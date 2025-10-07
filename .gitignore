@@ -13,3 +13,6 @@ imgui.ini
 /zig-out/
 /bb-cache/
 /self-hosted-bb-cache/
+/limine
+/ovmf
+/iso_root
