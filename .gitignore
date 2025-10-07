@@ -1,0 +1,15 @@
+/build/
+/*.data
+/perf.data*
+project
+/project.dSYM/
+/.cache/
+imgui.ini
+/cache/
+.DS_Store
+/*.perf
+/.gdb_history
+/.zig-cache/
+/zig-out/
+/bb-cache/
+/self-hosted-bb-cache/
