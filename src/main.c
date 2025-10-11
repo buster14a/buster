@@ -17,8 +17,8 @@ __attribute__((used, section(".limine_requests_end")))
 static volatile LIMINE_REQUESTS_END_MARKER;
 
 #define QEMU_EXIT_PORT 0xF4
-#define QEMU_EXIT_SUCCESS 0x00
-#define QEMU_EXIT_FAILURE 0x11
+#define QEMU_EXIT_SUCCESS 0x00000000
+#define QEMU_EXIT_FAILURE 0x00000010
 
 LOCAL void outb(u16 port, u8 value)
 {
@@ -35,19 +35,19 @@ LOCAL u8 inb(u16 port)
 [[noreturn]] LOCAL void qemu_exit(int code)
 {
     outb(QEMU_EXIT_PORT, code);
-    UNREACHABLE();
+    while(1){}
 }
 
 [[noreturn]] EXPORT void _start()
 {
     if (LIMINE_BASE_REVISION_SUPPORTED == false)
     {
-        qemu_exit(1);
+        qemu_exit(QEMU_EXIT_FAILURE);
     }
 
     if ((framebuffer_request.response == 0) | (framebuffer_request.response->framebuffer_count < 1))
     {
-        qemu_exit(1);
+        qemu_exit(QEMU_EXIT_FAILURE);
     }
 
     let framebuffer = framebuffer_request.response->framebuffers[0];
@@ -58,5 +58,5 @@ LOCAL u8 inb(u16 port)
         fb_ptr[i * (framebuffer->pitch / 4) + i] = 0xffffff;
     }
 
-    qemu_exit(0);
+    qemu_exit(QEMU_EXIT_SUCCESS);
 }
