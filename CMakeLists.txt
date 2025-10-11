@@ -30,7 +30,7 @@ if (CMAKE_C_COMPILER_TARGET MATCHES "^(x86_64|AMD64)$")
     add_compile_options(-masm=intel)
 endif()
 
-include_directories(BEFORE src)
+include_directories(BEFORE src limine)
 add_compile_definitions(
   $<$<CONFIG:Debug>:BB_DEBUG=1>
   $<$<NOT:$<CONFIG:Debug>>:BB_DEBUG=0>
