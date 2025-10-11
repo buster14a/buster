@@ -104,8 +104,9 @@ qemu_args = [
 	"-drive", "if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-x86_64.fd,readonly=on",
 	"-cdrom", "build/image.iso",
     "-no-reboot",
-    "-display",
-    "none" if is_ci else "gtk",
+    "-display", "none" if is_ci else "gtk",
+    "-d", "int,guest_errors,in_asm",
+    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
 ]
 
 do_kvm = is_ci and kvm_available()
@@ -119,10 +120,30 @@ else:
     qemu_args.append("-cpu"),
     qemu_args.append("max"),
 
+debug = True if len(sys.argv) > 1 and sys.argv[1].lower() == "debug" else False
+
+if debug:
+    qemu_args.append("-s")
+    qemu_args.append("-S")
+
 print(qemu_args)
 
-result = subprocess.run(qemu_args)
-return_code = result.returncode
+if debug:
+    qemu_result = subprocess.Popen(qemu_args)
+    result = subprocess.run([
+        "kitty",
+        "gdb",
+        "-ex", "set disassembly-flavor intel",
+        "-ex", "target remote :1234",
+        "-ex", "hb _start",
+        "-ex", "c",
+        "build/bb",
+    ])
+else:
+    result = subprocess.run(qemu_args)
+
+print(f"Raw: {result.returncode}")
+return_code = result.returncode >> 1
 if return_code != 0:
     print("QEMU failed to run successfully!\n")
 sys.exit(return_code)
