@@ -140,6 +140,7 @@ qemu_args = [
     "-no-reboot",
     "-display", "none" if is_ci else "gtk",
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    "-serial", "stdio",
 ]
 
 if len(d_args) != 0:
