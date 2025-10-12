@@ -33,6 +33,7 @@ jobs:
         env:
           CMAKE_BUILD_TYPE: ${{matrix.BUSTER_CMAKE_BUILD_TYPE}}
           LLVM_CMAKE_BUILD_TYPE: ${{matrix.LLVM_CMAKE_BUILD_TYPE}}
+          CMAKE_PREFIX_PATH: /home/act_runner/dev/toolchain/install/llvm_21.1.3_x86_64-linux-Release
         shell: bash
         run: |
-          .github/workflows/ci.sh
+          build.c

@@ -4,9 +4,16 @@
 #define BUSTER_KERNEL 0
 #endif
 
-#define _CRT_SECURE_NO_WARNINGS
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
+#endif
+
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
 #endif
 
 #define BUSTER_INCLUDE_TESTS 1
@@ -17,6 +24,10 @@
 #define EXPORT extern
 #endif
 
+#ifndef UNITY_BUILD
+#define UNITY_BUILD 0
+#endif
+
 #if UNITY_BUILD
 #define PUB_DECL static
 #define PUB_IMPL static
@@ -25,11 +36,13 @@
 #define PUB_IMPL
 #endif
 
+#define BUSTER_PACKED __attribute__((packed))
+
 #define LOCAL static
 
 #define array_length(x) (sizeof(x) / sizeof((x)[0]))
 
-#define field_parent_pointer(type, field, pointer) ((type *)((char *)(pointer) - __builtin_offsetof(type, field)))
+#define field_parent_pointer(type, field, pointer) ((type*)((char*)(pointer) - __builtin_offsetof(type, field)))
 
 #define let __auto_type
 #define STRUCT(n) typedef struct n n; struct n
@@ -112,7 +125,7 @@ STRUCT(SliceOfStringSlice)
     u64 length;
 };
 
-#define S(strlit) ((struct str) { (char*)(strlit), __builtin_strlen(strlit) })
+#define S(strlit) ((struct str) { .pointer = (char*)(strlit), .length = __builtin_strlen(strlit) })
 #define string_array_to_slice(arr) (StringSlice) { arr, array_length(arr) }
 
 [[noreturn]] [[gnu::cold]] PUB_DECL void _assert_failed(u32 line, str function_name, str file_path);
@@ -276,6 +289,7 @@ PUB_DECL void os_file_close(FileDescriptor* file_descriptor);
 #define arena_allocate(arena, T, count) (T*) arena_allocate_bytes(arena, sizeof(T) * (count), alignof(T))
 
 PUB_DECL str file_read(Arena* arena, str path, FileReadOptions options);
+PUB_DECL bool file_write(str path, str content);
 
 PUB_DECL TimeDataType take_timestamp();
 PUB_DECL u64 ns_between(TimeDataType start, TimeDataType end);

@@ -23,7 +23,7 @@ set(CMAKE_LINKER_TYPE LLD)
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(LINKER_SCRIPT ${SRC_DIR}/linker_script_x86_64.lds)
 
-add_compile_options(--target=x86_64-unknown-elf -ffreestanding -nostdlib -nostdlibinc -static -fno-pic -mno-red-zone -fno-stack-protector -fno-pie -fno-exceptions -fno-rtti -fno-asynchronous-unwind-tables -fno-unwind-tables)
+add_compile_options(--target=x86_64-unknown-elf -ffreestanding -nostdlib -nostdlibinc -static -fno-pic -mno-red-zone -fno-stack-protector -fno-pie -fno-exceptions -fno-rtti -fno-asynchronous-unwind-tables -fno-unwind-tables -mno-sse)
 add_link_options(-nostdlib -nostartfiles -static -fno-pie -Wl,--build-id=none -T ${LINKER_SCRIPT})
 
 if (CMAKE_C_COMPILER_TARGET MATCHES "^(x86_64|AMD64)$")

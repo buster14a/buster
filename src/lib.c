@@ -28,7 +28,6 @@
 #include <sys/wait.h>
 #include <pthread.h>
 #elif _WIN32
-#define WIN32_LEAN_AND_MEAN 1
 #include <winsock2.h>
 #include <windows.h>
 #include <mswsock.h>
@@ -203,6 +202,226 @@ LOCAL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool l
     }
 
     return result;
+}
+
+LOCAL void str_reverse(str s)
+{
+    char* restrict pointer = s.pointer;
+    for (u64 i = 0, reverse_i = s.length - 1; i < reverse_i; i += 1, reverse_i -= 1)
+    {
+        let ch = pointer[i];
+        pointer[i] = pointer[reverse_i];
+        pointer[reverse_i] = ch;
+    }
+}
+
+LOCAL str format_integer_hexadecimal(str buffer, u64 value)
+{
+    str result = {};
+
+    if (value == 0)
+    {
+        buffer.pointer[0] = '0';
+        result = (str) { buffer.pointer, 1};
+    }
+    else
+    {
+        let v = value;
+        u64 i = 0;
+
+        while (v != 0)
+        {
+            let digit = v % 16;
+            let ch = (u8)(digit > 9 ? (digit - 10 + 'a') : (digit + '0'));
+            check(i < buffer.length);
+            buffer.pointer[i] = ch;
+            i += 1;
+            v = v / 16;
+        }
+
+        let length = i;
+
+        result = (str) { buffer.pointer , length };
+        str_reverse(result);
+    }
+
+    return result;
+}
+
+LOCAL str format_integer_decimal(str buffer, u64 value, bool treat_as_signed)
+{
+    str result = {};
+
+    if (value == 0)
+    {
+        buffer.pointer[0] = '0';
+        result = (str) { buffer.pointer, 1};
+    }
+    else
+    {
+        u64 i = treat_as_signed;
+
+        buffer.pointer[0] = '-';
+        let v = value;
+
+        while (v != 0)
+        {
+            let digit = v % 10;
+            let ch = (u8)(digit + '0');
+            check(i < buffer.length);
+            buffer.pointer[i] = ch;
+            i += 1;
+            v = v / 10;
+        }
+
+        let length = i;
+
+        result = (str) { buffer.pointer + treat_as_signed, length - treat_as_signed };
+        str_reverse(result);
+        result.pointer -= treat_as_signed;
+        result.length += treat_as_signed;
+    }
+
+    return result;
+}
+
+LOCAL str format_integer_octal(str buffer, u64 value)
+{
+    str result = {};
+
+    if (value == 0)
+    {
+        buffer.pointer[0] = '0';
+        result = (str) { buffer.pointer, 1};
+    }
+    else
+    {
+        u64 i = 0;
+        let v = value;
+
+        while (v != 0)
+        {
+            let digit = v % 8;
+            let ch = (u8)(digit + '0');
+            check(i < buffer.length);
+            buffer.pointer[i] = ch;
+            i += 1;
+            v = v / 8;
+        }
+
+        let length = i;
+
+        result = (str) { buffer.pointer, length };
+        str_reverse(result);
+    }
+
+    return result;
+}
+
+LOCAL str format_integer_binary(str buffer, u64 value)
+{
+    str result = {};
+
+    if (value == 0)
+    {
+        buffer.pointer[0] = '0';
+        result = (str) { buffer.pointer, 1};
+    }
+    else
+    {
+        u64 i = 0;
+        let v = value;
+
+        while (v != 0)
+        {
+            let digit = v % 2;
+            let ch = (u8)(digit + '0');
+            check(i < buffer.length);
+            buffer.pointer[i] = ch;
+            i += 1;
+            v = v / 2;
+        }
+
+        let length = i;
+
+        result = (str) { buffer.pointer, length };
+        str_reverse(result);
+    }
+
+    return result;
+}
+
+PUB_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
+{
+    if (options.treat_as_signed)
+    {
+        check(!options.prefix);
+        check(options.format == INTEGER_FORMAT_DECIMAL);
+    }
+
+    u64 prefix_digit_count = 2;
+
+    str result = {};
+    if (options.prefix)
+    {
+        u8 prefix_ch;
+        switch (options.format)
+        {
+            break; case INTEGER_FORMAT_HEXADECIMAL: prefix_ch = 'x';
+            break; case INTEGER_FORMAT_DECIMAL: prefix_ch = 'd';
+            break; case INTEGER_FORMAT_OCTAL: prefix_ch = 'o';
+            break; case INTEGER_FORMAT_BINARY: prefix_ch = 'b';
+            break; default: UNREACHABLE();
+        }
+        buffer.pointer[0] = '0';
+        buffer.pointer[1] = prefix_ch;
+        buffer.pointer += prefix_digit_count;
+        buffer.length += prefix_digit_count;
+    }
+
+    switch (options.format)
+    {
+        break; case INTEGER_FORMAT_HEXADECIMAL:
+        {
+            result = format_integer_hexadecimal(buffer, options.value);
+        }
+        break; case INTEGER_FORMAT_DECIMAL:
+        {
+            result = format_integer_decimal(buffer, options.value, options.treat_as_signed);
+        }
+        break; case INTEGER_FORMAT_OCTAL:
+        {
+            result = format_integer_octal(buffer, options.value);
+        }
+        break; case INTEGER_FORMAT_BINARY:
+        {
+            result = format_integer_binary(buffer, options.value);
+        }
+        break; default: UNREACHABLE();
+    }
+
+    if (options.prefix)
+    {
+        result.pointer -= prefix_digit_count;
+        result.length += prefix_digit_count;
+    }
+
+    return result;
+}
+
+[[noreturn]] [[gnu::cold]] PUB_IMPL void _assert_failed(u32 line, str function_name, str file_path)
+{
+    print(S("Assert failed at "));
+    print(function_name);
+    print(S(" in "));
+    print(file_path);
+    print(S(":"));
+    char buffer[128];
+    let stack_string = format_integer_stack((str){ buffer, array_length(buffer) }, (FormatIntegerOptions){ .value = line });
+    print(stack_string);
+    print(S("\n"));
+        
+    fail();
 }
 
 #if BUSTER_KERNEL == 0
@@ -633,6 +852,21 @@ PUB_IMPL str file_read(Arena* arena, str path, FileReadOptions options)
     return result;
 }
 
+PUB_IMPL bool file_write(str path, str content)
+{
+    let fd = os_file_open(path, (OpenFlags) { .write = 1, .create = 1, .truncate = 1 }, (OpenPermissions){ .read = 1, .write = 1 });
+    bool result = {};
+
+    result = fd != 0;
+    if (result)
+    {
+        os_file_write(fd, content);
+        os_file_close(fd);
+    }
+
+    return result;
+}
+
 LOCAL str os_path_absolute_stack(str buffer, const char* restrict relative_file_path)
 {
     str result = {};
@@ -711,211 +945,6 @@ LOCAL bool _is_debugger_present = false;
     }
 
     exit(1);
-}
-
-LOCAL void str_reverse(str s)
-{
-    char* restrict pointer = s.pointer;
-    for (u64 i = 0, reverse_i = s.length - 1; i < reverse_i; i += 1, reverse_i -= 1)
-    {
-        let ch = pointer[i];
-        pointer[i] = pointer[reverse_i];
-        pointer[reverse_i] = ch;
-    }
-}
-
-LOCAL str format_integer_hexadecimal(str buffer, u64 value)
-{
-    str result = {};
-
-    if (value == 0)
-    {
-        buffer.pointer[0] = '0';
-        result = (str) { buffer.pointer, 1};
-    }
-    else
-    {
-        let v = value;
-        u64 i = 0;
-
-        while (v != 0)
-        {
-            let digit = v % 16;
-            let ch = (u8)(digit > 9 ? (digit - 10 + 'a') : (digit + '0'));
-            check(i < buffer.length);
-            buffer.pointer[i] = ch;
-            i += 1;
-            v = v / 16;
-        }
-
-        let length = i;
-
-        result = (str) { buffer.pointer , length };
-        str_reverse(result);
-    }
-
-    return result;
-}
-
-LOCAL str format_integer_decimal(str buffer, u64 value, bool treat_as_signed)
-{
-    str result = {};
-
-    if (value == 0)
-    {
-        buffer.pointer[0] = '0';
-        result = (str) { buffer.pointer, 1};
-    }
-    else
-    {
-        u64 i = treat_as_signed;
-
-        buffer.pointer[0] = '-';
-        let v = value;
-
-        while (v != 0)
-        {
-            let digit = v % 10;
-            let ch = (u8)(digit + '0');
-            check(i < buffer.length);
-            buffer.pointer[i] = ch;
-            i += 1;
-            v = v / 10;
-        }
-
-        let length = i;
-
-        result = (str) { buffer.pointer + treat_as_signed, length - treat_as_signed };
-        str_reverse(result);
-        result.pointer -= treat_as_signed;
-        result.length += treat_as_signed;
-    }
-
-    return result;
-}
-
-LOCAL str format_integer_octal(str buffer, u64 value)
-{
-    str result = {};
-
-    if (value == 0)
-    {
-        buffer.pointer[0] = '0';
-        result = (str) { buffer.pointer, 1};
-    }
-    else
-    {
-        u64 i = 0;
-        let v = value;
-
-        while (v != 0)
-        {
-            let digit = v % 8;
-            let ch = (u8)(digit + '0');
-            check(i < buffer.length);
-            buffer.pointer[i] = ch;
-            i += 1;
-            v = v / 8;
-        }
-
-        let length = i;
-
-        result = (str) { buffer.pointer, length };
-        str_reverse(result);
-    }
-
-    return result;
-}
-
-LOCAL str format_integer_binary(str buffer, u64 value)
-{
-    str result = {};
-
-    if (value == 0)
-    {
-        buffer.pointer[0] = '0';
-        result = (str) { buffer.pointer, 1};
-    }
-    else
-    {
-        u64 i = 0;
-        let v = value;
-
-        while (v != 0)
-        {
-            let digit = v % 2;
-            let ch = (u8)(digit + '0');
-            check(i < buffer.length);
-            buffer.pointer[i] = ch;
-            i += 1;
-            v = v / 2;
-        }
-
-        let length = i;
-
-        result = (str) { buffer.pointer, length };
-        str_reverse(result);
-    }
-
-    return result;
-}
-
-PUB_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
-{
-    if (options.treat_as_signed)
-    {
-        check(!options.prefix);
-        check(options.format == INTEGER_FORMAT_DECIMAL);
-    }
-
-    u64 prefix_digit_count = 2;
-
-    str result = {};
-    if (options.prefix)
-    {
-        u8 prefix_ch;
-        switch (options.format)
-        {
-            break; case INTEGER_FORMAT_HEXADECIMAL: prefix_ch = 'x';
-            break; case INTEGER_FORMAT_DECIMAL: prefix_ch = 'd';
-            break; case INTEGER_FORMAT_OCTAL: prefix_ch = 'o';
-            break; case INTEGER_FORMAT_BINARY: prefix_ch = 'b';
-            break; default: UNREACHABLE();
-        }
-        buffer.pointer[0] = '0';
-        buffer.pointer[1] = prefix_ch;
-        buffer.pointer += prefix_digit_count;
-        buffer.length += prefix_digit_count;
-    }
-
-    switch (options.format)
-    {
-        break; case INTEGER_FORMAT_HEXADECIMAL:
-        {
-            result = format_integer_hexadecimal(buffer, options.value);
-        }
-        break; case INTEGER_FORMAT_DECIMAL:
-        {
-            result = format_integer_decimal(buffer, options.value, options.treat_as_signed);
-        }
-        break; case INTEGER_FORMAT_OCTAL:
-        {
-            result = format_integer_octal(buffer, options.value);
-        }
-        break; case INTEGER_FORMAT_BINARY:
-        {
-            result = format_integer_binary(buffer, options.value);
-        }
-        break; default: UNREACHABLE();
-    }
-
-    if (options.prefix)
-    {
-        result.pointer -= prefix_digit_count;
-        result.length += prefix_digit_count;
-    }
-
-    return result;
 }
 
 PUB_IMPL str format_integer(Arena* arena, FormatIntegerOptions options, bool zero_terminate)
@@ -1658,7 +1687,7 @@ PUB_IMPL str str_slice(str s, u64 start, u64 end)
 PUB_IMPL bool str_equal(str s1, str s2)
 {
     bool is_equal = s1.length == s2.length;
-    if (is_equal & (s1.length != 0))
+    if (is_equal & (s1.length != 0) & (s1.pointer != s2.pointer))
     {
         is_equal = memory_compare(s1.pointer, s2.pointer, s1.length);
     }
@@ -1747,21 +1776,6 @@ PUB_IMPL void print(str str)
     os_file_write(os_get_stdout(), str);
 }
 
-[[noreturn]] [[gnu::cold]] PUB_IMPL void _assert_failed(u32 line, str function_name, str file_path)
-{
-    print(S("Assert failed at "));
-    print(function_name);
-    print(S(" in "));
-    print(file_path);
-    print(S(":"));
-    char buffer[128];
-    let stack_string = format_integer_stack((str){ buffer, array_length(buffer) }, (FormatIntegerOptions){ .value = line });
-    print(stack_string);
-    print(S("\n"));
-        
-    fail();
-}
-
 #if BUSTER_INCLUDE_TESTS
 PUB_IMPL bool lib_tests(TestArguments* restrict arguments)
 {
@@ -1787,4 +1801,18 @@ PUB_IMPL bool lib_tests(TestArguments* restrict arguments)
     return result;
 }
 #endif
+#else
+EXPORT void* memset(void* restrict address, int ch, u64 byte_count)
+{
+    let c = (char)ch;
+
+    let ptr = (u8* restrict)address;
+
+    for (u64 i = 0; i < byte_count; i += 1)
+    {
+        ptr[i] = c;
+    }
+
+    return address;
+}
 #endif
