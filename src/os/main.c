@@ -143,24 +143,57 @@ LOCAL u8 inb(u16 port)
     while(1){}
 }
 
+[[noreturn]] LOCAL void succeed()
+{
+    qemu_exit(QEMU_EXIT_SUCCESS);
+}
+
+[[noreturn]] PUB_IMPL void fail()
+{
+    qemu_exit(QEMU_EXIT_FAILURE);
+}
+
+LOCAL let rsdp_signature = S("RSD PTR ");
+
+STRUCT(RSDP)
+{
+    u64 signature;
+};
+
 [[noreturn]] EXPORT void _start()
 {
     if (LIMINE_BASE_REVISION_SUPPORTED == false)
     {
-        qemu_exit(QEMU_EXIT_FAILURE);
+        fail();
     }
 
     if ((framebuffer_request.response == 0) | (framebuffer_request.response->framebuffer_count < 1))
     {
-        qemu_exit(QEMU_EXIT_FAILURE);
+        fail();
     }
 
     let framebuffer = framebuffer_request.response->framebuffers[0];
 
-    for (u64 i = 0; i < 5000; i++)
+    bool fill = false;
+    if (fill)
     {
-        volatile u32 *fb_ptr = framebuffer->address;
-        fb_ptr[i] = 0xffffff;
+        for (u64 i = 0; i < 5000; i++)
+        {
+            volatile u32 *fb_ptr = framebuffer->address;
+            fb_ptr[i] = 0xffffff;
+        }
+    }
+
+    let rsdp_response = rsdp_request.response;
+    if (!rsdp_response)
+    {
+        fail();
+    }
+
+    let rsdp_address = rsdp_response->address;
+    if (!rsdp_address)
+    {
+        fail();
     }
 
     bool hang = false;
@@ -168,5 +201,5 @@ LOCAL u8 inb(u16 port)
     {
     }
 
-    qemu_exit(QEMU_EXIT_SUCCESS);
+    succeed();
 }

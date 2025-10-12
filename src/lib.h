@@ -112,7 +112,7 @@ STRUCT(SliceOfStringSlice)
     u64 length;
 };
 
-#define S(strlit) ((struct str) { (char*)(strlit), strlen(strlit) })
+#define S(strlit) ((struct str) { (char*)(strlit), __builtin_strlen(strlit) })
 #define string_array_to_slice(arr) (StringSlice) { arr, array_length(arr) }
 
 [[noreturn]] [[gnu::cold]] PUB_DECL void _assert_failed(u32 line, str function_name, str file_path);
