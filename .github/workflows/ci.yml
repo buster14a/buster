@@ -9,9 +9,9 @@ on:
       - main
 
 env:
-  BB_CI: 1
-  BB_BUILD_DEBUG: 1
-  BB_BUILD_NATIVE: 0
+  BUSTER_CI: 1
+  BUSTER_BUILD_DEBUG: 1
+  BUSTER_BUILD_NATIVE: 0
 
 jobs:
   ci:
@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ self-hosted ] # ubuntu-24.04 ] # ubuntu-24.04-arm, macos-26, macos-13, windows-2025, windows-11-arm ]
-        BIRTH_CMAKE_BUILD_TYPE: [ Debug, Release ]
+        BUSTER_CMAKE_BUILD_TYPE: [ Debug, Release ]
         LLVM_CMAKE_BUILD_TYPE: [ Release ]
     runs-on: ${{ matrix.os }}
     steps:
@@ -31,12 +31,8 @@ jobs:
           sudo apt-get install -y xorriso qemu-system
       - name: Build and test (Packaged LLVM)
         env:
-          CMAKE_BUILD_TYPE: ${{matrix.BIRTH_CMAKE_BUILD_TYPE}}
+          CMAKE_BUILD_TYPE: ${{matrix.BUSTER_CMAKE_BUILD_TYPE}}
           LLVM_CMAKE_BUILD_TYPE: ${{matrix.LLVM_CMAKE_BUILD_TYPE}}
         shell: bash
         run: |
-          ./generate.py
-          ./build.py
-          echo "Build suceeded!"
-          ./run.py
-          echo "Program suceeded!"
+          .github/workflows/ci.sh

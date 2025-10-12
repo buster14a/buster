@@ -1,7 +1,7 @@
 #pragma once
 
-#ifndef BUSTER_TIMON_KERNEL
-#define BUSTER_TIMON_KERNEL 0
+#ifndef BUSTER_KERNEL
+#define BUSTER_KERNEL 0
 #endif
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -9,7 +9,7 @@
 #define _GNU_SOURCE
 #endif
 
-#define BB_INCLUDE_TESTS 1
+#define BUSTER_INCLUDE_TESTS 1
 
 #if defined(__cplusplus)
 #define EXPORT extern "C"
@@ -68,7 +68,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#if BUSTER_TIMON_KERNEL == 0
+#if BUSTER_KERNEL == 0
 #include <string.h>
 #include <stdlib.h>
 #endif
@@ -91,8 +91,8 @@ typedef double f64;
 typedef __float128 f128;
 #endif
 
-#ifndef BB_STRING
-#define BB_STRING
+#ifndef BUSTER_STRING
+#define BUSTER_STRING
 STRUCT(str)
 {
     char* pointer;
@@ -129,7 +129,7 @@ STRUCT(SliceOfStringSlice)
 typedef void ShowCallback(void*,str);
 
 typedef struct Arena Arena;
-#if BB_INCLUDE_TESTS
+#if BUSTER_INCLUDE_TESTS
 STRUCT(TestArguments)
 {
     Arena* arena;
@@ -201,7 +201,7 @@ STRUCT(ThreadCreateOptions)
 {
 };
 
-#if BUSTER_TIMON_KERNEL == 0
+#if BUSTER_KERNEL == 0
 typedef
 #if defined(__linux__) || defined(__APPLE__)
 void*
@@ -257,7 +257,7 @@ STRUCT(IntegerParsing)
     u64 i;
 };
 
-#if BUSTER_TIMON_KERNEL == 0
+#if BUSTER_KERNEL == 0
 PUB_DECL void os_init();
 PUB_DECL Arena* arena_create(ArenaInitialization initialization);
 PUB_DECL bool arena_destroy(Arena* arena, u64 count);
@@ -330,6 +330,6 @@ PUB_DECL bool is_identifier(char ch);
 
 PUB_DECL void print(str str);
 
-#if BB_INCLUDE_TESTS
+#if BUSTER_INCLUDE_TESTS
 PUB_DECL bool lib_tests(TestArguments* restrict arguments);
 #endif

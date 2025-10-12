@@ -6,7 +6,7 @@
 #include <immintrin.h>
 #endif
 
-#if BUSTER_TIMON_KERNEL == 0
+#if BUSTER_KERNEL == 0
 #include <stdio.h>
 #endif
 
@@ -205,7 +205,7 @@ LOCAL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool l
     return result;
 }
 
-#if BUSTER_TIMON_KERNEL == 0
+#if BUSTER_KERNEL == 0
 PUB_IMPL FileDescriptor* os_file_open(str path, OpenFlags flags, OpenPermissions permissions)
 {
     check(!path.pointer[path.length]);
@@ -1762,7 +1762,7 @@ PUB_IMPL void print(str str)
     fail();
 }
 
-#if BB_INCLUDE_TESTS
+#if BUSTER_INCLUDE_TESTS
 PUB_IMPL bool lib_tests(TestArguments* restrict arguments)
 {
     bool result = 1;

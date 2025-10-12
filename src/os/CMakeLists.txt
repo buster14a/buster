@@ -20,7 +20,7 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 set(CLANG_TARGET_TRIPLE "x86_64-unknown-elf")
 set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
 set(CMAKE_LINKER_TYPE LLD)
-set(SRC_DIR ${CMAKE_SOURCE_DIR}/src)
+set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(LINKER_SCRIPT ${SRC_DIR}/linker_script_x86_64.lds)
 
 add_compile_options(--target=x86_64-unknown-elf -ffreestanding -nostdlib -nostdlibinc -static -fno-pic -mno-red-zone -fno-stack-protector -fno-pie -fno-exceptions -fno-rtti -fno-asynchronous-unwind-tables -fno-unwind-tables)
@@ -30,13 +30,13 @@ if (CMAKE_C_COMPILER_TARGET MATCHES "^(x86_64|AMD64)$")
     add_compile_options(-masm=intel)
 endif()
 
-include_directories(BEFORE src limine)
+include_directories(BEFORE ${SRC_DIR} ${SRC_DIR}/.. ${SRC_DIR}/limine)
 add_compile_definitions(
-  $<$<CONFIG:Debug>:BB_DEBUG=1>
-  $<$<NOT:$<CONFIG:Debug>>:BB_DEBUG=0>
+    $<$<CONFIG:Debug>:BUSTER_DEBUG=1>
+    $<$<NOT:$<CONFIG:Debug>>:BUSTER_DEBUG=0>
 )
 
-add_compile_definitions(BUSTER_TIMON_KERNEL=1)
+add_compile_definitions(BUSTER_KERNEL=1)
 
 if (NOT "${XC_SDK_PATH}" STREQUAL "")
     add_compile_definitions(XC_SDK_PATH="${XC_SDK_PATH}")
@@ -61,14 +61,14 @@ message(STATUS "UNITY_BUILD: ${UNITY_BUILD}")
 
 if (UNITY_BUILD)
     add_compile_definitions(UNITY_BUILD=1)
-    add_executable(bb
+    add_executable(buster_kernel
         ${SRC_DIR}/main.c
     )
 else()
     add_compile_definitions(UNITY_BUILD=0)
-    add_executable(bb
-        ${SRC_DIR}/lib.c
+    add_executable(buster_kernel
+        ${SRC_DIR}/../lib.c
         ${SRC_DIR}/main.c
     )
 endif()
-set_target_properties(bb PROPERTIES LINK_DEPENDS ${LINKER_SCRIPT})
+set_target_properties(buster_kernel PROPERTIES LINK_DEPENDS ${LINKER_SCRIPT})

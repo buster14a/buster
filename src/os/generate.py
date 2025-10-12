@@ -9,18 +9,6 @@ import urllib.request
 
 from pathlib import Path
 
-def download_file(url: str, dest: Path):
-    print(f"Downloading {url} -> {dest}")
-    urllib.request.urlretrieve(url, dest)
-
-def extract_7z(archive: Path, out_dir: Path):
-    print(f"Extracting {archive} -> {out_dir}")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["7z", "x", str(archive), f"-o{out_dir}", "-y"],
-        check=True
-    )
-
 def get_version(cmd):
     """Return (major, minor, patch) version tuple for clang, or None if unavailable."""
     try:
@@ -100,8 +88,8 @@ def get_compiler_paths():
 
 def main():
     # --- defaults ---
-    LLVM_VERSION = os.environ.get("LLVM_VERSION", "21.1.1")
-    BB_CI = os.environ.get("BB_CI", "0")
+    LLVM_VERSION = os.environ.get("LLVM_VERSION", "21.1.3")
+    BUSTER_CI = os.environ.get("BUSTER_CI", "0")
 
     CMAKE_BUILD_TYPE = os.environ.get("CMAKE_BUILD_TYPE")
     LLVM_CMAKE_BUILD_TYPE = os.environ.get("LLVM_CMAKE_BUILD_TYPE")
@@ -115,27 +103,27 @@ def main():
     # --- OS detection ---
     OSTYPE = sys.platform
     if OSTYPE.startswith("darwin"):
-        BIRTH_OS = "macos"
+        BUSTER_OS = "macos"
     elif OSTYPE.startswith("linux"):
-        BIRTH_OS = "linux"
+        BUSTER_OS = "linux"
     elif OSTYPE.startswith("msys") or OSTYPE.startswith("win"):
-        BIRTH_OS = "windows"
+        BUSTER_OS = "windows"
     else:
         print(f"Unidentified OS tag: {OSTYPE}")
         return 1
 
     # --- Arch detection ---
-    BIRTH_NATIVE_ARCH_STRING = platform.machine()
-    if BIRTH_NATIVE_ARCH_STRING in ("x86_64", "AMD64"):
-        BIRTH_ARCH = "x86_64"
-    elif BIRTH_NATIVE_ARCH_STRING in ("arm64", "aarch64", "ARM64"):
-        BIRTH_ARCH = "aarch64"
+    BUSTER_NATIVE_ARCH_STRING = platform.machine()
+    if BUSTER_NATIVE_ARCH_STRING in ("x86_64", "AMD64"):
+        BUSTER_ARCH = "x86_64"
+    elif BUSTER_NATIVE_ARCH_STRING in ("arm64", "aarch64", "ARM64"):
+        BUSTER_ARCH = "aarch64"
     else:
-        print(f"Unidentified arch tag: {BIRTH_NATIVE_ARCH_STRING}")
+        print(f"Unidentified arch tag: {BUSTER_NATIVE_ARCH_STRING}")
         return 1
 
-    LLVM_BASENAME = f"llvm_{LLVM_VERSION}_{BIRTH_ARCH}-{BIRTH_OS}-{LLVM_CMAKE_BUILD_TYPE}"
-    INSTALL_PATH = Path.home() / "dev/llvm/install"
+    LLVM_BASENAME = f"llvm_{LLVM_VERSION}_{BUSTER_ARCH}-{BUSTER_OS}-{LLVM_CMAKE_BUILD_TYPE}"
+    INSTALL_PATH = Path.home() / "dev/toolchain/install"
 
     # --- CMAKE_PREFIX_PATH ---
     CMAKE_PREFIX_PATH = os.environ.get("CMAKE_PREFIX_PATH")
@@ -143,11 +131,22 @@ def main():
         CMAKE_PREFIX_PATH = str(
             INSTALL_PATH / LLVM_BASENAME
         )
+    print(CMAKE_PREFIX_PATH)
 
     if Path(CMAKE_PREFIX_PATH).is_dir() == False:
         LLVM_7Z = LLVM_BASENAME + ".7z"
-        download_file(f"https://github.com/birth-software/llvm/releases/download/v{LLVM_VERSION}/" + LLVM_7Z, Path(LLVM_7Z))
-        extract_7z(Path(LLVM_7Z), INSTALL_PATH)
+        LLVM_URL = f"https://github.com/buster14a/toolchain/releases/download/v{LLVM_VERSION}/" + LLVM_7Z
+        LLVM_7Z_PATH = Path(LLVM_7Z)
+        print(f"Toolchain not found. Downloading {LLVM_URL} -> {LLVM_7Z_PATH}...")
+        urllib.request.urlretrieve(LLVM_URL, LLVM_7Z_PATH)
+
+        print(f"Extracting {LLVM_7Z_PATH} -> {INSTALL_PATH}")
+        INSTALL_PATH.mkdir(parents=True, exist_ok=True)
+        extract_result = subprocess.run(["7z", "x", str(LLVM_7Z_PATH), f"-o{INSTALL_PATH}", "-y"], text=True)
+
+        if extract_result.returncode != 0:
+            print("Extraction failed")
+            return 1
 
     limine_path_str = "limine"
 
@@ -177,12 +176,12 @@ def main():
         return 1
 
     # --- CMAKE_LINKER_TYPE ---
-    if BIRTH_OS == "linux" and BB_CI == "0":
+    if BUSTER_OS == "linux" and BUSTER_CI == "0":
         CMAKE_LINKER_TYPE = "MOLD"
     else:
         CMAKE_LINKER_TYPE = "LLD"
 
-    if BIRTH_OS == "macos":
+    if BUSTER_OS == "macos":
         xc_sdk_path_result = subprocess.run([
             "xcrun",
             "--show-sdk-path",
@@ -191,7 +190,7 @@ def main():
     else:
         XC_SDK_PATH=""
     
-    if BIRTH_OS == "windows":
+    if BUSTER_OS == "windows":
         EXE_EXTENSION=".exe"
     else:
         EXE_EXTENSION=""
@@ -201,8 +200,8 @@ def main():
     CLANGXX_PATH = f"{CMAKE_PREFIX_PATH}/bin/clang++{EXE_EXTENSION}"
 
     # --- cache dir ---
-    BB_CACHE_DIR = os.environ.get("BB_CACHE_DIR", "bb-cache")
-    Path(BB_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    BUSTER_CACHE_DIR = os.environ.get("BUSTER_CACHE_DIR", "buster-cache")
+    Path(BUSTER_CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
     # --- build dir ---
     build_dir = Path("build")
