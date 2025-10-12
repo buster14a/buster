@@ -8,7 +8,7 @@ import shutil
 def kvm_available():
     return os.path.exists("/dev/kvm") and os.access("/dev/kvm", os.R_OK | os.W_OK)
 
-is_ci = os.environ.get("BB_CI", "0") == "1"
+is_ci = os.environ.get("BUSTER_CI", "0") == "1"
 # Get OVMF
 ovmf_dir = "ovmf"
 arch = "x86_64"
@@ -29,7 +29,7 @@ if not os.path.exists(ovmf_dir):
 
 # generate image
 iso_root = "iso_root"
-kernel_src = "build/bb"
+kernel_src = "build/buster_kernel"
 
 result = subprocess.run(["make"], cwd="limine")
 
@@ -46,7 +46,7 @@ print(f"Copying {kernel_src} -> {iso_root}/boot/")
 shutil.copy(kernel_src, f"{iso_root}/boot/kernel")
 
 print("Copying limine.conf -> iso_root/boot/limine/")
-shutil.copy("src/limine.conf", f"{iso_root}/boot/limine/")
+shutil.copy("limine.conf", f"{iso_root}/boot/limine/")
 
 if arch == "x86_64":
     files_to_copy = [
@@ -137,7 +137,7 @@ if debug:
         "-ex", "target remote :1234",
         "-ex", "hb _start",
         "-ex", "c",
-        "build/bb",
+        kernel_src,
     ])
 else:
     result = subprocess.run(qemu_args)
