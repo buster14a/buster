@@ -12,6 +12,7 @@ env:
   BUSTER_CI: 1
   BUSTER_BUILD_DEBUG: 1
   BUSTER_BUILD_NATIVE: 0
+  LLVM_VERSION: 21.1.5
 
 jobs:
   ci:
@@ -19,8 +20,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ self-hosted ] # ubuntu-24.04 ] # ubuntu-24.04-arm, macos-26, macos-13, windows-2025, windows-11-arm ]
-        BUSTER_CMAKE_BUILD_TYPE: [ Debug, Release ]
-        LLVM_CMAKE_BUILD_TYPE: [ Release ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -31,9 +30,7 @@ jobs:
           sudo apt-get install -y xorriso qemu-system
       - name: Build and test (Packaged LLVM)
         env:
-          CMAKE_BUILD_TYPE: ${{matrix.BUSTER_CMAKE_BUILD_TYPE}}
-          LLVM_CMAKE_BUILD_TYPE: ${{matrix.LLVM_CMAKE_BUILD_TYPE}}
-          CMAKE_PREFIX_PATH: /home/act_runner/dev/toolchain/install/llvm_21.1.3_x86_64-linux-Release
+          CMAKE_PREFIX_PATH: /home/david/dev/toolchain/install/llvm_${{env.LLVM_VERSION}}_x86_64-linux-Release
         shell: bash
         run: |
           build.c test
