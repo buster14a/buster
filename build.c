@@ -4,12 +4,14 @@ set -eu
 
 if [[ -z "${BUSTER_CI:-}" ]]; then
     BUSTER_CI=0
-else
+fi
+
+if [[ "$#" != "0" ]]; then
     set -x
 fi
 
 if [[ -z "${CMAKE_PREFIX_PATH:-}" ]]; then
-    export CLANG=/usr/bin/clang
+    export CLANG=$(which clang)
 else
     export CLANG=$CMAKE_PREFIX_PATH/bin/clang
 fi
@@ -18,7 +20,7 @@ fi
 #endif
 #if [[ "$?" != "0" && "$?" != "333" ]]; then
     mkdir -p build
-    $CLANG build.c -o build/builder -Isrc -std=gnu2x -march=native -luring -DUNITY_BUILD=1 -g
+    $CLANG build.c -o build/builder -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=1 -DBUSTER_USE_PTHREAD=1 -g -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -luring -pthread #-ferror-limit=1 -ftime-trace -ftime-trace-verbose
     if [[ "$?" == "0" ]]; then
         BUSTER_REGENERATE=1 build/builder $@
     fi
@@ -28,52 +30,13 @@ exit $?
 
 #include <lib.h>
 
-#if UNITY_BUILD
+#if BUSTER_UNITY_BUILD
 #include <lib.c>
 #endif
-#include <liburing.h>
-#include <meow_hash_x64_aesni.h>
+#include <md5.h>
 #include <stdio.h>
 
-STRUCT(ArgumentBuilder)
-{
-    char** argv;
-    Arena* arena;
-    u64 arena_offset;
-};
-
-LOCAL char** argument_add(ArgumentBuilder* builder, char* arg)
-{
-    let ptr = arena_allocate(builder->arena, char*, 1);
-    *ptr = arg;
-    return ptr;
-}
-
-LOCAL ArgumentBuilder* argument_builder_start(Arena* arena, char* s)
-{
-    let position = arena->position;
-    let argument_builder = arena_allocate(arena, ArgumentBuilder, 1);
-    *argument_builder = (ArgumentBuilder) {
-        .argv = 0,
-        .arena = arena,
-        .arena_offset = position,
-    };
-    argument_builder->argv = argument_add(argument_builder, s);
-    return argument_builder;
-}
-
-LOCAL char** argument_builder_end(ArgumentBuilder* restrict builder)
-{
-    argument_add(builder, 0);
-    return builder->argv;
-}
-
-LOCAL void argument_builder_destroy(ArgumentBuilder* restrict builder)
-{
-    let arena = builder->arena;
-    let position = builder->arena_offset;
-    arena->position = position;
-}
+#define BUSTER_TODO() BUSTER_TRAP()
 
 STRUCT(Files)
 {
@@ -100,7 +63,6 @@ typedef enum CompilationModel
 STRUCT(WorkFile)
 {
     u128 hash;
-    str artifact_path;
     struct statx statx;
     u64 time_s;
     u64 time_ns;
@@ -108,16 +70,16 @@ STRUCT(WorkFile)
     u64 arena_offset;
     int fd;
     WorkFileStatus status;
-    u8 cache_padding[MIN(CACHE_LINE_GUESS - ((1 * sizeof(u64))), CACHE_LINE_GUESS)];
+    u8 cache_padding[BUSTER_MIN(BUSTER_CACHE_LINE_GUESS - ((0 * sizeof(u64))), BUSTER_CACHE_LINE_GUESS)];
 };
-static_assert(sizeof(WorkFile) % CACHE_LINE_GUESS == 0);
+static_assert(sizeof(WorkFile) % BUSTER_CACHE_LINE_GUESS == 0);
 
 STRUCT(OldFile)
 {
-    u8 cache_padding[CACHE_LINE_GUESS];
+    u8 cache_padding[BUSTER_CACHE_LINE_GUESS];
 };
 
-static_assert(sizeof(OldFile) % CACHE_LINE_GUESS == 0);
+static_assert(sizeof(OldFile) % BUSTER_CACHE_LINE_GUESS == 0);
 
 STRUCT(Artifact)
 {
@@ -125,7 +87,7 @@ STRUCT(Artifact)
     Files file;
 };
 
-LOCAL str file_relative_paths[] = {
+BUSTER_LOCAL str file_relative_paths[] = {
     S("build/cache_manifest"),
     S("build.c"),
     S("src/lib.h"),
@@ -134,35 +96,81 @@ LOCAL str file_relative_paths[] = {
     S("src/disk_builder.c"),
 };
 
-LOCAL WorkFile work_files[array_length(file_relative_paths)] = {};
-
-LOCAL constexpr u32 io_uring_queue_entry_count = 4096;
-
-LOCAL void work_file_open(WorkFile* file, str path, struct io_uring_sqe* sqe)
+typedef enum BuildCommand
 {
-    io_uring_prep_openat(sqe, AT_FDCWD, path.pointer, O_RDONLY, 0);
+    BUILD_COMMAND_BUILD,
+    BUILD_COMMAND_TEST,
+} BuildCommand;
+
+STRUCT(ProgramInput)
+{
+    BuildCommand command;
+};
+
+BUSTER_LOCAL WorkFile work_files[BUSTER_ARRAY_LENGTH(file_relative_paths)] = {};
+
+BUSTER_LOCAL void work_file_open(WorkFile* file, str path, u64 user_data)
+{
+    io_ring_prepare_open(path.pointer, user_data);
     file->status = WORK_FILE_OPENING;
     file->fd = -1;
 }
 
-LOCAL u128 hash_file(const char* pointer, u64 length)
+BUSTER_LOCAL u128 hash_file(const char* pointer, u64 length)
 {
-    check(((u64)pointer & (64 - 1)) == 0);
+    BUSTER_CHECK(((u64)pointer & (64 - 1)) == 0);
 
-    let result = MeowHash(MeowDefaultSeed, length, (void*)pointer);
-    return *(u128*)&result;
+    md5_ctx ctx;
+    md5_init(&ctx);
+    md5_update(&ctx, pointer, length);
+    u128 digest;
+    static_assert(sizeof(digest) == MD5_DIGEST_SIZE);
+    md5_finish(&ctx, (u8*)&digest);
+    return digest;
 }
 
-typedef enum ProcessResult
+STRUCT(Process)
 {
-    PROCESS_RESULT_SUCCESS,
-    PROCESS_RESULT_FAILED,
-    PROCESS_RESULT_FAILED_TRY_AGAIN,
-    PROCESS_RESULT_CRASH,
-    PROCESS_RESULT_UNKNOWN,
-} ProcessResult;
+    siginfo_t siginfo;
+    pid_t pid;
+    char** argv;
+    char** envp;
+    bool waited;
+};
 
-LOCAL pid_t spawn_process(char* argv[], char* envp[])
+static_assert(alignof(Process) == 8);
+
+ProcessResult process_query_wait(Process* p)
+{
+    ProcessResult result;
+    if (p->pid != -1)
+    {
+        if (p->waited)
+        {
+            // Then we are allowed to query the siginfo struct
+            if (BUSTER_LIKELY(p->siginfo.si_code == CLD_EXITED))
+            {
+                result = (ProcessResult)p->siginfo.si_status;
+            }
+            else
+            {
+                BUSTER_TODO();
+            }
+        }
+        else
+        {
+            result = PROCESS_RESULT_RUNNING;
+        }
+    }
+    else
+    {
+        result = PROCESS_RESULT_NOT_EXISTENT;
+    }
+    
+    return result;
+}
+
+BUSTER_LOCAL void spawn_process(Process* process, char* argv[], char* envp[])
 {
     let pid = fork();
 
@@ -173,39 +181,33 @@ LOCAL pid_t spawn_process(char* argv[], char* envp[])
     else if (pid == 0)
     {
         execve(argv[0], argv, envp);
-        trap();
+        BUSTER_TRAP();
     }
 
-    return pid;
+    if (global_program.verbose)
+    {
+        printf("Launched: ");
+
+        for (let a = argv; *a; a += 1)
+        {
+            printf("%s ", *a);
+        }
+
+        printf("\n");
+    }
+
+    *process = (Process) {
+        .argv = argv,
+        .envp = envp,
+        .pid = pid,
+    };
 }
 
-LOCAL ProcessResult wait_for_process(pid_t pid)
+typedef enum TaskId
 {
-    int status;
-    let wait_result = waitpid(pid, &status, 0);
-
-    ProcessResult result;
-    if (wait_result == pid)
-    {
-        if (WIFEXITED(status))
-        {
-            let exit_status = WEXITSTATUS(status);
-            result = (ProcessResult)exit_status;
-            check(result <= PROCESS_RESULT_FAILED_TRY_AGAIN);
-        }
-        else
-        {
-            result = PROCESS_RESULT_CRASH;
-        }
-    }
-    else
-    {
-        printf("Wait failed\n");
-        result = PROCESS_RESULT_UNKNOWN;
-    }
-
-    return result;
-}
+    TASK_ID_COMPILATION,
+    TASK_ID_LINKING,
+} TaskId;
 
 typedef enum ProjectId
 {
@@ -242,90 +244,197 @@ STRUCT(Target)
     OperatingSystem os;
 };
 
+BUSTER_LOCAL str target_to_string_builder(Target target)
+{
+    switch (target.arch)
+    {
+        break; case CPU_ARCH_X86_64:
+        {
+            switch (target.model)
+            {
+                break; case CPU_MODEL_GENERIC:
+                {
+                    switch (target.os)
+                    {
+                        break; case OPERATING_SYSTEM_LINUX: return S("x86_64-linux-baseline");
+                        break; case OPERATING_SYSTEM_MACOS: return S("x86_64-macos-baseline");
+                        break; case OPERATING_SYSTEM_WINDOWS: return S("x86_64-windows-baseline");
+                        break; case OPERATING_SYSTEM_UEFI: return S("x86_64-uefi-baseline");
+                        break; case OPERATING_SYSTEM_FREESTANDING: return S("x86_64-freestanding-baseline");
+                        break; default: BUSTER_UNREACHABLE();
+                    }
+                }
+                break; case CPU_MODEL_NATIVE:
+                {
+                    switch (target.os)
+                    {
+                        break; case OPERATING_SYSTEM_LINUX: return S("x86_64-linux-native");
+                        break; case OPERATING_SYSTEM_MACOS: return S("x86_64-macos-native");
+                        break; case OPERATING_SYSTEM_WINDOWS: return S("x86_64-windows-native");
+                        break; case OPERATING_SYSTEM_UEFI: return S("x86_64-uefi-native");
+                        break; case OPERATING_SYSTEM_FREESTANDING: return S("x86_64-freestanding-native");
+                        break; default: BUSTER_UNREACHABLE();
+                    }
+                }
+                break; default: BUSTER_UNREACHABLE();
+            }
+        }
+        break; default: BUSTER_UNREACHABLE();
+    }
+}
+
 STRUCT(CompilationUnit)
 {
     Target target;
     CompilationModel model;
     char** compilation_arguments;
     bool debug_info;
+    bool io_ring;
     u64 file;
-    pid_t pid;
-    u8 cache_padding[MIN(CACHE_LINE_GUESS - ((6 * sizeof(u64))), CACHE_LINE_GUESS)];
+    str object_path;
+    Process process;
+    u8 cache_padding[BUSTER_MIN(BUSTER_CACHE_LINE_GUESS - ((3 * sizeof(u64))), BUSTER_CACHE_LINE_GUESS)];
 };
 
-static_assert(sizeof(CompilationUnit) % CACHE_LINE_GUESS == 0);
+static_assert(sizeof(CompilationUnit) % BUSTER_CACHE_LINE_GUESS == 0);
 
-LOCAL void append_string(Arena* arena, str s)
+STRUCT(LinkUnit)
+{
+    Process link_process;
+    Process run_process;
+    str artifact_path;
+    Target target;
+    u64* compilations;
+    u64 compilation_count;
+    bool io_ring;
+    bool run;
+};
+
+BUSTER_LOCAL void append_string(Arena* arena, str s)
 {
     let allocation = arena_allocate_bytes(arena, s.length, 1);
     memcpy(allocation, s.pointer, s.length);
 }
 
-LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, CompilationUnit* units, u64 unit_count, char* envp[], str cwd)
+BUSTER_LOCAL bool target_equal(Target a, Target b)
+{
+    return memcmp(&a, &b, sizeof(a)) == 0;
+}
+
+BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, CompilationUnit* units, u64 unit_count, str cwd)
 {
     bool result = true;
 
     let compile_commands_start = compile_commands->position;
     append_string(compile_commands, S("[\n"));
 
+    constexpr u64 max_target_count = 16;
+    Target targets[max_target_count];
+    u64 target_count = 0;
+
     for (u64 unit_index = 0; unit_index < unit_count; unit_index += 1)
     {
         CompilationUnit* unit = &units[unit_index];
         let file_index = unit->file;
-        let work_file = &work_files[file_index];
         let path = file_relative_paths[file_index];
 
         let dot = str_last_ch(path, '.');
-        check(dot != string_no_match);
+        BUSTER_CHECK(dot != string_no_match);
         let extension_start = dot + 1;
         let extension = (str){ .pointer = path.pointer + extension_start, .length = path.length - extension_start };
-        check(str_equal(extension, S("c")));
+        BUSTER_CHECK(str_equal(extension, S("c")));
 
         {
+            let target_string_builder = target_to_string_builder(unit->target);
             str artifact_paths[] = {
                 cwd,
                 S("/build/"),
+                target_string_builder,
+                S("/"),
                 path,
                 S(".o"),
             };
-            let artifact_path = arena_join_string(arena, string_array_to_slice(artifact_paths), true);
-            work_file->artifact_path = artifact_path;
 
-            let compilation_model = COMPILATION_MODEL_INCREMENTAL;
+            u64 i;
+            for (i = 0; i < target_count; i += 1)
+            {
+                if (target_equal(unit->target, targets[i]))
+                {
+                    break;
+                }
+            }
+
+            char buffer[PATH_MAX];
+            u64 count = 0;
+            {
+                memcpy(buffer + count, artifact_paths[1].pointer + 1, artifact_paths[1].length - 1);
+                BUSTER_CHECK(artifact_paths[1].pointer[0] == '/');
+                count += artifact_paths[1].length - 1;
+            }
+
+            {
+                memcpy(buffer + count, artifact_paths[2].pointer, artifact_paths[2].length);
+                count += artifact_paths[2].length;
+            }
+
+            buffer[count] = 0;
+
+            if (i == target_count)
+            {
+                mkdir(buffer, 0755);
+                targets[target_count] = unit->target;
+                target_count += 1;
+            }
+
+            buffer[count] = '/';
+            count += 1;
+
+            let source_path = artifact_paths[4];
+            u64 source_i = 0;
+            while (1)
+            {
+                str source = str_slice_start(source_path, source_i);
+                let slash_index = str_first_ch(source, '/');
+                if (slash_index == string_no_match)
+                {
+                    break;
+                }
+
+                memcpy(buffer + count, source_path.pointer, slash_index);
+                buffer[count + slash_index] = 0;
+
+                mkdir(buffer, 0755);
+
+                source_i = slash_index + 1; 
+            }
+
+            let object_path = arena_join_string(arena, BUSTER_STRING_ARRAY_TO_SLICE(artifact_paths), true);
+            unit->object_path = object_path;
+
             str compilation_source_parts[] = {
                 cwd,
                 S("/"),
                 path,
             };
 
-            let compilation_source = arena_join_string(arena, string_array_to_slice(compilation_source_parts), true);
+            let compilation_source = arena_join_string(arena, BUSTER_STRING_ARRAY_TO_SLICE(compilation_source_parts), true);
             let clang_env = getenv("CLANG");
             char* clang_path = clang_env ? clang_env : "/usr/bin/clang";
-            char* model_arg;
-            switch (unit->target.model)
-            {
-                break; case CPU_MODEL_GENERIC:
-                    switch (unit->target.arch)
-                    {
-                        break; case CPU_ARCH_X86_64: model_arg = "-march=x86-64";
-                        break; default: UNREACHABLE();
-                    }
-                break; case CPU_MODEL_NATIVE: model_arg = "-march=native";
-                break; default: UNREACHABLE();
-            }
 
             let builder = argument_builder_start(arena, clang_path);
+            // argument_add(builder, "-ferror-limit=1");
             argument_add(builder, "-c");
             argument_add(builder, compilation_source.pointer);
             argument_add(builder, "-o");
-            argument_add(builder, artifact_path.pointer);
+            argument_add(builder, object_path.pointer);
             argument_add(builder, "-std=gnu2x");
             argument_add(builder, "-Isrc");
             argument_add(builder, "-Wno-pragma-once-outside-header");
 
-            if (unit->target.model == CPU_MODEL_NATIVE)
+            switch (unit->target.model)
             {
-                argument_add(builder, "-march=native");
+                break; case CPU_MODEL_NATIVE: argument_add(builder, "-march=native");
+                break; case CPU_MODEL_GENERIC: {}
             }
 
             if (unit->debug_info)
@@ -333,7 +442,9 @@ LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, Compila
                 argument_add(builder, "-g");
             }
 
-            argument_add(builder, unit->model == COMPILATION_MODEL_SINGLE_UNIT ? "-DUNITY_BUILD=1" : "-DUNITY_BUILD=0");
+            argument_add(builder, unit->model == COMPILATION_MODEL_SINGLE_UNIT ? "-DBUSTER_UNITY_BUILD=1" : "-DBUSTER_UNITY_BUILD=0");
+
+            argument_add(builder, unit->io_ring ? "-DBUSTER_USE_IO_RING=1" : "-DBUSTER_USE_IO_RING=0");
 
             let args = argument_builder_end(builder);
 
@@ -357,7 +468,6 @@ LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, Compila
             append_string(compile_commands, compilation_source);
             append_string(compile_commands, S("\"\n"));
             append_string(compile_commands, S("\t},\n"));
-
         }
     }
 
@@ -372,60 +482,73 @@ LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, Compila
         result = file_write(S("build/compile_commands.json"), compile_commands_str);
         if (!result)
         {
-            let e = errno;
-            perror(strerror(e));
+            perror(get_last_error_message());
         }
     }
 
     return result;
 }
 
-LOCAL bool compile(CompilationUnit* units, u64 unit_count, char* envp[])
+BUSTER_LOCAL bool compile(CompilationUnit* units, u64 unit_count, char* envp[])
 {
     bool result = true;
 
     for (u64 unit_index = 0; unit_index < unit_count; unit_index += 1)
     {
         CompilationUnit* unit = &units[unit_index];
-        let pid = spawn_process(unit->compilation_arguments, envp);
-        unit->pid = pid;
-        if (pid == -1)
+        spawn_process(&unit->process, unit->compilation_arguments, envp);
+        if (unit->process.pid == -1)
         {
             result = false;
         }
+#if BUSTER_USE_IO_RING
+        else
+        {
+            io_ring_prepare_waitid(unit->process.pid, &unit->process.siginfo, (u64)unit);
+        }
+#endif
     }
 
-    for (u64 unit_index = 0; unit_index < unit_count; unit_index += 1)
-    {
-        let unit = &units[unit_index];
-        let pid = unit->pid;
-        let file_index = unit->file;
-        let work_file = &work_files[file_index];
+#if BUSTER_USE_IO_RING
+    let wait_entries = io_ring_submit_and_wait_all();
+    result = wait_entries != 0;
+#endif
 
-        int status = 0;
-        let success = wait_for_process(pid) == PROCESS_RESULT_SUCCESS;
-        if (!success)
+    if (result)
+    {
+        BUSTER_CHECK(wait_entries == unit_count);
+
+        for (u64 unit_index = 0; unit_index < unit_count; unit_index += 1)
         {
-            printf("Compilation failed for artifact %s\n", work_file->artifact_path.pointer);
-            result = false;
+#if BUSTER_USE_IO_RING
+            let completion = io_ring_peek_completion();
+            let unit = (CompilationUnit*)completion.user_data;
+            let wait_result = completion.result;
+            bool success = (wait_result == 0) & (unit->process.siginfo.si_code == CLD_EXITED) & (unit->process.siginfo.si_status == 0);
+            if (!success)
+            {
+                // TODO: log failure
+                result = false;
+            }
+#else
+            let unit = &units[unit_index];
+            let pid = unit->process.pid;
+
+            let success = process_wait_sync(pid, &unit->process.siginfo) == PROCESS_RESULT_SUCCESS;
+            if (!success)
+            {
+                result = false;
+            }
+#endif
+            if ((!success) & global_program.verbose) printf("Compilation failed for artifact %s\n", unit->object_path.pointer);
         }
     }
 
     return result;
 }
 
-STRUCT(LinkOptions)
+BUSTER_LOCAL void queue_linkage_job(Arena* arena, LinkUnit* link_unit, CompilationUnit* units, char* envp[])
 {
-    str artifact_output;
-    bool io_uring;
-};
-
-LOCAL bool perform_linkage(Arena* arena, CompilationUnit* units, u64* unit_indices, u64 unit_count, char* envp[], LinkOptions options)
-{
-    bool result = false;
-
-    let first_arg = arena_allocate(arena, char*, 1);
-
     let clang_env = getenv("CLANG");
     char* clang_path = clang_env ? clang_env : "/usr/bin/clang";
 
@@ -433,18 +556,17 @@ LOCAL bool perform_linkage(Arena* arena, CompilationUnit* units, u64* unit_indic
 
     argument_add(builder, "-fuse-ld=lld");
     argument_add(builder, "-o");
-    argument_add(builder, options.artifact_output.pointer);
+    argument_add(builder, link_unit->artifact_path.pointer);
 
-    for (u64 i = 0; i < unit_count; i += 1)
+    for (u64 i = 0; i < link_unit->compilation_count; i += 1)
     {
-        let unit_i = unit_indices[i];
+        let unit_i = link_unit->compilations[i];
         let unit = &units[unit_i];
-        let unit_file = &work_files[unit->file];
-        let artifact_path = unit_file->artifact_path;
+        let artifact_path = unit->object_path;
         argument_add(builder, artifact_path.pointer);
     }
 
-    if (options.io_uring)
+    if (link_unit->io_ring)
     {
         argument_add(builder, "-luring");
     }
@@ -462,25 +584,16 @@ LOCAL bool perform_linkage(Arena* arena, CompilationUnit* units, u64* unit_indic
         printf("\n");
     }
 
-    let pid = spawn_process(argv, envp);
-    if (pid != -1)
-    {
-        result = wait_for_process(pid) == PROCESS_RESULT_SUCCESS;
-    }
-    argument_builder_destroy(builder);
-
-    return result;
+    spawn_process(&link_unit->link_process, argv, envp);
 }
 
-typedef enum BuildCommand
+BUSTER_LOCAL ProcessResult process_arguments(Arena* arena, void* context, u64 argc, char** argv, char** envp)
 {
-    BUILD_COMMAND_BUILD,
-    BUILD_COMMAND_TEST,
-} BuildCommand;
+    let input = (ProgramInput*)context;
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(envp);
 
-LOCAL ProcessResult main_function(int argc, char* argv[], char* envp[])
-{
-    BuildCommand command = {};
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
 
     {
         let arg_ptr = argv + 1;
@@ -493,62 +606,78 @@ LOCAL ProcessResult main_function(int argc, char* argv[], char* envp[])
 
             if (strcmp(a, "test") == 0)
             {
-                command = BUILD_COMMAND_TEST;
+                input->command = BUILD_COMMAND_TEST;
             }
             else
             {
-                printf("Command '%s' not recognized\n", a);
-                return PROCESS_RESULT_FAILED;
+                result = argument_process(argc, argv, envp, 1);
+
+                if (result != PROCESS_RESULT_SUCCESS)
+                {
+                    printf("Command '%s' not recognized\n", a);
+                }
             }
         }
 
-        while (arg_ptr != arg_top)
+        if (result == PROCESS_RESULT_SUCCESS)
         {
-            printf("Arguments > 2 not supported\n");
-            return PROCESS_RESULT_FAILED;
+            while (arg_ptr != arg_top)
+            {
+                printf("Arguments > 2 not supported\n");
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
         }
     }
 
+    if (!global_program.verbose & (input->command != BUILD_COMMAND_BUILD))
+    {
+        global_program.verbose = true;
+    }
 
+    return result;
+}
+
+BUSTER_LOCAL ProcessResult thread_entry_point(Thread* thread)
+{
+    BUSTER_UNUSED(thread);
+    let arena_init_start = take_timestamp();
     let arena = arena_create((ArenaInitialization){});
     let compile_commands = arena_create((ArenaInitialization){});
+    let arena_init_end = take_timestamp();
+    let input = (ProgramInput*)thread->context;
 
-    struct io_uring r;
-    let ring = &r;
+    let open_start = take_timestamp();
 
-    ProcessResult result = io_uring_queue_init(io_uring_queue_entry_count, ring, 0);
+    ProcessResult result = io_ring_init(&thread->ring, 4096) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 
     if (result == PROCESS_RESULT_SUCCESS)
     {
-        u64 entry_count = array_length(work_files);
+        u64 entry_count = BUSTER_ARRAY_LENGTH(work_files);
 
         for (u64 i = 0; i < entry_count; i += 1)
         {
-            struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-            sqe->user_data = i;
-
             let work_file = &work_files[i];
             let path = file_relative_paths[i];
-            work_file_open(work_file, path, sqe);
+            work_file_open(work_file, path, i);
         }
 
-        int submission_result = io_uring_submit_and_wait(ring, entry_count);
-        result = submission_result == entry_count ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        result = io_ring_submit_and_wait_all() ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        // result = ((submission_result >= 0) & ((u64)submission_result == entry_count)) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        let open_end = take_timestamp();
 
         if (result == PROCESS_RESULT_SUCCESS)
         {
             u64 completed_open_count = 0;
             bool cache_missing = false;
 
+            let stat_start = open_end;
+
             for (u64 i = 0; i < entry_count; i += 1)
             {
-                struct io_uring_cqe* cqe;
-                
-                if (io_uring_peek_cqe(ring, &cqe) == 0)
-                {
-                    let i = cqe->user_data;
-                    int fd = cqe->res;
-                    io_uring_cqe_seen(ring, cqe);
+                let completion = io_ring_peek_completion();
+                    let i = completion.user_data;
+                    let fd = completion.result;
 
                     let work_file = &work_files[i];
                     work_file->fd = fd;
@@ -561,67 +690,46 @@ LOCAL ProcessResult main_function(int argc, char* argv[], char* envp[])
 
                     if (is_valid_file_descriptor)
                     {
-                        let sqe = io_uring_get_sqe(ring);
-                        sqe->user_data = i;
-                        io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, STATX_MTIME | STATX_SIZE, &work_file->statx);
+                        io_ring_prepare_stat(fd, &work_file->statx, i, (StatOptions) { .size = 1, .modified_time = 1 });
                         completed_open_count += 1;
                     }
-                }
-                else
-                {
-                    printf("Internal failure: openat\n");
-                    result = PROCESS_RESULT_FAILED;
-                    break;
-                }
             }
 
             if (result == PROCESS_RESULT_SUCCESS)
             {
-                let statx_entry_count = entry_count - (entry_count - completed_open_count);
+                result = io_ring_submit_and_wait_all() ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 
-                submission_result = io_uring_submit_and_wait(ring, statx_entry_count);
-
-                result = submission_result == statx_entry_count ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+                let stat_end = take_timestamp();
 
                 if (result == PROCESS_RESULT_SUCCESS)
                 {
                     u64 arena_offset = 0x1000;
 
-                    for (int i = 0; i < submission_result; i += 1)
+                    for (u64 i = 0; i < completed_open_count; i += 1)
                     {
-                        struct io_uring_cqe* cqe;
-                        if (io_uring_peek_cqe(ring, &cqe) == 0)
+                        let completion = io_ring_peek_completion();
+                        let i = completion.user_data;
+                        let return_code = completion.result;
+
+                        bool succeeded = return_code == 0;
+
+                        if (succeeded)
                         {
-                            let i = cqe->user_data;
-                            int return_code = cqe->res;
-                            io_uring_cqe_seen(ring, cqe);
+                            let work_file = &work_files[i];
+                            let size = work_file->statx.stx_size;
+                            let s = work_file->statx.stx_mtime.tv_sec;
+                            let ns = work_file->statx.stx_mtime.tv_nsec;
+                            work_file->time_s = s;
+                            work_file->time_ns = ns;
+                            work_file->size = size;
 
-                            bool succeeded = return_code == 0;
-
-                            if (succeeded)
-                            {
-                                let work_file = &work_files[i];
-                                let size = work_file->statx.stx_size;
-                                let s = work_file->statx.stx_mtime.tv_sec;
-                                let ns = work_file->statx.stx_mtime.tv_nsec;
-                                work_file->time_s = s;
-                                work_file->time_ns = ns;
-                                work_file->size = size;
-
-                                work_file->arena_offset = arena_offset;
-                                arena_offset += align_forward(size + (64 * 4), 0x1000);
-                                work_file->status = WORK_FILE_STATED;
-                            }
-                            else
-                            {
-                                printf("Internal failure: statx failed\n");
-                                result = PROCESS_RESULT_FAILED;
-                                break;
-                            }
+                            work_file->arena_offset = arena_offset;
+                            arena_offset += align_forward(size + (64 * 4), 0x1000);
+                            work_file->status = WORK_FILE_STATED;
                         }
                         else
                         {
-                            printf("Internal failure: statx\n");
+                            printf("Internal failure: statx failed\n");
                             result = PROCESS_RESULT_FAILED;
                             break;
                         }
@@ -629,6 +737,7 @@ LOCAL ProcessResult main_function(int argc, char* argv[], char* envp[])
 
                     if (result == PROCESS_RESULT_SUCCESS)
                     {
+                        let file_processing_start = take_timestamp();
                         let allocation = arena_allocate_bytes(arena, arena_offset, 0x1000);
 
                         for (u64 i = 0; i < entry_count; i += 1)
@@ -641,85 +750,67 @@ LOCAL ProcessResult main_function(int argc, char* argv[], char* envp[])
 
                                 {
                                     let arena_offset = work_file->arena_offset;
-                                    let pointer = allocation + arena_offset;
+                                    let pointer = (u8*)allocation + arena_offset;
                                     let size = work_file->size;
 
-                                    let sqe = io_uring_get_sqe(ring);
-                                    sqe->user_data = i;
-                                    io_uring_prep_read(sqe, fd, pointer, size, 0);
                                     work_file->status = WORK_FILE_READING;
-                                }
-
-                                {
-                                    let sqe = io_uring_get_sqe(ring);
-                                    sqe->user_data = ((u64)1 << 32) | i;
-                                    io_uring_prep_close(sqe, fd);
+                                    io_ring_prepare_read_and_close(fd, pointer, size, i, 0, (u64)1 << 32);
                                 }
                             }
                         }
 
-                        submission_result = io_uring_submit(ring);
-                        let countdown = statx_entry_count * 2;
-                        result = submission_result == countdown ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+                        u32 submitted_count = io_ring_submit();
+                        result = submitted_count ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 
                         if (result == PROCESS_RESULT_SUCCESS)
                         {
-                            while (countdown--)
+                            while (submitted_count--)
                             {
-                                struct io_uring_cqe* cqe;
+                                let completion = io_ring_wait_completion();
 
-                                if (io_uring_wait_cqe(ring, &cqe) == 0)
+                                let user_data = completion.user_data;
+                                bool is_read = (user_data >> 32) == 0;
+                                let index = user_data & UINT32_MAX;
+                                let return_value = completion.result;
+
+                                if (is_read)
                                 {
-                                    let user_data = cqe->user_data;
-                                    bool is_read = (user_data >> 32) == 0;
-                                    let index = user_data & UINT32_MAX;
-                                    let return_value = cqe->res;
-                                    io_uring_cqe_seen(ring, cqe);
+                                    let work_file = &work_files[index];
+                                    let file_size = work_file->size;
 
-                                    if (is_read)
+                                    if ((return_value >= 0) & ((u64)return_value != file_size))
                                     {
-                                        let work_file = &work_files[index];
-                                        let file_size = work_file->size;
-
-                                        if (return_value != file_size)
-                                        {
-                                            printf("File sizes don't match");
-                                            result = PROCESS_RESULT_FAILED;
-                                            break;
-                                        }
-
-                                        let arena_offset = work_file->arena_offset;
-                                        let hash = hash_file((const char*)allocation + arena_offset, work_file->size);
-                                        work_file->hash = hash;
-                                        work_file->status = WORK_FILE_READ;
+                                        printf("File sizes don't match");
+                                        result = PROCESS_RESULT_FAILED;
+                                        break;
                                     }
-                                    else
-                                    {
-                                        if (return_value != 0)
-                                        {
-                                            printf("Close failed\n");
-                                            result = PROCESS_RESULT_SUCCESS;
-                                            break;
-                                        }
-                                    }
+
+                                    let arena_offset = work_file->arena_offset;
+                                    let hash = hash_file((const char*)allocation + arena_offset, work_file->size);
+                                    work_file->hash = hash;
+                                    work_file->status = WORK_FILE_READ;
                                 }
                                 else
                                 {
-                                    printf("Wait for cqe failed\n");
-                                    result = PROCESS_RESULT_SUCCESS;
-                                    break;
+                                    if (return_value != 0)
+                                    {
+                                        printf("Close failed\n");
+                                        result = PROCESS_RESULT_SUCCESS;
+                                        break;
+                                    }
                                 }
                             }
+
+                            let file_processing_end = take_timestamp();
+                            let compile_command_start = file_processing_end;
 
                             if (result == PROCESS_RESULT_SUCCESS)
                             {
                                 if (cache_missing)
                                 {
-                                    mkdir("build/src", 0755);
-
                                     u64 left_out_compilation_count = 1;
 
-                                    let candidate_compilation_unit_count = array_length(work_files) - left_out_compilation_count;
+                                    let candidate_compilation_unit_count = BUSTER_ARRAY_LENGTH(work_files) - left_out_compilation_count;
                                     u64 compilation_unit_count = 0;
 
                                     for (u64 i = 0; i < candidate_compilation_unit_count; i += 1)
@@ -766,64 +857,103 @@ LOCAL ProcessResult main_function(int argc, char* argv[], char* envp[])
 
                                                 *compilation_unit = (CompilationUnit) {
                                                     .file = file_index,
-                                                    .pid = -1,
-                                                    .model =  i == 0 ? COMPILATION_MODEL_SINGLE_UNIT : default_compilation_model,
+                                                    .model = i == 0 ? COMPILATION_MODEL_SINGLE_UNIT : default_compilation_model,
                                                     .target = {
                                                         .model = i == 0 ? CPU_MODEL_NATIVE : default_cpu_model,
                                                     },
                                                     .debug_info = true,
+                                                    .io_ring = i == 0,
                                                 };
                                             }
                                         }
                                     }
 
-                                    check(compilation_unit_i == compilation_unit_count);
+                                    BUSTER_CHECK(compilation_unit_i == compilation_unit_count);
 
                                     let cwd = path_absolute(arena, ".");
 
-                                    result = build_compile_commands(arena, compile_commands, compilation_units, compilation_unit_count, envp, cwd) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+                                    result = build_compile_commands(arena, compile_commands, compilation_units, compilation_unit_count, cwd) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+
+                                    let compile_command_end = take_timestamp();
 
                                     if (result == PROCESS_RESULT_SUCCESS)
                                     {
-                                        result = compile(compilation_units, compilation_unit_count, envp) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+                                        let compile_start = compile_command_end;
+                                        result = compile(compilation_units, compilation_unit_count, global_program.envp) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+                                        let compile_end = take_timestamp();
 
                                         if (result == PROCESS_RESULT_SUCCESS)
                                         {
+                                            let link_start = take_timestamp();
+
+                                            u64 builder_indices[] = { 0, 1 };
+                                            let disk_indices = arena_allocate(arena, u64, compilation_unit_count - 1);
+                                            for (u64 i = 0; i < compilation_unit_count; i += 1)
                                             {
-                                                u64 indices[] = { 0, 1 };
-                                                let artifact_output = S("build/builder");
-                                                LinkOptions options = {
-                                                    .artifact_output = artifact_output,
-                                                    .io_uring = true,
-                                                };
-                                                result = perform_linkage(arena, compilation_units, indices, array_length(indices), envp, options) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+                                                disk_indices[i] = i + 1;
+                                            }
+                                            LinkUnit link_units[] = {
+                                                {
+                                                    .artifact_path = S("build/builder"),
+                                                    .compilations = builder_indices,
+                                                    .compilation_count = BUSTER_ARRAY_LENGTH(builder_indices),
+                                                    .io_ring = true,
+                                                },
+                                                {
+                                                    .artifact_path = S("build/disk_builder"),
+                                                    .compilations = disk_indices,
+                                                    .compilation_count = compilation_unit_count - 1,
+                                                    .run = true,
+                                                },
+                                            };
+
+
+                                            for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(link_units); i += 1)
+                                            {
+                                                LinkUnit* link_unit = &link_units[i];
+                                                queue_linkage_job(arena, link_unit, compilation_units, global_program.envp);
                                             }
 
+                                            for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(link_units); i += 1)
                                             {
-                                                let unit_indices = arena_allocate(arena, u64, compilation_unit_count - 1);
-                                                for (u64 i = 0; i < compilation_unit_count; i += 1)
-                                                {
-                                                    unit_indices[i] = i;
-                                                }
+                                                let link_unit = &link_units[i];
+                                                let link_process = &link_unit->link_process;
+                                                io_ring_prepare_waitid(link_process->pid, &link_process->siginfo, (u64)link_process | TASK_ID_LINKING);
+                                            }
 
-                                                let artifact_output = S("build/disk_builder");
-                                                LinkOptions options = {
-                                                    .artifact_output = artifact_output,
+                                            result = io_ring_submit_and_wait_all() ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+                                            if (result != PROCESS_RESULT_SUCCESS)
+                                            {
+                                                if (global_program.verbose) printf("Waiting for linker jobs failed!\n");
+                                            }
+
+                                            let link_end = take_timestamp();
+
+                                            if (global_program.verbose && 0)
+                                            {
+                                                printf("Arena: %lu ns\n", ns_between(arena_init_start, arena_init_end));
+                                                //printf("Thread: %lu ns\n", ns_between(thread_start, thread_end));
+                                                printf("Open: %lu ns\n", ns_between(open_start, open_end));
+                                                printf("Stat: %lu ns\n", ns_between(stat_start, stat_end));
+                                                printf("File processing: %lu ns\n", ns_between(file_processing_start, file_processing_end));
+                                                printf("Compile command building: %lu ns\n", ns_between(compile_command_start, compile_command_end));
+                                                printf("Compilation (%lu objects): %lu ns\n", compilation_unit_count, ns_between(compile_start, compile_end));
+                                                printf("Link: %lu ns\n", ns_between(link_start, link_end));
+                                            }
+
+                                            if ((input->command == BUILD_COMMAND_TEST) & (result == PROCESS_RESULT_SUCCESS))
+                                            {
+                                                let link_unit = &link_units[1];
+                                                
+                                                char* args[] = {
+                                                    link_unit->artifact_path.pointer,
+                                                    0,
                                                 };
-                                                result = perform_linkage(arena, compilation_units + 1, unit_indices, compilation_unit_count - 1, envp, options) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-
-                                                if ((command == BUILD_COMMAND_TEST) & (result == PROCESS_RESULT_SUCCESS))
+                                                spawn_process(&link_unit->run_process, args, global_program.envp);
+                                                result = process_wait_sync(link_unit->run_process.pid, &link_unit->run_process.siginfo);
+                                                if (result == PROCESS_RESULT_SUCCESS)
                                                 {
-                                                    char* args[] = {
-                                                        artifact_output.pointer,
-                                                        0,
-                                                    };
-                                                    let pid = spawn_process(args, envp);
-                                                    result = pid != -1 ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-                                                    if (result == PROCESS_RESULT_SUCCESS)
-                                                    {
-                                                        result = wait_for_process(pid);
-                                                    }
+                                                    printf("All tests succeeded!\n");
                                                 }
                                             }
                                         }
@@ -831,20 +961,19 @@ LOCAL ProcessResult main_function(int argc, char* argv[], char* envp[])
                                 }
                                 else
                                 {
-                                    trap();
+                                    BUSTER_TRAP();
                                 }
                             }
                         }
                         else
                         {
-                            printf("Unmatched entry count: expected %lu but got %d\n", countdown, submission_result);
+                            // TODO:
+                            printf("Unmatched entry count\n");
                         }
                     }
                 }
             }
         }
-
-        io_uring_queue_exit(ring);
     }
 
     return result;
@@ -852,6 +981,14 @@ LOCAL ProcessResult main_function(int argc, char* argv[], char* envp[])
 
 int main(int argc, char* argv[], char* envp[])
 {
-    let result = main_function(argc, argv, envp);
-    return (int)result;
+    ProgramInput input = {};
+    return buster_run((BusterInitialization){
+        .process_arguments = &process_arguments,
+        .thread_entry_point = &thread_entry_point,
+        .context = &input,
+        .argv = argv,
+        .envp = envp,
+        .argc = argc,
+        .thread_spawn_policy = THREAD_SPAWN_POLICY_SINGLE_THREADED,
+    });
 }

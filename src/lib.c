@@ -2,10 +2,6 @@
 
 #include <lib.h>
 
-#ifdef __x86_64__
-#include <immintrin.h>
-#endif
-
 #if BUSTER_KERNEL == 0
 #include <stdio.h>
 #endif
@@ -18,7 +14,15 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/ptrace.h>
+#include <linux/limits.h>
+#include <linux/fs.h>
+#if BUSTER_USE_PTHREAD
 #include <pthread.h>
+#endif
+#if BUSTER_USE_IO_RING
+#include <liburing.h>
+#endif
+
 #elif defined(__APPLE__)
 #include <unistd.h>
 #include <fcntl.h>
@@ -33,6 +37,30 @@
 #include <mswsock.h>
 LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 #endif
+
+STRUCT(IoRing)
+{
+#ifdef __linux__
+#if BUSTER_USE_IO_RING
+    struct io_uring linux_impl;
+#endif
+#else
+#pragma error
+#endif
+    u32 submitted_entry_count;
+    u32 completed_entry_count;
+};
+
+STRUCT(Thread)
+{
+    Arena* arena;
+    ThreadEntryPoint* entry_point;
+    IoRing ring;
+    pthread_t handle;
+    void* context;
+};
+
+BUSTER_IMPL __thread Thread* thread;
 
 STRUCT(ProtectionFlags)
 {
@@ -50,7 +78,7 @@ STRUCT(MapFlags)
 };
 
 #if defined (__linux__) || defined(__APPLE__)
-LOCAL int os_posix_protection_flags(ProtectionFlags flags)
+BUSTER_LOCAL int os_posix_protection_flags(ProtectionFlags flags)
 {
     int result = 
         PROT_READ * flags.read |
@@ -61,7 +89,7 @@ LOCAL int os_posix_protection_flags(ProtectionFlags flags)
     return result;
 }
 
-LOCAL int os_posix_map_flags(MapFlags flags)
+BUSTER_LOCAL int os_posix_map_flags(MapFlags flags)
 {
     int result = 
 #ifdef __linux__
@@ -120,7 +148,7 @@ LOCAL DWORD os_windows_allocation_flags(MapFlags flags)
 }
 #endif
 
-LOCAL bool os_lock_and_unlock(void* address, u64 size)
+BUSTER_LOCAL bool os_lock_and_unlock(void* address, u64 size)
 {
     bool result = 1;
 
@@ -143,7 +171,7 @@ LOCAL bool os_lock_and_unlock(void* address, u64 size)
     return result;
 }
 
-LOCAL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
+BUSTER_LOCAL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
 {
     void* address = 0;
 
@@ -164,7 +192,7 @@ LOCAL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlag
     return address;
 }
 
-LOCAL bool os_unreserve(void* address, u64 size)
+BUSTER_LOCAL bool os_unreserve(void* address, u64 size)
 {
     bool result = 1;
 #if defined(__linux__) || defined(__APPLE__)
@@ -182,7 +210,7 @@ LOCAL bool os_unreserve(void* address, u64 size)
     return result;
 }
 
-LOCAL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
+BUSTER_LOCAL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
 {
     bool result = 1;
 
@@ -204,7 +232,7 @@ LOCAL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool l
     return result;
 }
 
-LOCAL void str_reverse(str s)
+BUSTER_LOCAL void str_reverse(str s)
 {
     char* restrict pointer = s.pointer;
     for (u64 i = 0, reverse_i = s.length - 1; i < reverse_i; i += 1, reverse_i -= 1)
@@ -215,7 +243,7 @@ LOCAL void str_reverse(str s)
     }
 }
 
-LOCAL str format_integer_hexadecimal(str buffer, u64 value)
+BUSTER_LOCAL str format_integer_hexadecimal(str buffer, u64 value)
 {
     str result = {};
 
@@ -233,7 +261,7 @@ LOCAL str format_integer_hexadecimal(str buffer, u64 value)
         {
             let digit = v % 16;
             let ch = (u8)(digit > 9 ? (digit - 10 + 'a') : (digit + '0'));
-            check(i < buffer.length);
+            BUSTER_CHECK(i < buffer.length);
             buffer.pointer[i] = ch;
             i += 1;
             v = v / 16;
@@ -248,7 +276,7 @@ LOCAL str format_integer_hexadecimal(str buffer, u64 value)
     return result;
 }
 
-LOCAL str format_integer_decimal(str buffer, u64 value, bool treat_as_signed)
+BUSTER_LOCAL str format_integer_decimal(str buffer, u64 value, bool treat_as_signed)
 {
     str result = {};
 
@@ -268,7 +296,7 @@ LOCAL str format_integer_decimal(str buffer, u64 value, bool treat_as_signed)
         {
             let digit = v % 10;
             let ch = (u8)(digit + '0');
-            check(i < buffer.length);
+            BUSTER_CHECK(i < buffer.length);
             buffer.pointer[i] = ch;
             i += 1;
             v = v / 10;
@@ -285,7 +313,7 @@ LOCAL str format_integer_decimal(str buffer, u64 value, bool treat_as_signed)
     return result;
 }
 
-LOCAL str format_integer_octal(str buffer, u64 value)
+BUSTER_LOCAL str format_integer_octal(str buffer, u64 value)
 {
     str result = {};
 
@@ -303,7 +331,7 @@ LOCAL str format_integer_octal(str buffer, u64 value)
         {
             let digit = v % 8;
             let ch = (u8)(digit + '0');
-            check(i < buffer.length);
+            BUSTER_CHECK(i < buffer.length);
             buffer.pointer[i] = ch;
             i += 1;
             v = v / 8;
@@ -318,7 +346,7 @@ LOCAL str format_integer_octal(str buffer, u64 value)
     return result;
 }
 
-LOCAL str format_integer_binary(str buffer, u64 value)
+BUSTER_LOCAL str format_integer_binary(str buffer, u64 value)
 {
     str result = {};
 
@@ -336,7 +364,7 @@ LOCAL str format_integer_binary(str buffer, u64 value)
         {
             let digit = v % 2;
             let ch = (u8)(digit + '0');
-            check(i < buffer.length);
+            BUSTER_CHECK(i < buffer.length);
             buffer.pointer[i] = ch;
             i += 1;
             v = v / 2;
@@ -351,12 +379,12 @@ LOCAL str format_integer_binary(str buffer, u64 value)
     return result;
 }
 
-PUB_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
+BUSTER_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
 {
     if (options.treat_as_signed)
     {
-        check(!options.prefix);
-        check(options.format == INTEGER_FORMAT_DECIMAL);
+        BUSTER_CHECK(!options.prefix);
+        BUSTER_CHECK(options.format == INTEGER_FORMAT_DECIMAL);
     }
 
     u64 prefix_digit_count = 2;
@@ -371,7 +399,7 @@ PUB_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
             break; case INTEGER_FORMAT_DECIMAL: prefix_ch = 'd';
             break; case INTEGER_FORMAT_OCTAL: prefix_ch = 'o';
             break; case INTEGER_FORMAT_BINARY: prefix_ch = 'b';
-            break; default: UNREACHABLE();
+            break; default: BUSTER_UNREACHABLE();
         }
         buffer.pointer[0] = '0';
         buffer.pointer[1] = prefix_ch;
@@ -397,7 +425,7 @@ PUB_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
         {
             result = format_integer_binary(buffer, options.value);
         }
-        break; default: UNREACHABLE();
+        break; default: BUSTER_UNREACHABLE();
     }
 
     if (options.prefix)
@@ -409,7 +437,7 @@ PUB_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
     return result;
 }
 
-[[noreturn]] [[gnu::cold]] PUB_IMPL void _assert_failed(u32 line, str function_name, str file_path)
+[[noreturn]] [[gnu::cold]] BUSTER_IMPL void _assert_failed(u32 line, str function_name, str file_path)
 {
     print(S("Assert failed at "));
     print(function_name);
@@ -417,7 +445,7 @@ PUB_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
     print(file_path);
     print(S(":"));
     char buffer[128];
-    let stack_string = format_integer_stack((str){ buffer, array_length(buffer) }, (FormatIntegerOptions){ .value = line });
+    let stack_string = format_integer_stack((str){ buffer, BUSTER_ARRAY_LENGTH(buffer) }, (FormatIntegerOptions){ .value = line });
     print(stack_string);
     print(S("\n"));
         
@@ -425,9 +453,9 @@ PUB_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
 }
 
 #if BUSTER_KERNEL == 0
-PUB_IMPL FileDescriptor* os_file_open(str path, OpenFlags flags, OpenPermissions permissions)
+BUSTER_IMPL FileDescriptor* os_file_open(str path, OpenFlags flags, OpenPermissions permissions)
 {
-    check(!path.pointer[path.length]);
+    BUSTER_CHECK(!path.pointer[path.length]);
     FileDescriptor* result = 0;
 #if defined (__linux__) || defined(__APPLE__)
     int o = 0;
@@ -445,7 +473,7 @@ PUB_IMPL FileDescriptor* os_file_open(str path, OpenFlags flags, OpenPermissions
     }
     else
     {
-        UNREACHABLE();
+        BUSTER_UNREACHABLE();
     }
 
     o |= (flags.truncate) * O_TRUNC;
@@ -530,87 +558,87 @@ PUB_IMPL FileDescriptor* os_file_open(str path, OpenFlags flags, OpenPermissions
     return result;
 }
 
-LOCAL FileDescriptor* posix_fd_to_generic_fd(int fd)
+BUSTER_LOCAL FileDescriptor* posix_fd_to_generic_fd(int fd)
 {
-    check(fd >= 0);
+    BUSTER_CHECK(fd >= 0);
     return (FileDescriptor*)(u64)(fd);
 }
 
-LOCAL int generic_fd_to_posix(FileDescriptor* fd)
+BUSTER_LOCAL int generic_fd_to_posix(FileDescriptor* fd)
 {
-    check(fd);
+    BUSTER_CHECK(fd);
     return (int)(u64)fd;
 }
 
-LOCAL void* generic_fd_to_windows(FileDescriptor* fd)
+BUSTER_LOCAL void* generic_fd_to_windows(FileDescriptor* fd)
 {
-    check(fd);
+    BUSTER_CHECK(fd);
     return (void*)fd;
 }
 
-PUB_IMPL u64 os_file_get_size(FileDescriptor* file_descriptor)
+BUSTER_IMPL u64 os_file_get_size(FileDescriptor* file_descriptor)
 {
 #if defined(__linux__) || defined(__APPLE__)
     int fd = generic_fd_to_posix(file_descriptor);
     struct stat sb;
     let fstat_result = fstat(fd, &sb);
-    check(fstat_result == 0);
+    BUSTER_CHECK(fstat_result == 0);
 
     return (u64)sb.st_size;
 #elif _WIN32
     HANDLE fd = generic_fd_to_windows(file_descriptor);
     LARGE_INTEGER file_size = {};
     BOOL result = GetFileSizeEx(fd, &file_size);
-    check(result);
+    CHECK(result);
     return file_size.QuadPart;
 #endif
 }
 
-LOCAL u64 os_file_read_partially(FileDescriptor* file_descriptor, void* buffer, u64 byte_count)
+BUSTER_LOCAL u64 os_file_read_partially(FileDescriptor* file_descriptor, void* buffer, u64 byte_count)
 {
 #if defined(__linux__) || defined(__APPLE__)
     let fd = generic_fd_to_posix(file_descriptor);
     let read_byte_count = read(fd, buffer, byte_count);
-    check(read_byte_count > 0);
+    BUSTER_CHECK(read_byte_count > 0);
 
     return (u64)read_byte_count;
 #elif _WIN32
     let fd = generic_fd_to_windows(file_descriptor);
     DWORD read_byte_count = 0;
     BOOL result = ReadFile(fd, buffer, (u32)byte_count, &read_byte_count, 0);
-    check(result);
+    CHECK(result);
     return read_byte_count;
 #endif
 }
 
-LOCAL void os_file_read(FileDescriptor* file_descriptor, str buffer, u64 byte_count)
+BUSTER_LOCAL void os_file_read(FileDescriptor* file_descriptor, str buffer, u64 byte_count)
 {
     u64 read_byte_count = 0;
     char* pointer = buffer.pointer;
-    check(buffer.length >= byte_count);
+    BUSTER_CHECK(buffer.length >= byte_count);
     while (byte_count - read_byte_count)
     {
         read_byte_count += os_file_read_partially(file_descriptor, pointer + read_byte_count, byte_count - read_byte_count);
     }
 }
 
-LOCAL u64 os_file_write_partially(FileDescriptor* file_descriptor, void* pointer, u64 length)
+BUSTER_LOCAL u64 os_file_write_partially(FileDescriptor* file_descriptor, void* pointer, u64 length)
 {
 #if defined(__linux__) || defined(__APPLE__)
     let fd = generic_fd_to_posix(file_descriptor);
     let result = write(fd, pointer, length);
-    check(result > 0);
+    BUSTER_CHECK(result > 0);
     return result;
 #elif defined(_WIN32)
     let fd = generic_fd_to_windows(file_descriptor);
     DWORD written_byte_count = 0;
     BOOL result = WriteFile(fd, pointer, (u32)length, &written_byte_count, 0);
-    check(result);
+    CHECK(result);
     return written_byte_count;
 #endif
 }
 
-PUB_IMPL FileDescriptor* os_get_stdout()
+BUSTER_IMPL FileDescriptor* os_get_stdout()
 {
     FileDescriptor* result = {};
 #if defined(__linux__) || defined(__APPLE__)
@@ -621,7 +649,7 @@ PUB_IMPL FileDescriptor* os_get_stdout()
     return result;
 }
 
-PUB_IMPL void os_file_write(FileDescriptor* file_descriptor, str buffer)
+BUSTER_IMPL void os_file_write(FileDescriptor* file_descriptor, str buffer)
 {
     u64 total_written_byte_count = 0;
 
@@ -632,30 +660,30 @@ PUB_IMPL void os_file_write(FileDescriptor* file_descriptor, str buffer)
     }
 }
 
-PUB_IMPL void os_file_close(FileDescriptor* file_descriptor)
+BUSTER_IMPL void os_file_close(FileDescriptor* file_descriptor)
 {
 #if defined(__linux__) || defined(__APPLE__)
     let fd = generic_fd_to_posix(file_descriptor);
     let close_result = close(fd);
-    check(close_result == 0);
+    BUSTER_CHECK(close_result == 0);
 #elif _WIN32
     let fd = generic_fd_to_windows(file_descriptor);
     let result = CloseHandle(fd);
-    check(result);
+    CHECK(result);
 #endif
 }
 
-LOCAL u64 page_size = KB(4);
-LOCAL u64 default_granularity = MB(2);
+BUSTER_LOCAL u64 page_size = BUSTER_KB(4);
+BUSTER_LOCAL u64 default_granularity = BUSTER_MB(2);
 
-LOCAL u64 minimum_position = sizeof(Arena);
+BUSTER_LOCAL u64 minimum_position = sizeof(Arena);
 
-LOCAL bool arena_lock_pages = true;
+BUSTER_LOCAL bool arena_lock_pages = true;
 
-LOCAL u64 default_reserve_size = GB(4);
-LOCAL u64 initial_size_granularity_factor = 4;
+BUSTER_LOCAL u64 default_reserve_size = BUSTER_GB(4);
+BUSTER_LOCAL u64 initial_size_granularity_factor = 4;
 
-PUB_IMPL Arena* arena_create(ArenaInitialization initialization)
+BUSTER_IMPL Arena* arena_create(ArenaInitialization initialization)
 {
     if (!initialization.reserved_size)
     {
@@ -687,7 +715,7 @@ PUB_IMPL Arena* arena_create(ArenaInitialization initialization)
 
     for (u64 i = 0; i < count; i += 1)
     {
-        let arena = (Arena*)(raw_pointer + (individual_reserved_size * i));
+        let arena = (Arena*)((u8*)raw_pointer + (individual_reserved_size * i));
         os_commit(arena, initialization.initial_size, protection_flags, arena_lock_pages);
         *arena = (Arena){ 
             .reserved_size = individual_reserved_size,
@@ -700,7 +728,7 @@ PUB_IMPL Arena* arena_create(ArenaInitialization initialization)
     return (Arena*)raw_pointer;
 }
 
-PUB_IMPL bool arena_destroy(Arena* arena, u64 count)
+BUSTER_IMPL bool arena_destroy(Arena* arena, u64 count)
 {
     count = count == 0 ? 1 : count;
     let reserved_size = arena->reserved_size;
@@ -708,29 +736,29 @@ PUB_IMPL bool arena_destroy(Arena* arena, u64 count)
     return os_unreserve(arena, size);
 }
 
-PUB_IMPL void arena_set_position(Arena* arena, u64 position)
+BUSTER_IMPL void arena_set_position(Arena* arena, u64 position)
 {
     arena->position = position;
 }
 
-PUB_IMPL void arena_reset_to_start(Arena* arena)
+BUSTER_IMPL void arena_reset_to_start(Arena* arena)
 {
     arena_set_position(arena, minimum_position);
 }
 
-PUB_IMPL void* arena_current_pointer(Arena* arena, u64 alignment)
+BUSTER_IMPL void* arena_current_pointer(Arena* arena, u64 alignment)
 {
     return (u8*)arena + align_forward(arena->position, alignment);
 }
 
-PUB_IMPL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
+BUSTER_IMPL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 {
     let aligned_offset = align_forward(arena->position, alignment);
     let aligned_size_after = aligned_offset + size;
     let arena_byte_pointer = (u8*)arena;
     let os_position = arena->os_position;
 
-    if (unlikely(aligned_size_after > os_position))
+    if (BUSTER_UNLIKELY(aligned_size_after > os_position))
     {
         let target_committed_size = align_forward(aligned_size_after, arena->granularity);
         let size_to_commit = target_committed_size - os_position;
@@ -741,12 +769,12 @@ PUB_IMPL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 
     let result = arena_byte_pointer + aligned_offset;
     arena->position = aligned_size_after;
-    check(arena->position <= arena->os_position);
+    BUSTER_CHECK(arena->position <= arena->os_position);
 
     return result;
 }
 
-PUB_IMPL str arena_join_string(Arena* arena, StringSlice strings, bool zero_terminate)
+BUSTER_IMPL str arena_join_string(Arena* arena, StringSlice strings, bool zero_terminate)
 {
     u64 size = 0;
 
@@ -767,7 +795,7 @@ PUB_IMPL str arena_join_string(Arena* arena, StringSlice strings, bool zero_term
         i += string.length;
     }
 
-    check(i == size);
+    BUSTER_CHECK(i == size);
     if (zero_terminate)
     {
         pointer[i] = 0;
@@ -776,7 +804,7 @@ PUB_IMPL str arena_join_string(Arena* arena, StringSlice strings, bool zero_term
     return str_from_ptr_len(pointer, size);
 }
 
-PUB_IMPL str arena_duplicate_string(Arena* arena, str str, bool zero_terminate)
+BUSTER_IMPL str arena_duplicate_string(Arena* arena, str str, bool zero_terminate)
 {
     char* pointer = arena_allocate_bytes(arena, str.length + zero_terminate, 1);
     memcpy(pointer, str.pointer, str.length);
@@ -788,24 +816,24 @@ PUB_IMPL str arena_duplicate_string(Arena* arena, str str, bool zero_terminate)
     return str_from_ptr_len(pointer, str.length);
 }
 
-PUB_IMPL TimeDataType take_timestamp()
+BUSTER_IMPL TimeDataType take_timestamp()
 {
 #if defined(__linux__) || defined(__APPLE__)
     struct timespec ts;
     let result = clock_gettime(CLOCK_MONOTONIC, &ts);
-    check(result == 0);
+    BUSTER_CHECK(result == 0);
     return *(u128*)&ts;
 #elif _WIN32
     LARGE_INTEGER c;
     BOOL result = QueryPerformanceCounter(&c);
-    check(result);
+    CHECK(result);
     return c.QuadPart;
 #endif
 }
 
-LOCAL TimeDataType frequency;
+BUSTER_LOCAL TimeDataType frequency;
 
-PUB_IMPL u64 ns_between(TimeDataType start, TimeDataType end)
+BUSTER_IMPL u64 ns_between(TimeDataType start, TimeDataType end)
 {
 #if defined(__linux__) || defined(__APPLE__)
     let start_ts = *(struct timespec*)&start;
@@ -821,7 +849,7 @@ PUB_IMPL u64 ns_between(TimeDataType start, TimeDataType end)
 #endif
 }
 
-PUB_IMPL str file_read(Arena* arena, str path, FileReadOptions options)
+BUSTER_IMPL str file_read(Arena* arena, str path, FileReadOptions options)
 {
     let fd = os_file_open(path, (OpenFlags) { .read = 1 }, (OpenPermissions){ .read = 1 });
     str result = {};
@@ -841,18 +869,18 @@ PUB_IMPL str file_read(Arena* arena, str path, FileReadOptions options)
         let file_size = os_file_get_size(fd);
         let allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
         let allocation_bottom = allocation_size - (file_size + options.start_padding);
-        let allocation_alignment = MAX(options.start_alignment, 1);
+        let allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
         let file_buffer = arena_allocate_bytes(arena, allocation_size, allocation_alignment);
-        os_file_read(fd, (str) { file_buffer + options.start_padding, file_size }, file_size);
-        memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
+        os_file_read(fd, (str) { (char*)file_buffer + options.start_padding, file_size }, file_size);
+        memset((u8*)file_buffer + options.start_padding + file_size, 0, allocation_bottom);
         os_file_close(fd);
-        result = (str) { file_buffer + options.start_padding, file_size };
+        result = (str) { (char*)file_buffer + options.start_padding, file_size };
     }
 
     return result;
 }
 
-PUB_IMPL bool file_write(str path, str content)
+BUSTER_IMPL bool file_write(str path, str content)
 {
     let fd = os_file_open(path, (OpenFlags) { .write = 1, .create = 1, .truncate = 1 }, (OpenPermissions){ .read = 1, .write = 1 });
     bool result = {};
@@ -867,7 +895,7 @@ PUB_IMPL bool file_write(str path, str content)
     return result;
 }
 
-LOCAL str os_path_absolute_stack(str buffer, const char* restrict relative_file_path)
+BUSTER_LOCAL str os_path_absolute_stack(str buffer, const char* restrict relative_file_path)
 {
     str result = {};
 #if defined(__linux__) || defined(__APPLE__)
@@ -876,7 +904,7 @@ LOCAL str os_path_absolute_stack(str buffer, const char* restrict relative_file_
     if (syscall_result)
     {
         result = str_from_ptr_len(syscall_result, strlen(syscall_result));
-        check(result.length < buffer.length);
+        BUSTER_CHECK(result.length < buffer.length);
     }
 
 #elif defined(_WIN32)
@@ -889,19 +917,199 @@ LOCAL str os_path_absolute_stack(str buffer, const char* restrict relative_file_
     return result;
 }
 
-PUB_IMPL str path_absolute(Arena* arena, const char* restrict relative_file_path)
+BUSTER_IMPL str path_absolute(Arena* arena, const char* restrict relative_file_path)
 {
-    char buffer[4096];
-    let stack_slice = os_path_absolute_stack((str){buffer, array_length(buffer)}, relative_file_path);
+    char buffer[PATH_MAX];
+    let stack_slice = os_path_absolute_stack((str){buffer, BUSTER_ARRAY_LENGTH(buffer)}, relative_file_path);
     let result = arena_duplicate_string(arena, stack_slice, true);
     return result;
 }
 
-PUB_IMPL void os_init()
+BUSTER_IMPL GlobalProgram global_program;
+
+BUSTER_LOCAL void global_initialize(BusterInitialization initialization)
 {
+    BUSTER_UNUSED(initialization);
+}
+
+BUSTER_LOCAL void thread_initialize()
+{
+}
+
+#if BUSTER_USE_IO_RING
+BUSTER_LOCAL bool io_ring_init(IoRing* ring, u32 entry_count)
+{
+    bool result = true;
+#ifdef __linux__
+    int io_uring_queue_creation_result = io_uring_queue_init(entry_count, &ring->linux_impl, 0);
+    result &= io_uring_queue_creation_result == 0;
+#endif
+    return result;
+}
+
+BUSTER_LOCAL IoRingSubmission io_ring_get_submission(IoRing* ring)
+{
+    return (IoRingSubmission) {
+        .sqe = io_uring_get_sqe(&ring->linux_impl),
+    };
+}
+
+BUSTER_IMPL IoRingSubmission io_ring_prepare_open(char* path, u64 user_data)
+{
+    let ring = &thread->ring;
+    let submission = io_ring_get_submission(ring);
+    submission.sqe->user_data = user_data;
+    io_uring_prep_openat(submission.sqe, AT_FDCWD, path, O_RDONLY, 0);
+    ring->submitted_entry_count += 1;
+    return submission;
+}
+
+STRUCT(StatOptions)
+{
+    u32 modified_time:1;
+    u32 size:1;
+};
+
+BUSTER_IMPL IoRingSubmission io_ring_prepare_stat(int fd, struct statx* statx_buffer, u64 user_data, StatOptions options)
+{
+    let ring = &thread->ring;
+    let submission = io_ring_get_submission(ring);
+    submission.sqe->user_data = user_data;
+    unsigned mask = 0;
+    if (options.modified_time) mask |= STATX_MTIME;
+    if (options.size) mask |= STATX_SIZE;
+    io_uring_prep_statx(submission.sqe, fd, "", AT_EMPTY_PATH, mask, statx_buffer);
+    ring->submitted_entry_count += 1;
+    return submission;
+}
+
+BUSTER_LOCAL constexpr u64 max_rw_count = 0x7ffff000;
+
+BUSTER_IMPL IoRingSubmission io_ring_prepare_read_and_close(int fd, u8* buffer, u64 size, u64 user_data, u64 read_mask, u64 close_mask)
+{
+    let ring = &thread->ring;
+    for (u64 i = 0; i != size;)
+    {
+        let offset = i;
+        let read_byte_count = BUSTER_MIN(size, max_rw_count);
+        let submission = io_ring_get_submission(ring);
+        io_uring_prep_read(submission.sqe, fd, buffer + offset, read_byte_count, offset);
+        submission.sqe->user_data = read_mask | user_data;
+        submission.sqe->flags |= IOSQE_IO_LINK;
+        i += read_byte_count;
+        ring->submitted_entry_count += 1;
+    }
+
+    let close = io_ring_get_submission(ring);
+    close.sqe->user_data = user_data | close_mask;
+    io_uring_prep_close(close.sqe, fd);
+    ring->submitted_entry_count += 1;
+
+    return close;
+}
+
+BUSTER_IMPL IoRingSubmission io_ring_prepare_waitid(pid_t pid, siginfo_t* siginfo, u64 user_data)
+{
+    let ring = &thread->ring;
+    let submission = io_ring_get_submission(ring);
+    submission.sqe->user_data = user_data;
+    io_uring_prep_waitid(submission.sqe, P_PID, pid, siginfo, WEXITED, 0);
+    ring->submitted_entry_count += 1;
+    return submission;
+}
+
+BUSTER_IMPL u32 io_ring_submit_and_wait_all()
+{
+    let ring = &thread->ring;
+    u32 result = 0;
+    let submitted_entry_count = ring->submitted_entry_count;
+    BUSTER_CHECK(submitted_entry_count);
+    let submit_wait_result = io_uring_submit_and_wait(&ring->linux_impl, submitted_entry_count);
+    if ((submit_wait_result >= 0) & (submitted_entry_count == (u32)submit_wait_result))
+    {
+        result = submitted_entry_count;
+        ring->submitted_entry_count = 0;
+    }
+    else if (global_program.verbose)
+    {
+        printf("Waiting for io_ring tasks failed\n");
+    }
+    return result;
+}
+
+BUSTER_IMPL u32 io_ring_submit()
+{
+    u32 result = 0;
+    let ring = &thread->ring;
+    let submitted_entry_count = ring->submitted_entry_count;
+    BUSTER_CHECK(submitted_entry_count);
+    let submit_result = io_uring_submit(&ring->linux_impl);
+    if ((submit_result >= 0) & ((u32)submit_result == submitted_entry_count))
+    {
+        result = (u32)submit_result;
+        ring->submitted_entry_count = 0;
+    }
+    return result;
+}
+
+BUSTER_IMPL IoRingCompletion io_ring_wait_completion()
+{
+    IoRingCompletion result = {};
+    let ring = &thread->ring.linux_impl;
+    struct io_uring_cqe* cqe;
+    let wait_result = io_uring_wait_cqe(ring, &cqe);
+    if (wait_result == 0)
+    {
+        result = (IoRingCompletion){
+            .user_data = cqe->user_data,
+            .result = cqe->res,
+        };
+        io_uring_cqe_seen(ring, cqe);
+    }
+
+    return result;
+}
+
+BUSTER_IMPL IoRingCompletion io_ring_peek_completion()
+{
+    IoRingCompletion completion = {};
+    let ring = &thread->ring.linux_impl;
+    struct io_uring_cqe* cqe;
+    int peek_result = io_uring_peek_cqe(ring, &cqe);
+    if (peek_result == 0)
+    {
+        completion = (IoRingCompletion){
+            .user_data = cqe->user_data,
+            .result = cqe->res,
+        };
+        io_uring_cqe_seen(ring, cqe);
+    }
+    else
+    {
+        printf("Peek failed\n");
+    }
+
+    return completion;
+}
+#endif
+
+BUSTER_LOCAL void* thread_os_entry_point(void* context)
+{
+    let thread = (Thread*)context;
+    thread->arena = arena_create((ArenaInitialization){});
+#if BUSTER_USE_IO_RING
+    io_ring_init(&thread->ring, 4096);
+#endif
+    let os_result = thread->entry_point(thread);
+    return (void*)(u64)os_result;
+}
+
+BUSTER_IMPL ProcessResult buster_run(BusterInitialization initialization)
+{
+    ProcessResult result = {};
 #ifdef _WIN32
     BOOL result = QueryPerformanceFrequency((LARGE_INTEGER*)&frequency);
-    check(result);
+    CHECK(result);
 
     WSADATA WinSockData;
     WSAStartup(MAKEWORD(2, 2), &WinSockData);
@@ -912,19 +1120,102 @@ PUB_IMPL void os_init()
     closesocket(Sock);
 #else
 #endif
+
+    global_program.arena = arena_create((ArenaInitialization){});
+    global_program.argc = initialization.argc;
+    global_program.argv = initialization.argv;
+    global_program.envp = initialization.envp;
+
+    result = initialization.process_arguments(global_program.arena, initialization.context, initialization.argc, initialization.argv, initialization.envp);
+
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        if (initialization.thread_entry_point)
+        {
+#if BUSTER_USE_PTHREAD
+            u64 thread_count = 0;
+
+            switch (initialization.thread_spawn_policy)
+            {
+                break; case THREAD_SPAWN_POLICY_SINGLE_THREADED:
+                {
+                    thread_count = 0;
+                }
+                break; case THREAD_SPAWN_POLICY_SPAWN_SINGLE_THREAD:
+                {
+                    thread_count = 1;
+                }
+                break; case THREAD_SPAWN_POLICY_SATURATE_LOGICAL_CORES:
+                {
+                }
+                break; case THREAD_SPAWN_POLICY_SATURATE_PHYSICAL_CORES:
+                {
+                }
+            }
+
+            if (thread_count != 0)
+            {
+                Thread* threads = arena_allocate(global_program.arena, Thread, thread_count);
+
+                u64 failure_count = 0;
+                for (u64 i = 0; i < thread_count; i += 1)
+                {
+                    let thread = &threads[i];
+                    thread->entry_point = initialization.thread_entry_point;
+                    let create_result = pthread_create(&thread->handle, 0, &thread_os_entry_point, thread);
+                    failure_count += create_result == 0;
+                }
+
+                if (failure_count == 0)
+                {
+                    for (u64 i = 0; i < thread_count; i += 1)
+                    {
+                        let thread = &threads[i];
+                        void* return_value;
+                        let join_result = pthread_join(thread->handle, &return_value);
+                        failure_count += join_result == 0;
+                        let thread_result = (ProcessResult)(u64)return_value;
+                        if (thread_result != PROCESS_RESULT_SUCCESS)
+                        {
+                            result = thread_result;
+                        }
+                    }
+                }
+
+                if (failure_count == 0)
+                {
+                    result = PROCESS_RESULT_FAILED;
+                }
+            }
+            else
+#endif
+            {
+                Thread thread_buffer = {};
+                thread = &thread_buffer;
+                thread->entry_point = initialization.thread_entry_point;
+                thread->context = initialization.context;
+                BUSTER_CHECK(initialization.thread_spawn_policy == THREAD_SPAWN_POLICY_SINGLE_THREADED);
+                result = thread->entry_point(thread);
+            }
+        }
+        else
+        {
+            if (global_program.verbose) printf("No thread entry point specified\n");
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
+
+    return result;
 }
 
-LOCAL bool is_debugger_present_called = false;
-LOCAL bool _is_debugger_present = false;
-
-[[gnu::cold]] LOCAL bool is_debugger_present()
+[[gnu::cold]] BUSTER_LOCAL bool is_debugger_present()
 {
-    if (unlikely(!is_debugger_present_called))
+    if (BUSTER_UNLIKELY(!global_program.is_debugger_present_called))
     {
-        is_debugger_present_called = true;
+        global_program.is_debugger_present_called = true;
 #if defined(__linux__)
         let os_result = ptrace(PTRACE_TRACEME, 0, 0, 0) == -1;
-        _is_debugger_present = os_result != 0;
+        global_program._is_debugger_present = os_result != 0;
 #elif defined(__APPLE__)
 #elif defined(_WIN32)
         let os_result = IsDebuggerPresent();
@@ -934,29 +1225,30 @@ LOCAL bool _is_debugger_present = false;
 #endif
     }
 
-    return _is_debugger_present;
+    return global_program._is_debugger_present;
 }
 
-[[noreturn]] [[gnu::cold]] PUB_IMPL void fail()
+[[noreturn]] [[gnu::cold]] BUSTER_IMPL void fail()
 {
     if (is_debugger_present())
     {
-        trap();
+        BUSTER_TRAP();
     }
 
     exit(1);
 }
 
-PUB_IMPL str format_integer(Arena* arena, FormatIntegerOptions options, bool zero_terminate)
+BUSTER_IMPL str format_integer(Arena* arena, FormatIntegerOptions options, bool zero_terminate)
 {
     char buffer[128];
-    let stack_string = format_integer_stack((str){ buffer, array_length(buffer) }, options);
+    let stack_string = format_integer_stack((str){ buffer, BUSTER_ARRAY_LENGTH(buffer) }, options);
     return arena_duplicate_string(arena, stack_string, zero_terminate);
 }
 
-PUB_IMPL ExecutionResult os_execute(Arena* arena, char** arguments, char** environment, ExecutionOptions options)
+BUSTER_IMPL ExecutionResult os_execute(Arena* arena, char** arguments, char** environment, ExecutionOptions options)
 {
     ExecutionResult result = {};
+    BUSTER_UNUSED(arena);
 
 #if defined (__linux__) || defined(__APPLE__)
     FileDescriptor* null_file_descriptor = 0;
@@ -1018,7 +1310,7 @@ PUB_IMPL ExecutionResult os_execute(Arena* arena, char** arguments, char** envir
 
             if (result != -1)
             {
-                UNREACHABLE();
+                BUSTER_UNREACHABLE();
             }
 
             fail();
@@ -1032,8 +1324,6 @@ PUB_IMPL ExecutionResult os_execute(Arena* arena, char** arguments, char** envir
                     close(pipes[i][1]);
                 }
             }
-
-            u64 offset = 0;
 
             if (options.policies[0] == STREAM_POLICY_PIPE | options.policies[1] == STREAM_POLICY_PIPE)
             {
@@ -1076,7 +1366,7 @@ PUB_IMPL ExecutionResult os_execute(Arena* arena, char** arguments, char** envir
             }
             else
             {
-                UNREACHABLE();
+                BUSTER_UNREACHABLE();
             }
         }
     }
@@ -1227,11 +1517,12 @@ PUB_IMPL ExecutionResult os_execute(Arena* arena, char** arguments, char** envir
     return result;
 }
 
-#if defined(__AVX512F__)
-PUB_IMPL IntegerParsing parse_hexadecimal_vectorized(const char* restrict p)
+#if 0
+BUSTER_IMPL IntegerParsing parse_hexadecimal_vectorized(const char* restrict p)
 {
     u64 value = 0;
     u64 i = 0;
+    BUSTER_UNUSED(p);
 
     while (1)
     {
@@ -1244,13 +1535,13 @@ PUB_IMPL IntegerParsing parse_hexadecimal_vectorized(const char* restrict p)
         //
         // i += 1;
         // value = accumulate_hexadecimal(value, ch);
-        trap();
+        BUSTER_TRAP();
     }
 
     return (IntegerParsing){ .value = value, .i = i };
 }
 
-PUB_IMPL IntegerParsing parse_decimal_vectorized(const char* restrict p)
+BUSTER_IMPL IntegerParsing parse_decimal_vectorized(const char* restrict p)
 {
     let zero = _mm512_set1_epi8('0');
     let nine = _mm512_set1_epi8('9');
@@ -1263,8 +1554,8 @@ PUB_IMPL IntegerParsing parse_decimal_vectorized(const char* restrict p)
 
     let digit_mask = _cvtu64_mask64((1ULL << digit_count) - 1);
     let digit2bin = _mm512_maskz_sub_epi8(digit_mask, chunk, zero);
-    let lo0 = _mm512_castsi512_si128(digit2bin);
-    let a = _mm512_cvtepu8_epi64(lo0);
+    //let lo0 = _mm512_castsi512_si128(digit2bin);
+    //let a = _mm512_cvtepu8_epi64(lo0);
     let digit_count_splat = _mm512_set1_epi8((u8)digit_count);
 
     let to_sub = _mm512_set_epi8(
@@ -1283,7 +1574,7 @@ PUB_IMPL IntegerParsing parse_decimal_vectorized(const char* restrict p)
     let a128_1_0 = _mm512_extracti64x2_epi64(asds, 1);
 
     let a128_0_1 = _mm_srli_si128(a128_0_0, 8);
-    let a128_1_1 = _mm_srli_si128(a128_1_0, 8);
+    //let a128_1_1 = _mm_srli_si128(a128_1_0, 8);
 
     let a8_0_0 = _mm512_cvtepu8_epi64(a128_0_0);
     let a8_0_1 = _mm512_cvtepu8_epi64(a128_0_1);
@@ -1330,20 +1621,21 @@ PUB_IMPL IntegerParsing parse_decimal_vectorized(const char* restrict p)
     return (IntegerParsing){ .value = value, .i = digit_count };
 }
 
-PUB_IMPL IntegerParsing parse_octal_vectorized(const char* restrict p)
+BUSTER_IMPL IntegerParsing parse_octal_vectorized(const char* restrict p)
 {
     u64 value = 0;
     u64 i = 0;
+    BUSTER_UNUSED(p);
 
     while (1)
     {
-        let chunk = _mm512_loadu_epi8(&p[i]);
-        let lower_limit = _mm512_cmpge_epu8_mask(chunk, _mm512_set1_epi8('0'));
-        let upper_limit = _mm512_cmple_epu8_mask(chunk, _mm512_set1_epi8('7'));
-        let is_octal = _kand_mask64(lower_limit, upper_limit);
-        let octal_mask = _cvtu64_mask64(_tzcnt_u64(~_cvtmask64_u64(is_octal)));
+        // let chunk = _mm512_loadu_epi8(&p[i]);
+        // let lower_limit = _mm512_cmpge_epu8_mask(chunk, _mm512_set1_epi8('0'));
+        // let upper_limit = _mm512_cmple_epu8_mask(chunk, _mm512_set1_epi8('7'));
+        // let is_octal = _kand_mask64(lower_limit, upper_limit);
+        // let octal_mask = _cvtu64_mask64(_tzcnt_u64(~_cvtmask64_u64(is_octal)));
 
-        trap();
+        BUSTER_TRAP();
 
         // if (!is_octal(ch))
         // {
@@ -1357,8 +1649,9 @@ PUB_IMPL IntegerParsing parse_octal_vectorized(const char* restrict p)
     return (IntegerParsing) { .value = value, .i = i };
 }
 
-PUB_IMPL IntegerParsing parse_binary_vectorized(const char* restrict f)
+BUSTER_IMPL IntegerParsing parse_binary_vectorized(const char* restrict f)
 {
+#if 0
     u64 value = 0;
 
     let chunk = _mm512_loadu_epi8(f);
@@ -1383,10 +1676,14 @@ PUB_IMPL IntegerParsing parse_binary_vectorized(const char* restrict f)
     let mask_int = _cvtmask64_u64(mask);
 
     return (IntegerParsing) { .value = value, .i = i };
+#else
+    BUSTER_UNUSED(f);
+    BUSTER_TRAP();
+#endif
 }
 #endif
 
-LOCAL u64 accumulate_hexadecimal(u64 accumulator, u8 ch)
+BUSTER_LOCAL u64 accumulate_hexadecimal(u64 accumulator, u8 ch)
 {
     u8 value;
 
@@ -1404,33 +1701,33 @@ LOCAL u64 accumulate_hexadecimal(u64 accumulator, u8 ch)
     }
     else
     {
-        UNREACHABLE();
+        BUSTER_UNREACHABLE();
     }
 
     return (accumulator * 16) + value;
 }
 
-LOCAL u64 accumulate_decimal(u64 accumulator, u8 ch)
+BUSTER_LOCAL u64 accumulate_decimal(u64 accumulator, u8 ch)
 {
-    check(is_decimal(ch));
+    BUSTER_CHECK(is_decimal(ch));
     return (accumulator * 10) + (ch - '0');
 }
 
-LOCAL u64 accumulate_octal(u64 accumulator, u8 ch)
+BUSTER_LOCAL u64 accumulate_octal(u64 accumulator, u8 ch)
 {
-    check(is_octal(ch));
+    BUSTER_CHECK(is_octal(ch));
 
     return (accumulator * 8) + (ch - '0');
 }
 
-LOCAL u64 accumulate_binary(u64 accumulator, u8 ch)
+BUSTER_LOCAL u64 accumulate_binary(u64 accumulator, u8 ch)
 {
-    check(is_binary(ch));
+    BUSTER_CHECK(is_binary(ch));
 
     return (accumulator * 2) + (ch - '0');
 }
 
-PUB_IMPL u64 parse_integer_decimal_assume_valid(str string)
+BUSTER_IMPL u64 parse_integer_decimal_assume_valid(str string)
 {
     u64 value = 0;
 
@@ -1443,7 +1740,7 @@ PUB_IMPL u64 parse_integer_decimal_assume_valid(str string)
     return value;
 }
 
-PUB_IMPL IntegerParsing parse_hexadecimal_scalar(const char* restrict p)
+BUSTER_IMPL IntegerParsing parse_hexadecimal_scalar(const char* restrict p)
 {
     u64 value = 0;
     u64 i = 0;
@@ -1464,7 +1761,7 @@ PUB_IMPL IntegerParsing parse_hexadecimal_scalar(const char* restrict p)
     return (IntegerParsing){ .value = value, .i = i };
 }
 
-PUB_IMPL IntegerParsing parse_decimal_scalar(const char* restrict p)
+BUSTER_IMPL IntegerParsing parse_decimal_scalar(const char* restrict p)
 {
     u64 value = 0;
     u64 i = 0;
@@ -1485,7 +1782,7 @@ PUB_IMPL IntegerParsing parse_decimal_scalar(const char* restrict p)
     return (IntegerParsing){ .value = value, .i = i };
 }
 
-PUB_IMPL IntegerParsing parse_octal_scalar(const char* restrict p)
+BUSTER_IMPL IntegerParsing parse_octal_scalar(const char* restrict p)
 {
     u64 value = 0;
     u64 i = 0;
@@ -1506,7 +1803,7 @@ PUB_IMPL IntegerParsing parse_octal_scalar(const char* restrict p)
     return (IntegerParsing) { .value = value, .i = i };
 }
 
-PUB_IMPL IntegerParsing parse_binary_scalar(const char* restrict p)
+BUSTER_IMPL IntegerParsing parse_binary_scalar(const char* restrict p)
 {
     u64 value = 0;
     u64 i = 0;
@@ -1530,40 +1827,43 @@ PUB_IMPL IntegerParsing parse_binary_scalar(const char* restrict p)
 #if defined(_WIN32)
 LOCAL ThreadHandle* os_windows_thread_to_generic(HANDLE handle)
 {
-    check(handle != 0);
+    CHECK(handle != 0);
     return (ThreadHandle*)handle;
 }
 
 LOCAL HANDLE os_windows_thread_from_generic(ThreadHandle* handle)
 {
-    check(handle != 0);
+    CHECK(handle != 0);
     return (HANDLE)handle;
 }
 #endif
 
 #if defined(__linux__) || defined(__APPLE__)
-LOCAL ThreadHandle* os_posix_thread_to_generic(pthread_t handle)
+BUSTER_LOCAL ThreadHandle* os_posix_thread_to_generic(pthread_t handle)
 {
-    check(handle != 0);
+    BUSTER_CHECK(handle != 0);
     return (ThreadHandle*)handle;
 }
 
-LOCAL pthread_t os_posix_thread_from_generic(ThreadHandle* handle)
+BUSTER_LOCAL pthread_t os_posix_thread_from_generic(ThreadHandle* handle)
 {
-    check(handle != 0);
+    BUSTER_CHECK(handle != 0);
     return (pthread_t)handle;
 }
 #endif
 
-PUB_IMPL ThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOptions options)
+BUSTER_IMPL ThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOptions options)
 {
+    BUSTER_UNUSED(options);
     ThreadHandle* result = 0;
 #if defined (__linux__) || defined(__APPLE__)
+#if BUSTER_USE_PTHREAD
     pthread_t handle;
     let create_result = pthread_create(&handle, 0, callback, 0);
     bool os_result = create_result == 0;
     handle = os_result ? handle : 0;
     result = os_posix_thread_to_generic(handle);
+#endif
 #elif defined (_WIN32)
     HANDLE handle = CreateThread(0, 0, callback, 0, 0, 0);
     result = os_windows_thread_to_generic(handle);
@@ -1571,18 +1871,20 @@ PUB_IMPL ThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOp
     return result;
 }
 
-PUB_IMPL u32 os_thread_join(ThreadHandle* handle)
+BUSTER_IMPL u32 os_thread_join(ThreadHandle* handle)
 {
     u32 return_code = 1;
 
 #if defined(__linux__) || defined(__APPLE__)
     let pthread = os_posix_thread_from_generic(handle);
     void* void_return_value = 0;
+#if BUSTER_USE_PTHREAD
     let join_result = pthread_join(pthread, &void_return_value);
     if (join_result == 0)
     {
         return_code = (u32)(u64)void_return_value;
     }
+#endif
 #elif defined(_WIN32)
     let thread_handle = os_windows_thread_from_generic(handle);
     WaitForSingleObject(thread_handle, INFINITE);
@@ -1600,15 +1902,19 @@ PUB_IMPL u32 os_thread_join(ThreadHandle* handle)
     return return_code;
 }
 
-PUB_IMPL void test_error(str check_text, u32 line, str function, str file_path)
+BUSTER_IMPL void test_error(str CHECK, u32 line, str function, str file_path)
 {
     if (is_debugger_present())
     {
-        trap();
+        BUSTER_UNUSED(CHECK);
+        BUSTER_UNUSED(line);
+        BUSTER_UNUSED(function);
+        BUSTER_UNUSED(file_path);
+        BUSTER_TRAP();
     }
 }
 
-PUB_IMPL u64 next_power_of_two(u64 n)
+BUSTER_IMPL u64 next_power_of_two(u64 n)
 {
     n -= 1;
 
@@ -1624,38 +1930,38 @@ PUB_IMPL u64 next_power_of_two(u64 n)
     return n;
 }
 
-PUB_IMPL bool str_is_zero_terminated(str s)
+BUSTER_IMPL bool str_is_zero_terminated(str s)
 {
     return s.pointer[s.length] == 0;
 }
 
-PUB_IMPL str str_from_pointers(char* start, char* end)
+BUSTER_IMPL str str_from_pointers(char* start, char* end)
 {
-    check(end >= start);
+    BUSTER_CHECK(end >= start);
     u64 len = end - start;
     return (str) { start, len };
 }
 
-PUB_IMPL str str_from_ptr_len(const char* ptr, u64 len)
+BUSTER_IMPL str str_from_ptr_len(const char* ptr, u64 len)
 {
     return (str) { (char*)ptr, len };
 }
 
-PUB_IMPL str str_from_ptr_start_end(char* ptr, u64 start, u64 end)
+BUSTER_IMPL str str_from_ptr_start_end(char* ptr, u64 start, u64 end)
 {
     return (str) { ptr + start, end - start };
 }
 
-PUB_IMPL str str_slice_start(str s, u64 start)
+BUSTER_IMPL str str_slice_start(str s, u64 start)
 {
     s.pointer += start;
     s.length -= start;
     return s;
 }
 
-PUB_IMPL bool memory_compare(void* a, void* b, u64 i)
+BUSTER_IMPL bool memory_compare(void* a, void* b, u64 i)
 {
-    check(a != b);
+    BUSTER_CHECK(a != b);
     bool result = 1;
 
     let p1 = (u8*)a;
@@ -1677,14 +1983,14 @@ PUB_IMPL bool memory_compare(void* a, void* b, u64 i)
     return result;
 }
 
-PUB_IMPL str str_slice(str s, u64 start, u64 end)
+BUSTER_IMPL str str_slice(str s, u64 start, u64 end)
 {
     s.pointer += start;
     s.length = end - start;
     return s;
 }
 
-PUB_IMPL bool str_equal(str s1, str s2)
+BUSTER_IMPL bool str_equal(str s1, str s2)
 {
     bool is_equal = s1.length == s2.length;
     if (is_equal & (s1.length != 0) & (s1.pointer != s2.pointer))
@@ -1695,7 +2001,23 @@ PUB_IMPL bool str_equal(str s1, str s2)
     return is_equal;
 }
 
-PUB_IMPL u64 str_last_ch(str s, u8 ch)
+BUSTER_IMPL u64 str_first_ch(str s, u8 ch)
+{
+    let result = string_no_match;
+
+    for (u64 i = 0; i < s.length; i += 1)
+    {
+        if (ch == s.pointer[i])
+        {
+            result = i;
+            break;
+        }
+    }
+
+    return result;
+}
+
+BUSTER_IMPL u64 str_last_ch(str s, u8 ch)
 {
     let result = string_no_match;
 
@@ -1714,89 +2036,142 @@ PUB_IMPL u64 str_last_ch(str s, u8 ch)
     return result;
 }
 
-PUB_IMPL u64 align_forward(u64 n, u64 a)
+BUSTER_IMPL u64 align_forward(u64 n, u64 a)
 {
     let mask = a - 1;
     let result = (n + mask) & ~mask;
     return result;
 }
 
-PUB_IMPL bool is_space(char ch)
+BUSTER_IMPL bool is_space(char ch)
 {
     return ((ch == ' ') | (ch == '\t')) | ((ch == '\r') | (ch == '\n'));
 }
 
-PUB_IMPL bool is_decimal(char ch)
+BUSTER_IMPL bool is_decimal(char ch)
 {
     return (ch >= '0') & (ch <= '9');
 }
 
-PUB_IMPL bool is_octal(char ch)
+BUSTER_IMPL bool is_octal(char ch)
 {
     return (ch >= '0') & (ch <= '7');
 }
 
-PUB_IMPL bool is_binary(char ch)
+BUSTER_IMPL bool is_binary(char ch)
 {
     return (ch == '0') | (ch == '1');
 }
 
-PUB_IMPL bool is_hexadecimal_alpha_lower(char ch)
+BUSTER_IMPL bool is_hexadecimal_alpha_lower(char ch)
 {
     return (ch >= 'a') & (ch <= 'f');
 }
 
-PUB_IMPL bool is_hexadecimal_alpha_upper(char ch)
+BUSTER_IMPL bool is_hexadecimal_alpha_upper(char ch)
 {
     return (ch >= 'A') & (ch <= 'F');
 }
 
-PUB_IMPL bool is_hexadecimal_alpha(char ch)
+BUSTER_IMPL bool is_hexadecimal_alpha(char ch)
 {
     return is_hexadecimal_alpha_upper(ch) | is_hexadecimal_alpha_lower(ch);
 }
 
-PUB_IMPL bool is_hexadecimal(char ch)
+BUSTER_IMPL bool is_hexadecimal(char ch)
 {
     return is_decimal(ch) | is_hexadecimal_alpha(ch);
 }
 
-PUB_IMPL bool is_identifier_start(char ch)
+BUSTER_IMPL bool is_identifier_start(char ch)
 {
     return (((ch >= 'a') & (ch <= 'z')) | ((ch >= 'A') & (ch <= 'Z'))) | (ch == '_');
 }
 
-PUB_IMPL bool is_identifier(char ch)
+BUSTER_IMPL bool is_identifier(char ch)
 {
     return is_identifier_start(ch) | is_decimal(ch);
 }
 
-PUB_IMPL void print(str str)
+BUSTER_IMPL void print(str str)
 {
     os_file_write(os_get_stdout(), str);
 }
 
+BUSTER_IMPL char** argument_add(ArgumentBuilder* builder, char* arg)
+{
+    let ptr = arena_allocate(builder->arena, char*, 1);
+    *ptr = arg;
+    return ptr;
+}
+
+BUSTER_IMPL ArgumentBuilder* argument_builder_start(Arena* arena, char* s)
+{
+    let position = arena->position;
+    let argument_builder = arena_allocate(arena, ArgumentBuilder, 1);
+    *argument_builder = (ArgumentBuilder) {
+        .argv = 0,
+        .arena = arena,
+        .arena_offset = position,
+    };
+    argument_builder->argv = argument_add(argument_builder, s);
+    return argument_builder;
+}
+
+BUSTER_IMPL char** argument_builder_end(ArgumentBuilder* restrict builder)
+{
+    argument_add(builder, 0);
+    return builder->argv;
+}
+
+BUSTER_IMPL ProcessResult argument_process(u64 argument_count, char** argument_pointer, char** environment_pointer, u64 argument_index)
+{
+    BUSTER_UNUSED(environment_pointer);
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
+
+    BUSTER_CHECK(argument_index < argument_count);
+
+    let argument = argument_pointer[argument_index];
+    if (strcmp(argument, "-verbose") == 0)
+    {
+        global_program.verbose = true;
+    }
+    else
+    {
+        result = PROCESS_RESULT_FAILED;
+    }
+
+    return result;
+}
+
+BUSTER_IMPL void argument_builder_destroy(ArgumentBuilder* restrict builder)
+{
+    let arena = builder->arena;
+    let position = builder->arena_offset;
+    arena->position = position;
+}
+
 #if BUSTER_INCLUDE_TESTS
-PUB_IMPL bool lib_tests(TestArguments* restrict arguments)
+BUSTER_IMPL bool lib_tests(TestArguments* restrict arguments)
 {
     bool result = 1;
     let arena = arguments->arena;
     let position = arena->position;
-    test(arguments, str_equal(S("123"), format_integer(arena, (FormatIntegerOptions) { .value = 123, .format = INTEGER_FORMAT_DECIMAL, }, true)));
-    test(arguments, str_equal(S("1000"), format_integer(arena, (FormatIntegerOptions) { .value = 1000, .format = INTEGER_FORMAT_DECIMAL }, true)));
-    test(arguments, str_equal(S("12839128391258192419"), format_integer(arena, (FormatIntegerOptions) { .value = 12839128391258192419ULL, .format = INTEGER_FORMAT_DECIMAL}, true)));
-    test(arguments, str_equal(S("-1"), format_integer(arena, (FormatIntegerOptions) { .value = 1, .format = INTEGER_FORMAT_DECIMAL, .treat_as_signed = true}, true)));
-    test(arguments, str_equal(S("-1123123123"), format_integer(arena, (FormatIntegerOptions) { .value = 1123123123, .format = INTEGER_FORMAT_DECIMAL, .treat_as_signed = true}, true)));
-    test(arguments, str_equal(S("0d0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_DECIMAL, .prefix = true }, true)));
-    test(arguments, str_equal(S("0d123"), format_integer(arena, (FormatIntegerOptions) { .value = 123, .format = INTEGER_FORMAT_DECIMAL, .prefix = true, }, true)));
-    test(arguments, str_equal(S("0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_HEXADECIMAL, }, true)));
-    test(arguments, str_equal(S("af"), format_integer(arena, (FormatIntegerOptions) { .value = 0xaf, .format = INTEGER_FORMAT_HEXADECIMAL, }, true)));
-    test(arguments, str_equal(S("0x0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_HEXADECIMAL, .prefix = true }, true)));
-    test(arguments, str_equal(S("0x8591baefcb"), format_integer(arena, (FormatIntegerOptions) { .value = 0x8591baefcb, .format = INTEGER_FORMAT_HEXADECIMAL, .prefix = true }, true)));
-    test(arguments, str_equal(S("0o12557"), format_integer(arena, (FormatIntegerOptions) { .value = 012557, .format = INTEGER_FORMAT_OCTAL, .prefix = true }, true)));
-    test(arguments, str_equal(S("12557"), format_integer(arena, (FormatIntegerOptions) { .value = 012557, .format = INTEGER_FORMAT_OCTAL, }, true)));
-    test(arguments, str_equal(S("0b101101"), format_integer(arena, (FormatIntegerOptions) { .value = 0b101101, .format = INTEGER_FORMAT_BINARY, .prefix = true }, true)));
-    test(arguments, str_equal(S("101101"), format_integer(arena, (FormatIntegerOptions) { .value = 0b101101, .format = INTEGER_FORMAT_BINARY, }, true)));
+    BUSTER_TEST(arguments, str_equal(S("123"), format_integer(arena, (FormatIntegerOptions) { .value = 123, .format = INTEGER_FORMAT_DECIMAL, }, true)));
+    BUSTER_TEST(arguments, str_equal(S("1000"), format_integer(arena, (FormatIntegerOptions) { .value = 1000, .format = INTEGER_FORMAT_DECIMAL }, true)));
+    BUSTER_TEST(arguments, str_equal(S("12839128391258192419"), format_integer(arena, (FormatIntegerOptions) { .value = 12839128391258192419ULL, .format = INTEGER_FORMAT_DECIMAL}, true)));
+    BUSTER_TEST(arguments, str_equal(S("-1"), format_integer(arena, (FormatIntegerOptions) { .value = 1, .format = INTEGER_FORMAT_DECIMAL, .treat_as_signed = true}, true)));
+    BUSTER_TEST(arguments, str_equal(S("-1123123123"), format_integer(arena, (FormatIntegerOptions) { .value = 1123123123, .format = INTEGER_FORMAT_DECIMAL, .treat_as_signed = true}, true)));
+    BUSTER_TEST(arguments, str_equal(S("0d0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_DECIMAL, .prefix = true }, true)));
+    BUSTER_TEST(arguments, str_equal(S("0d123"), format_integer(arena, (FormatIntegerOptions) { .value = 123, .format = INTEGER_FORMAT_DECIMAL, .prefix = true, }, true)));
+    BUSTER_TEST(arguments, str_equal(S("0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_HEXADECIMAL, }, true)));
+    BUSTER_TEST(arguments, str_equal(S("af"), format_integer(arena, (FormatIntegerOptions) { .value = 0xaf, .format = INTEGER_FORMAT_HEXADECIMAL, }, true)));
+    BUSTER_TEST(arguments, str_equal(S("0x0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_HEXADECIMAL, .prefix = true }, true)));
+    BUSTER_TEST(arguments, str_equal(S("0x8591baefcb"), format_integer(arena, (FormatIntegerOptions) { .value = 0x8591baefcb, .format = INTEGER_FORMAT_HEXADECIMAL, .prefix = true }, true)));
+    BUSTER_TEST(arguments, str_equal(S("0o12557"), format_integer(arena, (FormatIntegerOptions) { .value = 012557, .format = INTEGER_FORMAT_OCTAL, .prefix = true }, true)));
+    BUSTER_TEST(arguments, str_equal(S("12557"), format_integer(arena, (FormatIntegerOptions) { .value = 012557, .format = INTEGER_FORMAT_OCTAL, }, true)));
+    BUSTER_TEST(arguments, str_equal(S("0b101101"), format_integer(arena, (FormatIntegerOptions) { .value = 0b101101, .format = INTEGER_FORMAT_BINARY, .prefix = true }, true)));
+    BUSTER_TEST(arguments, str_equal(S("101101"), format_integer(arena, (FormatIntegerOptions) { .value = 0b101101, .format = INTEGER_FORMAT_BINARY, }, true)));
     arena->position = position;
     return result;
 }
@@ -1816,3 +2191,40 @@ EXPORT void* memset(void* restrict address, int ch, u64 byte_count)
     return address;
 }
 #endif
+
+BUSTER_IMPL char* get_last_error_message()
+{
+    return 0;
+}
+
+BUSTER_IMPL ProcessResult process_wait_sync(pid_t pid, void* siginfo_buffer)
+{
+    ProcessResult result;
+    let siginfo = (siginfo_t*)siginfo_buffer;
+    if (pid != -1)
+    {
+        int wait_result = waitid(P_PID, pid, siginfo_buffer, WEXITED);
+
+        if (wait_result == 0)
+        {
+            if (siginfo->si_code == CLD_EXITED)
+            {
+                result = (ProcessResult)siginfo->si_status;
+            }
+            else
+            {
+                result = PROCESS_RESULT_UNKNOWN;
+            }
+        }
+        else
+        {
+            result = PROCESS_RESULT_UNKNOWN;
+        }
+    }
+    else
+    {
+        result = PROCESS_RESULT_NOT_EXISTENT;
+    }
+
+    return result;
+}
