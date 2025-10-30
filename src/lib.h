@@ -329,6 +329,7 @@ PUB_DECL str str_slice_start(str s, u64 start);
 PUB_DECL bool memory_compare(void* a, void* b, u64 i);
 PUB_DECL str str_slice(str s, u64 start, u64 end);
 PUB_DECL bool str_equal(str s1, str s2);
+PUB_DECL u64 str_first_ch(str s, u8 ch);
 PUB_DECL u64 str_last_ch(str s, u8 ch);
 PUB_DECL u64 align_forward(u64 n, u64 a);
 PUB_DECL bool is_space(char ch);

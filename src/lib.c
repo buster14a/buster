@@ -19,6 +19,7 @@
 #include <sys/wait.h>
 #include <sys/ptrace.h>
 #include <pthread.h>
+#include <linux/limits.h>
 #elif defined(__APPLE__)
 #include <unistd.h>
 #include <fcntl.h>
@@ -687,7 +688,7 @@ PUB_IMPL Arena* arena_create(ArenaInitialization initialization)
 
     for (u64 i = 0; i < count; i += 1)
     {
-        let arena = (Arena*)(raw_pointer + (individual_reserved_size * i));
+        let arena = (Arena*)((u8*)raw_pointer + (individual_reserved_size * i));
         os_commit(arena, initialization.initial_size, protection_flags, arena_lock_pages);
         *arena = (Arena){ 
             .reserved_size = individual_reserved_size,
@@ -843,10 +844,10 @@ PUB_IMPL str file_read(Arena* arena, str path, FileReadOptions options)
         let allocation_bottom = allocation_size - (file_size + options.start_padding);
         let allocation_alignment = MAX(options.start_alignment, 1);
         let file_buffer = arena_allocate_bytes(arena, allocation_size, allocation_alignment);
-        os_file_read(fd, (str) { file_buffer + options.start_padding, file_size }, file_size);
-        memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
+        os_file_read(fd, (str) { (char*)file_buffer + options.start_padding, file_size }, file_size);
+        memset((u8*)file_buffer + options.start_padding + file_size, 0, allocation_bottom);
         os_file_close(fd);
-        result = (str) { file_buffer + options.start_padding, file_size };
+        result = (str) { (char*)file_buffer + options.start_padding, file_size };
     }
 
     return result;
@@ -891,7 +892,7 @@ LOCAL str os_path_absolute_stack(str buffer, const char* restrict relative_file_
 
 PUB_IMPL str path_absolute(Arena* arena, const char* restrict relative_file_path)
 {
-    char buffer[4096];
+    char buffer[PATH_MAX];
     let stack_slice = os_path_absolute_stack((str){buffer, array_length(buffer)}, relative_file_path);
     let result = arena_duplicate_string(arena, stack_slice, true);
     return result;
@@ -957,6 +958,7 @@ PUB_IMPL str format_integer(Arena* arena, FormatIntegerOptions options, bool zer
 PUB_IMPL ExecutionResult os_execute(Arena* arena, char** arguments, char** environment, ExecutionOptions options)
 {
     ExecutionResult result = {};
+    unused(arena);
 
 #if defined (__linux__) || defined(__APPLE__)
     FileDescriptor* null_file_descriptor = 0;
@@ -1032,8 +1034,6 @@ PUB_IMPL ExecutionResult os_execute(Arena* arena, char** arguments, char** envir
                     close(pipes[i][1]);
                 }
             }
-
-            u64 offset = 0;
 
             if (options.policies[0] == STREAM_POLICY_PIPE | options.policies[1] == STREAM_POLICY_PIPE)
             {
@@ -1232,6 +1232,7 @@ PUB_IMPL IntegerParsing parse_hexadecimal_vectorized(const char* restrict p)
 {
     u64 value = 0;
     u64 i = 0;
+    unused(p);
 
     while (1)
     {
@@ -1263,8 +1264,8 @@ PUB_IMPL IntegerParsing parse_decimal_vectorized(const char* restrict p)
 
     let digit_mask = _cvtu64_mask64((1ULL << digit_count) - 1);
     let digit2bin = _mm512_maskz_sub_epi8(digit_mask, chunk, zero);
-    let lo0 = _mm512_castsi512_si128(digit2bin);
-    let a = _mm512_cvtepu8_epi64(lo0);
+    //let lo0 = _mm512_castsi512_si128(digit2bin);
+    //let a = _mm512_cvtepu8_epi64(lo0);
     let digit_count_splat = _mm512_set1_epi8((u8)digit_count);
 
     let to_sub = _mm512_set_epi8(
@@ -1283,7 +1284,7 @@ PUB_IMPL IntegerParsing parse_decimal_vectorized(const char* restrict p)
     let a128_1_0 = _mm512_extracti64x2_epi64(asds, 1);
 
     let a128_0_1 = _mm_srli_si128(a128_0_0, 8);
-    let a128_1_1 = _mm_srli_si128(a128_1_0, 8);
+    //let a128_1_1 = _mm_srli_si128(a128_1_0, 8);
 
     let a8_0_0 = _mm512_cvtepu8_epi64(a128_0_0);
     let a8_0_1 = _mm512_cvtepu8_epi64(a128_0_1);
@@ -1334,14 +1335,15 @@ PUB_IMPL IntegerParsing parse_octal_vectorized(const char* restrict p)
 {
     u64 value = 0;
     u64 i = 0;
+    unused(p);
 
     while (1)
     {
-        let chunk = _mm512_loadu_epi8(&p[i]);
-        let lower_limit = _mm512_cmpge_epu8_mask(chunk, _mm512_set1_epi8('0'));
-        let upper_limit = _mm512_cmple_epu8_mask(chunk, _mm512_set1_epi8('7'));
-        let is_octal = _kand_mask64(lower_limit, upper_limit);
-        let octal_mask = _cvtu64_mask64(_tzcnt_u64(~_cvtmask64_u64(is_octal)));
+        // let chunk = _mm512_loadu_epi8(&p[i]);
+        // let lower_limit = _mm512_cmpge_epu8_mask(chunk, _mm512_set1_epi8('0'));
+        // let upper_limit = _mm512_cmple_epu8_mask(chunk, _mm512_set1_epi8('7'));
+        // let is_octal = _kand_mask64(lower_limit, upper_limit);
+        // let octal_mask = _cvtu64_mask64(_tzcnt_u64(~_cvtmask64_u64(is_octal)));
 
         trap();
 
@@ -1359,6 +1361,7 @@ PUB_IMPL IntegerParsing parse_octal_vectorized(const char* restrict p)
 
 PUB_IMPL IntegerParsing parse_binary_vectorized(const char* restrict f)
 {
+#if 0
     u64 value = 0;
 
     let chunk = _mm512_loadu_epi8(f);
@@ -1383,6 +1386,10 @@ PUB_IMPL IntegerParsing parse_binary_vectorized(const char* restrict f)
     let mask_int = _cvtmask64_u64(mask);
 
     return (IntegerParsing) { .value = value, .i = i };
+#else
+    unused(f);
+    trap();
+#endif
 }
 #endif
 
@@ -1557,6 +1564,7 @@ LOCAL pthread_t os_posix_thread_from_generic(ThreadHandle* handle)
 
 PUB_IMPL ThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOptions options)
 {
+    unused(options);
     ThreadHandle* result = 0;
 #if defined (__linux__) || defined(__APPLE__)
     pthread_t handle;
@@ -1604,6 +1612,10 @@ PUB_IMPL void test_error(str check_text, u32 line, str function, str file_path)
 {
     if (is_debugger_present())
     {
+        unused(check_text);
+        unused(line);
+        unused(function);
+        unused(file_path);
         trap();
     }
 }
@@ -1693,6 +1705,22 @@ PUB_IMPL bool str_equal(str s1, str s2)
     }
 
     return is_equal;
+}
+
+PUB_IMPL u64 str_first_ch(str s, u8 ch)
+{
+    let result = string_no_match;
+
+    for (u64 i = 0; i < s.length; i += 1)
+    {
+        if (ch == s.pointer[i])
+        {
+            result = i;
+            break;
+        }
+    }
+
+    return result;
 }
 
 PUB_IMPL u64 str_last_ch(str s, u8 ch)
