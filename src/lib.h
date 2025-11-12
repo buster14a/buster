@@ -88,6 +88,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <uchar.h>
 
 #if BUSTER_KERNEL == 0
 #include <string.h>
@@ -106,6 +107,9 @@ typedef int32_t s32;
 typedef int64_t s64;
 typedef signed __int128 s128;
 
+typedef char16_t char16;
+typedef char32_t char32;
+
 typedef float f32;
 typedef double f64;
 #if defined (__SIZEOF_FLOAT128__)
@@ -114,16 +118,30 @@ typedef __float128 f128;
 
 #ifndef BUSTER_STRING
 #define BUSTER_STRING
-STRUCT(str)
+STRUCT(String8)
 {
-    char* pointer;
+    u8* pointer;
     u64 length;
 };
+
+STRUCT(String16)
+{
+    u16* pointer;
+    u64 length;
+};
+
+STRUCT(String32)
+{
+    u32* pointer;
+    u64 length;
+};
+
+typedef String8 String;
 #endif
 
 STRUCT(StringSlice)
 {
-    str* pointer;
+    String8* pointer;
     u64 length;
 };
 
@@ -133,10 +151,14 @@ STRUCT(SliceOfStringSlice)
     u64 length;
 };
 
-#define S(strlit) ((struct str) { .pointer = (char*)(strlit), .length = __builtin_strlen(strlit) })
+#define S8(strlit) ((struct String8) { .pointer = (u8*)(strlit), .length = __builtin_strlen(strlit) })
+#define S16(strlit) ((struct String16) { .pointer = (u ## strlit), .length = str16_length(u ## strlit) })
+#define S32(strlit) ((struct String32) { .pointer = (U ## strlit), .length = str32_length(U ## strlit) })
+#define S(strlit) S8(strlit)
 #define BUSTER_STRING_ARRAY_TO_SLICE(arr) (StringSlice) { arr, BUSTER_ARRAY_LENGTH(arr) }
+#define str_size(strlit) ((strlit).length * sizeof(*((strlit).pointer)))
 
-[[noreturn]] [[gnu::cold]] BUSTER_DECL void _assert_failed(u32 line, str function_name, str file_path);
+[[noreturn]] [[gnu::cold]] BUSTER_DECL void _assert_failed(u32 line, String function_name, String file_path);
 #ifdef NDEBUG
 #define BUSTER_CHECK(ok) if (BUSTER_UNLIKELY(!(ok))) UNREACHABLE()
 #else
@@ -147,7 +169,7 @@ STRUCT(SliceOfStringSlice)
 #define BUSTER_MB(x) 1024ull * BUSTER_KB(x)
 #define BUSTER_KB(x) 1024ull * (x)
 
-typedef void ShowCallback(void*,str);
+typedef void ShowCallback(void*,String);
 
 typedef struct Arena Arena;
 #if BUSTER_INCLUDE_TESTS
@@ -265,7 +287,7 @@ typedef enum TerminationKind : u8
 
 STRUCT(ExecutionResult)
 {
-    str streams[STREAM_COUNT];
+    String streams[STREAM_COUNT];
     u32 termination_code;
     TerminationKind termination_kind;
 };
@@ -358,19 +380,19 @@ BUSTER_DECL bool arena_destroy(Arena* arena, u64 count);
 BUSTER_DECL void arena_set_position(Arena* arena, u64 position);
 BUSTER_DECL void arena_reset_to_start(Arena* arena);
 BUSTER_DECL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment);
-BUSTER_DECL str arena_duplicate_string(Arena* arena, str str, bool zero_terminate);
-BUSTER_DECL str arena_join_string(Arena* arena, StringSlice strings, bool zero_terminate);
+BUSTER_DECL String arena_duplicate_string(Arena* arena, String str, bool zero_terminate);
+BUSTER_DECL String arena_join_string(Arena* arena, StringSlice strings, bool zero_terminate);
 BUSTER_DECL void* arena_current_pointer(Arena* arena, u64 alignment);
 
-BUSTER_DECL FileDescriptor* os_file_open(str path, OpenFlags flags, OpenPermissions permissions);
+BUSTER_DECL FileDescriptor* os_file_open(String path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_DECL u64 os_file_get_size(FileDescriptor* file_descriptor);
-BUSTER_DECL void os_file_write(FileDescriptor* file_descriptor, str buffer);
+BUSTER_DECL void os_file_write(FileDescriptor* file_descriptor, String buffer);
 BUSTER_DECL void os_file_close(FileDescriptor* file_descriptor);
 
 #define arena_allocate(arena, T, count) (T*) arena_allocate_bytes(arena, sizeof(T) * (count), alignof(T))
 
-BUSTER_DECL str file_read(Arena* arena, str path, FileReadOptions options);
-BUSTER_DECL bool file_write(str path, str content);
+BUSTER_DECL String file_read(Arena* arena, String path, FileReadOptions options);
+BUSTER_DECL bool file_write(String path, String content);
 
 BUSTER_DECL char** argument_add(ArgumentBuilder* builder, char* arg);
 BUSTER_DECL void argument_builder_destroy(ArgumentBuilder* restrict builder);
@@ -379,17 +401,17 @@ BUSTER_DECL char** argument_builder_end(ArgumentBuilder* restrict builder);
 
 BUSTER_DECL TimeDataType take_timestamp();
 BUSTER_DECL u64 ns_between(TimeDataType start, TimeDataType end);
-BUSTER_DECL str path_absolute(Arena* arena, const char* restrict relative_file_path);
+BUSTER_DECL String path_absolute(Arena* arena, const char* restrict relative_file_path);
 BUSTER_DECL ExecutionResult os_execute(Arena* arena, char** arguments, char** environment, ExecutionOptions options);
 BUSTER_DECL FileDescriptor* os_get_stdout();
 BUSTER_DECL ThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOptions options);
 BUSTER_DECL u32 os_thread_join(ThreadHandle* handle);
 #endif
 
-BUSTER_DECL str format_integer_stack(str buffer, FormatIntegerOptions options);
-BUSTER_DECL str format_integer(Arena* arena, FormatIntegerOptions options, bool zero_terminate);
+BUSTER_DECL String format_integer_stack(String buffer, FormatIntegerOptions options);
+BUSTER_DECL String format_integer(Arena* arena, FormatIntegerOptions options, bool zero_terminate);
 
-BUSTER_DECL u64 parse_integer_decimal_assume_valid(str string);
+BUSTER_DECL u64 parse_integer_decimal_assume_valid(String string);
 BUSTER_DECL IntegerParsing parse_hexadecimal_scalar(const char* restrict p);
 BUSTER_DECL IntegerParsing parse_decimal_scalar(const char* restrict p);
 BUSTER_DECL IntegerParsing parse_octal_scalar(const char* restrict p);
@@ -407,16 +429,22 @@ BUSTER_DECL u64 next_power_of_two(u64 n);
 
 constexpr u64 string_no_match = UINT64_MAX;
 
-BUSTER_DECL bool str_is_zero_terminated(str s);
-BUSTER_DECL str str_from_pointers(char* start, char* end);
-BUSTER_DECL str str_from_ptr_len(const char* ptr, u64 len);
-BUSTER_DECL str str_from_ptr_start_end(char* ptr, u64 start, u64 end);
-BUSTER_DECL str str_slice_start(str s, u64 start);
+BUSTER_DECL bool str_is_zero_terminated(String s);
+BUSTER_DECL String str_from_pointers(char* start, char* end);
+BUSTER_DECL String str_from_ptr_len(const char* ptr, u64 len);
+BUSTER_DECL String str_from_ptr_start_end(char* ptr, u64 start, u64 end);
+BUSTER_DECL String str_slice_start(String s, u64 start);
+BUSTER_DECL String str_slice(String s, u64 start, u64 end);
+BUSTER_DECL bool str_equal(String s1, String s2);
+BUSTER_DECL u64 str_first_ch(String s, u8 ch);
+BUSTER_DECL u64 str_last_ch(String s, u8 ch);
+
+BUSTER_DECL u64 str16_length(const char16* s);
+BUSTER_DECL u64 str16_size(String16 s);
+BUSTER_DECL u64 str32_length(const char32* s);
+BUSTER_DECL u64 str32_size(String32 s);
+
 BUSTER_DECL bool memory_compare(void* a, void* b, u64 i);
-BUSTER_DECL str str_slice(str s, u64 start, u64 end);
-BUSTER_DECL bool str_equal(str s1, str s2);
-BUSTER_DECL u64 str_first_ch(str s, u8 ch);
-BUSTER_DECL u64 str_last_ch(str s, u8 ch);
 BUSTER_DECL u64 align_forward(u64 n, u64 a);
 BUSTER_DECL bool is_space(char ch);
 BUSTER_DECL bool is_decimal(char ch);
@@ -432,7 +460,7 @@ BUSTER_DECL bool is_identifier(char ch);
 BUSTER_DECL char* get_last_error_message();
 BUSTER_DECL ProcessResult process_wait_sync(pid_t pid, void* siginfo_buffer);
 
-BUSTER_DECL void print(str str);
+BUSTER_DECL void print(String str);
 
 #if BUSTER_USE_IO_RING
 BUSTER_DECL IoRingSubmission io_ring_prepare_open(char* path, u64 user_data);
