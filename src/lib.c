@@ -232,9 +232,9 @@ BUSTER_LOCAL bool os_commit(void* address, u64 size, ProtectionFlags protection,
     return result;
 }
 
-BUSTER_LOCAL void str_reverse(str s)
+BUSTER_LOCAL void str_reverse(String s)
 {
-    char* restrict pointer = s.pointer;
+    u8* restrict pointer = s.pointer;
     for (u64 i = 0, reverse_i = s.length - 1; i < reverse_i; i += 1, reverse_i -= 1)
     {
         let ch = pointer[i];
@@ -243,14 +243,14 @@ BUSTER_LOCAL void str_reverse(str s)
     }
 }
 
-BUSTER_LOCAL str format_integer_hexadecimal(str buffer, u64 value)
+BUSTER_LOCAL String format_integer_hexadecimal(String buffer, u64 value)
 {
-    str result = {};
+    String result = {};
 
     if (value == 0)
     {
         buffer.pointer[0] = '0';
-        result = (str) { buffer.pointer, 1};
+        result = (String) { buffer.pointer, 1};
     }
     else
     {
@@ -269,21 +269,21 @@ BUSTER_LOCAL str format_integer_hexadecimal(str buffer, u64 value)
 
         let length = i;
 
-        result = (str) { buffer.pointer , length };
+        result = (String) { buffer.pointer , length };
         str_reverse(result);
     }
 
     return result;
 }
 
-BUSTER_LOCAL str format_integer_decimal(str buffer, u64 value, bool treat_as_signed)
+BUSTER_LOCAL String format_integer_decimal(String buffer, u64 value, bool treat_as_signed)
 {
-    str result = {};
+    String result = {};
 
     if (value == 0)
     {
         buffer.pointer[0] = '0';
-        result = (str) { buffer.pointer, 1};
+        result = (String) { buffer.pointer, 1};
     }
     else
     {
@@ -304,7 +304,7 @@ BUSTER_LOCAL str format_integer_decimal(str buffer, u64 value, bool treat_as_sig
 
         let length = i;
 
-        result = (str) { buffer.pointer + treat_as_signed, length - treat_as_signed };
+        result = (String) { buffer.pointer + treat_as_signed, length - treat_as_signed };
         str_reverse(result);
         result.pointer -= treat_as_signed;
         result.length += treat_as_signed;
@@ -313,14 +313,14 @@ BUSTER_LOCAL str format_integer_decimal(str buffer, u64 value, bool treat_as_sig
     return result;
 }
 
-BUSTER_LOCAL str format_integer_octal(str buffer, u64 value)
+BUSTER_LOCAL String format_integer_octal(String buffer, u64 value)
 {
-    str result = {};
+    String result = {};
 
     if (value == 0)
     {
         buffer.pointer[0] = '0';
-        result = (str) { buffer.pointer, 1};
+        result = (String) { buffer.pointer, 1};
     }
     else
     {
@@ -339,21 +339,21 @@ BUSTER_LOCAL str format_integer_octal(str buffer, u64 value)
 
         let length = i;
 
-        result = (str) { buffer.pointer, length };
+        result = (String) { buffer.pointer, length };
         str_reverse(result);
     }
 
     return result;
 }
 
-BUSTER_LOCAL str format_integer_binary(str buffer, u64 value)
+BUSTER_LOCAL String format_integer_binary(String buffer, u64 value)
 {
-    str result = {};
+    String result = {};
 
     if (value == 0)
     {
         buffer.pointer[0] = '0';
-        result = (str) { buffer.pointer, 1};
+        result = (String) { buffer.pointer, 1};
     }
     else
     {
@@ -372,14 +372,14 @@ BUSTER_LOCAL str format_integer_binary(str buffer, u64 value)
 
         let length = i;
 
-        result = (str) { buffer.pointer, length };
+        result = (String) { buffer.pointer, length };
         str_reverse(result);
     }
 
     return result;
 }
 
-BUSTER_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
+BUSTER_IMPL String format_integer_stack(String buffer, FormatIntegerOptions options)
 {
     if (options.treat_as_signed)
     {
@@ -389,7 +389,7 @@ BUSTER_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
 
     u64 prefix_digit_count = 2;
 
-    str result = {};
+    String result = {};
     if (options.prefix)
     {
         u8 prefix_ch;
@@ -437,15 +437,15 @@ BUSTER_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
     return result;
 }
 
-[[noreturn]] [[gnu::cold]] BUSTER_IMPL void _assert_failed(u32 line, str function_name, str file_path)
+[[noreturn]] [[gnu::cold]] BUSTER_IMPL void _assert_failed(u32 line, String function_name, String file_path)
 {
     print(S("Assert failed at "));
     print(function_name);
     print(S(" in "));
     print(file_path);
     print(S(":"));
-    char buffer[128];
-    let stack_string = format_integer_stack((str){ buffer, BUSTER_ARRAY_LENGTH(buffer) }, (FormatIntegerOptions){ .value = line });
+    u8 buffer[128];
+    let stack_string = format_integer_stack((String){ buffer, BUSTER_ARRAY_LENGTH(buffer) }, (FormatIntegerOptions){ .value = line });
     print(stack_string);
     print(S("\n"));
         
@@ -453,7 +453,7 @@ BUSTER_IMPL str format_integer_stack(str buffer, FormatIntegerOptions options)
 }
 
 #if BUSTER_KERNEL == 0
-BUSTER_IMPL FileDescriptor* os_file_open(str path, OpenFlags flags, OpenPermissions permissions)
+BUSTER_IMPL FileDescriptor* os_file_open(String path, OpenFlags flags, OpenPermissions permissions)
 {
     BUSTER_CHECK(!path.pointer[path.length]);
     FileDescriptor* result = 0;
@@ -481,7 +481,7 @@ BUSTER_IMPL FileDescriptor* os_file_open(str path, OpenFlags flags, OpenPermissi
     o |= (flags.directory) * O_DIRECTORY;
 
     mode_t mode = permissions.execute ? 0755 : 0644;
-    int fd = open(path.pointer, o, mode);
+    int fd = open((char*)path.pointer, o, mode);
 
     if (fd >= 0)
     {
@@ -611,10 +611,10 @@ BUSTER_LOCAL u64 os_file_read_partially(FileDescriptor* file_descriptor, void* b
 #endif
 }
 
-BUSTER_LOCAL void os_file_read(FileDescriptor* file_descriptor, str buffer, u64 byte_count)
+BUSTER_LOCAL void os_file_read(FileDescriptor* file_descriptor, String buffer, u64 byte_count)
 {
     u64 read_byte_count = 0;
-    char* pointer = buffer.pointer;
+    let pointer = buffer.pointer;
     BUSTER_CHECK(buffer.length >= byte_count);
     while (byte_count - read_byte_count)
     {
@@ -649,7 +649,7 @@ BUSTER_IMPL FileDescriptor* os_get_stdout()
     return result;
 }
 
-BUSTER_IMPL void os_file_write(FileDescriptor* file_descriptor, str buffer)
+BUSTER_IMPL void os_file_write(FileDescriptor* file_descriptor, String buffer)
 {
     u64 total_written_byte_count = 0;
 
@@ -774,13 +774,13 @@ BUSTER_IMPL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
     return result;
 }
 
-BUSTER_IMPL str arena_join_string(Arena* arena, StringSlice strings, bool zero_terminate)
+BUSTER_IMPL String arena_join_string(Arena* arena, StringSlice strings, bool zero_terminate)
 {
     u64 size = 0;
 
     for (u64 i = 0; i < strings.length; i += 1)
     {
-        str string = strings.pointer[i];
+        let string = strings.pointer[i];
         size += string.length;
     }
 
@@ -790,7 +790,7 @@ BUSTER_IMPL str arena_join_string(Arena* arena, StringSlice strings, bool zero_t
 
     for (u64 index = 0; index < strings.length; index += 1)
     {
-        str string = strings.pointer[index];
+        let string = strings.pointer[index];
         memcpy(pointer + i, string.pointer, string.length);
         i += string.length;
     }
@@ -804,7 +804,7 @@ BUSTER_IMPL str arena_join_string(Arena* arena, StringSlice strings, bool zero_t
     return str_from_ptr_len(pointer, size);
 }
 
-BUSTER_IMPL str arena_duplicate_string(Arena* arena, str str, bool zero_terminate)
+BUSTER_IMPL String arena_duplicate_string(Arena* arena, String str, bool zero_terminate)
 {
     char* pointer = arena_allocate_bytes(arena, str.length + zero_terminate, 1);
     memcpy(pointer, str.pointer, str.length);
@@ -849,10 +849,10 @@ BUSTER_IMPL u64 ns_between(TimeDataType start, TimeDataType end)
 #endif
 }
 
-BUSTER_IMPL str file_read(Arena* arena, str path, FileReadOptions options)
+BUSTER_IMPL String file_read(Arena* arena, String path, FileReadOptions options)
 {
     let fd = os_file_open(path, (OpenFlags) { .read = 1 }, (OpenPermissions){ .read = 1 });
-    str result = {};
+    String result = {};
 
     if (fd)
     {
@@ -871,16 +871,16 @@ BUSTER_IMPL str file_read(Arena* arena, str path, FileReadOptions options)
         let allocation_bottom = allocation_size - (file_size + options.start_padding);
         let allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
         let file_buffer = arena_allocate_bytes(arena, allocation_size, allocation_alignment);
-        os_file_read(fd, (str) { (char*)file_buffer + options.start_padding, file_size }, file_size);
+        os_file_read(fd, (String) { (u8*)file_buffer + options.start_padding, file_size }, file_size);
         memset((u8*)file_buffer + options.start_padding + file_size, 0, allocation_bottom);
         os_file_close(fd);
-        result = (str) { (char*)file_buffer + options.start_padding, file_size };
+        result = (String) { (u8*)file_buffer + options.start_padding, file_size };
     }
 
     return result;
 }
 
-BUSTER_IMPL bool file_write(str path, str content)
+BUSTER_IMPL bool file_write(String path, String content)
 {
     let fd = os_file_open(path, (OpenFlags) { .write = 1, .create = 1, .truncate = 1 }, (OpenPermissions){ .read = 1, .write = 1 });
     bool result = {};
@@ -895,11 +895,11 @@ BUSTER_IMPL bool file_write(str path, str content)
     return result;
 }
 
-BUSTER_LOCAL str os_path_absolute_stack(str buffer, const char* restrict relative_file_path)
+BUSTER_LOCAL String os_path_absolute_stack(String buffer, const char* restrict relative_file_path)
 {
-    str result = {};
+    String result = {};
 #if defined(__linux__) || defined(__APPLE__)
-    let syscall_result = realpath(relative_file_path, buffer.pointer);
+    let syscall_result = realpath(relative_file_path, (char*)buffer.pointer);
 
     if (syscall_result)
     {
@@ -917,10 +917,10 @@ BUSTER_LOCAL str os_path_absolute_stack(str buffer, const char* restrict relativ
     return result;
 }
 
-BUSTER_IMPL str path_absolute(Arena* arena, const char* restrict relative_file_path)
+BUSTER_IMPL String path_absolute(Arena* arena, const char* restrict relative_file_path)
 {
     char buffer[PATH_MAX];
-    let stack_slice = os_path_absolute_stack((str){buffer, BUSTER_ARRAY_LENGTH(buffer)}, relative_file_path);
+    let stack_slice = os_path_absolute_stack((String){(u8*)buffer, BUSTER_ARRAY_LENGTH(buffer)}, relative_file_path);
     let result = arena_duplicate_string(arena, stack_slice, true);
     return result;
 }
@@ -1238,10 +1238,10 @@ BUSTER_IMPL ProcessResult buster_run(BusterInitialization initialization)
     exit(1);
 }
 
-BUSTER_IMPL str format_integer(Arena* arena, FormatIntegerOptions options, bool zero_terminate)
+BUSTER_IMPL String format_integer(Arena* arena, FormatIntegerOptions options, bool zero_terminate)
 {
     char buffer[128];
-    let stack_string = format_integer_stack((str){ buffer, BUSTER_ARRAY_LENGTH(buffer) }, options);
+    let stack_string = format_integer_stack((String){ (u8*)buffer, BUSTER_ARRAY_LENGTH(buffer) }, options);
     return arena_duplicate_string(arena, stack_string, zero_terminate);
 }
 
@@ -1727,7 +1727,7 @@ BUSTER_LOCAL u64 accumulate_binary(u64 accumulator, u8 ch)
     return (accumulator * 2) + (ch - '0');
 }
 
-BUSTER_IMPL u64 parse_integer_decimal_assume_valid(str string)
+BUSTER_IMPL u64 parse_integer_decimal_assume_valid(String string)
 {
     u64 value = 0;
 
@@ -1902,11 +1902,11 @@ BUSTER_IMPL u32 os_thread_join(ThreadHandle* handle)
     return return_code;
 }
 
-BUSTER_IMPL void test_error(str CHECK, u32 line, str function, str file_path)
+BUSTER_IMPL void test_error(String check, u32 line, String function, String file_path)
 {
     if (is_debugger_present())
     {
-        BUSTER_UNUSED(CHECK);
+        BUSTER_UNUSED(check);
         BUSTER_UNUSED(line);
         BUSTER_UNUSED(function);
         BUSTER_UNUSED(file_path);
@@ -1930,29 +1930,29 @@ BUSTER_IMPL u64 next_power_of_two(u64 n)
     return n;
 }
 
-BUSTER_IMPL bool str_is_zero_terminated(str s)
+BUSTER_IMPL bool str_is_zero_terminated(String s)
 {
     return s.pointer[s.length] == 0;
 }
 
-BUSTER_IMPL str str_from_pointers(char* start, char* end)
+BUSTER_IMPL String str_from_pointers(char* start, char* end)
 {
     BUSTER_CHECK(end >= start);
     u64 len = end - start;
-    return (str) { start, len };
+    return (String) { (u8*)start, len };
 }
 
-BUSTER_IMPL str str_from_ptr_len(const char* ptr, u64 len)
+BUSTER_IMPL String str_from_ptr_len(const char* ptr, u64 len)
 {
-    return (str) { (char*)ptr, len };
+    return (String) { (u8*)ptr, len };
 }
 
-BUSTER_IMPL str str_from_ptr_start_end(char* ptr, u64 start, u64 end)
+BUSTER_IMPL String str_from_ptr_start_end(char* ptr, u64 start, u64 end)
 {
-    return (str) { ptr + start, end - start };
+    return (String) { (u8*)ptr + start, end - start };
 }
 
-BUSTER_IMPL str str_slice_start(str s, u64 start)
+BUSTER_IMPL String str_slice_start(String s, u64 start)
 {
     s.pointer += start;
     s.length -= start;
@@ -1983,14 +1983,14 @@ BUSTER_IMPL bool memory_compare(void* a, void* b, u64 i)
     return result;
 }
 
-BUSTER_IMPL str str_slice(str s, u64 start, u64 end)
+BUSTER_IMPL String str_slice(String s, u64 start, u64 end)
 {
     s.pointer += start;
     s.length = end - start;
     return s;
 }
 
-BUSTER_IMPL bool str_equal(str s1, str s2)
+BUSTER_IMPL bool str_equal(String s1, String s2)
 {
     bool is_equal = s1.length == s2.length;
     if (is_equal & (s1.length != 0) & (s1.pointer != s2.pointer))
@@ -2001,7 +2001,7 @@ BUSTER_IMPL bool str_equal(str s1, str s2)
     return is_equal;
 }
 
-BUSTER_IMPL u64 str_first_ch(str s, u8 ch)
+BUSTER_IMPL u64 str_first_ch(String s, u8 ch)
 {
     let result = string_no_match;
 
@@ -2017,7 +2017,7 @@ BUSTER_IMPL u64 str_first_ch(str s, u8 ch)
     return result;
 }
 
-BUSTER_IMPL u64 str_last_ch(str s, u8 ch)
+BUSTER_IMPL u64 str_last_ch(String s, u8 ch)
 {
     let result = string_no_match;
 
@@ -2093,7 +2093,7 @@ BUSTER_IMPL bool is_identifier(char ch)
     return is_identifier_start(ch) | is_decimal(ch);
 }
 
-BUSTER_IMPL void print(str str)
+BUSTER_IMPL void print(String str)
 {
     os_file_write(os_get_stdout(), str);
 }
@@ -2195,6 +2195,30 @@ EXPORT void* memset(void* restrict address, int ch, u64 byte_count)
 BUSTER_IMPL char* get_last_error_message()
 {
     return 0;
+}
+
+BUSTER_IMPL u64 str16_length(const char16* s)
+{
+    let it = s;
+
+    while (*it)
+    {
+        it += 1;
+    }
+
+    return it - s;
+}
+
+BUSTER_IMPL u64 str32_length(const char32* s)
+{
+    let it = s;
+
+    while (*it)
+    {
+        it += 1;
+    }
+
+    return it - s;
 }
 
 BUSTER_IMPL ProcessResult process_wait_sync(pid_t pid, void* siginfo_buffer)
