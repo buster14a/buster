@@ -300,7 +300,7 @@ static_assert(sizeof(GPTPartitionEntry) == 128);
 int main()
 {
     let arena = arena_create((ArenaInitialization){});
-    let minimal_gpt = file_read(arena, S("build/minimal_gpt_64.img"), (FileReadOptions){});
+    let minimal_gpt = file_read(arena, S("build/minimal_fat32.img"), (FileReadOptions){});
     let minimal = (u8*)minimal_gpt.pointer;
     u64 sector_size = 512;
 
@@ -353,11 +353,11 @@ int main()
 
     u64 starting_lba = BUSTER_MB(1) / sector_size;
 
-    let partition_size = BUSTER_MB(64);
+    let disk_size = BUSTER_MB(64);
 
     *gpt_partition_entry = (GPTPartitionEntry) {
         .starting_lba = starting_lba,
-        .ending_lba = starting_lba + ((partition_size / sector_size) - starting_lba) - 32 - 2,
+        .ending_lba = starting_lba + ((disk_size / sector_size) - starting_lba) - 32 - 2,
         .attributes = 0,
     };
     printf("ending lba: %lx\n", gpt_partition_entry->ending_lba);
