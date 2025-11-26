@@ -20,7 +20,7 @@ fi
 #endif
 #if [[ "$?" != "0" && "$?" != "333" ]]; then
     mkdir -p build
-    $CLANG build.c -o build/builder -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=1 -DBUSTER_USE_PTHREAD=1 -g -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -luring -pthread #-ferror-limit=1 -ftime-trace -ftime-trace-verbose
+    $CLANG build.c -o build/builder -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=1 -DBUSTER_USE_PTHREAD=1 -g -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -Wno-gnu-flexible-array-initializer -Wno-missing-field-initializers -luring -pthread #-ferror-limit=1 -ftime-trace -ftime-trace-verbose
     if [[ "$?" == "0" ]]; then
         BUSTER_REGENERATE=1 build/builder $@
     fi
@@ -32,6 +32,9 @@ exit $?
 
 #if BUSTER_UNITY_BUILD
 #include <lib.c>
+#include <entry_point.c>
+#else
+#include <system_headers.h>
 #endif
 #include <md5.h>
 #include <stdio.h>
@@ -87,136 +90,27 @@ STRUCT(Artifact)
     Files file;
 };
 
-BUSTER_LOCAL String file_relative_paths[] = {
-    S("build/cache_manifest"),
-    S("build.c"),
-    S("src/lib.h"),
-    S("src/lib.c"),
-    S("src/meow_hash_x64_aesni.h"),
-    S("src/disk_builder.c"),
+typedef enum ModuleId : u8
+{
+    MODULE_LIB,
+    MODULE_SYSTEM_HEADERS,
+    MODULE_ENTRY_POINT,
+    MODULE_BUILDER,
+    MODULE_MD5,
+    MODULE_COUNT,
+} ModuleId;
+
+typedef enum DirectoryId
+{
+    DIRECTORY_SRC_ROOT,
+    DIRECTORY_ROOT,
+    DIRECTORY_COUNT,
+} DirectoryId;
+
+BUSTER_LOCAL __attribute__((used)) String directory_paths[] = {
+    [DIRECTORY_ROOT] = S(""),
+    [DIRECTORY_SRC_ROOT] = S("src"),
 };
-
-typedef enum BuildCommand
-{
-    BUILD_COMMAND_BUILD,
-    BUILD_COMMAND_TEST,
-    BUILD_COMMAND_DEBUG,
-} BuildCommand;
-
-STRUCT(ProgramInput)
-{
-    BuildCommand command;
-};
-
-BUSTER_LOCAL WorkFile work_files[BUSTER_ARRAY_LENGTH(file_relative_paths)] = {};
-
-BUSTER_LOCAL void work_file_open(WorkFile* file, String path, u64 user_data)
-{
-    io_ring_prepare_open((char*)path.pointer, user_data);
-    file->status = WORK_FILE_OPENING;
-    file->fd = -1;
-}
-
-BUSTER_LOCAL u128 hash_file(const char* pointer, u64 length)
-{
-    BUSTER_CHECK(((u64)pointer & (64 - 1)) == 0);
-
-    md5_ctx ctx;
-    md5_init(&ctx);
-    md5_update(&ctx, pointer, length);
-    u128 digest;
-    static_assert(sizeof(digest) == MD5_DIGEST_SIZE);
-    md5_finish(&ctx, (u8*)&digest);
-    return digest;
-}
-
-STRUCT(Process)
-{
-    siginfo_t siginfo;
-    pid_t pid;
-    char** argv;
-    char** envp;
-    bool waited;
-};
-
-static_assert(alignof(Process) == 8);
-
-ProcessResult process_query_wait(Process* p)
-{
-    ProcessResult result;
-    if (p->pid != -1)
-    {
-        if (p->waited)
-        {
-            // Then we are allowed to query the siginfo struct
-            if (BUSTER_LIKELY(p->siginfo.si_code == CLD_EXITED))
-            {
-                result = (ProcessResult)p->siginfo.si_status;
-            }
-            else
-            {
-                BUSTER_TODO();
-            }
-        }
-        else
-        {
-            result = PROCESS_RESULT_RUNNING;
-        }
-    }
-    else
-    {
-        result = PROCESS_RESULT_NOT_EXISTENT;
-    }
-    
-    return result;
-}
-
-BUSTER_LOCAL void spawn_process(Process* process, char* argv[], char* envp[])
-{
-    let pid = fork();
-
-    if (pid == -1)
-    {
-        printf("Failed to fork\n");
-    }
-    else if (pid == 0)
-    {
-        execve(argv[0], argv, envp);
-        BUSTER_TRAP();
-    }
-
-    if (global_program.verbose)
-    {
-        printf("Launched: ");
-
-        for (let a = argv; *a; a += 1)
-        {
-            printf("%s ", *a);
-        }
-
-        printf("\n");
-    }
-
-    *process = (Process) {
-        .argv = argv,
-        .envp = envp,
-        .pid = pid,
-    };
-}
-
-typedef enum TaskId
-{
-    TASK_ID_COMPILATION,
-    TASK_ID_LINKING,
-} TaskId;
-
-typedef enum ProjectId
-{
-    PROJECT_OPERATING_SYSTEM_BUILDER,
-    PROJECT_OPERATING_SYSTEM_BOOTLOADER,
-    PROJECT_OPERATING_SYSTEM_KERNEL,
-    PROJECT_COUNT,
-} ProjectId;
 
 typedef enum CpuArch
 {
@@ -244,6 +138,191 @@ STRUCT(Target)
     CpuModel model;
     OperatingSystem os;
 };
+
+BUSTER_LOCAL constexpr Target target_native = {
+#if defined(__x86_64__)
+    .arch = CPU_ARCH_X86_64,
+#else
+#pragma error
+#endif
+#if defined(__linux__)
+    .os = OPERATING_SYSTEM_LINUX,
+#else
+#pragma error
+#endif
+    .model = CPU_MODEL_NATIVE,
+};
+
+STRUCT(Module)
+{
+    DirectoryId directory;
+    bool no_header;
+    bool no_source;
+};
+
+STRUCT(TargetBuildFile)
+{
+    FileStats stats;
+    String full_path;
+    Target target;
+    CompilationModel model;
+    bool has_debug_info;
+    bool use_io_ring;
+};
+
+STRUCT(ModuleInstantiation)
+{
+    Target target;
+    ModuleId id;
+    u64 index;
+};
+
+STRUCT(LinkModule)
+{
+    ModuleId id;
+    u64 index;
+};
+
+STRUCT(ModuleSlice)
+{
+    LinkModule* pointer;
+    u64 length;
+};
+
+BUSTER_LOCAL Module modules[] = {
+    [MODULE_LIB] = {},
+    [MODULE_ENTRY_POINT] = {},
+    [MODULE_SYSTEM_HEADERS] = {
+        .no_source = true,
+    },
+    [MODULE_BUILDER] = {
+        .directory = DIRECTORY_ROOT,
+        .no_header = true,
+    },
+    [MODULE_MD5] = {
+        .no_source = true,
+    },
+};
+
+static_assert(BUSTER_ARRAY_LENGTH(modules) == MODULE_COUNT);
+
+BUSTER_LOCAL String module_names[] = {
+    [MODULE_LIB] = S("lib"),
+    [MODULE_SYSTEM_HEADERS] = S("system_headers"),
+    [MODULE_ENTRY_POINT] = S("entry_point"),
+    [MODULE_BUILDER] = S("build"),
+    [MODULE_MD5] = S("md5"),
+};
+
+static_assert(BUSTER_ARRAY_LENGTH(module_names) == MODULE_COUNT);
+
+#define LINK_UNIT_MODULES(_name, ...) BUSTER_LOCAL LinkModule _name ## _modules[] = { __VA_ARGS__ }
+#define LINK_UNIT(_name, ...) (LinkUnitSpecification) { .name = S(#_name), .modules = { .pointer = _name ## _modules, .length = BUSTER_ARRAY_LENGTH(_name ## _modules) }, __VA_ARGS__ }
+
+// TODO: better naming convention
+STRUCT(LinkUnitSpecification)
+{
+    String name;
+    ModuleSlice modules;
+    Target target;
+    bool use_io_ring;
+};
+
+LINK_UNIT_MODULES(builder, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_BUILDER }, { MODULE_MD5 });
+BUSTER_LOCAL LinkUnitSpecification specifications[] = {
+    LINK_UNIT(builder, .target = target_native),
+};
+
+typedef enum BuildCommand
+{
+    BUILD_COMMAND_BUILD,
+    BUILD_COMMAND_TEST,
+    BUILD_COMMAND_DEBUG,
+} BuildCommand;
+
+STRUCT(BuildProgramState)
+{
+    ProgramState general_state;
+    BuildCommand command;
+};
+
+BUSTER_LOCAL BuildProgramState build_program_state = {};
+BUSTER_IMPL ProgramState* program_state = &build_program_state.general_state;
+
+BUSTER_LOCAL u128 hash_file(u8* pointer, u64 length)
+{
+    BUSTER_CHECK(((u64)pointer & (64 - 1)) == 0);
+    u128 digest = 0;
+    if (length)
+    {
+        md5_ctx ctx;
+        md5_init(&ctx);
+        md5_update(&ctx, pointer, length);
+        static_assert(sizeof(digest) == MD5_DIGEST_SIZE);
+        md5_finish(&ctx, (u8*)&digest);
+    }
+    return digest;
+}
+
+#include <sys/resource.h>
+
+STRUCT(Process)
+{
+    ProcessResources resources;
+    ProcessHandle* handle;
+    char** argv;
+    char** envp;
+    bool waited;
+};
+
+static_assert(alignof(Process) == 8);
+
+BUSTER_LOCAL void spawn_process(Process* process, char* argv[], char* envp[])
+{
+    let pid = fork();
+
+    if (pid == -1)
+    {
+        if (program_state->input.verbose) printf("Failed to fork\n");
+    }
+    else if (pid == 0)
+    {
+        execve(argv[0], argv, envp);
+        BUSTER_TRAP();
+    }
+
+    if (program_state->input.verbose)
+    {
+        printf("Launched: ");
+
+        for (let a = argv; *a; a += 1)
+        {
+            printf("%s ", *a);
+        }
+
+        printf("\n");
+    }
+
+    *process = (Process) {
+        .argv = argv,
+        .envp = envp,
+        .handle = pid == -1 ? (ProcessHandle*)0 : (ProcessHandle*)(u64)pid,
+    };
+}
+
+typedef enum TaskId
+{
+    TASK_ID_COMPILATION,
+    TASK_ID_LINKING,
+} TaskId;
+
+typedef enum ProjectId
+{
+    PROJECT_OPERATING_SYSTEM_BUILDER,
+    PROJECT_OPERATING_SYSTEM_BOOTLOADER,
+    PROJECT_OPERATING_SYSTEM_KERNEL,
+    PROJECT_COUNT,
+} ProjectId;
 
 BUSTER_LOCAL String target_to_string_builder(Target target)
 {
@@ -289,12 +368,12 @@ STRUCT(CompilationUnit)
     Target target;
     CompilationModel model;
     char** compilation_arguments;
-    bool debug_info;
-    bool io_ring;
-    u64 file;
+    bool has_debug_info;
+    bool use_io_ring;
     String object_path;
+    String source_path;
     Process process;
-    u8 cache_padding[BUSTER_MIN(BUSTER_CACHE_LINE_GUESS - ((3 * sizeof(u64))), BUSTER_CACHE_LINE_GUESS)];
+    u8 cache_padding[BUSTER_MIN(BUSTER_CACHE_LINE_GUESS - ((5 * sizeof(u64))), BUSTER_CACHE_LINE_GUESS)];
 };
 
 static_assert(sizeof(CompilationUnit) % BUSTER_CACHE_LINE_GUESS == 0);
@@ -307,7 +386,7 @@ STRUCT(LinkUnit)
     Target target;
     u64* compilations;
     u64 compilation_count;
-    bool io_ring;
+    bool use_io_ring;
     bool run;
 };
 
@@ -322,156 +401,139 @@ BUSTER_LOCAL bool target_equal(Target a, Target b)
     return memcmp(&a, &b, sizeof(a)) == 0;
 }
 
-BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, CompilationUnit* units, u64 unit_count, String cwd)
+BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, CompilationUnit* units, u64 unit_count, String cwd, char* clang_path)
 {
     bool result = true;
-
-    let compile_commands_start = compile_commands->position;
-    append_string(compile_commands, S("[\n"));
 
     constexpr u64 max_target_count = 16;
     Target targets[max_target_count];
     u64 target_count = 0;
+    BUSTER_UNUSED(targets);
+    BUSTER_UNUSED(target_count);
 
-    for (u64 unit_index = 0; unit_index < unit_count; unit_index += 1)
+    let compile_commands_start = compile_commands->position;
+    append_string(compile_commands, S("[\n"));
+
+    for (u64 unit_i = 0; unit_i < unit_count; unit_i += 1)
     {
-        CompilationUnit* unit = &units[unit_index];
-        let file_index = unit->file;
-        let path = file_relative_paths[file_index];
+        let unit = &units[unit_i];
 
-        let dot = str_last_ch(path, '.');
-        BUSTER_CHECK(dot != string_no_match);
-        let extension_start = dot + 1;
-        let extension = (String){ .pointer = path.pointer + extension_start, .length = path.length - extension_start };
-        BUSTER_CHECK(str_equal(extension, S("c")));
+        let source_absolute_path = unit->source_path;
+        let source_relative_path = str_slice_start(source_absolute_path, cwd.length + 1);
+        let target_string_builder = target_to_string_builder(unit->target);
+        String object_absolute_path_parts[] = {
+            cwd,
+            S("/build/"),
+            target_string_builder,
+            S("/"),
+            source_relative_path,
+            S(".o"),
+        };
+
+        u64 target_i;
+        for (target_i = 0; target_i < target_count; target_i += 1)
+        {
+            if (target_equal(unit->target, targets[target_i]))
+            {
+                break;
+            }
+        }
+
+        char buffer[PATH_MAX];
+        u64 count = 0;
+        {
+            memcpy(buffer + count, object_absolute_path_parts[1].pointer + 1, object_absolute_path_parts[1].length - 1);
+            BUSTER_CHECK(object_absolute_path_parts[1].pointer[0] == '/');
+            count += object_absolute_path_parts[1].length - 1;
+        }
 
         {
-            let target_string_builder = target_to_string_builder(unit->target);
-            String artifact_paths[] = {
-                cwd,
-                S("/build/"),
-                target_string_builder,
-                S("/"),
-                path,
-                S(".o"),
-            };
-
-            u64 i;
-            for (i = 0; i < target_count; i += 1)
-            {
-                if (target_equal(unit->target, targets[i]))
-                {
-                    break;
-                }
-            }
-
-            char buffer[PATH_MAX];
-            u64 count = 0;
-            {
-                memcpy(buffer + count, artifact_paths[1].pointer + 1, artifact_paths[1].length - 1);
-                BUSTER_CHECK(artifact_paths[1].pointer[0] == '/');
-                count += artifact_paths[1].length - 1;
-            }
-
-            {
-                memcpy(buffer + count, artifact_paths[2].pointer, artifact_paths[2].length);
-                count += artifact_paths[2].length;
-            }
-
-            buffer[count] = 0;
-
-            if (i == target_count)
-            {
-                mkdir(buffer, 0755);
-                targets[target_count] = unit->target;
-                target_count += 1;
-            }
-
-            buffer[count] = '/';
-            count += 1;
-
-            let source_path = artifact_paths[4];
-            u64 source_i = 0;
-            while (1)
-            {
-                String source = str_slice_start(source_path, source_i);
-                let slash_index = str_first_ch(source, '/');
-                if (slash_index == string_no_match)
-                {
-                    break;
-                }
-
-                memcpy(buffer + count, source_path.pointer, slash_index);
-                buffer[count + slash_index] = 0;
-
-                mkdir(buffer, 0755);
-
-                source_i = slash_index + 1; 
-            }
-
-            let object_path = arena_join_string(arena, BUSTER_STRING_ARRAY_TO_SLICE(artifact_paths), true);
-            unit->object_path = object_path;
-
-            String compilation_source_parts[] = {
-                cwd,
-                S("/"),
-                path,
-            };
-
-            let compilation_source = arena_join_string(arena, BUSTER_STRING_ARRAY_TO_SLICE(compilation_source_parts), true);
-            let clang_env = getenv("CLANG");
-            char* clang_path = clang_env ? clang_env : "/usr/bin/clang";
-
-            let builder = argument_builder_start(arena, clang_path);
-            // argument_add(builder, "-ferror-limit=1");
-            argument_add(builder, "-c");
-            argument_add(builder, (char*)compilation_source.pointer);
-            argument_add(builder, "-o");
-            argument_add(builder, (char*)object_path.pointer);
-            argument_add(builder, "-std=gnu2x");
-            argument_add(builder, "-Isrc");
-            argument_add(builder, "-Wno-pragma-once-outside-header");
-
-            switch (unit->target.model)
-            {
-                break; case CPU_MODEL_NATIVE: argument_add(builder, "-march=native");
-                break; case CPU_MODEL_GENERIC: {}
-            }
-
-            if (unit->debug_info)
-            {
-                argument_add(builder, "-g");
-            }
-
-            argument_add(builder, unit->model == COMPILATION_MODEL_SINGLE_UNIT ? "-DBUSTER_UNITY_BUILD=1" : "-DBUSTER_UNITY_BUILD=0");
-
-            argument_add(builder, unit->io_ring ? "-DBUSTER_USE_IO_RING=1" : "-DBUSTER_USE_IO_RING=0");
-
-            let args = argument_builder_end(builder);
-
-            unit->compilation_arguments = args;
-
-            append_string(compile_commands, S("\t{\n\t\t\"directory\": \""));
-            append_string(compile_commands, cwd);
-            append_string(compile_commands, S("\",\n\t\t\"command\": \""));
-
-            for (char** a = args; *a; a += 1)
-            {
-                let arg_ptr = *a;
-                let arg_len = strlen(arg_ptr);
-                let arg = (String){ (u8*)arg_ptr, arg_len };
-                append_string(compile_commands, arg);
-                append_string(compile_commands, S(" "));
-            }
-
-            compile_commands->position -= 1;
-            append_string(compile_commands, S("\"\n\t\t\"file\": \""));
-            append_string(compile_commands, compilation_source);
-            append_string(compile_commands, S("\"\n"));
-            append_string(compile_commands, S("\t},\n"));
+            memcpy(buffer + count, object_absolute_path_parts[2].pointer, object_absolute_path_parts[2].length);
+            count += object_absolute_path_parts[2].length;
         }
-    }
 
+        buffer[count] = 0;
+
+        if (target_i == target_count)
+        {
+            mkdir(buffer, 0755);
+            targets[target_count] = unit->target;
+            target_count += 1;
+        }
+
+        buffer[count] = '/';
+        count += 1;
+
+        u64 source_i = 0;
+        while (1)
+        {
+            String source = str_slice_start(source_relative_path, source_i);
+            let slash_index = str_first_ch(source, '/');
+            if (slash_index == string_no_match)
+            {
+                break;
+            }
+
+            memcpy(buffer + count, source_relative_path.pointer, slash_index);
+            buffer[count + slash_index] = 0;
+
+            mkdir(buffer, 0755);
+
+            source_i = slash_index + 1; 
+        }
+
+        let object_path = arena_join_string(arena, BUSTER_STRING_ARRAY_TO_SLICE(object_absolute_path_parts), true);
+        unit->object_path = object_path;
+
+
+        let builder = argument_builder_start(arena, clang_path);
+        argument_add(builder, "-ferror-limit=1");
+        argument_add(builder, "-c");
+        argument_add(builder, (char*)source_absolute_path.pointer);
+        argument_add(builder, "-o");
+        argument_add(builder, (char*)object_path.pointer);
+        argument_add(builder, "-std=gnu2x");
+        argument_add(builder, "-Isrc");
+        argument_add(builder, "-Wno-pragma-once-outside-header");
+
+        switch (unit->target.model)
+        {
+            break; case CPU_MODEL_NATIVE: argument_add(builder, "-march=native");
+            break; case CPU_MODEL_GENERIC: {}
+        }
+
+        if (unit->has_debug_info)
+        {
+            argument_add(builder, "-g");
+        }
+
+        argument_add(builder, unit->model == COMPILATION_MODEL_SINGLE_UNIT ? "-DBUSTER_UNITY_BUILD=1" : "-DBUSTER_UNITY_BUILD=0");
+
+        argument_add(builder, unit->use_io_ring ? "-DBUSTER_USE_IO_RING=1" : "-DBUSTER_USE_IO_RING=0");
+
+        let args = argument_builder_end(builder);
+
+        unit->compilation_arguments = args;
+
+        append_string(compile_commands, S("\t{\n\t\t\"directory\": \""));
+        append_string(compile_commands, cwd);
+        append_string(compile_commands, S("\",\n\t\t\"command\": \""));
+
+        for (char** a = args; *a; a += 1)
+        {
+            let arg_ptr = *a;
+            let arg_len = strlen(arg_ptr);
+            let arg = (String){ (u8*)arg_ptr, arg_len };
+            append_string(compile_commands, arg);
+            append_string(compile_commands, S(" "));
+        }
+
+        compile_commands->position -= 1;
+        append_string(compile_commands, S("\",\n\t\t\"file\": \""));
+        append_string(compile_commands, source_absolute_path);
+        append_string(compile_commands, S("\"\n"));
+        append_string(compile_commands, S("\t},\n"));
+    }
     compile_commands->position -= 2;
 
     append_string(compile_commands, S("\n]"));
@@ -490,111 +552,12 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
     return result;
 }
 
-BUSTER_LOCAL bool compile(CompilationUnit* units, u64 unit_count, char* envp[])
+BUSTER_IMPL ProcessResult process_arguments()
 {
-    bool result = true;
-
-    for (u64 unit_index = 0; unit_index < unit_count; unit_index += 1)
-    {
-        CompilationUnit* unit = &units[unit_index];
-        spawn_process(&unit->process, unit->compilation_arguments, envp);
-        if (unit->process.pid == -1)
-        {
-            result = false;
-        }
-#if BUSTER_USE_IO_RING
-        else
-        {
-            io_ring_prepare_waitid(unit->process.pid, &unit->process.siginfo, (u64)unit);
-        }
-#endif
-    }
-
-#if BUSTER_USE_IO_RING
-    let wait_entries = io_ring_submit_and_wait_all();
-    result = wait_entries != 0;
-#endif
-
-    if (result)
-    {
-        BUSTER_CHECK(wait_entries == unit_count);
-
-        for (u64 unit_index = 0; unit_index < unit_count; unit_index += 1)
-        {
-#if BUSTER_USE_IO_RING
-            let completion = io_ring_peek_completion();
-            let unit = (CompilationUnit*)completion.user_data;
-            let wait_result = completion.result;
-            bool success = (wait_result == 0) & (unit->process.siginfo.si_code == CLD_EXITED) & (unit->process.siginfo.si_status == 0);
-            if (!success)
-            {
-                // TODO: log failure
-                result = false;
-            }
-#else
-            let unit = &units[unit_index];
-            let pid = unit->process.pid;
-
-            let success = process_wait_sync(pid, &unit->process.siginfo) == PROCESS_RESULT_SUCCESS;
-            if (!success)
-            {
-                result = false;
-            }
-#endif
-            if ((!success) & global_program.verbose) printf("Compilation failed for artifact %s\n", unit->object_path.pointer);
-        }
-    }
-
-    return result;
-}
-
-BUSTER_LOCAL void queue_linkage_job(Arena* arena, LinkUnit* link_unit, CompilationUnit* units, char* envp[])
-{
-    let clang_env = getenv("CLANG");
-    char* clang_path = clang_env ? clang_env : "/usr/bin/clang";
-
-    let builder = argument_builder_start(arena, clang_path);
-
-    argument_add(builder, "-fuse-ld=lld");
-    argument_add(builder, "-o");
-    argument_add(builder, (char*)link_unit->artifact_path.pointer);
-
-    for (u64 i = 0; i < link_unit->compilation_count; i += 1)
-    {
-        let unit_i = link_unit->compilations[i];
-        let unit = &units[unit_i];
-        let artifact_path = unit->object_path;
-        argument_add(builder, (char*)artifact_path.pointer);
-    }
-
-    if (link_unit->io_ring)
-    {
-        argument_add(builder, "-luring");
-    }
-
-    let argv = argument_builder_end(builder);
-    bool debug = false;
-    if (debug)
-    {
-        let a = argv;
-        while (*a)
-        {
-            printf("%s ", *a);
-            a += 1;
-        }
-        printf("\n");
-    }
-
-    spawn_process(&link_unit->link_process, argv, envp);
-}
-
-BUSTER_LOCAL ProcessResult process_arguments(Arena* arena, void* context, u64 argc, char** argv, char** envp)
-{
-    let input = (ProgramInput*)context;
-    BUSTER_UNUSED(arena);
-    BUSTER_UNUSED(envp);
-
     ProcessResult result = PROCESS_RESULT_SUCCESS;
+    let argc = program_state->input.argc;
+    let argv = program_state->input.argv;
+    let envp = program_state->input.envp;
 
     {
         let arg_ptr = argv + 1;
@@ -607,15 +570,15 @@ BUSTER_LOCAL ProcessResult process_arguments(Arena* arena, void* context, u64 ar
 
             if (strcmp(a, "test") == 0)
             {
-                input->command = BUILD_COMMAND_TEST;
+                build_program_state.command = BUILD_COMMAND_TEST;
             }
             else if (strcmp(a, "debug") == 0)
             {
-                input->command = BUILD_COMMAND_DEBUG;
+                build_program_state.command = BUILD_COMMAND_DEBUG;
             }
             else
             {
-                result = argument_process(argc, argv, envp, 1);
+                result = buster_argument_process(argc, argv, envp, 1);
 
                 if (result != PROCESS_RESULT_SUCCESS)
                 {
@@ -635,389 +598,230 @@ BUSTER_LOCAL ProcessResult process_arguments(Arena* arena, void* context, u64 ar
         }
     }
 
-    if (!global_program.verbose & (input->command != BUILD_COMMAND_BUILD))
+    if (!program_state->input.verbose & (build_program_state.command != BUILD_COMMAND_BUILD))
     {
-        global_program.verbose = true;
+        program_state->input.verbose = true;
     }
 
     return result;
 }
 
-BUSTER_LOCAL ProcessResult thread_entry_point(Thread* thread)
+BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
 {
-    BUSTER_UNUSED(thread);
-    let arena_init_start = take_timestamp();
-    let arena = arena_create((ArenaInitialization){});
-    let compile_commands = arena_create((ArenaInitialization){});
-    let arena_init_end = take_timestamp();
-    let input = (ProgramInput*)thread->context;
-
-    let open_start = take_timestamp();
-
-    ProcessResult result = io_ring_init(&thread->ring, 4096) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-
-    if (result == PROCESS_RESULT_SUCCESS)
+    let cache_manifest = os_file_open(S("build/cache_manifest"), (OpenFlags) { .read = 1 }, (OpenPermissions){});
+    let cache_manifest_stats = os_file_get_stats(cache_manifest, (FileStatsOptions){ .size = 1, .modified_time = 1 });
+    let cache_manifest_buffer = (u8*)arena_allocate_bytes(thread->arena, cache_manifest_stats.size, 64);
+    os_file_read(cache_manifest, (String){ cache_manifest_buffer, cache_manifest_stats.size }, cache_manifest_stats.size);
+    os_file_close(cache_manifest);
+    let cache_manifest_hash = hash_file(cache_manifest_buffer, cache_manifest_stats.size);
+    BUSTER_UNUSED(cache_manifest_hash);
+    if (cache_manifest)
     {
-        u64 entry_count = BUSTER_ARRAY_LENGTH(work_files);
+        BUSTER_TRAP();
+    }
+    else
+    {
+        BUSTER_UNUSED(target_native);
+    }
 
-        for (u64 i = 0; i < entry_count; i += 1)
+    let cwd = path_absolute(thread->arena, ".");
+    let general_arena = arena_create((ArenaInitialization){});
+    let file_list_arena = arena_create((ArenaInitialization){});
+    let file_list_start = file_list_arena->position;
+    let file_list = (TargetBuildFile*)((u8*)file_list_arena + file_list_start);
+    u64 file_list_count = 0;
+
+    let module_list_arena = arena_create((ArenaInitialization){});
+    let module_list_start = module_list_arena->position;
+    let module_list = (ModuleInstantiation*)((u8*)module_list_arena + module_list_start);
+    u64 module_list_count = 0;
+
+    u64 c_source_file_count = 0;
+
+    for (u64 link_unit_index = 0; link_unit_index < BUSTER_ARRAY_LENGTH(specifications); link_unit_index += 1)
+    {
+        let link_unit = &specifications[link_unit_index];
+        let link_unit_modules = link_unit->modules;
+        let link_unit_target = link_unit->target;
+
+        for (u64 module_index = 0; module_index < link_unit_modules.length; module_index += 1)
         {
-            let work_file = &work_files[i];
-            let path = file_relative_paths[i];
-            work_file_open(work_file, path, i);
-        }
+            let module = &link_unit_modules.pointer[module_index];
+            // if ((!recompile_builder) & (module == MODULE_BUILDER))
+            // {
+            //     continue;
+            // }
 
-        result = io_ring_submit_and_wait_all() ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-        // result = ((submission_result >= 0) & ((u64)submission_result == entry_count)) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-        let open_end = take_timestamp();
+            let module_specification = modules[module->id];
 
-        if (result == PROCESS_RESULT_SUCCESS)
-        {
-            u64 completed_open_count = 0;
-            bool cache_missing = false;
-
-            let stat_start = open_end;
-
-            for (u64 i = 0; i < entry_count; i += 1)
+            u64 i;
+            for (i = 0; i < module_list_count; i += 1)
             {
-                let completion = io_ring_peek_completion();
-                    let i = completion.user_data;
-                    let fd = completion.result;
-
-                    let work_file = &work_files[i];
-                    work_file->fd = fd;
-
-                    bool is_valid_file_descriptor = fd >= 0;
-                    if (!is_valid_file_descriptor & (i == 0))
-                    {
-                        cache_missing = 1;
-                    }
-
-                    if (is_valid_file_descriptor)
-                    {
-                        io_ring_prepare_stat(fd, &work_file->statx, i, (StatOptions) { .size = 1, .modified_time = 1 });
-                        completed_open_count += 1;
-                    }
-            }
-
-            if (result == PROCESS_RESULT_SUCCESS)
-            {
-                result = io_ring_submit_and_wait_all() ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-
-                let stat_end = take_timestamp();
-
-                if (result == PROCESS_RESULT_SUCCESS)
+                let existing_module = &module_list[i];
+                if ((existing_module->id == module->id) & target_equal(existing_module->target, link_unit_target))
                 {
-                    u64 arena_offset = 0x1000;
-
-                    for (u64 i = 0; i < completed_open_count; i += 1)
-                    {
-                        let completion = io_ring_peek_completion();
-                        let i = completion.user_data;
-                        let return_code = completion.result;
-
-                        bool succeeded = return_code == 0;
-
-                        if (succeeded)
-                        {
-                            let work_file = &work_files[i];
-                            let size = work_file->statx.stx_size;
-                            let s = work_file->statx.stx_mtime.tv_sec;
-                            let ns = work_file->statx.stx_mtime.tv_nsec;
-                            work_file->time_s = s;
-                            work_file->time_ns = ns;
-                            work_file->size = size;
-
-                            work_file->arena_offset = arena_offset;
-                            arena_offset += align_forward(size + (64 * 4), 0x1000);
-                            work_file->status = WORK_FILE_STATED;
-                        }
-                        else
-                        {
-                            printf("Internal failure: statx failed\n");
-                            result = PROCESS_RESULT_FAILED;
-                            break;
-                        }
-                    }
-
-                    if (result == PROCESS_RESULT_SUCCESS)
-                    {
-                        let file_processing_start = take_timestamp();
-                        let allocation = arena_allocate_bytes(arena, arena_offset, 0x1000);
-
-                        for (u64 i = 0; i < entry_count; i += 1)
-                        {
-                            let work_file = &work_files[i];
-
-                            if (work_file->status == WORK_FILE_STATED)
-                            {
-                                let fd = work_file->fd;
-
-                                {
-                                    let arena_offset = work_file->arena_offset;
-                                    let pointer = (u8*)allocation + arena_offset;
-                                    let size = work_file->size;
-
-                                    work_file->status = WORK_FILE_READING;
-                                    io_ring_prepare_read_and_close(fd, pointer, size, i, 0, (u64)1 << 32);
-                                }
-                            }
-                        }
-
-                        u32 submitted_count = io_ring_submit();
-                        result = submitted_count ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-
-                        if (result == PROCESS_RESULT_SUCCESS)
-                        {
-                            while (submitted_count--)
-                            {
-                                let completion = io_ring_wait_completion();
-
-                                let user_data = completion.user_data;
-                                bool is_read = (user_data >> 32) == 0;
-                                let index = user_data & UINT32_MAX;
-                                let return_value = completion.result;
-
-                                if (is_read)
-                                {
-                                    let work_file = &work_files[index];
-                                    let file_size = work_file->size;
-
-                                    if ((return_value >= 0) & ((u64)return_value != file_size))
-                                    {
-                                        printf("File sizes don't match");
-                                        result = PROCESS_RESULT_FAILED;
-                                        break;
-                                    }
-
-                                    let arena_offset = work_file->arena_offset;
-                                    let hash = hash_file((const char*)allocation + arena_offset, work_file->size);
-                                    work_file->hash = hash;
-                                    work_file->status = WORK_FILE_READ;
-                                }
-                                else
-                                {
-                                    if (return_value != 0)
-                                    {
-                                        printf("Close failed\n");
-                                        result = PROCESS_RESULT_SUCCESS;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            let file_processing_end = take_timestamp();
-                            let compile_command_start = file_processing_end;
-
-                            if (result == PROCESS_RESULT_SUCCESS)
-                            {
-                                if (cache_missing)
-                                {
-                                    u64 left_out_compilation_count = 1;
-
-                                    let candidate_compilation_unit_count = BUSTER_ARRAY_LENGTH(work_files) - left_out_compilation_count;
-                                    u64 compilation_unit_count = 0;
-
-                                    for (u64 i = 0; i < candidate_compilation_unit_count; i += 1)
-                                    {
-                                        let file_index = i + left_out_compilation_count;
-                                        let path = file_relative_paths[file_index];
-
-                                        let dot = str_last_ch(path, '.');
-
-                                        if (dot != string_no_match)
-                                        {
-                                            let extension_start = dot + 1;
-                                            let extension = (String){ .pointer = path.pointer + extension_start, .length = path.length - extension_start };
-
-                                            if (str_equal(extension, S("c")))
-                                            {
-                                                compilation_unit_count += 1;
-                                            }
-                                        }
-                                    }
-
-                                    let compilation_units = arena_allocate(arena, CompilationUnit, compilation_unit_count);
-                                    u64 compilation_unit_i = 0;
-
-                                    CompilationModel default_compilation_model = COMPILATION_MODEL_INCREMENTAL;
-                                    CpuModel default_cpu_model = CPU_MODEL_GENERIC;
-
-                                    for (u64 i = 0; i < candidate_compilation_unit_count; i += 1)
-                                    {
-                                        let file_index = i + left_out_compilation_count;
-                                        let path = file_relative_paths[file_index];
-
-                                        let dot = str_last_ch(path, '.');
-
-                                        if (dot != string_no_match)
-                                        {
-                                            let extension_start = dot + 1;
-                                            let extension = (String){ .pointer = path.pointer + extension_start, .length = path.length - extension_start };
-
-                                            if (str_equal(extension, S("c")))
-                                            {
-                                                let compilation_unit = &compilation_units[compilation_unit_i];
-                                                compilation_unit_i += 1;
-
-                                                *compilation_unit = (CompilationUnit) {
-                                                    .file = file_index,
-                                                    .model = i == 0 ? COMPILATION_MODEL_SINGLE_UNIT : default_compilation_model,
-                                                    .target = {
-                                                        .model = i == 0 ? CPU_MODEL_NATIVE : default_cpu_model,
-                                                    },
-                                                    .debug_info = true,
-                                                    .io_ring = i == 0,
-                                                };
-                                            }
-                                        }
-                                    }
-
-                                    BUSTER_CHECK(compilation_unit_i == compilation_unit_count);
-
-                                    let cwd = path_absolute(arena, ".");
-
-                                    result = build_compile_commands(arena, compile_commands, compilation_units, compilation_unit_count, cwd) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-
-                                    let compile_command_end = take_timestamp();
-
-                                    if (result == PROCESS_RESULT_SUCCESS)
-                                    {
-                                        let compile_start = compile_command_end;
-                                        result = compile(compilation_units, compilation_unit_count, global_program.envp) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-                                        let compile_end = take_timestamp();
-
-                                        if (result == PROCESS_RESULT_SUCCESS)
-                                        {
-                                            let link_start = take_timestamp();
-
-                                            u64 builder_indices[] = { 0, 1 };
-                                            let disk_indices = arena_allocate(arena, u64, compilation_unit_count - 1);
-                                            for (u64 i = 0; i < compilation_unit_count; i += 1)
-                                            {
-                                                disk_indices[i] = i + 1;
-                                            }
-                                            LinkUnit link_units[] = {
-                                                {
-                                                    .artifact_path = S("build/builder"),
-                                                    .compilations = builder_indices,
-                                                    .compilation_count = BUSTER_ARRAY_LENGTH(builder_indices),
-                                                    .io_ring = true,
-                                                },
-                                                {
-                                                    .artifact_path = S("build/disk_builder"),
-                                                    .compilations = disk_indices,
-                                                    .compilation_count = compilation_unit_count - 1,
-                                                    .run = true,
-                                                },
-                                            };
-
-
-                                            for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(link_units); i += 1)
-                                            {
-                                                LinkUnit* link_unit = &link_units[i];
-                                                queue_linkage_job(arena, link_unit, compilation_units, global_program.envp);
-                                            }
-
-                                            for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(link_units); i += 1)
-                                            {
-                                                let link_unit = &link_units[i];
-                                                let link_process = &link_unit->link_process;
-                                                io_ring_prepare_waitid(link_process->pid, &link_process->siginfo, (u64)link_process | TASK_ID_LINKING);
-                                            }
-
-                                            result = io_ring_submit_and_wait_all() ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-                                            if (result != PROCESS_RESULT_SUCCESS)
-                                            {
-                                                if (global_program.verbose) printf("Waiting for linker jobs failed!\n");
-                                            }
-
-                                            let link_end = take_timestamp();
-
-                                            if (global_program.verbose && 0)
-                                            {
-                                                printf("Arena: %lu ns\n", ns_between(arena_init_start, arena_init_end));
-                                                //printf("Thread: %lu ns\n", ns_between(thread_start, thread_end));
-                                                printf("Open: %lu ns\n", ns_between(open_start, open_end));
-                                                printf("Stat: %lu ns\n", ns_between(stat_start, stat_end));
-                                                printf("File processing: %lu ns\n", ns_between(file_processing_start, file_processing_end));
-                                                printf("Compile command building: %lu ns\n", ns_between(compile_command_start, compile_command_end));
-                                                printf("Compilation (%lu objects): %lu ns\n", compilation_unit_count, ns_between(compile_start, compile_end));
-                                                printf("Link: %lu ns\n", ns_between(link_start, link_end));
-                                            }
-
-                                            if (result == PROCESS_RESULT_SUCCESS)
-                                            {
-                                                switch (input->command)
-                                                {
-                                                    break; case BUILD_COMMAND_BUILD:
-                                                    {
-                                                    }
-                                                    break; case BUILD_COMMAND_TEST:
-                                                    {
-                                                        let link_unit = &link_units[1];
-
-                                                        char* args[] = {
-                                                            (char*)link_unit->artifact_path.pointer,
-                                                            0,
-                                                        };
-                                                        spawn_process(&link_unit->run_process, args, global_program.envp);
-                                                        result = process_wait_sync(link_unit->run_process.pid, &link_unit->run_process.siginfo);
-                                                        if (result == PROCESS_RESULT_SUCCESS)
-                                                        {
-                                                            printf("All tests succeeded!\n");
-                                                        }
-                                                    }
-                                                    break; case BUILD_COMMAND_DEBUG:
-                                                    {
-                                                        let link_unit = &link_units[1];
-
-                                                        char* args[] = {
-                                                            "/usr/bin/gdb",
-                                                            "-ex",
-                                                            "r",
-                                                            "--args",
-                                                            (char*)link_unit->artifact_path.pointer,
-                                                            0,
-                                                        };
-                                                        spawn_process(&link_unit->run_process, args, global_program.envp);
-                                                        result = process_wait_sync(link_unit->run_process.pid, &link_unit->run_process.siginfo);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                else
-                                {
-                                    BUSTER_TRAP();
-                                }
-                            }
-                        }
-                        else
-                        {
-                            // TODO:
-                            printf("Unmatched entry count\n");
-                        }
-                    }
+                    break;
                 }
             }
+
+            if (i == module_list_count)
+            {
+                let count = (u64)1 + (!module_specification.no_header & !module_specification.no_source);
+                file_list_count += count;
+                let new_file = arena_allocate(file_list_arena, TargetBuildFile, count);
+
+                // This is wasteful, but it might not matter?
+                String parts[] = {
+                    cwd,
+                    S("/"),
+                    directory_paths[module_specification.directory],
+                    module_specification.directory == DIRECTORY_ROOT ? S("") : S("/"),
+                    module_names[module->id],
+                    module_specification.no_source ? S(".h") : S(".c"),
+                };
+                let c_full_path = arena_join_string(general_arena, BUSTER_STRING_ARRAY_TO_SLICE(parts), true);
+
+                *new_file = (TargetBuildFile) {
+                    .full_path = c_full_path,
+                    .target = link_unit_target,
+                };
+
+                let c_source_file_index = c_source_file_count;
+                module->index = c_source_file_index;
+                c_source_file_count = c_source_file_index + !module_specification.no_source;
+
+                module_list[module_list_count++] = (ModuleInstantiation) {
+                    .target = link_unit_target,
+                    .id = module->id,
+                    .index = module->index,
+                };
+
+                if (!module_specification.no_source & !module_specification.no_header)
+                {
+                    let h_full_path = arena_duplicate_string(general_arena, c_full_path, true);
+                    h_full_path.pointer[h_full_path.length - 1] = 'h';
+                    *(new_file + 1) = (TargetBuildFile) {
+                        .full_path = h_full_path,
+                        .target = link_unit_target,
+                    };
+                }
+            }
+            else
+            {
+                module->index = module_list[i].index;
+            }
+        }
+    }
+
+    let compilation_unit_count = c_source_file_count;
+    let compilation_units = arena_allocate(general_arena, CompilationUnit, c_source_file_count);
+
+    for (u64 file_i = 0, compilation_unit_i = 0; file_i < file_list_count; file_i += 1)
+    {
+        TargetBuildFile* source_file = &file_list[file_i]; 
+        let fd = os_file_open(str_slice_start(source_file->full_path, cwd.length + 1), (OpenFlags){ .read = 1 }, (OpenPermissions){});
+        let stats = os_file_get_stats(fd, (FileStatsOptions){ .raw = UINT64_MAX });
+        let buffer = arena_allocate_bytes(general_arena, stats.size, 64);
+        String buffer_slice = { buffer, stats.size};
+        os_file_read(fd, buffer_slice, stats.size);
+        os_file_close(fd);
+        let __attribute__((unused)) hash = hash_file(buffer_slice.pointer, buffer_slice.length);
+
+        if (source_file->full_path.pointer[source_file->full_path.length - 1] == 'c')
+        {
+            let compilation_unit = &compilation_units[compilation_unit_i];
+            compilation_unit_i += 1;
+            *compilation_unit = (CompilationUnit) {
+                .target = source_file->target,
+                .model = source_file->model,
+                .has_debug_info = source_file->has_debug_info,
+                .use_io_ring = source_file->use_io_ring,
+                .source_path = source_file->full_path,
+            };
+        }
+    }
+
+    let compile_commands = arena_create((ArenaInitialization){});
+    let clang_env = getenv("CLANG");
+    char* clang_path = clang_env ? clang_env : "/usr/bin/clang";
+    build_compile_commands(general_arena, compile_commands, compilation_units, compilation_unit_count, cwd, clang_path);
+
+    let selected_compilation_count = compilation_unit_count;
+    let selected_compilation_units = compilation_units;
+
+    for (u64 unit_i = 0; unit_i < selected_compilation_count; unit_i += 1)
+    {
+        let unit = &selected_compilation_units[unit_i];
+        spawn_process(&unit->process, unit->compilation_arguments, program_state->input.envp);
+    }
+
+    ProcessResult result = {};
+
+    for (u64 unit_i = 0; unit_i < selected_compilation_count; unit_i += 1)
+    {
+        let unit = &selected_compilation_units[unit_i];
+        ProcessResources resources = {};
+        let unit_compilation_result = os_process_wait_sync(unit->process.handle, resources);
+        if (unit_compilation_result != PROCESS_RESULT_SUCCESS)
+        {
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
+
+    let argument_arena = arena_create((ArenaInitialization){});
+    for (u64 link_unit_i = 0; link_unit_i < BUSTER_ARRAY_LENGTH(specifications); link_unit_i += 1)
+    {
+        let link_unit_specification = &specifications[link_unit_i];
+        let link_modules = link_unit_specification->modules;
+
+        let builder = argument_builder_start(argument_arena, clang_path);
+
+        argument_add(builder, "-fuse-ld=lld");
+        argument_add(builder, "-o");
+        String artifact_path_parts[] = {
+            S("build/"),
+            link_unit_specification->name,
+        };
+        let artifact_path = arena_join_string(general_arena, BUSTER_STRING_ARRAY_TO_SLICE(artifact_path_parts), true);
+        argument_add(builder, (char*)artifact_path.pointer);
+
+        for (u64 module_i = 0; module_i < link_modules.length; module_i += 1)
+        {
+            let module = &link_modules.pointer[module_i];
+            let unit = &compilation_units[module->index];
+            let artifact_path = unit->object_path;
+            if (!modules[module->id].no_source)
+            {
+                argument_add(builder, (char*)artifact_path.pointer);
+            }
+        }
+
+        if (link_unit_specification->use_io_ring)
+        {
+            argument_add(builder, "-luring");
+        }
+
+        let argv = argument_builder_end(builder);
+        bool debug = false;
+        if (debug)
+        {
+            let a = argv;
+            while (*a)
+            {
+                printf("%s ", *a);
+                a += 1;
+            }
+            printf("\n");
+        }
+
+        let process = os_process_spawn(argv, program_state->input.envp);
+        ProcessResources resources = {};
+        let link_result = os_process_wait_sync(process, resources);
+        if (link_result != PROCESS_RESULT_SUCCESS)
+        {
+            result = PROCESS_RESULT_FAILED;
         }
     }
 
     return result;
-}
-
-int main(int argc, char* argv[], char* envp[])
-{
-    ProgramInput input = {};
-    return buster_run((BusterInitialization){
-        .process_arguments = &process_arguments,
-        .thread_entry_point = &thread_entry_point,
-        .context = &input,
-        .argv = argv,
-        .envp = envp,
-        .argc = argc,
-        .thread_spawn_policy = THREAD_SPAWN_POLICY_SINGLE_THREADED,
-    });
 }
