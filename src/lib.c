@@ -2,63 +2,10 @@
 
 #include <lib.h>
 
-#if BUSTER_KERNEL == 0
-#include <stdio.h>
-#endif
+#include <system_headers.h>
 
-#ifdef __linux__
-#include <unistd.h>
-#include <fcntl.h>
-#include <time.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <sys/ptrace.h>
-#include <linux/limits.h>
-#include <linux/fs.h>
-#if BUSTER_USE_PTHREAD
-#include <pthread.h>
-#endif
-#if BUSTER_USE_IO_RING
-#include <liburing.h>
-#endif
+#include <entry_point.h>
 
-#elif defined(__APPLE__)
-#include <unistd.h>
-#include <fcntl.h>
-#include <time.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <pthread.h>
-#elif _WIN32
-#include <winsock2.h>
-#include <windows.h>
-#include <mswsock.h>
-LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
-#endif
-
-STRUCT(IoRing)
-{
-#ifdef __linux__
-#if BUSTER_USE_IO_RING
-    struct io_uring linux_impl;
-#endif
-#else
-#pragma error
-#endif
-    u32 submitted_entry_count;
-    u32 completed_entry_count;
-};
-
-STRUCT(Thread)
-{
-    Arena* arena;
-    ThreadEntryPoint* entry_point;
-    IoRing ring;
-    pthread_t handle;
-    void* context;
-};
 
 BUSTER_IMPL __thread Thread* thread;
 
@@ -576,6 +523,40 @@ BUSTER_LOCAL void* generic_fd_to_windows(FileDescriptor* fd)
     return (void*)fd;
 }
 
+BUSTER_IMPL FileStats os_file_get_stats(FileDescriptor* file_descriptor, FileStatsOptions options)
+{
+    FileStats result = {};
+
+    if (((u64)file_descriptor != 0) & (options.raw != 0))
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        int fd = generic_fd_to_posix(file_descriptor);
+        struct stat sb;
+        let fstat_result = fstat(fd, &sb);
+        if (fstat_result == 0)
+        {
+            if (options.size)
+            {
+                result.size = (u64)sb.st_size;
+            }
+
+            if (options.modified_time)
+            {
+                result.modified_time_s = (u64)sb.st_mtime;
+            }
+        }
+#elif _WIN32
+        HANDLE fd = generic_fd_to_windows(file_descriptor);
+        LARGE_INTEGER file_size = {};
+        BOOL result = GetFileSizeEx(fd, &file_size);
+        CHECK(result);
+        return file_size.QuadPart;
+#endif
+    }
+
+    return result;
+}
+
 BUSTER_IMPL u64 os_file_get_size(FileDescriptor* file_descriptor)
 {
 #if defined(__linux__) || defined(__APPLE__)
@@ -611,7 +592,7 @@ BUSTER_LOCAL u64 os_file_read_partially(FileDescriptor* file_descriptor, void* b
 #endif
 }
 
-BUSTER_LOCAL void os_file_read(FileDescriptor* file_descriptor, String buffer, u64 byte_count)
+BUSTER_IMPL void os_file_read(FileDescriptor* file_descriptor, String buffer, u64 byte_count)
 {
     u64 read_byte_count = 0;
     let pointer = buffer.pointer;
@@ -660,17 +641,23 @@ BUSTER_IMPL void os_file_write(FileDescriptor* file_descriptor, String buffer)
     }
 }
 
-BUSTER_IMPL void os_file_close(FileDescriptor* file_descriptor)
+BUSTER_IMPL bool os_file_close(FileDescriptor* file_descriptor)
 {
+    bool result = false;
+    if (file_descriptor)
+    {
 #if defined(__linux__) || defined(__APPLE__)
-    let fd = generic_fd_to_posix(file_descriptor);
-    let close_result = close(fd);
-    BUSTER_CHECK(close_result == 0);
+        let fd = generic_fd_to_posix(file_descriptor);
+        let close_result = close(fd);
+        result = close_result == 0;
 #elif _WIN32
-    let fd = generic_fd_to_windows(file_descriptor);
-    let result = CloseHandle(fd);
-    CHECK(result);
+        let fd = generic_fd_to_windows(file_descriptor);
+        let close_result = CloseHandle(fd);
+        result = close_result != 0;
 #endif
+    }
+
+    return result;
 }
 
 BUSTER_LOCAL u64 page_size = BUSTER_KB(4);
@@ -895,7 +882,7 @@ BUSTER_IMPL bool file_write(String path, String content)
     return result;
 }
 
-BUSTER_LOCAL String os_path_absolute_stack(String buffer, const char* restrict relative_file_path)
+BUSTER_IMPL String os_path_absolute_stack(String buffer, const char* restrict relative_file_path)
 {
     String result = {};
 #if defined(__linux__) || defined(__APPLE__)
@@ -923,13 +910,6 @@ BUSTER_IMPL String path_absolute(Arena* arena, const char* restrict relative_fil
     let stack_slice = os_path_absolute_stack((String){(u8*)buffer, BUSTER_ARRAY_LENGTH(buffer)}, relative_file_path);
     let result = arena_duplicate_string(arena, stack_slice, true);
     return result;
-}
-
-BUSTER_IMPL GlobalProgram global_program;
-
-BUSTER_LOCAL void global_initialize(BusterInitialization initialization)
-{
-    BUSTER_UNUSED(initialization);
 }
 
 BUSTER_LOCAL void thread_initialize()
@@ -1030,7 +1010,7 @@ BUSTER_IMPL u32 io_ring_submit_and_wait_all()
         result = submitted_entry_count;
         ring->submitted_entry_count = 0;
     }
-    else if (global_program.verbose)
+    else if (program_state->input.verbose)
     {
         printf("Waiting for io_ring tasks failed\n");
     }
@@ -1104,118 +1084,15 @@ BUSTER_LOCAL void* thread_os_entry_point(void* context)
     return (void*)(u64)os_result;
 }
 
-BUSTER_IMPL ProcessResult buster_run(BusterInitialization initialization)
-{
-    ProcessResult result = {};
-#ifdef _WIN32
-    BOOL result = QueryPerformanceFrequency((LARGE_INTEGER*)&frequency);
-    CHECK(result);
-
-    WSADATA WinSockData;
-    WSAStartup(MAKEWORD(2, 2), &WinSockData);
-    GUID guid = WSAID_MULTIPLE_RIO;
-    DWORD rio_byte = 0;
-    SOCKET Sock = socket(AF_UNSPEC, SOCK_STREAM, IPPROTO_TCP);
-    WSAIoctl(Sock, SIO_GET_MULTIPLE_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid), (void**)&w32_rio_functions, sizeof(w32_rio_functions), &rio_byte, 0, 0);
-    closesocket(Sock);
-#else
-#endif
-
-    global_program.arena = arena_create((ArenaInitialization){});
-    global_program.argc = initialization.argc;
-    global_program.argv = initialization.argv;
-    global_program.envp = initialization.envp;
-
-    result = initialization.process_arguments(global_program.arena, initialization.context, initialization.argc, initialization.argv, initialization.envp);
-
-    if (result == PROCESS_RESULT_SUCCESS)
-    {
-        if (initialization.thread_entry_point)
-        {
-#if BUSTER_USE_PTHREAD
-            u64 thread_count = 0;
-
-            switch (initialization.thread_spawn_policy)
-            {
-                break; case THREAD_SPAWN_POLICY_SINGLE_THREADED:
-                {
-                    thread_count = 0;
-                }
-                break; case THREAD_SPAWN_POLICY_SPAWN_SINGLE_THREAD:
-                {
-                    thread_count = 1;
-                }
-                break; case THREAD_SPAWN_POLICY_SATURATE_LOGICAL_CORES:
-                {
-                }
-                break; case THREAD_SPAWN_POLICY_SATURATE_PHYSICAL_CORES:
-                {
-                }
-            }
-
-            if (thread_count != 0)
-            {
-                Thread* threads = arena_allocate(global_program.arena, Thread, thread_count);
-
-                u64 failure_count = 0;
-                for (u64 i = 0; i < thread_count; i += 1)
-                {
-                    let thread = &threads[i];
-                    thread->entry_point = initialization.thread_entry_point;
-                    let create_result = pthread_create(&thread->handle, 0, &thread_os_entry_point, thread);
-                    failure_count += create_result == 0;
-                }
-
-                if (failure_count == 0)
-                {
-                    for (u64 i = 0; i < thread_count; i += 1)
-                    {
-                        let thread = &threads[i];
-                        void* return_value;
-                        let join_result = pthread_join(thread->handle, &return_value);
-                        failure_count += join_result == 0;
-                        let thread_result = (ProcessResult)(u64)return_value;
-                        if (thread_result != PROCESS_RESULT_SUCCESS)
-                        {
-                            result = thread_result;
-                        }
-                    }
-                }
-
-                if (failure_count == 0)
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
-            }
-            else
-#endif
-            {
-                Thread thread_buffer = {};
-                thread = &thread_buffer;
-                thread->entry_point = initialization.thread_entry_point;
-                thread->context = initialization.context;
-                BUSTER_CHECK(initialization.thread_spawn_policy == THREAD_SPAWN_POLICY_SINGLE_THREADED);
-                result = thread->entry_point(thread);
-            }
-        }
-        else
-        {
-            if (global_program.verbose) printf("No thread entry point specified\n");
-            result = PROCESS_RESULT_FAILED;
-        }
-    }
-
-    return result;
-}
 
 [[gnu::cold]] BUSTER_LOCAL bool is_debugger_present()
 {
-    if (BUSTER_UNLIKELY(!global_program.is_debugger_present_called))
+    if (BUSTER_UNLIKELY(!program_state->is_debugger_present_called))
     {
-        global_program.is_debugger_present_called = true;
+        program_state->is_debugger_present_called = true;
 #if defined(__linux__)
         let os_result = ptrace(PTRACE_TRACEME, 0, 0, 0) == -1;
-        global_program._is_debugger_present = os_result != 0;
+        program_state->_is_debugger_present = os_result != 0;
 #elif defined(__APPLE__)
 #elif defined(_WIN32)
         let os_result = IsDebuggerPresent();
@@ -1225,7 +1102,7 @@ BUSTER_IMPL ProcessResult buster_run(BusterInitialization initialization)
 #endif
     }
 
-    return global_program._is_debugger_present;
+    return program_state->_is_debugger_present;
 }
 
 [[noreturn]] [[gnu::cold]] BUSTER_IMPL void fail()
@@ -2124,7 +2001,7 @@ BUSTER_IMPL char** argument_builder_end(ArgumentBuilder* restrict builder)
     return builder->argv;
 }
 
-BUSTER_IMPL ProcessResult argument_process(u64 argument_count, char** argument_pointer, char** environment_pointer, u64 argument_index)
+BUSTER_IMPL ProcessResult buster_argument_process(u64 argument_count, char** argument_pointer, char** environment_pointer, u64 argument_index)
 {
     BUSTER_UNUSED(environment_pointer);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
@@ -2134,7 +2011,7 @@ BUSTER_IMPL ProcessResult argument_process(u64 argument_count, char** argument_p
     let argument = argument_pointer[argument_index];
     if (strcmp(argument, "-verbose") == 0)
     {
-        global_program.verbose = true;
+        program_state->input.verbose = true;
     }
     else
     {
@@ -2252,3 +2129,59 @@ BUSTER_IMPL ProcessResult process_wait_sync(pid_t pid, void* siginfo_buffer)
 
     return result;
 }
+
+BUSTER_IMPL ProcessHandle* os_process_spawn(char* argv[], char* envp[])
+{
+    let pid = fork();
+
+    if (pid == -1)
+    {
+        if (program_state->input.verbose) printf("Failed to fork\n");
+    }
+    else if (pid == 0)
+    {
+        execve(argv[0], argv, envp);
+        BUSTER_TRAP();
+    }
+
+    if (program_state->input.verbose)
+    {
+        printf("Launched: ");
+
+        for (let a = argv; *a; a += 1)
+        {
+            printf("%s ", *a);
+        }
+
+        printf("\n");
+    }
+
+    return pid == -1 ? (ProcessHandle*)0 : (ProcessHandle*)(u64)pid;
+}
+
+BUSTER_IMPL ProcessResult os_process_wait_sync(ProcessHandle* handle, ProcessResources resources)
+{
+    ProcessResult result = PROCESS_RESULT_UNKNOWN;
+
+    if (handle)
+    {
+        let pid = (pid_t)(u64)handle;
+        int status;
+        int options = 0;
+        let wait_result = wait4(pid, &status, options, resources.linux_);
+        // Normal exit
+        if ((wait_result == pid) & WIFEXITED(status))
+        {
+            let exit_code = WEXITSTATUS(status);
+            result = (ProcessResult)exit_code;
+        }
+        else
+        {
+            // TODO
+            wait_result = PROCESS_RESULT_FAILED;
+        }
+    }
+
+    return result;
+}
+

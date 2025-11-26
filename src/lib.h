@@ -141,7 +141,7 @@ typedef String8 String;
 
 STRUCT(StringSlice)
 {
-    String8* pointer;
+    String* pointer;
     u64 length;
 };
 
@@ -155,7 +155,8 @@ STRUCT(SliceOfStringSlice)
 #define S16(strlit) ((struct String16) { .pointer = (u ## strlit), .length = str16_length(u ## strlit) })
 #define S32(strlit) ((struct String32) { .pointer = (U ## strlit), .length = str32_length(U ## strlit) })
 #define S(strlit) S8(strlit)
-#define BUSTER_STRING_ARRAY_TO_SLICE(arr) (StringSlice) { arr, BUSTER_ARRAY_LENGTH(arr) }
+#define BUSTER_ARRAY_TO_SLICE(T, arr) (T) { (arr), BUSTER_ARRAY_LENGTH(arr) }
+#define BUSTER_STRING_ARRAY_TO_SLICE(arr) BUSTER_ARRAY_TO_SLICE(StringSlice, arr)
 #define str_size(strlit) ((strlit).length * sizeof(*((strlit).pointer)))
 
 [[noreturn]] [[gnu::cold]] BUSTER_DECL void _assert_failed(u32 line, String function_name, String file_path);
@@ -205,17 +206,32 @@ STRUCT(Arena)
     u64 granularity;
 };
 
-STRUCT(GlobalProgram)
+typedef enum ThreadSpawnPolicy
 {
-    Arena* arena;
+    THREAD_SPAWN_POLICY_SINGLE_THREADED,
+    THREAD_SPAWN_POLICY_SPAWN_SINGLE_THREAD,
+    THREAD_SPAWN_POLICY_SATURATE_LOGICAL_CORES,
+    THREAD_SPAWN_POLICY_SATURATE_PHYSICAL_CORES,
+} ThreadSpawnPolicy;
+
+STRUCT(ProgramInput)
+{
     int argc;
     char** argv;
     char** envp;
-    u64 is_debugger_present_called:1;
-    u64 _is_debugger_present:1;
+    ThreadSpawnPolicy thread_spawn_policy;
     u64 verbose:1;
 };
-BUSTER_DECL GlobalProgram global_program;
+
+STRUCT(ProgramState)
+{
+    ProgramInput input;
+    Arena* arena;
+    u64 is_debugger_present_called:1;
+    u64 _is_debugger_present:1;
+};
+
+BUSTER_DECL ProgramState* program_state;
 
 STRUCT(ArenaInitialization)
 {
@@ -250,7 +266,29 @@ STRUCT(FormatIntegerOptions)
 };
 
 typedef struct FileDescriptor FileDescriptor;
+typedef struct ProcessHandle ProcessHandle;
 typedef struct ThreadHandle ThreadHandle;
+
+STRUCT(FileStats)
+{
+    u64 modified_time_s;
+    u64 modified_time_ns;
+    u64 size;
+};
+
+STRUCT(FileStatsOptions)
+{
+    union
+    {
+        u64 raw;
+        struct
+        {
+            u64 size:1;
+            u64 modified_time:1;
+            u64 reserved:62;
+        };
+    };
+};
 
 STRUCT(ThreadCreateOptions)
 {
@@ -319,14 +357,6 @@ STRUCT(ArgumentBuilder)
     u64 arena_offset;
 };
 
-typedef enum ThreadSpawnPolicy
-{
-    THREAD_SPAWN_POLICY_SINGLE_THREADED,
-    THREAD_SPAWN_POLICY_SPAWN_SINGLE_THREAD,
-    THREAD_SPAWN_POLICY_SATURATE_LOGICAL_CORES,
-    THREAD_SPAWN_POLICY_SATURATE_PHYSICAL_CORES,
-} ThreadSpawnPolicy;
-
 STRUCT(ThreadInitialization)
 {
 };
@@ -346,19 +376,19 @@ typedef struct Thread Thread;
 BUSTER_DECL __thread Thread* thread;
 
 typedef ProcessResult ThreadEntryPoint(Thread*);
+BUSTER_DECL ProcessResult thread_entry_point(Thread* thread);
 
 typedef ProcessResult ProcessArguments(Arena* arena, void* context, u64 argc, char** argv, char** envp);
 
-STRUCT(BusterInitialization)
-{
-    ProcessArguments* process_arguments;
-    ThreadEntryPoint* thread_entry_point;
-    void* context;
-    char** argv;
-    char** envp;
-    int argc;
-    ThreadSpawnPolicy thread_spawn_policy;
-};
+// STRUCT(BusterInitialization)
+// {
+//     ProcessArguments* process_arguments;
+//     void* context;
+//     char** argv;
+//     char** envp;
+//     int argc;
+//     ThreadSpawnPolicy thread_spawn_policy;
+// };
 
 STRUCT(IoRingCompletion)
 {
@@ -373,8 +403,13 @@ STRUCT(IoRingSubmission)
 #endif
 };
 
+STRUCT(ProcessResources)
+{
+    struct rusage* linux_;
+};
+
 #if BUSTER_KERNEL == 0
-BUSTER_DECL ProcessResult buster_run(BusterInitialization initialization);
+// BUSTER_DECL ProcessResult buster_run(BusterInitialization initialization);
 BUSTER_DECL Arena* arena_create(ArenaInitialization initialization);
 BUSTER_DECL bool arena_destroy(Arena* arena, u64 count);
 BUSTER_DECL void arena_set_position(Arena* arena, u64 position);
@@ -386,8 +421,10 @@ BUSTER_DECL void* arena_current_pointer(Arena* arena, u64 alignment);
 
 BUSTER_DECL FileDescriptor* os_file_open(String path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_DECL u64 os_file_get_size(FileDescriptor* file_descriptor);
+BUSTER_DECL FileStats os_file_get_stats(FileDescriptor* file_descriptor, FileStatsOptions options);
 BUSTER_DECL void os_file_write(FileDescriptor* file_descriptor, String buffer);
-BUSTER_DECL void os_file_close(FileDescriptor* file_descriptor);
+BUSTER_DECL void os_file_read(FileDescriptor* file_descriptor, String buffer, u64 byte_count);
+BUSTER_DECL bool os_file_close(FileDescriptor* file_descriptor);
 
 #define arena_allocate(arena, T, count) (T*) arena_allocate_bytes(arena, sizeof(T) * (count), alignof(T))
 
@@ -401,6 +438,7 @@ BUSTER_DECL char** argument_builder_end(ArgumentBuilder* restrict builder);
 
 BUSTER_DECL TimeDataType take_timestamp();
 BUSTER_DECL u64 ns_between(TimeDataType start, TimeDataType end);
+BUSTER_DECL String os_path_absolute_stack(String buffer, const char* restrict relative_file_path);
 BUSTER_DECL String path_absolute(Arena* arena, const char* restrict relative_file_path);
 BUSTER_DECL ExecutionResult os_execute(Arena* arena, char** arguments, char** environment, ExecutionOptions options);
 BUSTER_DECL FileDescriptor* os_get_stdout();
@@ -458,7 +496,9 @@ BUSTER_DECL bool is_identifier_start(char ch);
 BUSTER_DECL bool is_identifier(char ch);
 
 BUSTER_DECL char* get_last_error_message();
-BUSTER_DECL ProcessResult process_wait_sync(pid_t pid, void* siginfo_buffer);
+BUSTER_DECL ProcessHandle* os_process_spawn(char* argv[], char* envp[]);
+BUSTER_DECL ProcessResult os_process_wait_sync(ProcessHandle* handle, ProcessResources resources);
+BUSTER_DECL ProcessResult buster_argument_process(u64 argument_count, char** argument_pointer, char** environment_pointer, u64 argument_index);
 
 BUSTER_DECL void print(String str);
 
