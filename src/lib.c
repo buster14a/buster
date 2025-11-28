@@ -660,7 +660,7 @@ BUSTER_IMPL bool os_file_close(FileDescriptor* file_descriptor)
     return result;
 }
 
-BUSTER_LOCAL u64 page_size = BUSTER_KB(4);
+__attribute__((used)) BUSTER_LOCAL u64 page_size = BUSTER_KB(4);
 BUSTER_LOCAL u64 default_granularity = BUSTER_MB(2);
 
 BUSTER_LOCAL u64 minimum_position = sizeof(Arena);
@@ -818,7 +818,7 @@ BUSTER_IMPL TimeDataType take_timestamp()
 #endif
 }
 
-BUSTER_LOCAL TimeDataType frequency;
+__attribute__((used)) BUSTER_LOCAL TimeDataType frequency;
 
 BUSTER_IMPL u64 ns_between(TimeDataType start, TimeDataType end)
 {
@@ -1740,6 +1740,8 @@ BUSTER_IMPL ThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreat
     bool os_result = create_result == 0;
     handle = os_result ? handle : 0;
     result = os_posix_thread_to_generic(handle);
+#else
+    BUSTER_UNUSED(callback);
 #endif
 #elif defined (_WIN32)
     HANDLE handle = CreateThread(0, 0, callback, 0, 0, 0);
@@ -1753,14 +1755,16 @@ BUSTER_IMPL u32 os_thread_join(ThreadHandle* handle)
     u32 return_code = 1;
 
 #if defined(__linux__) || defined(__APPLE__)
+#if BUSTER_USE_PTHREAD
     let pthread = os_posix_thread_from_generic(handle);
     void* void_return_value = 0;
-#if BUSTER_USE_PTHREAD
     let join_result = pthread_join(pthread, &void_return_value);
     if (join_result == 0)
     {
         return_code = (u32)(u64)void_return_value;
     }
+#else
+    BUSTER_UNUSED(handle);
 #endif
 #elif defined(_WIN32)
     let thread_handle = os_windows_thread_from_generic(handle);
@@ -1909,6 +1913,31 @@ BUSTER_IMPL u64 str_last_ch(String s, u8 ch)
             break;
         }
     } while (pointer - s.pointer);
+
+    return result;
+}
+
+BUSTER_IMPL bool str_ends_with(String s, String ending)
+{
+    bool result = (ending.length <= s.length);
+    if (result)
+    {
+        String last_chunk = { s.pointer + (s.length - ending.length), ending.length };
+        result = str_equal(last_chunk, ending);
+    }
+
+    return result;
+}
+
+BUSTER_IMPL bool str_starts_with(String s, String beginning)
+{
+    bool result = (beginning.length <= s.length);
+
+    if (result)
+    {
+        String first_chunk = { s.pointer , beginning.length };
+        result = str_equal(first_chunk, beginning);
+    }
 
     return result;
 }

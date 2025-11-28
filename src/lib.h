@@ -476,6 +476,8 @@ BUSTER_DECL String str_slice(String s, u64 start, u64 end);
 BUSTER_DECL bool str_equal(String s1, String s2);
 BUSTER_DECL u64 str_first_ch(String s, u8 ch);
 BUSTER_DECL u64 str_last_ch(String s, u8 ch);
+BUSTER_DECL bool str_starts_with(String s, String beginning);
+BUSTER_DECL bool str_ends_with(String s, String ending);
 
 BUSTER_DECL u64 str16_length(const char16* s);
 BUSTER_DECL u64 str16_size(String16 s);
