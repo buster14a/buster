@@ -41,54 +41,11 @@ exit $?
 
 #define BUSTER_TODO() BUSTER_TRAP()
 
-STRUCT(Files)
-{
-    u16* pointer;
-    u64 count;
-};
-
-typedef enum WorkFileStatus : u8
-{
-    WORK_FILE_OPENING,
-    WORK_FILE_OPEN_ERROR,
-    WORK_FILE_STATING,
-    WORK_FILE_STATED,
-    WORK_FILE_READING,
-    WORK_FILE_READ,
-} WorkFileStatus;
-
 typedef enum CompilationModel
 {
     COMPILATION_MODEL_INCREMENTAL,
     COMPILATION_MODEL_SINGLE_UNIT,
 } CompilationModel;
-
-STRUCT(WorkFile)
-{
-    u128 hash;
-    struct statx statx;
-    u64 time_s;
-    u64 time_ns;
-    u64 size;
-    u64 arena_offset;
-    int fd;
-    WorkFileStatus status;
-    u8 cache_padding[BUSTER_MIN(BUSTER_CACHE_LINE_GUESS - ((0 * sizeof(u64))), BUSTER_CACHE_LINE_GUESS)];
-};
-static_assert(sizeof(WorkFile) % BUSTER_CACHE_LINE_GUESS == 0);
-
-STRUCT(OldFile)
-{
-    u8 cache_padding[BUSTER_CACHE_LINE_GUESS];
-};
-
-static_assert(sizeof(OldFile) % BUSTER_CACHE_LINE_GUESS == 0);
-
-STRUCT(Artifact)
-{
-    String path;
-    Files file;
-};
 
 typedef enum ModuleId : u8
 {
@@ -97,6 +54,7 @@ typedef enum ModuleId : u8
     MODULE_ENTRY_POINT,
     MODULE_BUILDER,
     MODULE_MD5,
+    MODULE_CC_MAIN,
     MODULE_COUNT,
 } ModuleId;
 
@@ -104,13 +62,17 @@ typedef enum DirectoryId
 {
     DIRECTORY_SRC_ROOT,
     DIRECTORY_ROOT,
+    DIRECTORY_CC,
     DIRECTORY_COUNT,
 } DirectoryId;
 
-BUSTER_LOCAL __attribute__((used)) String directory_paths[] = {
+BUSTER_LOCAL String directory_paths[] = {
     [DIRECTORY_ROOT] = S(""),
     [DIRECTORY_SRC_ROOT] = S("src"),
+    [DIRECTORY_CC] = S("src/compiler/frontend/cc"),
 };
+
+static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == DIRECTORY_COUNT);
 
 typedef enum CpuArch
 {
@@ -129,6 +91,8 @@ typedef enum OperatingSystem
     OPERATING_SYSTEM_MACOS,
     OPERATING_SYSTEM_WINDOWS,
     OPERATING_SYSTEM_UEFI,
+    OPERATING_SYSTEM_ANDROID,
+    OPERATING_SYSTEM_IOS,
     OPERATING_SYSTEM_FREESTANDING,
 } OperatingSystem;
 
@@ -202,6 +166,10 @@ BUSTER_LOCAL Module modules[] = {
     [MODULE_MD5] = {
         .no_source = true,
     },
+    [MODULE_CC_MAIN] = {
+        .directory = DIRECTORY_CC,
+        .no_header = true,
+    },
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == MODULE_COUNT);
@@ -212,6 +180,7 @@ BUSTER_LOCAL String module_names[] = {
     [MODULE_ENTRY_POINT] = S("entry_point"),
     [MODULE_BUILDER] = S("build"),
     [MODULE_MD5] = S("md5"),
+    [MODULE_CC_MAIN] = S("cc_main"),
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(module_names) == MODULE_COUNT);
@@ -224,13 +193,16 @@ STRUCT(LinkUnitSpecification)
 {
     String name;
     ModuleSlice modules;
+    String artifact_path;
     Target target;
     bool use_io_ring;
 };
 
 LINK_UNIT_MODULES(builder, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_BUILDER }, { MODULE_MD5 });
+LINK_UNIT_MODULES(cc, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_CC_MAIN }, );
 BUSTER_LOCAL LinkUnitSpecification specifications[] = {
     LINK_UNIT(builder, .target = target_native),
+    LINK_UNIT(cc, .target = target_native),
 };
 
 typedef enum BuildCommand
@@ -430,6 +402,9 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             S(".o"),
         };
 
+        let object_path = arena_join_string(arena, BUSTER_STRING_ARRAY_TO_SLICE(object_absolute_path_parts), true);
+        unit->object_path = object_path;
+
         u64 target_i;
         for (target_i = 0; target_i < target_count; target_i += 1)
         {
@@ -440,19 +415,19 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         }
 
         char buffer[PATH_MAX];
-        u64 count = 0;
+        u64 buffer_i = 0;
         {
-            memcpy(buffer + count, object_absolute_path_parts[1].pointer + 1, object_absolute_path_parts[1].length - 1);
+            memcpy(buffer + buffer_i, object_absolute_path_parts[1].pointer + 1, object_absolute_path_parts[1].length - 1);
             BUSTER_CHECK(object_absolute_path_parts[1].pointer[0] == '/');
-            count += object_absolute_path_parts[1].length - 1;
+            buffer_i += object_absolute_path_parts[1].length - 1;
         }
 
         {
-            memcpy(buffer + count, object_absolute_path_parts[2].pointer, object_absolute_path_parts[2].length);
-            count += object_absolute_path_parts[2].length;
+            memcpy(buffer + buffer_i, object_absolute_path_parts[2].pointer, object_absolute_path_parts[2].length);
+            buffer_i += object_absolute_path_parts[2].length;
         }
 
-        buffer[count] = 0;
+        buffer[buffer_i] = 0;
 
         if (target_i == target_count)
         {
@@ -461,30 +436,35 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             target_count += 1;
         }
 
-        buffer[count] = '/';
-        count += 1;
+        if (program_state->input.verbose) printf("Start making paths for %s. Starting point: %.*s\n", object_path.pointer, (int)buffer_i, buffer);
 
+        let buffer_start = buffer_i;
         u64 source_i = 0;
         while (1)
         {
-            String source = str_slice_start(source_relative_path, source_i);
-            let slash_index = str_first_ch(source, '/');
+            String source_remaining = str_slice_start(source_relative_path, source_i);
+            let slash_index = str_first_ch(source_remaining, '/');
             if (slash_index == string_no_match)
             {
                 break;
             }
 
-            memcpy(buffer + count, source_relative_path.pointer, slash_index);
-            buffer[count + slash_index] = 0;
+            String source_chunk = { source_remaining.pointer, slash_index };
+
+            buffer[buffer_start + source_i] = '/';
+            source_i += 1;
+
+            let dst = buffer + buffer_start + source_i;
+            let src = source_chunk;
+            let byte_count = slash_index;
+
+            memcpy(dst, src.pointer, byte_count);
+            buffer[buffer_start + source_i + byte_count] = 0;
 
             mkdir(buffer, 0755);
 
-            source_i = slash_index + 1; 
+            source_i += byte_count; 
         }
-
-        let object_path = arena_join_string(arena, BUSTER_STRING_ARRAY_TO_SLICE(object_absolute_path_parts), true);
-        unit->object_path = object_path;
-
 
         let builder = argument_builder_start(arena, clang_path);
         argument_add(builder, "-ferror-limit=1");
@@ -494,7 +474,18 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         argument_add(builder, (char*)object_path.pointer);
         argument_add(builder, "-std=gnu2x");
         argument_add(builder, "-Isrc");
+        argument_add(builder, "-Wall");
+        argument_add(builder, "-Werror");
+        argument_add(builder, "-Wextra");
+        argument_add(builder, "-Wpedantic");
+        argument_add(builder, "-pedantic");
+        argument_add(builder, "-Wno-gnu-auto-type");
         argument_add(builder, "-Wno-pragma-once-outside-header");
+        argument_add(builder, "-Wno-gnu-empty-struct");
+        argument_add(builder, "-Wno-bitwise-instead-of-logical");
+        argument_add(builder, "-Wno-unused-function");
+        argument_add(builder, "-Wno-gnu-flexible-array-initializer");
+        argument_add(builder, "-Wno-missing-field-initializers");
 
         switch (unit->target.model)
         {
@@ -638,7 +629,9 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
 
     u64 c_source_file_count = 0;
 
-    for (u64 link_unit_index = 0; link_unit_index < BUSTER_ARRAY_LENGTH(specifications); link_unit_index += 1)
+    constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
+
+    for (u64 link_unit_index = 0; link_unit_index < link_unit_count; link_unit_index += 1)
     {
         let link_unit = &specifications[link_unit_index];
         let link_unit_modules = link_unit->modules;
@@ -684,6 +677,7 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
                 *new_file = (TargetBuildFile) {
                     .full_path = c_full_path,
                     .target = link_unit_target,
+                    .has_debug_info = true,
                 };
 
                 let c_source_file_index = c_source_file_count;
@@ -703,6 +697,7 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
                     *(new_file + 1) = (TargetBuildFile) {
                         .full_path = h_full_path,
                         .target = link_unit_target,
+                        .has_debug_info = true,
                     };
                 }
             }
@@ -768,58 +763,116 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
         }
     }
 
-    let argument_arena = arena_create((ArenaInitialization){});
-    for (u64 link_unit_i = 0; link_unit_i < BUSTER_ARRAY_LENGTH(specifications); link_unit_i += 1)
+    // TODO: depend more-fine grainedly, ie: link those objects which succeeded compiling instead of all or nothing
+    if (result == PROCESS_RESULT_SUCCESS)
     {
-        let link_unit_specification = &specifications[link_unit_i];
-        let link_modules = link_unit_specification->modules;
+        let argument_arena = arena_create((ArenaInitialization){});
+        ProcessHandle* processes[link_unit_count];
 
-        let builder = argument_builder_start(argument_arena, clang_path);
-
-        argument_add(builder, "-fuse-ld=lld");
-        argument_add(builder, "-o");
-        String artifact_path_parts[] = {
-            S("build/"),
-            link_unit_specification->name,
-        };
-        let artifact_path = arena_join_string(general_arena, BUSTER_STRING_ARRAY_TO_SLICE(artifact_path_parts), true);
-        argument_add(builder, (char*)artifact_path.pointer);
-
-        for (u64 module_i = 0; module_i < link_modules.length; module_i += 1)
+        for (u64 link_unit_i = 0; link_unit_i < link_unit_count; link_unit_i += 1)
         {
-            let module = &link_modules.pointer[module_i];
-            let unit = &compilation_units[module->index];
-            let artifact_path = unit->object_path;
-            if (!modules[module->id].no_source)
+            let link_unit_specification = &specifications[link_unit_i];
+            let link_modules = link_unit_specification->modules;
+
+            let builder = argument_builder_start(argument_arena, clang_path);
+
+            argument_add(builder, "-fuse-ld=lld");
+            argument_add(builder, "-o");
+
+            bool is_builder = link_unit_i == 0; // str_equal(link_unit_specification->name, S("builder"));
+
+            String artifact_path_parts[] = {
+                S("build/"),
+                is_builder ? S("") : target_to_string_builder(link_unit_specification->target),
+                is_builder ? S("") : S("/"),
+                link_unit_specification->name,
+            };
+            let artifact_path = arena_join_string(general_arena, BUSTER_STRING_ARRAY_TO_SLICE(artifact_path_parts), true);
+            link_unit_specification->artifact_path = artifact_path;
+            argument_add(builder, (char*)artifact_path.pointer);
+
+            for (u64 module_i = 0; module_i < link_modules.length; module_i += 1)
             {
-                argument_add(builder, (char*)artifact_path.pointer);
+                let module = &link_modules.pointer[module_i];
+                let unit = &compilation_units[module->index];
+                let artifact_path = unit->object_path;
+                if (!modules[module->id].no_source)
+                {
+                    argument_add(builder, (char*)artifact_path.pointer);
+                }
+            }
+
+            if (link_unit_specification->use_io_ring)
+            {
+                argument_add(builder, "-luring");
+            }
+
+            let argv = argument_builder_end(builder);
+            bool debug = false;
+            if (debug)
+            {
+                let a = argv;
+                while (*a)
+                {
+                    printf("%s ", *a);
+                    a += 1;
+                }
+                printf("\n");
+            }
+
+            let process = os_process_spawn(argv, program_state->input.envp);
+            processes[link_unit_i] = process;
+        }
+
+        for (u64 link_unit_i = 0; link_unit_i < link_unit_count; link_unit_i += 1)
+        {
+            let process = processes[link_unit_i];
+            ProcessResources resources = {};
+            let link_result = os_process_wait_sync(process, resources);
+            if (link_result != PROCESS_RESULT_SUCCESS)
+            {
+                result = PROCESS_RESULT_FAILED;
             }
         }
+    }
 
-        if (link_unit_specification->use_io_ring)
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        switch (build_program_state.command)
         {
-            argument_add(builder, "-luring");
-        }
-
-        let argv = argument_builder_end(builder);
-        bool debug = false;
-        if (debug)
-        {
-            let a = argv;
-            while (*a)
+            break; case BUILD_COMMAND_BUILD: {}
+            break; case BUILD_COMMAND_TEST:
             {
-                printf("%s ", *a);
-                a += 1;
-            }
-            printf("\n");
-        }
+                ProcessHandle* processes[link_unit_count];
+                
+                // Skip builder tests
+                u64 link_unit_start = 1;
 
-        let process = os_process_spawn(argv, program_state->input.envp);
-        ProcessResources resources = {};
-        let link_result = os_process_wait_sync(process, resources);
-        if (link_result != PROCESS_RESULT_SUCCESS)
-        {
-            result = PROCESS_RESULT_FAILED;
+                for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
+                {
+                    let link_unit_specification = &specifications[link_unit_i];
+
+                    char* argv[] = {
+                        (char*)link_unit_specification->artifact_path.pointer,
+                        "test",
+                        0,
+                    };
+
+                    processes[link_unit_i] = os_process_spawn(argv, program_state->input.envp);
+                }
+
+                for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
+                {
+                    let process = processes[link_unit_i];
+                    ProcessResources resources = {};
+                    let test_result = os_process_wait_sync(process, resources);
+                    if (test_result != PROCESS_RESULT_SUCCESS)
+                    {
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                }
+            }
+            break; case BUILD_COMMAND_DEBUG: { }
         }
     }
 
