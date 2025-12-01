@@ -1,3 +1,5 @@
+#pragma once
+
 typedef struct ProgramInput ProgramInput;
 #include <lib.h>
 
