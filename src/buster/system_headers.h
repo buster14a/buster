@@ -1,6 +1,6 @@
 #pragma once
 
-#include <lib.h>
+#include <buster/lib.h>
 
 #if BUSTER_KERNEL == 0
 #include <stdio.h>
@@ -16,6 +16,7 @@
 #include <sys/ptrace.h>
 #include <linux/limits.h>
 #include <linux/fs.h>
+#include <spawn.h>
 #if BUSTER_USE_PTHREAD
 #include <pthread.h>
 #endif
@@ -31,11 +32,12 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <pthread.h>
-#elif _WIN32
+#elif defined(_WIN32)
 #include <winsock2.h>
 #include <windows.h>
 #include <mswsock.h>
-LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
+
+BUSTER_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 #endif
 
 STRUCT(IoRing)
@@ -44,8 +46,6 @@ STRUCT(IoRing)
 #if BUSTER_USE_IO_RING
     struct io_uring linux_impl;
 #endif
-#else
-#pragma error
 #endif
     u32 submitted_entry_count;
     u32 completed_entry_count;
@@ -56,5 +56,13 @@ struct Thread
     Arena* arena;
     ThreadEntryPoint* entry_point;
     IoRing ring;
-    pthread_t handle;
+    ThreadHandle* handle;
 };
+
+BUSTER_LOCAL constexpr u64 max_path_length =
+#ifdef _WIN32
+MAX_PATH
+#else
+PATH_MAX
+#endif
+;
