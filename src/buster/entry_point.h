@@ -1,6 +1,6 @@
 #pragma once
 
 typedef struct ProgramInput ProgramInput;
-#include <lib.h>
+#include <buster/lib.h>
 
 BUSTER_DECL ProcessResult process_arguments();

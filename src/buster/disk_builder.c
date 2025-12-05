@@ -51,8 +51,7 @@ static_assert(sizeof(GPTHeader) == 96);
 constexpr u64 gpt_header_size = sizeof(GPTHeader) - sizeof(u32);
 static_assert(gpt_header_size == 92);
 
-typedef enum VerificationError
-{
+ENUM(VerificationError,
     VERIFICATION_ERROR_DISK_SUCCESS,
     VERIFICATION_ERROR_DISK_EMPTY,
     VERIFICATION_ERROR_DISK_NOT_SECTOR_SIZED,
@@ -66,7 +65,7 @@ typedef enum VerificationError
     VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS,
     VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA,
     VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA,
-} VerificationError;
+);
 
 BUSTER_LOCAL VerificationError verify_disk(u8* disk, u64 disk_size)
 {
