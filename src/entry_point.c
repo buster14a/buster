@@ -97,7 +97,7 @@ BUSTER_LOCAL ProcessResult buster_entry_point(int argc, char* argv[], char* envp
                 thread->entry_point = thread_entry_point;
                 thread->arena = arena_create((ArenaInitialization){});
                 BUSTER_CHECK(program_state->input.thread_spawn_policy == THREAD_SPAWN_POLICY_SINGLE_THREADED);
-                result = thread->entry_point(thread);
+                result = thread->entry_point();
             }
     }
 

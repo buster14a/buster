@@ -16,6 +16,7 @@
 #include <sys/ptrace.h>
 #include <linux/limits.h>
 #include <linux/fs.h>
+#include <spawn.h>
 #if BUSTER_USE_PTHREAD
 #include <pthread.h>
 #endif

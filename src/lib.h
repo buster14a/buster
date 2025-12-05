@@ -116,6 +116,16 @@ typedef double f64;
 typedef __float128 f128;
 #endif
 
+#if _WIN32
+#define ENUM_START(E, T) enum E
+#define ENUM_END(E, T); typedef T E
+#else
+#define ENUM_START(E, T) typedef enum E : T
+#define ENUM_END(E, T) E
+#endif
+#define ENUM_T(E, T, ...) ENUM_START(E, T) { __VA_ARGS__ } ENUM_END(E, T)
+#define ENUM(E, ...) typedef enum E { __VA_ARGS__ } E
+
 #ifndef BUSTER_STRING
 #define BUSTER_STRING
 STRUCT(String8)
@@ -137,6 +147,11 @@ STRUCT(String32)
 };
 
 typedef String8 String;
+
+#if defined(_WIN32)
+typedef String16 OsString;
+#else
+typedef String8 OsString;
 #endif
 
 STRUCT(StringSlice)
@@ -154,7 +169,16 @@ STRUCT(SliceOfStringSlice)
 #define S8(strlit) ((struct String8) { .pointer = (u8*)(strlit), .length = __builtin_strlen(strlit) })
 #define S16(strlit) ((struct String16) { .pointer = (u ## strlit), .length = str16_length(u ## strlit) })
 #define S32(strlit) ((struct String32) { .pointer = (U ## strlit), .length = str32_length(U ## strlit) })
+
 #define S(strlit) S8(strlit)
+#if defined(_WIN32)
+#define OsS(strlit) S16(strlit)
+#else
+#define OsS(strlit) S8(strlit)
+#endif
+#endif
+
+
 #define BUSTER_ARRAY_TO_SLICE(T, arr) (T) { (arr), BUSTER_ARRAY_LENGTH(arr) }
 #define BUSTER_STRING_ARRAY_TO_SLICE(arr) BUSTER_ARRAY_TO_SLICE(StringSlice, arr)
 #define str_size(strlit) ((strlit).length * sizeof(*((strlit).pointer)))
@@ -206,13 +230,12 @@ STRUCT(Arena)
     u64 granularity;
 };
 
-typedef enum ThreadSpawnPolicy
-{
+ENUM(ThreadSpawnPolicy,
     THREAD_SPAWN_POLICY_SINGLE_THREADED,
     THREAD_SPAWN_POLICY_SPAWN_SINGLE_THREAD,
     THREAD_SPAWN_POLICY_SATURATE_LOGICAL_CORES,
     THREAD_SPAWN_POLICY_SATURATE_PHYSICAL_CORES,
-} ThreadSpawnPolicy;
+);
 
 STRUCT(ProgramInput)
 {
@@ -249,13 +272,12 @@ STRUCT(FileReadOptions)
     u32 end_alignment;
 };
 
-typedef enum IntegerFormat
-{
+ENUM(IntegerFormat,
     INTEGER_FORMAT_DECIMAL,
     INTEGER_FORMAT_HEXADECIMAL,
     INTEGER_FORMAT_OCTAL,
     INTEGER_FORMAT_BINARY,
-} IntegerFormat;
+);
 
 STRUCT(FormatIntegerOptions)
 {
@@ -312,36 +334,6 @@ u64
 u128
 #endif
 TimeDataType;
-
-typedef enum TerminationKind : u8
-{
-    TERMINATION_KIND_UNKNOWN,
-    TERMINATION_KIND_EXIT,
-    TERMINATION_KIND_SIGNAL,
-    TERMINATION_KIND_STOP,
-} TerminationKind;
-
-#define STREAM_COUNT (2)
-
-STRUCT(ExecutionResult)
-{
-    String streams[STREAM_COUNT];
-    u32 termination_code;
-    TerminationKind termination_kind;
-};
-
-typedef enum StreamPolicy : u8
-{
-    STREAM_POLICY_INHERIT,
-    STREAM_POLICY_PIPE,
-    STREAM_POLICY_IGNORE,
-} StreamPolicy;
-
-STRUCT(ExecutionOptions)
-{
-    StreamPolicy policies[STREAM_COUNT];
-    FileDescriptor* null_file_descriptor;
-};
 #endif
 
 STRUCT(IntegerParsing)
@@ -361,8 +353,7 @@ STRUCT(ThreadInitialization)
 {
 };
 
-typedef enum ProcessResult
-{
+ENUM(ProcessResult,
     PROCESS_RESULT_SUCCESS,
     PROCESS_RESULT_FAILED,
     PROCESS_RESULT_FAILED_TRY_AGAIN,
@@ -370,25 +361,16 @@ typedef enum ProcessResult
     PROCESS_RESULT_NOT_EXISTENT,
     PROCESS_RESULT_RUNNING,
     PROCESS_RESULT_UNKNOWN,
-} ProcessResult;
+);
 
 typedef struct Thread Thread;
 BUSTER_DECL __thread Thread* thread;
 
-typedef ProcessResult ThreadEntryPoint(Thread*);
-BUSTER_DECL ProcessResult thread_entry_point(Thread* thread);
+typedef ProcessResult ThreadEntryPoint(void);
+BUSTER_DECL ProcessResult thread_entry_point();
+BUSTER_DECL Arena* thread_arena();
 
 typedef ProcessResult ProcessArguments(Arena* arena, void* context, u64 argc, char** argv, char** envp);
-
-// STRUCT(BusterInitialization)
-// {
-//     ProcessArguments* process_arguments;
-//     void* context;
-//     char** argv;
-//     char** envp;
-//     int argc;
-//     ThreadSpawnPolicy thread_spawn_policy;
-// };
 
 STRUCT(IoRingCompletion)
 {
@@ -419,6 +401,7 @@ BUSTER_DECL String arena_duplicate_string(Arena* arena, String str, bool zero_te
 BUSTER_DECL String arena_join_string(Arena* arena, StringSlice strings, bool zero_terminate);
 BUSTER_DECL void* arena_current_pointer(Arena* arena, u64 alignment);
 
+BUSTER_IMPL void os_make_directory(OsString path);
 BUSTER_DECL FileDescriptor* os_file_open(String path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_DECL u64 os_file_get_size(FileDescriptor* file_descriptor);
 BUSTER_DECL FileStats os_file_get_stats(FileDescriptor* file_descriptor, FileStatsOptions options);
@@ -440,7 +423,6 @@ BUSTER_DECL TimeDataType take_timestamp();
 BUSTER_DECL u64 ns_between(TimeDataType start, TimeDataType end);
 BUSTER_DECL String os_path_absolute_stack(String buffer, const char* restrict relative_file_path);
 BUSTER_DECL String path_absolute(Arena* arena, const char* restrict relative_file_path);
-BUSTER_DECL ExecutionResult os_execute(Arena* arena, char** arguments, char** environment, ExecutionOptions options);
 BUSTER_DECL FileDescriptor* os_get_stdout();
 BUSTER_DECL ThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOptions options);
 BUSTER_DECL u32 os_thread_join(ThreadHandle* handle);

@@ -6,7 +6,6 @@
 
 #include <entry_point.h>
 
-
 BUSTER_IMPL __thread Thread* thread;
 
 STRUCT(ProtectionFlags)
@@ -503,6 +502,15 @@ BUSTER_IMPL FileDescriptor* os_file_open(String path, OpenFlags flags, OpenPermi
     }
 #endif
     return result;
+}
+
+BUSTER_IMPL void os_make_directory(OsString path)
+{
+#if defined(__linux__) || defined(__APPLE__)
+    mkdir((const char*)path.pointer, 0755);
+#elif defined(_WIN32)
+    CreateDirectoryW(path.pointer, 0);
+#endif
 }
 
 BUSTER_LOCAL FileDescriptor* posix_fd_to_generic_fd(int fd)
@@ -1073,17 +1081,21 @@ BUSTER_IMPL IoRingCompletion io_ring_peek_completion()
 }
 #endif
 
-BUSTER_LOCAL void* thread_os_entry_point(void* context)
+BUSTER_IMPL Arena* thread_arena()
+{
+    return thread->arena;
+}
+
+[[gnu::cold]] BUSTER_LOCAL void* thread_os_entry_point(void* context)
 {
     let thread = (Thread*)context;
     thread->arena = arena_create((ArenaInitialization){});
 #if BUSTER_USE_IO_RING
     io_ring_init(&thread->ring, 4096);
 #endif
-    let os_result = thread->entry_point(thread);
+    let os_result = thread->entry_point();
     return (void*)(u64)os_result;
 }
-
 
 [[gnu::cold]] BUSTER_LOCAL bool is_debugger_present()
 {
@@ -1120,278 +1132,6 @@ BUSTER_IMPL String format_integer(Arena* arena, FormatIntegerOptions options, bo
     char buffer[128];
     let stack_string = format_integer_stack((String){ (u8*)buffer, BUSTER_ARRAY_LENGTH(buffer) }, options);
     return arena_duplicate_string(arena, stack_string, zero_terminate);
-}
-
-BUSTER_IMPL ExecutionResult os_execute(Arena* arena, char** arguments, char** environment, ExecutionOptions options)
-{
-    ExecutionResult result = {};
-    BUSTER_UNUSED(arena);
-
-#if defined (__linux__) || defined(__APPLE__)
-    FileDescriptor* null_file_descriptor = 0;
-
-    if (options.null_file_descriptor)
-    {
-        null_file_descriptor = options.null_file_descriptor;
-    }
-    else if ((options.policies[0] == STREAM_POLICY_IGNORE) | (options.policies[1] == STREAM_POLICY_IGNORE))
-    {
-        null_file_descriptor = os_file_open(S("/dev/null"), (OpenFlags) { .write = 1 }, (OpenPermissions){});
-    }
-
-    int pipes[STREAM_COUNT][2];
-
-    for (int i = 0; i < STREAM_COUNT; i += 1)
-    {
-        if (options.policies[i] == STREAM_POLICY_PIPE)
-        {
-            if (pipe(pipes[i]) == -1)
-            {
-                fail();
-            }
-        }
-    }
-
-    let pid = fork();
-
-    switch (pid)
-    {
-        break; case -1:
-        {
-            fail();
-        }
-        break; case 0:
-        {
-            for (int i = 0; i < STREAM_COUNT; i += 1)
-            {
-                let fd = (i + 1);
-
-                switch (options.policies[i])
-                {
-                    break; case STREAM_POLICY_INHERIT: {}
-                    break; case STREAM_POLICY_PIPE:
-                    {
-                        close(pipes[i][0]);
-                        dup2(pipes[i][1], fd);
-                        close(pipes[i][1]);
-                    }
-                    break; case STREAM_POLICY_IGNORE:
-                    {
-                        dup2(generic_fd_to_posix(null_file_descriptor), fd);
-                        close(generic_fd_to_posix(null_file_descriptor));
-                    }
-                }
-            }
-
-            let result = execve(arguments[0], arguments, environment);
-
-            if (result != -1)
-            {
-                BUSTER_UNREACHABLE();
-            }
-
-            fail();
-        }
-        break; default:
-        {
-            for (int i = 0; i < STREAM_COUNT; i += 1)
-            {
-                if (options.policies[i] == STREAM_POLICY_PIPE)
-                {
-                    close(pipes[i][1]);
-                }
-            }
-
-            if (options.policies[0] == STREAM_POLICY_PIPE | options.policies[1] == STREAM_POLICY_PIPE)
-            {
-                fail();
-            }
-
-            int status = 0;
-            let waitpid_result = waitpid(pid, &status, 0);
-
-            if (waitpid_result == pid)
-            {
-                if (WIFEXITED(status))
-                {
-                    result.termination_code = WEXITSTATUS(status);
-                    result.termination_kind = TERMINATION_KIND_EXIT;
-                }
-                else if (WIFSIGNALED(status))
-                {
-                    result.termination_code = WTERMSIG(status);
-                    result.termination_kind = TERMINATION_KIND_SIGNAL;
-                }
-                else if (WIFSTOPPED(status))
-                {
-                    result.termination_code = WSTOPSIG(status);
-                    result.termination_kind = TERMINATION_KIND_STOP;
-                }
-                else
-                {
-                    result.termination_kind = TERMINATION_KIND_UNKNOWN;
-                }
-
-                if (!options.null_file_descriptor & !!null_file_descriptor)
-                {
-                    os_file_close(null_file_descriptor);
-                }
-            }
-            else if (waitpid_result == -1)
-            {
-                fail();
-            }
-            else
-            {
-                BUSTER_UNREACHABLE();
-            }
-        }
-    }
-#elif _WIN32
-    {
-        HANDLE hStdInRead  = NULL, hStdInWrite  = NULL;
-        HANDLE hStdOutRead = NULL, hStdOutWrite = NULL;
-        HANDLE hStdErrRead = NULL, hStdErrWrite = NULL;
-
-        SECURITY_ATTRIBUTES sa = { sizeof(sa) };
-        sa.bInheritHandle = TRUE;
-        sa.lpSecurityDescriptor = NULL;
-
-        if (options.policies[0] == STREAM_POLICY_PIPE)
-        {
-            if (!CreatePipe(&hStdOutRead, &hStdOutWrite, &sa, 0))
-            {
-                fail();
-            }
-            if (!SetHandleInformation(hStdOutRead, HANDLE_FLAG_INHERIT, 0))
-            {
-                fail();
-            }
-        }
-
-        if (options.policies[1] == STREAM_POLICY_PIPE)
-        {
-            if (!CreatePipe(&hStdErrRead, &hStdErrWrite, &sa, 0))
-            {
-                fail();
-            }
-            if (!SetHandleInformation(hStdErrRead, HANDLE_FLAG_INHERIT, 0))
-            {
-                fail();
-            }
-        }
-
-        STARTUPINFO si;
-        ZeroMemory(&si, sizeof(si));
-        si.cb = sizeof(si);
-        si.dwFlags |= STARTF_USESTDHANDLES;
-
-        si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
-        si.hStdOutput = (options.policies[0] == STREAM_POLICY_PIPE) ? hStdOutWrite : GetStdHandle(STD_OUTPUT_HANDLE);
-        si.hStdError  = (options.policies[1] == STREAM_POLICY_PIPE) ? hStdErrWrite : GetStdHandle(STD_ERROR_HANDLE);
-
-        PROCESS_INFORMATION pi;
-        ZeroMemory(&pi, sizeof(pi));
-
-        size_t cmd_len = 0;
-        for (int i = 0; arguments[i]; i += 1)
-        {
-            cmd_len += strlen(arguments[i]) + 1;
-        }
-        char* cmdline = (char*)malloc(cmd_len + 1);
-        if (!cmdline)
-        {
-            fail();
-        }
-        cmdline[0] = '\0';
-        for (int i = 0; arguments[i]; i += 1)
-        {
-            strcat(cmdline, arguments[i]);
-            if (arguments[i+1]) strcat(cmdline, " ");
-        }
-
-        LPVOID env_block = NULL;
-        if (environment)
-        {
-            size_t total_len = 1;
-            for (char** e = environment; *e; ++e)
-            {
-                total_len += strlen(*e) + 1;
-            }
-
-            env_block = malloc(total_len);
-
-            if (!env_block)
-            {
-                fail();
-            }
-
-            char* dst = (char*)env_block;
-            for (char** e = environment; *e; ++e)
-            {
-                size_t len = strlen(*e);
-                memcpy(dst, *e, len);
-                dst[len] = '\0';
-                dst += len + 1;
-            }
-            *dst = '\0';
-        }
-
-        BOOL success = CreateProcessA(
-            NULL,
-            cmdline,
-            NULL,
-            NULL,
-            TRUE,
-            0,
-            env_block,
-            NULL,
-            &si,
-            &pi
-        );
-
-        free(cmdline);
-
-        if (!success)
-        {
-            fail();
-        }
-
-        if (hStdInRead)
-        {
-            CloseHandle(hStdInRead);
-        }
-        if (hStdOutWrite)
-        {
-            CloseHandle(hStdOutWrite);
-        }
-        if (hStdErrWrite)
-        {
-            CloseHandle(hStdErrWrite);
-        }
-
-        WaitForSingleObject(pi.hProcess, INFINITE);
-
-        DWORD exit_code = 0;
-        if (!GetExitCodeProcess(pi.hProcess, &exit_code))
-        {
-            fail();
-        }
-
-        result.termination_code = (int)exit_code;
-        result.termination_kind = TERMINATION_KIND_EXIT;
-
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-
-        if (env_block)
-        {
-            free(env_block);
-        }
-    }
-#endif
-
-    return result;
 }
 
 #if 0
@@ -2161,29 +1901,36 @@ BUSTER_IMPL ProcessResult process_wait_sync(pid_t pid, void* siginfo_buffer)
 
 BUSTER_IMPL ProcessHandle* os_process_spawn(char* argv[], char* envp[])
 {
-    let pid = fork();
+    pid_t pid = -1;
+    posix_spawn_file_actions_t file_actions;
+    posix_spawnattr_t attributes;
+    let file_actions_init = posix_spawn_file_actions_init(&file_actions);
+    let attribute_init = posix_spawnattr_init(&attributes);
 
-    if (pid == -1)
+    if (file_actions_init == 0 && attribute_init == 0)
     {
-        if (program_state->input.verbose) printf("Failed to fork\n");
-    }
-    else if (pid == 0)
-    {
-        execve(argv[0], argv, envp);
-        BUSTER_TRAP();
-    }
+        let spawn_result = posix_spawn(&pid, argv[0], &file_actions, &attributes, argv, envp);
 
-    if (program_state->input.verbose)
-    {
-        printf("Launched: ");
-
-        for (let a = argv; *a; a += 1)
+        if (program_state->input.verbose)
         {
-            printf("%s ", *a);
+            printf("Launched: ");
+
+            for (let a = argv; *a; a += 1)
+            {
+                printf("%s ", *a);
+            }
+
+            printf("\n");
         }
 
-        printf("\n");
+        if (spawn_result != 0)
+        {
+            pid = -1;
+        }
     }
+
+    posix_spawn_file_actions_destroy(&file_actions);
+    posix_spawnattr_destroy(&attributes);
 
     return pid == -1 ? (ProcessHandle*)0 : (ProcessHandle*)(u64)pid;
 }

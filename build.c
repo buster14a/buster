@@ -35,60 +35,55 @@ exit $?
 #if BUSTER_UNITY_BUILD
 #include <lib.c>
 #include <entry_point.c>
-#else
-#include <system_headers.h>
 #endif
 #include <md5.h>
 #include <stdio.h>
 
 #define BUSTER_TODO() BUSTER_TRAP()
 
-typedef enum CompilationModel
-{
+ENUM(CompilationModel,
     COMPILATION_MODEL_INCREMENTAL,
     COMPILATION_MODEL_SINGLE_UNIT,
-} CompilationModel;
+);
 
-typedef enum ModuleId : u8
-{
+ENUM_T(ModuleId, u8,
     MODULE_LIB,
     MODULE_SYSTEM_HEADERS,
     MODULE_ENTRY_POINT,
     MODULE_BUILDER,
     MODULE_MD5,
     MODULE_CC_MAIN,
+    MODULE_ASM_MAIN,
     MODULE_COUNT,
-} ModuleId;
+);
 
-typedef enum DirectoryId
-{
+ENUM(DirectoryId,
     DIRECTORY_SRC_ROOT,
     DIRECTORY_ROOT,
     DIRECTORY_CC,
+    DIRECTORY_ASM,
     DIRECTORY_COUNT,
-} DirectoryId;
+);
 
 BUSTER_LOCAL String directory_paths[] = {
     [DIRECTORY_ROOT] = S(""),
     [DIRECTORY_SRC_ROOT] = S("src"),
     [DIRECTORY_CC] = S("src/compiler/frontend/cc"),
+    [DIRECTORY_ASM] = S("src/compiler/frontend/asm"),
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == DIRECTORY_COUNT);
 
-typedef enum CpuArch
-{
+ENUM(CpuArch,
     CPU_ARCH_X86_64,
-} CpuArch;
+);
 
-typedef enum CpuModel
-{
+ENUM(CpuModel,
     CPU_MODEL_GENERIC,
     CPU_MODEL_NATIVE,
-} CpuModel;
+);
 
-typedef enum OperatingSystem
-{
+ENUM(OperatingSystem,
     OPERATING_SYSTEM_LINUX,
     OPERATING_SYSTEM_MACOS,
     OPERATING_SYSTEM_WINDOWS,
@@ -96,7 +91,7 @@ typedef enum OperatingSystem
     OPERATING_SYSTEM_ANDROID,
     OPERATING_SYSTEM_IOS,
     OPERATING_SYSTEM_FREESTANDING,
-} OperatingSystem;
+);
 
 STRUCT(Target)
 {
@@ -172,6 +167,10 @@ BUSTER_LOCAL Module modules[] = {
         .directory = DIRECTORY_CC,
         .no_header = true,
     },
+    [MODULE_ASM_MAIN] = {
+        .directory = DIRECTORY_ASM,
+        .no_header = true,
+    },
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == MODULE_COUNT);
@@ -183,6 +182,7 @@ BUSTER_LOCAL String module_names[] = {
     [MODULE_BUILDER] = S("build"),
     [MODULE_MD5] = S("md5"),
     [MODULE_CC_MAIN] = S("cc_main"),
+    [MODULE_ASM_MAIN] = S("asm_main"),
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(module_names) == MODULE_COUNT);
@@ -202,17 +202,21 @@ STRUCT(LinkUnitSpecification)
 
 LINK_UNIT_MODULES(builder, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_BUILDER }, { MODULE_MD5 });
 LINK_UNIT_MODULES(cc, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_CC_MAIN }, );
+LINK_UNIT_MODULES(asm, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_ASM_MAIN }, );
+
 BUSTER_LOCAL LinkUnitSpecification specifications[] = {
     LINK_UNIT(builder, .target = target_native),
     LINK_UNIT(cc, .target = target_native),
+    LINK_UNIT(asm, .target = target_native),
 };
+BUSTER_LOCAL constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
 
-typedef enum BuildCommand
-{
+
+ENUM(BuildCommand,
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_TEST,
     BUILD_COMMAND_DEBUG,
-} BuildCommand;
+);
 
 STRUCT(BuildProgramState)
 {
@@ -251,52 +255,17 @@ STRUCT(Process)
 
 static_assert(alignof(Process) == 8);
 
-BUSTER_LOCAL void spawn_process(Process* process, char* argv[], char* envp[])
-{
-    let pid = fork();
-
-    if (pid == -1)
-    {
-        if (program_state->input.verbose) printf("Failed to fork\n");
-    }
-    else if (pid == 0)
-    {
-        execve(argv[0], argv, envp);
-        BUSTER_TRAP();
-    }
-
-    if (program_state->input.verbose)
-    {
-        printf("Launched: ");
-
-        for (let a = argv; *a; a += 1)
-        {
-            printf("%s ", *a);
-        }
-
-        printf("\n");
-    }
-
-    *process = (Process) {
-        .argv = argv,
-        .envp = envp,
-        .handle = pid == -1 ? (ProcessHandle*)0 : (ProcessHandle*)(u64)pid,
-    };
-}
-
-typedef enum TaskId
-{
+ENUM(TaskId,
     TASK_ID_COMPILATION,
     TASK_ID_LINKING,
-} TaskId;
+);
 
-typedef enum ProjectId
-{
+ENUM(ProjectId,
     PROJECT_OPERATING_SYSTEM_BUILDER,
     PROJECT_OPERATING_SYSTEM_BOOTLOADER,
     PROJECT_OPERATING_SYSTEM_KERNEL,
     PROJECT_COUNT,
-} ProjectId;
+);
 
 BUSTER_LOCAL String target_to_string_builder(Target target)
 {
@@ -416,7 +385,7 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             }
         }
 
-        char buffer[PATH_MAX];
+        char buffer[4096];
         u64 buffer_i = 0;
         {
             memcpy(buffer + buffer_i, object_absolute_path_parts[1].pointer + 1, object_absolute_path_parts[1].length - 1);
@@ -433,7 +402,7 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
 
         if (target_i == target_count)
         {
-            mkdir(buffer, 0755);
+            os_make_directory((OsString){(u8*)buffer, buffer_i });
             targets[target_count] = unit->target;
             target_count += 1;
         }
@@ -461,9 +430,10 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             let byte_count = slash_index;
 
             memcpy(dst, src.pointer, byte_count);
-            buffer[buffer_start + source_i + byte_count] = 0;
+            let length = buffer_start + source_i + byte_count;
+            buffer[length] = 0;
 
-            mkdir(buffer, 0755);
+            os_make_directory((OsString){(u8*)buffer, length });
 
             source_i += byte_count; 
         }
@@ -599,11 +569,11 @@ BUSTER_IMPL ProcessResult process_arguments()
     return result;
 }
 
-BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
+BUSTER_IMPL ProcessResult thread_entry_point()
 {
     let cache_manifest = os_file_open(S("build/cache_manifest"), (OpenFlags) { .read = 1 }, (OpenPermissions){});
     let cache_manifest_stats = os_file_get_stats(cache_manifest, (FileStatsOptions){ .size = 1, .modified_time = 1 });
-    let cache_manifest_buffer = (u8*)arena_allocate_bytes(thread->arena, cache_manifest_stats.size, 64);
+    let cache_manifest_buffer = (u8*)arena_allocate_bytes(thread_arena(), cache_manifest_stats.size, 64);
     os_file_read(cache_manifest, (String){ cache_manifest_buffer, cache_manifest_stats.size }, cache_manifest_stats.size);
     os_file_close(cache_manifest);
     let cache_manifest_hash = hash_file(cache_manifest_buffer, cache_manifest_stats.size);
@@ -617,7 +587,7 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
         BUSTER_UNUSED(target_native);
     }
 
-    let cwd = path_absolute(thread->arena, ".");
+    let cwd = path_absolute(thread_arena(), ".");
     let general_arena = arena_create((ArenaInitialization){});
     let file_list_arena = arena_create((ArenaInitialization){});
     let file_list_start = file_list_arena->position;
@@ -630,8 +600,6 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
     u64 module_list_count = 0;
 
     u64 c_source_file_count = 0;
-
-    constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
 
     for (u64 link_unit_index = 0; link_unit_index < link_unit_count; link_unit_index += 1)
     {
@@ -749,7 +717,7 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
     for (u64 unit_i = 0; unit_i < selected_compilation_count; unit_i += 1)
     {
         let unit = &selected_compilation_units[unit_i];
-        spawn_process(&unit->process, unit->compilation_arguments, program_state->input.envp);
+        unit->process.handle = os_process_spawn(unit->compilation_arguments, program_state->input.envp);
     }
 
     ProcessResult result = {};
@@ -757,8 +725,7 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
     for (u64 unit_i = 0; unit_i < selected_compilation_count; unit_i += 1)
     {
         let unit = &selected_compilation_units[unit_i];
-        ProcessResources resources = {};
-        let unit_compilation_result = os_process_wait_sync(unit->process.handle, resources);
+        let unit_compilation_result = os_process_wait_sync(unit->process.handle, unit->process.resources);
         if (unit_compilation_result != PROCESS_RESULT_SUCCESS)
         {
             result = PROCESS_RESULT_FAILED;
