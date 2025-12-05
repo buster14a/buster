@@ -1,19 +1,19 @@
 #pragma once
 
-#include <entry_point.h>
+#include <buster/entry_point.h>
 
 #if BUSTER_UNITY_BUILD
-#include <lib.c>
+#include <buster/lib.c>
 #else
-#include <system_headers.h>
+#include <buster/system_headers.h>
 #endif
 
-BUSTER_LOCAL ProcessResult buster_entry_point(int argc, char* argv[], char* envp[])
+BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList envp)
 {
     ProcessResult result = {};
 #ifdef _WIN32
-    BOOL result = QueryPerformanceFrequency((LARGE_INTEGER*)&frequency);
-    CHECK(result);
+    BOOL query_result = QueryPerformanceFrequency((LARGE_INTEGER*)&frequency);
+    BUSTER_CHECK(query_result);
 
     WSADATA WinSockData;
     WSAStartup(MAKEWORD(2, 2), &WinSockData);
@@ -26,7 +26,6 @@ BUSTER_LOCAL ProcessResult buster_entry_point(int argc, char* argv[], char* envp
 #endif
 
     program_state->arena = arena_create((ArenaInitialization){});
-    program_state->input.argc = argc;
     program_state->input.argv = argv;
     program_state->input.envp = envp;
 
@@ -64,8 +63,9 @@ BUSTER_LOCAL ProcessResult buster_entry_point(int argc, char* argv[], char* envp
                 {
                     let thread = &threads[i];
                     thread->entry_point = thread_entry_point;
-                    let create_result = pthread_create(&thread->handle, 0, &thread_os_entry_point, thread);
-                    failure_count += create_result == 0;
+                    let handle = os_thread_create(thread_os_entry_point, (ThreadCreateOptions){});
+                    thread->handle = handle;
+                    failure_count += handle == 0;
                 }
 
                 if (failure_count == 0)
@@ -73,14 +73,13 @@ BUSTER_LOCAL ProcessResult buster_entry_point(int argc, char* argv[], char* envp
                     for (u64 i = 0; i < thread_count; i += 1)
                     {
                         let thread = &threads[i];
-                        void* return_value;
-                        let join_result = pthread_join(thread->handle, &return_value);
-                        failure_count += join_result == 0;
-                        let thread_result = (ProcessResult)(u64)return_value;
+                        let exit_code = os_thread_join(thread->handle);
+                        let thread_result = (ProcessResult)exit_code;
                         if (thread_result != PROCESS_RESULT_SUCCESS)
                         {
                             result = thread_result;
                         }
+                        failure_count += thread_result != PROCESS_RESULT_SUCCESS;
                     }
                 }
 
@@ -97,15 +96,19 @@ BUSTER_LOCAL ProcessResult buster_entry_point(int argc, char* argv[], char* envp
                 thread->entry_point = thread_entry_point;
                 thread->arena = arena_create((ArenaInitialization){});
                 BUSTER_CHECK(program_state->input.thread_spawn_policy == THREAD_SPAWN_POLICY_SINGLE_THREADED);
-                result = thread->entry_point(thread);
+                result = thread->entry_point();
             }
     }
 
     return result;
 }
 
+#if BUSTER_LINK_LIBC
 int main(int argc, char* argv[], char* envp[])
 {
-    let result = buster_entry_point(argc, argv, envp);
+    BUSTER_UNUSED(argc);
+    let result = buster_entry_point((OsStringList)argv, (OsStringList)envp);
     return (int)result;
 }
+#else
+#endif

@@ -20,7 +20,7 @@ fi
 #endif
 #if [[ "$?" != "0" && "$?" != "333" ]]; then
     mkdir -p build
-    $CLANG build.c -o build/builder -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=1 -DBUSTER_USE_PTHREAD=1 -g -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -Wno-gnu-flexible-array-initializer -Wno-missing-field-initializers -Wno-pragma-once-outside-header -luring -pthread #-ferror-limit=1 -ftime-trace -ftime-trace-verbose
+    $CLANG build.c -o build/builder -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=0 -DBUSTER_USE_PTHREAD=1 -g -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -Wno-gnu-flexible-array-initializer -Wno-missing-field-initializers -Wno-pragma-once-outside-header -pthread -ferror-limit=1 #-ftime-trace -ftime-trace-verbose
     if [[ "$?" == "0" ]]; then
         BUSTER_REGENERATE=1 build/builder $@
     fi
@@ -30,65 +30,52 @@ exit $?
 
 #pragma once
 
-#include <lib.h>
+#include <buster/lib.h>
 
 #if BUSTER_UNITY_BUILD
-#include <lib.c>
-#include <entry_point.c>
-#else
-#include <system_headers.h>
+#include <buster/lib.c>
+#include <buster/entry_point.c>
 #endif
-#include <md5.h>
-#include <stdio.h>
+#include <martins/md5.h>
+#include <buster/system_headers.h>
 
 #define BUSTER_TODO() BUSTER_TRAP()
 
-typedef enum CompilationModel
-{
+ENUM(CompilationModel,
     COMPILATION_MODEL_INCREMENTAL,
     COMPILATION_MODEL_SINGLE_UNIT,
-} CompilationModel;
+);
 
-typedef enum ModuleId : u8
-{
+ENUM_T(ModuleId, u8,
     MODULE_LIB,
     MODULE_SYSTEM_HEADERS,
     MODULE_ENTRY_POINT,
     MODULE_BUILDER,
     MODULE_MD5,
     MODULE_CC_MAIN,
+    MODULE_ASM_MAIN,
     MODULE_COUNT,
-} ModuleId;
+);
 
-typedef enum DirectoryId
-{
-    DIRECTORY_SRC_ROOT,
+ENUM(DirectoryId,
+    DIRECTORY_SRC_BUSTER,
+    DIRECTORY_SRC_MARTINS,
     DIRECTORY_ROOT,
     DIRECTORY_CC,
+    DIRECTORY_ASM,
     DIRECTORY_COUNT,
-} DirectoryId;
+);
 
-BUSTER_LOCAL String directory_paths[] = {
-    [DIRECTORY_ROOT] = S(""),
-    [DIRECTORY_SRC_ROOT] = S("src"),
-    [DIRECTORY_CC] = S("src/compiler/frontend/cc"),
-};
-
-static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == DIRECTORY_COUNT);
-
-typedef enum CpuArch
-{
+ENUM(CpuArch,
     CPU_ARCH_X86_64,
-} CpuArch;
+);
 
-typedef enum CpuModel
-{
+ENUM(CpuModel,
     CPU_MODEL_GENERIC,
     CPU_MODEL_NATIVE,
-} CpuModel;
+);
 
-typedef enum OperatingSystem
-{
+ENUM(OperatingSystem,
     OPERATING_SYSTEM_LINUX,
     OPERATING_SYSTEM_MACOS,
     OPERATING_SYSTEM_WINDOWS,
@@ -96,7 +83,7 @@ typedef enum OperatingSystem
     OPERATING_SYSTEM_ANDROID,
     OPERATING_SYSTEM_IOS,
     OPERATING_SYSTEM_FREESTANDING,
-} OperatingSystem;
+);
 
 STRUCT(Target)
 {
@@ -114,7 +101,7 @@ BUSTER_LOCAL constexpr Target target_native = {
 #if defined(__linux__)
     .os = OPERATING_SYSTEM_LINUX,
 #else
-#pragma error
+    .os = OPERATING_SYSTEM_WINDOWS,
 #endif
     .model = CPU_MODEL_NATIVE,
 };
@@ -129,7 +116,7 @@ STRUCT(Module)
 STRUCT(TargetBuildFile)
 {
     FileStats stats;
-    String full_path;
+    OsString full_path;
     Target target;
     CompilationModel model;
     bool has_debug_info;
@@ -166,53 +153,43 @@ BUSTER_LOCAL Module modules[] = {
         .no_header = true,
     },
     [MODULE_MD5] = {
+        .directory = DIRECTORY_SRC_MARTINS,
         .no_source = true,
     },
     [MODULE_CC_MAIN] = {
         .directory = DIRECTORY_CC,
         .no_header = true,
     },
+    [MODULE_ASM_MAIN] = {
+        .directory = DIRECTORY_ASM,
+        .no_header = true,
+    },
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == MODULE_COUNT);
 
-BUSTER_LOCAL String module_names[] = {
-    [MODULE_LIB] = S("lib"),
-    [MODULE_SYSTEM_HEADERS] = S("system_headers"),
-    [MODULE_ENTRY_POINT] = S("entry_point"),
-    [MODULE_BUILDER] = S("build"),
-    [MODULE_MD5] = S("md5"),
-    [MODULE_CC_MAIN] = S("cc_main"),
-};
-
-static_assert(BUSTER_ARRAY_LENGTH(module_names) == MODULE_COUNT);
-
 #define LINK_UNIT_MODULES(_name, ...) BUSTER_LOCAL LinkModule _name ## _modules[] = { __VA_ARGS__ }
-#define LINK_UNIT(_name, ...) (LinkUnitSpecification) { .name = S(#_name), .modules = { .pointer = _name ## _modules, .length = BUSTER_ARRAY_LENGTH(_name ## _modules) }, __VA_ARGS__ }
+#define LINK_UNIT(_name, ...) (LinkUnitSpecification) { .name = OsS(#_name), .modules = { .pointer = _name ## _modules, .length = BUSTER_ARRAY_LENGTH(_name ## _modules) }, __VA_ARGS__ }
 
 // TODO: better naming convention
 STRUCT(LinkUnitSpecification)
 {
-    String name;
+    OsString name;
     ModuleSlice modules;
-    String artifact_path;
+    OsString artifact_path;
     Target target;
     bool use_io_ring;
 };
 
 LINK_UNIT_MODULES(builder, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_BUILDER }, { MODULE_MD5 });
 LINK_UNIT_MODULES(cc, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_CC_MAIN }, );
-BUSTER_LOCAL LinkUnitSpecification specifications[] = {
-    LINK_UNIT(builder, .target = target_native),
-    LINK_UNIT(cc, .target = target_native),
-};
+LINK_UNIT_MODULES(asm, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_ASM_MAIN }, );
 
-typedef enum BuildCommand
-{
+ENUM(BuildCommand,
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_TEST,
     BUILD_COMMAND_DEBUG,
-} BuildCommand;
+);
 
 STRUCT(BuildProgramState)
 {
@@ -238,67 +215,30 @@ BUSTER_LOCAL u128 hash_file(u8* pointer, u64 length)
     return digest;
 }
 
-#include <sys/resource.h>
-
 STRUCT(Process)
 {
     ProcessResources resources;
     ProcessHandle* handle;
-    char** argv;
-    char** envp;
+    OsStringList argv;
+    OsStringList envp;
     bool waited;
 };
 
 static_assert(alignof(Process) == 8);
 
-BUSTER_LOCAL void spawn_process(Process* process, char* argv[], char* envp[])
-{
-    let pid = fork();
-
-    if (pid == -1)
-    {
-        if (program_state->input.verbose) printf("Failed to fork\n");
-    }
-    else if (pid == 0)
-    {
-        execve(argv[0], argv, envp);
-        BUSTER_TRAP();
-    }
-
-    if (program_state->input.verbose)
-    {
-        printf("Launched: ");
-
-        for (let a = argv; *a; a += 1)
-        {
-            printf("%s ", *a);
-        }
-
-        printf("\n");
-    }
-
-    *process = (Process) {
-        .argv = argv,
-        .envp = envp,
-        .handle = pid == -1 ? (ProcessHandle*)0 : (ProcessHandle*)(u64)pid,
-    };
-}
-
-typedef enum TaskId
-{
+ENUM(TaskId,
     TASK_ID_COMPILATION,
     TASK_ID_LINKING,
-} TaskId;
+);
 
-typedef enum ProjectId
-{
+ENUM(ProjectId,
     PROJECT_OPERATING_SYSTEM_BUILDER,
     PROJECT_OPERATING_SYSTEM_BOOTLOADER,
     PROJECT_OPERATING_SYSTEM_KERNEL,
     PROJECT_COUNT,
-} ProjectId;
+);
 
-BUSTER_LOCAL String target_to_string_builder(Target target)
+BUSTER_LOCAL OsString target_to_string_builder(Target target)
 {
     switch (target.arch)
     {
@@ -310,11 +250,11 @@ BUSTER_LOCAL String target_to_string_builder(Target target)
                 {
                     switch (target.os)
                     {
-                        break; case OPERATING_SYSTEM_LINUX: return S("x86_64-linux-baseline");
-                        break; case OPERATING_SYSTEM_MACOS: return S("x86_64-macos-baseline");
-                        break; case OPERATING_SYSTEM_WINDOWS: return S("x86_64-windows-baseline");
-                        break; case OPERATING_SYSTEM_UEFI: return S("x86_64-uefi-baseline");
-                        break; case OPERATING_SYSTEM_FREESTANDING: return S("x86_64-freestanding-baseline");
+                        break; case OPERATING_SYSTEM_LINUX: return OsS("x86_64-linux-baseline");
+                        break; case OPERATING_SYSTEM_MACOS: return OsS("x86_64-macos-baseline");
+                        break; case OPERATING_SYSTEM_WINDOWS: return OsS("x86_64-windows-baseline");
+                        break; case OPERATING_SYSTEM_UEFI: return OsS("x86_64-uefi-baseline");
+                        break; case OPERATING_SYSTEM_FREESTANDING: return OsS("x86_64-freestanding-baseline");
                         break; default: BUSTER_UNREACHABLE();
                     }
                 }
@@ -322,11 +262,11 @@ BUSTER_LOCAL String target_to_string_builder(Target target)
                 {
                     switch (target.os)
                     {
-                        break; case OPERATING_SYSTEM_LINUX: return S("x86_64-linux-native");
-                        break; case OPERATING_SYSTEM_MACOS: return S("x86_64-macos-native");
-                        break; case OPERATING_SYSTEM_WINDOWS: return S("x86_64-windows-native");
-                        break; case OPERATING_SYSTEM_UEFI: return S("x86_64-uefi-native");
-                        break; case OPERATING_SYSTEM_FREESTANDING: return S("x86_64-freestanding-native");
+                        break; case OPERATING_SYSTEM_LINUX: return OsS("x86_64-linux-native");
+                        break; case OPERATING_SYSTEM_MACOS: return OsS("x86_64-macos-native");
+                        break; case OPERATING_SYSTEM_WINDOWS: return OsS("x86_64-windows-native");
+                        break; case OPERATING_SYSTEM_UEFI: return OsS("x86_64-uefi-native");
+                        break; case OPERATING_SYSTEM_FREESTANDING: return OsS("x86_64-freestanding-native");
                         break; default: BUSTER_UNREACHABLE();
                     }
                 }
@@ -341,11 +281,11 @@ STRUCT(CompilationUnit)
 {
     Target target;
     CompilationModel model;
-    char** compilation_arguments;
+    OsStringList compilation_arguments;
     bool has_debug_info;
     bool use_io_ring;
-    String object_path;
-    String source_path;
+    OsString object_path;
+    OsString source_path;
     Process process;
     u8 cache_padding[BUSTER_MIN(BUSTER_CACHE_LINE_GUESS - ((5 * sizeof(u64))), BUSTER_CACHE_LINE_GUESS)];
 };
@@ -356,7 +296,7 @@ STRUCT(LinkUnit)
 {
     Process link_process;
     Process run_process;
-    String artifact_path;
+    String8 artifact_path;
     Target target;
     u64* compilations;
     u64 compilation_count;
@@ -364,10 +304,14 @@ STRUCT(LinkUnit)
     bool run;
 };
 
-BUSTER_LOCAL void append_string(Arena* arena, String s)
+BUSTER_LOCAL void append_string8(Arena* arena, String8 s)
 {
-    let allocation = arena_allocate_bytes(arena, s.length, 1);
-    memcpy(allocation, s.pointer, s.length);
+    arena_duplicate_string8(arena, s, false);
+}
+
+BUSTER_LOCAL void append_string16(Arena* arena, String16 s)
+{
+    string16_to_string8(arena, s);
 }
 
 BUSTER_LOCAL bool target_equal(Target a, Target b)
@@ -375,7 +319,7 @@ BUSTER_LOCAL bool target_equal(Target a, Target b)
     return memcmp(&a, &b, sizeof(a)) == 0;
 }
 
-BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, CompilationUnit* units, u64 unit_count, String cwd, char* clang_path)
+BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, CompilationUnit* units, u64 unit_count, OsString cwd, OsString clang_path)
 {
     bool result = true;
 
@@ -386,25 +330,25 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
     BUSTER_UNUSED(target_count);
 
     let compile_commands_start = compile_commands->position;
-    append_string(compile_commands, S("[\n"));
+    append_string8(compile_commands, S8("[\n"));
 
     for (u64 unit_i = 0; unit_i < unit_count; unit_i += 1)
     {
         let unit = &units[unit_i];
 
         let source_absolute_path = unit->source_path;
-        let source_relative_path = str_slice_start(source_absolute_path, cwd.length + 1);
+        let source_relative_path = string_slice_start(source_absolute_path, cwd.length + 1);
         let target_string_builder = target_to_string_builder(unit->target);
-        String object_absolute_path_parts[] = {
+        OsString object_absolute_path_parts[] = {
             cwd,
-            S("/build/"),
+            OsS("/build/"),
             target_string_builder,
-            S("/"),
+            OsS("/"),
             source_relative_path,
-            S(".o"),
+            OsS(".o"),
         };
 
-        let object_path = arena_join_string(arena, BUSTER_STRING_ARRAY_TO_SLICE(object_absolute_path_parts), true);
+        let object_path = arena_join_os_string(arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, object_absolute_path_parts), true);
         unit->object_path = object_path;
 
         u64 target_i;
@@ -416,42 +360,41 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             }
         }
 
-        char buffer[PATH_MAX];
+        OsChar buffer[4096];
         u64 buffer_i = 0;
-        {
-            memcpy(buffer + buffer_i, object_absolute_path_parts[1].pointer + 1, object_absolute_path_parts[1].length - 1);
-            BUSTER_CHECK(object_absolute_path_parts[1].pointer[0] == '/');
-            buffer_i += object_absolute_path_parts[1].length - 1;
-        }
+        let os_char_size = sizeof(buffer[0]);
 
+        for (u64 i = 1; i < 3; i += 1)
         {
-            memcpy(buffer + buffer_i, object_absolute_path_parts[2].pointer, object_absolute_path_parts[2].length);
-            buffer_i += object_absolute_path_parts[2].length;
+            memcpy(buffer + buffer_i, object_absolute_path_parts[i].pointer + (i == 1), string_size(object_absolute_path_parts[i]) - (((i == 1) * os_char_size)));
+            buffer_i += object_absolute_path_parts[i].length - (i == 1);
+            if (i == 1)
+            {
+                BUSTER_CHECK(object_absolute_path_parts[i].pointer[0] == '/');
+            }
         }
 
         buffer[buffer_i] = 0;
 
         if (target_i == target_count)
         {
-            mkdir(buffer, 0755);
+            os_make_directory((OsString){buffer, buffer_i });
             targets[target_count] = unit->target;
             target_count += 1;
         }
-
-        if (program_state->input.verbose) printf("Start making paths for %s. Starting point: %.*s\n", object_path.pointer, (int)buffer_i, buffer);
 
         let buffer_start = buffer_i;
         u64 source_i = 0;
         while (1)
         {
-            String source_remaining = str_slice_start(source_relative_path, source_i);
-            let slash_index = str_first_ch(source_remaining, '/');
+            let source_remaining = string_slice_start(source_relative_path, source_i);
+            let slash_index = os_string_first_character(source_remaining, '/');
             if (slash_index == string_no_match)
             {
                 break;
             }
 
-            String source_chunk = { source_remaining.pointer, slash_index };
+            OsString source_chunk = { source_remaining.pointer, slash_index };
 
             buffer[buffer_start + source_i] = '/';
             source_i += 1;
@@ -461,81 +404,100 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             let byte_count = slash_index;
 
             memcpy(dst, src.pointer, byte_count);
-            buffer[buffer_start + source_i + byte_count] = 0;
+            let length = buffer_start + source_i + byte_count;
+            buffer[length] = 0;
 
-            mkdir(buffer, 0755);
+            os_make_directory((OsString){buffer, length });
 
             source_i += byte_count; 
         }
 
         let builder = argument_builder_start(arena, clang_path);
-        argument_add(builder, "-ferror-limit=1");
-        argument_add(builder, "-c");
-        argument_add(builder, (char*)source_absolute_path.pointer);
-        argument_add(builder, "-o");
-        argument_add(builder, (char*)object_path.pointer);
-        argument_add(builder, "-std=gnu2x");
-        argument_add(builder, "-Isrc");
-        argument_add(builder, "-Wall");
-        argument_add(builder, "-Werror");
-        argument_add(builder, "-Wextra");
-        argument_add(builder, "-Wpedantic");
-        argument_add(builder, "-pedantic");
-        argument_add(builder, "-Wno-gnu-auto-type");
-        argument_add(builder, "-Wno-pragma-once-outside-header");
-        argument_add(builder, "-Wno-gnu-empty-struct");
-        argument_add(builder, "-Wno-bitwise-instead-of-logical");
-        argument_add(builder, "-Wno-unused-function");
-        argument_add(builder, "-Wno-gnu-flexible-array-initializer");
-        argument_add(builder, "-Wno-missing-field-initializers");
+        argument_add(builder, OsS("-ferror-limit=1"));
+        argument_add(builder, OsS("-c"));
+        argument_add(builder, source_absolute_path);
+        argument_add(builder, OsS("-o"));
+        argument_add(builder, object_path);
+        argument_add(builder, OsS("-std=gnu2x"));
+        argument_add(builder, OsS("-Isrc"));
+        argument_add(builder, OsS("-Wall"));
+        argument_add(builder, OsS("-Werror"));
+        argument_add(builder, OsS("-Wextra"));
+        argument_add(builder, OsS("-Wpedantic"));
+        argument_add(builder, OsS("-pedantic"));
+        argument_add(builder, OsS("-Wno-gnu-auto-type"));
+        argument_add(builder, OsS("-Wno-pragma-once-outside-header"));
+        argument_add(builder, OsS("-Wno-gnu-empty-struct"));
+        argument_add(builder, OsS("-Wno-bitwise-instead-of-logical"));
+        argument_add(builder, OsS("-Wno-unused-function"));
+        argument_add(builder, OsS("-Wno-gnu-flexible-array-initializer"));
+        argument_add(builder, OsS("-Wno-missing-field-initializers"));
 
         switch (unit->target.model)
         {
-            break; case CPU_MODEL_NATIVE: argument_add(builder, "-march=native");
+            break; case CPU_MODEL_NATIVE: argument_add(builder, OsS("-march=native"));
             break; case CPU_MODEL_GENERIC: {}
         }
 
         if (unit->has_debug_info)
         {
-            argument_add(builder, "-g");
+            argument_add(builder, OsS("-g"));
         }
 
-        argument_add(builder, unit->model == COMPILATION_MODEL_SINGLE_UNIT ? "-DBUSTER_UNITY_BUILD=1" : "-DBUSTER_UNITY_BUILD=0");
+        argument_add(builder, unit->model == COMPILATION_MODEL_SINGLE_UNIT ? OsS("-DBUSTER_UNITY_BUILD=1") : OsS("-DBUSTER_UNITY_BUILD=0"));
 
-        argument_add(builder, unit->use_io_ring ? "-DBUSTER_USE_IO_RING=1" : "-DBUSTER_USE_IO_RING=0");
+        argument_add(builder, unit->use_io_ring ? OsS("-DBUSTER_USE_IO_RING=1") : OsS("-DBUSTER_USE_IO_RING=0"));
 
         let args = argument_builder_end(builder);
 
         unit->compilation_arguments = args;
 
-        append_string(compile_commands, S("\t{\n\t\t\"directory\": \""));
-        append_string(compile_commands, cwd);
-        append_string(compile_commands, S("\",\n\t\t\"command\": \""));
+        append_string8(compile_commands, S8("\t{\n\t\t\"directory\": \""));
+        append_string8(compile_commands, os_string_to_string8(arena, cwd));
+        append_string8(compile_commands, S8("\",\n\t\t\"command\": \""));
 
-        for (char** a = args; *a; a += 1)
+#if defined(_WIN32)
+        let length = string16_length(args);
+        OsString arg_strings = { args, length };
+        let arg_it = arg_strings;
+        bool is_space;
+        do
+        {
+            let space = string16_first_character(arg_it, ' ');
+            is_space = space != string_no_match;
+            let end = is_space ? (space + 1) : arg_it.length;
+            let arg_chunk = (OsString){ arg_it.pointer, end };
+            append_string16(compile_commands, arg_chunk);
+            arg_it.pointer += end;
+            arg_it.length -= end;
+        } while (is_space);
+#else
+        for (OsChar** a = args; *a; a += 1)
         {
             let arg_ptr = *a;
-            let arg_len = strlen(arg_ptr);
-            let arg = (String){ (u8*)arg_ptr, arg_len };
-            append_string(compile_commands, arg);
-            append_string(compile_commands, S(" "));
+            let arg_len = strlen((char*)arg_ptr);
+            let arg = (String8){ (u8*)arg_ptr, arg_len };
+            append_string8(compile_commands, arg);
+            append_string8(compile_commands, S8(" "));
         }
+#endif
 
         compile_commands->position -= 1;
-        append_string(compile_commands, S("\",\n\t\t\"file\": \""));
-        append_string(compile_commands, source_absolute_path);
-        append_string(compile_commands, S("\"\n"));
-        append_string(compile_commands, S("\t},\n"));
+        append_string8(compile_commands, S8("\",\n\t\t\"file\": \""));
+        append_string8(compile_commands, os_string_to_string8(arena, source_absolute_path));
+        append_string8(compile_commands, S8("\"\n"));
+        append_string8(compile_commands, S8("\t},\n"));
     }
+
     compile_commands->position -= 2;
 
-    append_string(compile_commands, S("\n]"));
+    append_string8(compile_commands, S8("\n]"));
 
-    let compile_commands_str = (String){ .pointer = (u8*)compile_commands + compile_commands_start, .length = compile_commands->position - compile_commands_start };
+    let compile_commands_str = (String8){ .pointer = (u8*)compile_commands + compile_commands_start, .length = compile_commands->position - compile_commands_start };
 
     if (result)
     {
-        result = file_write(S("build/compile_commands.json"), compile_commands_str);
+        result = file_write(OsS("build/compile_commands.json"), compile_commands_str);
         if (!result)
         {
             perror(get_last_error_message());
@@ -548,46 +510,58 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
 BUSTER_IMPL ProcessResult process_arguments()
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
-    let argc = program_state->input.argc;
     let argv = program_state->input.argv;
     let envp = program_state->input.envp;
 
     {
-        let arg_ptr = argv + 1;
-        let arg_top = argv + argc;
+        BUSTER_UNUSED(argv);
+        BUSTER_UNUSED(envp);
+        // TODO: arg processing
 
-        if (arg_ptr != arg_top)
+        let arg_iterator = os_string_list_initialize(argv);
+        let arg_it = &arg_iterator;
+        os_string_list_next(arg_it);
+        let command = os_string_list_next(arg_it);
+        if (command.pointer)
         {
-            let a = *arg_ptr;
-            arg_ptr += 1;
+            OsString possible_commands[] = {
+                [BUILD_COMMAND_BUILD] = OsS("build"),
+                [BUILD_COMMAND_TEST] = OsS("test"),
+                [BUILD_COMMAND_DEBUG] = OsS("debug"),
+            };
 
-            if (strcmp(a, "test") == 0)
+            u64 possible_command_count = BUSTER_ARRAY_LENGTH(possible_commands);
+
+            u64 i;
+            for (i = 0; i < possible_command_count; i += 1)
             {
-                build_program_state.command = BUILD_COMMAND_TEST;
+                if (os_string_equal(command, possible_commands[i]))
+                {
+                    break;
+                }
             }
-            else if (strcmp(a, "debug") == 0)
+
+            if (i == possible_command_count)
             {
-                build_program_state.command = BUILD_COMMAND_DEBUG;
+                u64 argument_index = 1;
+                let os_argument_process_result = buster_argument_process(argv, envp, argument_index, command);
+                if (os_argument_process_result != PROCESS_RESULT_SUCCESS)
+                {
+                    result = os_argument_process_result;
+                    printf("Command not recognized!\n");
+                }
             }
             else
             {
-                result = buster_argument_process(argc, argv, envp, 1);
-
-                if (result != PROCESS_RESULT_SUCCESS)
-                {
-                    printf("Command '%s' not recognized\n", a);
-                }
+                build_program_state.command = (BuildCommand)i;
             }
         }
 
-        if (result == PROCESS_RESULT_SUCCESS)
+        let second_argument = os_string_list_next(arg_it);
+        if (second_argument.pointer)
         {
-            while (arg_ptr != arg_top)
-            {
-                printf("Arguments > 2 not supported\n");
-                result = PROCESS_RESULT_FAILED;
-                break;
-            }
+            printf("Arguments > 2 not supported\n");
+            result = PROCESS_RESULT_FAILED;
         }
     }
 
@@ -599,12 +573,40 @@ BUSTER_IMPL ProcessResult process_arguments()
     return result;
 }
 
-BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
+BUSTER_IMPL ProcessResult thread_entry_point()
 {
-    let cache_manifest = os_file_open(S("build/cache_manifest"), (OpenFlags) { .read = 1 }, (OpenPermissions){});
+    LinkUnitSpecification specifications[] = {
+        LINK_UNIT(builder, .target = target_native),
+        LINK_UNIT(cc, .target = target_native),
+        LINK_UNIT(asm, .target = target_native),
+    };
+    constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
+
+    OsString directory_paths[] = {
+        [DIRECTORY_ROOT] = OsS(""),
+        [DIRECTORY_SRC_BUSTER] = OsS("src/buster"),
+        [DIRECTORY_CC] = OsS("src/buster/compiler/frontend/cc"),
+        [DIRECTORY_ASM] = OsS("src/buster/compiler/frontend/asm"),
+    };
+
+    static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == DIRECTORY_COUNT);
+
+    OsString module_names[] = {
+        [MODULE_LIB] = OsS("lib"),
+        [MODULE_SYSTEM_HEADERS] = OsS("system_headers"),
+        [MODULE_ENTRY_POINT] = OsS("entry_point"),
+        [MODULE_BUILDER] = OsS("build"),
+        [MODULE_MD5] = OsS("md5"),
+        [MODULE_CC_MAIN] = OsS("cc_main"),
+        [MODULE_ASM_MAIN] = OsS("asm_main"),
+    };
+
+    static_assert(BUSTER_ARRAY_LENGTH(module_names) == MODULE_COUNT);
+
+    let cache_manifest = os_file_open(OsS("build/cache_manifest"), (OpenFlags) { .read = 1 }, (OpenPermissions){});
     let cache_manifest_stats = os_file_get_stats(cache_manifest, (FileStatsOptions){ .size = 1, .modified_time = 1 });
-    let cache_manifest_buffer = (u8*)arena_allocate_bytes(thread->arena, cache_manifest_stats.size, 64);
-    os_file_read(cache_manifest, (String){ cache_manifest_buffer, cache_manifest_stats.size }, cache_manifest_stats.size);
+    let cache_manifest_buffer = (u8*)arena_allocate_bytes(thread_arena(), cache_manifest_stats.size, 64);
+    os_file_read(cache_manifest, (String8){ cache_manifest_buffer, cache_manifest_stats.size }, cache_manifest_stats.size);
     os_file_close(cache_manifest);
     let cache_manifest_hash = hash_file(cache_manifest_buffer, cache_manifest_stats.size);
     BUSTER_UNUSED(cache_manifest_hash);
@@ -617,7 +619,7 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
         BUSTER_UNUSED(target_native);
     }
 
-    let cwd = path_absolute(thread->arena, ".");
+    let cwd = path_absolute(thread_arena(), OsS("."));
     let general_arena = arena_create((ArenaInitialization){});
     let file_list_arena = arena_create((ArenaInitialization){});
     let file_list_start = file_list_arena->position;
@@ -630,8 +632,6 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
     u64 module_list_count = 0;
 
     u64 c_source_file_count = 0;
-
-    constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
 
     for (u64 link_unit_index = 0; link_unit_index < link_unit_count; link_unit_index += 1)
     {
@@ -666,15 +666,15 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
                 let new_file = arena_allocate(file_list_arena, TargetBuildFile, count);
 
                 // This is wasteful, but it might not matter?
-                String parts[] = {
+                OsString parts[] = {
                     cwd,
-                    S("/"),
+                    OsS("/"),
                     directory_paths[module_specification.directory],
-                    module_specification.directory == DIRECTORY_ROOT ? S("") : S("/"),
+                    module_specification.directory == DIRECTORY_ROOT ? OsS("") : OsS("/"),
                     module_names[module->id],
-                    module_specification.no_source ? S(".h") : S(".c"),
+                    module_specification.no_source ? OsS(".h") : OsS(".c"),
                 };
-                let c_full_path = arena_join_string(general_arena, BUSTER_STRING_ARRAY_TO_SLICE(parts), true);
+                let c_full_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, parts), true);
 
                 *new_file = (TargetBuildFile) {
                     .full_path = c_full_path,
@@ -694,7 +694,7 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
 
                 if (!module_specification.no_source & !module_specification.no_header)
                 {
-                    let h_full_path = arena_duplicate_string(general_arena, c_full_path, true);
+                    let h_full_path = arena_duplicate_os_string(general_arena, c_full_path, true);
                     h_full_path.pointer[h_full_path.length - 1] = 'h';
                     *(new_file + 1) = (TargetBuildFile) {
                         .full_path = h_full_path,
@@ -716,10 +716,10 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
     for (u64 file_i = 0, compilation_unit_i = 0; file_i < file_list_count; file_i += 1)
     {
         TargetBuildFile* source_file = &file_list[file_i]; 
-        let fd = os_file_open(str_slice_start(source_file->full_path, cwd.length + 1), (OpenFlags){ .read = 1 }, (OpenPermissions){});
+        let fd = os_file_open(string_slice_start(source_file->full_path, cwd.length + 1), (OpenFlags){ .read = 1 }, (OpenPermissions){});
         let stats = os_file_get_stats(fd, (FileStatsOptions){ .raw = UINT64_MAX });
         let buffer = arena_allocate_bytes(general_arena, stats.size, 64);
-        String buffer_slice = { buffer, stats.size};
+        String8 buffer_slice = { buffer, stats.size};
         os_file_read(fd, buffer_slice, stats.size);
         os_file_close(fd);
         let __attribute__((unused)) hash = hash_file(buffer_slice.pointer, buffer_slice.length);
@@ -739,8 +739,8 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
     }
 
     let compile_commands = arena_create((ArenaInitialization){});
-    let clang_env = getenv("CLANG");
-    char* clang_path = clang_env ? clang_env : "/usr/bin/clang";
+    let clang_env = os_get_environment_variable(OsS("CLANG"));
+    let clang_path = clang_env.pointer ? clang_env : OsS("/usr/bin/clang");
     build_compile_commands(general_arena, compile_commands, compilation_units, compilation_unit_count, cwd, clang_path);
 
     let selected_compilation_count = compilation_unit_count;
@@ -749,7 +749,7 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
     for (u64 unit_i = 0; unit_i < selected_compilation_count; unit_i += 1)
     {
         let unit = &selected_compilation_units[unit_i];
-        spawn_process(&unit->process, unit->compilation_arguments, program_state->input.envp);
+        unit->process.handle = os_process_spawn(unit->compilation_arguments, program_state->input.envp);
     }
 
     ProcessResult result = {};
@@ -757,8 +757,7 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
     for (u64 unit_i = 0; unit_i < selected_compilation_count; unit_i += 1)
     {
         let unit = &selected_compilation_units[unit_i];
-        ProcessResources resources = {};
-        let unit_compilation_result = os_process_wait_sync(unit->process.handle, resources);
+        let unit_compilation_result = os_process_wait_sync(unit->process.handle, unit->process.resources);
         if (unit_compilation_result != PROCESS_RESULT_SUCCESS)
         {
             result = PROCESS_RESULT_FAILED;
@@ -778,20 +777,20 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
 
             let builder = argument_builder_start(argument_arena, clang_path);
 
-            argument_add(builder, "-fuse-ld=lld");
-            argument_add(builder, "-o");
+            argument_add(builder, OsS("-fuse-ld=lld"));
+            argument_add(builder, OsS("-o"));
 
             bool is_builder = link_unit_i == 0; // str_equal(link_unit_specification->name, S("builder"));
 
-            String artifact_path_parts[] = {
-                S("build/"),
-                is_builder ? S("") : target_to_string_builder(link_unit_specification->target),
-                is_builder ? S("") : S("/"),
+            OsString artifact_path_parts[] = {
+                OsS("build/"),
+                is_builder ? OsS("") : target_to_string_builder(link_unit_specification->target),
+                is_builder ? OsS("") : OsS("/"),
                 link_unit_specification->name,
             };
-            let artifact_path = arena_join_string(general_arena, BUSTER_STRING_ARRAY_TO_SLICE(artifact_path_parts), true);
+            let artifact_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, artifact_path_parts), true);
             link_unit_specification->artifact_path = artifact_path;
-            argument_add(builder, (char*)artifact_path.pointer);
+            argument_add(builder, artifact_path);
 
             for (u64 module_i = 0; module_i < link_modules.length; module_i += 1)
             {
@@ -800,27 +799,16 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
                 let artifact_path = unit->object_path;
                 if (!modules[module->id].no_source)
                 {
-                    argument_add(builder, (char*)artifact_path.pointer);
+                    argument_add(builder, artifact_path);
                 }
             }
 
             if (link_unit_specification->use_io_ring)
             {
-                argument_add(builder, "-luring");
+                argument_add(builder, OsS("-luring"));
             }
 
             let argv = argument_builder_end(builder);
-            bool debug = false;
-            if (debug)
-            {
-                let a = argv;
-                while (*a)
-                {
-                    printf("%s ", *a);
-                    a += 1;
-                }
-                printf("\n");
-            }
 
             let process = os_process_spawn(argv, program_state->input.envp);
             processes[link_unit_i] = process;
@@ -854,11 +842,20 @@ BUSTER_IMPL ProcessResult thread_entry_point(Thread* thread)
                 {
                     let link_unit_specification = &specifications[link_unit_i];
 
-                    char* argv[] = {
-                        (char*)link_unit_specification->artifact_path.pointer,
-                        "test",
+#if defined(_WIN32)
+                    OsString argv_parts[] = {
+                        link_unit_specification->artifact_path,
+                        OsS(" test"),
+                    };
+                    let argv_os_string = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, argv_parts), true);
+                    let argv = argv_os_string.pointer;
+#else
+                    OsChar* argv[] = {
+                        link_unit_specification->artifact_path.pointer,
+                        (u8*)"test",
                         0,
                     };
+#endif
 
                     processes[link_unit_i] = os_process_spawn(argv, program_state->input.envp);
                 }
