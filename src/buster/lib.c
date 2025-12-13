@@ -6,7 +6,7 @@
 
 #include <buster/entry_point.h>
 
-BUSTER_IMPL __thread Thread* thread;
+BUSTER_IMPL THREAD_LOCAL_DECL Thread* thread;
 
 STRUCT(ProtectionFlags)
 {
@@ -488,28 +488,30 @@ BUSTER_IMPL FileDescriptor* os_file_open(OsString path, OpenFlags flags, OpenPer
         creation_disposition |= OPEN_EXISTING;
     }
 
-    let fd = CreateFileA((char*)path.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
+    let fd = CreateFileW(path.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
     if (fd != INVALID_HANDLE_VALUE)
     {
         result = (FileDescriptor*)fd;
     }
     else
     {
+#if 0
         DWORD error = GetLastError();
-        LPVOID msgBuffer;
+        OsChar msgBuffer[1024];
 
-        FormatMessageA(
-                FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        FormatMessageW(
+                FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
                 NULL,
                 error,
                 MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                (LPSTR)&msgBuffer,
+                msgBuffer,
                 0,
                 NULL
                 );
 
-        printf("Error %lu: %s\n", error, (char*)msgBuffer);
+        print(S8("Error {u32}: {S16}\n"), error, string16_from_pointer(msgBuffer));
         LocalFree(msgBuffer);
+#endif
     }
 #endif
     return result;
@@ -901,6 +903,27 @@ BUSTER_IMPL u64 ns_between(TimeDataType start, TimeDataType end)
 #endif
 }
 
+BUSTER_IMPL bool os_initialize_time()
+{
+    bool result = {};
+#if defined(_WIN32)
+    LARGE_INTEGER freq;
+    result = QueryPerformanceFrequency(&freq) != 0;
+    if (result)
+    {
+        frequency = (u64)freq.HighPart;
+    }
+#else
+    struct timespec ts;
+    result = clock_getres(CLOCK_MONOTONIC, &ts) == 0;
+    if (result)
+    {
+        frequency = *(u128*)&ts;
+    }
+#endif
+    return result;
+}
+
 BUSTER_IMPL String8 file_read(Arena* arena, OsString path, FileReadOptions options)
 {
     let fd = os_file_open(path, (OpenFlags) { .read = 1 }, (OpenPermissions){ .read = 1 });
@@ -955,7 +978,7 @@ BUSTER_IMPL OsString os_path_absolute_stack(OsString buffer, OsString relative_f
 
     if (syscall_result)
     {
-        result = string8_from_pointer_length((u8*)syscall_result, strlen(syscall_result));
+        result = string8_from_pointer_length(syscall_result, strlen(syscall_result));
         BUSTER_CHECK(result.length < buffer.length);
     }
 
@@ -973,7 +996,7 @@ BUSTER_IMPL OsString os_path_absolute_stack(OsString buffer, OsString relative_f
 BUSTER_IMPL OsString path_absolute(Arena* arena, OsString relative_file_path)
 {
     OsChar buffer[max_path_length];
-    let stack_slice = os_path_absolute_stack((OsString){buffer, BUSTER_ARRAY_LENGTH(buffer)}, relative_file_path);
+    let stack_slice = os_path_absolute_stack(os_string_from_pointer_length(buffer, BUSTER_ARRAY_LENGTH(buffer)), relative_file_path);
     let result = arena_duplicate_os_string(arena, stack_slice, true);
     return result;
 }
@@ -1185,7 +1208,7 @@ BUSTER_IMPL Arena* thread_arena()
         BUSTER_TRAP();
     }
 
-    exit(1);
+    os_exit(1);
 }
 
 BUSTER_IMPL String8 format_integer(Arena* arena, FormatIntegerOptions options, bool zero_terminate)
@@ -1586,6 +1609,8 @@ BUSTER_IMPL u32 os_thread_join(ThreadHandle* handle)
 
 BUSTER_IMPL void test_error(String8 check, u32 line, String8 function, String8 file_path)
 {
+    print(S8("{S8} failed at {S8}:{S8}:{u32}\n"), check, file_path, function, line);
+
     if (is_debugger_present())
     {
         BUSTER_UNUSED(check);
@@ -1612,6 +1637,21 @@ BUSTER_IMPL u64 next_power_of_two(u64 n)
     return n;
 }
 
+BUSTER_IMPL String8 string8_from_pointer(char* pointer)
+{
+    return (String8){(u8*)pointer, string8_length(pointer)};
+}
+
+BUSTER_IMPL String16 string16_from_pointer(char16* pointer)
+{
+    return (String16){(u16*)pointer, string16_length(pointer)};
+}
+
+BUSTER_IMPL String16 string16_from_pointer_length(char16* pointer, u64 length)
+{
+    return (String16){(u16*)pointer, length};
+}
+
 BUSTER_IMPL String8 string8_from_pointers(char8* start, char8* end)
 {
     BUSTER_CHECK(end >= start);
@@ -1619,7 +1659,7 @@ BUSTER_IMPL String8 string8_from_pointers(char8* start, char8* end)
     return (String8) { (u8*)start, len };
 }
 
-BUSTER_IMPL String8 string8_from_pointer_length(const char8* pointer, u64 len)
+BUSTER_IMPL String8 string8_from_pointer_length(char* pointer, u64 len)
 {
     return (String8) { (u8*)pointer, len };
 }
@@ -1849,20 +1889,148 @@ BUSTER_IMPL bool is_identifier(char ch)
     return is_identifier_start(ch) | is_decimal(ch);
 }
 
-BUSTER_IMPL void print(String8 str)
+BUSTER_IMPL void print_raw(String8 str)
 {
     os_file_write(os_get_stdout(), str);
+}
+BUSTER_IMPL void print(String8 format, ...)
+{
+    let it = format.pointer;
+    let top = it + format.length;
+    va_list va;
+    va_start(va);
+
+    u8 buffer[8192];
+    u64 buffer_i = 0;
+
+    while (it != top)
+    {
+        while (it != top && *it != '{')
+        {
+            buffer[buffer_i++] = *it++;
+        }
+
+        if (*it == '{')
+        {
+#if 0
+            // TODO: replace with proper printing
+            while (*it != '}')
+            {
+                buffer[buffer_i++] = *it++;
+            }
+
+            buffer[buffer_i++] = *it++;
+#else
+            it += 1;
+
+            u8 format_buffer[128];
+            u64 format_buffer_i = 0;
+
+            while (*it != '}')
+            {
+                format_buffer[format_buffer_i++] = *it++;
+            }
+
+            it += 1;
+
+            let this_format_string = string8_from_pointer_length((char*)format_buffer, format_buffer_i);
+            ENUM(Format, 
+                    FORMAT_OS_STRING,
+                    FORMAT_STRING8,
+                    FORMAT_STRING16,
+                    FORMAT_STRING32,
+                    FORMAT_UNSIGNED_INTEGER_8,
+                    FORMAT_UNSIGNED_INTEGER_16,
+                    FORMAT_UNSIGNED_INTEGER_32,
+                    FORMAT_UNSIGNED_INTEGER_64,
+                    FORMAT_UNSIGNED_INTEGER_128,
+                    FORMAT_SIGNED_INTEGER_8,
+                    FORMAT_SIGNED_INTEGER_16,
+                    FORMAT_SIGNED_INTEGER_32,
+                    FORMAT_SIGNED_INTEGER_64,
+                    FORMAT_SIGNED_INTEGER_128,
+                    FORMAT_INTEGER_COUNT,
+                );
+            String8 possible_format_strings[FORMAT_INTEGER_COUNT] = {
+                [FORMAT_OS_STRING] = S8("OsS"),
+                [FORMAT_STRING8] = S8("S8"),
+            };
+
+            u64 i;
+            for (i = 0; i < BUSTER_ARRAY_LENGTH(possible_format_strings); i += 1)
+            {
+                if (string8_equal(this_format_string, possible_format_strings[i]))
+                {
+                    break;
+                }
+            }
+
+            if (i == FORMAT_INTEGER_COUNT)
+            {
+                buffer[buffer_i++] = '{';
+                for (u64 i = 0; i < this_format_string.length; i += 1)
+                {
+                    buffer[buffer_i++] = this_format_string.pointer[i];
+                }
+                buffer[buffer_i++] = '}';
+            }
+            else
+            {
+                let format = (Format)i;
+
+                switch (format)
+                {
+                    break; case FORMAT_OS_STRING:
+                    {
+                        let pointer = va_arg(va, OsChar*);
+                        let string = os_string_from_pointer(pointer);
+                        for (u64 i = 0; i < string.length; i += 1)
+                        {
+                            buffer[buffer_i++] = string.pointer[i];
+                        }
+                    }
+                    break; case FORMAT_STRING8:
+                    {
+                        let string = va_arg(va, String8);
+                        for (u64 i = 0; i < string.length; i += 1)
+                        {
+                            buffer[buffer_i++] = string.pointer[i];
+                        }
+                    }
+                    break; case FORMAT_STRING16:
+                    break; case FORMAT_STRING32:
+                    break; case FORMAT_UNSIGNED_INTEGER_8:
+                    break; case FORMAT_UNSIGNED_INTEGER_16:
+                    break; case FORMAT_UNSIGNED_INTEGER_32:
+                    break; case FORMAT_UNSIGNED_INTEGER_64:
+                    break; case FORMAT_UNSIGNED_INTEGER_128:
+                    break; case FORMAT_SIGNED_INTEGER_8:
+                    break; case FORMAT_SIGNED_INTEGER_16:
+                    break; case FORMAT_SIGNED_INTEGER_32:
+                    break; case FORMAT_SIGNED_INTEGER_64:
+                    break; case FORMAT_SIGNED_INTEGER_128:
+                    break; case FORMAT_INTEGER_COUNT:
+                    {
+                    }
+                }
+            }
+#endif
+        }
+    }
+
+    let string = string8_from_pointer_length((char*)buffer, buffer_i);
+    os_file_write(os_get_stdout(), string);
 }
 
 BUSTER_IMPL OsStringList argument_add(ArgumentBuilder* builder, OsString arg)
 {
 #if _WIN32
     let result = arena_duplicate_os_string(builder->arena, arg, true);
-    result.pointer[arg.length] = 0;
+    result.pointer[arg.length] = ' ';
     return result.pointer;
 #else
     let result = arena_allocate(builder->arena, OsChar*, 1);
-    *result = arg.pointer;
+    *result = (OsChar*)arg.pointer;
     return result;
 #endif
 }
@@ -1883,7 +2051,7 @@ BUSTER_IMPL ArgumentBuilder* argument_builder_start(Arena* arena, OsString s)
 BUSTER_IMPL OsStringList argument_builder_end(ArgumentBuilder* restrict builder)
 {
 #if defined(_WIN32)
-    *(OsChar*)((u8*)builder->arena + builder->arena->position) = 0;
+    *(OsChar*)((u8*)builder->arena + builder->arena->position - sizeof(OsChar)) = 0;
 #else
     argument_add(builder, (OsString){});
 #endif
@@ -1957,7 +2125,7 @@ EXPORT void* memset(void* restrict address, int ch, u64 byte_count)
 }
 #endif
 
-BUSTER_IMPL char* get_last_error_message()
+BUSTER_IMPL OsChar* get_last_error_message()
 {
     return 0;
 }
@@ -1986,12 +2154,34 @@ BUSTER_IMPL u64 string32_length(const char32* s)
     return it - s;
 }
 
-BUSTER_IMPL ProcessHandle* os_process_spawn(OsStringList argv, OsStringList envp)
+BUSTER_IMPL ProcessHandle* os_process_spawn(OsChar* name, OsStringList argv, OsStringList envp)
 {
+    ProcessHandle* result = {};
 #if defined(_WIN32)
-    BUSTER_UNUSED(argv);
     BUSTER_UNUSED(envp);
-    BUSTER_TRAP();
+    PROCESS_INFORMATION process_information = {};
+    STARTUPINFOW startup_info = {sizeof(startup_info)};
+    if (CreateProcessW(name, argv, 0, 0, 1, 0, 0, 0, &startup_info, &process_information))
+    {
+        result = process_information.hProcess;
+    }
+    else
+    {
+        let error = GetLastError();
+
+        OsChar buffer[4096];
+        DWORD length = FormatMessageW(
+                FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                NULL,
+                error,
+                MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                buffer,
+                BUSTER_ARRAY_LENGTH(buffer),
+                NULL
+                );
+        // TODO: delete?
+        WriteConsoleW(GetStdHandle(STD_OUTPUT_HANDLE), buffer, length, 0, 0);
+    }
 #else
     pid_t pid = -1;
     posix_spawn_file_actions_t file_actions;
@@ -2001,18 +2191,18 @@ BUSTER_IMPL ProcessHandle* os_process_spawn(OsStringList argv, OsStringList envp
 
     if (file_actions_init == 0 && attribute_init == 0)
     {
-        let spawn_result = posix_spawn(&pid, (char*)argv[0], &file_actions, &attributes, (char**)argv, (char**)envp);
+        let spawn_result = posix_spawn(&pid, name, &file_actions, &attributes, (char**)argv, (char**)envp);
 
         if (program_state->input.verbose)
         {
-            printf("Launched: ");
+            print(S8("Launched: "));
 
             for (let a = argv; *a; a += 1)
             {
-                printf("%s ", *a);
+                print(S8("{OsS} "), *a);
             }
 
-            printf("\n");
+            print(S8("\n"));
         }
 
         if (spawn_result != 0)
@@ -2024,8 +2214,10 @@ BUSTER_IMPL ProcessHandle* os_process_spawn(OsStringList argv, OsStringList envp
     posix_spawn_file_actions_destroy(&file_actions);
     posix_spawnattr_destroy(&attributes);
 
-    return pid == -1 ? (ProcessHandle*)0 : (ProcessHandle*)(u64)pid;
+    result = pid == -1 ? (ProcessHandle*)0 : (ProcessHandle*)(u64)pid;
 #endif
+
+    return result;
 }
 
 BUSTER_IMPL ProcessResult os_process_wait_sync(ProcessHandle* handle, ProcessResources resources)
@@ -2036,7 +2228,15 @@ BUSTER_IMPL ProcessResult os_process_wait_sync(ProcessHandle* handle, ProcessRes
     {
 #if defined(_WIN32)
         BUSTER_UNUSED(resources);
-        BUSTER_TRAP();
+        let wait_result = WaitForSingleObject(handle, INFINITE);
+        if (wait_result == WAIT_OBJECT_0)
+        {
+            DWORD exit_code;
+            if (GetExitCodeProcess(handle, &exit_code))
+            {
+                result = (ProcessResult)exit_code;
+            }
+        }
 #else
         let pid = (pid_t)(u64)handle;
         int status;
@@ -2095,22 +2295,40 @@ BUSTER_IMPL OsString os_string_list_next(OsStringListIterator* iterator)
 {
     OsString result = {};
     let list = iterator->list;
-    let position = iterator->position;
+    let original_position = iterator->position;
+    let position = original_position;
 
     let current = list[position];
     if (current)
     {
 #if defined(_WIN32)
-
-        let space = raw_string16_first_character(list, ' ');
-        let is_space = space != string_no_match;
         let pointer = &list[position];
-        let length = is_space ? space : string16_length(pointer);
-        position += length + is_space;
+        if (*pointer == '"')
+        {
+            let double_quote = raw_string16_first_character(pointer, ' ');
+            if (double_quote == string_no_match)
+            {
+                return result;
+            }
+
+            position += double_quote + 1;
+            pointer = &list[position];
+        }
+
+        let space = raw_string16_first_character(pointer, ' ');
+        let is_space = space != string_no_match;
+        while (pointer[space] == ' ')
+        {
+            space += 1;
+        }
+
+        let not_double_quote_length = (is_space ? space : string16_length(pointer));
+        let length = (position - original_position) + not_double_quote_length;
+        position += not_double_quote_length + is_space;
         result = (OsString){ pointer, length };
 #else
         position += 1;
-        result = (OsString) { current, string8_length((char*)current) };
+        result = os_string_from_pointer(current);
 #endif
         iterator->position = position;
     }
@@ -2142,4 +2360,17 @@ BUSTER_IMPL OsString os_get_environment_variable(OsString variable)
     result = (OsString){(u8*)pointer, string8_length(pointer)};
 #endif
     return result;
+}
+
+[[gnu::noreturn]] BUSTER_IMPL void os_exit(u32 code)
+{
+#if BUSTER_LINK_LIBC
+    exit((int)code);
+#else
+#if _WIN32
+    ExitProcess(code);
+#else
+#pragma error
+#endif
+#endif
 }

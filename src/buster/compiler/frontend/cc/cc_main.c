@@ -5,7 +5,7 @@
 STRUCT(CCProgramState)
 {
     ProgramState general_program_state;
-    String8 cwd;
+    OsString cwd;
 };
 
 BUSTER_LOCAL CCProgramState cc_program_state = {
@@ -21,30 +21,30 @@ BUSTER_IMPL ProcessResult process_arguments()
 
 STRUCT(CompilerOptions)
 {
-    String8 cwd;
+    OsString cwd;
 };
 
 STRUCT(File)
 {
-    String8 absolute_path;
+    OsString absolute_path;
     String8 original_content;
     String8 preprocessed_content;
 };
 
 STRUCT(CompilerFileReadOptions)
 {
-    String8 cwd;
-    String8 relative_path;
+    OsString cwd;
+    OsString relative_path;
 };
 
 BUSTER_LOCAL File file_from_path(Arena* arena, CompilerFileReadOptions options)
 {
-    String8 parts[] = {
+    OsString parts[] = {
         options.cwd,
-        S8("/"),
+        OsS("/"),
         options.relative_path,
     };
-    let absolute_path = arena_join_string8(arena, BUSTER_ARRAY_TO_SLICE(String8Slice, parts), true);
+    let absolute_path = arena_join_os_string(arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, parts), true);
     let file_content = file_read(arena, options.relative_path, (FileReadOptions) {});
 
     return (File) {
@@ -94,7 +94,7 @@ BUSTER_LOCAL bool compile_file(Arena* arena, File* file, CompilerOptions options
     return true;
 }
 
-BUSTER_LOCAL bool compile(Arena* arena, String8 relative_path, CompilerOptions options)
+BUSTER_LOCAL bool compile(Arena* arena, OsString relative_path, CompilerOptions options)
 {
     if (!options.cwd.pointer)
     {
@@ -113,12 +113,12 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     let arena = thread->arena;
     cc_program_state.cwd = path_absolute(arena, OsS("."));
     BUSTER_UNUSED(thread);
-    printf("Hello world from the compiler\n");
+    print(S8("Hello world from the compiler\n"));
     let basic = OsS("test/cc/basic.c");
     let result = compile(arena, basic, (CompilerOptions) {});
     if (!result)
     {
-        printf("Compilation failed!\n");
+        print(S8("Compilation failed!\n"));
     }
     return result ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }

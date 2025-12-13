@@ -24,6 +24,24 @@
 #endif
 #endif
 
+#if BUSTER_LINK_LIBC
+#define THREAD_LOCAL_DECL __thread
+#else
+#if defined(_WIN32)
+#define THREAD_LOCAL_DECL
+#else
+#pragma error
+#endif
+#endif
+
+#define thread_local_get(x) TlsGetValue(x)
+
+#if defined(__APPLE__)
+#define BUSTER_APPLE 1
+#else
+#define BUSTER_APPLE 0
+#endif
+
 #define BUSTER_INCLUDE_TESTS 1
 
 #if defined(__cplusplus)
@@ -96,12 +114,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <uchar.h>
-
-#if defined(_WIN32)
-typedef char char8_t;
-#endif
-
+#include <stdarg.h>
 #if BUSTER_KERNEL == 0
 #include <string.h>
 #include <stdlib.h>
@@ -118,6 +131,18 @@ typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
 typedef signed __int128 s128;
+
+#if BUSTER_APPLE == 0
+#include <uchar.h>
+#else
+typedef char char8_t;
+typedef u16 char16_t;
+typedef u32 char32_t;
+#endif
+
+#if defined(_WIN32)
+typedef char char8_t;
+#endif
 
 typedef char8_t char8;
 typedef char16_t char16;
@@ -149,7 +174,11 @@ STRUCT(String8)
 
 STRUCT(String16)
 {
+#if defined(_WIN32)
+    wchar_t* pointer;
+#else
     u16* pointer;
+#endif
     u64 length;
 };
 
@@ -161,10 +190,10 @@ STRUCT(String32)
 
 #if defined(_WIN32)
 typedef String16 OsString;
-typedef char16 OsChar;
+typedef wchar_t OsChar;
 #else
 typedef String8 OsString;
-typedef char8 OsChar;
+typedef char OsChar;
 #endif
 
 #if defined(_WIN32)
@@ -413,7 +442,7 @@ ENUM(ProcessResult,
 );
 
 typedef struct Thread Thread;
-BUSTER_DECL __thread Thread* thread;
+BUSTER_DECL THREAD_LOCAL_DECL Thread* thread;
 
 typedef ProcessResult ThreadEntryPoint(void);
 BUSTER_DECL ProcessResult thread_entry_point();
@@ -523,9 +552,10 @@ constexpr u64 string_no_match = UINT64_MAX;
 
 #define string_slice_start(s, start) ((typeof(s)) { (s).pointer + (start), (s).length - (start) })
 
+BUSTER_DECL String8 string8_from_pointer(char* start);
 BUSTER_DECL String8 string8_from_pointers(char8* start, char8* end);
-BUSTER_DECL String8 string8_from_pointer_length(const char8* ptr, u64 len);
-BUSTER_DECL String8 string8_from_pointer_start_end(char8* ptr, u64 start, u64 end);
+BUSTER_DECL String8 string8_from_pointer_length(char* pointer, u64 len);
+BUSTER_DECL String8 string8_from_pointer_start_end(char8* pointer, u64 start, u64 end);
 BUSTER_DECL String8 string8_slice(String8 s, u64 start, u64 end);
 BUSTER_DECL bool string8_equal(String8 s1, String8 s2);
 BUSTER_DECL u64 string8_first_character(String8 s, char8 ch);
@@ -533,9 +563,10 @@ BUSTER_DECL u64 string8_last_character(String8 s, char8 ch);
 BUSTER_DECL bool string8_starts_with(String8 s, String8 beginning);
 BUSTER_DECL bool string8_ends_with(String8 s, String8 ending);
 
+BUSTER_DECL String16 string16_from_pointer(char16* start);
 BUSTER_DECL String16 string16_from_pointers(char16* start, char16* end);
-BUSTER_DECL String16 string16_from_pointer_length(const char16* ptr, u64 len);
-BUSTER_DECL String16 string16_from_pointer_start_end(char16* ptr, u64 start, u64 end);
+BUSTER_DECL String16 string16_from_pointer_length(char16* pointer, u64 len);
+BUSTER_DECL String16 string16_from_pointer_start_end(char16* pointer, u64 start, u64 end);
 BUSTER_DECL String16 string16_slice(String16 s, u64 start, u64 end);
 BUSTER_DECL bool string16_equal(String16 s1, String16 s2);
 BUSTER_DECL u64 string16_first_character(String16 s, char16 ch);
@@ -544,20 +575,23 @@ BUSTER_DECL bool string16_starts_with(String16 s, String16 beginning);
 BUSTER_DECL bool string16_ends_with(String16 s, String16 ending);
 
 BUSTER_DECL u64 string16_length(const char16* s);
-BUSTER_DECL u64 string16_size(String16 s);
 BUSTER_DECL u64 string32_length(const char32* s);
-BUSTER_DECL u64 string32_size(String32 s);
 
 BUSTER_DECL String8 string16_to_string8(Arena* arena, String16 s);
 
+#define os_string_to_c(s) (OsChar*)((s).pointer)
 #if defined(_WIN32)
+#define os_string_from_pointer(pointer) string16_from_pointer(pointer)
 #define os_string_first_character string16_first_character
 #define os_string_to_string8(a, s) string16_to_string8(a, s)
 #define os_string_equal(a, b) string16_equal(a, b)
+#define os_string_from_pointer_length(pointer, length) string16_from_pointer_length(pointer, length)
 #else
+#define os_string_from_pointer(pointer) string8_from_pointer(pointer)
 #define os_string_first_character string8_first_character
 #define os_string_to_string8(a, s) s
 #define os_string_equal(a, b) string8_equal(a, b)
+#define os_string_from_pointer_length(pointer, length) string8_from_pointer_length(pointer, length)
 #endif
 
 #if defined(_WIN32)
@@ -579,8 +613,8 @@ BUSTER_DECL bool is_hexadecimal(char ch);
 BUSTER_DECL bool is_identifier_start(char ch);
 BUSTER_DECL bool is_identifier(char ch);
 
-BUSTER_DECL char* get_last_error_message();
-BUSTER_DECL ProcessHandle* os_process_spawn(OsStringList argv, OsStringList envp);
+BUSTER_DECL OsChar* get_last_error_message();
+BUSTER_DECL ProcessHandle* os_process_spawn(OsChar* name, OsStringList argv, OsStringList envp);
 BUSTER_DECL ProcessResult os_process_wait_sync(ProcessHandle* handle, ProcessResources resources);
 BUSTER_DECL ProcessResult buster_argument_process(OsStringList argument_pointer, OsStringList environment_pointer, u64 argument_index, OsString argument);
 BUSTER_DECL OsString os_get_environment_variable(OsString variable);
@@ -588,7 +622,11 @@ BUSTER_DECL OsString os_get_environment_variable(OsString variable);
 BUSTER_DECL OsStringListIterator os_string_list_initialize(OsStringList list);
 BUSTER_DECL OsString os_string_list_next(OsStringListIterator* iterator);
 
-BUSTER_DECL void print(String8 str);
+BUSTER_DECL void print_raw(String8 str);
+BUSTER_DECL void print(String8 str, ...);
+
+[[gnu::noreturn]] BUSTER_DECL void os_exit(u32 code);
+BUSTER_DECL bool os_initialize_time();
 
 #if BUSTER_USE_IO_RING
 BUSTER_DECL IoRingSubmission io_ring_prepare_open(char* path, u64 user_data);

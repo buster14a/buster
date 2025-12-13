@@ -11,10 +11,8 @@
 BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList envp)
 {
     ProcessResult result = {};
+    os_initialize_time();
 #ifdef _WIN32
-    BOOL query_result = QueryPerformanceFrequency((LARGE_INTEGER*)&frequency);
-    BUSTER_CHECK(query_result);
-
     WSADATA WinSockData;
     WSAStartup(MAKEWORD(2, 2), &WinSockData);
     GUID guid = WSAID_MULTIPLE_RIO;
@@ -104,11 +102,80 @@ BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList en
 }
 
 #if BUSTER_LINK_LIBC
-int main(int argc, char* argv[], char* envp[])
+BUSTER_EXPORT int main(int argc, char* argv[], char* envp[])
 {
     BUSTER_UNUSED(argc);
     let result = buster_entry_point((OsStringList)argv, (OsStringList)envp);
     return (int)result;
 }
 #else
+#if _WIN32
+[[gnu::noreturn]] BUSTER_EXPORT void mainCRTStartup()
+{
+    let result = buster_entry_point(GetCommandLineW(), GetEnvironmentStringsW());
+    ExitProcess((UINT)result);
+}
+#endif
+
+BUSTER_EXPORT void *memset(void* pointer, int c, size_t n)
+{
+    u8* restrict p = (u8*)pointer;
+
+    for (u64 i = 0; i < n; i += 1)
+    {
+        p[i] = c;
+    }
+
+    return pointer;
+}
+
+BUSTER_EXPORT int memcmp(const void* s1, const void* s2, size_t n)
+{
+    let a = (u8*)s1;
+    let b = (u8*)s2;
+
+    int result = 0;
+
+    for (u64 i = 0; i < n; i += 1)
+    {
+        result = a - b;
+        if (result)
+        {
+            break;
+        }
+    }
+
+    return result;
+}
+
+BUSTER_EXPORT void *memcpy(void* restrict destination, const void* restrict source, size_t n)
+{
+    for (u64 i = 0; i < n; i += 1)
+    {
+        ((u8*)(destination))[i] = ((u8*)(source))[i];
+    }
+
+    return destination;
+}
+
+BUSTER_EXPORT size_t strlen(const char* s)
+{
+    let i = s;
+    let it = (char*)s;
+
+    while (*it)
+    {
+        it += 1;
+    }
+
+    return (size_t)(it - i);
+}
+
+int _fltused = 1;
+
+#if _WIN32
+BUSTER_EXPORT void __chkstk(void)
+{
+}
+#endif
 #endif

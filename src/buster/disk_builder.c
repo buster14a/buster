@@ -1,6 +1,5 @@
 #pragma once
 #include <lib.h>
-#include <stdio.h>
 
 #if BUSTER_UNITY_BUILD
 #include <lib.c>

@@ -21,6 +21,6 @@ BUSTER_IMPL ProcessResult process_arguments()
 
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
-    printf("Hello world from assembler\n");
+    print(S8("Hello world from assembler\n"));
     return PROCESS_RESULT_SUCCESS;
 }
