@@ -2,11 +2,7 @@
 
 #include <buster/lib.h>
 
-#if BUSTER_KERNEL == 0
-#include <stdio.h>
-#endif
-
-#ifdef __linux__
+#if defined(__linux__)
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
@@ -23,8 +19,9 @@
 #if BUSTER_USE_IO_RING
 #include <liburing.h>
 #endif
+#endif
 
-#elif defined(__APPLE__)
+#if defined(__APPLE__)
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
@@ -32,10 +29,15 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <pthread.h>
-#elif defined(_WIN32)
+#include <sys/syslimits.h>
+#include <spawn.h>
+#endif
+
+#if defined(_WIN32)
 #include <winsock2.h>
 #include <windows.h>
 #include <mswsock.h>
+#include <limits.h>
 
 BUSTER_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 #endif
