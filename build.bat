@@ -87,6 +87,7 @@ if not exist build (
     -DBUSTER_UNITY_BUILD=1 ^
     -DBUSTER_USE_IO_RING=0 ^
     -DBUSTER_USE_PTHREAD=1 ^
+    -DBUSTER_INCLUDE_TESTS=1 ^
     -g ^
     -Werror ^
     -Wall ^

@@ -43,7 +43,7 @@ fi
 #endif
 #if [[ "$?" != "0" && "$?" != "333" ]]; then
     mkdir -p build
-    $CLANG build.c -o build/builder -fuse-ld=lld $CLANG_EXTRA_FLAGS -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=0 -DBUSTER_USE_PTHREAD=1 -g -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-language-extension-token -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -Wno-gnu-flexible-array-initializer -Wno-missing-field-initializers -Wno-pragma-once-outside-header -pthread -fwrapv -fno-strict-aliasing -funsigned-char -ferror-limit=1 #-ftime-trace -ftime-trace-verbose
+    $CLANG build.c -o build/builder -fuse-ld=lld $CLANG_EXTRA_FLAGS -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=0 -DBUSTER_USE_PTHREAD=1 -DBUSTER_INCLUDE_TESTS=1 -g -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-language-extension-token -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -Wno-gnu-flexible-array-initializer -Wno-missing-field-initializers -Wno-pragma-once-outside-header -pthread -fwrapv -fno-strict-aliasing -funsigned-char -ferror-limit=1 #-ftime-trace -ftime-trace-verbose
     if [[ "$?" == "0" ]]; then
         BUSTER_REGENERATE=1 build/builder $@
         # BUSTER_REGENERATE=1 lldb -b -o run -o 'bt all' -- build/builder $@
@@ -219,6 +219,7 @@ STRUCT(LinkUnitSpecification)
     OsString artifact_path;
     Target target;
     bool use_io_ring;
+    bool has_debug_info;
 };
 
 LINK_UNIT_MODULES(builder, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_BUILDER }, { MODULE_MD5 });
@@ -381,6 +382,7 @@ STRUCT(CompilationUnit)
     OsStringList compilation_arguments;
     bool has_debug_info;
     bool use_io_ring;
+    bool include_tests;
     OsString object_path;
     OsString source_path;
     Process process;
@@ -414,6 +416,12 @@ BUSTER_LOCAL void append_string16(Arena* arena, String16 s)
 {
     string16_to_string8(arena, s);
 }
+
+#if _WIN32
+#define append_os_string append_string16
+#else
+#define append_os_string append_string8
+#endif
 
 BUSTER_LOCAL bool target_equal(Target a, Target b)
 {
@@ -577,31 +585,12 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         append_string8(compile_commands, os_string_to_string8(arena, cwd));
         append_string8(compile_commands, S8("\",\n\t\t\"command\": \""));
 
-#if defined(_WIN32)
-        let length = string16_length(args);
-        OsString arg_strings = { args, length };
-        let arg_it = arg_strings;
-        bool is_space;
-        do
+        let arg_it = os_string_list_initialize(args);
+        for (let arg = os_string_list_next(&arg_it); arg.pointer; arg = os_string_list_next(&arg_it))
         {
-            let space = string16_first_character(arg_it, ' ');
-            is_space = space != string_no_match;
-            let end = is_space ? (space + 1) : arg_it.length;
-            let arg_chunk = (OsString){ arg_it.pointer, end };
-            append_string16(compile_commands, arg_chunk);
-            arg_it.pointer += end;
-            arg_it.length -= end;
-        } while (is_space);
-#else
-        for (OsChar** a = args; *a; a += 1)
-        {
-            let arg_ptr = *a;
-            let arg_len = strlen((char*)arg_ptr);
-            let arg = (String8){ (u8*)arg_ptr, arg_len };
-            append_string8(compile_commands, arg);
+            append_os_string(compile_commands, arg);
             append_string8(compile_commands, S8(" "));
         }
-#endif
 
         compile_commands->position -= 1;
         append_string8(compile_commands, S8("\",\n\t\t\"file\": \""));
@@ -641,7 +630,8 @@ BUSTER_IMPL ProcessResult process_arguments()
 
         let arg_iterator = os_string_list_initialize(argv);
         let arg_it = &arg_iterator;
-        os_string_list_next(arg_it);
+        let first_argument = os_string_list_next(arg_it);
+        BUSTER_UNUSED(first_argument);
         let command = os_string_list_next(arg_it);
         if (command.pointer)
         {
@@ -694,15 +684,20 @@ BUSTER_IMPL ProcessResult process_arguments()
     return result;
 }
 
+BUSTER_LOCAL bool builder_tests(TestArguments* arguments)
+{
+    return lib_tests(arguments);
+}
+
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
 #if defined(__APPLE__)
     xc_sdk_path = os_string_from_pointer(getenv("XC_SDK_PATH"));
 #endif
     LinkUnitSpecification specifications[] = {
-        LINK_UNIT(builder, .target = target_native),
-        LINK_UNIT(cc, .target = target_native),
-        LINK_UNIT(asm, .target = target_native),
+        LINK_UNIT(builder, .target = target_native, .has_debug_info = true),
+        LINK_UNIT(cc, .target = target_native, .has_debug_info = true),
+        LINK_UNIT(asm, .target = target_native, .has_debug_info = true),
     };
     constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
 
@@ -910,13 +905,14 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             }
         }
 
+        u64 link_unit_start = 1;
         // TODO: depend more-fine grainedly, ie: link those objects which succeeded compiling instead of all or nothing
         if (result == PROCESS_RESULT_SUCCESS)
         {
             let argument_arena = arena_create((ArenaInitialization){});
             ProcessHandle* processes[link_unit_count];
 
-            for (u64 link_unit_i = 0; link_unit_i < link_unit_count; link_unit_i += 1)
+            for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
             {
                 let link_unit_specification = &specifications[link_unit_i];
                 let link_modules = link_unit_specification->modules;
@@ -933,6 +929,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     is_builder ? OsS("") : target_to_string_builder(link_unit_specification->target),
                     is_builder ? OsS("") : OsS("/"),
                     link_unit_specification->name,
+                    link_unit_specification->target.os == OPERATING_SYSTEM_WINDOWS ? OsS(".exe") : OsS(""),
                 };
                 let artifact_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, artifact_path_parts), true);
                 link_unit_specification->artifact_path = artifact_path;
@@ -949,6 +946,10 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     }
                 }
 
+                if (link_unit_specification->has_debug_info)
+                {
+                    argument_add(builder, OsS("-g"));
+                }
 
                 if (link_unit_specification->target.os == OPERATING_SYSTEM_WINDOWS)
                 {
@@ -975,7 +976,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 processes[link_unit_i] = process;
             }
 
-            for (u64 link_unit_i = 0; link_unit_i < link_unit_count; link_unit_i += 1)
+            for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
             {
                 let process = processes[link_unit_i];
                 ProcessResources resources = {};
@@ -997,7 +998,14 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     ProcessHandle* processes[link_unit_count];
 
                     // Skip builder tests
-                    u64 link_unit_start = 1;
+
+                    TestArguments arguments = {
+                        .arena = general_arena,
+                    };
+                    if (!builder_tests(&arguments))
+                    {
+                        result = PROCESS_RESULT_FAILED;
+                    }
 
                     for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
                     {

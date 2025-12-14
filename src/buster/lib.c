@@ -107,11 +107,17 @@ BUSTER_LOCAL bool os_lock_and_unlock(void* address, u64 size)
     }
     result = os_result == 0;
 #elif defined(_WIN32)
-    RIO_BUFFERID buffer_id = w32_rio_functions.RIORegisterBuffer(address, size);
-    result = buffer_id != RIO_INVALID_BUFFERID;
-    if (result)
+    if (w32_rio_functions.RIORegisterBuffer)
     {
-        w32_rio_functions.RIODeregisterBuffer(buffer_id);
+        RIO_BUFFERID buffer_id = w32_rio_functions.RIORegisterBuffer(address, size);
+        result = buffer_id != RIO_INVALID_BUFFERID;
+        if (result)
+        {
+            if (w32_rio_functions.RIODeregisterBuffer)
+            {
+                w32_rio_functions.RIODeregisterBuffer(buffer_id);
+            }
+        }
     }
 #endif
     return result;
@@ -1912,15 +1918,6 @@ BUSTER_IMPL void print(String8 format, ...)
 
         if (*it == '{')
         {
-#if 0
-            // TODO: replace with proper printing
-            while (*it != '}')
-            {
-                buffer[buffer_i++] = *it++;
-            }
-
-            buffer[buffer_i++] = *it++;
-#else
             it += 1;
 
             u8 format_buffer[128];
@@ -1982,11 +1979,10 @@ BUSTER_IMPL void print(String8 format, ...)
                 {
                     break; case FORMAT_OS_STRING:
                     {
-                        let pointer = va_arg(va, OsChar*);
-                        let string = os_string_from_pointer(pointer);
+                        let string = va_arg(va, OsString);
                         for (u64 i = 0; i < string.length; i += 1)
                         {
-                            buffer[buffer_i++] = string.pointer[i];
+                            buffer[buffer_i++] = (u8)string.pointer[i];
                         }
                     }
                     break; case FORMAT_STRING8:
@@ -2014,7 +2010,6 @@ BUSTER_IMPL void print(String8 format, ...)
                     }
                 }
             }
-#endif
         }
     }
 
@@ -2087,25 +2082,54 @@ BUSTER_IMPL void argument_builder_destroy(ArgumentBuilder* restrict builder)
 #if BUSTER_INCLUDE_TESTS
 BUSTER_IMPL bool lib_tests(TestArguments* restrict arguments)
 {
+    print(S8("Running lib tests...\n"));
     bool result = 1;
     let arena = arguments->arena;
     let position = arena->position;
-    BUSTER_TEST(arguments, string8_equal(S8("123"), format_integer(arena, (FormatIntegerOptions) { .value = 123, .format = INTEGER_FORMAT_DECIMAL, }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("1000"), format_integer(arena, (FormatIntegerOptions) { .value = 1000, .format = INTEGER_FORMAT_DECIMAL }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("12839128391258192419"), format_integer(arena, (FormatIntegerOptions) { .value = 12839128391258192419ULL, .format = INTEGER_FORMAT_DECIMAL}, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("-1"), format_integer(arena, (FormatIntegerOptions) { .value = 1, .format = INTEGER_FORMAT_DECIMAL, .treat_as_signed = true}, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("-1123123123"), format_integer(arena, (FormatIntegerOptions) { .value = 1123123123, .format = INTEGER_FORMAT_DECIMAL, .treat_as_signed = true}, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("0d0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_DECIMAL, .prefix = true }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("0d123"), format_integer(arena, (FormatIntegerOptions) { .value = 123, .format = INTEGER_FORMAT_DECIMAL, .prefix = true, }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_HEXADECIMAL, }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("af"), format_integer(arena, (FormatIntegerOptions) { .value = 0xaf, .format = INTEGER_FORMAT_HEXADECIMAL, }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("0x0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_HEXADECIMAL, .prefix = true }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("0x8591baefcb"), format_integer(arena, (FormatIntegerOptions) { .value = 0x8591baefcb, .format = INTEGER_FORMAT_HEXADECIMAL, .prefix = true }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("0o12557"), format_integer(arena, (FormatIntegerOptions) { .value = 012557, .format = INTEGER_FORMAT_OCTAL, .prefix = true }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("12557"), format_integer(arena, (FormatIntegerOptions) { .value = 012557, .format = INTEGER_FORMAT_OCTAL, }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("0b101101"), format_integer(arena, (FormatIntegerOptions) { .value = 0b101101, .format = INTEGER_FORMAT_BINARY, .prefix = true }, true)));
-    BUSTER_TEST(arguments, string8_equal(S8("101101"), format_integer(arena, (FormatIntegerOptions) { .value = 0b101101, .format = INTEGER_FORMAT_BINARY, }, true)));
+
+    {
+        BUSTER_TEST(arguments, string8_equal(S8("123"), format_integer(arena, (FormatIntegerOptions) { .value = 123, .format = INTEGER_FORMAT_DECIMAL, }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("1000"), format_integer(arena, (FormatIntegerOptions) { .value = 1000, .format = INTEGER_FORMAT_DECIMAL }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("12839128391258192419"), format_integer(arena, (FormatIntegerOptions) { .value = 12839128391258192419ULL, .format = INTEGER_FORMAT_DECIMAL}, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("-1"), format_integer(arena, (FormatIntegerOptions) { .value = 1, .format = INTEGER_FORMAT_DECIMAL, .treat_as_signed = true}, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("-1123123123"), format_integer(arena, (FormatIntegerOptions) { .value = 1123123123, .format = INTEGER_FORMAT_DECIMAL, .treat_as_signed = true}, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("0d0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_DECIMAL, .prefix = true }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("0d123"), format_integer(arena, (FormatIntegerOptions) { .value = 123, .format = INTEGER_FORMAT_DECIMAL, .prefix = true, }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_HEXADECIMAL, }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("af"), format_integer(arena, (FormatIntegerOptions) { .value = 0xaf, .format = INTEGER_FORMAT_HEXADECIMAL, }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("0x0"), format_integer(arena, (FormatIntegerOptions) { .value = 0, .format = INTEGER_FORMAT_HEXADECIMAL, .prefix = true }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("0x8591baefcb"), format_integer(arena, (FormatIntegerOptions) { .value = 0x8591baefcb, .format = INTEGER_FORMAT_HEXADECIMAL, .prefix = true }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("0o12557"), format_integer(arena, (FormatIntegerOptions) { .value = 012557, .format = INTEGER_FORMAT_OCTAL, .prefix = true }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("12557"), format_integer(arena, (FormatIntegerOptions) { .value = 012557, .format = INTEGER_FORMAT_OCTAL, }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("0b101101"), format_integer(arena, (FormatIntegerOptions) { .value = 0b101101, .format = INTEGER_FORMAT_BINARY, .prefix = true }, true)));
+        BUSTER_TEST(arguments, string8_equal(S8("101101"), format_integer(arena, (FormatIntegerOptions) { .value = 0b101101, .format = INTEGER_FORMAT_BINARY, }, true)));
+    }
+
+    {
+        OsString strings[] = {
+            OsS("clang"),
+            OsS("-c"),
+            OsS("-o"),
+            OsS("--help"),
+        };
+
+        let builder = argument_builder_start(arena, strings[0]);
+        for (u64 i = 1; i < BUSTER_ARRAY_LENGTH(strings); i += 1)
+        {
+            argument_add(builder, strings[i]);
+        }
+
+        let argv = argument_builder_end(builder);
+        let it = os_string_list_initialize(argv);
+
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(strings); i += 1)
+        {
+            BUSTER_TEST(arguments, os_string_equal(os_string_list_next(&it), strings[i]));
+        }
+    }
+
     arena->position = position;
+    print(S8("Lib tests {S8}!\n"), result ? S8("passed") : S8("failed"));
     return result;
 }
 #endif
@@ -2193,18 +2217,6 @@ BUSTER_IMPL ProcessHandle* os_process_spawn(OsChar* name, OsStringList argv, OsS
     {
         let spawn_result = posix_spawn(&pid, name, &file_actions, &attributes, (char**)argv, (char**)envp);
 
-        if (program_state->input.verbose)
-        {
-            print(S8("Launched: "));
-
-            for (let a = argv; *a; a += 1)
-            {
-                print(S8("{OsS} "), *a);
-            }
-
-            print(S8("\n"));
-        }
-
         if (spawn_result != 0)
         {
             pid = -1;
@@ -2216,6 +2228,19 @@ BUSTER_IMPL ProcessHandle* os_process_spawn(OsChar* name, OsStringList argv, OsS
 
     result = pid == -1 ? (ProcessHandle*)0 : (ProcessHandle*)(u64)pid;
 #endif
+
+    if (program_state->input.verbose)
+    {
+        print(S8("Launched: "));
+
+        let list = os_string_list_initialize(argv);
+        for (let a = os_string_list_next(&list); a.pointer; a = os_string_list_next(&list))
+        {
+            print(S8("{OsS} "), a);
+        }
+
+        print(S8("\n"));
+    }
 
     return result;
 }
@@ -2302,30 +2327,37 @@ BUSTER_IMPL OsString os_string_list_next(OsStringListIterator* iterator)
     if (current)
     {
 #if defined(_WIN32)
-        let pointer = &list[position];
+        let original_pointer = &list[position];
+        let pointer = original_pointer;
         if (*pointer == '"')
         {
-            let double_quote = raw_string16_first_character(pointer, ' ');
+            // TODO: handle escape
+            let double_quote = raw_string16_first_character(pointer + 1, '"');
             if (double_quote == string_no_match)
             {
                 return result;
             }
 
-            position += double_quote + 1;
+            position += double_quote + 1 + 1;
             pointer = &list[position];
         }
 
         let space = raw_string16_first_character(pointer, ' ');
         let is_space = space != string_no_match;
-        while (pointer[space] == ' ')
+        space = is_space ? space : 0;
+        position += space;
+        position += is_space ? 0 : string16_length(pointer);
+        let length = position - original_position;
+
+        if (is_space)
         {
-            space += 1;
+            while (list[position] == ' ')
+            {
+                position += 1;
+            }
         }
 
-        let not_double_quote_length = (is_space ? space : string16_length(pointer));
-        let length = (position - original_position) + not_double_quote_length;
-        position += not_double_quote_length + is_space;
-        result = (OsString){ pointer, length };
+        result = (OsString){ original_pointer, length };
 #else
         position += 1;
         result = os_string_from_pointer(current);
