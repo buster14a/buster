@@ -17,11 +17,7 @@
 #endif
 
 #ifndef BUSTER_LINK_LIBC
-#if defined(_WIN32)
-#define BUSTER_LINK_LIBC 0
-#else
 #define BUSTER_LINK_LIBC 1
-#endif
 #endif
 
 #if BUSTER_LINK_LIBC
@@ -505,7 +501,7 @@ BUSTER_DECL FileDescriptor* os_file_open(OsString path, OpenFlags flags, OpenPer
 BUSTER_DECL u64 os_file_get_size(FileDescriptor* file_descriptor);
 BUSTER_DECL FileStats os_file_get_stats(FileDescriptor* file_descriptor, FileStatsOptions options);
 BUSTER_DECL void os_file_write(FileDescriptor* file_descriptor, String8 buffer);
-BUSTER_DECL void os_file_read(FileDescriptor* file_descriptor, String8 buffer, u64 byte_count);
+BUSTER_DECL u64 os_file_read(FileDescriptor* file_descriptor, String8 buffer, u64 byte_count);
 BUSTER_DECL bool os_file_close(FileDescriptor* file_descriptor);
 
 #define arena_allocate(arena, T, count) (T*) arena_allocate_bytes(arena, sizeof(T) * (count), alignof(T))
@@ -613,7 +609,7 @@ BUSTER_DECL bool is_hexadecimal(char ch);
 BUSTER_DECL bool is_identifier_start(char ch);
 BUSTER_DECL bool is_identifier(char ch);
 
-BUSTER_DECL OsChar* get_last_error_message();
+BUSTER_DECL OsString get_last_error_message(Arena* arena);
 BUSTER_DECL ProcessHandle* os_process_spawn(OsChar* name, OsStringList argv, OsStringList envp);
 BUSTER_DECL ProcessResult os_process_wait_sync(ProcessHandle* handle, ProcessResources resources);
 BUSTER_DECL ProcessResult buster_argument_process(OsStringList argument_pointer, OsStringList environment_pointer, u64 argument_index, OsString argument);

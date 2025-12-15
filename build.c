@@ -1,55 +1,6 @@
 #if 0
 #!/usr/bin/env bash
-set -eu
-
-if [[ -z "${BUSTER_CI:-}" ]]; then
-    BUSTER_CI=0
-fi
-
-if [[ -z "${BUSTER_OPTIMIZE:-}" ]]; then
-    BUSTER_OPTIMIZE=0
-fi
-
-if [[ -z "${BUSTER_LLVM_VERSION:-}" ]]; then
-    BUSTER_LLVM_VERSION=21.1.7
-fi
-
-if [[ -z "${CMAKE_PREFIX_PATH:-}" ]]; then
-    if [[ "$BUSTER_CI" == "1" ]]; then
-        source ./setup_ci.sh
-    else
-        export BUSTER_ARCH=x86_64
-        export BUSTER_OS=linux
-        export CMAKE_PREFIX_PATH=$HOME/dev/toolchain/install/llvm_${BUSTER_LLVM_VERSION}_${BUSTER_ARCH}-${BUSTER_OS}-Release
-    fi
-fi
-
-if [[ -z "${CLANG:-}" ]]; then
-    export CLANG=$CMAKE_PREFIX_PATH/bin/clang
-fi
-
-if [[ "$#" != "0" ]]; then
-    set -x
-fi
-
-XC_SDK_PATH=""
-CLANG_EXTRA_FLAGS=""
-if [[ "$BUSTER_OS" == "macos" ]]; then
-    export XC_SDK_PATH=$(xcrun --sdk macosx --show-sdk-path)
-    CLANG_EXTRA_FLAGS="-isysroot $XC_SDK_PATH"
-fi
-
-#if 0BUSTER_REGENERATE=0 build/builder $@ 2>/dev/null
-#endif
-#if [[ "$?" != "0" && "$?" != "333" ]]; then
-    mkdir -p build
-    $CLANG build.c -o build/builder -fuse-ld=lld $CLANG_EXTRA_FLAGS -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=0 -DBUSTER_USE_PTHREAD=1 -DBUSTER_INCLUDE_TESTS=1 -g -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-language-extension-token -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -Wno-gnu-flexible-array-initializer -Wno-missing-field-initializers -Wno-pragma-once-outside-header -pthread -fwrapv -fno-strict-aliasing -funsigned-char -ferror-limit=1 #-ftime-trace -ftime-trace-verbose
-    if [[ "$?" == "0" ]]; then
-        BUSTER_REGENERATE=1 build/builder $@
-        # BUSTER_REGENERATE=1 lldb -b -o run -o 'bt all' -- build/builder $@
-    fi
-#endif fi
-exit $?
+source build.sh
 #endif
 
 #pragma once
@@ -57,9 +8,12 @@ exit $?
 #define BUSTER_USE_PADDING 0
 
 #include <buster/lib.h>
+#include <buster/target.h>
+#include <buster/entry_point.h>
 
 #if BUSTER_UNITY_BUILD
 #include <buster/lib.c>
+#include <buster/target.h>
 #include <buster/entry_point.c>
 #endif
 
@@ -77,10 +31,18 @@ ENUM_T(ModuleId, u8,
     MODULE_LIB,
     MODULE_SYSTEM_HEADERS,
     MODULE_ENTRY_POINT,
+    MODULE_TARGET,
+    MODULE_X86_64,
+    MODULE_AARCH64,
     MODULE_BUILDER,
     MODULE_MD5,
     MODULE_CC_MAIN,
     MODULE_ASM_MAIN,
+    MODULE_IR,
+    MODULE_CODEGEN,
+    MODULE_LINK,
+    MODULE_LINK_JIT,
+    MODULE_LINK_ELF,
     MODULE_COUNT,
 );
 
@@ -90,62 +52,11 @@ ENUM(DirectoryId,
     DIRECTORY_ROOT,
     DIRECTORY_CC,
     DIRECTORY_ASM,
+    DIRECTORY_IR,
+    DIRECTORY_BACKEND,
+    DIRECTORY_LINK,
     DIRECTORY_COUNT,
 );
-
-ENUM(CpuArch,
-    CPU_ARCH_X86_64,
-    CPU_ARCH_AARCH64,
-);
-
-ENUM(CpuModel,
-    CPU_MODEL_GENERIC,
-    CPU_MODEL_NATIVE,
-);
-
-ENUM(OperatingSystem,
-    OPERATING_SYSTEM_LINUX,
-    OPERATING_SYSTEM_MACOS,
-    OPERATING_SYSTEM_WINDOWS,
-    OPERATING_SYSTEM_UEFI,
-    OPERATING_SYSTEM_ANDROID,
-    OPERATING_SYSTEM_IOS,
-    OPERATING_SYSTEM_FREESTANDING,
-);
-
-STRUCT(Target)
-{
-    CpuArch arch;
-    CpuModel model;
-    OperatingSystem os;
-};
-
-BUSTER_LOCAL constexpr Target target_native = {
-#if defined(__x86_64__)
-    .arch = CPU_ARCH_X86_64,
-#elif defined(__aarch64__)
-    .arch = CPU_ARCH_AARCH64,
-#else
-#pragma error
-#endif
-#if defined(__linux__)
-    .os = OPERATING_SYSTEM_LINUX,
-#elif defined(_WIN32)
-    .os = OPERATING_SYSTEM_WINDOWS,
-#elif defined(__APPLE__)
-#define BUSTER_APPLE 1
-#include <TargetConditionals.h>
-#if TARGET_OS_MAC == 1
-    .os = OPERATING_SYSTEM_MACOS,
-#elif (TARGET_OS_IPHONE == 1) || (TARGET_IPHONE_SIMULATOR == 1)
-    .os = OPERATING_SYSTEM_IOS
-#else
-#pragma error
-#endif
-#endif
-    .model = CPU_MODEL_NATIVE,
-};
-
 STRUCT(Module)
 {
     DirectoryId directory;
@@ -185,6 +96,9 @@ STRUCT(ModuleSlice)
 BUSTER_LOCAL Module modules[] = {
     [MODULE_LIB] = {},
     [MODULE_ENTRY_POINT] = {},
+    [MODULE_TARGET] = {},
+    [MODULE_X86_64] = {},
+    [MODULE_AARCH64] = {},
     [MODULE_SYSTEM_HEADERS] = {
         .no_source = true,
     },
@@ -204,11 +118,25 @@ BUSTER_LOCAL Module modules[] = {
         .directory = DIRECTORY_ASM,
         .no_header = true,
     },
+    [MODULE_IR] = {
+        .directory = DIRECTORY_IR,
+    },
+    [MODULE_CODEGEN] = {
+        .directory = DIRECTORY_BACKEND,
+    },
+    [MODULE_LINK] = {
+        .directory = DIRECTORY_LINK,
+    },
+    [MODULE_LINK_JIT] = {
+        .directory = DIRECTORY_LINK,
+    },
+    [MODULE_LINK_ELF] = {
+        .directory = DIRECTORY_LINK,
+    },
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == MODULE_COUNT);
 
-#define LINK_UNIT_MODULES(_name, ...) BUSTER_LOCAL LinkModule _name ## _modules[] = { __VA_ARGS__ }
 #define LINK_UNIT(_name, ...) (LinkUnitSpecification) { .name = OsS(#_name), .modules = { .pointer = _name ## _modules, .length = BUSTER_ARRAY_LENGTH(_name ## _modules) }, __VA_ARGS__ }
 
 // TODO: better naming convention
@@ -222,9 +150,11 @@ STRUCT(LinkUnitSpecification)
     bool has_debug_info;
 };
 
-LINK_UNIT_MODULES(builder, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_BUILDER }, { MODULE_MD5 });
-LINK_UNIT_MODULES(cc, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_CC_MAIN }, );
-LINK_UNIT_MODULES(asm, { MODULE_LIB }, { MODULE_SYSTEM_HEADERS }, { MODULE_ENTRY_POINT }, { MODULE_ASM_MAIN }, );
+#if defined(__x86_64__)
+BUSTER_LOCAL constexpr ModuleId native_module = MODULE_X86_64;
+#elif defined(__aarch64__)
+BUSTER_LOCAL constexpr ModuleId native_module = MODULE_AARCH64;
+#endif
 
 ENUM(BuildCommand,
     BUILD_COMMAND_BUILD,
@@ -278,101 +208,6 @@ ENUM(ProjectId,
     PROJECT_OPERATING_SYSTEM_KERNEL,
     PROJECT_COUNT,
 );
-
-BUSTER_LOCAL OsString target_to_string_builder(Target target)
-{
-    switch (target.arch)
-    {
-        break; case CPU_ARCH_X86_64:
-        {
-            switch (target.model)
-            {
-                break; case CPU_MODEL_GENERIC:
-                {
-                    switch (target.os)
-                    {
-                        break; case OPERATING_SYSTEM_LINUX: return OsS("x86_64-linux-baseline");
-                        break; case OPERATING_SYSTEM_MACOS: return OsS("x86_64-macos-baseline");
-                        break; case OPERATING_SYSTEM_WINDOWS: return OsS("x86_64-windows-baseline");
-                        break; case OPERATING_SYSTEM_UEFI: return OsS("x86_64-uefi-baseline");
-                        break; case OPERATING_SYSTEM_FREESTANDING: return OsS("x86_64-freestanding-baseline");
-                        break; default: BUSTER_UNREACHABLE();
-                    }
-                }
-                break; case CPU_MODEL_NATIVE:
-                {
-                    switch (target.os)
-                    {
-                        break; case OPERATING_SYSTEM_LINUX: return OsS("x86_64-linux-native");
-                        break; case OPERATING_SYSTEM_MACOS: return OsS("x86_64-macos-native");
-                        break; case OPERATING_SYSTEM_WINDOWS: return OsS("x86_64-windows-native");
-                        break; case OPERATING_SYSTEM_UEFI: return OsS("x86_64-uefi-native");
-                        break; case OPERATING_SYSTEM_FREESTANDING: return OsS("x86_64-freestanding-native");
-                        break; default: BUSTER_UNREACHABLE();
-                    }
-                }
-                break; default: BUSTER_UNREACHABLE();
-            }
-        }
-        break; case CPU_ARCH_AARCH64:
-        {
-            switch (target.model)
-            {
-                break; case CPU_MODEL_GENERIC:
-                {
-                    switch (target.os)
-                    {
-                        break; case OPERATING_SYSTEM_LINUX: return OsS("aarch64-linux-baseline");
-                        break; case OPERATING_SYSTEM_MACOS: return OsS("aarch64-macos-baseline");
-                        break; case OPERATING_SYSTEM_WINDOWS: return OsS("aarch64-windows-baseline");
-                        break; case OPERATING_SYSTEM_UEFI: return OsS("aarch64-uefi-baseline");
-                        break; case OPERATING_SYSTEM_FREESTANDING: return OsS("aarch64-freestanding-baseline");
-                        break; default: BUSTER_UNREACHABLE();
-                    }
-                }
-                break; case CPU_MODEL_NATIVE:
-                {
-                    switch (target.os)
-                    {
-                        break; case OPERATING_SYSTEM_LINUX: return OsS("aarch64-linux-native");
-                        break; case OPERATING_SYSTEM_MACOS: return OsS("aarch64-macos-native");
-                        break; case OPERATING_SYSTEM_WINDOWS: return OsS("aarch64-windows-native");
-                        break; case OPERATING_SYSTEM_UEFI: return OsS("aarch64-uefi-native");
-                        break; case OPERATING_SYSTEM_FREESTANDING: return OsS("aarch64-freestanding-native");
-                        break; default: BUSTER_UNREACHABLE();
-                    }
-                }
-                break; default: BUSTER_UNREACHABLE();
-            }
-        }
-        break; default: BUSTER_UNREACHABLE();
-    }
-}
-
-BUSTER_LOCAL OsString arch_to_string(CpuArch arch)
-{
-    switch (arch)
-    {
-        break; case CPU_ARCH_X86_64: return OsS("x86_64");
-        break; case CPU_ARCH_AARCH64: return OsS("aarch64");
-        break; default: return OsS("");
-    }
-}
-
-BUSTER_LOCAL OsString os_to_string(OperatingSystem os)
-{
-    switch (os)
-    {
-        break; case OPERATING_SYSTEM_LINUX: return OsS("linux");
-        break; case OPERATING_SYSTEM_MACOS: return OsS("macos");
-        break; case OPERATING_SYSTEM_WINDOWS: return OsS("windows");
-        break; case OPERATING_SYSTEM_UEFI: return OsS("uefi");
-        break; case OPERATING_SYSTEM_ANDROID: return OsS("android");
-        break; case OPERATING_SYSTEM_IOS: return OsS("ios");
-        break; case OPERATING_SYSTEM_FREESTANDING: return OsS("freestanding");
-        break; default: return OsS("");
-    }
-}
 
 STRUCT(CompilationUnit)
 {
@@ -442,18 +277,25 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
 
     let compile_commands_start = compile_commands->position;
     append_string8(compile_commands, S8("[\n"));
+    print(S8("Unit count: {u64}\n"), unit_count);
 
     for (u64 unit_i = 0; unit_i < unit_count; unit_i += 1)
     {
         let unit = &units[unit_i];
+        print(S8("Unit: {u64}\n"), unit_i);
 
         let source_absolute_path = unit->source_path;
         let source_relative_path = string_slice_start(source_absolute_path, cwd.length + 1);
-        let target_string_builder = target_to_string_builder(unit->target);
+        let target_strings = target_to_split_os_string(unit->target);
+        static_assert(BUSTER_ARRAY_LENGTH(target_strings.s) == 3);
         OsString object_absolute_path_parts[] = {
             cwd,
             OsS("/build/"),
-            target_string_builder,
+            target_strings.s[0],
+            OsS("-"),
+            target_strings.s[1],
+            OsS("-"),
+            target_strings.s[2],
             OsS("/"),
             source_relative_path,
             OsS(".o"),
@@ -461,6 +303,14 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
 
         let object_path = arena_join_os_string(arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, object_absolute_path_parts), true);
         unit->object_path = object_path;
+        // Forced to do it so early because we would need another arena here otherwise (since arena is used for the argument builder)
+        let march = unit->target.cpu.arch == CPU_ARCH_X86_64 ? OsS("-march=") : OsS("-mcpu=");
+        let cpu_model_string = cpu_model_to_os_string(unit->target.cpu.model);
+        OsString march_parts[] = {
+            march,
+            cpu_model_string,
+        };
+        let march_os_string = arena_join_os_string(arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, march_parts), true);
 
         u64 target_i;
         for (target_i = 0; target_i < target_count; target_i += 1)
@@ -471,11 +321,11 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             }
         }
 
-        OsChar buffer[4096];
+        OsChar buffer[max_path_length];
         u64 buffer_i = 0;
         let os_char_size = sizeof(buffer[0]);
 
-        for (u64 i = 1; i < 3; i += 1)
+        for (u64 i = 1; i < BUSTER_ARRAY_LENGTH(target_strings.s) * 2 - 1 + 2; i += 1)
         {
             memcpy(buffer + buffer_i, object_absolute_path_parts[i].pointer + (i == 1), string_size(object_absolute_path_parts[i]) - (((i == 1) * os_char_size)));
             buffer_i += object_absolute_path_parts[i].length - (i == 1);
@@ -486,13 +336,16 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         }
 
         buffer[buffer_i] = 0;
+        print(S8("Memcpy end\n"));
 
         if (target_i == target_count)
         {
-            os_make_directory(os_string_from_pointer_length(buffer, buffer_i));
+            let directory = os_string_from_pointer_length(buffer, buffer_i);
+            os_make_directory(directory);
             targets[target_count] = unit->target;
             target_count += 1;
         }
+        print(S8("First directory\n"));
 
         let buffer_start = buffer_i;
         u64 source_i = 0;
@@ -518,29 +371,38 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             let length = buffer_start + source_i + byte_count;
             buffer[length] = 0;
 
-            os_make_directory(os_string_from_pointer_length(buffer, length));
+            let directory = os_string_from_pointer_length(buffer, length);
+            os_make_directory(directory);
 
             source_i += byte_count; 
         }
+        print(S8("All directory. Arena position: {u64:x}\n"), arena->position);
 
         let builder = argument_builder_start(arena, clang_path);
+        if (!builder)
+        {
+            print(S8("Failed to allocate memory for string builder\n"));
+        }
+        print(S8("After builder\n"));
         argument_add(builder, OsS("-ferror-limit=1"));
         argument_add(builder, OsS("-c"));
         argument_add(builder, source_absolute_path);
         argument_add(builder, OsS("-o"));
         argument_add(builder, object_path);
         argument_add(builder, OsS("-std=gnu2x"));
+        print(S8("-std\n"));
 
-        if (unit->target.os == OPERATING_SYSTEM_WINDOWS)
-        {
-            argument_add(builder, OsS("-nostdlib"));
-        }
+        // if (unit->target.os == OPERATING_SYSTEM_WINDOWS)
+        // {
+        //     argument_add(builder, OsS("-nostdlib"));
+        // }
 
         if (xc_sdk_path.pointer)
         {
             argument_add(builder, OsS("-isysroot"));
             argument_add(builder, xc_sdk_path);
         }
+        print(S8("After SDK path\n"));
 
         argument_add(builder, OsS("-Isrc"));
         argument_add(builder, OsS("-Wall"));
@@ -561,11 +423,7 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         argument_add(builder, OsS("-fwrapv"));
         argument_add(builder, OsS("-fno-strict-aliasing"));
 
-        switch (unit->target.model)
-        {
-            break; case CPU_MODEL_NATIVE: argument_add(builder, OsS("-march=native"));
-            break; case CPU_MODEL_GENERIC: {}
-        }
+        argument_add(builder, march_os_string);
 
         if (unit->has_debug_info)
         {
@@ -585,12 +443,14 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         append_string8(compile_commands, os_string_to_string8(arena, cwd));
         append_string8(compile_commands, S8("\",\n\t\t\"command\": \""));
 
+        print(S8("os string start\n"));
         let arg_it = os_string_list_initialize(args);
         for (let arg = os_string_list_next(&arg_it); arg.pointer; arg = os_string_list_next(&arg_it))
         {
             append_os_string(compile_commands, arg);
             append_string8(compile_commands, S8(" "));
         }
+        print(S8("os string end\n"));
 
         compile_commands->position -= 1;
         append_string8(compile_commands, S8("\",\n\t\t\"file\": \""));
@@ -605,14 +465,17 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
 
     let compile_commands_str = (String8){ .pointer = (u8*)compile_commands + compile_commands_start, .length = compile_commands->position - compile_commands_start };
 
+    print(S8("Before writing compile commands\n"));
+
     if (result)
     {
         result = file_write(OsS("build/compile_commands.json"), compile_commands_str);
         if (!result)
         {
-            print(S8(""), get_last_error_message());
+            print(S8("Error writing compile commands: {OsS}"), get_last_error_message(arena));
         }
     }
+    print(S8("After writing compile commands\n"));
 
     return result;
 }
@@ -691,9 +554,42 @@ BUSTER_LOCAL bool builder_tests(TestArguments* arguments)
 
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
+    print(S8("Reached thread entry point\n"));
 #if defined(__APPLE__)
-    xc_sdk_path = os_string_from_pointer(getenv("XC_SDK_PATH"));
+    xc_sdk_path = os_get_environment_variable(OsS("XC_SDK_PATH"));
 #endif
+
+    LinkModule builder_modules[] = {
+        { MODULE_LIB },
+        { MODULE_SYSTEM_HEADERS },
+        { MODULE_ENTRY_POINT },
+        { MODULE_BUILDER },
+        { MODULE_MD5 },
+        { native_module },
+        { MODULE_TARGET }
+    };
+    LinkModule cc_modules[] = {
+        { MODULE_LIB },
+        { MODULE_SYSTEM_HEADERS },
+        { MODULE_ENTRY_POINT },
+        { MODULE_CC_MAIN },
+        { MODULE_IR },
+        { MODULE_CODEGEN },
+        { MODULE_LINK },
+        { MODULE_LINK_JIT },
+        { MODULE_LINK_ELF },
+        { native_module },
+        { MODULE_TARGET }
+    };
+    LinkModule asm_modules[] = {
+        { MODULE_LIB },
+        { MODULE_SYSTEM_HEADERS },
+        { MODULE_ENTRY_POINT },
+        { MODULE_ASM_MAIN },
+        { native_module },
+        { MODULE_TARGET },
+    };
+
     LinkUnitSpecification specifications[] = {
         LINK_UNIT(builder, .target = target_native, .has_debug_info = true),
         LINK_UNIT(cc, .target = target_native, .has_debug_info = true),
@@ -702,10 +598,14 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
 
     OsString directory_paths[] = {
-        [DIRECTORY_ROOT] = OsS(""),
         [DIRECTORY_SRC_BUSTER] = OsS("src/buster"),
+        [DIRECTORY_SRC_MARTINS] = OsS("src/martins"),
+        [DIRECTORY_ROOT] = OsS(""),
         [DIRECTORY_CC] = OsS("src/buster/compiler/frontend/cc"),
         [DIRECTORY_ASM] = OsS("src/buster/compiler/frontend/asm"),
+        [DIRECTORY_IR] = OsS("src/buster/compiler/ir"),
+        [DIRECTORY_BACKEND] = OsS("src/buster/compiler/backend"),
+        [DIRECTORY_LINK] = OsS("src/buster/compiler/link"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == DIRECTORY_COUNT);
@@ -714,10 +614,18 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         [MODULE_LIB] = OsS("lib"),
         [MODULE_SYSTEM_HEADERS] = OsS("system_headers"),
         [MODULE_ENTRY_POINT] = OsS("entry_point"),
+        [MODULE_TARGET] = OsS("target"),
+        [MODULE_X86_64] = OsS("x86_64"),
+        [MODULE_AARCH64] = OsS("aarch64"),
         [MODULE_BUILDER] = OsS("build"),
         [MODULE_MD5] = OsS("md5"),
         [MODULE_CC_MAIN] = OsS("cc_main"),
         [MODULE_ASM_MAIN] = OsS("asm_main"),
+        [MODULE_IR] = OsS("ir"),
+        [MODULE_CODEGEN] = OsS("code_generation"),
+        [MODULE_LINK] = OsS("link"),
+        [MODULE_LINK_ELF] = OsS("elf"),
+        [MODULE_LINK_JIT] = OsS("jit"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(module_names) == MODULE_COUNT);
@@ -873,9 +781,9 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             OsS("/dev/toolchain/install/llvm_"),
             OsS("21.1.7"), // TODO
             OsS("_"),
-            arch_to_string(target_native.arch),
+            cpu_arch_to_os_string(target_native.cpu.arch),
             OsS("-"),
-            os_to_string(target_native.os),
+            operating_system_to_os_string(target_native.os),
             OsS("-Release"),
             OsS("/bin/clang.exe"),
         };
@@ -884,8 +792,11 @@ BUSTER_IMPL ProcessResult thread_entry_point()
 
     ProcessResult result = {};
 
+    print(S8("Reached compiled commands\n"));
     if (build_compile_commands(general_arena, compile_commands, compilation_units, compilation_unit_count, cwd, clang_path))
     {
+        print(S8("Passed compiled commands\n"));
+
         let selected_compilation_count = compilation_unit_count;
         let selected_compilation_units = compilation_units;
 
@@ -894,6 +805,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             let unit = &selected_compilation_units[unit_i];
             unit->process.handle = os_process_spawn(unit->compiler, unit->compilation_arguments, program_state->input.envp);
         }
+
+        print(S8("Spawned compile commands\n"));
 
         for (u64 unit_i = 0; unit_i < selected_compilation_count; unit_i += 1)
         {
@@ -905,12 +818,15 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             }
         }
 
+        print(S8("Waited compile commands\n"));
+
         u64 link_unit_start = 1;
         // TODO: depend more-fine grainedly, ie: link those objects which succeeded compiling instead of all or nothing
         if (result == PROCESS_RESULT_SUCCESS)
         {
             let argument_arena = arena_create((ArenaInitialization){});
             ProcessHandle* processes[link_unit_count];
+            print(S8("Before spawning linking commands\n"));
 
             for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
             {
@@ -923,10 +839,16 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 argument_add(builder, OsS("-o"));
 
                 bool is_builder = link_unit_i == 0; // str_equal(link_unit_specification->name, S("builder"));
+                let target_strings = target_to_split_os_string(link_unit_specification->target);
+                static_assert(BUSTER_ARRAY_LENGTH(target_strings.s) == 3);
 
                 OsString artifact_path_parts[] = {
                     OsS("build/"),
-                    is_builder ? OsS("") : target_to_string_builder(link_unit_specification->target),
+                    is_builder ? OsS("") : target_strings.s[0],
+                    is_builder ? OsS("") : OsS("-"),
+                    is_builder ? OsS("") : target_strings.s[1],
+                    is_builder ? OsS("") : OsS("-"),
+                    is_builder ? OsS("") : target_strings.s[2],
                     is_builder ? OsS("") : OsS("/"),
                     link_unit_specification->name,
                     link_unit_specification->target.os == OPERATING_SYSTEM_WINDOWS ? OsS(".exe") : OsS(""),
@@ -953,12 +875,13 @@ BUSTER_IMPL ProcessResult thread_entry_point()
 
                 if (link_unit_specification->target.os == OPERATING_SYSTEM_WINDOWS)
                 {
-                    argument_add(builder, OsS("-nostdlib"));
-                    argument_add(builder, OsS("-lkernel32"));
                     argument_add(builder, OsS("-lws2_32"));
-                    argument_add(builder, OsS("-Wl,-entry:mainCRTStartup"));
-                    argument_add(builder, OsS("-Wl,-subsystem:console"));
+                    //     argument_add(builder, OsS("-nostdlib"));
+                    //     argument_add(builder, OsS("-lkernel32"));
+                    //     argument_add(builder, OsS("-Wl,-entry:mainCRTStartup"));
+                    //     argument_add(builder, OsS("-Wl,-subsystem:console"));
                 }
+
                 if (xc_sdk_path.pointer)
                 {
                     argument_add(builder, OsS("-isysroot"));
@@ -975,6 +898,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 let process = os_process_spawn((OsChar*)clang_path.pointer, argv, program_state->input.envp);
                 processes[link_unit_i] = process;
             }
+
+            print(S8("Before waiting linking commands\n"));
 
             for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
             {
@@ -995,6 +920,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 break; case BUILD_COMMAND_BUILD: {}
                 break; case BUILD_COMMAND_TEST:
                 {
+                    print(S8("Before running tests\n"));
                     ProcessHandle* processes[link_unit_count];
 
                     // Skip builder tests

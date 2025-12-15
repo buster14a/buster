@@ -13,6 +13,7 @@
 #include <linux/limits.h>
 #include <linux/fs.h>
 #include <spawn.h>
+#include <errno.h>
 #if BUSTER_USE_PTHREAD
 #include <pthread.h>
 #endif
@@ -31,6 +32,8 @@
 #include <pthread.h>
 #include <sys/syslimits.h>
 #include <spawn.h>
+#include <errno.h>
+#include <sys/sysctl.h>
 #endif
 
 #if defined(_WIN32)
@@ -38,6 +41,7 @@
 #include <windows.h>
 #include <mswsock.h>
 #include <limits.h>
+#include <setjmp.h>
 
 BUSTER_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 #endif
