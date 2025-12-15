@@ -604,30 +604,46 @@ BUSTER_IMPL u64 os_file_get_size(FileDescriptor* file_descriptor)
 
 BUSTER_LOCAL u64 os_file_read_partially(FileDescriptor* file_descriptor, void* buffer, u64 byte_count)
 {
+    u64 result = 0;
 #if defined(__linux__) || defined(__APPLE__)
     let fd = generic_fd_to_posix(file_descriptor);
     let read_byte_count = read(fd, buffer, byte_count);
-    BUSTER_CHECK(read_byte_count > 0);
-
-    return (u64)read_byte_count;
+    if (read_byte_count > 0)
+    {
+        result = (u64)read_byte_count;
+    }
+    else if (read_byte_count < 0)
+    {
+        print(S8(strerror(errno)));
+    }
 #elif defined(_WIN32)
     let fd = generic_fd_to_windows(file_descriptor);
     DWORD read_byte_count = 0;
-    BOOL result = ReadFile(fd, buffer, (u32)byte_count, &read_byte_count, 0);
-    BUSTER_CHECK(result);
-    return read_byte_count;
+    BOOL read_result = ReadFile(fd, buffer, (u32)byte_count, &read_byte_count, 0);
+    if (read_result)
+    {
+        result = read_byte_count;
+    }
 #endif
+    return result;
 }
 
-BUSTER_IMPL void os_file_read(FileDescriptor* file_descriptor, String8 buffer, u64 byte_count)
+BUSTER_IMPL u64 os_file_read(FileDescriptor* file_descriptor, String8 buffer, u64 byte_count)
 {
     u64 read_byte_count = 0;
     let pointer = buffer.pointer;
     BUSTER_CHECK(buffer.length >= byte_count);
     while (byte_count - read_byte_count)
     {
-        read_byte_count += os_file_read_partially(file_descriptor, pointer + read_byte_count, byte_count - read_byte_count);
+        let iteration_read_byte_count = os_file_read_partially(file_descriptor, pointer + read_byte_count, byte_count - read_byte_count);
+        if (iteration_read_byte_count == 0)
+        {
+            break;
+        }
+        read_byte_count += iteration_read_byte_count;
     }
+
+    return read_byte_count;
 }
 
 BUSTER_LOCAL u64 os_file_write_partially(FileDescriptor* file_descriptor, void* pointer, u64 length)
@@ -948,12 +964,16 @@ BUSTER_IMPL String8 file_read(Arena* arena, OsString path, FileReadOptions optio
         }
 
         let file_size = os_file_get_size(fd);
-        let allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
-        let allocation_bottom = allocation_size - (file_size + options.start_padding);
-        let allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
-        let file_buffer = arena_allocate_bytes(arena, allocation_size, allocation_alignment);
-        os_file_read(fd, (String8) { (u8*)file_buffer + options.start_padding, file_size }, file_size);
-        memset((u8*)file_buffer + options.start_padding + file_size, 0, allocation_bottom);
+        let file_buffer = (u8*)&file_read;
+        if (file_size)
+        {
+            let allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
+            let allocation_bottom = allocation_size - (file_size + options.start_padding);
+            let allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
+            file_buffer = arena_allocate_bytes(arena, allocation_size, allocation_alignment);
+            file_size = os_file_read(fd, (String8) { (u8*)file_buffer + options.start_padding, file_size }, file_size);
+            memset((u8*)file_buffer + options.start_padding + file_size, 0, allocation_bottom);
+        }
         os_file_close(fd);
         result = (String8) { (u8*)file_buffer + options.start_padding, file_size };
     }
@@ -1907,6 +1927,8 @@ BUSTER_IMPL void print(String8 format, ...)
     va_start(va);
 
     u8 buffer[8192];
+    let buffer_slice = BUSTER_ARRAY_TO_SLICE(String8, buffer);
+    buffer_slice.length -= 1;
     u64 buffer_i = 0;
 
     while (it != top)
@@ -1930,7 +1952,7 @@ BUSTER_IMPL void print(String8 format, ...)
 
             it += 1;
 
-            let this_format_string = string8_from_pointer_length((char*)format_buffer, format_buffer_i);
+            let whole_format_string = string8_from_pointer_length((char*)format_buffer, format_buffer_i);
             ENUM(Format, 
                     FORMAT_OS_STRING,
                     FORMAT_STRING8,
@@ -1951,7 +1973,24 @@ BUSTER_IMPL void print(String8 format, ...)
             String8 possible_format_strings[FORMAT_INTEGER_COUNT] = {
                 [FORMAT_OS_STRING] = S8("OsS"),
                 [FORMAT_STRING8] = S8("S8"),
+                [FORMAT_STRING16] = S8("S16"),
+                [FORMAT_STRING32] = S8("S32"),
+                [FORMAT_UNSIGNED_INTEGER_8] = S8("u8"),
+                [FORMAT_UNSIGNED_INTEGER_16] = S8("u16"),
+                [FORMAT_UNSIGNED_INTEGER_32] = S8("u32"),
+                [FORMAT_UNSIGNED_INTEGER_64] = S8("u64"),
+                [FORMAT_UNSIGNED_INTEGER_128] = S8("u128"),
+                [FORMAT_SIGNED_INTEGER_8] = S8("s8"),
+                [FORMAT_SIGNED_INTEGER_16] = S8("s16"),
+                [FORMAT_SIGNED_INTEGER_32] = S8("s32"),
+                [FORMAT_SIGNED_INTEGER_64] = S8("s64"),
+                [FORMAT_SIGNED_INTEGER_128] = S8("s128"),
             };
+
+            let first_format = string8_first_character(whole_format_string, ':');
+            bool is_format_kind = first_format != string_no_match;
+            let this_format_string_length = is_format_kind ? first_format : whole_format_string.length;
+            let this_format_string = string8_slice(whole_format_string, 0, this_format_string_length);
 
             u64 i;
             for (i = 0; i < BUSTER_ARRAY_LENGTH(possible_format_strings); i += 1)
@@ -1962,52 +2001,143 @@ BUSTER_IMPL void print(String8 format, ...)
                 }
             }
 
-            if (i == FORMAT_INTEGER_COUNT)
-            {
-                buffer[buffer_i++] = '{';
-                for (u64 i = 0; i < this_format_string.length; i += 1)
-                {
-                    buffer[buffer_i++] = this_format_string.pointer[i];
-                }
-                buffer[buffer_i++] = '}';
-            }
-            else
-            {
-                let format = (Format)i;
+            ENUM(FormatKind,
+                FORMAT_KIND_DECIMAL,
+                FORMAT_KIND_BINARY,
+                FORMAT_KIND_OCTAL,
+                FORMAT_KIND_HEXADECIMAL,
+                FORMAT_KIND_COUNT,
+            );
 
-                switch (format)
+            let format = (Format)i;
+
+            FormatKind format_kind = FORMAT_KIND_DECIMAL;
+
+            if (is_format_kind)
+            {
+                String8 possible_format_kind_strings[FORMAT_KIND_COUNT] = {
+                    [FORMAT_KIND_DECIMAL] = S8("d"),
+                    [FORMAT_KIND_BINARY] = S8("b"),
+                    [FORMAT_KIND_OCTAL] = S8("o"),
+                    [FORMAT_KIND_HEXADECIMAL] = S8("x"),
+                };
+
+                let format_kind_string = string8_slice_start(whole_format_string, first_format + 1);
+
+                for (i = 0; i < BUSTER_ARRAY_LENGTH(possible_format_kind_strings); i += 1)
                 {
-                    break; case FORMAT_OS_STRING:
+                    if (string8_equal(format_kind_string, possible_format_kind_strings[i]))
                     {
-                        let string = va_arg(va, OsString);
-                        for (u64 i = 0; i < string.length; i += 1)
-                        {
-                            buffer[buffer_i++] = (u8)string.pointer[i];
-                        }
+                        break;
                     }
-                    break; case FORMAT_STRING8:
+                }
+
+                format_kind = (FormatKind)i;
+            }
+
+            switch (format)
+            {
+                break; case FORMAT_OS_STRING:
+                {
+                    // TODO:
+                    let string = va_arg(va, OsString);
+                    for (u64 i = 0; i < string.length; i += 1)
                     {
-                        let string = va_arg(va, String8);
-                        for (u64 i = 0; i < string.length; i += 1)
-                        {
-                            buffer[buffer_i++] = string.pointer[i];
-                        }
+                        buffer[buffer_i++] = (u8)string.pointer[i];
                     }
-                    break; case FORMAT_STRING16:
-                    break; case FORMAT_STRING32:
-                    break; case FORMAT_UNSIGNED_INTEGER_8:
-                    break; case FORMAT_UNSIGNED_INTEGER_16:
-                    break; case FORMAT_UNSIGNED_INTEGER_32:
-                    break; case FORMAT_UNSIGNED_INTEGER_64:
-                    break; case FORMAT_UNSIGNED_INTEGER_128:
-                    break; case FORMAT_SIGNED_INTEGER_8:
-                    break; case FORMAT_SIGNED_INTEGER_16:
-                    break; case FORMAT_SIGNED_INTEGER_32:
-                    break; case FORMAT_SIGNED_INTEGER_64:
-                    break; case FORMAT_SIGNED_INTEGER_128:
-                    break; case FORMAT_INTEGER_COUNT:
+                }
+                break; case FORMAT_STRING8:
+                {
+                    let string = va_arg(va, String8);
+                    for (u64 i = 0; i < string.length; i += 1)
                     {
+                        buffer[buffer_i++] = string.pointer[i];
                     }
+                }
+                break; case FORMAT_STRING16:
+                {
+                    // TODO:
+                    let string = va_arg(va, String16);
+                    for (u64 i = 0; i < string.length; i += 1)
+                    {
+                        buffer[buffer_i++] = (u8)string.pointer[i];
+                    }
+                }
+                break; case FORMAT_STRING32:
+                {
+                    // TODO:
+                    let string = va_arg(va, String32);
+                    for (u64 i = 0; i < string.length; i += 1)
+                    {
+                        buffer[buffer_i++] = (u8)string.pointer[i];
+                    }
+                }
+                break; case FORMAT_UNSIGNED_INTEGER_8: case FORMAT_UNSIGNED_INTEGER_16: case FORMAT_UNSIGNED_INTEGER_32: case FORMAT_UNSIGNED_INTEGER_64:
+                {
+                    u64 value;
+                    switch (format)
+                    {
+                        break; case FORMAT_UNSIGNED_INTEGER_8: value = (u8)(va_arg(va, u32) & UINT8_MAX);
+                        break; case FORMAT_UNSIGNED_INTEGER_16: value = (u16)(va_arg(va, u32) & UINT16_MAX);
+                        break; case FORMAT_UNSIGNED_INTEGER_32: value = va_arg(va, u32);
+                        break; case FORMAT_UNSIGNED_INTEGER_64: value = va_arg(va, u64);
+                        break; default: BUSTER_UNREACHABLE();
+                    }
+
+                    let string_buffer = string8_slice(buffer_slice, buffer_i, buffer_slice.length);
+                    String8 format_result;
+
+                    switch (format_kind)
+                    {
+                        break; case FORMAT_KIND_DECIMAL: format_result = format_integer_decimal(string_buffer, value, false);
+                        break; case FORMAT_KIND_BINARY: format_result = format_integer_binary(string_buffer, value);
+                        break; case FORMAT_KIND_OCTAL: format_result = format_integer_octal(string_buffer, value);
+                        break; case FORMAT_KIND_HEXADECIMAL: format_result = format_integer_hexadecimal(string_buffer, value);
+                        break; case FORMAT_KIND_COUNT: BUSTER_UNREACHABLE();
+                    }
+
+                    buffer_i += format_result.length;
+                }
+                break; case FORMAT_SIGNED_INTEGER_8: case FORMAT_SIGNED_INTEGER_16: case FORMAT_SIGNED_INTEGER_32: case FORMAT_SIGNED_INTEGER_64:
+                {
+                    s64 value;
+                    switch (format)
+                    {
+                        break; case FORMAT_SIGNED_INTEGER_8: value = (s8)(va_arg(va, s32) & INT8_MAX);
+                        break; case FORMAT_SIGNED_INTEGER_16: value = (s16)(va_arg(va, s32) & INT16_MAX);
+                        break; case FORMAT_SIGNED_INTEGER_32: value = va_arg(va, s32);
+                        break; case FORMAT_SIGNED_INTEGER_64: value = va_arg(va, s64);
+                        break; default: BUSTER_UNREACHABLE();
+                    }
+
+                    let string_buffer = string8_slice(buffer_slice, buffer_i, buffer_slice.length);
+                    String8 format_result;
+
+                    switch (format_kind)
+                    {
+                        break; case FORMAT_KIND_DECIMAL: format_result = format_integer_decimal(string_buffer, value, true);
+                        break; case FORMAT_KIND_BINARY: format_result = format_integer_binary(string_buffer, value);
+                        break; case FORMAT_KIND_OCTAL: format_result = format_integer_octal(string_buffer, value);
+                        break; case FORMAT_KIND_HEXADECIMAL: format_result = format_integer_hexadecimal(string_buffer, value);
+                        break; case FORMAT_KIND_COUNT: BUSTER_UNREACHABLE();
+                    }
+
+                    buffer_i += format_result.length;
+                }
+                break; case FORMAT_UNSIGNED_INTEGER_128:
+                {
+                }
+                break; case FORMAT_SIGNED_INTEGER_128:
+                {
+                }
+                break; case FORMAT_INTEGER_COUNT:
+                {
+                    buffer[buffer_i++] = '{';
+                    for (u64 i = 0; i < whole_format_string.length; i += 1)
+                    {
+                        buffer[buffer_i++] = whole_format_string.pointer[i];
+                    }
+                    buffer[buffer_i++] = '}';
                 }
             }
         }
@@ -2021,11 +2151,17 @@ BUSTER_IMPL OsStringList argument_add(ArgumentBuilder* builder, OsString arg)
 {
 #if defined(_WIN32)
     let result = arena_duplicate_os_string(builder->arena, arg, true);
-    result.pointer[arg.length] = ' ';
+    if (result.pointer)
+    {
+        result.pointer[arg.length] = ' ';
+    }
     return result.pointer;
 #else
     let result = arena_allocate(builder->arena, OsChar*, 1);
-    *result = (OsChar*)arg.pointer;
+    if (result)
+    {
+        *result = (OsChar*)arg.pointer;
+    }
     return result;
 #endif
 }
@@ -2033,13 +2169,20 @@ BUSTER_IMPL OsStringList argument_add(ArgumentBuilder* builder, OsString arg)
 BUSTER_IMPL ArgumentBuilder* argument_builder_start(Arena* arena, OsString s)
 {
     let position = arena->position;
+    print(S8("Arg builder start\n"));
     let argument_builder = arena_allocate(arena, ArgumentBuilder, 1);
-    *argument_builder = (ArgumentBuilder) {
-        .argv = 0,
-        .arena = arena,
-        .arena_offset = position,
-    };
-    argument_builder->argv = argument_add(argument_builder, s);
+    print(S8("Arg builder end\n"));
+    if (argument_builder)
+    {
+        *argument_builder = (ArgumentBuilder) {
+            .argv = 0,
+                .arena = arena,
+                .arena_offset = position,
+        };
+        print(S8("Arg add start\n"));
+        argument_builder->argv = argument_add(argument_builder, s);
+        print(S8("Arg add end\n"));
+    }
     return argument_builder;
 }
 
@@ -2149,9 +2292,29 @@ EXPORT void* memset(void* restrict address, int ch, u64 byte_count)
 }
 #endif
 
-BUSTER_IMPL OsChar* get_last_error_message()
+BUSTER_IMPL OsString get_last_error_message(Arena* arena)
 {
-    return 0;
+#if defined(_WIN32)
+    OsChar buffer[4096];
+    let error = GetLastError();
+
+    DWORD length = FormatMessageW(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL,
+            error,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            buffer,
+            BUSTER_ARRAY_LENGTH(buffer),
+            NULL
+            );
+    let error_string_stack = os_string_from_pointer_length(buffer, length);
+    let error_string = arena_duplicate_os_string(arena, error_string_stack, true);
+#else
+    let error_string_pointer = strerror(errno);
+    let error_string = S8(error_string_pointer);
+    BUSTER_UNUSED(arena);
+#endif
+    return error_string;
 }
 
 BUSTER_IMPL u64 string16_length(const char16* s)
@@ -2405,4 +2568,22 @@ BUSTER_IMPL OsString os_get_environment_variable(OsString variable)
 #pragma error
 #endif
 #endif
+}
+
+BUSTER_IMPL bool copy_file(CopyFileArguments arguments)
+{
+    bool result = true;
+#if defined(_WIN32)
+    result = CopyFileW(arguments.original_path.pointer, arguments.new_path.pointer, false) != 0;
+    if (!result)
+    {
+        print(S8("Error message: {OsS}\n"), get_last_error_message(arena_create((ArenaInitialization){})));
+        print(S8("Original: {OsS}\n"), arguments.original_path);
+        print(S8("New: {OsS}\n"), arguments.new_path);
+        BUSTER_TRAP();
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
 }

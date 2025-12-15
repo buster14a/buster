@@ -11,7 +11,7 @@ echo "BUSTER_OS=$BUSTER_OS" >> $GITHUB_ENV
 echo "BUSTER_ARCH=$BUSTER_ARCH" >> $GITHUB_ENV
 
 if [[ "$BUSTER_OS" == "linux" ]]; then
-    cat /proc/cpuinfo | grep -m1 'model name' | cut -d: -f2-
+    cat /proc/cpuinfo
 elif [[ "$BUSTER_OS" == "macos" ]]; then
     sysctl -n machdep.cpu.brand_string
 elif [[ "$BUSTER_OS" == "windows" ]]; then

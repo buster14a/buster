@@ -45,6 +45,8 @@ if not defined CMAKE_PREFIX_PATH (
     set CMAKE_PREFIX_PATH=%USERPROFILE%\dev\toolchain\install\llvm_%BUSTER_LLVM_VERSION%_%BUSTER_ARCH%-%BUSTER_OS%-Release
 )
 
+copy "%CMAKE_PREFIX_PATH%\lib\clang\21\lib\windows\clang_rt.asan_dynamic-%BUSTER_ARCH%.dll" build >NUL
+
 if not defined CLANG (
     set CLANG=%CMAKE_PREFIX_PATH%\bin\clang.exe
 )
@@ -72,15 +74,16 @@ if not exist build (
     mkdir build || goto :error
 )
 
+REM -nostdlib ^
+REM -lkernel32 ^
+REM -Wl,-entry:mainCRTStartup ^
+REM -Wl,-subsystem:console ^
+
 "%CLANG%" build.c ^
     -o build\builder.exe ^
     -fuse-ld=lld ^
     %CLANG_EXTRA_FLAGS% ^
-    -nostdlib ^
-    -lkernel32 ^
     -lws2_32 ^
-    -Wl,-entry:mainCRTStartup ^
-    -Wl,-subsystem:console ^
     -Isrc ^
     -std=gnu2x ^
     -march=native ^
@@ -105,12 +108,17 @@ if not exist build (
     -fwrapv ^
     -fno-strict-aliasing ^
     -funsigned-char ^
+    -fsanitize=address,undefined ^
+    -fsanitize-recover=undefined ^
     -ferror-limit=1 || goto :error
 
 REM ------------------------------------------------------------
 REM Run builder if build succeeded
 REM ------------------------------------------------------------
 
+REM "C:\Program Files (x86)\Windows Kits\10\Debuggers\arm64\cdb.exe" -o -g -G ^
+REM -c ".symfix; .reload; g; .echo === EXCEPTION ===; .exr -1; .echo === CONTEXT ===; .ecxr; .echo === STACK ===; kv; q" ^
+REM build\builder.exe %*
 set BUSTER_REGENERATE=1
 build\builder.exe %*
 set EXIT_CODE=%ERRORLEVEL%

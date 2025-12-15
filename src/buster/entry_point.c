@@ -1,15 +1,17 @@
 #pragma once
 
 #include <buster/entry_point.h>
+#include <buster/system_headers.h>
+#include <buster/target.h>
 
 #if BUSTER_UNITY_BUILD
 #include <buster/lib.c>
-#else
-#include <buster/system_headers.h>
+#include <buster/target.c>
 #endif
 
 BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList envp)
 {
+    print(S8("Reached buster_entry_point\n"));
     ProcessResult result = {};
     os_initialize_time();
 #ifdef _WIN32
@@ -26,6 +28,10 @@ BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList en
     program_state->arena = arena_create((ArenaInitialization){});
     program_state->input.argv = argv;
     program_state->input.envp = envp;
+
+    print(S8("Detecting CPU model...\n"));
+    cpu_detect_model();
+    print(S8("Detected CPU model...\n"));
 
     result = process_arguments();
 
@@ -105,7 +111,13 @@ BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList en
 BUSTER_EXPORT int main(int argc, char* argv[], char* envp[])
 {
     BUSTER_UNUSED(argc);
+#if _WIN32
+    BUSTER_UNUSED(argv);
+    BUSTER_UNUSED(envp);
+    let result = buster_entry_point(GetCommandLineW(), GetEnvironmentStringsW());
+#else
     let result = buster_entry_point((OsStringList)argv, (OsStringList)envp);
+#endif
     return (int)result;
 }
 #else
@@ -171,7 +183,57 @@ BUSTER_EXPORT size_t strlen(const char* s)
     return (size_t)(it - i);
 }
 
-int _fltused = 1;
+[[gnu::noreturn]] BUSTER_EXPORT void abort()
+{
+    BUSTER_TRAP();
+}
+
+BUSTER_EXPORT int atoi(const char* pointer)
+{
+    return parse_decimal_scalar(pointer);
+}
+
+BUSTER_EXPORT long atol(const char* pointer)
+{
+    return parse_decimal_scalar(pointer);
+}
+
+BUSTER_EXPORT long long atoll(const char* pointer)
+{
+    return parse_decimal_scalar(pointer);
+}
+
+BUSTER_EXPORT double frexp(double x, int* e)
+{
+    // TODO:
+    BUSTER_UNUSED(x);
+    BUSTER_UNUSED(e);
+    return 0.0;
+}
+
+[[gnu::noreturn]] BUSTER_EXPORT void longjmp(jmp_buf env, int val)
+{
+    // TODO:
+    BUSTER_TRAP();
+}
+
+BUSTER_EXPORT void *memchr(const void* s, int c, size_t n)
+{
+    u8* pointer = s;
+    u8 ch = (u8)c;
+    u64 i;
+    for (i = 0; i < n; i += 1)
+    {
+        if (pointer[i] == ch)
+        {
+            break;
+        }
+    }
+
+    return pointer + i == pointer + n ? 0 : pointer + i;
+}
+
+BUSTER_IMPL int _fltused = 1;
 
 #if defined(_WIN32)
 BUSTER_EXPORT void __chkstk(void)

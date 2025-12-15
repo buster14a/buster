@@ -1,16 +1,21 @@
 #pragma once
 #include <buster/lib.h>
 #include <buster/system_headers.h>
+#include <buster/compiler/ir/ir.h>
+#include <buster/compiler/backend/code_generation.h>
+
+ENUM(CompilerCommand, 
+    COMPILER_COMMAND_TEST,
+);
 
 STRUCT(CCProgramState)
 {
     ProgramState general_program_state;
     OsString cwd;
+    CompilerCommand command;
 };
 
-BUSTER_LOCAL CCProgramState cc_program_state = {
-
-};
+BUSTER_LOCAL CCProgramState cc_program_state = {};
 
 BUSTER_IMPL ProgramState* program_state = &cc_program_state.general_program_state;
 
@@ -108,6 +113,21 @@ BUSTER_LOCAL bool compile(Arena* arena, OsString relative_path, CompilerOptions 
     return compile_file(arena, &file, options);
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_LOCAL bool compiler_tests(TestArguments* arguments)
+{
+    let module = ir_create_mock_module(arguments->arena);
+    let functions = ir_module_get_functions(module);
+    let generation = module_generation_initialize();
+    for (u64 i = 0; i < functions.length; i += 1)
+    {
+        let function = &functions.pointer[i];
+        function_generate(&generation, arguments->arena, module, function, (CodeGenerationOptions){});
+    }
+    return true;
+}
+#endif
+
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
     let arena = thread->arena;
@@ -120,5 +140,23 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     {
         print(S8("Compilation failed!\n"));
     }
+
+    switch (cc_program_state.command)
+    {
+        break; case COMPILER_COMMAND_TEST:
+        {
+#if BUSTER_INCLUDE_TESTS
+            TestArguments test_arguments = {
+                .arena = arena,
+            };
+            result = result & ir_tests(&test_arguments);
+            result = result & compiler_tests(&test_arguments);
+#else
+            result = false;
+#endif
+        }
+        break; default: result = false;
+    }
+
     return result ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
