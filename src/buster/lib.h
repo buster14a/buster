@@ -90,7 +90,7 @@
 #define BUSTER_MIN(a,b) (((a)<(b))?(a):(b))
 #define BUSTER_MAX(a,b) (((a)>(b))?(a):(b))
 
-#if __APPLE__ &&  __aarch64__
+#if defined(__APPLE__) &&  defined(__aarch64__)
 #define BUSTER_CACHE_LINE_GUESS (128)
 #else
 #define BUSTER_CACHE_LINE_GUESS (64)

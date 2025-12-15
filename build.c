@@ -417,7 +417,7 @@ BUSTER_LOCAL void append_string16(Arena* arena, String16 s)
     string16_to_string8(arena, s);
 }
 
-#if _WIN32
+#if defined(_WIN32)
 #define append_os_string append_string16
 #else
 #define append_os_string append_string8

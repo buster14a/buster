@@ -2019,7 +2019,7 @@ BUSTER_IMPL void print(String8 format, ...)
 
 BUSTER_IMPL OsStringList argument_add(ArgumentBuilder* builder, OsString arg)
 {
-#if _WIN32
+#if defined(_WIN32)
     let result = arena_duplicate_os_string(builder->arena, arg, true);
     result.pointer[arg.length] = ' ';
     return result.pointer;
@@ -2399,7 +2399,7 @@ BUSTER_IMPL OsString os_get_environment_variable(OsString variable)
 #if BUSTER_LINK_LIBC
     exit((int)code);
 #else
-#if _WIN32
+#if defined(_WIN32)
     ExitProcess(code);
 #else
 #pragma error

@@ -109,7 +109,7 @@ BUSTER_EXPORT int main(int argc, char* argv[], char* envp[])
     return (int)result;
 }
 #else
-#if _WIN32
+#if defined(_WIN32)
 [[gnu::noreturn]] BUSTER_EXPORT void mainCRTStartup()
 {
     let result = buster_entry_point(GetCommandLineW(), GetEnvironmentStringsW());
@@ -173,7 +173,7 @@ BUSTER_EXPORT size_t strlen(const char* s)
 
 int _fltused = 1;
 
-#if _WIN32
+#if defined(_WIN32)
 BUSTER_EXPORT void __chkstk(void)
 {
 }
