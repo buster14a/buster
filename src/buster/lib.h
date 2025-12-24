@@ -30,7 +30,11 @@
 #endif
 #endif
 
+#if BUSTER_LINK_LIBC
+#define thread_local_get(x) (x)
+#else
 #define thread_local_get(x) TlsGetValue(x)
+#endif
 
 #if defined(__APPLE__)
 #define BUSTER_APPLE 1
