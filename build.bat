@@ -45,8 +45,6 @@ if not defined CMAKE_PREFIX_PATH (
     set CMAKE_PREFIX_PATH=%USERPROFILE%\dev\toolchain\install\llvm_%BUSTER_LLVM_VERSION%_%BUSTER_ARCH%-%BUSTER_OS%-Release
 )
 
-copy "%CMAKE_PREFIX_PATH%\lib\clang\21\lib\windows\clang_rt.asan_dynamic-%BUSTER_ARCH%.dll" build >NUL
-
 if not defined CLANG (
     set CLANG=%CMAKE_PREFIX_PATH%\bin\clang.exe
 )
@@ -72,7 +70,10 @@ REM ------------------------------------------------------------
 
 if not exist build (
     mkdir build || goto :error
+    dir build
 )
+
+copy "%CMAKE_PREFIX_PATH%\lib\clang\21\lib\windows\clang_rt.asan_dynamic-%BUSTER_ARCH%.dll" build >NUL
 
 REM -nostdlib ^
 REM -lkernel32 ^

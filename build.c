@@ -674,13 +674,18 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     };
     let original_asan_dll = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, original_dll_parts), true);
     let target_strings = target_to_split_os_string(target_native);
-    OsString destination_dll_parts[] = {
+    OsString target_native_dir_path_parts[] = {
         OsS("build/"),
         target_strings.s[0],
         OsS("-"),
         target_strings.s[1],
         OsS("-"),
         target_strings.s[2],
+    };
+    let target_native_dir_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, target_native_dir_path_parts), true);
+    os_make_directory(target_native_dir_path);
+    OsString destination_dll_parts[] = {
+        target_native_dir_path,
         OsS("/"),
         dll_filename,
     };
