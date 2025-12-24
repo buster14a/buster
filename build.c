@@ -428,7 +428,14 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         bool sanitize = true;
         if (sanitize)
         {
-            argument_add(builder, OsS("-fsanitize=address,undefined"));
+            if (unit->target.cpu.arch == CPU_ARCH_AARCH64 && unit->target.os == OPERATING_SYSTEM_WINDOWS)
+            {
+                argument_add(builder, OsS("-fsanitize=undefined"));
+            }
+            else
+            {
+                argument_add(builder, OsS("-fsanitize=address,undefined"));
+            }
             argument_add(builder, OsS("-fsanitize-recover=undefined"));
         }
 
@@ -658,6 +665,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     let general_arena = arena_create((ArenaInitialization){});
 
 #if defined(_WIN32)
+#if defined(__x86_64__)
     let cmake_prefix_path = os_get_environment_variable(OsS("CMAKE_PREFIX_PATH"));
     let dll_filename = 
 #if defined(__x86_64__)
@@ -691,6 +699,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     };
     let destination_asan_dll = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, destination_dll_parts), true);
     copy_file((CopyFileArguments){ .original_path = original_asan_dll, .new_path = destination_asan_dll });
+#endif
 #endif
 
     let file_list_arena = arena_create((ArenaInitialization){});
@@ -940,7 +949,14 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 bool sanitize = true;
                 if (sanitize)
                 {
-                    argument_add(builder, OsS("-fsanitize=address,undefined"));
+                    if (link_unit_specification->target.cpu.arch == CPU_ARCH_AARCH64 && link_unit_specification->target.os == OPERATING_SYSTEM_WINDOWS)
+                    {
+                        argument_add(builder, OsS("-fsanitize=undefined"));
+                    }
+                    else
+                    {
+                        argument_add(builder, OsS("-fsanitize=address,undefined"));
+                    }
                     argument_add(builder, OsS("-fsanitize-recover=undefined"));
                 }
 
