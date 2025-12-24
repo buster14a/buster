@@ -2169,9 +2169,7 @@ BUSTER_IMPL OsStringList argument_add(ArgumentBuilder* builder, OsString arg)
 BUSTER_IMPL ArgumentBuilder* argument_builder_start(Arena* arena, OsString s)
 {
     let position = arena->position;
-    print(S8("Arg builder start\n"));
     let argument_builder = arena_allocate(arena, ArgumentBuilder, 1);
-    print(S8("Arg builder end\n"));
     if (argument_builder)
     {
         *argument_builder = (ArgumentBuilder) {
@@ -2179,9 +2177,7 @@ BUSTER_IMPL ArgumentBuilder* argument_builder_start(Arena* arena, OsString s)
                 .arena = arena,
                 .arena_offset = position,
         };
-        print(S8("Arg add start\n"));
         argument_builder->argv = argument_add(argument_builder, s);
-        print(S8("Arg add end\n"));
     }
     return argument_builder;
 }

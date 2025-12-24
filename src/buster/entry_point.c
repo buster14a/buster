@@ -11,7 +11,6 @@
 
 BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList envp)
 {
-    print(S8("Reached buster_entry_point\n"));
     ProcessResult result = {};
     os_initialize_time();
 #ifdef _WIN32
@@ -29,9 +28,7 @@ BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList en
     program_state->input.argv = argv;
     program_state->input.envp = envp;
 
-    print(S8("Detecting CPU model...\n"));
     cpu_detect_model();
-    print(S8("Detected CPU model...\n"));
 
     result = process_arguments();
 

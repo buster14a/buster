@@ -63,17 +63,13 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
 
     if (file_size == length)
     {
-        print(S8("Value (string): \"{S8}\"\n"), midr_el1_string);
-
         if (buffer[0] == '0' && buffer[1] == 'x')
         {
             let value = parse_hexadecimal_scalar((char*)buffer + 2).value;
-            print(S8("Value (u64): \"{u64:x}\"\n"), value);
 
             if (value <= INT32_MAX)
             {
                 let value_u32 = (u32)value;
-                print(S8("Value (u32): \"{u32:x}\"\n"), value_u32);
                 let id_register = *(IdentificationRegister*)&value_u32;
 
                 result = CPU_MODEL_A64_GENERIC;

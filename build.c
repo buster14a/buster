@@ -277,12 +277,10 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
 
     let compile_commands_start = compile_commands->position;
     append_string8(compile_commands, S8("[\n"));
-    print(S8("Unit count: {u64}\n"), unit_count);
 
     for (u64 unit_i = 0; unit_i < unit_count; unit_i += 1)
     {
         let unit = &units[unit_i];
-        print(S8("Unit: {u64}\n"), unit_i);
 
         let source_absolute_path = unit->source_path;
         let source_relative_path = string_slice_start(source_absolute_path, cwd.length + 1);
@@ -336,7 +334,6 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         }
 
         buffer[buffer_i] = 0;
-        print(S8("Memcpy end\n"));
 
         if (target_i == target_count)
         {
@@ -345,7 +342,6 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             targets[target_count] = unit->target;
             target_count += 1;
         }
-        print(S8("First directory\n"));
 
         let buffer_start = buffer_i;
         u64 source_i = 0;
@@ -376,21 +372,14 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
 
             source_i += byte_count; 
         }
-        print(S8("All directory. Arena position: {u64:x}\n"), arena->position);
 
         let builder = argument_builder_start(arena, clang_path);
-        if (!builder)
-        {
-            print(S8("Failed to allocate memory for string builder\n"));
-        }
-        print(S8("After builder\n"));
         argument_add(builder, OsS("-ferror-limit=1"));
         argument_add(builder, OsS("-c"));
         argument_add(builder, source_absolute_path);
         argument_add(builder, OsS("-o"));
         argument_add(builder, object_path);
         argument_add(builder, OsS("-std=gnu2x"));
-        print(S8("-std\n"));
 
         // if (unit->target.os == OPERATING_SYSTEM_WINDOWS)
         // {
@@ -402,7 +391,6 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             argument_add(builder, OsS("-isysroot"));
             argument_add(builder, xc_sdk_path);
         }
-        print(S8("After SDK path\n"));
 
         argument_add(builder, OsS("-Isrc"));
         argument_add(builder, OsS("-Wall"));
@@ -457,14 +445,12 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         append_string8(compile_commands, os_string_to_string8(arena, cwd));
         append_string8(compile_commands, S8("\",\n\t\t\"command\": \""));
 
-        print(S8("os string start\n"));
         let arg_it = os_string_list_initialize(args);
         for (let arg = os_string_list_next(&arg_it); arg.pointer; arg = os_string_list_next(&arg_it))
         {
             append_os_string(compile_commands, arg);
             append_string8(compile_commands, S8(" "));
         }
-        print(S8("os string end\n"));
 
         compile_commands->position -= 1;
         append_string8(compile_commands, S8("\",\n\t\t\"file\": \""));
@@ -479,8 +465,6 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
 
     let compile_commands_str = (String8){ .pointer = (u8*)compile_commands + compile_commands_start, .length = compile_commands->position - compile_commands_start };
 
-    print(S8("Before writing compile commands\n"));
-
     if (result)
     {
         result = file_write(OsS("build/compile_commands.json"), compile_commands_str);
@@ -489,7 +473,6 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             print(S8("Error writing compile commands: {OsS}"), get_last_error_message(arena));
         }
     }
-    print(S8("After writing compile commands\n"));
 
     return result;
 }
@@ -568,7 +551,6 @@ BUSTER_LOCAL bool builder_tests(TestArguments* arguments)
 
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
-    print(S8("Reached thread entry point\n"));
 #if defined(__APPLE__)
     xc_sdk_path = os_get_environment_variable(OsS("XC_SDK_PATH"));
 #endif
@@ -845,11 +827,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
 
     ProcessResult result = {};
 
-    print(S8("Reached compiled commands\n"));
     if (build_compile_commands(general_arena, compile_commands, compilation_units, compilation_unit_count, cwd, clang_path))
     {
-        print(S8("Passed compiled commands\n"));
-
         let selected_compilation_count = compilation_unit_count;
         let selected_compilation_units = compilation_units;
 
@@ -858,8 +837,6 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             let unit = &selected_compilation_units[unit_i];
             unit->process.handle = os_process_spawn(unit->compiler, unit->compilation_arguments, program_state->input.envp);
         }
-
-        print(S8("Spawned compile commands\n"));
 
         for (u64 unit_i = 0; unit_i < selected_compilation_count; unit_i += 1)
         {
@@ -871,15 +848,12 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             }
         }
 
-        print(S8("Waited compile commands\n"));
-
         u64 link_unit_start = 1;
         // TODO: depend more-fine grainedly, ie: link those objects which succeeded compiling instead of all or nothing
         if (result == PROCESS_RESULT_SUCCESS)
         {
             let argument_arena = arena_create((ArenaInitialization){});
             ProcessHandle* processes[link_unit_count];
-            print(S8("Before spawning linking commands\n"));
 
             for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
             {
@@ -966,8 +940,6 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 processes[link_unit_i] = process;
             }
 
-            print(S8("Before waiting linking commands\n"));
-
             for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
             {
                 let process = processes[link_unit_i];
@@ -987,7 +959,6 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 break; case BUILD_COMMAND_BUILD: {}
                 break; case BUILD_COMMAND_TEST:
                 {
-                    print(S8("Before running tests\n"));
                     ProcessHandle* processes[link_unit_count];
 
                     // Skip builder tests
