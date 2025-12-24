@@ -1858,6 +1858,19 @@ BUSTER_IMPL bool string8_starts_with(String8 s, String8 beginning)
     return result;
 }
 
+BUSTER_IMPL bool string16_starts_with(String16 s, String16 beginning)
+{
+    bool result = (beginning.length <= s.length);
+
+    if (result)
+    {
+        String16 first_chunk = { s.pointer , beginning.length };
+        result = string16_equal(first_chunk, beginning);
+    }
+
+    return result;
+}
+
 BUSTER_IMPL u64 align_forward(u64 n, u64 a)
 {
     let mask = a - 1;
@@ -1955,6 +1968,7 @@ BUSTER_IMPL void print(String8 format, ...)
             let whole_format_string = string8_from_pointer_length((char*)format_buffer, format_buffer_i);
             ENUM(Format, 
                     FORMAT_OS_STRING,
+                    FORMAT_OS_CHAR,
                     FORMAT_STRING8,
                     FORMAT_STRING16,
                     FORMAT_STRING32,
@@ -1972,6 +1986,7 @@ BUSTER_IMPL void print(String8 format, ...)
                 );
             String8 possible_format_strings[FORMAT_INTEGER_COUNT] = {
                 [FORMAT_OS_STRING] = S8("OsS"),
+                [FORMAT_OS_CHAR] = S8("OsC"),
                 [FORMAT_STRING8] = S8("S8"),
                 [FORMAT_STRING16] = S8("S16"),
                 [FORMAT_STRING32] = S8("S32"),
@@ -2045,6 +2060,12 @@ BUSTER_IMPL void print(String8 format, ...)
                     {
                         buffer[buffer_i++] = (u8)string.pointer[i];
                     }
+                }
+                break; case FORMAT_OS_CHAR:
+                {
+                    // TODO:
+                    let os_char = (OsChar)va_arg(va, u32);
+                    buffer[buffer_i++] = (u8)os_char;
                 }
                 break; case FORMAT_STRING8:
                 {

@@ -72,6 +72,7 @@ STRUCT(TargetBuildFile)
     CompilationModel model;
     bool has_debug_info;
     bool use_io_ring;
+    bool optimize;
 };
 
 STRUCT(ModuleInstantiation)
@@ -148,6 +149,7 @@ STRUCT(LinkUnitSpecification)
     Target target;
     bool use_io_ring;
     bool has_debug_info;
+    bool optimize;
 };
 
 #if defined(__x86_64__)
@@ -166,6 +168,7 @@ STRUCT(BuildProgramState)
 {
     ProgramState general_state;
     BuildCommand command;
+    bool optimize;
 };
 
 BUSTER_LOCAL BuildProgramState build_program_state = {};
@@ -215,6 +218,7 @@ STRUCT(CompilationUnit)
     CompilationModel model;
     OsChar* compiler;
     OsStringList compilation_arguments;
+    bool optimize;
     bool has_debug_info;
     bool use_io_ring;
     bool include_tests;
@@ -413,7 +417,8 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
 
         argument_add(builder, march_os_string);
 
-        bool sanitize = true;
+
+        bool sanitize = !unit->optimize;
         if (sanitize)
         {
             if (unit->target.cpu.arch == CPU_ARCH_AARCH64 && unit->target.os == OPERATING_SYSTEM_WINDOWS)
@@ -425,6 +430,11 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
                 argument_add(builder, OsS("-fsanitize=address,undefined"));
             }
             argument_add(builder, OsS("-fsanitize-recover=undefined"));
+        }
+
+        if (unit->optimize)
+        {
+            argument_add(builder, OsS("-O2"));
         }
 
         if (unit->has_debug_info)
@@ -529,10 +539,33 @@ BUSTER_IMPL ProcessResult process_arguments()
         }
 
         let second_argument = os_string_list_next(arg_it);
+
         if (second_argument.pointer)
         {
-            print(S8("Arguments > 2 not supported\n"));
-            result = PROCESS_RESULT_FAILED;
+            let optimize_arg = OsS("--optimize=");
+            if (second_argument.length > 2 && os_string_starts_with(second_argument, optimize_arg) && second_argument.length == optimize_arg.length + 1)
+            {
+                let optimize_arg_value = second_argument.pointer[optimize_arg.length];
+                switch (optimize_arg_value)
+                {
+                    break; case '1': build_program_state.optimize = true;
+                    break; case '0': build_program_state.optimize = false;
+                    break; default: print(S8("Unrecognized argument 2: '{OsC}'\n"), optimize_arg_value);
+                }
+            }
+            else
+            {
+                print(S8("Unrecognized argument 2: '{OsS}'\n"), second_argument);
+                    
+                result = PROCESS_RESULT_FAILED;
+            }
+
+            let third_argument = os_string_list_next(arg_it);
+            if (third_argument.pointer)
+            {
+                print(S8("Arguments > 3 not supported\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
         }
     }
 
@@ -587,9 +620,9 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     };
 
     LinkUnitSpecification specifications[] = {
-        LINK_UNIT(builder, .target = target_native, .has_debug_info = true),
-        LINK_UNIT(cc, .target = target_native, .has_debug_info = true),
-        LINK_UNIT(asm, .target = target_native, .has_debug_info = true),
+        LINK_UNIT(builder, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true),
+        LINK_UNIT(cc, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true),
+        LINK_UNIT(asm, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true),
     };
     constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
 
@@ -742,7 +775,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 *new_file = (TargetBuildFile) {
                     .full_path = c_full_path,
                     .target = link_unit_target,
-                    .has_debug_info = true,
+                    .has_debug_info = link_unit->has_debug_info,
+                    .optimize = link_unit->optimize,
                 };
 
                 let c_source_file_index = c_source_file_count;
@@ -762,7 +796,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     *(new_file + 1) = (TargetBuildFile) {
                         .full_path = h_full_path,
                         .target = link_unit_target,
-                        .has_debug_info = true,
+                        .has_debug_info = link_unit->has_debug_info,
+                        .optimize = link_unit->optimize,
                     };
                 }
             }
@@ -797,6 +832,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 .has_debug_info = source_file->has_debug_info,
                 .use_io_ring = source_file->use_io_ring,
                 .source_path = source_file->full_path,
+                .optimize = source_file->optimize,
             };
         }
     }
@@ -920,7 +956,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     argument_add(builder, OsS("-luring"));
                 }
 
-                bool sanitize = true;
+                bool sanitize = !link_unit_specification->optimize;
                 if (sanitize)
                 {
                     if (link_unit_specification->target.cpu.arch == CPU_ARCH_AARCH64 && link_unit_specification->target.os == OPERATING_SYSTEM_WINDOWS)
