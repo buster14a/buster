@@ -581,12 +581,14 @@ BUSTER_DECL String8 string16_to_string8(Arena* arena, String16 s);
 #define os_string_first_character string16_first_character
 #define os_string_to_string8(a, s) string16_to_string8(a, s)
 #define os_string_equal(a, b) string16_equal(a, b)
+#define os_string_starts_with(a, b) string16_starts_with(a, b)
 #define os_string_from_pointer_length(pointer, length) string16_from_pointer_length(pointer, length)
 #else
 #define os_string_from_pointer(pointer) string8_from_pointer(pointer)
 #define os_string_first_character string8_first_character
 #define os_string_to_string8(a, s) s
 #define os_string_equal(a, b) string8_equal(a, b)
+#define os_string_starts_with(a, b) string8_starts_with(a, b)
 #define os_string_from_pointer_length(pointer, length) string8_from_pointer_length(pointer, length)
 #endif
 

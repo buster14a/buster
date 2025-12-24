@@ -19,28 +19,38 @@ jobs:
       fail-fast: false
       matrix:
         os: [ self-hosted, ubuntu-24.04, macos-15-intel, windows-2025, ubuntu-24.04-arm, macos-26, windows-11-arm ]
-        optimize: [ 0 , 1 ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      # - name: Install dependencies
-      #   if: matrix.os == 'ubuntu-24.04'
-      #   shell: bash
-      #   run: |
-      #     sudo apt-get install -y xorriso qemu-system
-      - name: Build and test (Packaged LLVM)
+      - name: Build and test (Packaged LLVM) (optimize=0)
         shell: bash
         env:
-          BUSTER_OPTIMIZE: ${{matrix.optimize}}
           BUSTER_OS_TAG: ${{matrix.os}}
         if: matrix.os != 'windows-2025' && matrix.os != 'windows-11-arm'
         run: |
-          ./build.sh test
-      - name: Build and test (Packaged LLVM)
+          rm -rf build
+          ./build.sh test --optimize=0
+      - name: Build and test (Packaged LLVM) (optimize=1)
+        shell: bash
+        env:
+          BUSTER_OS_TAG: ${{matrix.os}}
+        if: matrix.os != 'windows-2025' && matrix.os != 'windows-11-arm'
+        run: |
+          rm -rf build
+          ./build.sh test --optimize=1
+      - name: Build and test (Packaged LLVM) (optimize=0)
         if: matrix.os == 'windows-2025' || matrix.os == 'windows-11-arm'
         shell: cmd
         env:
-          BUSTER_OPTIMIZE: ${{matrix.optimize}}
           BUSTER_OS_TAG: ${{matrix.os}}
         run: |
-          build.bat test
+          rmdir /s /q build
+          build.bat test --optimize=0
+      - name: Build and test (Packaged LLVM) (optimize=1)
+        if: matrix.os == 'windows-2025' || matrix.os == 'windows-11-arm'
+        shell: cmd
+        env:
+          BUSTER_OS_TAG: ${{matrix.os}}
+        run: |
+          rmdir /s /q build
+          build.bat test --optimize=1
