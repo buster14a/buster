@@ -1,4 +1,4 @@
-@echo off
+@echo off 
 setlocal EnableExtensions EnableDelayedExpansion
 
 REM ------------------------------------------------------------
@@ -62,7 +62,6 @@ REM macOS SDK logic (no-op on Windows)
 REM ------------------------------------------------------------
 
 set XC_SDK_PATH=
-set CLANG_EXTRA_FLAGS=
 
 REM ------------------------------------------------------------
 REM Build
@@ -73,7 +72,11 @@ if not exist build (
     dir build
 )
 
-copy "%CMAKE_PREFIX_PATH%\lib\clang\21\lib\windows\clang_rt.asan_dynamic-%BUSTER_ARCH%.dll" build >NUL
+set CLANG_EXTRA_FLAGS=-fsanitize=undefined
+if /I "%BUSTER_ARCH%"=="x86_64" (
+    set CLANG_EXTRA_FLAGS="-fsanitize=address,undefined"
+    copy "%CMAKE_PREFIX_PATH%\lib\clang\21\lib\windows\clang_rt.asan_dynamic-%BUSTER_ARCH%.dll" build >NUL
+)
 
 REM -nostdlib ^
 REM -lkernel32 ^
@@ -83,7 +86,6 @@ REM -Wl,-subsystem:console ^
 "%CLANG%" build.c ^
     -o build\builder.exe ^
     -fuse-ld=lld ^
-    %CLANG_EXTRA_FLAGS% ^
     -lws2_32 ^
     -Isrc ^
     -std=gnu2x ^
@@ -109,7 +111,7 @@ REM -Wl,-subsystem:console ^
     -fwrapv ^
     -fno-strict-aliasing ^
     -funsigned-char ^
-    -fsanitize=address,undefined ^
+    %CLANG_EXTRA_FLAGS% ^
     -fsanitize-recover=undefined ^
     -ferror-limit=1 || goto :error
 
