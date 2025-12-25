@@ -73,6 +73,7 @@ STRUCT(TargetBuildFile)
     bool has_debug_info;
     bool use_io_ring;
     bool optimize;
+    bool fuzz;
 };
 
 STRUCT(ModuleInstantiation)
@@ -150,6 +151,7 @@ STRUCT(LinkUnitSpecification)
     bool use_io_ring;
     bool has_debug_info;
     bool optimize;
+    bool fuzz;
 };
 
 #if defined(__x86_64__)
@@ -169,6 +171,7 @@ STRUCT(BuildProgramState)
     ProgramState general_state;
     BuildCommand command;
     bool optimize;
+    bool fuzz;
 };
 
 BUSTER_LOCAL BuildProgramState build_program_state = {};
@@ -220,6 +223,7 @@ STRUCT(CompilationUnit)
     OsStringList compilation_arguments;
     bool optimize;
     bool has_debug_info;
+    bool fuzz;
     bool use_io_ring;
     bool include_tests;
     OsString object_path;
@@ -268,6 +272,23 @@ BUSTER_LOCAL bool target_equal(Target a, Target b)
 }
 
 BUSTER_LOCAL OsString xc_sdk_path = {};
+
+BUSTER_LOCAL void add_sanitize_arguments(ArgumentBuilder* builder, Target target, bool fuzz)
+{
+    if (!(target.cpu.arch == CPU_ARCH_AARCH64 && target.os == OPERATING_SYSTEM_WINDOWS))
+    {
+        argument_add(builder, OsS("-fsanitize=address"));
+    }
+
+    argument_add(builder, OsS("-fsanitize=undefined"));
+    argument_add(builder, OsS("-fsanitize=bounds"));
+    argument_add(builder, OsS("-fsanitize-recover=all"));
+
+    if (fuzz)
+    {
+        argument_add(builder, OsS("-fsanitize=fuzzer"));
+    }
+}
 
 BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, CompilationUnit* units, u64 unit_count, OsString cwd, OsString clang_path)
 {
@@ -418,18 +439,12 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         argument_add(builder, march_os_string);
 
 
-        bool sanitize = !unit->optimize;
+        bool sanitize = !unit->optimize || unit->fuzz;
         if (sanitize)
         {
-            if (unit->target.cpu.arch == CPU_ARCH_AARCH64 && unit->target.os == OPERATING_SYSTEM_WINDOWS)
-            {
-                argument_add(builder, OsS("-fsanitize=undefined"));
-            }
-            else
-            {
-                argument_add(builder, OsS("-fsanitize=address,undefined"));
-            }
-            argument_add(builder, OsS("-fsanitize-recover=undefined"));
+            if (unit->fuzz) argument_add(builder, OsS("-DBUSTER_FUZZING=1"));
+
+            add_sanitize_arguments(builder, unit->target, unit->fuzz);
         }
 
         if (unit->optimize)
@@ -538,33 +553,52 @@ BUSTER_IMPL ProcessResult process_arguments()
             }
         }
 
-        let second_argument = os_string_list_next(arg_it);
-
-        if (second_argument.pointer)
+        while (true)
         {
-            let optimize_arg = OsS("--optimize=");
-            if (second_argument.length > 2 && os_string_starts_with(second_argument, optimize_arg) && second_argument.length == optimize_arg.length + 1)
+            let argument = os_string_list_next(arg_it);
+            if (!argument.pointer)
             {
-                let optimize_arg_value = second_argument.pointer[optimize_arg.length];
-                switch (optimize_arg_value)
+                break;
+            }
+
+            STRUCT(BooleanArgument)
+            {
+                OsString string;
+                bool* value_pointer;
+            };
+            BooleanArgument boolean_arguments[] = {
+                { OsS("--optimize="), &build_program_state.optimize },
+                { OsS("--fuzz="), &build_program_state.fuzz },
+            };
+
+            constexpr u64 boolean_argument_count = BUSTER_ARRAY_LENGTH(boolean_arguments);
+
+            u64 i;
+            for (i = 0; i < boolean_argument_count; i += 1)
+            {
+                let boolean_argument = boolean_arguments[i];
+                if (os_string_starts_with(argument, boolean_argument.string) && argument.length == boolean_argument.string.length + 1)
                 {
-                    break; case '1': build_program_state.optimize = true;
-                    break; case '0': build_program_state.optimize = false;
-                    break; default: print(S8("Unrecognized argument 2: '{OsC}'\n"), optimize_arg_value);
+                    let arg_value = argument.pointer[boolean_argument.string.length];
+                    switch (arg_value)
+                    {
+                        break; case '1': *boolean_argument.value_pointer = true;
+                        break; case '0': *boolean_argument.value_pointer = false;
+                        break; default:
+                        {
+                            print(S8("For argument '{OsS}', unrecognized value: '{OsC}'\n"), boolean_argument.string, arg_value);
+                            result = PROCESS_RESULT_FAILED;
+                        }
+                    }
+                    break;
                 }
             }
-            else
-            {
-                print(S8("Unrecognized argument 2: '{OsS}'\n"), second_argument);
-                    
-                result = PROCESS_RESULT_FAILED;
-            }
 
-            let third_argument = os_string_list_next(arg_it);
-            if (third_argument.pointer)
+            if (i == boolean_argument_count)
             {
-                print(S8("Arguments > 3 not supported\n"));
+                print(S8("Unrecognized argument: '{OsS}'\n"), argument);
                 result = PROCESS_RESULT_FAILED;
+                break;
             }
         }
     }
@@ -620,9 +654,9 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     };
 
     LinkUnitSpecification specifications[] = {
-        LINK_UNIT(builder, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true),
-        LINK_UNIT(cc, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true),
-        LINK_UNIT(asm, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true),
+        LINK_UNIT(builder, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true, .fuzz = build_program_state.fuzz),
+        LINK_UNIT(cc, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true, .fuzz = build_program_state.fuzz),
+        LINK_UNIT(asm, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true, .fuzz = build_program_state.fuzz),
     };
     constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
 
@@ -777,6 +811,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     .target = link_unit_target,
                     .has_debug_info = link_unit->has_debug_info,
                     .optimize = link_unit->optimize,
+                    .fuzz = link_unit->fuzz,
                 };
 
                 let c_source_file_index = c_source_file_count;
@@ -798,6 +833,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                         .target = link_unit_target,
                         .has_debug_info = link_unit->has_debug_info,
                         .optimize = link_unit->optimize,
+                        .fuzz = link_unit->fuzz,
                     };
                 }
             }
@@ -833,6 +869,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 .use_io_ring = source_file->use_io_ring,
                 .source_path = source_file->full_path,
                 .optimize = source_file->optimize,
+                .fuzz = source_file->fuzz,
             };
         }
     }
@@ -956,18 +993,10 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     argument_add(builder, OsS("-luring"));
                 }
 
-                bool sanitize = !link_unit_specification->optimize;
+                bool sanitize = !link_unit_specification->optimize || link_unit_specification->fuzz;
                 if (sanitize)
                 {
-                    if (link_unit_specification->target.cpu.arch == CPU_ARCH_AARCH64 && link_unit_specification->target.os == OPERATING_SYSTEM_WINDOWS)
-                    {
-                        argument_add(builder, OsS("-fsanitize=undefined"));
-                    }
-                    else
-                    {
-                        argument_add(builder, OsS("-fsanitize=address,undefined"));
-                    }
-                    argument_add(builder, OsS("-fsanitize-recover=undefined"));
+                    add_sanitize_arguments(builder, link_unit_specification->target, link_unit_specification->fuzz);
                 }
 
                 let argv = argument_builder_end(builder);
@@ -1011,24 +1040,48 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     {
                         let link_unit_specification = &specifications[link_unit_i];
 
+                        if (link_unit_specification->fuzz)
+                        {
 #if defined(_WIN32)
-                        OsString argv_parts[] = {
-                            link_unit_specification->artifact_path,
-                            OsS(" test"),
-                        };
-                        let argv_os_string = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, argv_parts), true);
-                        let argv = argv_os_string.pointer;
-                        let first_arg = argv_parts[0].pointer;
+                            OsString argv_parts[] = {
+                                link_unit_specification->artifact_path,
+                                OsS(" -max_len=4096"),
+                                OsS(" -max_total_time=60"),
+                            };
+                            let argv_os_string = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, argv_parts), true);
+                            let argv = argv_os_string.pointer;
+                            let first_arg = argv_parts[0].pointer;
 #else
-                        OsChar* argv[] = {
-                            os_string_to_c(link_unit_specification->artifact_path),
-                            "test",
-                            0,
-                        };
-                        let first_arg = argv[0];
+                            OsChar* argv[] = {
+                                os_string_to_c(link_unit_specification->artifact_path),
+                                "-max_len=4096",
+                                "-max_total_time=60",
+                                0,
+                            };
+                            let first_arg = argv[0];
 #endif
-
-                        processes[link_unit_i] = os_process_spawn(first_arg, argv, program_state->input.envp);
+                            processes[link_unit_i] = os_process_spawn(first_arg, argv, program_state->input.envp);
+                        }
+                        else
+                        {
+#if defined(_WIN32)
+                            OsString argv_parts[] = {
+                                link_unit_specification->artifact_path,
+                                OsS(" test"),
+                            };
+                            let argv_os_string = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, argv_parts), true);
+                            let argv = argv_os_string.pointer;
+                            let first_arg = argv_parts[0].pointer;
+#else
+                            OsChar* argv[] = {
+                                os_string_to_c(link_unit_specification->artifact_path),
+                                "test",
+                                0,
+                            };
+                            let first_arg = argv[0];
+#endif
+                            processes[link_unit_i] = os_process_spawn(first_arg, argv, program_state->input.envp);
+                        }
                     }
 
                     for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
