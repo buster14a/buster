@@ -105,6 +105,13 @@ BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList en
 }
 
 #if BUSTER_LINK_LIBC
+#if BUSTER_FUZZING
+BUSTER_DECL s32 buster_fuzz(const u8* pointer, size_t size);
+BUSTER_EXPORT s32 LLVMFuzzerTestOneInput(const u8* pointer, size_t size)
+{
+    return buster_fuzz(pointer, size);
+}
+#else
 BUSTER_EXPORT int main(int argc, char* argv[], char* envp[])
 {
     BUSTER_UNUSED(argc);
@@ -117,6 +124,7 @@ BUSTER_EXPORT int main(int argc, char* argv[], char* envp[])
 #endif
     return (int)result;
 }
+#endif
 #else
 #if defined(_WIN32)
 [[gnu::noreturn]] BUSTER_EXPORT void mainCRTStartup()

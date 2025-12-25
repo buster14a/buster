@@ -42,7 +42,7 @@ fi
 #endif
 #if [[ "$?" != "0" && "$?" != "333" ]]; then
     mkdir -p build
-    $CLANG build.c -o build/builder -fuse-ld=lld $CLANG_EXTRA_FLAGS -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=0 -DBUSTER_USE_PTHREAD=1 -DBUSTER_INCLUDE_TESTS=1 -g -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-language-extension-token -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -Wno-gnu-flexible-array-initializer -Wno-missing-field-initializers -Wno-pragma-once-outside-header -pthread -fwrapv -fno-strict-aliasing -funsigned-char -ferror-limit=1 -fsanitize=address,undefined -fsanitize-recover=undefined #-ftime-trace -ftime-trace-verbose
+    $CLANG build.c -o build/builder -fuse-ld=lld $CLANG_EXTRA_FLAGS -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=0 -DBUSTER_USE_PTHREAD=1 -DBUSTER_INCLUDE_TESTS=1 -g -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-language-extension-token -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -Wno-gnu-flexible-array-initializer -Wno-missing-field-initializers -Wno-pragma-once-outside-header -pthread -fwrapv -fno-strict-aliasing -funsigned-char -ferror-limit=1 -fsanitize=address -fsanitize=undefined -fsanitize=bounds -fsanitize-recover=undefined #-ftime-trace -ftime-trace-verbose
     if [[ "$?" == "0" ]]; then
         BUSTER_REGENERATE=1 build/builder $@
         # BUSTER_REGENERATE=1 lldb -b -o run -o 'bt all' -- build/builder $@

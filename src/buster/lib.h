@@ -20,6 +20,10 @@
 #define BUSTER_LINK_LIBC 1
 #endif
 
+#ifndef BUSTER_FUZZING
+#define BUSTER_FUZZING 0
+#endif
+
 #if BUSTER_LINK_LIBC
 #define THREAD_LOCAL_DECL __thread
 #else

@@ -134,7 +134,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     cc_program_state.cwd = path_absolute(arena, OsS("."));
     BUSTER_UNUSED(thread);
     print(S8("Hello world from the compiler\n"));
-    let basic = OsS("test/cc/basic.c");
+    let basic = OsS("tests/cc/basic.c");
     let result = compile(arena, basic, (CompilerOptions) {});
     if (!result)
     {
@@ -160,3 +160,12 @@ BUSTER_IMPL ProcessResult thread_entry_point()
 
     return result ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
+
+#if BUSTER_FUZZING
+BUSTER_DECL s32 buster_fuzz(const u8* pointer, size_t size)
+{
+    BUSTER_UNUSED(pointer);
+    BUSTER_UNUSED(size);
+    return 0;
+}
+#endif
