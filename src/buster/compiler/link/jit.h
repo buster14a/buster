@@ -6,5 +6,5 @@
 STRUCT(JitModule)
 {
 };
-BUSTER_DECL JitModule module_jit(Arena* arena, LinkArguments arguments);
+BUSTER_DECL JitModule module_jit(Arena* arena, LinkUnit unit);
 BUSTER_DECL int jit_module_run(JitModule module);

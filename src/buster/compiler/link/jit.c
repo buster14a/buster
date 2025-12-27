@@ -1,10 +1,10 @@
 #pragma once
 
 #include <buster/compiler/link/jit.h>
-BUSTER_IMPL JitModule module_jit(Arena* arena, LinkArguments arguments)
+BUSTER_IMPL JitModule module_jit(Arena* arena, LinkUnit unit)
 {
     BUSTER_UNUSED(arena);
-    BUSTER_UNUSED(arguments);
+    BUSTER_UNUSED(unit);
     return (JitModule){};
 }
 

@@ -132,7 +132,6 @@ BUSTER_IMPL ProcessResult thread_entry_point()
 {
     let arena = thread->arena;
     cc_program_state.cwd = path_absolute(arena, OsS("."));
-    BUSTER_UNUSED(thread);
     print(S8("Hello world from the compiler\n"));
     let basic = OsS("tests/cc/basic.c");
     let result = compile(arena, basic, (CompilerOptions) {});
