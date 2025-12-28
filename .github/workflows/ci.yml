@@ -34,7 +34,7 @@ jobs:
             for fuzz in 0 1; do
               echo "Optimize=$optimize. Fuzz=$fuzz"
               rm -rf build
-              ./build.sh test --optimize="$optimize" --fuzz="$fuzz"
+              ./build.sh test --optimize="$optimize" --fuzz="$fuzz" --ci=1
             done
           done
       - name: Build and test (Windows)
@@ -58,7 +58,7 @@ jobs:
               echo Optimize=%%O. Fuzz=%%F
               if exist build rmdir /s /q build
 
-              call build.bat test --optimize=%%O --fuzz=%%F
+              call build.bat test --optimize=%%O --fuzz=%%F --ci=1
               if errorlevel 1 (
                 echo build.bat failed: !errorlevel!
                 set EXIT_CODE=!errorlevel!

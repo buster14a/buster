@@ -70,7 +70,7 @@ STRUCT(TargetBuildFile)
     OsString full_path;
     Target target;
     CompilationModel model;
-    bool has_debug_info;
+    bool has_debug_information;
     bool use_io_ring;
     bool optimize;
     bool fuzz;
@@ -149,7 +149,7 @@ STRUCT(LinkUnitSpecification)
     OsString artifact_path;
     Target target;
     bool use_io_ring;
-    bool has_debug_info;
+    bool has_debug_information;
     bool optimize;
     bool fuzz;
 };
@@ -172,6 +172,7 @@ STRUCT(BuildProgramState)
     BuildCommand command;
     bool optimize;
     bool fuzz;
+    bool ci;
 };
 
 BUSTER_LOCAL BuildProgramState build_program_state = {};
@@ -222,7 +223,7 @@ STRUCT(CompilationUnit)
     OsChar* compiler;
     OsStringList compilation_arguments;
     bool optimize;
-    bool has_debug_info;
+    bool has_debug_information;
     bool fuzz;
     bool use_io_ring;
     bool include_tests;
@@ -288,6 +289,19 @@ BUSTER_LOCAL void add_sanitize_arguments(ArgumentBuilder* builder, Target target
     {
         argument_add(builder, OsS("-fsanitize=fuzzer"));
     }
+}
+
+STRUCT(SanitizeArguments)
+{
+    bool optimize;
+    bool fuzz;
+    bool has_debug_information;
+    bool ci;
+};
+
+BUSTER_LOCAL bool build_should_sanitize(SanitizeArguments arguments)
+{
+    return BUSTER_SELECT(arguments.ci, arguments.has_debug_information & ((!arguments.optimize) | arguments.fuzz), arguments.fuzz);
 }
 
 BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, CompilationUnit* units, u64 unit_count, OsString cwd, OsString clang_path)
@@ -437,14 +451,19 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         argument_add(builder, OsS("-fno-strict-aliasing"));
 
         argument_add(builder, march_os_string);
+        SanitizeArguments sanitizer_arguments = {
+            .optimize = unit->optimize,
+            .fuzz = unit->fuzz,
+            .has_debug_information = unit->has_debug_information,
+            .ci = build_program_state.ci,
+        };
+        bool sanitize = build_should_sanitize(sanitizer_arguments);
 
-
-        bool sanitize = !unit->optimize || unit->fuzz;
         if (sanitize)
         {
-            if (unit->fuzz) argument_add(builder, OsS("-DBUSTER_FUZZING=1"));
+            if (sanitizer_arguments.fuzz) argument_add(builder, OsS("-DBUSTER_FUZZING=1"));
 
-            add_sanitize_arguments(builder, unit->target, unit->fuzz);
+            add_sanitize_arguments(builder, unit->target, sanitizer_arguments.fuzz);
         }
 
         if (unit->optimize)
@@ -452,7 +471,7 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
             argument_add(builder, OsS("-O2"));
         }
 
-        if (unit->has_debug_info)
+        if (unit->has_debug_information)
         {
             argument_add(builder, OsS("-g"));
         }
@@ -553,14 +572,9 @@ BUSTER_IMPL ProcessResult process_arguments()
             }
         }
 
-        while (true)
+        OsString argument;
+        while ((argument = os_string_list_next(arg_it)).pointer)
         {
-            let argument = os_string_list_next(arg_it);
-            if (!argument.pointer)
-            {
-                break;
-            }
-
             STRUCT(BooleanArgument)
             {
                 OsString string;
@@ -569,6 +583,7 @@ BUSTER_IMPL ProcessResult process_arguments()
             BooleanArgument boolean_arguments[] = {
                 { OsS("--optimize="), &build_program_state.optimize },
                 { OsS("--fuzz="), &build_program_state.fuzz },
+                { OsS("--ci="), &build_program_state.ci },
             };
 
             constexpr u64 boolean_argument_count = BUSTER_ARRAY_LENGTH(boolean_arguments);
@@ -654,9 +669,9 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     };
 
     LinkUnitSpecification specifications[] = {
-        LINK_UNIT(builder, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true, .fuzz = build_program_state.fuzz),
-        LINK_UNIT(cc, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true, .fuzz = build_program_state.fuzz),
-        LINK_UNIT(asm, .target = target_native, .optimize = build_program_state.optimize, .has_debug_info = true, .fuzz = build_program_state.fuzz),
+        LINK_UNIT(builder, .target = target_native, .optimize = build_program_state.optimize, .has_debug_information = true, .fuzz = build_program_state.fuzz),
+        LINK_UNIT(cc, .target = target_native, .optimize = build_program_state.optimize, .has_debug_information = true, .fuzz = build_program_state.fuzz),
+        LINK_UNIT(asm, .target = target_native, .optimize = build_program_state.optimize, .has_debug_information = true, .fuzz = build_program_state.fuzz),
     };
     constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
 
@@ -809,7 +824,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 *new_file = (TargetBuildFile) {
                     .full_path = c_full_path,
                     .target = link_unit_target,
-                    .has_debug_info = link_unit->has_debug_info,
+                    .has_debug_information = link_unit->has_debug_information,
                     .optimize = link_unit->optimize,
                     .fuzz = link_unit->fuzz,
                 };
@@ -831,7 +846,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     *(new_file + 1) = (TargetBuildFile) {
                         .full_path = h_full_path,
                         .target = link_unit_target,
-                        .has_debug_info = link_unit->has_debug_info,
+                        .has_debug_information = link_unit->has_debug_information,
                         .optimize = link_unit->optimize,
                         .fuzz = link_unit->fuzz,
                     };
@@ -865,7 +880,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             *compilation_unit = (CompilationUnit) {
                 .target = source_file->target,
                 .model = source_file->model,
-                .has_debug_info = source_file->has_debug_info,
+                .has_debug_information = source_file->has_debug_information,
                 .use_io_ring = source_file->use_io_ring,
                 .source_path = source_file->full_path,
                 .optimize = source_file->optimize,
@@ -968,7 +983,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     }
                 }
 
-                if (link_unit_specification->has_debug_info)
+                if (link_unit_specification->has_debug_information)
                 {
                     argument_add(builder, OsS("-g"));
                 }
@@ -993,10 +1008,16 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     argument_add(builder, OsS("-luring"));
                 }
 
-                bool sanitize = !link_unit_specification->optimize || link_unit_specification->fuzz;
+                SanitizeArguments sanitizer_arguments = {
+                    .optimize = link_unit_specification->optimize,
+                    .fuzz = link_unit_specification->fuzz,
+                    .has_debug_information = link_unit_specification->has_debug_information,
+                    .ci = build_program_state.ci,
+                };
+                bool sanitize = build_should_sanitize(sanitizer_arguments);
                 if (sanitize)
                 {
-                    add_sanitize_arguments(builder, link_unit_specification->target, link_unit_specification->fuzz);
+                    add_sanitize_arguments(builder, link_unit_specification->target, sanitizer_arguments.fuzz);
                 }
 
                 let argv = argument_builder_end(builder);

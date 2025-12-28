@@ -82,6 +82,9 @@
 
 #define BUSTER_FIELD_PARENT_POINTER(type, field, pointer) ((type*)((char*)(pointer) - __builtin_offsetof(type, field)))
 
+#define BUSTER_UNPREDICTABLE(cond) __builtin_unpredictable(cond)
+#define BUSTER_SELECT(cond, a, b) BUSTER_UNPREDICTABLE(cond) ? (a) : (b)
+
 #define let __auto_type
 #define STRUCT(n) typedef struct n n; struct n
 #define UNION(n) typedef union n n; union n
