@@ -20,6 +20,18 @@ source build.sh
 #include <martins/md5.h>
 #include <buster/system_headers.h>
 
+STRUCT(LLVMVersion)
+{
+    u8 major;
+    u8 minor;
+    u8 revision;
+    OsString string;
+};
+
+BUSTER_LOCAL __attribute__((used)) OsString toolchain_path = {};
+BUSTER_LOCAL OsString clang_path = {};
+BUSTER_LOCAL OsString xc_sdk_path = {};
+
 #define BUSTER_TODO() BUSTER_TRAP()
 
 ENUM(CompilationModel,
@@ -68,7 +80,7 @@ STRUCT(TargetBuildFile)
 {
     FileStats stats;
     OsString full_path;
-    Target target;
+    Target* target;
     CompilationModel model;
     bool has_debug_information;
     bool use_io_ring;
@@ -78,7 +90,7 @@ STRUCT(TargetBuildFile)
 
 STRUCT(ModuleInstantiation)
 {
-    Target target;
+    Target* target;
     ModuleId id;
     u64 index;
 };
@@ -147,11 +159,12 @@ STRUCT(LinkUnitSpecification)
     OsString name;
     ModuleSlice modules;
     OsString artifact_path;
-    Target target;
+    Target* target;
     bool use_io_ring;
     bool has_debug_information;
     bool optimize;
     bool fuzz;
+    bool is_builder;
 };
 
 #if defined(__x86_64__)
@@ -173,6 +186,7 @@ STRUCT(BuildProgramState)
     bool optimize;
     bool fuzz;
     bool ci;
+    bool has_debug_information;
 };
 
 BUSTER_LOCAL BuildProgramState build_program_state = {};
@@ -218,7 +232,7 @@ ENUM(ProjectId,
 
 STRUCT(CompilationUnit)
 {
-    Target target;
+    Target* target;
     CompilationModel model;
     OsChar* compiler;
     OsStringList compilation_arguments;
@@ -267,16 +281,20 @@ BUSTER_LOCAL void append_string16(Arena* arena, String16 s)
 #define append_os_string append_string8
 #endif
 
-BUSTER_LOCAL bool target_equal(Target a, Target b)
+BUSTER_LOCAL bool target_equal(Target* a, Target* b)
 {
-    return memcmp(&a, &b, sizeof(a)) == 0;
+    bool result = a == b;
+    if (!result)
+    {
+        result = memcmp(&a, &b, sizeof(a)) == 0;
+    }
+    return result;
 }
 
-BUSTER_LOCAL OsString xc_sdk_path = {};
 
-BUSTER_LOCAL void add_sanitize_arguments(ArgumentBuilder* builder, Target target, bool fuzz)
+BUSTER_LOCAL void add_sanitize_arguments(ArgumentBuilder* builder, Target* target, bool fuzz)
 {
-    if (!(target.cpu.arch == CPU_ARCH_AARCH64 && target.os == OPERATING_SYSTEM_WINDOWS))
+    if (!(target->cpu.arch == CPU_ARCH_AARCH64 && target->os == OPERATING_SYSTEM_WINDOWS))
     {
         argument_add(builder, OsS("-fsanitize=address"));
     }
@@ -304,12 +322,12 @@ BUSTER_LOCAL bool build_should_sanitize(SanitizeArguments arguments)
     return BUSTER_SELECT(arguments.ci, arguments.has_debug_information & ((!arguments.optimize) | arguments.fuzz), arguments.fuzz);
 }
 
-BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, CompilationUnit* units, u64 unit_count, OsString cwd, OsString clang_path)
+BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, CompilationUnit* units, u64 unit_count, OsString cwd)
 {
     bool result = true;
 
     constexpr u64 max_target_count = 16;
-    Target targets[max_target_count];
+    Target* targets[max_target_count];
     u64 target_count = 0;
     BUSTER_UNUSED(targets);
     BUSTER_UNUSED(target_count);
@@ -323,7 +341,7 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
 
         let source_absolute_path = unit->source_path;
         let source_relative_path = string_slice_start(source_absolute_path, cwd.length + 1);
-        let target_strings = target_to_split_os_string(unit->target);
+        let target_strings = target_to_split_os_string(*unit->target);
         static_assert(BUSTER_ARRAY_LENGTH(target_strings.s) == 3);
         OsString object_absolute_path_parts[] = {
             cwd,
@@ -341,8 +359,8 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         let object_path = arena_join_os_string(arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, object_absolute_path_parts), true);
         unit->object_path = object_path;
         // Forced to do it so early because we would need another arena here otherwise (since arena is used for the argument builder)
-        let march = unit->target.cpu.arch == CPU_ARCH_X86_64 ? OsS("-march=") : OsS("-mcpu=");
-        let cpu_model_string = cpu_model_to_os_string(unit->target.cpu.model);
+        let march = unit->target->cpu.arch == CPU_ARCH_X86_64 ? OsS("-march=") : OsS("-mcpu=");
+        let cpu_model_string = cpu_model_to_os_string(unit->target->cpu.model);
         OsString march_parts[] = {
             march,
             cpu_model_string,
@@ -450,6 +468,9 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         argument_add(builder, OsS("-fwrapv"));
         argument_add(builder, OsS("-fno-strict-aliasing"));
 
+        argument_add(builder, OsS("-DBUSTER_CLANG_ABSOLUTE_PATH=" OS_STRING_DOUBLE_QUOTE BUSTER_CLANG_ABSOLUTE_PATH OS_STRING_DOUBLE_QUOTE));
+        argument_add(builder, OsS("-DBUSTER_TOOLCHAIN_ABSOLUTE_PATH=" OS_STRING_DOUBLE_QUOTE BUSTER_TOOLCHAIN_ABSOLUTE_PATH OS_STRING_DOUBLE_QUOTE));
+
         argument_add(builder, march_os_string);
         SanitizeArguments sanitizer_arguments = {
             .optimize = unit->optimize,
@@ -526,6 +547,8 @@ BUSTER_IMPL ProcessResult process_arguments()
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     let argv = program_state->input.argv;
     let envp = program_state->input.envp;
+
+    build_program_state.has_debug_information = true;
 
     {
         BUSTER_UNUSED(argv);
@@ -633,9 +656,11 @@ BUSTER_LOCAL bool builder_tests(TestArguments* arguments)
 
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
-#if defined(__APPLE__)
-    xc_sdk_path = os_get_environment_variable(OsS("XC_SDK_PATH"));
+#if defined(BUSTER_XC_SDK_PATH)
+    xc_sdk_path = OsS(BUSTER_XC_SDK_PATH);
 #endif
+    clang_path = OsS(BUSTER_CLANG_ABSOLUTE_PATH);
+    toolchain_path = OsS(BUSTER_TOOLCHAIN_ABSOLUTE_PATH);
 
     LinkModule builder_modules[] = {
         { MODULE_LIB },
@@ -669,11 +694,21 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     };
 
     LinkUnitSpecification specifications[] = {
-        LINK_UNIT(builder, .target = target_native, .optimize = build_program_state.optimize, .has_debug_information = true, .fuzz = build_program_state.fuzz),
-        LINK_UNIT(cc, .target = target_native, .optimize = build_program_state.optimize, .has_debug_information = true, .fuzz = build_program_state.fuzz),
-        LINK_UNIT(asm, .target = target_native, .optimize = build_program_state.optimize, .has_debug_information = true, .fuzz = build_program_state.fuzz),
+        LINK_UNIT(builder),
+        LINK_UNIT(cc),
+        LINK_UNIT(asm),
     };
+
     constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
+    for (u64 i = 0; i < link_unit_count; i += 1)
+    {
+        let link_unit = &specifications[i];
+        link_unit->target = &target_native;
+        link_unit->optimize = build_program_state.optimize;
+        link_unit->has_debug_information = build_program_state.has_debug_information;
+        link_unit->fuzz = build_program_state.fuzz;
+        link_unit->is_builder = os_string_equal(link_unit->name, OsS("builder"));
+    }
 
     OsString directory_paths[] = {
         [DIRECTORY_SRC_BUSTER] = OsS("src/buster"),
@@ -730,7 +765,6 @@ BUSTER_IMPL ProcessResult thread_entry_point()
 
 #if defined(_WIN32)
 #if defined(__x86_64__)
-    let cmake_prefix_path = os_get_environment_variable(OsS("CMAKE_PREFIX_PATH"));
     let dll_filename = 
 #if defined(__x86_64__)
         OsS("clang_rt.asan_dynamic-x86_64.dll");
@@ -740,7 +774,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
 #pragma error
 #endif
     OsString original_dll_parts[] = {
-        cmake_prefix_path,
+        toolchain_path,
         OsS("/lib/clang/21/lib/windows/"),
         dll_filename,
     };
@@ -890,32 +924,10 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     }
 
     let compile_commands = arena_create((ArenaInitialization){});
-    let clang_env = os_get_environment_variable(OsS("CLANG"));
-    let clang_path = clang_env;
-    if (!clang_path.pointer)
-    {
-#if defined(_WIN32)
-        let home = os_get_environment_variable(OsS("USERPROFILE"));
-#else
-        let home = os_get_environment_variable(OsS("HOME"));
-#endif
-        OsString clang_path_parts[] = {
-            home,
-            OsS("/dev/toolchain/install/llvm_"),
-            OsS("21.1.7"), // TODO
-            OsS("_"),
-            cpu_arch_to_os_string(target_native.cpu.arch),
-            OsS("-"),
-            operating_system_to_os_string(target_native.os),
-            OsS("-Release"),
-            OsS("/bin/clang.exe"),
-        };
-        clang_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, clang_path_parts), true);
-    }
 
     ProcessResult result = {};
 
-    if (build_compile_commands(general_arena, compile_commands, compilation_units, compilation_unit_count, cwd, clang_path))
+    if (build_compile_commands(general_arena, compile_commands, compilation_units, compilation_unit_count, cwd))
     {
         let selected_compilation_count = compilation_unit_count;
         let selected_compilation_units = compilation_units;
@@ -932,6 +944,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             let unit_compilation_result = os_process_wait_sync(unit->process.handle, unit->process.resources);
             if (unit_compilation_result != PROCESS_RESULT_SUCCESS)
             {
+                print(S8("Some of the compilations failed\n"));
                 result = PROCESS_RESULT_FAILED;
             }
         }
@@ -954,7 +967,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 argument_add(builder, OsS("-o"));
 
                 bool is_builder = link_unit_i == 0; // str_equal(link_unit_specification->name, S("builder"));
-                let target_strings = target_to_split_os_string(link_unit_specification->target);
+                let target_strings = target_to_split_os_string(*link_unit_specification->target);
                 static_assert(BUSTER_ARRAY_LENGTH(target_strings.s) == 3);
 
                 OsString artifact_path_parts[] = {
@@ -966,7 +979,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     is_builder ? OsS("") : target_strings.s[2],
                     is_builder ? OsS("") : OsS("/"),
                     link_unit_specification->name,
-                    link_unit_specification->target.os == OPERATING_SYSTEM_WINDOWS ? OsS(".exe") : OsS(""),
+                    link_unit_specification->target->os == OPERATING_SYSTEM_WINDOWS ? OsS(".exe") : OsS(""),
                 };
                 let artifact_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, artifact_path_parts), true);
                 link_unit_specification->artifact_path = artifact_path;
@@ -988,7 +1001,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     argument_add(builder, OsS("-g"));
                 }
 
-                if (link_unit_specification->target.os == OPERATING_SYSTEM_WINDOWS)
+                if (link_unit_specification->target->os == OPERATING_SYSTEM_WINDOWS)
                 {
                     argument_add(builder, OsS("-lws2_32"));
                     //     argument_add(builder, OsS("-nostdlib"));
@@ -1033,7 +1046,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 let link_result = os_process_wait_sync(process, resources);
                 if (link_result != PROCESS_RESULT_SUCCESS)
                 {
-                    result = PROCESS_RESULT_FAILED;
+                    print(S8("Some of the linkage failed\n"));
+                    result = link_result;
                 }
             }
         }
@@ -1054,6 +1068,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     };
                     if (!builder_tests(&arguments))
                     {
+                        print(S8("Build tests failed!\n"));
                         result = PROCESS_RESULT_FAILED;
                     }
 
@@ -1112,7 +1127,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                         let test_result = os_process_wait_sync(process, resources);
                         if (test_result != PROCESS_RESULT_SUCCESS)
                         {
-                            result = PROCESS_RESULT_FAILED;
+                            print(S8("Some of the unit tests failed\n"));
+                            result = test_result;
                         }
                     }
                 }

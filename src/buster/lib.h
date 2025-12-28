@@ -261,8 +261,10 @@ typedef SliceOfString8Slice SliceOfOsStringSlice;
 
 #if defined(_WIN32)
 #define OsS(strlit) S16(strlit)
+#define OS_STRING_DOUBLE_QUOTE "\\\""
 #else
 #define OsS(strlit) S8(strlit)
+#define OS_STRING_DOUBLE_QUOTE "\""
 #endif
 #endif
 
