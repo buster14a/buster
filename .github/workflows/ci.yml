@@ -8,11 +8,6 @@ on:
     branches:
       - main
 
-env:
-  BUSTER_CI: 1
-  BUSTER_BUILD_DEBUG: 1
-  BUSTER_BUILD_NATIVE: 0
-  BUSTER_LLVM_VERSION: 21.1.7
 jobs:
   ci:
     strategy:
@@ -24,48 +19,64 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and test (UNIX)
         shell: bash
-        env:
-          BUSTER_OS_TAG: ${{matrix.os}}
         if: matrix.os != 'windows-2025' && matrix.os != 'windows-11-arm'
         run: |
           set -euo pipefail
+          BUSTER_SELF_HOSTED=0
+          if [[ "${{matrix.os}}" == "self-hosted" ]]; then
+            BUSTER_SELF_HOSTED=1
+          fi
 
           for optimize in 0 1; do
             for fuzz in 0 1; do
               echo "Optimize=$optimize. Fuzz=$fuzz"
               rm -rf build
-              ./build.sh test --optimize="$optimize" --fuzz="$fuzz" --ci=1
+              ./build.sh test --optimize="$optimize" --fuzz="$fuzz" --ci=1 --self-hosted=$BUSTER_SELF_HOSTED
             done
           done
       - name: Build and test (Windows)
         if: matrix.os == 'windows-2025' || matrix.os == 'windows-11-arm'
-        shell: cmd
-        env:
-          BUSTER_OS_TAG: ${{matrix.os}}
+        shell: pwsh
         run: |
-          @echo off
-          setlocal EnableExtensions EnableDelayedExpansion
+          $ErrorActionPreference = 'Continue'
+          Set-PSDebug -Trace 1
 
-          set EXIT_CODE=0
-          if "%BUSTER_OS_TAG%"=="windows-11-arm" (
-            set FUZZ_VALUES=0
-          ) else (
-            set FUZZ_VALUES=0 1
-          )
+          $exitCode = 0
 
-          for %%O in (0 1) do (
-            for %%F in (!FUZZ_VALUES!) do (
-              echo Optimize=%%O. Fuzz=%%F
-              if exist build rmdir /s /q build
+          # On windows-11-arm: fuzz=0 only; otherwise fuzz=0,1
+          $fuzzValues = if (${{matrix.BUSTER_OS_TAG}} -eq 'windows-11-arm') {
+            @(0)
+          } else {
+            @(0, 1)
+          }
 
-              call build.bat test --optimize=%%O --fuzz=%%F --ci=1
-              if errorlevel 1 (
-                echo build.bat failed: !errorlevel!
-                set EXIT_CODE=!errorlevel!
-                goto :done
-              )
-            )
-          )
+          foreach ($o in 0, 1)
+          {
+            foreach ($f in $fuzzValues)
+            {
+              Write-Host "Optimize=$o. Fuzz=$f"
 
-          :done
-          exit /b %EXIT_CODE%
+              if (Test-Path -LiteralPath 'build')
+              {
+                Remove-Item -LiteralPath 'build' -Recurse -Force -ErrorAction SilentlyContinue
+              }
+
+              & pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 `
+                test `
+                "--optimize=$o" `
+                "--fuzz=$f" `
+                "--ci=1"
+
+              $rc = $LASTEXITCODE
+              if ($rc -ne 0)
+              {
+                Write-Host "build.ps1 failed: $rc"
+                $exitCode = $rc
+                break
+              }
+            }
+
+            if ($exitCode -ne 0) { break }
+          }
+
+          exit $exitCode
