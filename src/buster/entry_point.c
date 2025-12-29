@@ -4,6 +4,14 @@
 #include <buster/system_headers.h>
 #include <buster/target.h>
 
+#if BUSTER_LINK_LIBC
+#if BUSTER_FUZZING
+
+BUSTER_EXPORT s32 LLVMFuzzerTestOneInput(const u8* pointer, size_t size)
+{
+    return buster_fuzz(pointer, size);
+}
+#else
 BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList envp)
 {
     ProcessResult result = {};
@@ -99,14 +107,6 @@ BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList en
     return result;
 }
 
-#if BUSTER_LINK_LIBC
-#if BUSTER_FUZZING
-BUSTER_DECL s32 buster_fuzz(const u8* pointer, size_t size);
-BUSTER_EXPORT s32 LLVMFuzzerTestOneInput(const u8* pointer, size_t size)
-{
-    return buster_fuzz(pointer, size);
-}
-#else
 BUSTER_EXPORT int main(int argc, char* argv[], char* envp[])
 {
     BUSTER_UNUSED(argc);

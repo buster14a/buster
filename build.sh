@@ -3,8 +3,6 @@ set -eu
 
 source build.env
 
-BUSTER_OPTIMIZE=0
-BUSTER_FUZZ=0
 BUSTER_CI=0
 BUSTER_DOWNLOAD_TOOLCHAIN=0
 BUSTER_SELF_HOSTED=0
@@ -18,12 +16,10 @@ fi
 
 for arg in "${@:2}"; do
     case "$arg" in
-        --optimize=*) BUSTER_OPTIMIZE="${arg#*=}";;
-        --fuzz=*) BUSTER_FUZZ="${arg#*=}";;
         --ci=*) BUSTER_CI="${arg#*=}";;
         --download_toolchain=*) BUSTER_DOWNLOAD_TOOLCHAIN="${arg#*=}";;
         --self-hosted=*) BUSTER_SELF_HOSTED="${arg#*=}";;
-        *) echo "error: unknown argument: $arg"; exit 1;;
+        *) ;;
     esac
 done
 
@@ -90,7 +86,7 @@ BUSTER_BUILD_DIRECTORY=build
 mkdir -p $BUSTER_BUILD_DIRECTORY
 $BUSTER_CLANG_ABSOLUTE_PATH build.c -o $BUSTER_BUILD_DIRECTORY/builder -fuse-ld=lld "-DBUSTER_TOOLCHAIN_ABSOLUTE_PATH=\"$BUSTER_TOOLCHAIN_ABSOLUTE_PATH\"" "-DBUSTER_CLANG_ABSOLUTE_PATH=\"$BUSTER_CLANG_ABSOLUTE_PATH\"" "${CLANG_EXTRA_FLAGS[@]}" -O0 -Isrc -std=gnu2x -march=native -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_IO_RING=0 -DBUSTER_USE_PTHREAD=1 -DBUSTER_INCLUDE_TESTS=1 -Werror -Wall -Wextra -Wpedantic -pedantic -Wno-language-extension-token -Wno-gnu-auto-type -Wno-gnu-empty-struct -Wno-bitwise-instead-of-logical -Wno-unused-function -Wno-gnu-flexible-array-initializer -Wno-missing-field-initializers -Wno-pragma-once-outside-header -pthread -fwrapv -fno-strict-aliasing -funsigned-char -ferror-limit=1 -g #-fsanitize=address -fsanitize=undefined -fsanitize=bounds -fsanitize-recover=undefined #-ftime-trace -ftime-trace-verbose
 if [[ "$?" == "0" ]]; then
-    build/builder $BUSTER_COMMAND --optimize=$BUSTER_OPTIMIZE --fuzz=$BUSTER_FUZZ --ci=$BUSTER_CI
+    build/builder $@
     # lldb -b -o run -o 'bt all' -- build/builder $@
 fi
 exit $?
