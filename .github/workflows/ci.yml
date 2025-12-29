@@ -27,16 +27,18 @@ jobs:
             BUSTER_SELF_HOSTED=1
           fi
 
-          for optimize in 0 1; do
-            for fuzz in 0 1; do
-              echo "Optimize=$optimize. Fuzz=$fuzz"
-              rm -rf build
-              ./build.sh test --optimize="$optimize" --fuzz="$fuzz" --ci=1 --self-hosted=$BUSTER_SELF_HOSTED
+          for unity_build in 0 1; do
+            for optimize in 0 1; do
+              for fuzz in 0 1; do
+                echo "Optimize=$optimize. Fuzz=$fuzz. Unity build: $unity_build"
+                rm -rf build
+                ./build.sh test --ci=1 --self-hosted=$BUSTER_SELF_HOSTED --optimize="$optimize" --fuzz="$fuzz" --unity-build="$unity_build"
+              done
             done
           done
       - name: Build and test (Windows)
         if: matrix.BUSTER_OS_TAG == 'windows-2025' || matrix.BUSTER_OS_TAG == 'windows-11-arm'
-        shell: pwsh
+        shell: powershell
         run: |
           Set-StrictMode -Version Latest
           Set-PSDebug -Trace 1
@@ -51,33 +53,32 @@ jobs:
             @(0, 1)
           }
 
-          foreach ($o in 0, 1)
+          foreach ($unity_build in 0, 1)
           {
-            foreach ($f in $fuzzValues)
+            foreach ($optimize in 0, 1)
             {
-              Write-Host "Optimize=$o. Fuzz=$f"
-
-              if (Test-Path -LiteralPath 'build')
+              foreach ($fuzz in $fuzzValues)
               {
-                Remove-Item -LiteralPath 'build' -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Host "Optimize=$optimize. Fuzz=$fuzz. Unity build: $unity_build"
+
+                if (Test-Path -LiteralPath 'build')
+                {
+                  Remove-Item -LiteralPath 'build' -Recurse -Force -ErrorAction SilentlyContinue
+                }
+
+                .\build.ps1 test "--ci=1" "--optimize=$optimize" "--fuzz=$fuzz" "--unity-build=$unity_build"
+
+                $rc = $LASTEXITCODE
+                if ($rc -ne 0)
+                {
+                  Write-Host "build.ps1 failed: $rc"
+                  $exitCode = $rc
+                  break
+                }
               }
 
-              & pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 `
-                test `
-                "--optimize=$o" `
-                "--fuzz=$f" `
-                "--ci=1"
-
-              $rc = $LASTEXITCODE
-              if ($rc -ne 0)
-              {
-                Write-Host "build.ps1 failed: $rc"
-                $exitCode = $rc
-                break
-              }
+              if ($exitCode -ne 0) { break }
             }
-
-            if ($exitCode -ne 0) { break }
           }
 
           exit $exitCode

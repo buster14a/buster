@@ -123,6 +123,10 @@ STRUCT(IrFunctions)
 BUSTER_DECL IrFunctions ir_module_get_functions(IrModule* module);
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_IMPL IrModule* ir_create_mock_module(Arena* arena);
-BUSTER_IMPL bool ir_tests(TestArguments* arguments);
+BUSTER_DECL IrModule* ir_create_mock_module(Arena* arena);
+BUSTER_DECL bool ir_tests(TestArguments* arguments);
+#endif
+
+#if BUSTER_UNITY_BUILD
+#include <buster/compiler/ir/ir.c>
 #endif

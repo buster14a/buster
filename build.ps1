@@ -49,33 +49,37 @@ Import-DotEnv "build.env"
 # -----------------------------
 # Defaults (match Bash)
 # -----------------------------
-$BUSTER_OPTIMIZE          = 0
-$BUSTER_FUZZ              = 0
 $BUSTER_CI                = 0
 $BUSTER_DOWNLOAD_TOOLCHAIN= 0
 $BUSTER_SELF_HOSTED       = 0
-$BUSTER_COMMAND           = 'build'
 
 # -----------------------------
 # Args: first arg is command, rest are --key=value
 # -----------------------------
-if ($args.Count -ge 1) {
-    $BUSTER_COMMAND = $args[0]
+if ($args.Count -ge 1)
+{
     Set-PSDebug -Trace 1
+
+    if ($args.Count -ge 2)
+    {
+        foreach ($arg in $args[1..($args.Count-1)])
+        {
+            if ($args.Count -lt 2)
+            {
+                break
+            }
+
+            switch -Regex ($arg)
+            {
+                '^--ci=(.+)$'                 { $BUSTER_CI                 = [int]$Matches[1]; break }
+                '^--download_toolchain=(.+)$' { $BUSTER_DOWNLOAD_TOOLCHAIN = [int]$Matches[1]; break }
+                '^--self-hosted=(.+)$'        { $BUSTER_SELF_HOSTED        = [int]$Matches[1]; break }
+                default { break }
+            }
+        }
+    }
 }
 
-foreach ($arg in $args[1..($args.Count-1)]) {
-  if ($args.Count -lt 2) { break }
-
-  switch -Regex ($arg) {
-    '^--optimize=(.+)$'           { $BUSTER_OPTIMIZE           = [int]$Matches[1]; break }
-    '^--fuzz=(.+)$'               { $BUSTER_FUZZ               = [int]$Matches[1]; break }
-    '^--ci=(.+)$'                 { $BUSTER_CI                 = [int]$Matches[1]; break }
-    '^--download_toolchain=(.+)$' { $BUSTER_DOWNLOAD_TOOLCHAIN = [int]$Matches[1]; break }
-    '^--self-hosted=(.+)$'        { $BUSTER_SELF_HOSTED        = [int]$Matches[1]; break }
-    default { throw "error: unknown argument: $arg" }
-  }
-}
 
 # -----------------------------
 # Detect arch/os (Windows)
@@ -84,20 +88,25 @@ $BUSTER_OS = 'windows'
 
 # Prefer PROCESSOR_ARCHITEW6432 when present (32-bit pwsh on 64-bit OS)
 $nativeArch = $env:PROCESSOR_ARCHITEW6432
-if (-not $nativeArch) { $nativeArch = $env:PROCESSOR_ARCHITECTURE }
+if (-not $nativeArch)
+{
+    $nativeArch = $env:PROCESSOR_ARCHITECTURE
+}
 
-switch ($nativeArch.ToUpperInvariant()) {
-  'AMD64' { $BUSTER_ARCH = 'x86_64' }
-  'ARM64' { $BUSTER_ARCH = 'aarch64' }
-  default { throw "error: unknown CPU architecture: $nativeArch" }
+switch ($nativeArch.ToUpperInvariant())
+{
+    'AMD64' { $BUSTER_ARCH = 'x86_64' }
+    'ARM64' { $BUSTER_ARCH = 'aarch64' }
+    default { throw "error: unknown CPU architecture: $nativeArch" }
 }
 
 # -----------------------------
 # CI logging
 # -----------------------------
-if ($BUSTER_CI -eq 1) {
-  Write-Host "Command: '$BUSTER_COMMAND'"
-  try {
+if ($BUSTER_CI -eq 1)
+{
+  try
+  {
     $cpuName = (Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name)
     Write-Host "CPU: $cpuName"
   } catch {}
@@ -110,7 +119,8 @@ $maj = $env:BUSTER_LLVM_VERSION_MAJOR
 $min = $env:BUSTER_LLVM_VERSION_MINOR
 $rev = $env:BUSTER_LLVM_VERSION_REVISION
 
-if (-not $maj -or -not $min -or -not $rev) {
+if (-not $maj -or -not $min -or -not $rev)
+{
   throw "error: BUSTER_LLVM_VERSION_MAJOR/MINOR/REVISION must be set in build.env"
 }
 
@@ -165,11 +175,12 @@ $builderExe = Join-Path $buildDir 'builder.exe'
 $builderExe = $builderExe -replace '\\', '/'
 
 $clangArgs = @(
+  '-v',
   'build.c',
   '-o', $builderExe,
   '-fuse-ld=lld',
-  "-DBUSTER_TOOLCHAIN_ABSOLUTE_PATH=`"$BUSTER_TOOLCHAIN_ABSOLUTE_PATH`"",
-  "-DBUSTER_CLANG_ABSOLUTE_PATH=`"$BUSTER_CLANG_ABSOLUTE_PATH`"",
+  ('-DBUSTER_TOOLCHAIN_ABSOLUTE_PATH=\"' + $BUSTER_TOOLCHAIN_ABSOLUTE_PATH + '\"'),
+  ('-DBUSTER_CLANG_ABSOLUTE_PATH=\"' + $BUSTER_CLANG_ABSOLUTE_PATH + '\"'),
   '-O0', '-Isrc', '-std=gnu2x', '-march=native',
   '-DBUSTER_UNITY_BUILD=1',
   '-DBUSTER_USE_IO_RING=0',
@@ -194,5 +205,5 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # -----------------------------
 # Run builder
 # -----------------------------
-& $builderExe $BUSTER_COMMAND "--optimize=$BUSTER_OPTIMIZE" "--fuzz=$BUSTER_FUZZ" "--ci=$BUSTER_CI"
+& $builderExe @args
 exit $LASTEXITCODE

@@ -4,6 +4,8 @@
 #include <buster/compiler/ir/ir.h>
 #include <buster/compiler/backend/code_generation.h>
 
+#include <buster/entry_point.h>
+
 ENUM(CompilerCommand, 
     COMPILER_COMMAND_TEST,
 );
@@ -18,11 +20,6 @@ STRUCT(CCProgramState)
 BUSTER_LOCAL CCProgramState cc_program_state = {};
 
 BUSTER_IMPL ProgramState* program_state = &cc_program_state.general_program_state;
-
-BUSTER_IMPL ProcessResult process_arguments()
-{
-    return PROCESS_RESULT_SUCCESS;
-}
 
 STRUCT(CompilerOptions)
 {
@@ -128,6 +125,19 @@ BUSTER_LOCAL bool compiler_tests(TestArguments* arguments)
 }
 #endif
 
+#if BUSTER_FUZZING
+BUSTER_DECL s32 buster_fuzz(const u8* pointer, size_t size)
+{
+    BUSTER_UNUSED(pointer);
+    BUSTER_UNUSED(size);
+    return 0;
+}
+#else
+BUSTER_IMPL ProcessResult process_arguments()
+{
+    return PROCESS_RESULT_SUCCESS;
+}
+
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
     let arena = thread->arena;
@@ -159,13 +169,5 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     }
 
     return result ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-}
-
-#if BUSTER_FUZZING
-BUSTER_DECL s32 buster_fuzz(const u8* pointer, size_t size)
-{
-    BUSTER_UNUSED(pointer);
-    BUSTER_UNUSED(size);
-    return 0;
 }
 #endif

@@ -1755,6 +1755,13 @@ BUSTER_IMPL String8 string8_slice(String8 s, u64 start, u64 end)
     return s;
 }
 
+BUSTER_IMPL String16 string16_slice(String16 s, u64 start, u64 end)
+{
+    s.pointer += start;
+    s.length = end - start;
+    return s;
+}
+
 BUSTER_LOCAL bool string_generic_equal(void* p1, void* p2, u64 l1, u64 l2, u64 element_size)
 {
     bool is_equal = l1 == l2;
@@ -1786,6 +1793,82 @@ BUSTER_IMPL u64 string8_first_character(String8 s, char8 ch)
         {
             result = i;
             break;
+        }
+    }
+
+    return result;
+}
+
+BUSTER_IMPL u64 string8_first_ocurrence(String8 s, String8 sub)
+{
+    u64 result = string_no_match;
+
+    if (sub.length && s.length >= sub.length)
+    {
+        u64 i = 0;
+
+        while (true)
+        {
+            let s_sub = string8_slice_start(s, i);
+            let index = string8_first_character(s_sub, sub.pointer[0]);
+            if (index == string_no_match)
+            {
+                break;
+            }
+
+            let candidate_result = i + index;
+            let s_sub_sub = string8_slice_start(s, candidate_result);
+            if (s_sub_sub.length < sub.length)
+            {
+                break;
+            }
+            s_sub_sub = string8_slice(s_sub_sub, 0, sub.length);
+            
+            if (string8_equal(s_sub_sub, sub))
+            {
+                result = candidate_result;
+                break;
+            }
+
+            i = candidate_result + 1;
+        }
+    }
+
+    return result;
+}
+
+BUSTER_IMPL u64 string16_first_ocurrence(String16 s, String16 sub)
+{
+    u64 result = string_no_match;
+
+    if (sub.length && s.length >= sub.length)
+    {
+        u64 i = 0;
+
+        while (true)
+        {
+            let s_sub = string16_slice_start(s, i);
+            let index = string16_first_character(s_sub, sub.pointer[0]);
+            if (index == string_no_match)
+            {
+                break;
+            }
+
+            let candidate_result = i + index;
+            let s_sub_sub = string16_slice_start(s, candidate_result);
+            if (s_sub_sub.length < sub.length)
+            {
+                break;
+            }
+            s_sub_sub = string16_slice(s_sub_sub, 0, sub.length);
+            
+            if (string16_equal(s_sub_sub, sub))
+            {
+                result = candidate_result;
+                break;
+            }
+
+            i = candidate_result + 1;
         }
     }
 

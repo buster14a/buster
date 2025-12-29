@@ -2,6 +2,8 @@
 #include <buster/lib.h>
 #include <buster/system_headers.h>
 
+#include <buster/entry_point.h>
+
 STRUCT(AsmProgramState)
 {
     ProgramState general_program_state;

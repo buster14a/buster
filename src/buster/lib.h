@@ -51,7 +51,7 @@
 #if defined(__cplusplus)
 #define BUSTER_EXPORT extern "C"
 #else
-#define BUSTER_EXPORT extern
+#define BUSTER_EXPORT
 #endif
 
 #ifndef BUSTER_UNITY_BUILD
@@ -103,6 +103,7 @@
 #define BUSTER_CACHE_LINE_GUESS (64)
 #endif
 
+#define BUSTER_ASSUME(x) __builtin_assume(x)
 #ifdef NDEBUG
 #define BUSTER_UNREACHABLE() __builtin_unreachable()
 #else
@@ -569,6 +570,7 @@ BUSTER_DECL String8 string8_slice(String8 s, u64 start, u64 end);
 BUSTER_DECL bool string8_equal(String8 s1, String8 s2);
 BUSTER_DECL u64 string8_first_character(String8 s, char8 ch);
 BUSTER_DECL u64 string8_last_character(String8 s, char8 ch);
+BUSTER_DECL u64 string8_first_ocurrence(String8 s, String8 sub);
 BUSTER_DECL bool string8_starts_with(String8 s, String8 beginning);
 BUSTER_DECL bool string8_ends_with(String8 s, String8 ending);
 BUSTER_DECL u64 string8_occurrence_count(String8 s, u8 ch);
@@ -581,6 +583,7 @@ BUSTER_DECL String16 string16_slice(String16 s, u64 start, u64 end);
 BUSTER_DECL bool string16_equal(String16 s1, String16 s2);
 BUSTER_DECL u64 string16_first_character(String16 s, char16 ch);
 BUSTER_DECL u64 string16_last_character(String16 s, char16 ch);
+BUSTER_DECL u64 string16_first_ocurrence(String16 s, String16 sub);
 BUSTER_DECL bool string16_starts_with(String16 s, String16 beginning);
 BUSTER_DECL bool string16_ends_with(String16 s, String16 ending);
 
@@ -597,6 +600,7 @@ BUSTER_DECL String8 string16_to_string8(Arena* arena, String16 s);
 #define os_string_equal(a, b) string16_equal(a, b)
 #define os_string_starts_with(a, b) string16_starts_with(a, b)
 #define os_string_from_pointer_length(pointer, length) string16_from_pointer_length(pointer, length)
+#define os_string_first_ocurrence(s, sub) string16_first_ocurrence(s, sub)
 #else
 #define os_string_from_pointer(pointer) string8_from_pointer(pointer)
 #define os_string_first_character string8_first_character
@@ -604,6 +608,7 @@ BUSTER_DECL String8 string16_to_string8(Arena* arena, String16 s);
 #define os_string_equal(a, b) string8_equal(a, b)
 #define os_string_starts_with(a, b) string8_starts_with(a, b)
 #define os_string_from_pointer_length(pointer, length) string8_from_pointer_length(pointer, length)
+#define os_string_first_ocurrence(s, sub) string8_first_ocurrence(s, sub)
 #endif
 
 #if defined(_WIN32)
