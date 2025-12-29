@@ -571,6 +571,7 @@ BUSTER_DECL u64 string8_first_character(String8 s, char8 ch);
 BUSTER_DECL u64 string8_last_character(String8 s, char8 ch);
 BUSTER_DECL bool string8_starts_with(String8 s, String8 beginning);
 BUSTER_DECL bool string8_ends_with(String8 s, String8 ending);
+BUSTER_DECL u64 string8_occurrence_count(String8 s, u8 ch);
 
 BUSTER_DECL String16 string16_from_pointer(char16* start);
 BUSTER_DECL String16 string16_from_pointers(char16* start, char16* end);

@@ -506,7 +506,32 @@ BUSTER_LOCAL bool build_compile_commands(Arena* arena, Arena* compile_commands, 
         let arg_it = os_string_list_initialize(args);
         for (let arg = os_string_list_next(&arg_it); arg.pointer; arg = os_string_list_next(&arg_it))
         {
-            append_os_string(compile_commands, arg);
+            let a = arg;
+#ifndef _WIN32
+            let double_quote_count = string8_occurrence_count(a, '"');
+            if (double_quote_count != 0)
+            {
+                let new_length = a.length + double_quote_count;
+                a = (String8) { .pointer = arena_allocate(compile_commands, u8, new_length), .length = new_length };
+                bool is_double_quote;
+                for (u64 i = 0, double_quote_i = 0; i < arg.length; i += 1)
+                {
+                    let original_ch = arg.pointer[i];
+                    is_double_quote = original_ch == '"';
+                    let escape_i = double_quote_i;
+                    let character_i = double_quote_i + is_double_quote;
+                    a.pointer[escape_i] = '\\';
+                    a.pointer[character_i] = original_ch;
+                    double_quote_i = character_i + 1;
+                }
+            }
+            else
+            {
+                append_os_string(compile_commands, a);
+            }
+#else
+            append_os_string(compile_commands, a);
+#endif
             append_string8(compile_commands, S8(" "));
         }
 

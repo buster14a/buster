@@ -193,6 +193,18 @@ BUSTER_LOCAL void string8_reverse(String8 s)
     }
 }
 
+BUSTER_IMPL u64 string8_occurrence_count(String8 s, u8 ch)
+{
+    u64 count = 0;
+    let restrict p = s.pointer;
+    for (u64 i = 0; i < s.length; i += 1)
+    {
+        count += p[i] == ch;
+    }
+
+    return count;
+}
+
 BUSTER_LOCAL void string16_reverse(String16 s)
 {
     let restrict pointer = s.pointer;
