@@ -1,10 +1,6 @@
 #pragma once
 #include <lib.h>
 
-#if BUSTER_UNITY_BUILD
-#include <lib.c>
-#endif
-
 STRUCT(MBRPartitionRecord)
 {
     u32 boot_indicator:8;

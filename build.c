@@ -10,13 +10,6 @@ source build.sh
 #include <buster/lib.h>
 #include <buster/target.h>
 #include <buster/entry_point.h>
-
-#if BUSTER_UNITY_BUILD
-#include <buster/lib.c>
-#include <buster/target.h>
-#include <buster/entry_point.c>
-#endif
-
 #include <martins/md5.h>
 #include <buster/system_headers.h>
 

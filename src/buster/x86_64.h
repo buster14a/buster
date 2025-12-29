@@ -12,3 +12,7 @@ STRUCT(CpuId)
 };
 
 BUSTER_DECL CpuModel cpu_detect_model_x86_64();
+
+#if BUSTER_UNITY_BUILD
+#include <buster/x86_64.c>
+#endif

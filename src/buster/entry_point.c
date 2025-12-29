@@ -4,11 +4,6 @@
 #include <buster/system_headers.h>
 #include <buster/target.h>
 
-#if BUSTER_UNITY_BUILD
-#include <buster/lib.c>
-#include <buster/target.c>
-#endif
-
 BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList envp)
 {
     ProcessResult result = {};

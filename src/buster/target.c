@@ -3,15 +3,9 @@
 
 #if defined(__x86_64__)
 #include <buster/x86_64.h>
-#if BUSTER_UNITY_BUILD
-#include <buster/x86_64.c>
-#endif
 #endif
 #if defined(__aarch64__)
 #include <buster/aarch64.h>
-#if BUSTER_UNITY_BUILD
-#include <buster/aarch64.c>
-#endif
 #endif
 #if defined(__APPLE__)
 #include <TargetConditionals.h>

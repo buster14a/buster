@@ -654,3 +654,7 @@ BUSTER_DECL u32 io_ring_submit_and_wait_all();
 #if BUSTER_INCLUDE_TESTS
 BUSTER_DECL bool lib_tests(TestArguments* restrict arguments);
 #endif
+
+#if BUSTER_UNITY_BUILD
+#include <buster/lib.c>
+#endif

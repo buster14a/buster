@@ -206,3 +206,7 @@ BUSTER_DECL OsString target_to_string(Arena* arena, Target target);
 BUSTER_DECL OsString cpu_arch_to_os_string(CpuArch arch);
 BUSTER_DECL OsString operating_system_to_os_string(OperatingSystem os);
 BUSTER_DECL OsString cpu_model_to_os_string(CpuModel model);
+
+#if BUSTER_UNITY_BUILD
+#include <buster/target.c>
+#endif

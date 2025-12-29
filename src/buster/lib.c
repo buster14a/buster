@@ -4,8 +4,6 @@
 
 #include <buster/system_headers.h>
 
-#include <buster/entry_point.h>
-
 BUSTER_IMPL THREAD_LOCAL_DECL Thread* thread;
 
 STRUCT(ProtectionFlags)
