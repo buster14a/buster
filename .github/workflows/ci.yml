@@ -8,6 +8,10 @@ on:
     branches:
       - main
 
+env:
+  BUSTER_FAST_FUZZ_DURATION_SECONDS: 10
+  BUSTER_THOROUGH_FUZZ_DURATION_SECONDS: 180
+
 jobs:
   ci:
     strategy:
@@ -45,6 +49,161 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           $exitCode = 0
+          Get-Content -LiteralPath "build.env" | ForEach-Object {
+            $line = $_.Trim()
+            if ($line.Length -eq 0) { return }
+            if ($line.StartsWith('#')) { return }
+
+            if ($line.StartsWith('export ')) {
+              $line = $line.Substring(7).Trim()
+            }
+
+            # split on first '='
+            $eq = $line.IndexOf('=')
+            if ($eq -lt 1) { return }
+
+            $key = $line.Substring(0, $eq).Trim()
+            $rhs = $line.Substring($eq + 1).Trim()
+
+            function Parse-BashArrayRhs {
+              param([Parameter(Mandatory=$true)][string]$Text)
+
+              # Expect something like: ( ... )
+              $t = $Text.Trim()
+              if ($t.Length -lt 2 -or $t[0] -ne '(') { return $null }
+
+              # Find matching closing ')' (allowing quotes/escapes)
+              $i = 1
+              $inSingle = $false
+              $inDouble = $false
+              $escaped  = $false
+
+              while ($i -lt $t.Length) {
+                $ch = $t[$i]
+
+                if ($escaped) { $escaped = $false; $i++; continue }
+
+                if (-not $inSingle -and $ch -eq '\') { $escaped = $true; $i++; continue }
+
+                if (-not $inDouble -and $ch -eq "'" ) { $inSingle = -not $inSingle; $i++; continue }
+                if (-not $inSingle -and $ch -eq '"' ) { $inDouble = -not $inDouble; $i++; continue }
+
+                if (-not $inSingle -and -not $inDouble -and $ch -eq ')') { break }
+
+                $i++
+              }
+
+              if ($i -ge $t.Length -or $t[$i] -ne ')') {
+                throw "Unterminated bash array RHS: $Text"
+              }
+
+              $inner = $t.Substring(1, $i - 1) # between '(' and ')'
+
+              # Tokenize inner elements (bash-like, practical subset)
+              $tokens = New-Object System.Collections.Generic.List[string]
+              $sb = New-Object System.Text.StringBuilder
+              $inSingle = $false
+              $inDouble = $false
+              $escaped  = $false
+
+              for ($j = 0; $j -lt $inner.Length; $j++) {
+                $ch = $inner[$j]
+
+                if ($escaped) {
+                  # In bash, backslash escapes next char (outside single quotes; in double quotes it's partial).
+                  [void]$sb.Append($ch)
+                  $escaped = $false
+                  continue
+                  }
+
+                  if ($inSingle) {
+                    if ($ch -eq "'") {
+                      $inSingle = $false
+                  } else {
+                    [void]$sb.Append($ch)
+                    }
+                    continue
+                    }
+
+                    if ($inDouble) {
+                      if ($ch -eq '"') {
+                        $inDouble = $false
+                        continue
+                        }
+
+                        if ($ch -eq '\') {
+                          # In bash double-quotes, backslash can escape: \, ", $, `, newline
+                          if ($j + 1 -lt $inner.Length) {
+                            $next = $inner[$j + 1]
+                            if ($next -in @('\','"','$','`',"`n")) {
+                              $j++
+                              [void]$sb.Append($next)
+                              continue
+                              }
+                            }
+                            # Otherwise treat '\' literally
+                            [void]$sb.Append('\')
+                            continue
+                            }
+
+                            [void]$sb.Append($ch)
+                            continue
+                            }
+
+                            # Not in quotes
+                            if ($ch -match '\s') {
+                              if ($sb.Length -gt 0) {
+                                $tokens.Add($sb.ToString())
+                                $null = $sb.Clear()
+                            }
+                            continue
+                            }
+
+                            if ($ch -eq "'") { $inSingle = $true; continue }
+                            if ($ch -eq '"') { $inDouble = $true; continue }
+
+                            if ($ch -eq '\') { $escaped = $true; continue }
+
+                            [void]$sb.Append($ch)
+                            }
+
+                            if ($escaped) {
+                              # trailing backslash: treat it literally
+                              [void]$sb.Append('\')
+                            }
+
+                                if ($inSingle -or $inDouble) {
+                                  throw "Unterminated quote in bash array RHS: $Text"
+                                }
+
+                                if ($sb.Length -gt 0) {
+                                  $tokens.Add($sb.ToString())
+                                }
+
+                                return ,$tokens.ToArray()
+                                }
+
+                                # Try parse as array first: KEY=(...)
+                                $arr = $null
+                                if ($rhs.StartsWith('(')) {
+                                  $arr = Parse-BashArrayRhs -Text $rhs
+                                }
+
+                                if ($null -ne $arr) {
+                                  # Set as a PowerShell array
+                                  Set-Variable -Name $key -Value $arr -Scope Script
+                                  return
+                                  }
+
+                                  # Scalar: strip surrounding quotes (your existing behavior)
+                                  $val = $rhs
+                                  if (($val.Length -ge 2) -and (($val.StartsWith('"') -and $val.EndsWith('"')) -or ($val.StartsWith("'") -and $val.EndsWith("'")))) {
+                                    $val = $val.Substring(1, $val.Length - 2)
+                                  }
+
+                                  Set-Variable -Name $key -Value $val -Scope Script
+                                  }
+
 
           # On windows-11-arm: fuzz=0 only; otherwise fuzz=0,1
           $fuzzValues = if ('${{matrix.BUSTER_OS_TAG}}' -eq 'windows-11-arm') {

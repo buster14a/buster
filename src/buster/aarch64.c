@@ -193,8 +193,8 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
     }
 #elif defined(__APPLE__)
       u32 family;
-      size_t length = sizeof(family);
-      sysctlbyname("hw.cpufamily", &family, &length, 0, 0);
+      size_t family_length = sizeof(family);
+      sysctlbyname("hw.cpufamily", &family, &family_length, 0, 0);
 
       switch (family)
       {
@@ -224,11 +224,11 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
 
       if (family == 0 && result == CPU_MODEL_A64_GENERIC)
       {
-          char buffer[4096];
-          size_t length = BUSTER_ARRAY_LENGTH(buffer) - 1;
-          if (sysctlbyname("machdep.cpu.brand_string", buffer, &length, 0, 0) == 0)
+          char8 buffer[4096];
+          size_t buffer_length = BUSTER_ARRAY_LENGTH(buffer) - 1;
+          if (sysctlbyname("machdep.cpu.brand_string", buffer, &buffer_length, 0, 0) == 0)
           {
-              if (sysctlbyname("machdep.cpu.brand_string", 0, &length, 0, 0) == 0)
+              if (sysctlbyname("machdep.cpu.brand_string", 0, &buffer_length, 0, 0) == 0)
               {
                   let brand_string = S8(buffer);
                   if (string8_starts_with(brand_string, S8("Apple M1")))

@@ -10,7 +10,7 @@ source build.sh
 #include <buster/lib.h>
 #include <buster/target.h>
 #include <buster/entry_point.h>
-#include <martins/md5.h>
+// #include <martins/md5.h>
 #include <buster/system_headers.h>
 
 STRUCT(BuildTarget)
@@ -33,7 +33,7 @@ BUSTER_LOCAL __attribute__((used)) OsString toolchain_path = {};
 BUSTER_LOCAL OsString clang_path = {};
 BUSTER_LOCAL OsString xc_sdk_path = {};
 
-#define BUSTER_TODO() BUSTER_TRAP()
+#define BUSTER_TODO() print(S8("TODO\n")); fail()
 
 ENUM_T(ModuleId, u8,
     MODULE_LIB,
@@ -70,6 +70,7 @@ STRUCT(Module)
     DirectoryId directory;
     bool no_header;
     bool no_source;
+    u8 reserved[2];
 };
 
 STRUCT(TargetBuildFile)
@@ -77,23 +78,26 @@ STRUCT(TargetBuildFile)
     FileStats stats;
     OsString full_path;
     BuildTarget* target;
-    bool has_debug_information;
-    bool use_io_ring;
-    bool optimize;
-    bool fuzz;
+    u64 has_debug_information:1;
+    u64 use_io_ring:1;
+    u64 optimize:1;
+    u64 fuzz:1;
+    u64 reserved:60;
 };
 
 STRUCT(ModuleInstantiation)
 {
     BuildTarget* target;
-    ModuleId id;
     u64 index;
+    ModuleId id;
+    u8 reserved[7];
 };
 
 STRUCT(LinkModule)
 {
-    ModuleId id;
     u64 index;
+    ModuleId id;
+    u8 reserved[7];
 };
 
 STRUCT(ModuleSlice)
@@ -156,11 +160,12 @@ STRUCT(LinkUnitSpecification)
     OsString artifact_path;
     BuildTarget* target;
     OsString* object_paths;
-    bool use_io_ring;
-    bool has_debug_information;
-    bool optimize;
-    bool fuzz;
-    bool is_builder;
+    u64 use_io_ring:1;
+    u64 has_debug_information:1;
+    u64 optimize:1;
+    u64 fuzz:1;
+    u64 is_builder:1;
+    u64 reserved:59;
 };
 
 #if defined(__x86_64__)
@@ -176,8 +181,7 @@ ENUM(BuildCommand,
     BUILD_COMMAND_COUNT,
 );
 
-typedef enum BuildFlag
-{
+ENUM(BuildFlag,
     BUILD_FLAG_OPTIMIZE,
     BUILD_FLAG_FUZZ,
     BUILD_FLAG_CI,
@@ -186,16 +190,52 @@ typedef enum BuildFlag
     BUILD_FLAG_JUST_PREPROCESSOR,
     BUILD_FLAG_SELF_HOSTED,
     BUILD_FLAG_COUNT,
-} BuildFlag;
+);
+
+ENUM(BuildIntegerOption,
+    BUILD_INTEGER_OPTION_FUZZ_DURATION_SECONDS,
+    BUILD_INTEGER_OPTION_COUNT,
+);
+
+UNION(BuildIntegerOptionValue)
+{
+    s64 signed_value;
+    u64 unsigned_value;
+};
+
+ENUM_T(BuildIntegerOptionFormat, u8,
+    BUILD_INTEGER_OPTION_FORMAT_HEXADECIMAL,
+    BUILD_INTEGER_OPTION_FORMAT_DECIMAL_POSITIVE,
+    BUILD_INTEGER_OPTION_FORMAT_DECIMAL_NEGATIVE,
+    BUILD_INTEGER_OPTION_FORMAT_OCTAL,
+    BUILD_INTEGER_OPTION_FORMAT_BINARY,
+);
+
+STRUCT(BuildIntegerOptionSettings)
+{
+    BuildIntegerOptionFormat format:3;
+    u8 is_set:1;
+    u8 reserved:4;
+};
+static_assert(sizeof(BuildIntegerOptionSettings) == 1);
+
+STRUCT(BuildIntegerOptions)
+{
+    BuildIntegerOptionValue values[BUILD_INTEGER_OPTION_COUNT];
+    BuildIntegerOptionSettings settings[BUILD_INTEGER_OPTION_COUNT];
+    u8 reserved[7];
+};
 
 typedef u64 FlagBackingType;
 
 STRUCT(BuildProgramState)
 {
     ProgramState general_state;
-    BuildCommand command;
     FlagBackingType value_flags;
     FlagBackingType set_flags;
+    BuildIntegerOptions integer;
+    BuildCommand command;
+    u8 reserved[4];
 };
 
 static_assert(sizeof(FlagBackingType) * 8 > BUILD_FLAG_COUNT);
@@ -219,17 +259,24 @@ BUSTER_LOCAL void build_flag_set(BuildFlag flag, bool value)
     build_program_state.set_flags |= (FlagBackingType)1 << flag;
 }
 
+BUSTER_LOCAL u64 build_integer_option_get_unsigned(BuildIntegerOption option_id)
+{
+    let option_value = build_program_state.integer.values[option_id];
+    return option_value.unsigned_value;
+}
+
 BUSTER_LOCAL u128 hash_file(u8* pointer, u64 length)
 {
     BUSTER_CHECK(((u64)pointer & (64 - 1)) == 0);
     u128 digest = 0;
     if (length)
     {
-        md5_ctx ctx;
-        md5_init(&ctx);
-        md5_update(&ctx, pointer, length);
-        static_assert(sizeof(digest) == MD5_DIGEST_SIZE);
-        md5_finish(&ctx, (u8*)&digest);
+        // TODO:
+        // md5_ctx ctx;
+        // md5_init(&ctx);
+        // md5_update(&ctx, pointer, length);
+        // static_assert(sizeof(digest) == MD5_DIGEST_SIZE);
+        // md5_finish(&ctx, (u8*)&digest);
     }
     return digest;
 }
@@ -240,7 +287,8 @@ STRUCT(Process)
     ProcessHandle* handle;
     OsStringList argv;
     OsStringList envp;
-    bool waited;
+    u64 waited:1;
+    u64 reserved:63;
 };
 
 static_assert(alignof(Process) == 8);
@@ -262,14 +310,15 @@ STRUCT(CompilationUnit)
     BuildTarget* target;
     OsChar* compiler;
     OsStringList compilation_arguments;
-    bool optimize;
-    bool has_debug_information;
-    bool fuzz;
-    bool use_io_ring;
-    bool include_tests;
     OsString object_path;
     OsString source_path;
     Process process;
+    u64 optimize:1;
+    u64 has_debug_information:1;
+    u64 fuzz:1;
+    u64 use_io_ring:1;
+    u64 include_tests:1;
+    u64 reserved:59;
 #if BUSTER_USE_PADDING
     u8 cache_padding[BUSTER_MIN(BUSTER_CACHE_LINE_GUESS - ((5 * sizeof(u64))), BUSTER_CACHE_LINE_GUESS)];
 #endif
@@ -322,58 +371,63 @@ BUSTER_IMPL ProcessResult process_arguments()
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     let argv = program_state->input.argv;
     let envp = program_state->input.envp;
-    bool any_arguments;
+    bool is_command_present = false;
 
     {
         BUSTER_UNUSED(argv);
         BUSTER_UNUSED(envp);
         // TODO: arg processing
 
-        let arg_iterator = os_string_list_initialize(argv);
-        let arg_it = &arg_iterator;
-        let first_argument = os_string_list_next(arg_it);
+        let arg_it = os_string_list_iterator_initialize(argv);
+        let first_argument = os_string_list_iterator_next(&arg_it);
         BUSTER_UNUSED(first_argument);
-        let command = os_string_list_next(arg_it);
-        any_arguments = command.pointer != 0;
+        let command = os_string_list_iterator_next(&arg_it);
+        u64 argument_count = 1;
 
-        if (any_arguments)
+        if (command.pointer)
         {
-            OsString possible_commands[] = {
-                [BUILD_COMMAND_BUILD] = OsS("build"),
-                [BUILD_COMMAND_TEST] = OsS("test"),
-                [BUILD_COMMAND_DEBUG] = OsS("debug"),
-            };
-            static_assert(BUSTER_ARRAY_LENGTH(possible_commands) == BUILD_COMMAND_COUNT);
-
-            u64 possible_command_count = BUSTER_ARRAY_LENGTH(possible_commands);
-
-            u64 i;
-            for (i = 0; i < possible_command_count; i += 1)
+            if (os_string_starts_with(command, OsS("--")))
             {
-                if (os_string_equal(command, possible_commands[i]))
-                {
-                    break;
-                }
-            }
-
-            if (i == possible_command_count)
-            {
-                u64 argument_index = 1;
-                let os_argument_process_result = buster_argument_process(argv, envp, argument_index, command);
-                if (os_argument_process_result != PROCESS_RESULT_SUCCESS)
-                {
-                    result = os_argument_process_result;
-                    print(S8("Command not recognized!\n"));
-                }
+                arg_it = os_string_list_iterator_initialize(argv);
+                os_string_list_iterator_next(&arg_it);
             }
             else
             {
-                build_program_state.command = (BuildCommand)i;
+                OsString possible_commands[] = {
+                    [BUILD_COMMAND_BUILD] = OsS("build"),
+                    [BUILD_COMMAND_TEST] = OsS("test"),
+                    [BUILD_COMMAND_DEBUG] = OsS("debug"),
+                };
+                static_assert(BUSTER_ARRAY_LENGTH(possible_commands) == BUILD_COMMAND_COUNT);
+
+                u64 possible_command_count = BUSTER_ARRAY_LENGTH(possible_commands);
+
+                u64 i;
+                for (i = 0; i < possible_command_count; i += 1)
+                {
+                    if (os_string_equal(command, possible_commands[i]))
+                    {
+                        break;
+                    }
+                }
+
+                if (i != possible_command_count)
+                {
+                    is_command_present = true;
+                    build_program_state.command = (BuildCommand)i;
+                }
+                else
+                {
+                    print(S8("Command not recognized: {OsS}!\n"), command);
+                    result = PROCESS_RESULT_FAILED;
+                }
+
+                argument_count += 1;
             }
         }
 
         OsString argument;
-        while ((argument = os_string_list_next(arg_it)).pointer)
+        while ((argument = os_string_list_iterator_next(&arg_it)).pointer)
         {
             OsString build_flag_strings[] = {
                 [BUILD_FLAG_OPTIMIZE] = OsS("--optimize="),
@@ -399,7 +453,7 @@ BUSTER_IMPL ProcessResult process_arguments()
                         let arg_value = argument.pointer[build_flag_string.length];
                         switch (arg_value)
                         {
-                            break; case '1': case '0': build_flag_set(i, arg_value == '1');
+                            break; case '1': case '0': build_flag_set((BuildFlag)i, arg_value == '1');
                             break; default:
                             {
                                 is_valid_value = false;
@@ -417,12 +471,108 @@ BUSTER_IMPL ProcessResult process_arguments()
                 }
             }
 
-            if (i == BUILD_FLAG_COUNT)
+            bool found = i != BUILD_FLAG_COUNT;
+
+            if (!found)
             {
-                print(S8("Unrecognized argument: '{OsS}'\n"), argument);
-                result = PROCESS_RESULT_FAILED;
-                break;
+                OsString integer_option_strings[] = {
+                    [BUILD_INTEGER_OPTION_FUZZ_DURATION_SECONDS] = OsS("--fuzz-duration="),
+                };
+                static_assert(BUSTER_ARRAY_LENGTH(integer_option_strings) == BUILD_INTEGER_OPTION_COUNT);
+
+                u64 build_integer_option_i;
+                for (build_integer_option_i = 0; build_integer_option_i < BUILD_INTEGER_OPTION_COUNT; build_integer_option_i += 1)
+                {
+                    let integer_option_string = integer_option_strings[build_integer_option_i];
+
+                    if (os_string_starts_with(argument, integer_option_string))
+                    {
+                        let value_string = string_slice_start(integer_option_string, integer_option_string.length);
+
+                        BuildIntegerOptionFormat format = BUILD_INTEGER_OPTION_FORMAT_DECIMAL_POSITIVE;
+
+                        // TODO: handle negative numbers
+                        IntegerParsing p = {};
+                        u64 prefix_character_count = 0;
+                        if (value_string.length > 2 && value_string.pointer[0] == '0')
+                        {
+                            let second_ch = value_string.pointer[1];
+                            switch (second_ch)
+                            {
+                                break; case 'x': format = BUILD_INTEGER_OPTION_FORMAT_HEXADECIMAL; prefix_character_count = 2; p = os_string_parse_hexadecimal((OsChar*)value_string.pointer + 2);
+                                break; case 'd': format = BUILD_INTEGER_OPTION_FORMAT_DECIMAL_POSITIVE; prefix_character_count = 2; p = os_string_parse_decimal((OsChar*)value_string.pointer + 2);
+                                break; case 'o': format = BUILD_INTEGER_OPTION_FORMAT_OCTAL; prefix_character_count = 2; p = os_string_parse_octal((OsChar*)value_string.pointer + 2);
+                                break; case 'b': format = BUILD_INTEGER_OPTION_FORMAT_BINARY; prefix_character_count = 2; p = os_string_parse_binary((OsChar*)value_string.pointer + 2);
+                                break; default: {}
+                            }
+                        }
+                        else if (value_string.length > 1 && value_string.pointer[0] == '-')
+                        {
+                            format = BUILD_INTEGER_OPTION_FORMAT_DECIMAL_NEGATIVE;
+                            prefix_character_count = 1;
+                            p = os_string_parse_decimal((OsChar*)value_string.pointer + 1);
+                        }
+
+                        if (format == BUILD_INTEGER_OPTION_FORMAT_DECIMAL_POSITIVE && p.i == 0)
+                        {
+                            p = os_string_parse_decimal((OsChar*)value_string.pointer);
+                        }
+
+                        if (p.i + prefix_character_count == value_string.length)
+                        {
+                            if (format == BUILD_INTEGER_OPTION_FORMAT_DECIMAL_NEGATIVE)
+                            {
+                                let negative_value = (s64)0-(s64)p.value;
+                                let cast_value = (u64)((s64)0 - negative_value);
+                                if (cast_value != p.value)
+                                {
+                                    print(S8("Negative value is too low: \n"), argument);
+                                    result = PROCESS_RESULT_FAILED;
+                                }
+                                else
+                                {
+                                    build_program_state.integer.values[build_integer_option_i] = (BuildIntegerOptionValue) {
+                                        .signed_value = negative_value,
+                                    };
+                                }
+                            }
+                            else
+                            {
+                                build_program_state.integer.values[build_integer_option_i] = (BuildIntegerOptionValue) {
+                                    .unsigned_value = p.value,
+                                };
+                            }
+
+                            build_program_state.integer.settings[build_integer_option_i] = (BuildIntegerOptionSettings) {
+                                .format = format,
+                                .is_set = true,
+                            };
+                        }
+                        else
+                        {
+                            print(S8("For argument '{OsS}', unrecognized value\n"), argument);
+                            result = PROCESS_RESULT_FAILED;
+                        }
+
+                        break;
+                    }
+                }
+
+                found = i != BUILD_INTEGER_OPTION_COUNT;
             }
+
+            if (!found)
+            {
+                let os_argument_process_result = buster_argument_process(argv, envp, argument_count, command);
+                if (os_argument_process_result != PROCESS_RESULT_SUCCESS)
+                {
+                    print(S8("Unrecognized argument: '{OsS}'\n"), argument);
+                    result = os_argument_process_result;
+                    break;
+                }
+            }
+
+            argument_count += 1;
         }
     }
 
@@ -436,7 +586,7 @@ BUSTER_IMPL ProcessResult process_arguments()
         build_flag_set(BUILD_FLAG_UNITY_BUILD, build_flag_get(BUILD_FLAG_OPTIMIZE));
     }
 
-    if (any_arguments & !program_state->input.verbose)
+    if (is_command_present & !program_state->input.verbose)
     {
         program_state->input.verbose = true;
     }
@@ -456,15 +606,16 @@ STRUCT(CompileLinkOptions)
     u64 source_count;
     BuildTarget* target;
 
-    bool optimize;
-    bool fuzz;
-    bool has_debug_information;
-    bool ci;
-    bool unity_build;
-    bool use_io_ring;
-    bool just_preprocessor;
-    bool compile;
-    bool link;
+    u64 optimize:1;
+    u64 fuzz:1;
+    u64 has_debug_information:1;
+    u64 ci:1;
+    u64 unity_build:1;
+    u64 use_io_ring:1;
+    u64 just_preprocessor:1;
+    u64 compile:1;
+    u64 link:1;
+    u64 reserved:55;
 };
 
 BUSTER_LOCAL OsStringList build_compile_link_arguments(Arena* arena, CompileLinkOptions options)
@@ -489,7 +640,7 @@ BUSTER_LOCAL OsStringList build_compile_link_arguments(Arena* arena, CompileLink
     bool sanitize = BUSTER_SELECT(options.ci, options.has_debug_information & ((!options.optimize) | options.fuzz), options.fuzz);
     if (sanitize)
     {
-        if (!(options.target->pointer->cpu.arch == CPU_ARCH_AARCH64 && options.target->pointer->os == OPERATING_SYSTEM_WINDOWS))
+        if (!(options.target->pointer->cpu_arch == CPU_ARCH_AARCH64 && options.target->pointer->os == OPERATING_SYSTEM_WINDOWS))
         {
             argument_add(builder, OsS("-fsanitize=address"));
         }
@@ -543,6 +694,7 @@ BUSTER_LOCAL OsStringList build_compile_link_arguments(Arena* arena, CompileLink
         argument_add(builder, OsS("-Wno-gnu-flexible-array-initializer"));
         argument_add(builder, OsS("-Wno-missing-field-initializers"));
         argument_add(builder, OsS("-Wno-language-extension-token"));
+        argument_add(builder, OsS("-Wno-zero-length-array"));
 
         argument_add(builder, OsS("-funsigned-char"));
         argument_add(builder, OsS("-fwrapv"));
@@ -600,34 +752,34 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     toolchain_path = OsS(BUSTER_TOOLCHAIN_ABSOLUTE_PATH);
 
     LinkModule builder_modules[] = {
-        { MODULE_BUILDER },
-        { MODULE_LIB },
-        { MODULE_SYSTEM_HEADERS },
-        { MODULE_ENTRY_POINT },
-        { MODULE_MD5 },
-        { native_module },
-        { MODULE_TARGET }
+        { .id = MODULE_BUILDER },
+        { .id = MODULE_LIB },
+        { .id = MODULE_SYSTEM_HEADERS },
+        { .id = MODULE_ENTRY_POINT },
+        // { MODULE_MD5 },
+        { .id = native_module },
+        { .id = MODULE_TARGET }
     };
     LinkModule cc_modules[] = {
-        { MODULE_CC_MAIN },
-        { MODULE_LIB },
-        { MODULE_SYSTEM_HEADERS },
-        { MODULE_ENTRY_POINT },
-        { MODULE_IR },
-        { MODULE_CODEGEN },
-        { MODULE_LINK },
-        { MODULE_LINK_JIT },
-        { MODULE_LINK_ELF },
-        { native_module },
-        { MODULE_TARGET }
+        { .id = MODULE_CC_MAIN },
+        { .id = MODULE_LIB },
+        { .id = MODULE_SYSTEM_HEADERS },
+        { .id = MODULE_ENTRY_POINT },
+        { .id = MODULE_IR },
+        { .id = MODULE_CODEGEN },
+        { .id = MODULE_LINK },
+        { .id = MODULE_LINK_JIT },
+        { .id = MODULE_LINK_ELF },
+        { .id = native_module },
+        { .id = MODULE_TARGET }
     };
     LinkModule asm_modules[] = {
-        { MODULE_ASM_MAIN },
-        { MODULE_LIB },
-        { MODULE_SYSTEM_HEADERS },
-        { MODULE_ENTRY_POINT },
-        { native_module },
-        { MODULE_TARGET },
+        { .id = MODULE_ASM_MAIN },
+        { .id = MODULE_LIB },
+        { .id = MODULE_SYSTEM_HEADERS },
+        { .id = MODULE_ENTRY_POINT },
+        { .id = native_module },
+        { .id = MODULE_TARGET },
     };
 
     LinkUnitSpecification specifications[] = {
@@ -664,7 +816,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         {
             target_buffer[target_i] = target;
 
-            let march = target->pointer->cpu.arch == CPU_ARCH_X86_64 ? OsS("-march=") : OsS("-mcpu=");
+            let march = target->pointer->cpu_arch == CPU_ARCH_X86_64 ? OsS("-march=") : OsS("-mcpu=");
             let target_strings = target_to_split_os_string(*target->pointer);
             OsString march_parts[] = {
                 march,
@@ -673,12 +825,12 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             target->march_string = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, march_parts), true);
 
             OsString triple_parts[2 * TARGET_STRING_COMPONENT_COUNT - 1];
-            for (u64 i = 0; i < TARGET_STRING_COMPONENT_COUNT; i += 1)
+            for (u64 triple_i = 0; triple_i < TARGET_STRING_COMPONENT_COUNT; triple_i += 1)
             {
-                triple_parts[i * 2 + 0] = target_strings.s[i];
-                if (i < (TARGET_STRING_COMPONENT_COUNT - 1))
+                triple_parts[triple_i * 2 + 0] = target_strings.s[triple_i];
+                if (triple_i < (TARGET_STRING_COMPONENT_COUNT - 1))
                 {
-                    triple_parts[i * 2 + 1] = OsS("-");
+                    triple_parts[triple_i * 2 + 1] = OsS("-");
                 }
             }
 
@@ -747,14 +899,14 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         let cache_manifest = os_file_open(OsS("build/cache_manifest"), (OpenFlags) { .read = 1 }, (OpenPermissions){});
         let cache_manifest_stats = os_file_get_stats(cache_manifest, (FileStatsOptions){ .size = 1, .modified_time = 1 });
         let cache_manifest_buffer = (u8*)arena_allocate_bytes(thread_arena(), cache_manifest_stats.size, 64);
-        os_file_read(cache_manifest, (String8){ cache_manifest_buffer, cache_manifest_stats.size }, cache_manifest_stats.size);
+        os_file_read(cache_manifest, (ByteSlice){ cache_manifest_buffer, cache_manifest_stats.size }, cache_manifest_stats.size);
         os_file_close(cache_manifest);
         let cache_manifest_hash = hash_file(cache_manifest_buffer, cache_manifest_stats.size);
         BUSTER_UNUSED(cache_manifest_hash);
         if (cache_manifest)
         {
             print(S8("TODO: Cache manifest found!\n"));
-            BUSTER_TRAP();
+            fail();
         }
         else
         {
@@ -902,8 +1054,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         {
             let fd = os_file_open(string_slice_start(source_file->full_path, cwd.length + 1), (OpenFlags){ .read = 1 }, (OpenPermissions){});
             let stats = os_file_get_stats(fd, (FileStatsOptions){ .raw = UINT64_MAX });
-            let buffer = arena_allocate_bytes(general_arena, stats.size, 64);
-            String8 buffer_slice = { buffer, stats.size};
+            let buffer = (u8*)arena_allocate_bytes(general_arena, stats.size, 64);
+            ByteSlice buffer_slice = { buffer, stats.size};
             os_file_read(fd, buffer_slice, stats.size);
             os_file_close(fd);
             let __attribute__((unused)) hash = hash_file(buffer_slice.pointer, buffer_slice.length);
@@ -1021,8 +1173,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             append_string8(compile_commands, os_string_to_string8(general_arena, cwd));
             append_string8(compile_commands, S8("\",\n\t\t\"command\": \""));
 
-            let arg_it = os_string_list_initialize(args);
-            for (let arg = os_string_list_next(&arg_it); arg.pointer; arg = os_string_list_next(&arg_it))
+            let arg_it = os_string_list_iterator_initialize(args);
+            for (let arg = os_string_list_iterator_next(&arg_it); arg.pointer; arg = os_string_list_iterator_next(&arg_it))
             {
                 let a = arg;
 #ifndef _WIN32
@@ -1030,7 +1182,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 if (double_quote_count != 0)
                 {
                     let new_length = a.length + double_quote_count;
-                    a = (String8) { .pointer = arena_allocate(compile_commands, u8, new_length), .length = new_length };
+                    a = (String8) { .pointer = arena_allocate(compile_commands, char8, new_length), .length = new_length };
                     bool is_double_quote;
                     for (u64 i = 0, double_quote_i = 0; i < arg.length; i += 1)
                     {
@@ -1064,8 +1216,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
 
         append_string8(compile_commands, S8("\n]"));
 
-        let compile_commands_str = (String8){ .pointer = (u8*)compile_commands + compile_commands_start, .length = compile_commands->position - compile_commands_start };
-        result = file_write(OsS("build/compile_commands.json"), compile_commands_str) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        let compile_commands_str = (String8){ .pointer = (char8*)compile_commands + compile_commands_start, .length = compile_commands->position - compile_commands_start };
+        result = file_write(OsS("build/compile_commands.json"), string_to_byte_slice(compile_commands_str)) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     }
 
     if (result == PROCESS_RESULT_SUCCESS)
@@ -1172,53 +1324,35 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                         result = PROCESS_RESULT_FAILED;
                     }
 
+                    u64 fuzz_max_length = 4096;
+                    let length_argument = arena_os_string_format(general_arena, OsS("-max_len={u64}"), fuzz_max_length);
+                    u64 max_total_time = build_integer_option_get_unsigned(BUILD_INTEGER_OPTION_FUZZ_DURATION_SECONDS);
+                    if (max_total_time == 0)
+                    {
+                        max_total_time = 30;
+                    }
+                    let max_total_time_argument = arena_os_string_format(general_arena, OsS("-max_total_time={u64}"), max_total_time);
+
                     // Skip builder executable since we execute the tests ourselves
                     for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
                     {
                         let link_unit_specification = &specifications[link_unit_i];
 
-                        if (link_unit_specification->fuzz)
-                        {
-#if defined(_WIN32)
-                            OsString argv_parts[] = {
-                                link_unit_specification->artifact_path,
-                                OsS(" -max_len=4096"),
-                                OsS(" -max_total_time=30"),
-                            };
-                            let argv_os_string = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, argv_parts), true);
-                            let argv = argv_os_string.pointer;
-                            let first_arg = argv_parts[0].pointer;
-#else
-                            OsChar* argv[] = {
-                                os_string_to_c(link_unit_specification->artifact_path),
-                                "-max_len=4096",
-                                "-max_total_time=30",
-                                0,
-                            };
-                            let first_arg = argv[0];
-#endif
-                            processes[link_unit_i] = os_process_spawn(first_arg, argv, program_state->input.envp);
-                        }
-                        else
-                        {
-#if defined(_WIN32)
-                            OsString argv_parts[] = {
-                                link_unit_specification->artifact_path,
-                                OsS(" test"),
-                            };
-                            let argv_os_string = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, argv_parts), true);
-                            let argv = argv_os_string.pointer;
-                            let first_arg = argv_parts[0].pointer;
-#else
-                            OsChar* argv[] = {
-                                os_string_to_c(link_unit_specification->artifact_path),
-                                "test",
-                                0,
-                            };
-                            let first_arg = argv[0];
-#endif
-                            processes[link_unit_i] = os_process_spawn(first_arg, argv, program_state->input.envp);
-                        }
+                        let first_argument = link_unit_specification->artifact_path;
+                        OsString fuzz_arguments[] = {
+                            first_argument,
+                            length_argument,
+                            max_total_time_argument,
+                        };
+
+                        OsString test_arguments[] = {
+                            first_argument,
+                            OsS("test"),
+                        };
+
+                        let os_argument_slice = link_unit_specification->fuzz ? BUSTER_ARRAY_TO_SLICE(OsStringSlice, fuzz_arguments) : BUSTER_ARRAY_TO_SLICE(OsStringSlice, test_arguments);
+                        let os_arguments = os_string_list_create(general_arena, os_argument_slice);
+                        processes[link_unit_i] = os_process_spawn(first_argument.pointer, os_arguments, program_state->input.envp);
                     }
 
                     for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
