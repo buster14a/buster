@@ -1,6 +1,8 @@
 #pragma once
 
 #include <buster/compiler/link/jit.h>
+#include <buster/string8.h>
+
 BUSTER_IMPL JitModule module_jit(Arena* arena, LinkArguments arguments)
 {
     BUSTER_UNUSED(arena);

@@ -1,5 +1,5 @@
 #pragma once
-#include <buster/lib.h>
+#include <buster/base.h>
 #include <buster/target.h>
 
 ENUM(IrTypeId,
@@ -28,6 +28,7 @@ STRUCT(IrValue)
     u64 constant_integer;
     IrType* type;
     IrValueId id;
+    u8 reserved[4];
 };
 
 ENUM(IrCallingConvention,
@@ -43,9 +44,10 @@ ENUM(IrInstructionId,
 STRUCT(IrInstruction)
 {
     IrValue* value;
-    IrInstructionId id;
     IrInstruction* previous;
     IrInstruction* next;
+    IrInstructionId id;
+    u8 reserved[4];
 };
 
 STRUCT(IrBasicBlock)
@@ -66,10 +68,10 @@ STRUCT(IrFunctionTypeBase)
 STRUCT(IrFunctionType)
 {
     IrType type;
+    IrCallingConvention calling_convention;
     IrType* return_type;
     IrType** argument_types;
     u64 argument_count;
-    IrCallingConvention calling_convention;
     Target* target;
 };
 
@@ -123,10 +125,7 @@ STRUCT(IrFunctions)
 BUSTER_DECL IrFunctions ir_module_get_functions(IrModule* module);
 
 #if BUSTER_INCLUDE_TESTS
+#include <buster/test.h>
 BUSTER_DECL IrModule* ir_create_mock_module(Arena* arena);
 BUSTER_DECL bool ir_tests(TestArguments* arguments);
-#endif
-
-#if BUSTER_UNITY_BUILD
-#include <buster/compiler/ir/ir.c>
 #endif

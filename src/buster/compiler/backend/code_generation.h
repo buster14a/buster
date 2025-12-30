@@ -1,6 +1,6 @@
 #pragma once
 
-#include <buster/lib.h>
+#include <buster/base.h>
 #include <buster/compiler/ir/ir.h>
 
 STRUCT(CodeGeneration)
@@ -11,11 +11,8 @@ STRUCT(CodeGeneration)
 
 STRUCT(CodeGenerationOptions)
 {
+    u8 reserved[4];
 };
 
 BUSTER_DECL CodeGeneration module_generation_initialize();
 BUSTER_DECL bool function_generate(CodeGeneration* generation, Arena* arena, IrModule* module, IrFunction* function, CodeGenerationOptions options);
-
-#if BUSTER_UNITY_BUILD
-#include <buster/compiler/backend/code_generation.c>
-#endif

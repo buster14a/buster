@@ -1,5 +1,8 @@
 #pragma once
 #include <buster/compiler/backend/code_generation.h>
+#include <buster/arena.h>
+#include <buster/integer.h>
+#include <buster/assertion.h>
 
 BUSTER_IMPL CodeGeneration module_generation_initialize()
 {
@@ -9,7 +12,7 @@ BUSTER_IMPL CodeGeneration module_generation_initialize()
     };
 }
 
-BUSTER_LOCAL void write_prologue(CodeGeneration* generation)
+BUSTER_GLOBAL_LOCAL void write_prologue(CodeGeneration* generation)
 {
     u8 push_rbp[] = { 0x55 };
     u8 mov_rbp_rsp[] = { 0x48, 0x89, 0xe5 };
@@ -18,7 +21,7 @@ BUSTER_LOCAL void write_prologue(CodeGeneration* generation)
     memcpy(bytes + sizeof(push_rbp), mov_rbp_rsp, sizeof(mov_rbp_rsp));
 }
 
-BUSTER_LOCAL void write_epilogue(CodeGeneration* generation)
+BUSTER_GLOBAL_LOCAL void write_epilogue(CodeGeneration* generation)
 {
     u8 pop_rbp[] = { 0x5d };
     u8 ret[] = { 0xc3 };
@@ -46,7 +49,7 @@ ENUM_T(Register_x86_64, u8,
     REGISTER_15 = 15,
 );
 
-BUSTER_LOCAL Register_x86_64 system_v_return_registers[] = {
+BUSTER_GLOBAL_LOCAL Register_x86_64 system_v_return_registers[] = {
     REGISTER_A,
     REGISTER_D,
 };

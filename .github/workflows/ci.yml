@@ -7,7 +7,6 @@ on:
       - "**"
     branches:
       - main
-
 jobs:
   ci:
     strategy:
@@ -26,16 +25,11 @@ jobs:
           if [[ "${{matrix.BUSTER_OS_TAG}}" == "self-hosted" ]]; then
             BUSTER_SELF_HOSTED=1
           fi
-
-          for unity_build in 0 1; do
-            for optimize in 0 1; do
-              for fuzz in 0 1; do
-                echo "Optimize=$optimize. Fuzz=$fuzz. Unity build: $unity_build"
-                rm -rf build
-                ./build.sh test --ci=1 --self-hosted=$BUSTER_SELF_HOSTED --optimize="$optimize" --fuzz="$fuzz" --unity-build="$unity_build"
-              done
-            done
-          done
+          GIT_MAIN_BRANCH=0
+          if [ "$(git branch --show-current)" = "main" ]; then
+            GIT_MAIN_BRANCH=1
+          fi
+          ./build.sh test_all --ci=1 --self-hosted=$BUSTER_SELF_HOSTED --main-branch=$GIT_MAIN_BRANCH
       - name: Build and test (Windows)
         if: matrix.BUSTER_OS_TAG == 'windows-2025' || matrix.BUSTER_OS_TAG == 'windows-11-arm'
         shell: powershell
@@ -44,41 +38,9 @@ jobs:
           Set-PSDebug -Trace 1
           $ErrorActionPreference = 'Stop'
 
-          $exitCode = 0
-
-          # On windows-11-arm: fuzz=0 only; otherwise fuzz=0,1
-          $fuzzValues = if ('${{matrix.BUSTER_OS_TAG}}' -eq 'windows-11-arm') {
-            @(0)
-          } else {
-            @(0, 1)
+          $GIT_MAIN_BRANCH = 0
+          if ((git branch --show-current) -eq 'main') {
+            $GIT_MAIN_BRANCH = 1
           }
 
-          foreach ($unity_build in 0, 1)
-          {
-            foreach ($optimize in 0, 1)
-            {
-              foreach ($fuzz in $fuzzValues)
-              {
-                Write-Host "Optimize=$optimize. Fuzz=$fuzz. Unity build: $unity_build"
-
-                if (Test-Path -LiteralPath 'build')
-                {
-                  Remove-Item -LiteralPath 'build' -Recurse -Force -ErrorAction SilentlyContinue
-                }
-
-                .\build.ps1 test "--ci=1" "--optimize=$optimize" "--fuzz=$fuzz" "--unity-build=$unity_build"
-
-                $rc = $LASTEXITCODE
-                if ($rc -ne 0)
-                {
-                  Write-Host "build.ps1 failed: $rc"
-                  $exitCode = $rc
-                  break
-                }
-              }
-
-              if ($exitCode -ne 0) { break }
-            }
-          }
-
-          exit $exitCode
+          .\build.ps1 test_all "--ci=1" "--main-branch=$GIT_MAIN_BRANCH"

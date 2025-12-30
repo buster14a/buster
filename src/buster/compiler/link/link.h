@@ -1,12 +1,14 @@
 #pragma once
 
-#include <buster/lib.h>
+#include <buster/base.h>
+#include <buster/string_os.h>
 
 STRUCT(LinkArguments)
 {
-    OsString* objects;
+    StringOs* objects;
     u64 object_count;
     String8* section_contents;
     String8* section_names;
     u16 section_count;
+    u8 reserved[6];
 };
