@@ -2,129 +2,98 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# -----------------------------
-# Load .env (classical KEY=VALUE)
-# Supports:
-#  - blank lines
-#  - # comments (whole-line)
-#  - optional leading "export "
-#  - quoted values "..." or '...'
-#  - values may contain '='
-# -----------------------------
-function Import-DotEnv([string]$Path) {
-  if (-not (Test-Path -LiteralPath $Path)) {
-    throw "error: $Path not found"
-  }
+# Don't put left braces into a new line, otherwise Powershell will do weird stuff
+if (!(Test-Path variable:BUSTER_LLVM_VERSION_MAJOR)) {
+    Get-Content -LiteralPath "build.env" | ForEach-Object {
+        $line = $_.Trim()
+            if ($line.Length -eq 0) { return }
+        if ($line.StartsWith('#')) { return }
 
-  Get-Content -LiteralPath $Path | ForEach-Object {
-    $line = $_.Trim()
-    if ($line.Length -eq 0) { return }
-    if ($line.StartsWith('#')) { return }
+        if ($line.StartsWith('export ')) {
+            $line = $line.Substring(7).Trim()
+        }
 
-    if ($line.StartsWith('export ')) {
-      $line = $line.Substring(7).Trim()
+# split on first '='
+        $eq = $line.IndexOf('=')
+        if ($eq -lt 1) { return }
+
+        $key = $line.Substring(0, $eq).Trim()
+        $val = $line.Substring($eq + 1).Trim()
+
+# strip surrounding quotes
+        if (($val.Length -ge 2) -and (($val.StartsWith('"') -and $val.EndsWith('"')) -or ($val.StartsWith("'") -and $val.EndsWith("'")))) {
+            $val = $val.Substring(1, $val.Length - 2)
+        }
+
+        Set-Variable -Name $key -Value $val -Scope Script
     }
-
-    # split on first '='
-    $eq = $line.IndexOf('=')
-    if ($eq -lt 1) { return }
-
-    $key = $line.Substring(0, $eq).Trim()
-    $val = $line.Substring($eq + 1).Trim()
-
-    # strip surrounding quotes
-    if (($val.Length -ge 2) -and (
-        ($val.StartsWith('"') -and $val.EndsWith('"')) -or
-        ($val.StartsWith("'") -and $val.EndsWith("'"))
-      )) {
-      $val = $val.Substring(1, $val.Length - 2)
-    }
-
-    [System.Environment]::SetEnvironmentVariable($key, $val, 'Process')
-  }
 }
 
-Import-DotEnv "build.env"
-
-# -----------------------------
-# Defaults (match Bash)
-# -----------------------------
 $BUSTER_CI                = 0
 $BUSTER_DOWNLOAD_TOOLCHAIN= 0
 $BUSTER_SELF_HOSTED       = 0
+$BUSTER_FUZZ_DURATION_SECONDS = 0
 
-# -----------------------------
-# Args: first arg is command, rest are --key=value
-# -----------------------------
-if ($args.Count -ge 1)
-{
+if ($args.Count -ge 1) {
     Set-PSDebug -Trace 1
 
-    if ($args.Count -ge 2)
-    {
-        foreach ($arg in $args[1..($args.Count-1)])
-        {
-            if ($args.Count -lt 2)
-            {
+    if ($args.Count -ge 2) {
+        foreach ($arg in $args[1..($args.Count-1)]) {
+            if ($args.Count -lt 2) {
                 break
             }
 
-            switch -Regex ($arg)
-            {
+            switch -Regex ($arg) {
                 '^--ci=(.+)$'                 { $BUSTER_CI                 = [int]$Matches[1]; break }
                 '^--download_toolchain=(.+)$' { $BUSTER_DOWNLOAD_TOOLCHAIN = [int]$Matches[1]; break }
                 '^--self-hosted=(.+)$'        { $BUSTER_SELF_HOSTED        = [int]$Matches[1]; break }
+                '^--fuzz-duration=(.+)$'        { $BUSTER_FUZZ_DURATION_SECONDS        = [int]$Matches[1]; break }
                 default { break }
             }
         }
     }
 }
 
+if ($BUSTER_FUZZ_DURATION_SECONDS -eq '0') {
+    if ($BUSTER_CI -eq '1') {
+        if ($BUSTER_SELF_HOSTED -eq '1') {
+            $BUSTER_FUZZ_DURATION_SECONDS = $BUSTER_FAST_FUZZ_DURATION_SECONDS
+        } else {
+            $branch = git branch --show-current
 
-# -----------------------------
-# Detect arch/os (Windows)
-# -----------------------------
+            if ($branch -eq 'main') {
+                $BUSTER_FUZZ_DURATION_SECONDS = $BUSTER_THOROUGH_FUZZ_DURATION_SECONDS
+            } else {
+                $BUSTER_FUZZ_DURATION_SECONDS = $BUSTER_FAST_FUZZ_DURATION_SECONDS
+            }
+        }
+    } else {
+        $BUSTER_FUZZ_DURATION_SECONDS = $BUSTER_FAST_FUZZ_DURATION_SECONDS
+    }
+}
+
+
 $BUSTER_OS = 'windows'
 
-# Prefer PROCESSOR_ARCHITEW6432 when present (32-bit pwsh on 64-bit OS)
 $nativeArch = $env:PROCESSOR_ARCHITEW6432
-if (-not $nativeArch)
-{
+if (-not $nativeArch) {
     $nativeArch = $env:PROCESSOR_ARCHITECTURE
 }
 
-switch ($nativeArch.ToUpperInvariant())
-{
+switch ($nativeArch.ToUpperInvariant()) {
     'AMD64' { $BUSTER_ARCH = 'x86_64' }
     'ARM64' { $BUSTER_ARCH = 'aarch64' }
     default { throw "error: unknown CPU architecture: $nativeArch" }
 }
 
-# -----------------------------
-# CI logging
-# -----------------------------
-if ($BUSTER_CI -eq 1)
-{
-  try
-  {
+if ($BUSTER_CI -eq 1) {
+  try {
     $cpuName = (Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name)
     Write-Host "CPU: $cpuName"
   } catch {}
 }
 
-# -----------------------------
-# Toolchain naming/paths
-# -----------------------------
-$maj = $env:BUSTER_LLVM_VERSION_MAJOR
-$min = $env:BUSTER_LLVM_VERSION_MINOR
-$rev = $env:BUSTER_LLVM_VERSION_REVISION
-
-if (-not $maj -or -not $min -or -not $rev)
-{
-  throw "error: BUSTER_LLVM_VERSION_MAJOR/MINOR/REVISION must be set in build.env"
-}
-
-$BUSTER_LLVM_VERSION_STRING = "$maj.$min.$rev"
+$BUSTER_LLVM_VERSION_STRING = "$BUSTER_LLVM_VERSION_MAJOR.$BUSTER_LLVM_VERSION_MINOR.$BUSTER_LLVM_VERSION_REVISION"
 $BUSTER_TOOLCHAIN_BASENAME  = "llvm_${BUSTER_LLVM_VERSION_STRING}_${BUSTER_ARCH}-${BUSTER_OS}-Release"
 $BUSTER_TOOLCHAIN_INSTALL_PATH = Join-Path $env:USERPROFILE 'dev\toolchain\install'
 $BUSTER_TOOLCHAIN_ABSOLUTE_PATH = Join-Path $BUSTER_TOOLCHAIN_INSTALL_PATH $BUSTER_TOOLCHAIN_BASENAME
@@ -144,7 +113,6 @@ if (($BUSTER_CI -eq 1) -and ($BUSTER_SELF_HOSTED -eq 0)) {
     }
 }
 
-# Download + extract toolchain
 if ($BUSTER_DOWNLOAD_TOOLCHAIN -eq 1) {
   $toolchain7z  = "$BUSTER_TOOLCHAIN_BASENAME.7z"
   $toolchainUrl = "https://github.com/buster14a/toolchain/releases/download/v$BUSTER_LLVM_VERSION_STRING/$toolchain7z"
@@ -165,9 +133,6 @@ if (-not (Test-Path -LiteralPath $BUSTER_CLANG_ABSOLUTE_PATH)) {
   throw "error: clang not found at: $BUSTER_CLANG_ABSOLUTE_PATH"
 }
 
-# -----------------------------
-# Build builder
-# -----------------------------
 $buildDir = 'build'
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
@@ -175,7 +140,6 @@ $builderExe = Join-Path $buildDir 'builder.exe'
 $builderExe = $builderExe -replace '\\', '/'
 
 $clangArgs = @(
-  '-v',
   'build.c',
   '-o', $builderExe,
   '-fuse-ld=lld',
@@ -202,8 +166,5 @@ $clangArgs = @(
 & $BUSTER_CLANG_ABSOLUTE_PATH @clangArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# -----------------------------
-# Run builder
-# -----------------------------
-& $builderExe @args
+& $builderExe @args "--fuzz-duration=$BUSTER_FUZZ_DURATION_SECONDS"
 exit $LASTEXITCODE

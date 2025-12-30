@@ -8,6 +8,10 @@ on:
     branches:
       - main
 
+env:
+  BUSTER_FAST_FUZZ_DURATION_SECONDS: 10
+  BUSTER_THOROUGH_FUZZ_DURATION_SECONDS: 180
+
 jobs:
   ci:
     strategy:
@@ -45,6 +49,32 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           $exitCode = 0
+          Get-Content -LiteralPath "build.env" | ForEach-Object
+          {
+              $line = $_.Trim()
+              if ($line.Length -eq 0) { return 1 }
+              if ($line.StartsWith('#')) { return 1 }
+          
+              if ($line.StartsWith('export '))
+              {
+                  $line = $line.Substring(7).Trim()
+              }
+          
+              # split on first '='
+              $eq = $line.IndexOf('=')
+              if ($eq -lt 1) { return 1 }
+          
+              $key = $line.Substring(0, $eq).Trim()
+              $val = $line.Substring($eq + 1).Trim()
+          
+              # strip surrounding quotes
+              if (($val.Length -ge 2) -and (($val.StartsWith('"') -and $val.EndsWith('"')) -or ($val.StartsWith("'") -and $val.EndsWith("'"))))
+              {
+                  $val = $val.Substring(1, $val.Length - 2)
+              }
+          
+              ${key} = $val
+          }
 
           # On windows-11-arm: fuzz=0 only; otherwise fuzz=0,1
           $fuzzValues = if ('${{matrix.BUSTER_OS_TAG}}' -eq 'windows-11-arm') {

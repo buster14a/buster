@@ -13,16 +13,14 @@
 #endif
 
 BUSTER_IMPL Target target_native = {
-    .cpu = {
 #if defined(__x86_64__)
-        .arch = CPU_ARCH_X86_64,
+    .cpu_arch = CPU_ARCH_X86_64,
 #elif defined(__aarch64__)
-        .arch = CPU_ARCH_AARCH64,
+    .cpu_arch = CPU_ARCH_AARCH64,
 #else
 #pragma error
 #endif
-        .model = CPU_MODEL_NATIVE,
-    },
+    .cpu_model = CPU_MODEL_NATIVE,
 #if defined(__linux__)
     .os = OPERATING_SYSTEM_LINUX,
 #elif defined(_WIN32)
@@ -41,7 +39,7 @@ BUSTER_IMPL Target target_native = {
 
 BUSTER_IMPL bool cpu_is_native(CpuModel model)
 {
-    return (model == CPU_MODEL_NATIVE) | (model == target_native.cpu.model);
+    return (model == CPU_MODEL_NATIVE) | (model == target_native.cpu_model);
 }
 
 BUSTER_IMPL CpuModel cpu_detect_model()
@@ -54,15 +52,15 @@ BUSTER_IMPL CpuModel cpu_detect_model()
 #else
 #pragma error // TODO: implement CPU detection code for this architecture
 #endif
-    target_native.cpu.model = cpu_model;
+    target_native.cpu_model = cpu_model;
     return cpu_model;
 }
 
 BUSTER_IMPL TargetStringSplit target_to_split_os_string(Target target)
 {
-    OsString arch_string = cpu_arch_to_os_string(target.cpu.arch);
+    OsString arch_string = cpu_arch_to_os_string(target.cpu_arch);
     OsString os_string = operating_system_to_os_string(target.os);
-    OsString model_string = cpu_model_to_os_string(target.cpu.model);
+    OsString model_string = cpu_model_to_os_string(target.cpu_model);
 
     return (TargetStringSplit) { arch_string, os_string, model_string };
 }

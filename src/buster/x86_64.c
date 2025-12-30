@@ -13,7 +13,7 @@ BUSTER_LOCAL CpuId cpuid(u32 leaf, u32 subleaf)
 BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
 {
     let vendor_cpuid = cpuid(0, 0);
-    u8 vendor_buffer[3 * sizeof(vendor_cpuid.eax)];
+    char8 vendor_buffer[3 * sizeof(vendor_cpuid.eax)];
     let vendor_string = BUSTER_ARRAY_TO_SLICE(String8, vendor_buffer);
     *(u32*)(vendor_buffer + 0 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.ebx;
     *(u32*)(vendor_buffer + 1 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.edx;
@@ -30,7 +30,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
     let extended_family = (u8)((family_model_cpuid.eax >> 20) & 0xff);
 
     let family = original_family == 0xf ? original_family + extended_family : original_family;
-    model = ((original_family == 0x6) | (original_family == 0xf)) ? (extended_model << 4) | model : model;
+    model = ((original_family == 0x6) | (original_family == 0xf)) ? (u8)((extended_model << 4) | model) : model;
 
     // TODO fill these in
     bool has_sse = false;
