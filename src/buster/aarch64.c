@@ -3,6 +3,7 @@
 
 #include <buster/aarch64.h>
 #include <buster/system_headers.h>
+#include <buster/os.h>
 
 ENUM_T(A64Implementer, u8,
     A64_IMPLEMENTER_ARM = 0x41,
@@ -52,20 +53,20 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
     CpuModel result = CPU_MODEL_ERROR;
 
 #if defined(__linux__)
-    constexpr u64 length = sizeof(u64) * 2 + 2;
-    u8 buffer[length + 4096];
-    let fd = os_file_open(OsS("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"), (OpenFlags){ .read = 1 }, (OpenPermissions){});
+#define BUSTER_AARCH64_BUFFER_LENGTH (sizeof(u64) * 2 + 2)
+    char8 buffer[BUSTER_AARCH64_BUFFER_LENGTH + 4096];
+    let fd = os_file_open(SOs("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"), (OpenFlags){ .read = 1 }, (OpenPermissions){});
     let midr_el1_string = BUSTER_ARRAY_TO_SLICE(String8, buffer);
-    midr_el1_string.length = length;
-    let file_size = os_file_read(fd, midr_el1_string, length);
+    midr_el1_string.length = BUSTER_AARCH64_BUFFER_LENGTH;
+    let file_size = os_file_read(fd, BUSTER_SLICE_TO_BYTE_SLICE(midr_el1_string), BUSTER_AARCH64_BUFFER_LENGTH);
     buffer[file_size] = 0;
     os_file_close(fd);
 
-    if (file_size == length)
+    if (file_size == BUSTER_AARCH64_BUFFER_LENGTH)
     {
         if (buffer[0] == '0' && buffer[1] == 'x')
         {
-            let value = parse_hexadecimal_scalar((char*)buffer + 2).value;
+            let value = string8_parse_u64_hexadecimal((char*)buffer + 2).value;
 
             if (value <= INT32_MAX)
             {
@@ -189,12 +190,12 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
     }
     else
     {
-        print(S8("Error reading CPU model\n"));
+        string8_print(S8("Error reading CPU model\n"));
     }
 #elif defined(__APPLE__)
       u32 family;
-      size_t length = sizeof(family);
-      sysctlbyname("hw.cpufamily", &family, &length, 0, 0);
+      size_t family_length = sizeof(family);
+      sysctlbyname("hw.cpufamily", &family, &family_length, 0, 0);
 
       switch (family)
       {
@@ -224,26 +225,26 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
 
       if (family == 0 && result == CPU_MODEL_A64_GENERIC)
       {
-          char buffer[4096];
-          size_t length = BUSTER_ARRAY_LENGTH(buffer) - 1;
-          if (sysctlbyname("machdep.cpu.brand_string", buffer, &length, 0, 0) == 0)
+          char8 buffer[4096];
+          size_t buffer_length = BUSTER_ARRAY_LENGTH(buffer) - 1;
+          if (sysctlbyname("machdep.cpu.brand_string", buffer, &buffer_length, 0, 0) == 0)
           {
-              if (sysctlbyname("machdep.cpu.brand_string", 0, &length, 0, 0) == 0)
+              if (sysctlbyname("machdep.cpu.brand_string", 0, &buffer_length, 0, 0) == 0)
               {
                   let brand_string = S8(buffer);
-                  if (string8_starts_with(brand_string, S8("Apple M1")))
+                  if (string8_starts_with_sequence(brand_string, S8("Apple M1")))
                   {
                       result = CPU_MODEL_A64_APPLE_M1;
                   }
-                  else if (string8_starts_with(brand_string, S8("Apple M2")))
+                  else if (string8_starts_with_sequence(brand_string, S8("Apple M2")))
                   {
                       result = CPU_MODEL_A64_APPLE_M2;
                   }
-                  else if (string8_starts_with(brand_string, S8("Apple M3")))
+                  else if (string8_starts_with_sequence(brand_string, S8("Apple M3")))
                   {
                       result = CPU_MODEL_A64_APPLE_M3;
                   }
-                  else if (string8_starts_with(brand_string, S8("Apple M4")))
+                  else if (string8_starts_with_sequence(brand_string, S8("Apple M4")))
                   {
                       result = CPU_MODEL_A64_APPLE_M4;
                   }

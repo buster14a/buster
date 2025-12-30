@@ -1,7 +1,8 @@
 #pragma once
 #include <buster/x86_64.h>
+#include <buster/string8.h>
 
-BUSTER_LOCAL CpuId cpuid(u32 leaf, u32 subleaf)
+BUSTER_GLOBAL_LOCAL CpuId cpuid(u32 leaf, u32 subleaf)
 {
     CpuId result = {};
     asm volatile ("cpuid"
@@ -13,7 +14,7 @@ BUSTER_LOCAL CpuId cpuid(u32 leaf, u32 subleaf)
 BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
 {
     let vendor_cpuid = cpuid(0, 0);
-    u8 vendor_buffer[3 * sizeof(vendor_cpuid.eax)];
+    char8 vendor_buffer[3 * sizeof(vendor_cpuid.eax)];
     let vendor_string = BUSTER_ARRAY_TO_SLICE(String8, vendor_buffer);
     *(u32*)(vendor_buffer + 0 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.ebx;
     *(u32*)(vendor_buffer + 1 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.edx;
@@ -30,7 +31,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
     let extended_family = (u8)((family_model_cpuid.eax >> 20) & 0xff);
 
     let family = original_family == 0xf ? original_family + extended_family : original_family;
-    model = ((original_family == 0x6) | (original_family == 0xf)) ? (extended_model << 4) | model : model;
+    model = ((original_family == 0x6) | (original_family == 0xf)) ? (u8)((extended_model << 4) | model) : model;
 
     // TODO fill these in
     bool has_sse = false;
@@ -38,7 +39,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
     bool has_avx512bf16 = false;
     bool has_avx512vnni = false;
 
-    if (string8_equal(vendor_string, S8("AuthenticAMD")))
+    if (string_equal(vendor_string, S8("AuthenticAMD")))
     {
         switch (family)
         {
@@ -116,7 +117,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
             break; default: {};
         }
     }
-    else if (string8_equal(vendor_string, S8("GenuineIntel")))
+    else if (string_equal(vendor_string, S8("GenuineIntel")))
     {
         switch (family)
         {
@@ -190,7 +191,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
     }
     else
     {
-        print(S8("Vendor string: {S8}\n"), vendor_string);
+        string8_print(S8("Vendor string: {S8}\n"), vendor_string);
     }
 
     return result;

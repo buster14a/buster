@@ -1,6 +1,6 @@
 #pragma once
 
-#include <buster/lib.h>
+#include <buster/base.h>
 
 #if defined(__linux__)
 #include <unistd.h>
@@ -43,32 +43,18 @@
 #include <limits.h>
 #include <setjmp.h>
 
-BUSTER_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
+BUSTER_GLOBAL_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 #endif
-
-STRUCT(IoRing)
-{
-#ifdef __linux__
-#if BUSTER_USE_IO_RING
-    struct io_uring linux_impl;
-#endif
-#endif
-    u32 submitted_entry_count;
-    u32 completed_entry_count;
-};
 
 struct Thread
 {
     Arena* arena;
     ThreadEntryPoint* entry_point;
-    IoRing ring;
     ThreadHandle* handle;
 };
 
-BUSTER_LOCAL constexpr u64 max_path_length =
 #ifdef _WIN32
-MAX_PATH
+#define BUSTER_MAX_PATH_LENGTH (u64)MAX_PATH
 #else
-PATH_MAX
+#define BUSTER_MAX_PATH_LENGTH (u64)(PATH_MAX)
 #endif
-;

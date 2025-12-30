@@ -1,7 +1,9 @@
 #pragma once
 #include <buster/compiler/ir/ir.h>
+#include <buster/arena.h>
+#include <buster/string8.h>
 
-BUSTER_LOCAL IrModule* ir_module_create(Arena* arena, Target* target, String8 name)
+BUSTER_GLOBAL_LOCAL IrModule* ir_module_create(Arena* arena, Target* target, String8 name)
 {
     let module = arena_allocate(arena, IrModule, 1);
     *module = (IrModule){
@@ -14,7 +16,7 @@ BUSTER_LOCAL IrModule* ir_module_create(Arena* arena, Target* target, String8 na
     return module;
 }
 
-BUSTER_LOCAL IrFunctionType* ir_function_type_get(IrModule* module, IrFunctionType create)
+BUSTER_GLOBAL_LOCAL IrFunctionType* ir_function_type_get(IrModule* module, IrFunctionType create)
 {
     if (!create.target)
     {
@@ -26,14 +28,14 @@ BUSTER_LOCAL IrFunctionType* ir_function_type_get(IrModule* module, IrFunctionTy
     return function_type;
 }
 
-BUSTER_LOCAL IrType* ir_create_type(IrModule* module, IrType type)
+BUSTER_GLOBAL_LOCAL IrType* ir_create_type(IrModule* module, IrType type)
 {
     let result = arena_allocate(module->arena, IrType, 1);
     *result = type;
     return result;
 }
 
-BUSTER_LOCAL void ir_block_append_instruction(IrBasicBlock* basic_block, IrInstruction* instruction)
+BUSTER_GLOBAL_LOCAL void ir_block_append_instruction(IrBasicBlock* basic_block, IrInstruction* instruction)
 {
     if (!basic_block->first)
     {
@@ -48,12 +50,12 @@ BUSTER_LOCAL void ir_block_append_instruction(IrBasicBlock* basic_block, IrInstr
     }
 }
 
-BUSTER_LOCAL void ir_function_append_instruction(IrFunction* function, IrInstruction* instruction)
+BUSTER_GLOBAL_LOCAL void ir_function_append_instruction(IrFunction* function, IrInstruction* instruction)
 {
     ir_block_append_instruction(function->current_basic_block, instruction);
 }
 
-BUSTER_LOCAL IrInstruction* ir_create_return(IrModule* module, IrFunction* function, IrValue* value)
+BUSTER_GLOBAL_LOCAL IrInstruction* ir_create_return(IrModule* module, IrFunction* function, IrValue* value)
 {
     let result = arena_allocate(module->arena, IrInstruction, 1);
     *result = (IrInstruction) {
@@ -64,7 +66,7 @@ BUSTER_LOCAL IrInstruction* ir_create_return(IrModule* module, IrFunction* funct
     return result;
 }
 
-BUSTER_LOCAL IrValue* ir_constant_integer(IrModule* module, IrType* type, u64 value)
+BUSTER_GLOBAL_LOCAL IrValue* ir_constant_integer(IrModule* module, IrType* type, u64 value)
 {
     let result = arena_allocate(module->arena, IrValue, 1);
     *result = (IrValue) {
@@ -75,7 +77,7 @@ BUSTER_LOCAL IrValue* ir_constant_integer(IrModule* module, IrType* type, u64 va
     return result;
 }
 
-BUSTER_LOCAL IrFunction* ir_function_create(IrModule* module, IrGlobalSymbol symbol)
+BUSTER_GLOBAL_LOCAL IrFunction* ir_function_create(IrModule* module, IrGlobalSymbol symbol)
 {
     IrFunction* function = 0;
     symbol.id = IR_GLOBAL_SYMBOL_FUNCTION;
@@ -94,7 +96,7 @@ BUSTER_LOCAL IrFunction* ir_function_create(IrModule* module, IrGlobalSymbol sym
     return function;
 }
 
-BUSTER_LOCAL IrGlobalVariable* ir_global_variable_create(IrModule* module, IrGlobalSymbol symbol)
+BUSTER_GLOBAL_LOCAL IrGlobalVariable* ir_global_variable_create(IrModule* module, IrGlobalSymbol symbol)
 {
     IrGlobalVariable* result = 0;
     symbol.id = IR_GLOBAL_SYMBOL_VARIABLE;
@@ -116,7 +118,7 @@ BUSTER_DECL IrFunctions ir_module_get_functions(IrModule* module)
     let start = (u8*)(module->function_arena + 1);
     return (IrFunctions) {
         .pointer = (IrFunction*)start,
-        .length = ((arena_pointer + module->function_arena->position) - start) / sizeof(IrFunction),
+        .length = (u64)((arena_pointer + module->function_arena->position) - start) / sizeof(IrFunction),
     };
 }
 

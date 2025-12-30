@@ -1,10 +1,39 @@
 #pragma once
-#include <buster/lib.h>
+#include <buster/base.h>
 #include <buster/system_headers.h>
 #include <buster/compiler/ir/ir.h>
 #include <buster/compiler/backend/code_generation.h>
+#include <buster/file.h>
+#include <buster/path.h>
+#include <buster/string8.h>
 
 #include <buster/entry_point.h>
+
+#if BUSTER_UNITY_BUILD
+#include <buster/entry_point.c>
+#include <buster/target.c>
+#if defined(__x86_64__)
+#include <buster/x86_64.c>
+#endif
+#if defined(__aarch64__)
+#include <buster/aarch64.c>
+#endif
+#include <buster/assertion.c>
+#include <buster/memory.c>
+#include <buster/string8.c>
+#include <buster/os.c>
+#include <buster/string.c>
+#include <buster/arena.c>
+#include <buster/string_os.c>
+#if _WIN32
+#include <buster/string16.c>
+#endif
+#include <buster/integer.c>
+#include <buster/file.c>
+#include <buster/compiler/ir/ir.c>
+#include <buster/compiler/backend/code_generation.c>
+#include <buster/path.c>
+#endif
 
 ENUM(CompilerCommand, 
     COMPILER_COMMAND_TEST,
@@ -13,49 +42,50 @@ ENUM(CompilerCommand,
 STRUCT(CCProgramState)
 {
     ProgramState general_program_state;
-    OsString cwd;
+    StringOs cwd;
     CompilerCommand command;
+    u8 reserved[4];
 };
 
-BUSTER_LOCAL CCProgramState cc_program_state = {};
+BUSTER_GLOBAL_LOCAL CCProgramState cc_program_state = {};
 
 BUSTER_IMPL ProgramState* program_state = &cc_program_state.general_program_state;
 
 STRUCT(CompilerOptions)
 {
-    OsString cwd;
+    StringOs cwd;
 };
 
 STRUCT(File)
 {
-    OsString absolute_path;
+    StringOs absolute_path;
     String8 original_content;
     String8 preprocessed_content;
 };
 
 STRUCT(CompilerFileReadOptions)
 {
-    OsString cwd;
-    OsString relative_path;
+    StringOs cwd;
+    StringOs relative_path;
 };
 
-BUSTER_LOCAL File file_from_path(Arena* arena, CompilerFileReadOptions options)
+BUSTER_GLOBAL_LOCAL File file_from_path(Arena* arena, CompilerFileReadOptions options)
 {
-    OsString parts[] = {
+    StringOs parts[] = {
         options.cwd,
-        OsS("/"),
+        SOs("/"),
         options.relative_path,
     };
-    let absolute_path = arena_join_os_string(arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, parts), true);
+    let absolute_path = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, parts), true);
     let file_content = file_read(arena, options.relative_path, (FileReadOptions) {});
 
     return (File) {
         .absolute_path = absolute_path,
-        .original_content = file_content,
+        .original_content = BYTE_SLICE_TO_STRING(8, file_content),
     };
 }
 
-BUSTER_LOCAL bool preprocess_file(File* file)
+BUSTER_GLOBAL_LOCAL bool preprocess_file(File* file)
 {
     // TODO
     file->preprocessed_content = file->original_content;
@@ -67,19 +97,19 @@ STRUCT(ParsingResult)
     bool success;
 };
 
-BUSTER_LOCAL bool parsing_succeeded(ParsingResult result)
+BUSTER_GLOBAL_LOCAL bool parsing_succeeded(ParsingResult result)
 {
     BUSTER_UNUSED(result);
     return true;
 }
 
-BUSTER_LOCAL ParsingResult parse_chunk(File file)
+BUSTER_GLOBAL_LOCAL ParsingResult parse_chunk(File file)
 {
     BUSTER_UNUSED(file);
     return (ParsingResult){};
 }
 
-BUSTER_LOCAL bool compile_file(Arena* arena, File* file, CompilerOptions options)
+BUSTER_GLOBAL_LOCAL bool compile_file(Arena* arena, File* file, CompilerOptions options)
 {
     BUSTER_UNUSED(arena);
     BUSTER_UNUSED(file);
@@ -96,7 +126,7 @@ BUSTER_LOCAL bool compile_file(Arena* arena, File* file, CompilerOptions options
     return true;
 }
 
-BUSTER_LOCAL bool compile(Arena* arena, OsString relative_path, CompilerOptions options)
+BUSTER_GLOBAL_LOCAL bool compile(Arena* arena, StringOs relative_path, CompilerOptions options)
 {
     if (!options.cwd.pointer)
     {
@@ -111,7 +141,7 @@ BUSTER_LOCAL bool compile(Arena* arena, OsString relative_path, CompilerOptions 
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_LOCAL bool compiler_tests(TestArguments* arguments)
+BUSTER_GLOBAL_LOCAL bool compiler_tests(TestArguments* arguments)
 {
     let module = ir_create_mock_module(arguments->arena);
     let functions = ir_module_get_functions(module);
@@ -141,14 +171,14 @@ BUSTER_IMPL ProcessResult process_arguments()
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
     let arena = thread->arena;
-    cc_program_state.cwd = path_absolute(arena, OsS("."));
+    cc_program_state.cwd = path_absolute_arena(arena, SOs("."));
     BUSTER_UNUSED(thread);
-    print(S8("Hello world from the compiler\n"));
-    let basic = OsS("tests/cc/basic.c");
+    string8_print(S8("Hello world from the compiler\n"));
+    let basic = SOs("tests/cc/basic.c");
     let result = compile(arena, basic, (CompilerOptions) {});
     if (!result)
     {
-        print(S8("Compilation failed!\n"));
+        string8_print(S8("Compilation failed!\n"));
     }
 
     switch (cc_program_state.command)
