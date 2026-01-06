@@ -290,9 +290,9 @@ typedef SliceOfString8Slice SliceOfOsStringSlice;
 #define compile_time_string_length(strlit) ((sizeof(strlit) / sizeof(strlit[0])) - 1)
 #define string8_length(strlit) ((strlit) ? __builtin_strlen(strlit) : 0)
 
-#define S8(strlit) ((struct String8) { .pointer = (char8*)(strlit), .length = compile_time_string_length(strlit) })
-#define S16(strlit) ((struct String16) { .pointer = (char16*)(u ## strlit), .length = compile_time_string_length(u ## strlit) })
-#define S32(strlit) ((struct String32) { .pointer = (char32*)(U ## strlit), .length = compile_time_string_length(U ## strlit) })
+#define S8(strlit) ((String8) { .pointer = (char8*)(strlit), .length = compile_time_string_length(strlit) })
+#define S16(strlit) ((String16) { .pointer = (char16*)(u ## strlit), .length = compile_time_string_length(u ## strlit) })
+#define S32(strlit) ((String32) { .pointer = (char32*)(U ## strlit), .length = compile_time_string_length(U ## strlit) })
 
 #if defined(_WIN32)
 #define OsS(strlit) S16(strlit)
@@ -462,40 +462,6 @@ u128
 #endif
 TimeDataType;
 #endif
-
-STRUCT(IntegerParsing)
-{
-    u64 value;
-    u64 i;
-};
-
-STRUCT(ArgumentBuilder)
-{
-    OsStringList argv;
-    Arena* arena;
-    u64 arena_offset;
-};
-
-STRUCT(ThreadInitialization)
-{
-};
-
-ENUM(ProcessResult,
-    PROCESS_RESULT_SUCCESS,
-    PROCESS_RESULT_FAILED,
-    PROCESS_RESULT_FAILED_TRY_AGAIN,
-    PROCESS_RESULT_CRASH,
-    PROCESS_RESULT_NOT_EXISTENT,
-    PROCESS_RESULT_RUNNING,
-    PROCESS_RESULT_UNKNOWN,
-);
-
-typedef struct Thread Thread;
-BUSTER_DECL THREAD_LOCAL_DECL Thread* thread;
-
-typedef ProcessResult ThreadEntryPoint(void);
-BUSTER_DECL ProcessResult thread_entry_point();
-BUSTER_DECL Arena* thread_arena();
 
 typedef ProcessResult ProcessArguments(Arena* arena, void* context, u64 argc, char** argv, char** envp);
 
@@ -697,15 +663,6 @@ BUSTER_DECL u64 align_forward(u64 n, u64 a);
 #define character_is_identifier_start(ch) (character_is_alpha_upper(ch) | character_is_alpha_lower(ch) | ((ch) == '_'))
 #define character_is_identifier(ch) (character_is_identifier_start(ch) | character_is_decimal(ch))
 
-BUSTER_DECL OsString get_last_error_message(Arena* arena);
-BUSTER_DECL ProcessHandle* os_process_spawn(OsChar* name, OsStringList argv, OsStringList envp);
-BUSTER_DECL ProcessResult os_process_wait_sync(ProcessHandle* handle, ProcessResources resources);
-BUSTER_DECL ProcessResult buster_argument_process(OsStringList argument_pointer, OsStringList environment_pointer, u64 argument_index, OsString argument);
-BUSTER_DECL OsString os_get_environment_variable(OsString variable);
-
-BUSTER_DECL OsStringList os_string_list_create(Arena* arena, OsStringSlice arguments);
-BUSTER_DECL OsStringListIterator os_string_list_iterator_initialize(OsStringList list);
-BUSTER_DECL OsString os_string_list_iterator_next(OsStringListIterator* iterator);
 
 BUSTER_DECL void print_raw(String8 str);
 BUSTER_DECL void print(String8 str, ...);
