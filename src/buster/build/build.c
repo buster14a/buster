@@ -7,18 +7,47 @@ source build.sh
 
 #define BUSTER_USE_PADDING 0
 
-#include <buster/lib.h>
+#include <buster/base.h>
 #include <buster/target.h>
 #include <buster/entry_point.h>
 // #include <martins/md5.h>
 #include <buster/system_headers.h>
+#include <buster/string_os.h>
+#include <buster/path.h>
+#include <buster/file.h>
+#include <buster/build/compiler_options.h>
+
+#if BUSTER_INCLUDE_TESTS
+#include <buster/test.h>
+#endif
+
+#if BUSTER_UNITY_BUILD
+#include <buster/os.c>
+#include <buster/arena.c>
+#include <buster/assertion.c>
+#include <buster/target.c>
+#include <buster/memory.c>
+#include <buster/string.c>
+#include <buster/string8.c>
+#include <buster/string_os.c>
+#include <buster/integer.c>
+#if defined(__x86_64__)
+#include <buster/x86_64.c>
+#endif
+#if defined(__aarch64__)
+#include <buster/aarch64.c>
+#endif
+#include <buster/entry_point.c>
+#include <buster/path.c>
+#include <buster/file.c>
+#endif
 
 STRUCT(BuildTarget)
 {
     Target* pointer;
-    OsString string;
-    OsString march_string;
-    OsString directory_path;
+    StringOs string;
+    StringOs march_string;
+    StringOs directory_path;
 };
 
 STRUCT(LLVMVersion)
@@ -26,12 +55,12 @@ STRUCT(LLVMVersion)
     u8 major;
     u8 minor;
     u8 revision;
-    OsString string;
+    StringOs string;
 };
 
-BUSTER_LOCAL __attribute__((used)) OsString toolchain_path = {};
-BUSTER_LOCAL OsString clang_path = {};
-BUSTER_LOCAL OsString xc_sdk_path = {};
+BUSTER_LOCAL __attribute__((used)) StringOs toolchain_path = {};
+BUSTER_LOCAL StringOs clang_path = {};
+BUSTER_LOCAL StringOs xc_sdk_path = {};
 
 #define BUSTER_TODO() print(S8("TODO\n")); fail()
 
@@ -76,7 +105,7 @@ STRUCT(Module)
 STRUCT(TargetBuildFile)
 {
     FileStats stats;
-    OsString full_path;
+    StringOs full_path;
     BuildTarget* target;
     u64 has_debug_information:1;
     u64 use_io_ring:1;
@@ -150,16 +179,16 @@ BUSTER_LOCAL Module modules[] = {
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == MODULE_COUNT);
 
-#define LINK_UNIT(_name, ...) (LinkUnitSpecification) { .name = OsS(#_name), .modules = { .pointer = _name ## _modules, .length = build_flag_get(BUILD_FLAG_UNITY_BUILD) ? 1 : BUSTER_ARRAY_LENGTH(_name ## _modules) }, __VA_ARGS__ }
+#define LINK_UNIT(_name, ...) (LinkUnitSpecification) { .name = SOs(#_name), .modules = { .pointer = _name ## _modules, .length = build_flag_get(BUILD_FLAG_UNITY_BUILD) ? 1 : BUSTER_ARRAY_LENGTH(_name ## _modules) }, __VA_ARGS__ }
 
 // TODO: better naming convention
 STRUCT(LinkUnitSpecification)
 {
-    OsString name;
+    StringOs name;
     ModuleSlice modules;
-    OsString artifact_path;
+    StringOs artifact_path;
     BuildTarget* target;
-    OsString* object_paths;
+    StringOs* object_paths;
     u64 use_io_ring:1;
     u64 has_debug_information:1;
     u64 optimize:1;
@@ -285,8 +314,8 @@ STRUCT(Process)
 {
     ProcessResources resources;
     ProcessHandle* handle;
-    OsStringList argv;
-    OsStringList envp;
+    StringOsList argv;
+    StringOsList envp;
     u64 waited:1;
     u64 reserved:63;
 };
@@ -308,10 +337,10 @@ ENUM(ProjectId,
 STRUCT(CompilationUnit)
 {
     BuildTarget* target;
-    OsChar* compiler;
-    OsStringList compilation_arguments;
-    OsString object_path;
-    OsString source_path;
+    StringOs compiler;
+    StringOsList compilation_arguments;
+    StringOs object_path;
+    StringOs source_path;
     Process process;
     u64 optimize:1;
     u64 has_debug_information:1;
@@ -342,15 +371,15 @@ STRUCT(LinkUnit)
 
 BUSTER_LOCAL void append_string8(Arena* arena, String8 s)
 {
-    arena_duplicate_string8(arena, s, false);
+    string8_duplicate_arena(arena, s, false);
 }
 
+#if defined(_WIN32)
 BUSTER_LOCAL void append_string16(Arena* arena, String16 s)
 {
     string16_to_string8(arena, s);
 }
 
-#if defined(_WIN32)
 #define append_os_string append_string16
 #else
 #define append_os_string append_string8
@@ -374,10 +403,6 @@ BUSTER_IMPL ProcessResult process_arguments()
     bool is_command_present = false;
 
     {
-        BUSTER_UNUSED(argv);
-        BUSTER_UNUSED(envp);
-        // TODO: arg processing
-
         let arg_it = os_string_list_iterator_initialize(argv);
         let first_argument = os_string_list_iterator_next(&arg_it);
         BUSTER_UNUSED(first_argument);
@@ -386,17 +411,17 @@ BUSTER_IMPL ProcessResult process_arguments()
 
         if (command.pointer)
         {
-            if (os_string_starts_with(command, OsS("--")))
+            if (os_string_starts_with_sequence(command, SOs("--")))
             {
                 arg_it = os_string_list_iterator_initialize(argv);
                 os_string_list_iterator_next(&arg_it);
             }
             else
             {
-                OsString possible_commands[] = {
-                    [BUILD_COMMAND_BUILD] = OsS("build"),
-                    [BUILD_COMMAND_TEST] = OsS("test"),
-                    [BUILD_COMMAND_DEBUG] = OsS("debug"),
+                StringOs possible_commands[] = {
+                    [BUILD_COMMAND_BUILD] = SOs("build"),
+                    [BUILD_COMMAND_TEST] = SOs("test"),
+                    [BUILD_COMMAND_DEBUG] = SOs("debug"),
                 };
                 static_assert(BUSTER_ARRAY_LENGTH(possible_commands) == BUILD_COMMAND_COUNT);
 
@@ -405,7 +430,7 @@ BUSTER_IMPL ProcessResult process_arguments()
                 u64 i;
                 for (i = 0; i < possible_command_count; i += 1)
                 {
-                    if (os_string_equal(command, possible_commands[i]))
+                    if (string_equal(command, possible_commands[i]))
                     {
                         break;
                     }
@@ -418,7 +443,7 @@ BUSTER_IMPL ProcessResult process_arguments()
                 }
                 else
                 {
-                    print(S8("Command not recognized: {OsS}!\n"), command);
+                    string8_print(S8("Command not recognized: {OsS}!\n"), command);
                     result = PROCESS_RESULT_FAILED;
                 }
 
@@ -426,17 +451,18 @@ BUSTER_IMPL ProcessResult process_arguments()
             }
         }
 
-        OsString argument;
+        StringOs argument;
         while ((argument = os_string_list_iterator_next(&arg_it)).pointer)
         {
-            OsString build_flag_strings[] = {
-                [BUILD_FLAG_OPTIMIZE] = OsS("--optimize="),
-                [BUILD_FLAG_FUZZ] = OsS("--fuzz="),
-                [BUILD_FLAG_CI] = OsS("--ci="),
-                [BUILD_FLAG_HAS_DEBUG_INFORMATION] = OsS("--has-debug-information="),
-                [BUILD_FLAG_UNITY_BUILD] = OsS("--unity-build="),
-                [BUILD_FLAG_JUST_PREPROCESSOR] = OsS("--just-preprocessor="),
-                [BUILD_FLAG_SELF_HOSTED] = OsS("--self-hosted="),
+            string8_print(S8("Argument: {SOs}\n"), argument);
+            StringOs build_flag_strings[] = {
+                [BUILD_FLAG_OPTIMIZE] = SOs("--optimize="),
+                [BUILD_FLAG_FUZZ] = SOs("--fuzz="),
+                [BUILD_FLAG_CI] = SOs("--ci="),
+                [BUILD_FLAG_HAS_DEBUG_INFORMATION] = SOs("--has-debug-information="),
+                [BUILD_FLAG_UNITY_BUILD] = SOs("--unity-build="),
+                [BUILD_FLAG_JUST_PREPROCESSOR] = SOs("--just-preprocessor="),
+                [BUILD_FLAG_SELF_HOSTED] = SOs("--self-hosted="),
             };
             static_assert(BUSTER_ARRAY_LENGTH(build_flag_strings) == BUILD_FLAG_COUNT);
 
@@ -444,7 +470,7 @@ BUSTER_IMPL ProcessResult process_arguments()
             for (i = 0; i < BUILD_FLAG_COUNT; i += 1)
             {
                 let build_flag_string = build_flag_strings[i];
-                if (os_string_starts_with(argument, build_flag_string))
+                if (os_string_starts_with_sequence(argument, build_flag_string))
                 {
                     bool is_valid_value = argument.length == build_flag_string.length + 1;
 
@@ -463,7 +489,7 @@ BUSTER_IMPL ProcessResult process_arguments()
 
                     if (!is_valid_value)
                     {
-                        print(S8("For argument '{OsS}', unrecognized value\n"), argument);
+                        string8_print(S8("For argument '{OsS}', unrecognized value\n"), argument);
                         result = PROCESS_RESULT_FAILED;
                     }
 
@@ -475,8 +501,8 @@ BUSTER_IMPL ProcessResult process_arguments()
 
             if (!found)
             {
-                OsString integer_option_strings[] = {
-                    [BUILD_INTEGER_OPTION_FUZZ_DURATION_SECONDS] = OsS("--fuzz-duration="),
+                StringOs integer_option_strings[] = {
+                    [BUILD_INTEGER_OPTION_FUZZ_DURATION_SECONDS] = SOs("--fuzz-duration="),
                 };
                 static_assert(BUSTER_ARRAY_LENGTH(integer_option_strings) == BUILD_INTEGER_OPTION_COUNT);
 
@@ -485,24 +511,24 @@ BUSTER_IMPL ProcessResult process_arguments()
                 {
                     let integer_option_string = integer_option_strings[build_integer_option_i];
 
-                    if (os_string_starts_with(argument, integer_option_string))
+                    if (os_string_starts_with_sequence(argument, integer_option_string))
                     {
-                        let value_string = string_slice_start(integer_option_string, integer_option_string.length);
+                        let value_string = BUSTER_SLICE_START(integer_option_string, integer_option_string.length);
 
                         BuildIntegerOptionFormat format = BUILD_INTEGER_OPTION_FORMAT_DECIMAL_POSITIVE;
 
                         // TODO: handle negative numbers
-                        IntegerParsing p = {};
+                        IntegerParsingU64 p = {};
                         u64 prefix_character_count = 0;
                         if (value_string.length > 2 && value_string.pointer[0] == '0')
                         {
                             let second_ch = value_string.pointer[1];
                             switch (second_ch)
                             {
-                                break; case 'x': format = BUILD_INTEGER_OPTION_FORMAT_HEXADECIMAL; prefix_character_count = 2; p = os_string_parse_hexadecimal((OsChar*)value_string.pointer + 2);
-                                break; case 'd': format = BUILD_INTEGER_OPTION_FORMAT_DECIMAL_POSITIVE; prefix_character_count = 2; p = os_string_parse_decimal((OsChar*)value_string.pointer + 2);
-                                break; case 'o': format = BUILD_INTEGER_OPTION_FORMAT_OCTAL; prefix_character_count = 2; p = os_string_parse_octal((OsChar*)value_string.pointer + 2);
-                                break; case 'b': format = BUILD_INTEGER_OPTION_FORMAT_BINARY; prefix_character_count = 2; p = os_string_parse_binary((OsChar*)value_string.pointer + 2);
+                                break; case 'x': format = BUILD_INTEGER_OPTION_FORMAT_HEXADECIMAL; prefix_character_count = 2; p = os_string_parse_u64_hexadecimal(value_string.pointer + 2);
+                                break; case 'd': format = BUILD_INTEGER_OPTION_FORMAT_DECIMAL_POSITIVE; prefix_character_count = 2; p = os_string_parse_u64_decimal(value_string.pointer + 2);
+                                break; case 'o': format = BUILD_INTEGER_OPTION_FORMAT_OCTAL; prefix_character_count = 2; p = os_string_parse_u64_octal(value_string.pointer + 2);
+                                break; case 'b': format = BUILD_INTEGER_OPTION_FORMAT_BINARY; prefix_character_count = 2; p = os_string_parse_u64_binary(value_string.pointer + 2);
                                 break; default: {}
                             }
                         }
@@ -510,15 +536,15 @@ BUSTER_IMPL ProcessResult process_arguments()
                         {
                             format = BUILD_INTEGER_OPTION_FORMAT_DECIMAL_NEGATIVE;
                             prefix_character_count = 1;
-                            p = os_string_parse_decimal((OsChar*)value_string.pointer + 1);
+                            p = os_string_parse_u64_decimal(value_string.pointer + 1);
                         }
 
-                        if (format == BUILD_INTEGER_OPTION_FORMAT_DECIMAL_POSITIVE && p.i == 0)
+                        if (format == BUILD_INTEGER_OPTION_FORMAT_DECIMAL_POSITIVE && p.length == 0)
                         {
-                            p = os_string_parse_decimal((OsChar*)value_string.pointer);
+                            p = os_string_parse_u64_decimal(value_string.pointer);
                         }
 
-                        if (p.i + prefix_character_count == value_string.length)
+                        if (p.length + prefix_character_count == value_string.length)
                         {
                             if (format == BUILD_INTEGER_OPTION_FORMAT_DECIMAL_NEGATIVE)
                             {
@@ -526,7 +552,7 @@ BUSTER_IMPL ProcessResult process_arguments()
                                 let cast_value = (u64)((s64)0 - negative_value);
                                 if (cast_value != p.value)
                                 {
-                                    print(S8("Negative value is too low: \n"), argument);
+                                    string8_print(S8("Negative value is too low: \n"), argument);
                                     result = PROCESS_RESULT_FAILED;
                                 }
                                 else
@@ -550,7 +576,7 @@ BUSTER_IMPL ProcessResult process_arguments()
                         }
                         else
                         {
-                            print(S8("For argument '{OsS}', unrecognized value\n"), argument);
+                            string8_print(S8("For argument '{OsS}', unrecognized value\n"), argument);
                             result = PROCESS_RESULT_FAILED;
                         }
 
@@ -566,7 +592,7 @@ BUSTER_IMPL ProcessResult process_arguments()
                 let os_argument_process_result = buster_argument_process(argv, envp, argument_count, command);
                 if (os_argument_process_result != PROCESS_RESULT_SUCCESS)
                 {
-                    print(S8("Unrecognized argument: '{OsS}'\n"), argument);
+                    string8_print(S8("Unrecognized argument: '{OsS}'\n"), argument);
                     result = os_argument_process_result;
                     break;
                 }
@@ -596,13 +622,14 @@ BUSTER_IMPL ProcessResult process_arguments()
 
 BUSTER_LOCAL bool builder_tests(TestArguments* arguments)
 {
-    return lib_tests(arguments);
+    BUSTER_UNUSED(arguments);
+    return true;
 }
 
 STRUCT(CompileLinkOptions)
 {
-    OsString destination_path;
-    OsString* source_paths;
+    StringOs destination_path;
+    StringOs* source_paths;
     u64 source_count;
     BuildTarget* target;
 
@@ -618,19 +645,19 @@ STRUCT(CompileLinkOptions)
     u64 reserved:55;
 };
 
-BUSTER_LOCAL OsStringList build_compile_link_arguments(Arena* arena, CompileLinkOptions options)
+BUSTER_LOCAL StringOsList build_compile_link_arguments(Arena* arena, CompileLinkOptions options)
 {
     // Forced to do it so early because we would need another arena here otherwise (since arena is used for the argument builder)
-    OsString march_os_string = options.target->march_string;
+    StringOs march_os_string = options.target->march_string;
 
     let builder = argument_builder_start(arena, clang_path);
-    argument_add(builder, OsS("-ferror-limit=1"));
+    argument_add(builder, SOs("-ferror-limit=1"));
     if (options.just_preprocessor)
     {
-        argument_add(builder, OsS("-E"));
+        argument_add(builder, SOs("-E"));
     }
 
-    argument_add(builder, OsS("-o"));
+    argument_add(builder, SOs("-o"));
     argument_add(builder, options.destination_path);
     for (u64 i = 0; i < options.source_count; i += 1)
     {
@@ -642,27 +669,27 @@ BUSTER_LOCAL OsStringList build_compile_link_arguments(Arena* arena, CompileLink
     {
         if (!(options.target->pointer->cpu_arch == CPU_ARCH_AARCH64 && options.target->pointer->os == OPERATING_SYSTEM_WINDOWS))
         {
-            argument_add(builder, OsS("-fsanitize=address"));
+            argument_add(builder, SOs("-fsanitize=address"));
         }
 
-        argument_add(builder, OsS("-fsanitize=undefined"));
-        argument_add(builder, OsS("-fsanitize=bounds"));
-        argument_add(builder, OsS("-fsanitize-recover=all"));
+        argument_add(builder, SOs("-fsanitize=undefined"));
+        argument_add(builder, SOs("-fsanitize=bounds"));
+        argument_add(builder, SOs("-fsanitize-recover=all"));
 
         if (options.fuzz)
         {
-            argument_add(builder, OsS("-fsanitize=fuzzer"));
+            argument_add(builder, SOs("-fsanitize=fuzzer"));
         }
     }
 
     if (options.has_debug_information)
     {
-        argument_add(builder, OsS("-g"));
+        argument_add(builder, SOs("-g"));
     }
 
     if (xc_sdk_path.pointer)
     {
-        argument_add(builder, OsS("-isysroot"));
+        argument_add(builder, SOs("-isysroot"));
         argument_add(builder, xc_sdk_path);
     }
 
@@ -670,66 +697,66 @@ BUSTER_LOCAL OsStringList build_compile_link_arguments(Arena* arena, CompileLink
     {
         if (!options.link || options.just_preprocessor)
         {
-            argument_add(builder, OsS("-c"));
+            argument_add(builder, SOs("-c"));
         }
 
-        argument_add(builder, OsS("-Isrc"));
+        argument_add(builder, SOs("-Isrc"));
 
-        argument_add(builder, OsS("-std=gnu2x"));
+        argument_add(builder, SOs("-std=gnu2x"));
 
         if (!options.just_preprocessor)
         {
-            argument_add(builder, OsS("-Werror"));
+            argument_add(builder, SOs("-Werror"));
         }
-        argument_add(builder, OsS("-Wall"));
-        argument_add(builder, OsS("-Wextra"));
-        argument_add(builder, OsS("-Wpedantic"));
-        argument_add(builder, OsS("-pedantic"));
+        argument_add(builder, SOs("-Wall"));
+        argument_add(builder, SOs("-Wextra"));
+        argument_add(builder, SOs("-Wpedantic"));
+        argument_add(builder, SOs("-pedantic"));
 
-        argument_add(builder, OsS("-Wno-gnu-auto-type"));
-        argument_add(builder, OsS("-Wno-pragma-once-outside-header"));
-        argument_add(builder, OsS("-Wno-gnu-empty-struct"));
-        argument_add(builder, OsS("-Wno-bitwise-instead-of-logical"));
-        argument_add(builder, OsS("-Wno-unused-function"));
-        argument_add(builder, OsS("-Wno-gnu-flexible-array-initializer"));
-        argument_add(builder, OsS("-Wno-missing-field-initializers"));
-        argument_add(builder, OsS("-Wno-language-extension-token"));
-        argument_add(builder, OsS("-Wno-zero-length-array"));
+        argument_add(builder, SOs("-Wno-gnu-auto-type"));
+        argument_add(builder, SOs("-Wno-pragma-once-outside-header"));
+        argument_add(builder, SOs("-Wno-gnu-empty-struct"));
+        argument_add(builder, SOs("-Wno-bitwise-instead-of-logical"));
+        argument_add(builder, SOs("-Wno-unused-function"));
+        argument_add(builder, SOs("-Wno-gnu-flexible-array-initializer"));
+        argument_add(builder, SOs("-Wno-missing-field-initializers"));
+        argument_add(builder, SOs("-Wno-language-extension-token"));
+        argument_add(builder, SOs("-Wno-zero-length-array"));
 
-        argument_add(builder, OsS("-funsigned-char"));
-        argument_add(builder, OsS("-fwrapv"));
-        argument_add(builder, OsS("-fno-strict-aliasing"));
+        argument_add(builder, SOs("-funsigned-char"));
+        argument_add(builder, SOs("-fwrapv"));
+        argument_add(builder, SOs("-fno-strict-aliasing"));
 
-        argument_add(builder, OsS("-DBUSTER_CLANG_ABSOLUTE_PATH=" OS_STRING_DOUBLE_QUOTE BUSTER_CLANG_ABSOLUTE_PATH OS_STRING_DOUBLE_QUOTE));
-        argument_add(builder, OsS("-DBUSTER_TOOLCHAIN_ABSOLUTE_PATH=" OS_STRING_DOUBLE_QUOTE BUSTER_TOOLCHAIN_ABSOLUTE_PATH OS_STRING_DOUBLE_QUOTE));
-        argument_add(builder, options.unity_build ? OsS("-DBUSTER_UNITY_BUILD=1") : OsS("-DBUSTER_UNITY_BUILD=0"));
-        argument_add(builder, options.fuzz ? OsS("-DBUSTER_FUZZING=1") : OsS("-DBUSTER_FUZZING=0"));
-        argument_add(builder, options.use_io_ring ? OsS("-DBUSTER_USE_IO_RING=1") : OsS("-DBUSTER_USE_IO_RING=0"));
+        argument_add(builder, SOs("-DBUSTER_CLANG_ABSOLUTE_PATH=" OS_STRING_DOUBLE_QUOTE BUSTER_CLANG_ABSOLUTE_PATH OS_STRING_DOUBLE_QUOTE));
+        argument_add(builder, SOs("-DBUSTER_TOOLCHAIN_ABSOLUTE_PATH=" OS_STRING_DOUBLE_QUOTE BUSTER_TOOLCHAIN_ABSOLUTE_PATH OS_STRING_DOUBLE_QUOTE));
+        argument_add(builder, options.unity_build ? SOs("-DBUSTER_UNITY_BUILD=1") : SOs("-DBUSTER_UNITY_BUILD=0"));
+        argument_add(builder, options.fuzz ? SOs("-DBUSTER_FUZZING=1") : SOs("-DBUSTER_FUZZING=0"));
+        argument_add(builder, options.use_io_ring ? SOs("-DBUSTER_USE_IO_RING=1") : SOs("-DBUSTER_USE_IO_RING=0"));
 
         argument_add(builder, march_os_string);
 
         if (options.optimize)
         {
-            argument_add(builder, OsS("-O2"));
+            argument_add(builder, SOs("-O2"));
         }
         else
         {
-            argument_add(builder, OsS("-O0"));
+            argument_add(builder, SOs("-O0"));
         }
     }
 
     if (!options.just_preprocessor && options.link)
     {
-        argument_add(builder, OsS("-fuse-ld=lld"));
+        argument_add(builder, SOs("-fuse-ld=lld"));
 
         if (options.use_io_ring)
         {
-            argument_add(builder, OsS("-luring"));
+            argument_add(builder, SOs("-luring"));
         }
 
         if (options.target->pointer->os == OPERATING_SYSTEM_WINDOWS)
         {
-            argument_add(builder, OsS("-lws2_32"));
+            argument_add(builder, SOs("-lws2_32"));
         }
     }
 
@@ -743,13 +770,13 @@ BUSTER_LOCAL BuildTarget build_target_native = {
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
     let general_arena = arena_create((ArenaInitialization){});
-    let cwd = path_absolute(general_arena, OsS("."));
+    let cwd = path_absolute_arena(general_arena, SOs("."));
 
 #if defined(BUSTER_XC_SDK_PATH)
-    xc_sdk_path = OsS(BUSTER_XC_SDK_PATH);
+    xc_sdk_path = SOs(BUSTER_XC_SDK_PATH);
 #endif
-    clang_path = OsS(BUSTER_CLANG_ABSOLUTE_PATH);
-    toolchain_path = OsS(BUSTER_TOOLCHAIN_ABSOLUTE_PATH);
+    clang_path = SOs(BUSTER_CLANG_ABSOLUTE_PATH);
+    toolchain_path = SOs(BUSTER_TOOLCHAIN_ABSOLUTE_PATH);
 
     LinkModule builder_modules[] = {
         { .id = MODULE_BUILDER },
@@ -800,7 +827,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         link_unit->optimize = build_flag_get(BUILD_FLAG_OPTIMIZE);
         link_unit->has_debug_information = build_flag_get(BUILD_FLAG_HAS_DEBUG_INFORMATION);
         link_unit->fuzz = build_flag_get(BUILD_FLAG_FUZZ);
-        link_unit->is_builder = os_string_equal(link_unit->name, OsS("builder"));
+        link_unit->is_builder = string_equal(link_unit->name, SOs("builder"));
 
         u64 target_i;
         for (target_i = 0; target_i < target_count; target_i += 1)
@@ -816,87 +843,87 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         {
             target_buffer[target_i] = target;
 
-            let march = target->pointer->cpu_arch == CPU_ARCH_X86_64 ? OsS("-march=") : OsS("-mcpu=");
-            let target_strings = target_to_split_os_string(*target->pointer);
-            OsString march_parts[] = {
+            let march = target->pointer->cpu_arch == CPU_ARCH_X86_64 ? SOs("-march=") : SOs("-mcpu=");
+            let target_strings = target_to_split_string_os(*target->pointer);
+            StringOs march_parts[] = {
                 march,
                 target_strings.s[TARGET_CPU_MODEL],
             };
-            target->march_string = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, march_parts), true);
+            target->march_string = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, march_parts), true);
 
-            OsString triple_parts[2 * TARGET_STRING_COMPONENT_COUNT - 1];
+            StringOs triple_parts[2 * TARGET_STRING_COMPONENT_COUNT - 1];
             for (u64 triple_i = 0; triple_i < TARGET_STRING_COMPONENT_COUNT; triple_i += 1)
             {
                 triple_parts[triple_i * 2 + 0] = target_strings.s[triple_i];
                 if (triple_i < (TARGET_STRING_COMPONENT_COUNT - 1))
                 {
-                    triple_parts[triple_i * 2 + 1] = OsS("-");
+                    triple_parts[triple_i * 2 + 1] = SOs("-");
                 }
             }
 
-            let target_triple = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, triple_parts), true);
+            let target_triple = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, triple_parts), true);
             target->string = target_triple;
 
-            OsString directory_path_parts[] = {
+            StringOs directory_path_parts[] = {
                 cwd,
-                OsS("/build/"),
+                SOs("/build/"),
                 target_triple,
             };
-            let directory = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, directory_path_parts), true);
+            let directory = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, directory_path_parts), true);
             target->directory_path = directory;
             os_make_directory(directory);
             target_count += 1;
         }
 
-        OsString artifact_path_parts[] = {
+        StringOs artifact_path_parts[] = {
             cwd,
-            OsS("/build/"),
-            link_unit->is_builder ? OsS("") : target->string,
-            link_unit->is_builder ? OsS("") : OsS("/"),
+            SOs("/build/"),
+            link_unit->is_builder ? SOs("") : target->string,
+            link_unit->is_builder ? SOs("") : SOs("/"),
             link_unit->name,
-            target->pointer->os == OPERATING_SYSTEM_WINDOWS ? OsS(".exe") : OsS(""),
+            target->pointer->os == OPERATING_SYSTEM_WINDOWS ? SOs(".exe") : SOs(""),
         };
 
-        let artifact_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, artifact_path_parts), true);
+        let artifact_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, artifact_path_parts), true);
         link_unit->artifact_path = artifact_path;
     }
 
-    OsString directory_paths[] = {
-        [DIRECTORY_SRC_BUSTER] = OsS("src/buster"),
-        [DIRECTORY_SRC_MARTINS] = OsS("src/martins"),
-        [DIRECTORY_ROOT] = OsS(""),
-        [DIRECTORY_CC] = OsS("src/buster/compiler/frontend/cc"),
-        [DIRECTORY_ASM] = OsS("src/buster/compiler/frontend/asm"),
-        [DIRECTORY_IR] = OsS("src/buster/compiler/ir"),
-        [DIRECTORY_BACKEND] = OsS("src/buster/compiler/backend"),
-        [DIRECTORY_LINK] = OsS("src/buster/compiler/link"),
+    StringOs directory_paths[] = {
+        [DIRECTORY_SRC_BUSTER] = SOs("src/buster"),
+        [DIRECTORY_SRC_MARTINS] = SOs("src/martins"),
+        [DIRECTORY_ROOT] = SOs(""),
+        [DIRECTORY_CC] = SOs("src/buster/compiler/frontend/cc"),
+        [DIRECTORY_ASM] = SOs("src/buster/compiler/frontend/asm"),
+        [DIRECTORY_IR] = SOs("src/buster/compiler/ir"),
+        [DIRECTORY_BACKEND] = SOs("src/buster/compiler/backend"),
+        [DIRECTORY_LINK] = SOs("src/buster/compiler/link"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == DIRECTORY_COUNT);
 
-    OsString module_names[] = {
-        [MODULE_LIB] = OsS("lib"),
-        [MODULE_SYSTEM_HEADERS] = OsS("system_headers"),
-        [MODULE_ENTRY_POINT] = OsS("entry_point"),
-        [MODULE_TARGET] = OsS("target"),
-        [MODULE_X86_64] = OsS("x86_64"),
-        [MODULE_AARCH64] = OsS("aarch64"),
-        [MODULE_BUILDER] = OsS("build"),
-        [MODULE_MD5] = OsS("md5"),
-        [MODULE_CC_MAIN] = OsS("cc_main"),
-        [MODULE_ASM_MAIN] = OsS("asm_main"),
-        [MODULE_IR] = OsS("ir"),
-        [MODULE_CODEGEN] = OsS("code_generation"),
-        [MODULE_LINK] = OsS("link"),
-        [MODULE_LINK_ELF] = OsS("elf"),
-        [MODULE_LINK_JIT] = OsS("jit"),
+    StringOs module_names[] = {
+        [MODULE_LIB] = SOs("lib"),
+        [MODULE_SYSTEM_HEADERS] = SOs("system_headers"),
+        [MODULE_ENTRY_POINT] = SOs("entry_point"),
+        [MODULE_TARGET] = SOs("target"),
+        [MODULE_X86_64] = SOs("x86_64"),
+        [MODULE_AARCH64] = SOs("aarch64"),
+        [MODULE_BUILDER] = SOs("build"),
+        [MODULE_MD5] = SOs("md5"),
+        [MODULE_CC_MAIN] = SOs("cc_main"),
+        [MODULE_ASM_MAIN] = SOs("asm_main"),
+        [MODULE_IR] = SOs("ir"),
+        [MODULE_CODEGEN] = SOs("code_generation"),
+        [MODULE_LINK] = SOs("link"),
+        [MODULE_LINK_ELF] = SOs("elf"),
+        [MODULE_LINK_JIT] = SOs("jit"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(module_names) == MODULE_COUNT);
 
     if (!build_flag_get(BUILD_FLAG_UNITY_BUILD))
     {
-        let cache_manifest = os_file_open(OsS("build/cache_manifest"), (OpenFlags) { .read = 1 }, (OpenPermissions){});
+        let cache_manifest = os_file_open(SOs("build/cache_manifest"), (OpenFlags) { .read = 1 }, (OpenPermissions){});
         let cache_manifest_stats = os_file_get_stats(cache_manifest, (FileStatsOptions){ .size = 1, .modified_time = 1 });
         let cache_manifest_buffer = (u8*)arena_allocate_bytes(thread_arena(), cache_manifest_stats.size, 64);
         os_file_read(cache_manifest, (ByteSlice){ cache_manifest_buffer, cache_manifest_stats.size }, cache_manifest_stats.size);
@@ -905,8 +932,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         BUSTER_UNUSED(cache_manifest_hash);
         if (cache_manifest)
         {
-            print(S8("TODO: Cache manifest found!\n"));
-            fail();
+            string8_print(S8("TODO: Cache manifest found!\n"));
+            os_fail();
         }
         else
         {
@@ -918,32 +945,32 @@ BUSTER_IMPL ProcessResult thread_entry_point()
 #if defined(__x86_64__)
     let dll_filename = 
 #if defined(__x86_64__)
-        OsS("clang_rt.asan_dynamic-x86_64.dll");
+        SOs("clang_rt.asan_dynamic-x86_64.dll");
 #elif defined(__aarch64__)
-        OsS("clang_rt.asan_dynamic-aarch64.dll");
+        SOs("clang_rt.asan_dynamic-aarch64.dll");
 #else
 #pragma error
 #endif
     OsString original_dll_parts[] = {
         toolchain_path,
-        OsS("/lib/clang/21/lib/windows/"),
+        SOs("/lib/clang/21/lib/windows/"),
         dll_filename,
     };
     let original_asan_dll = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, original_dll_parts), true);
     let target_strings = target_to_split_os_string(target_native);
     OsString target_native_dir_path_parts[] = {
-        OsS("build/"),
+        SOs("build/"),
         target_strings.s[0],
-        OsS("-"),
+        SOs("-"),
         target_strings.s[1],
-        OsS("-"),
+        SOs("-"),
         target_strings.s[2],
     };
     let target_native_dir_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, target_native_dir_path_parts), true);
     os_make_directory(target_native_dir_path);
     OsString destination_dll_parts[] = {
         target_native_dir_path,
-        OsS("/"),
+        SOs("/"),
         dll_filename,
     };
     let destination_asan_dll = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, destination_dll_parts), true);
@@ -996,15 +1023,15 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 let new_file = arena_allocate(file_list_arena, TargetBuildFile, count);
 
                 // This is wasteful, but it might not matter?
-                OsString parts[] = {
+                StringOs parts[] = {
                     cwd,
-                    OsS("/"),
+                    SOs("/"),
                     directory_paths[module_specification.directory],
-                    module_specification.directory == DIRECTORY_ROOT ? OsS("") : OsS("/"),
+                    module_specification.directory == DIRECTORY_ROOT ? SOs("") : SOs("/"),
                     module_names[module->id],
-                    module_specification.no_source ? OsS(".h") : OsS(".c"),
+                    module_specification.no_source ? SOs(".h") : SOs(".c"),
                 };
-                let c_full_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, parts), true);
+                let c_full_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, parts), true);
 
                 *new_file = (TargetBuildFile) {
                     .full_path = c_full_path,
@@ -1052,7 +1079,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         TargetBuildFile* source_file = &file_list[file_i]; 
         if (!build_flag_get(BUILD_FLAG_UNITY_BUILD))
         {
-            let fd = os_file_open(string_slice_start(source_file->full_path, cwd.length + 1), (OpenFlags){ .read = 1 }, (OpenPermissions){});
+            let fd = os_file_open(BUSTER_SLICE_START(source_file->full_path, cwd.length + 1), (OpenFlags){ .read = 1 }, (OpenPermissions){});
             let stats = os_file_get_stats(fd, (FileStatsOptions){ .raw = UINT64_MAX });
             let buffer = (u8*)arena_allocate_bytes(general_arena, stats.size, 64);
             ByteSlice buffer_slice = { buffer, stats.size};
@@ -1083,23 +1110,23 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         let unit = &compilation_units[unit_i];
 
         let source_absolute_path = unit->source_path;
-        let source_relative_path = string_slice_start(source_absolute_path, cwd.length + 1);
+        let source_relative_path = BUSTER_SLICE_START(source_absolute_path, cwd.length + 1);
         let target_directory_path = unit->target->directory_path;
-        OsString object_absolute_path_parts[] = {
+        StringOs object_absolute_path_parts[] = {
             target_directory_path,
-            OsS("/"),
+            SOs("/"),
             source_relative_path,
 #if _WIN32
-            OsS(".obj"),
+            SOs(".obj"),
 #else
-            OsS(".o"),
+            SOs(".o"),
 #endif
         };
 
-        let object_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(OsStringSlice, object_absolute_path_parts), true);
+        let object_path = arena_join_os_string(general_arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, object_absolute_path_parts), true);
         unit->object_path = object_path;
 
-        OsChar buffer[max_path_length];
+        CharOs buffer[max_path_length];
         let os_char_size = sizeof(buffer[0]);
         let copy_character_count = target_directory_path.length;
         memcpy(buffer, target_directory_path.pointer, (copy_character_count + 1) * os_char_size);
@@ -1110,14 +1137,14 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         u64 source_i = 0;
         while (1)
         {
-            let source_remaining = string_slice_start(source_relative_path, source_i);
-            let slash_index = os_string_first_character(source_remaining, '/');
+            let source_remaining = BUSTER_SLICE_START(source_relative_path, source_i);
+            let slash_index = string_first_code_point(source_remaining, '/');
             if (slash_index == string_no_match)
             {
                 break;
             }
 
-            OsString source_chunk = { source_remaining.pointer, slash_index };
+            StringOs source_chunk = { source_remaining.pointer, slash_index };
 
             buffer[buffer_start + source_i] = '/';
             source_i += 1;
@@ -1166,7 +1193,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             };
             let args = build_compile_link_arguments(general_arena, options);
 
-            unit->compiler = (OsChar*)clang_path.pointer;
+            unit->compiler = clang_path;
             unit->compilation_arguments = args;
 
             append_string8(compile_commands, S8("\t{\n\t\t\"directory\": \""));
@@ -1178,7 +1205,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             {
                 let a = arg;
 #ifndef _WIN32
-                let double_quote_count = string8_occurrence_count(a, '"');
+                let double_quote_count = string8_code_point_count(a, '"');
                 if (double_quote_count != 0)
                 {
                     let new_length = a.length + double_quote_count;
@@ -1217,7 +1244,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         append_string8(compile_commands, S8("\n]"));
 
         let compile_commands_str = (String8){ .pointer = (char8*)compile_commands + compile_commands_start, .length = compile_commands->position - compile_commands_start };
-        result = file_write(OsS("build/compile_commands.json"), string_to_byte_slice(compile_commands_str)) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        result = file_write(SOs("build/compile_commands.json"), BUSTER_SLICE_TO_BYTE_SLICE(compile_commands_str)) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     }
 
     if (result == PROCESS_RESULT_SUCCESS)
@@ -1239,7 +1266,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 let unit_compilation_result = os_process_wait_sync(unit->process.handle, unit->process.resources);
                 if (unit_compilation_result != PROCESS_RESULT_SUCCESS)
                 {
-                    print(S8("Some of the compilations failed\n"));
+                    string8_print(S8("Some of the compilations failed\n"));
                     result = PROCESS_RESULT_FAILED;
                 }
             }
@@ -1256,7 +1283,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 let link_unit_specification = &specifications[link_unit_i];
                 let link_modules = link_unit_specification->modules;
 
-                let source_paths = (OsString*)align_forward((u64)((u8*)general_arena + general_arena->position), alignof(OsString));
+                let source_paths = (StringOs*)align_forward((u64)((u8*)general_arena + general_arena->position), alignof(StringOs));
                 u64 source_path_count = 0;
 
                 for (u64 module_i = 0; module_i < link_modules.length; module_i += 1)
@@ -1266,7 +1293,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     if (!modules[module->id].no_source)
                     {
                         let unit = &compilation_units[module->index];
-                        let object_path = arena_allocate(general_arena, OsString, 1);
+                        let object_path = arena_allocate(general_arena, StringOs, 1);
                         *object_path = (build_flag_get(BUILD_FLAG_JUST_PREPROCESSOR) | build_flag_get(BUILD_FLAG_UNITY_BUILD)) ? unit->source_path : unit->object_path;
                         source_path_count += 1;
                     }
@@ -1288,7 +1315,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     .link = 1,
                 };
                 let link_arguments = build_compile_link_arguments(general_arena, options);
-                let process = os_process_spawn((OsChar*)clang_path.pointer, link_arguments, program_state->input.envp);
+                let process = os_process_spawn(clang_path, link_arguments, program_state->input.envp);
                 processes[link_unit_i] = process;
             }
 
@@ -1299,7 +1326,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                 let link_result = os_process_wait_sync(process, resources);
                 if (link_result != PROCESS_RESULT_SUCCESS)
                 {
-                    print(S8("Some of the linkage failed\n"));
+                    string8_print(S8("Some of the linkage failed\n"));
                     result = link_result;
                 }
             }
@@ -1320,18 +1347,18 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     };
                     if (!builder_tests(&arguments))
                     {
-                        print(S8("Build tests failed!\n"));
+                        string8_print(S8("Build tests failed!\n"));
                         result = PROCESS_RESULT_FAILED;
                     }
 
                     u64 fuzz_max_length = 4096;
-                    let length_argument = arena_os_string_format(general_arena, OsS("-max_len={u64}"), fuzz_max_length);
+                    let length_argument = arena_os_string_format(general_arena, SOs("-max_len={u64}"), fuzz_max_length);
                     u64 max_total_time = build_integer_option_get_unsigned(BUILD_INTEGER_OPTION_FUZZ_DURATION_SECONDS);
                     if (max_total_time == 0)
                     {
                         max_total_time = 30;
                     }
-                    let max_total_time_argument = arena_os_string_format(general_arena, OsS("-max_total_time={u64}"), max_total_time);
+                    let max_total_time_argument = arena_os_string_format(general_arena, SOs("-max_total_time={u64}"), max_total_time);
 
                     // Skip builder executable since we execute the tests ourselves
                     for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
@@ -1339,20 +1366,20 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                         let link_unit_specification = &specifications[link_unit_i];
 
                         let first_argument = link_unit_specification->artifact_path;
-                        OsString fuzz_arguments[] = {
+                        StringOs fuzz_arguments[] = {
                             first_argument,
                             length_argument,
                             max_total_time_argument,
                         };
 
-                        OsString test_arguments[] = {
+                        StringOs test_arguments[] = {
                             first_argument,
-                            OsS("test"),
+                            SOs("test"),
                         };
 
-                        let os_argument_slice = link_unit_specification->fuzz ? BUSTER_ARRAY_TO_SLICE(OsStringSlice, fuzz_arguments) : BUSTER_ARRAY_TO_SLICE(OsStringSlice, test_arguments);
+                        let os_argument_slice = link_unit_specification->fuzz ? BUSTER_ARRAY_TO_SLICE(StringOsSlice, fuzz_arguments) : BUSTER_ARRAY_TO_SLICE(StringOsSlice, test_arguments);
                         let os_arguments = os_string_list_create(general_arena, os_argument_slice);
-                        processes[link_unit_i] = os_process_spawn(first_argument.pointer, os_arguments, program_state->input.envp);
+                        processes[link_unit_i] = os_process_spawn(first_argument, os_arguments, program_state->input.envp);
                     }
 
                     for (u64 link_unit_i = link_unit_start; link_unit_i < link_unit_count; link_unit_i += 1)
@@ -1362,7 +1389,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                         let test_result = os_process_wait_sync(process, resources);
                         if (test_result != PROCESS_RESULT_SUCCESS)
                         {
-                            print(S8("Some of the unit tests failed\n"));
+                            string8_print(S8("Some of the unit tests failed\n"));
                             result = test_result;
                         }
                     }
@@ -1373,7 +1400,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     }
     else
     {
-        print(S8("Error writing compile commands: {OsS}"), get_last_error_message(general_arena));
+        string8_print(S8("Error writing compile commands: {OsS}"), get_last_error_message(general_arena));
     }
 
     return result;

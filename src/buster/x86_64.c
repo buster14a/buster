@@ -38,7 +38,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
     bool has_avx512bf16 = false;
     bool has_avx512vnni = false;
 
-    if (string8_equal(vendor_string, S8("AuthenticAMD")))
+    if (string_equal(vendor_string, S8("AuthenticAMD")))
     {
         switch (family)
         {
@@ -116,7 +116,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
             break; default: {};
         }
     }
-    else if (string8_equal(vendor_string, S8("GenuineIntel")))
+    else if (string_equal(vendor_string, S8("GenuineIntel")))
     {
         switch (family)
         {
@@ -190,7 +190,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
     }
     else
     {
-        print(S8("Vendor string: {S8}\n"), vendor_string);
+        string8_print(S8("Vendor string: {S8}\n"), vendor_string);
     }
 
     return result;

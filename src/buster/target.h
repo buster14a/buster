@@ -1,6 +1,7 @@
 #pragma once
 
-#include <buster/lib.h>
+#include <buster/base.h>
+#include <buster/string_os.h>
 
 ENUM_T(CpuArch, u8,
     CPU_ARCH_X86_64,
@@ -192,19 +193,15 @@ STRUCT(Target)
 
 STRUCT(TargetStringSplit)
 {
-    OsString s[TARGET_STRING_COMPONENT_COUNT];
+    StringOs s[TARGET_STRING_COMPONENT_COUNT];
 };
 
 BUSTER_DECL Target target_native;
 
 BUSTER_DECL bool cpu_is_native(CpuModel model);
 BUSTER_DECL CpuModel cpu_detect_model();
-BUSTER_DECL TargetStringSplit target_to_split_os_string(Target target);
-BUSTER_DECL OsString target_to_string(Arena* arena, Target target);
-BUSTER_DECL OsString cpu_arch_to_os_string(CpuArch arch);
-BUSTER_DECL OsString operating_system_to_os_string(OperatingSystem os);
-BUSTER_DECL OsString cpu_model_to_os_string(CpuModel model);
-
-#if BUSTER_UNITY_BUILD
-#include <buster/target.c>
-#endif
+BUSTER_DECL TargetStringSplit target_to_split_string_os(Target target);
+BUSTER_DECL StringOs target_to_string(Arena* arena, Target target);
+BUSTER_DECL StringOs cpu_arch_to_string_os(CpuArch arch);
+BUSTER_DECL StringOs operating_system_to_string_os(OperatingSystem os);
+BUSTER_DECL StringOs cpu_model_to_string_os(CpuModel model);

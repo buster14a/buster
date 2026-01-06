@@ -52,20 +52,20 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
     CpuModel result = CPU_MODEL_ERROR;
 
 #if defined(__linux__)
-    constexpr u64 length = sizeof(u64) * 2 + 2;
-    u8 buffer[length + 4096];
-    let fd = os_file_open(OsS("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"), (OpenFlags){ .read = 1 }, (OpenPermissions){});
+#define BUSTER_AARCH64_BUFFER_LENGTH (sizeof(u64) * 2 + 2)
+    char8 buffer[BUSTER_AARCH64_BUFFER_LENGTH + 4096];
+    let fd = os_file_open(SOs("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"), (OpenFlags){ .read = 1 }, (OpenPermissions){});
     let midr_el1_string = BUSTER_ARRAY_TO_SLICE(String8, buffer);
-    midr_el1_string.length = length;
-    let file_size = os_file_read(fd, midr_el1_string, length);
+    midr_el1_string.length = BUSTER_AARCH64_BUFFER_LENGTH;
+    let file_size = os_file_read(fd, BUSTER_SLICE_TO_BYTE_SLICE(midr_el1_string), BUSTER_AARCH64_BUFFER_LENGTH);
     buffer[file_size] = 0;
     os_file_close(fd);
 
-    if (file_size == length)
+    if (file_size == BUSTER_AARCH64_BUFFER_LENGTH)
     {
         if (buffer[0] == '0' && buffer[1] == 'x')
         {
-            let value = parse_hexadecimal_scalar((char*)buffer + 2).value;
+            let value = string8_parse_u64_hexadecimal((char*)buffer + 2).value;
 
             if (value <= INT32_MAX)
             {
@@ -189,7 +189,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
     }
     else
     {
-        print(S8("Error reading CPU model\n"));
+        string8_print(S8("Error reading CPU model\n"));
     }
 #elif defined(__APPLE__)
       u32 family;
@@ -231,19 +231,19 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
               if (sysctlbyname("machdep.cpu.brand_string", 0, &buffer_length, 0, 0) == 0)
               {
                   let brand_string = S8(buffer);
-                  if (string8_starts_with(brand_string, S8("Apple M1")))
+                  if (string8_starts_with_sequence(brand_string, S8("Apple M1")))
                   {
                       result = CPU_MODEL_A64_APPLE_M1;
                   }
-                  else if (string8_starts_with(brand_string, S8("Apple M2")))
+                  else if (string8_starts_with_sequence(brand_string, S8("Apple M2")))
                   {
                       result = CPU_MODEL_A64_APPLE_M2;
                   }
-                  else if (string8_starts_with(brand_string, S8("Apple M3")))
+                  else if (string8_starts_with_sequence(brand_string, S8("Apple M3")))
                   {
                       result = CPU_MODEL_A64_APPLE_M3;
                   }
-                  else if (string8_starts_with(brand_string, S8("Apple M4")))
+                  else if (string8_starts_with_sequence(brand_string, S8("Apple M4")))
                   {
                       result = CPU_MODEL_A64_APPLE_M4;
                   }
