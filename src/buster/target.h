@@ -2,12 +2,12 @@
 
 #include <buster/lib.h>
 
-ENUM(CpuArch,
+ENUM_T(CpuArch, u8,
     CPU_ARCH_X86_64,
     CPU_ARCH_AARCH64,
 );
 
-ENUM(OperatingSystem,
+ENUM_T(OperatingSystem, u8, 
     OPERATING_SYSTEM_LINUX,
     OPERATING_SYSTEM_MACOS,
     OPERATING_SYSTEM_WINDOWS,
@@ -17,7 +17,7 @@ ENUM(OperatingSystem,
     OPERATING_SYSTEM_FREESTANDING,
 );
 
-ENUM_T(CpuModel, u64, 
+ENUM_T(CpuModel, u8, 
     CPU_MODEL_ERROR,
     CPU_MODEL_BASELINE,
     CPU_MODEL_NATIVE,
@@ -183,13 +183,11 @@ ENUM(TargetStringComponents,
 
 STRUCT(Target)
 {
-    struct
-    {
-        CpuArch arch;
-        CpuModel model;
-        TargetCpuFeatures* features;
-    } cpu;
+    CpuArch cpu_arch;
+    CpuModel cpu_model;
     OperatingSystem os;
+    u8 reserved[5];
+    TargetCpuFeatures* cpu_features;
 };
 
 STRUCT(TargetStringSplit)

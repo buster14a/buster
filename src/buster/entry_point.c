@@ -65,10 +65,10 @@ BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList en
                 u64 failure_count = 0;
                 for (u64 i = 0; i < thread_count; i += 1)
                 {
-                    let thread = &threads[i];
-                    thread->entry_point = thread_entry_point;
+                    let this_thread = &threads[i];
+                    this_thread->entry_point = thread_entry_point;
                     let handle = os_thread_create(thread_os_entry_point, (ThreadCreateOptions){});
-                    thread->handle = handle;
+                    this_thread->handle = handle;
                     failure_count += handle == 0;
                 }
 
@@ -76,8 +76,8 @@ BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList en
                 {
                     for (u64 i = 0; i < thread_count; i += 1)
                     {
-                        let thread = &threads[i];
-                        let exit_code = os_thread_join(thread->handle);
+                        let this_thread = &threads[i];
+                        let exit_code = os_thread_join(this_thread->handle);
                         let thread_result = (ProcessResult)exit_code;
                         if (thread_result != PROCESS_RESULT_SUCCESS)
                         {

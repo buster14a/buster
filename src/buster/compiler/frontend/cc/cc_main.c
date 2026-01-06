@@ -51,7 +51,7 @@ BUSTER_LOCAL File file_from_path(Arena* arena, CompilerFileReadOptions options)
 
     return (File) {
         .absolute_path = absolute_path,
-        .original_content = file_content,
+        .original_content = byte_slice_to_string(8, file_content),
     };
 }
 
