@@ -3,16 +3,50 @@
 #include <buster/entry_point.h>
 #include <buster/system_headers.h>
 #include <buster/target.h>
+#include <buster/assertion.h>
+#include <buster/arena.h>
 
 #if BUSTER_LINK_LIBC
+BUSTER_IMPL BUSTER_THREAD_LOCAL_DECL Thread* thread;
 #if BUSTER_FUZZING
-
 BUSTER_EXPORT s32 LLVMFuzzerTestOneInput(const u8* pointer, size_t size)
 {
     return buster_fuzz(pointer, size);
 }
 #else
-BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList envp)
+
+BUSTER_IMPL ProcessResult buster_argument_process(StringOsList argument_pointer, StringOsList environment_pointer, u64 argument_index, StringOs argument)
+{
+    BUSTER_UNUSED(argument_pointer);
+    BUSTER_UNUSED(environment_pointer);
+    BUSTER_UNUSED(argument_index);
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
+
+    if (string_equal(argument, SOs("--verbose")))
+    {
+        program_state->input.verbose = true;
+    }
+    else
+    {
+        result = PROCESS_RESULT_FAILED;
+    }
+
+    return result;
+}
+
+
+[[gnu::cold]] BUSTER_GLOBAL_LOCAL ThreadReturnType thread_os_entry_point(void* context)
+{
+    thread = (Thread*)context;
+    thread->arena = arena_create((ArenaInitialization){});
+#if BUSTER_USE_IO_RING
+    io_ring_init(&thread->ring, 4096);
+#endif
+    let os_result = thread->entry_point();
+    return (ThreadReturnType)(u64)os_result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOsList envp)
 {
     ProcessResult result = {};
     os_initialize_time();
@@ -65,10 +99,10 @@ BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList en
                 u64 failure_count = 0;
                 for (u64 i = 0; i < thread_count; i += 1)
                 {
-                    let thread = &threads[i];
-                    thread->entry_point = thread_entry_point;
+                    let this_thread = &threads[i];
+                    this_thread->entry_point = thread_entry_point;
                     let handle = os_thread_create(thread_os_entry_point, (ThreadCreateOptions){});
-                    thread->handle = handle;
+                    this_thread->handle = handle;
                     failure_count += handle == 0;
                 }
 
@@ -76,8 +110,8 @@ BUSTER_LOCAL ProcessResult buster_entry_point(OsStringList argv, OsStringList en
                 {
                     for (u64 i = 0; i < thread_count; i += 1)
                     {
-                        let thread = &threads[i];
-                        let exit_code = os_thread_join(thread->handle);
+                        let this_thread = &threads[i];
+                        let exit_code = os_thread_join(this_thread->handle);
                         let thread_result = (ProcessResult)exit_code;
                         if (thread_result != PROCESS_RESULT_SUCCESS)
                         {
@@ -115,7 +149,7 @@ BUSTER_EXPORT int main(int argc, char* argv[], char* envp[])
     BUSTER_UNUSED(envp);
     let result = buster_entry_point(GetCommandLineW(), GetEnvironmentStringsW());
 #else
-    let result = buster_entry_point((OsStringList)argv, (OsStringList)envp);
+    let result = buster_entry_point((StringOsList)argv, (StringOsList)envp);
 #endif
     return (int)result;
 }
