@@ -458,23 +458,10 @@ BUSTER_IMPL FileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPer
     }
     else
     {
-#if 0
-        DWORD error = GetLastError();
-        OsChar msgBuffer[1024];
-
-        FormatMessageW(
-                FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                NULL,
-                error,
-                MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                msgBuffer,
-                0,
-                NULL
-                );
-
-        print(S8("Error {u32}: {S16}\n"), error, string16_from_pointer(msgBuffer));
-        LocalFree(msgBuffer);
-#endif
+        if (program_state->input.verbose)
+        {
+            string8_print(S8("Error: {EOs}\n"), os_get_last_error());
+        }
     }
 #endif
     return result;
@@ -515,26 +502,29 @@ BUSTER_IMPL void os_file_write(FileDescriptor* file_descriptor, ByteSlice buffer
 BUSTER_GLOBAL_LOCAL u64 os_file_read_partially(FileDescriptor* file_descriptor, void* buffer, u64 byte_count)
 {
     u64 result = 0;
+    bool success = true;
 #if defined(__linux__) || defined(__APPLE__)
     let fd = generic_fd_to_posix(file_descriptor);
     let read_byte_count = read(fd, buffer, byte_count);
-    if (read_byte_count > 0)
+    success = read_byte_count >= 0;
+    if (success)
     {
         result = (u64)read_byte_count;
-    }
-    else if (read_byte_count < 0)
-    {
-        string8_print(string8_from_pointer(strerror(errno)));
     }
 #elif defined(_WIN32)
     let fd = generic_fd_to_windows(file_descriptor);
     DWORD read_byte_count = 0;
-    BOOL read_result = ReadFile(fd, buffer, (u32)byte_count, &read_byte_count, 0);
-    if (read_result)
+    success = ReadFile(fd, buffer, (u32)byte_count, &read_byte_count, 0) != 0;
+    if (success)
     {
         result = read_byte_count;
     }
 #endif
+    if (!success)
+    {
+        string8_print(S8("Error reading file: {EOs}\n"), os_get_last_error());
+    }
+
     return result;
 }
 
@@ -670,21 +660,7 @@ BUSTER_IMPL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringO
         }
         else
         {
-            string8_print(S8("Error creating a process: {SOsL}\n"), argv);
-            let error = GetLastError();
-
-            CharOs buffer[4096];
-            DWORD length = FormatMessageW(
-                    FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                    NULL,
-                    error,
-                    MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                    buffer,
-                    BUSTER_ARRAY_LENGTH(buffer),
-                    NULL
-                    );
-            // TODO: delete?
-            WriteConsoleW(GetStdHandle(STD_OUTPUT_HANDLE), buffer, length, 0, 0);
+            string8_print(S8("Error creating a process: {EOs}\n{SOsL}\n"), os_get_last_error(), argv);
         }
     }
 
@@ -914,29 +890,37 @@ BUSTER_IMPL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnRes
     return result;
 }
 
-BUSTER_IMPL StringOs get_last_error_message(Arena* arena)
+BUSTER_IMPL OsError os_get_last_error()
 {
+    OsError result = {};
 #if defined(_WIN32)
-    CharOs buffer[4096];
-    let error = GetLastError();
-
-    DWORD length = FormatMessageW(
-            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            NULL,
-            error,
-            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            buffer,
-            BUSTER_ARRAY_LENGTH(buffer),
-            NULL
-            );
-    let error_string_stack = string_os_from_pointer_length(buffer, length);
-    let error_string = string_os_duplicate_arena(arena, error_string_stack, true);
+    result.v = GetLastError();
 #else
-    let error_string_pointer = strerror(errno);
-    let error_string = string8_from_pointer(error_string_pointer);
-    BUSTER_UNUSED(arena);
+    let error = errno;
+    static_assert(sizeof(result.v) == sizeof(error));
+    result.v = (typeof(result.v))error;
 #endif
-    return error_string;
+    return result;
+}
+
+BUSTER_IMPL StringOs os_error_write_message(StringOs string, OsError error)
+{
+    BUSTER_CHECK(string.length == BUSTER_OS_ERROR_BUFFER_MAX_LENGTH);
+    StringOs result = {};
+#if defined(_WIN32)
+    let length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)error.v, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), string.pointer, string.length > ~(DWORD)0 ? ~(DWORD)0 : (DWORD)string.length, 0);
+    if (length != 0)
+    {
+        result = string_os_from_pointer_length(string.pointer, length - 1);
+    }
+#else
+    let error_raw_string = strerror((int)error.v);
+    let error_string = string8_from_pointer(error_raw_string);
+    result = string;
+    memcpy(result.pointer, error_string.pointer, BUSTER_SLICE_SIZE(error_string));
+    result.length = error_string.length;
+#endif
+    return result;
 }
 
 BUSTER_IMPL StringOs os_get_environment_variable(StringOs variable)

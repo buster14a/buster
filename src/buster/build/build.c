@@ -1026,7 +1026,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
     }
     else
     {
-        string8_print(S8("Error writing compile commands: {SOs}"), get_last_error_message(general_arena));
+        string8_print(S8("Error writing compile commands: {EOs}"), os_get_last_error());
     }
 
     return result;

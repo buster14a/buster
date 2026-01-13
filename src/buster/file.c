@@ -72,9 +72,7 @@ BUSTER_IMPL bool file_copy(CopyFileArguments arguments)
         }
         else
         {
-            string8_print(S8("Error message: {SOs}\n"), get_last_error_message(arena_create((ArenaInitialization){})));
-            string8_print(S8("Original: {SOs}\n"), arguments.original_path);
-            string8_print(S8("New: {SOs}\n"), arguments.new_path);
+            string8_print(S8("Error message: {EOs}. Original: {SOs}. New: {SOs}\n"), os_get_last_error(), arguments.original_path, arguments.new_path);
             os_fail();
         }
     }
