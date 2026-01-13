@@ -790,7 +790,7 @@ BUSTER_IMPL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringO
 
     if (program_state->input.verbose)
     {
-        string8_print(S8("Launched: "));
+        string8_print(result.handle ? S8("Launched: ") : S8("Failed to launch: "));
 
         let list = string_os_list_iterator_initialize(argv);
         for (let a = string_os_list_iterator_next(&list); a.pointer; a = string_os_list_iterator_next(&list))
