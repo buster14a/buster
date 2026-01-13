@@ -979,7 +979,10 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
 
                     u64 fuzz_max_length = 4096;
                     let length_argument = string_os_format_arena(general_arena, SOs("-max_len={u64}"), fuzz_max_length);
-                    let max_total_time_argument = string_os_format_arena(general_arena, SOs("-max_total_time={u64}"), configuration->fuzz_time_seconds);
+                    let fuzz_time_seconds = configuration->fuzz_time_seconds;
+                    // Override momentarily since the fuzzing is a no-op for now
+                    fuzz_time_seconds = 1;
+                    let max_total_time_argument = string_os_format_arena(general_arena, SOs("-max_total_time={u64}"), fuzz_time_seconds);
 
                     // Skip builder executable since we execute the tests ourselves
                     for (u64 link_unit_i = 0; link_unit_i < link_unit_count; link_unit_i += 1)
