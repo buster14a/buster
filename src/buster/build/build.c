@@ -386,12 +386,14 @@ BUSTER_GLOBAL_LOCAL bool unit_test_succeeded(UnitTestResult result)
     return result.succeeded_test_count == result.test_count;
 }
 
+#if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL UnitTestResult builder_tests(TestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {};
     return result;
 }
+#endif
 
 ENUM(BatchArena,
     BATCH_ARENA_GENERAL,
@@ -806,6 +808,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 .unity_build = configuration->unity_build,
                 .use_io_ring = unit->use_io_ring,
                 .just_preprocessor = configuration->just_preprocessor,
+                .include_tests = 1,
                 .compile = 1,
                 .link = configuration->unity_build,
             };
@@ -932,6 +935,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                     .unity_build = configuration->unity_build,
                     .use_io_ring = link_unit_specification->use_io_ring,
                     .just_preprocessor = configuration->just_preprocessor,
+                    .include_tests = 1,
                     .compile = configuration->unity_build,
                     .link = 1,
                 };
@@ -961,6 +965,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 // TODO: fill
                 break; case BUILD_COMMAND_TEST_ALL: case BUILD_COMMAND_TEST:
                 {
+#if BUSTER_INCLUDE_TESTS
                     TestArguments arguments = {
                         .arena = general_arena,
                     };
@@ -1010,6 +1015,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                             string8_print(S8("FAILED to run the following executable: {SOsL}\n"), specification->run_arguments);
                         }
                     }
+#endif
                 }
                 break; case BUILD_COMMAND_DEBUG: {}
             }

@@ -188,6 +188,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             .unity_build = 1,
             .use_io_ring = 0,
             .just_preprocessor = 0,
+            .include_tests = 1,
             .compile = 1,
             .link = 1,
         };
