@@ -693,6 +693,11 @@ BUSTER_IMPL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringO
         if (options.capture & (1 << stream) && pipe_creation_results[stream])
         {
             CloseHandle(result.pipes[stream][1]);
+
+            if (!result.handle)
+            {
+                CloseHandle(result.pipes[stream][0]);
+            }
         }
     }
 #else
@@ -764,6 +769,11 @@ BUSTER_IMPL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringO
         if (options.capture & (1 << stream) && pipe_creation_results[stream])
         {
             close(pipes[stream][1]);
+
+            if (pid == -1)
+            {
+                close(pipes[stream][0]);
+            }
         }
 
         for (int i = 0; i < 2; i += 1)
