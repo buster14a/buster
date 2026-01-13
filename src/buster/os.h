@@ -121,7 +121,15 @@ STRUCT(ProcessWaitResult)
     u8 reserved[4];
 };
 
-BUSTER_DECL StringOs get_last_error_message(Arena* arena);
+STRUCT(OsError)
+{
+    u32 v;
+};
+
+#define BUSTER_OS_ERROR_BUFFER_MAX_LENGTH (BUSTER_KB(64))
+
+BUSTER_DECL OsError os_get_last_error();
+BUSTER_DECL StringOs os_error_write_message(StringOs string, OsError error);
 BUSTER_DECL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, StringOsList envp, ProcessSpawnOptions options);
 BUSTER_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
 BUSTER_DECL StringOs os_get_environment_variable(StringOs variable);

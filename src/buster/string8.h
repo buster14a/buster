@@ -28,3 +28,4 @@ BUSTER_DECL void string8_print(String8 format, ...);
 BUSTER_DECL String8 string8_format_arena(Arena* arena, bool null_terminate, String8 format, ...);
 BUSTER_DECL String8 string8_join_arena(Arena* arena, String8Slice strings, bool zero_terminate);
 BUSTER_DECL String8 string8_duplicate_arena(Arena* arena, String8 string, bool zero_terminate);
+BUSTER_DECL u64 string8_copy(String8 destination, String8 source);

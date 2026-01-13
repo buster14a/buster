@@ -200,3 +200,16 @@ BUSTER_IMPL String16 string16_format_arena(Arena* arena, bool null_terminate, St
 
     return result;
 }
+
+BUSTER_IMPL u64 string16_copy(String16 destination, String16 source)
+{
+    u64 result = 0;
+
+    if (source.length <= destination.length)
+    {
+        result = BUSTER_SLICE_SIZE(source);
+        memcpy(destination.pointer, source.pointer, result);
+    }
+
+    return result;
+}

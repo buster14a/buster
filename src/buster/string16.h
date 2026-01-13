@@ -30,3 +30,5 @@ BUSTER_DECL void string16_print(String16 format, ...);
 BUSTER_DECL String16 string16_format_arena(Arena* arena, bool null_terminate, String16 format, ...);
 BUSTER_DECL String16 string16_join_arena(Arena* arena, String16Slice strings, bool zero_terminate);
 BUSTER_DECL String16 string16_duplicate_arena(Arena* arena, String16 string, bool zero_terminate);
+
+BUSTER_DECL u64 string16_copy(String16 destination, String16 source);

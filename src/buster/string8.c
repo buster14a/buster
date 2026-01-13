@@ -279,39 +279,41 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
 
             let whole_format_string = string8_from_pointer_length(format_buffer, format_buffer_i);
             ENUM(FormatTypeId, 
-                    FORMAT_CHAR_OS,
-                    FORMAT_STRING_OS,
-                    FORMAT_STRING_OS_LIST,
-                    FORMAT_STRING8,
-                    FORMAT_STRING16,
-                    FORMAT_UNSIGNED_INTEGER_8,
-                    FORMAT_UNSIGNED_INTEGER_16,
-                    FORMAT_UNSIGNED_INTEGER_32,
-                    FORMAT_UNSIGNED_INTEGER_64,
-                    FORMAT_UNSIGNED_INTEGER_128,
-                    FORMAT_SIGNED_INTEGER_8,
-                    FORMAT_SIGNED_INTEGER_16,
-                    FORMAT_SIGNED_INTEGER_32,
-                    FORMAT_SIGNED_INTEGER_64,
-                    FORMAT_SIGNED_INTEGER_128,
-                    FORMAT_INTEGER_COUNT,
+                    FORMAT_TYPE_CHAR_OS,
+                    FORMAT_TYPE_STRING_OS,
+                    FORMAT_TYPE_STRING_OS_LIST,
+                    FORMAT_TYPE_STRING8,
+                    FORMAT_TYPE_STRING16,
+                    FORMAT_TYPE_UNSIGNED_INTEGER_8,
+                    FORMAT_TYPE_UNSIGNED_INTEGER_16,
+                    FORMAT_TYPE_UNSIGNED_INTEGER_32,
+                    FORMAT_TYPE_UNSIGNED_INTEGER_64,
+                    FORMAT_TYPE_UNSIGNED_INTEGER_128,
+                    FORMAT_TYPE_SIGNED_INTEGER_8,
+                    FORMAT_TYPE_SIGNED_INTEGER_16,
+                    FORMAT_TYPE_SIGNED_INTEGER_32,
+                    FORMAT_TYPE_SIGNED_INTEGER_64,
+                    FORMAT_TYPE_SIGNED_INTEGER_128,
+                    FORMAT_TYPE_OS_ERROR,
+                    FORMAT_TYPE_SPECIFIER_COUNT,
                 );
-            String8 possible_format_strings[FORMAT_INTEGER_COUNT] = {
-                [FORMAT_CHAR_OS] = S8("COs"),
-                [FORMAT_STRING_OS] = S8("SOs"),
-                [FORMAT_STRING_OS_LIST] = S8("SOsL"),
-                [FORMAT_STRING8] = S8("S8"),
-                [FORMAT_STRING16] = S8("S16"),
-                [FORMAT_UNSIGNED_INTEGER_8] = S8("u8"),
-                [FORMAT_UNSIGNED_INTEGER_16] = S8("u16"),
-                [FORMAT_UNSIGNED_INTEGER_32] = S8("u32"),
-                [FORMAT_UNSIGNED_INTEGER_64] = S8("u64"),
-                [FORMAT_UNSIGNED_INTEGER_128] = S8("u128"),
-                [FORMAT_SIGNED_INTEGER_8] = S8("s8"),
-                [FORMAT_SIGNED_INTEGER_16] = S8("s16"),
-                [FORMAT_SIGNED_INTEGER_32] = S8("s32"),
-                [FORMAT_SIGNED_INTEGER_64] = S8("s64"),
-                [FORMAT_SIGNED_INTEGER_128] = S8("s128"),
+            String8 possible_format_strings[FORMAT_TYPE_SPECIFIER_COUNT] = {
+                [FORMAT_TYPE_CHAR_OS] = S8("COs"),
+                [FORMAT_TYPE_STRING_OS] = S8("SOs"),
+                [FORMAT_TYPE_STRING_OS_LIST] = S8("SOsL"),
+                [FORMAT_TYPE_STRING8] = S8("S8"),
+                [FORMAT_TYPE_STRING16] = S8("S16"),
+                [FORMAT_TYPE_UNSIGNED_INTEGER_8] = S8("u8"),
+                [FORMAT_TYPE_UNSIGNED_INTEGER_16] = S8("u16"),
+                [FORMAT_TYPE_UNSIGNED_INTEGER_32] = S8("u32"),
+                [FORMAT_TYPE_UNSIGNED_INTEGER_64] = S8("u64"),
+                [FORMAT_TYPE_UNSIGNED_INTEGER_128] = S8("u128"),
+                [FORMAT_TYPE_SIGNED_INTEGER_8] = S8("s8"),
+                [FORMAT_TYPE_SIGNED_INTEGER_16] = S8("s16"),
+                [FORMAT_TYPE_SIGNED_INTEGER_32] = S8("s32"),
+                [FORMAT_TYPE_SIGNED_INTEGER_64] = S8("s64"),
+                [FORMAT_TYPE_SIGNED_INTEGER_128] = S8("s128"),
+                [FORMAT_TYPE_OS_ERROR] = S8("EOs"),
             };
 
             let first_format = string_first_code_point(whole_format_string, ':');
@@ -544,7 +546,7 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
 
             switch (format_type_id)
             {
-                break; case FORMAT_STRING_OS_LIST:
+                break; case FORMAT_TYPE_STRING_OS_LIST:
                 {
                     let string_os_list = va_arg(variable_arguments, StringOsList);
                     let it = string_os_list_iterator_initialize(string_os_list);
@@ -583,7 +585,7 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
 
                     result.needed_code_unit_count += full_length;
                 }
-                break; case FORMAT_STRING_OS:
+                break; case FORMAT_TYPE_STRING_OS:
                 {
                     // TODO:
                     let string = va_arg(variable_arguments, StringOs);
@@ -602,7 +604,7 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
 
                     result.needed_code_unit_count += string.length;
                 }
-                break; case FORMAT_CHAR_OS:
+                break; case FORMAT_TYPE_CHAR_OS:
                 {
                     // TODO:
                     let os_char = (CharOs)va_arg(variable_arguments, u32);
@@ -615,7 +617,7 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
 
                     result.needed_code_unit_count += 1;
                 }
-                break; case FORMAT_STRING8:
+                break; case FORMAT_TYPE_STRING8:
                 {
                     let string = va_arg(variable_arguments, String8);
                     written = result.real_buffer_index + string.length <= buffer_slice.length;
@@ -627,7 +629,7 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
 
                     result.needed_code_unit_count += string.length;
                 }
-                break; case FORMAT_STRING16:
+                break; case FORMAT_TYPE_STRING16:
                 {
                     // TODO:
                     let string = va_arg(variable_arguments, String16);
@@ -644,7 +646,7 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
 
                     result.needed_code_unit_count += string.length;
                 }
-                break; case FORMAT_UNSIGNED_INTEGER_8: case FORMAT_UNSIGNED_INTEGER_16: case FORMAT_UNSIGNED_INTEGER_32: case FORMAT_UNSIGNED_INTEGER_64:
+                break; case FORMAT_TYPE_UNSIGNED_INTEGER_8: case FORMAT_TYPE_UNSIGNED_INTEGER_16: case FORMAT_TYPE_UNSIGNED_INTEGER_32: case FORMAT_TYPE_UNSIGNED_INTEGER_64:
                 {
                     u8 prefix_buffer[2] = {};
                     prefix = prefix && format_kind != FORMAT_KIND_COUNT;
@@ -676,22 +678,22 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
                     u64 value_size;
                     switch (format_type_id)
                     {
-                        break; case FORMAT_UNSIGNED_INTEGER_8:
+                        break; case FORMAT_TYPE_UNSIGNED_INTEGER_8:
                         {
                             value = (u8)(va_arg(variable_arguments, u32) & UINT8_MAX);
                             value_size = sizeof(u8);
                         }
-                        break; case FORMAT_UNSIGNED_INTEGER_16:
+                        break; case FORMAT_TYPE_UNSIGNED_INTEGER_16:
                         {
                             value = (u16)(va_arg(variable_arguments, u32) & UINT16_MAX);
                             value_size = sizeof(u16);
                         }
-                        break; case FORMAT_UNSIGNED_INTEGER_32:
+                        break; case FORMAT_TYPE_UNSIGNED_INTEGER_32:
                         {
                             value = va_arg(variable_arguments, u32);
                             value_size = sizeof(u32);
                         }
-                        break; case FORMAT_UNSIGNED_INTEGER_64:
+                        break; case FORMAT_TYPE_UNSIGNED_INTEGER_64:
                         {
                             value = va_arg(variable_arguments, u64);
                             value_size = sizeof(u64);
@@ -727,10 +729,10 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
                             prefix_second_character = 'd';
                             switch (format_type_id)
                             {
-                                break; case FORMAT_UNSIGNED_INTEGER_8: integer_max_width = 3;
-                                break; case FORMAT_UNSIGNED_INTEGER_16: integer_max_width = 5;
-                                break; case FORMAT_UNSIGNED_INTEGER_32: integer_max_width = 10;
-                                break; case FORMAT_UNSIGNED_INTEGER_64: integer_max_width = 20;
+                                break; case FORMAT_TYPE_UNSIGNED_INTEGER_8: integer_max_width = 3;
+                                break; case FORMAT_TYPE_UNSIGNED_INTEGER_16: integer_max_width = 5;
+                                break; case FORMAT_TYPE_UNSIGNED_INTEGER_32: integer_max_width = 10;
+                                break; case FORMAT_TYPE_UNSIGNED_INTEGER_64: integer_max_width = 20;
                                 break; default: BUSTER_UNREACHABLE();
                             }
                             digit_group_character_count = 3;
@@ -746,10 +748,10 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
                             prefix_second_character = 'o';
                             switch (format_type_id)
                             {
-                                break; case FORMAT_UNSIGNED_INTEGER_8: integer_max_width = 3;
-                                break; case FORMAT_UNSIGNED_INTEGER_16: integer_max_width = 6;
-                                break; case FORMAT_UNSIGNED_INTEGER_32: integer_max_width = 11;
-                                break; case FORMAT_UNSIGNED_INTEGER_64: integer_max_width = 22;
+                                break; case FORMAT_TYPE_UNSIGNED_INTEGER_8: integer_max_width = 3;
+                                break; case FORMAT_TYPE_UNSIGNED_INTEGER_16: integer_max_width = 6;
+                                break; case FORMAT_TYPE_UNSIGNED_INTEGER_32: integer_max_width = 11;
+                                break; case FORMAT_TYPE_UNSIGNED_INTEGER_64: integer_max_width = 22;
                                 break; default: BUSTER_UNREACHABLE();
                             }
                             digit_group_character_count = 3;
@@ -822,7 +824,7 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
 
                     result.needed_code_unit_count += character_to_write_count;
                 }
-                break; case FORMAT_SIGNED_INTEGER_8: case FORMAT_SIGNED_INTEGER_16: case FORMAT_SIGNED_INTEGER_32: case FORMAT_SIGNED_INTEGER_64:
+                break; case FORMAT_TYPE_SIGNED_INTEGER_8: case FORMAT_TYPE_SIGNED_INTEGER_16: case FORMAT_TYPE_SIGNED_INTEGER_32: case FORMAT_TYPE_SIGNED_INTEGER_64:
                 {
                     if (format_kind == FORMAT_KIND_COUNT)
                     {
@@ -832,10 +834,10 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
                     s64 value;
                     switch (format_type_id)
                     {
-                        break; case FORMAT_SIGNED_INTEGER_8: value = (s8)(va_arg(variable_arguments, s32) & INT8_MAX);
-                        break; case FORMAT_SIGNED_INTEGER_16: value = (s16)(va_arg(variable_arguments, s32) & INT16_MAX);
-                        break; case FORMAT_SIGNED_INTEGER_32: value = va_arg(variable_arguments, s32);
-                        break; case FORMAT_SIGNED_INTEGER_64: value = va_arg(variable_arguments, s64);
+                        break; case FORMAT_TYPE_SIGNED_INTEGER_8: value = (s8)(va_arg(variable_arguments, s32) & INT8_MAX);
+                        break; case FORMAT_TYPE_SIGNED_INTEGER_16: value = (s16)(va_arg(variable_arguments, s32) & INT16_MAX);
+                        break; case FORMAT_TYPE_SIGNED_INTEGER_32: value = va_arg(variable_arguments, s32);
+                        break; case FORMAT_TYPE_SIGNED_INTEGER_64: value = va_arg(variable_arguments, s64);
                         break; default: BUSTER_UNREACHABLE();
                     }
 
@@ -862,15 +864,38 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
 
                     result.needed_code_unit_count += format_result.length;
                 }
-                break; case FORMAT_UNSIGNED_INTEGER_128:
+                break; case FORMAT_TYPE_UNSIGNED_INTEGER_128:
                 {
                     // TODO:
                 }
-                break; case FORMAT_SIGNED_INTEGER_128:
+                break; case FORMAT_TYPE_SIGNED_INTEGER_128:
                 {
                     // TODO:
                 }
-                break; case FORMAT_INTEGER_COUNT:
+                break; case FORMAT_TYPE_OS_ERROR:
+                {
+                    let os_error = va_arg(variable_arguments, OsError);
+                    CharOs error_buffer[BUSTER_OS_ERROR_BUFFER_MAX_LENGTH];
+                    let error_string = os_error_write_message(BUSTER_ARRAY_TO_SLICE(StringOs, error_buffer), os_error);
+
+                    written = result.real_buffer_index + error_string.length <= buffer_slice.length;
+
+                    if (written)
+                    {
+#if defined(_WIN32)
+                        for (u64 error_i = 0; error_i < error_string.length; error_i += 1)
+                        {
+                            buffer_slice.pointer[result.real_buffer_index + error_i] = (char8)error_string.pointer[error_i];
+                        }
+#else
+                        memcpy(buffer_slice.pointer + result.real_buffer_index, error_string.pointer, BUSTER_SLICE_SIZE(error_string));
+#endif
+                        result.real_buffer_index += error_string.length;
+                    }
+
+                    result.needed_code_unit_count += error_string.length;
+                }
+                break; case FORMAT_TYPE_SPECIFIER_COUNT:
                 {
                     if (result.real_buffer_index < buffer_slice.length)
                     {
@@ -1017,4 +1042,17 @@ BUSTER_IMPL String8 string8_join_arena(Arena* arena, String8Slice strings, bool 
     }
 
     return (String8){pointer, length};
+}
+
+BUSTER_IMPL u64 string8_copy(String8 destination, String8 source)
+{
+    u64 result = 0;
+
+    if (source.length <= destination.length)
+    {
+        result = BUSTER_SLICE_SIZE(source);
+        memcpy(destination.pointer, source.pointer, result);
+    }
+
+    return result;
 }
