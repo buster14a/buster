@@ -54,6 +54,7 @@ source build.sh
 BUSTER_GLOBAL_LOCAL __attribute__((used)) StringOs toolchain_path = {};
 BUSTER_GLOBAL_LOCAL StringOs clang_path = {};
 BUSTER_GLOBAL_LOCAL __attribute__((used)) StringOs xc_sdk_path = {};
+BUSTER_GLOBAL_LOCAL bool is_stderr_tty = true;
 
 #define BUSTER_TODO() print(S8("TODO\n")); fail()
 
@@ -809,6 +810,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 .use_io_ring = unit->use_io_ring,
                 .just_preprocessor = configuration->just_preprocessor,
                 .include_tests = 1,
+                .force_color = is_stderr_tty,
                 .compile = 1,
                 .link = configuration->unity_build,
             };
@@ -878,17 +880,32 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
             for (u64 unit_i = 0; unit_i < selected_compilation_count; unit_i += 1)
             {
                 let unit = &selected_compilation_units[unit_i];
-                unit->compile_spawn = os_process_spawn(unit->compiler, unit->compilation_arguments, program_state->input.envp, (ProcessSpawnOptions){});
+                unit->compile_spawn = os_process_spawn(unit->compiler, unit->compilation_arguments, program_state->input.envp, (ProcessSpawnOptions){ .capture = (1 << STANDARD_STREAM_OUTPUT) | (1 << STANDARD_STREAM_ERROR) });
             }
 
             for (u64 unit_i = 0; unit_i < selected_compilation_count; unit_i += 1)
             {
                 let unit = &selected_compilation_units[unit_i];
                 let unit_compilation_result = os_process_wait_sync(general_arena, unit->compile_spawn);
+
+                for (StandardStream stream = STANDARD_STREAM_OUTPUT; stream < STANDARD_STREAM_COUNT; stream += 1)
+                {
+                    let standard_stream = unit_compilation_result.streams[stream];
+                    if (standard_stream.length)
+                    {
+                        let stream_string = string8_from_pointer_length((char8*)standard_stream.pointer, standard_stream.length);
+                        string8_print(S8("{SOs} stream {u8}:\n{S8}"), unit->object_path, stream, stream_string);
+                    }
+                }
+
                 if (unit_compilation_result.result != PROCESS_RESULT_SUCCESS)
                 {
-                    string8_print(S8("FAILED to run the following compiling process: {SOsL}\n"), unit->compilation_arguments);
                     result.process = unit_compilation_result.result;
+
+                    if (program_state->input.verbose)
+                    {
+                        string8_print(S8("FAILED to run the following compiling process: {SOsL}\n"), unit->compilation_arguments);
+                    }
                 }
             }
         }
@@ -936,6 +953,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                     .use_io_ring = link_unit_specification->use_io_ring,
                     .just_preprocessor = configuration->just_preprocessor,
                     .include_tests = 1,
+                    .force_color = is_stderr_tty,
                     .compile = configuration->unity_build,
                     .link = 1,
                 };
@@ -948,10 +966,25 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
             {
                 let link_unit = &specifications[link_unit_i];
                 let link_result = os_process_wait_sync(general_arena, link_unit->link_spawn);
+
+                for (StandardStream stream = STANDARD_STREAM_OUTPUT; stream < STANDARD_STREAM_COUNT; stream += 1)
+                {
+                    let standard_stream = link_result.streams[stream];
+                    if (standard_stream.length)
+                    {
+                        let stream_string = string8_from_pointer_length((char8*)standard_stream.pointer, standard_stream.length);
+                        string8_print(S8("{SOs} stream {u8}:\n{S8}"), link_unit->artifact_path, stream, stream_string);
+                    }
+                }
+
                 if (link_result.result != PROCESS_RESULT_SUCCESS)
                 {
-                    string8_print(S8("FAILED to run the following linking process: {SOsL}\n"), link_unit->link_arguments);
                     result.process = link_result.result;
+
+                    if (program_state->input.verbose)
+                    {
+                        string8_print(S8("FAILED to run the following linking process: {SOsL}\n"), link_unit->link_arguments);
+                    }
                 }
             }
         }
@@ -1004,18 +1037,32 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                         let os_argument_slice = link_unit_specification->fuzz ? BUSTER_ARRAY_TO_SLICE(StringOsSlice, fuzz_arguments) : BUSTER_ARRAY_TO_SLICE(StringOsSlice, test_arguments);
                         let os_arguments = string_os_list_create_from(general_arena, os_argument_slice);
                         link_unit_specification->run_arguments = os_arguments;
-                        link_unit_specification->run_spawn = os_process_spawn(first_argument, os_arguments, program_state->input.envp, (ProcessSpawnOptions){});
+                        link_unit_specification->run_spawn = os_process_spawn(first_argument, os_arguments, program_state->input.envp, (ProcessSpawnOptions){ (1 << STANDARD_STREAM_OUTPUT) | (1 << STANDARD_STREAM_ERROR) });
                     }
 
                     for (u64 link_unit_i = 0; link_unit_i < link_unit_count; link_unit_i += 1)
                     {
                         let link_unit = &specifications[link_unit_i];
                         let test_result = os_process_wait_sync(general_arena, link_unit->run_spawn);
+
+                        for (StandardStream stream = STANDARD_STREAM_OUTPUT; stream < STANDARD_STREAM_COUNT; stream += 1)
+                        {
+                            let standard_stream = test_result.streams[stream];
+                            if (standard_stream.length)
+                            {
+                                let stream_string = string8_from_pointer_length((char8*)standard_stream.pointer, standard_stream.length);
+                                string8_print(S8("{SOs} running stream {u8}:\n{S8}"), link_unit->artifact_path, stream, stream_string);
+                            }
+                        }
+
                         consume_external_tests(&result, test_result.result);
                         if (test_result.result != PROCESS_RESULT_SUCCESS)
                         {
                             let specification = &specifications[link_unit_i];
-                            string8_print(S8("FAILED to run the following executable: {SOsL}\n"), specification->run_arguments);
+                            if (program_state->input.verbose)
+                            {
+                                string8_print(S8("FAILED to run the following executable: {SOsL}\n"), specification->run_arguments);
+                            }
                         }
                     }
 #endif
@@ -1044,6 +1091,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     let toolchain_information = toolchain_get_information(arenas[BATCH_ARENA_GENERAL], current_llvm_version);
     clang_path = toolchain_information.clang_path;
     toolchain_path = toolchain_information.prefix_path;
+    is_stderr_tty = os_is_tty(os_get_standard_stream(STANDARD_STREAM_ERROR));
 
 #if defined(_WIN32)
 #if defined(__x86_64__)

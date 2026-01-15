@@ -152,7 +152,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             0,
         };
         let xc_process = os_process_spawn(xc_first_argument, xc_sdk_path_process_argv, program_state->input.envp, (ProcessSpawnOptions){
-            .capture = 1 << STANDARD_STREAM_OUT,
+            .capture = 1 << STANDARD_STREAM_OUTPUT,
         });
 
         if (xc_process.handle)
@@ -160,7 +160,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             let xc_process_result = os_process_wait_sync(arena, xc_process);
             if (xc_process_result.result == PROCESS_RESULT_SUCCESS)
             {
-                xc_sdk_path = BYTE_SLICE_TO_STRING(8, xc_process_result.streams[STANDARD_STREAM_OUT]);
+                xc_sdk_path = BYTE_SLICE_TO_STRING(8, xc_process_result.streams[STANDARD_STREAM_OUTPUT]);
                 // There's a line feed character before the null terminator
                 xc_sdk_path.length -= 1;
                 xc_sdk_path.pointer[xc_sdk_path.length] = 0;
@@ -214,7 +214,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
 #endif
             };
             let build_arguments = string_os_list_duplicate_and_substitute_first_argument(arena, program_state->input.argv, build_executable, BUSTER_ARRAY_TO_SLICE(StringOsSlice, extra_arguments));
-            let build_process = os_process_spawn(build_executable, build_arguments, program_state->input.envp, (ProcessSpawnOptions){});
+            let build_process = os_process_spawn(build_executable, build_arguments, program_state->input.envp, (ProcessSpawnOptions){ .capture = 0 });
             if (build_process.handle)
             {
                 let build_process_result = os_process_wait_sync(arena, build_process);

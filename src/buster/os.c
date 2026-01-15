@@ -241,11 +241,33 @@ BUSTER_GLOBAL_LOCAL bool os_unreserve(void* address, u64 size)
     return result;
 }
 
+BUSTER_IMPL FileDescriptor* os_get_standard_stream(StandardStream stream)
+{
+    FileDescriptor* result = {};
+#if defined(__linux__) || defined(__APPLE__)
+    int fds[] = {
+        [STANDARD_STREAM_INPUT] = STDIN_FILENO,
+        [STANDARD_STREAM_OUTPUT] = STDOUT_FILENO,
+        [STANDARD_STREAM_ERROR] = STDERR_FILENO,
+    };
+    static_assert(BUSTER_ARRAY_LENGTH(fds) == STANDARD_STREAM_COUNT);
+    result = posix_fd_to_generic_fd(fds[stream]);
+#elif defined(_WIN32)
+    DWORD descriptors[] = {
+        [STANDARD_STREAM_INPUT] = STD_INPUT_HANDLE,
+        [STANDARD_STREAM_OUTPUT] = STD_OUTPUT_HANDLE,
+        [STANDARD_STREAM_ERROR] = STD_ERROR_HANDLE,
+    };
+    result = (FileDescriptor*)GetStdHandle(descriptors[stream]);
+#endif
+    return result;
+}
+
 BUSTER_IMPL FileDescriptor* os_get_stdout()
 {
     FileDescriptor* result = {};
 #if defined(__linux__) || defined(__APPLE__)
-    result = posix_fd_to_generic_fd(1);
+    result = posix_fd_to_generic_fd(STDOUT_FILENO);
 #elif defined(_WIN32)
     result = (FileDescriptor*)GetStdHandle(STD_OUTPUT_HANDLE);
 #endif
@@ -649,8 +671,8 @@ BUSTER_IMPL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringO
         if (any_capture)
         {
             startup_info.dwFlags |= STARTF_USESTDHANDLES;
-            startup_info.hStdInput = options.capture & (1 << STANDARD_STREAM_IN) ? result.pipes[STANDARD_STREAM_IN][1] : GetStdHandle(STD_INPUT_HANDLE);
-            startup_info.hStdOutput = options.capture & (1 << STANDARD_STREAM_OUT) ? result.pipes[STANDARD_STREAM_OUT][1] : GetStdHandle(STD_OUTPUT_HANDLE);
+            startup_info.hStdInput = options.capture & (1 << STANDARD_STREAM_INPUT) ? result.pipes[STANDARD_STREAM_INPUT][1] : GetStdHandle(STD_INPUT_HANDLE);
+            startup_info.hStdOutput = options.capture & (1 << STANDARD_STREAM_OUTPUT) ? result.pipes[STANDARD_STREAM_OUTPUT][1] : GetStdHandle(STD_OUTPUT_HANDLE);
             startup_info.hStdError = options.capture & (1 << STANDARD_STREAM_ERROR) ? result.pipes[STANDARD_STREAM_ERROR][1] : GetStdHandle(STD_ERROR_HANDLE);
         }
 
@@ -704,14 +726,7 @@ BUSTER_IMPL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringO
                     pipe_result = false;
                 }
 
-                int fd;
-                switch (stream)
-                {
-                    break; case STANDARD_STREAM_IN: fd = STDIN_FILENO;
-                    break; case STANDARD_STREAM_OUT: fd = STDOUT_FILENO;
-                    break; case STANDARD_STREAM_ERROR: fd = STDERR_FILENO;
-                    break; case STANDARD_STREAM_COUNT: BUSTER_UNREACHABLE();
-                }
+                let fd = generic_fd_to_posix(os_get_standard_stream(stream));
 
                 if (posix_spawn_file_actions_adddup2(&file_actions, pipes[stream][1], fd) != 0)
                 {
@@ -967,3 +982,16 @@ BUSTER_IMPL u64 os_file_get_size(FileDescriptor* file_descriptor)
 #endif
 }
 
+BUSTER_IMPL bool os_is_tty(FileDescriptor* file)
+{
+    bool result = false;
+#if defined(_WIN32)
+    DWORD mode;
+    let handle = (HANDLE)file;
+    result = GetConsoleMode(handle, &mode) != 0;
+#else
+    let fd = generic_fd_to_posix(file);
+    result = isatty(fd);
+#endif
+    return result;
+}
