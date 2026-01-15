@@ -116,7 +116,6 @@ BUSTER_GLOBAL_LOCAL StringOs std_flags[] = {
     SOs("-std=gnu2x"),
 };
 
-
 BUSTER_IMPL StringOsList build_compile_link_arguments(Arena* arena, const CompileLinkOptions * const restrict options)
 {
     // Forced to do it so early because we would need another arena here otherwise (since arena is used for the argument builder)
@@ -127,6 +126,15 @@ BUSTER_IMPL StringOsList build_compile_link_arguments(Arena* arena, const Compil
     if (options->just_preprocessor)
     {
         string_os_list_builder_append(builder, SOs("-E"));
+    }
+
+    if (options->force_color)
+    {
+        string_os_list_builder_append(builder, SOs("-fdiagnostics-color=always"));
+    }
+    else
+    {
+        string_os_list_builder_append(builder, SOs("-fdiagnostics-color=auto"));
     }
 
     string_os_list_builder_append(builder, SOs("-o"));

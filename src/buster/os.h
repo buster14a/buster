@@ -96,8 +96,8 @@ STRUCT(ThreadInitialization)
 };
 
 ENUM_T(StandardStream, u8,
-    STANDARD_STREAM_IN,
-    STANDARD_STREAM_OUT,
+    STANDARD_STREAM_INPUT,
+    STANDARD_STREAM_OUTPUT,
     STANDARD_STREAM_ERROR,
     STANDARD_STREAM_COUNT,
 );
@@ -176,6 +176,7 @@ BUSTER_DECL bool os_initialize_time();
 
 BUSTER_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
 BUSTER_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
+BUSTER_DECL bool os_is_tty(FileDescriptor* file);
 
 #if BUSTER_USE_IO_RING
 BUSTER_DECL IoRingSubmission io_ring_prepare_open(char* path, u64 user_data);

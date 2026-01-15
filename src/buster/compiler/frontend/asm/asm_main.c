@@ -34,7 +34,6 @@ STRUCT(AsmProgramState)
 };
 
 BUSTER_GLOBAL_LOCAL AsmProgramState asm_program_state = {
-
 };
 
 BUSTER_IMPL ProgramState* program_state = &asm_program_state.general_program_state;

@@ -28,9 +28,10 @@ STRUCT(CompileLinkOptions)
     u64 just_preprocessor:1;
     u64 sanitize:1;
     u64 include_tests:1;
+    u64 force_color:1;
     u64 compile:1;
     u64 link:1;
-    u64 reserved:54;
+    u64 reserved:53;
 };
 
 BUSTER_DECL BuildTarget build_target_native;
