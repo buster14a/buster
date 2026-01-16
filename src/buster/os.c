@@ -825,7 +825,11 @@ BUSTER_IMPL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnRes
 
                 if (!iteration_read_result)
                 {
-                    string8_print(S8("Failed to read from process pipe\n"));
+                    let os_error = os_get_last_error();
+                    if (os_error.v != ERROR_BROKEN_PIPE)
+                    {
+                        string8_print(S8("Failed to read from process pipe: {EOs}\n"), os_get_last_error());
+                    }
                 }
 
                 CloseHandle(read_pipe);
@@ -872,7 +876,7 @@ BUSTER_IMPL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnRes
                 
                 if (iteration_read_result < 0)
                 {
-                    string8_print(S8("Failed to read from process pipe\n"));
+                    string8_print(S8("Failed to read from process pipe: {OsE}\n"), os_get_last_error());
                 }
 
                 close(read_pipe);

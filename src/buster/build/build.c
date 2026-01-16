@@ -583,14 +583,14 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
     if (!configuration->unity_build)
     {
         let cache_manifest = os_file_open(SOs("build/cache_manifest"), (OpenFlags) { .read = 1 }, (OpenPermissions){});
-        let cache_manifest_stats = os_file_get_stats(cache_manifest, (FileStatsOptions){ .size = 1, .modified_time = 1 });
-        let cache_manifest_buffer = (u8*)arena_allocate_bytes(thread_arena(), cache_manifest_stats.size, 64);
-        os_file_read(cache_manifest, (ByteSlice){ cache_manifest_buffer, cache_manifest_stats.size }, cache_manifest_stats.size);
-        os_file_close(cache_manifest);
-        let cache_manifest_hash = hash_file(cache_manifest_buffer, cache_manifest_stats.size);
-        BUSTER_UNUSED(cache_manifest_hash);
         if (cache_manifest)
         {
+            let cache_manifest_stats = os_file_get_stats(cache_manifest, (FileStatsOptions){ .size = 1, .modified_time = 1 });
+            let cache_manifest_buffer = (u8*)arena_allocate_bytes(thread_arena(), cache_manifest_stats.size, 64);
+            os_file_read(cache_manifest, (ByteSlice){ cache_manifest_buffer, cache_manifest_stats.size }, cache_manifest_stats.size);
+            os_file_close(cache_manifest);
+            let cache_manifest_hash = hash_file(cache_manifest_buffer, cache_manifest_stats.size);
+            BUSTER_UNUSED(cache_manifest_hash);
             string8_print(S8("TODO: Cache manifest found!\n"));
             os_fail();
         }
@@ -959,7 +959,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 };
                 let link_arguments = build_compile_link_arguments(general_arena, &options);
                 link_unit_specification->link_arguments = link_arguments;
-                link_unit_specification->link_spawn = os_process_spawn(clang_path, link_arguments, program_state->input.envp, (ProcessSpawnOptions){});
+                link_unit_specification->link_spawn = os_process_spawn(clang_path, link_arguments, program_state->input.envp, (ProcessSpawnOptions){ .capture = (1 << STANDARD_STREAM_OUTPUT) | (1 << STANDARD_STREAM_ERROR) });
             }
 
             for (u64 link_unit_i = 0; link_unit_i < link_unit_count; link_unit_i += 1)
