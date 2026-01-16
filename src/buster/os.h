@@ -8,7 +8,6 @@ ENUM(ThreadSpawnPolicy,
     THREAD_SPAWN_POLICY_SATURATE_PHYSICAL_CORES,
 );
 
-
 STRUCT(ProtectionFlags)
 {
     u64 read:1;
@@ -176,7 +175,11 @@ BUSTER_DECL bool os_initialize_time();
 
 BUSTER_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
 BUSTER_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
+BUSTER_IMPL bool os_unreserve(void* address, u64 size);
+
 BUSTER_DECL bool os_is_tty(FileDescriptor* file);
+
+[[gnu::cold]] BUSTER_DECL bool is_debugger_present();
 
 #if BUSTER_USE_IO_RING
 BUSTER_DECL IoRingSubmission io_ring_prepare_open(char* path, u64 user_data);

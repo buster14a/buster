@@ -5,6 +5,7 @@ source build.sh
 
 #pragma once
 
+#define BUSTER_INCLUDE_TESTS 1
 #define BUSTER_USE_PADDING 0
 
 #include <buster/base.h>
@@ -49,6 +50,9 @@ source build.sh
 #include <buster/entry_point.c>
 #include <buster/path.c>
 #include <buster/file.c>
+#if BUSTER_INCLUDE_TESTS
+#include <buster/test.c>
+#endif
 #endif
 
 BUSTER_GLOBAL_LOCAL __attribute__((used)) StringOs toolchain_path = {};
@@ -265,6 +269,7 @@ BUSTER_GLOBAL_LOCAL LinkModule cc_modules[] = {
     { .id = MODULE_STRING_COMMON },
     { .id = MODULE_STRING8 },
     { .id = string_native_module },
+    { .id = MODULE_TEST },
 };
 
 BUSTER_GLOBAL_LOCAL LinkModule asm_modules[] = {
@@ -283,6 +288,7 @@ BUSTER_GLOBAL_LOCAL LinkModule asm_modules[] = {
     { .id = MODULE_STRING_COMMON },
     { .id = MODULE_STRING8 },
     { .id = string_native_module },
+    { .id = MODULE_TEST },
 };
 
 BUSTER_GLOBAL_LOCAL u128 hash_file(u8* pointer, u64 length)
@@ -376,19 +382,8 @@ BUSTER_GLOBAL_LOCAL bool target_equal(BuildTarget* a, BuildTarget* b)
     return result;
 }
 
-STRUCT(UnitTestResult)
-{
-    u64 succeeded_test_count;
-    u64 test_count;
-};
-
-BUSTER_GLOBAL_LOCAL bool unit_test_succeeded(UnitTestResult result)
-{
-    return result.succeeded_test_count == result.test_count;
-}
-
 #if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL UnitTestResult builder_tests(TestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult builder_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {};
@@ -416,32 +411,6 @@ STRUCT(BatchTestConfiguration)
     u64 just_preprocessor:1;
     u64 reserved:58;
 };
-
-STRUCT(BatchTestResult)
-{
-    u64 succeeded_unit_test_count;
-    u64 unit_test_count;
-    u64 succeeded_module_test_count;
-    u64 module_test_count;
-    u64 external_test_count;
-    u64 succeeded_external_test_count;
-    ProcessResult process;
-    u8 reserved[4];
-};
-
-BUSTER_GLOBAL_LOCAL void consume_unit_tests(BatchTestResult* batch, UnitTestResult unit_test)
-{
-    batch->succeeded_unit_test_count += unit_test.succeeded_test_count;
-    batch->unit_test_count += unit_test.test_count;
-    batch->succeeded_module_test_count += unit_test_succeeded(unit_test);
-    batch->module_test_count += 1;
-}
-
-BUSTER_GLOBAL_LOCAL void consume_external_tests(BatchTestResult* batch, ProcessResult result)
-{
-    batch->succeeded_external_test_count += result == PROCESS_RESULT_SUCCESS;
-    batch->external_test_count += 1;
-}
 
 BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* const configuration)
 {
@@ -894,7 +863,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                     if (standard_stream.length)
                     {
                         let stream_string = string8_from_pointer_length((char8*)standard_stream.pointer, standard_stream.length);
-                        string8_print(S8("{SOs} stream {u8}:\n{S8}"), unit->object_path, stream, stream_string);
+                        string8_print(stream_string);
                     }
                 }
 
@@ -973,7 +942,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                     if (standard_stream.length)
                     {
                         let stream_string = string8_from_pointer_length((char8*)standard_stream.pointer, standard_stream.length);
-                        string8_print(S8("{SOs} stream {u8}:\n{S8}"), link_unit->artifact_path, stream, stream_string);
+                        string8_print(stream_string);
                     }
                 }
 
@@ -999,7 +968,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 break; case BUILD_COMMAND_TEST_ALL: case BUILD_COMMAND_TEST:
                 {
 #if BUSTER_INCLUDE_TESTS
-                    TestArguments arguments = {
+                    UnitTestArguments arguments = {
                         .arena = general_arena,
                     };
 
@@ -1051,7 +1020,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                             if (standard_stream.length)
                             {
                                 let stream_string = string8_from_pointer_length((char8*)standard_stream.pointer, standard_stream.length);
-                                string8_print(S8("{SOs} running stream {u8}:\n{S8}"), link_unit->artifact_path, stream, stream_string);
+                                string8_print(stream_string);
                             }
                         }
 

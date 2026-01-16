@@ -1,4 +1,5 @@
 #define BUSTER_PREAMBLE
+#define BUSTER_INCLUDE_TESTS 0
 #define BUSTER_UNITY_BUILD 1
 #include <buster/base.h>
 #include <buster/entry_point.h>

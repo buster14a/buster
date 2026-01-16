@@ -3,6 +3,17 @@
 #include <buster/arena.h>
 #include <buster/assertion.h>
 
+BUSTER_GLOBAL_LOCAL void string16_reverse(String16 s)
+{
+    let restrict pointer = s.pointer;
+    for (u64 i = 0, reverse_i = s.length - 1; i < reverse_i; i += 1, reverse_i -= 1)
+    {
+        let ch = pointer[i];
+        pointer[i] = pointer[reverse_i];
+        pointer[reverse_i] = ch;
+    }
+}
+
 BUSTER_IMPL u64 string16_length(const char16* s)
 {
     u64 result = 0;

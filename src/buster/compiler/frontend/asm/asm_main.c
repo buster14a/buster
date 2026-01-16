@@ -25,6 +25,7 @@
 #include <buster/os.c>
 #include <buster/arena.c>
 #include <buster/integer.c>
+#include <buster/test.c>
 #endif
 
 STRUCT(AsmProgramState)
@@ -53,7 +54,9 @@ BUSTER_IMPL ProcessResult process_arguments()
 
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
+    UnitTestArguments arguments = { thread_arena(), &default_show };
+    let result = library_tests(&arguments);
     string8_print(S8("Hello world from assembler\n"));
-    return PROCESS_RESULT_SUCCESS;
+    return batch_test_report(&arguments, result) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 #endif

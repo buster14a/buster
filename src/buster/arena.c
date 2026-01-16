@@ -92,3 +92,16 @@ BUSTER_IMPL Arena* arena_create(ArenaInitialization initialization)
 
     return (Arena*)raw_pointer;
 }
+
+BUSTER_IMPL bool arena_destroy(Arena* arena, u64 count)
+{
+    count = count == 0 ? 1 : count;
+    let reserved_size = arena->reserved_size;
+    let size = reserved_size * count;
+    return os_unreserve(arena, size);
+}
+
+BUSTER_IMPL void* arena_current_pointer(Arena* arena, u64 alignment)
+{
+    return (u8*)arena + align_forward(arena->position, alignment);
+}

@@ -4,7 +4,7 @@
 #include <buster/assertion.h>
 #include <buster/arena.h>
 
-[[gnu::cold]] BUSTER_GLOBAL_LOCAL bool is_debugger_present()
+[[gnu::cold]] BUSTER_IMPL bool is_debugger_present()
 {
     if (BUSTER_UNLIKELY(!program_state->is_debugger_present_called))
     {
@@ -221,24 +221,6 @@ BUSTER_IMPL void* os_reserve(void* base, u64 size, ProtectionFlags protection, M
     address = VirtualAlloc(base, size, allocation_flags, protection_flags);
 #endif
     return address;
-}
-
-BUSTER_GLOBAL_LOCAL bool os_unreserve(void* address, u64 size)
-{
-    bool result = 1;
-#if defined(__linux__) || defined(__APPLE__)
-    let unmap_result = munmap(address, size);
-    result = unmap_result == 0;
-#elif defined(_WIN32)
-    let virtual_free_result = VirtualFree(address, size, MEM_DECOMMIT);
-    result = virtual_free_result != 0;
-    if (result)
-    {
-        virtual_free_result = VirtualFree(address, 0, MEM_RELEASE);
-        result = virtual_free_result != 0;
-    }
-#endif
-    return result;
 }
 
 BUSTER_IMPL FileDescriptor* os_get_standard_stream(StandardStream stream)
@@ -999,3 +981,22 @@ BUSTER_IMPL bool os_is_tty(FileDescriptor* file)
 #endif
     return result;
 }
+
+BUSTER_IMPL bool os_unreserve(void* address, u64 size)
+{
+    bool result = 1;
+#if defined(__linux__) || defined(__APPLE__)
+    let unmap_result = munmap(address, size);
+    result = unmap_result == 0;
+#elif defined(_WIN32)
+    let virtual_free_result = VirtualFree(address, size, MEM_DECOMMIT);
+    result = virtual_free_result != 0;
+    if (result)
+    {
+        virtual_free_result = VirtualFree(address, 0, MEM_RELEASE);
+        result = virtual_free_result != 0;
+    }
+#endif
+    return result;
+}
+
