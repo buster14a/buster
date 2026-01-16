@@ -25,13 +25,14 @@ STRUCT(CompileLinkOptions)
     u64 has_debug_information:1;
     u64 unity_build:1;
     u64 use_io_ring:1;
+    u64 use_graphics:1;
     u64 just_preprocessor:1;
     u64 sanitize:1;
     u64 include_tests:1;
     u64 force_color:1;
     u64 compile:1;
     u64 link:1;
-    u64 reserved:53;
+    u64 reserved:52;
 };
 
 BUSTER_DECL BuildTarget build_target_native;

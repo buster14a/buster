@@ -196,13 +196,13 @@ typedef char char8_t;
 
 typedef char char8;
 static_assert(sizeof(char8) == 1);
-#if _WIN32
+#if defined(_WIN32)
 typedef wchar_t char16;
 #else
 typedef char16_t char16;
 #endif
 static_assert(sizeof(char16) == 2);
-#if _WIN32
+#if defined(_WIN32)
 typedef char32_t char32;
 #else
 typedef wchar_t char32;
@@ -261,9 +261,11 @@ STRUCT(SliceOfString16Slice)
 #define code_point_is_identifier_start(ch) (code_point_is_alpha_upper(ch) | code_point_is_alpha_lower(ch) | ((ch) == '_'))
 #define code_point_is_identifier(ch) (code_point_is_identifier_start(ch) | code_point_is_decimal(ch))
 
-typedef struct FileDescriptor FileDescriptor;
-typedef struct ProcessHandle ProcessHandle;
-typedef struct ThreadHandle ThreadHandle;
+typedef struct OsFileDescriptor OsFileDescriptor;
+typedef struct OsProcessHandle OsProcessHandle;
+typedef struct OsThreadHandle OsThreadHandle;
+typedef struct OsModule OsModule;
+typedef struct OsSymbol OsSymbol;
 
 ENUM(ProcessResult,
     PROCESS_RESULT_SUCCESS,

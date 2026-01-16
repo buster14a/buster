@@ -25,7 +25,7 @@
 #include <buster/string.c>
 #include <buster/arena.c>
 #include <buster/string_os.c>
-#if _WIN32
+#if defined(_WIN32)
 #include <buster/string16.c>
 #endif
 #include <buster/integer.c>

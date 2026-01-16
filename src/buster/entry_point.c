@@ -144,7 +144,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
 BUSTER_EXPORT int main(int argc, char* argv[], char* envp[])
 {
     BUSTER_UNUSED(argc);
-#if _WIN32
+#if defined(_WIN32)
     BUSTER_UNUSED(argv);
     BUSTER_UNUSED(envp);
     let result = buster_entry_point(GetCommandLineW(), GetEnvironmentStringsW());

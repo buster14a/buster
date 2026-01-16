@@ -35,7 +35,7 @@ source build.sh
 #include <buster/string.c>
 #include <buster/string8.c>
 #include <buster/string_os.c>
-#if _WIN32
+#if defined(_WIN32)
 #include <buster/string16.c>
 #endif
 #include <buster/integer.c>
@@ -92,6 +92,10 @@ ENUM_T(ModuleId, u64,
     MODULE_LINK,
     MODULE_LINK_JIT,
     MODULE_LINK_ELF,
+    MODULE_UI_CORE,
+    MODULE_RENDER_CORE,
+    MODULE_WINDOW,
+    MODULE_TOY_GUI,
     MODULE_COUNT,
 );
 
@@ -105,6 +109,7 @@ ENUM(DirectoryId,
     DIRECTORY_BACKEND,
     DIRECTORY_LINK,
     DIRECTORY_BUILD,
+    DIRECTORY_TOY_GUI,
     DIRECTORY_COUNT,
 );
 STRUCT(Module)
@@ -122,10 +127,11 @@ STRUCT(TargetBuildFile)
     BuildTarget* target;
     u64 has_debug_information:1;
     u64 use_io_ring:1;
+    u64 use_graphics:1;
     u64 optimize:1;
     u64 fuzz:1;
     u64 sanitize:1;
-    u64 reserved:59;
+    u64 reserved:58;
 };
 
 STRUCT(ModuleInstantiation)
@@ -199,6 +205,12 @@ BUSTER_GLOBAL_LOCAL Module modules[] = {
     [MODULE_LINK_ELF] = {
         .directory = DIRECTORY_LINK,
     },
+    [MODULE_UI_CORE] = {},
+    [MODULE_RENDER_CORE] = {},
+    [MODULE_WINDOW] = {},
+    [MODULE_TOY_GUI] = {
+        .directory = DIRECTORY_TOY_GUI,
+    },
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == MODULE_COUNT);
@@ -210,18 +222,18 @@ STRUCT(LinkUnitSpecification)
     ModuleSlice modules;
     StringOs artifact_path;
     BuildTarget* target;
-    StringOs* object_paths;
     StringOsList link_arguments;
     StringOsList run_arguments;
     ProcessSpawnResult link_spawn;
     ProcessSpawnResult run_spawn;
     u64 use_io_ring:1;
+    u64 use_graphics:1;
     u64 has_debug_information:1;
     u64 optimize:1;
     u64 fuzz:1;
     u64 sanitize:1;
     u64 is_builder:1;
-    u64 reserved:58;
+    u64 reserved:57;
 };
 
 #if defined(__x86_64__)
@@ -291,6 +303,28 @@ BUSTER_GLOBAL_LOCAL LinkModule asm_modules[] = {
     { .id = MODULE_TEST },
 };
 
+BUSTER_GLOBAL_LOCAL LinkModule toy_gui_modules[] = {
+    { .id = MODULE_TOY_GUI },
+    { .id = MODULE_BASE },
+    { .id = MODULE_ASSERTION },
+    { .id = MODULE_OS },
+    { .id = MODULE_ARENA },
+    { .id = MODULE_INTEGER },
+    { .id = MODULE_MEMORY },
+    { .id = MODULE_SYSTEM_HEADERS },
+    { .id = MODULE_ENTRY_POINT },
+    { .id = cpu_native_module },
+    { .id = MODULE_TARGET },
+    { .id = MODULE_STRING_OS },
+    { .id = MODULE_STRING_COMMON },
+    { .id = MODULE_STRING8 },
+    { .id = string_native_module },
+    { .id = MODULE_WINDOW },
+    { .id = MODULE_RENDER_CORE },
+    { .id = MODULE_UI_CORE },
+    { .id = MODULE_TEST },
+};
+
 BUSTER_GLOBAL_LOCAL u128 hash_file(u8* pointer, u64 length)
 {
     BUSTER_CHECK(((u64)pointer & (64 - 1)) == 0);
@@ -333,8 +367,9 @@ STRUCT(CompilationUnit)
     u64 fuzz:1;
     u64 sanitize:1;
     u64 use_io_ring:1;
+    u64 use_graphics:1;
     u64 include_tests:1;
-    u64 reserved:58;
+    u64 reserved:57;
 #if BUSTER_USE_PADDING
     u8 cache_padding[BUSTER_MIN(BUSTER_CACHE_LINE_GUESS - ((5 * sizeof(u64))), BUSTER_CACHE_LINE_GUESS)];
 #endif
@@ -343,18 +378,6 @@ STRUCT(CompilationUnit)
 #if BUSTER_USE_PADDING
 static_assert(sizeof(CompilationUnit) % BUSTER_CACHE_LINE_GUESS == 0);
 #endif
-
-STRUCT(LinkUnit)
-{
-    // Process link_process;
-    // Process run_process;
-    String8 artifact_path;
-    BuildTarget* target;
-    u64* compilations;
-    u64 compilation_count;
-    bool use_io_ring;
-    bool run;
-};
 
 BUSTER_GLOBAL_LOCAL void append_string8(Arena* arena, String8 s)
 {
@@ -421,8 +444,10 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
     LinkUnitSpecification specifications[] = {
         { .name = SOs("cc"), .modules = BUSTER_ARRAY_TO_SLICE(ModuleSlice, cc_modules), },
         { .name = SOs("asm"), .modules = BUSTER_ARRAY_TO_SLICE(ModuleSlice, asm_modules), },
+        { .name = SOs("toy_gui"), .modules = BUSTER_ARRAY_TO_SLICE(ModuleSlice, toy_gui_modules), },
     };
     constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
+    let default_target = link_unit_count - 1;
 
     BuildTarget* target_buffer[link_unit_count];
     u64 target_count = 0;
@@ -441,6 +466,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         link_unit->fuzz = configuration->fuzz;
         link_unit->sanitize = configuration->sanitize;
         link_unit->is_builder = string_equal(link_unit->name, SOs("builder"));
+        link_unit->use_graphics = string_equal(link_unit->name, SOs("toy_gui"));
 
         u64 target_i;
         for (target_i = 0; target_i < target_count; target_i += 1)
@@ -511,6 +537,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [DIRECTORY_BACKEND] = SOs("src/buster/compiler/backend"),
         [DIRECTORY_LINK] = SOs("src/buster/compiler/link"),
         [DIRECTORY_BUILD] = SOs("src/buster/build"),
+        [DIRECTORY_TOY_GUI] = SOs("src/buster/toy_gui"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == DIRECTORY_COUNT);
@@ -545,6 +572,10 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [MODULE_STRING_COMMON] = SOs("string"),
         [MODULE_TEST] = SOs("test"),
         [MODULE_TIME] = SOs("time"),
+        [MODULE_UI_CORE] = SOs("ui_core"),
+        [MODULE_RENDER_CORE] = SOs("render_core"),
+        [MODULE_WINDOW] = SOs("window"),
+        [MODULE_TOY_GUI] = SOs("toy_gui"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(module_names) == MODULE_COUNT);
@@ -627,6 +658,8 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                     .optimize = link_unit->optimize,
                     .fuzz = link_unit->fuzz,
                     .sanitize = link_unit->sanitize,
+                    .use_io_ring = link_unit->use_io_ring,
+                    .use_graphics = link_unit->use_graphics,
                 };
 
                 let c_source_file_index = c_source_file_count;
@@ -650,6 +683,8 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                         .optimize = link_unit->optimize,
                         .fuzz = link_unit->fuzz,
                         .sanitize = link_unit->sanitize,
+                        .use_io_ring = link_unit->use_io_ring,
+                        .use_graphics = link_unit->use_graphics,
                     };
                 }
             }
@@ -685,6 +720,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 .target = source_file->target,
                 .has_debug_information = source_file->has_debug_information,
                 .use_io_ring = source_file->use_io_ring,
+                .use_graphics = source_file->use_graphics,
                 .source_path = source_file->full_path,
                 .optimize = source_file->optimize,
                 .fuzz = source_file->fuzz,
@@ -704,7 +740,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
             target_directory_path,
             SOs("/"),
             source_relative_path,
-#if _WIN32
+#if defined(_WIN32)
             SOs(".obj"),
 #else
             SOs(".o"),
@@ -777,6 +813,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 .has_debug_information = unit->has_debug_information,
                 .unity_build = configuration->unity_build,
                 .use_io_ring = unit->use_io_ring,
+                .use_graphics = unit->use_graphics,
                 .just_preprocessor = configuration->just_preprocessor,
                 .include_tests = 1,
                 .force_color = is_stderr_tty,
@@ -863,7 +900,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                     if (standard_stream.length)
                     {
                         let stream_string = string8_from_pointer_length((char8*)standard_stream.pointer, standard_stream.length);
-                        string8_print(stream_string);
+                        string8_print(S8("{S8}"), stream_string);
                     }
                 }
 
@@ -920,6 +957,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                     .sanitize = link_unit_specification->sanitize,
                     .unity_build = configuration->unity_build,
                     .use_io_ring = link_unit_specification->use_io_ring,
+                    .use_graphics = link_unit_specification->use_graphics,
                     .just_preprocessor = configuration->just_preprocessor,
                     .include_tests = 1,
                     .force_color = is_stderr_tty,
@@ -942,7 +980,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                     if (standard_stream.length)
                     {
                         let stream_string = string8_from_pointer_length((char8*)standard_stream.pointer, standard_stream.length);
-                        string8_print(stream_string);
+                        string8_print(S8("{S8}"), stream_string);
                     }
                 }
 
@@ -1006,7 +1044,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                         let os_argument_slice = link_unit_specification->fuzz ? BUSTER_ARRAY_TO_SLICE(StringOsSlice, fuzz_arguments) : BUSTER_ARRAY_TO_SLICE(StringOsSlice, test_arguments);
                         let os_arguments = string_os_list_create_from(general_arena, os_argument_slice);
                         link_unit_specification->run_arguments = os_arguments;
-                        link_unit_specification->run_spawn = os_process_spawn(first_argument, os_arguments, program_state->input.envp, (ProcessSpawnOptions){ (1 << STANDARD_STREAM_OUTPUT) | (1 << STANDARD_STREAM_ERROR) });
+                        link_unit_specification->run_spawn = os_process_spawn(first_argument, os_arguments, program_state->input.envp, (ProcessSpawnOptions){ .capture = link_unit_i != default_target ? (1 << STANDARD_STREAM_OUTPUT) | (1 << STANDARD_STREAM_ERROR) : 0 });
                     }
 
                     for (u64 link_unit_i = 0; link_unit_i < link_unit_count; link_unit_i += 1)
@@ -1036,7 +1074,25 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                     }
 #endif
                 }
-                break; case BUILD_COMMAND_DEBUG: {}
+                break; case BUILD_COMMAND_DEBUG:
+                {
+                    let default_unit = &specifications[default_target];
+                    StringOs argument_descriptions[] = {
+                        SOs("gf2"),
+                        default_unit->artifact_path,
+                    };
+                    let arguments = string_os_list_create_from(general_arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, argument_descriptions));
+                    let spawn_result = os_process_spawn(argument_descriptions[0], arguments, program_state->input.envp, (ProcessSpawnOptions){});
+                    if (spawn_result.handle)
+                    {
+                        let wait_result = os_process_wait_sync(0, spawn_result);
+                        result.process = wait_result.result;
+                    }
+                    else
+                    {
+                        result.process = PROCESS_RESULT_FAILED;
+                    }
+                }
             }
         }
     }

@@ -240,6 +240,21 @@ BUSTER_IMPL StringOsList build_compile_link_arguments(Arena* arena, const Compil
             string_os_list_builder_append(builder, SOs("-luring"));
         }
 
+        if (options->use_graphics)
+        {
+            switch (options->target->pointer->os)
+            {
+                break; case OPERATING_SYSTEM_LINUX:
+                {
+                    string_os_list_builder_append(builder, SOs("-lX11"));
+                    string_os_list_builder_append(builder, SOs("-lxcb"));
+                }
+                break; default:
+                {
+                }
+            }
+        }
+
         if (options->target->pointer->os == OPERATING_SYSTEM_WINDOWS)
         {
             string_os_list_builder_append(builder, SOs("-lws2_32"));

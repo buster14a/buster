@@ -55,7 +55,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             SOs("7z"),
         };
 
-#if _WIN32
+#if defined(_WIN32)
         CharOs buffer[BUSTER_MAX_PATH_LENGTH + 1];
 
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(executables); i += 1)
