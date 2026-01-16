@@ -127,5 +127,5 @@ BUSTER_DECL IrFunctions ir_module_get_functions(IrModule* module);
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
 BUSTER_DECL IrModule* ir_create_mock_module(Arena* arena);
-BUSTER_DECL bool ir_tests(TestArguments* arguments);
+BUSTER_DECL bool ir_tests(UnitTestArguments* arguments);
 #endif

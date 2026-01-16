@@ -29,3 +29,8 @@ BUSTER_DECL String8 string8_format_arena(Arena* arena, bool null_terminate, Stri
 BUSTER_DECL String8 string8_join_arena(Arena* arena, String8Slice strings, bool zero_terminate);
 BUSTER_DECL String8 string8_duplicate_arena(Arena* arena, String8 string, bool zero_terminate);
 BUSTER_DECL u64 string8_copy(String8 destination, String8 source);
+
+#if BUSTER_INCLUDE_TESTS
+#include <buster/test.h>
+BUSTER_IMPL UnitTestResult string8_tests(UnitTestArguments* arguments);
+#endif

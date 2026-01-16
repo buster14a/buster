@@ -141,7 +141,7 @@ BUSTER_IMPL IrModule* ir_create_mock_module(Arena* arena)
     return module;
 }
 
-BUSTER_IMPL bool ir_tests(TestArguments* arguments)
+BUSTER_IMPL bool ir_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     return true;

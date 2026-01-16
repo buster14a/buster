@@ -33,6 +33,7 @@
 #include <buster/compiler/ir/ir.c>
 #include <buster/compiler/backend/code_generation.c>
 #include <buster/path.c>
+#include <buster/test.c>
 #endif
 
 ENUM(CompilerCommand, 
@@ -141,7 +142,7 @@ BUSTER_GLOBAL_LOCAL bool compile(Arena* arena, StringOs relative_path, CompilerO
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL bool compiler_tests(TestArguments* arguments)
+BUSTER_GLOBAL_LOCAL bool compiler_tests(UnitTestArguments* arguments)
 {
     let module = ir_create_mock_module(arguments->arena);
     let functions = ir_module_get_functions(module);
@@ -170,13 +171,14 @@ BUSTER_IMPL ProcessResult process_arguments()
 
 BUSTER_IMPL ProcessResult thread_entry_point()
 {
-    let arena = thread->arena;
-    cc_program_state.cwd = path_absolute_arena(arena, SOs("."));
-    BUSTER_UNUSED(thread);
+    UnitTestArguments arguments = { thread_arena(), &default_show };
+    let arena = arguments.arena;
     string8_print(S8("Hello world from the compiler\n"));
+    let result = library_tests(&arguments);
+    cc_program_state.cwd = path_absolute_arena(arena, SOs("."));
     let basic = SOs("tests/cc/basic.c");
-    let result = compile(arena, basic, (CompilerOptions) {});
-    if (!result)
+    let compile_result = compile(arena, basic, (CompilerOptions) {});
+    if (!compile_result)
     {
         string8_print(S8("Compilation failed!\n"));
     }
@@ -186,18 +188,18 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         break; case COMPILER_COMMAND_TEST:
         {
 #if BUSTER_INCLUDE_TESTS
-            TestArguments test_arguments = {
+            UnitTestArguments test_arguments = {
                 .arena = arena,
             };
-            result = result & ir_tests(&test_arguments);
-            result = result & compiler_tests(&test_arguments);
+            compile_result = compile_result & ir_tests(&test_arguments);
+            compile_result = compile_result & compiler_tests(&test_arguments);
 #else
-            result = false;
+            compile_result = false;
 #endif
         }
-        break; default: result = false;
+        break; default: compile_result = false;
     }
 
-    return result ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return (compile_result && batch_test_report(&arguments, result)) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 #endif
