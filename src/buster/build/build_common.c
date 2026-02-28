@@ -170,6 +170,12 @@ BUSTER_IMPL StringOsList build_compile_link_arguments(Arena* arena, const Compil
         string_os_list_builder_append(builder, SOs("-fsanitize-recover=all"));
     }
 
+    if (options->time_build)
+    {
+        string_os_list_builder_append(builder, SOs("-ftime-trace"));
+        string_os_list_builder_append(builder, SOs("-ftime-trace-verbose"));
+    }
+
     if (options->fuzz)
     {
         string_os_list_builder_append(builder, SOs("-fsanitize=fuzzer"));
@@ -303,6 +309,7 @@ ENUM(BuildFlag,
     BUILD_FLAG_SANITIZE,
     BUILD_FLAG_MAIN_BRANCH,
     BUILD_FLAG_AVOID_DOWNLOAD,
+    BUILD_FLAG_TIME_COMPILATION,
     BUILD_FLAG_COUNT,
 );
 
@@ -468,6 +475,7 @@ BUSTER_IMPL ProcessResult process_arguments()
                 [BUILD_FLAG_SANITIZE] = SOs("--sanitize="),
                 [BUILD_FLAG_MAIN_BRANCH] = SOs("--main-branch="),
                 [BUILD_FLAG_AVOID_DOWNLOAD] = SOs("--avoid-download="),
+                [BUILD_FLAG_TIME_COMPILATION] = SOs("--time-compilation="),
             };
             static_assert(BUSTER_ARRAY_LENGTH(build_flag_strings) == BUILD_FLAG_COUNT);
 

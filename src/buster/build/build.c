@@ -445,7 +445,8 @@ STRUCT(BatchTestConfiguration)
     u64 has_debug_information:1;
     u64 unity_build:1;
     u64 just_preprocessor:1;
-    u64 reserved:58;
+    u64 time_build:1;
+    u64 reserved:57;
 };
 
 ENUM(ShaderStage,
@@ -917,6 +918,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 .use_io_ring = unit->use_io_ring,
                 .use_graphics = unit->use_graphics,
                 .just_preprocessor = configuration->just_preprocessor,
+                .time_build = configuration->time_build,
                 .include_tests = 1,
                 .force_color = is_stderr_tty,
                 .compile = 1,
@@ -1077,6 +1079,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                     .use_io_ring = link_unit_specification->use_io_ring,
                     .use_graphics = link_unit_specification->use_graphics,
                     .just_preprocessor = configuration->just_preprocessor,
+                    .time_build = configuration->time_build,
                     .include_tests = 1,
                     .force_color = is_stderr_tty,
                     .compile = configuration->unity_build,
@@ -1360,7 +1363,9 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                                 .sanitize = sanitize,
                                 .has_debug_information = has_debug_information,
                                 .unity_build = unity_build,
+                                .just_preprocessor = 0,
                                 .fuzz_time_seconds = fuzz_time_seconds,
+                                .time_build = 0,
                             };
                             memcpy(configuration.arenas, arenas, sizeof(arenas));
 
@@ -1407,6 +1412,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             .unity_build = build_flag_get(BUILD_FLAG_UNITY_BUILD),
             .just_preprocessor = build_flag_get(BUILD_FLAG_JUST_PREPROCESSOR),
             .fuzz_time_seconds = fuzz_time_seconds,
+            .time_build = build_flag_get(BUILD_FLAG_TIME_COMPILATION),
         };
         memcpy(configuration.arenas, arenas, sizeof(arenas));
         let run_result = single_run(&configuration);

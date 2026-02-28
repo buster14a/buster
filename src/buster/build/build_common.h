@@ -22,6 +22,7 @@ STRUCT(CompileLinkOptions)
 
     u64 optimize:1;
     u64 fuzz:1;
+    u64 time_build:1;
     u64 has_debug_information:1;
     u64 unity_build:1;
     u64 use_io_ring:1;
@@ -32,7 +33,7 @@ STRUCT(CompileLinkOptions)
     u64 force_color:1;
     u64 compile:1;
     u64 link:1;
-    u64 reserved:52;
+    u64 reserved:51;
 };
 
 BUSTER_DECL BuildTarget build_target_native;
