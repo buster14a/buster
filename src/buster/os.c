@@ -3,6 +3,7 @@
 #include <buster/system_headers.h>
 #include <buster/assertion.h>
 #include <buster/arena.h>
+#include <buster/arguments.h>
 
 [[gnu::cold]] BUSTER_IMPL bool is_debugger_present()
 {
@@ -72,13 +73,13 @@ BUSTER_GLOBAL_LOCAL int os_posix_map_flags(MapFlags flags)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL FileDescriptor* posix_fd_to_generic_fd(int fd)
+BUSTER_GLOBAL_LOCAL OsFileDescriptor* posix_fd_to_generic_fd(int fd)
 {
     BUSTER_CHECK(fd >= 0);
-    return (FileDescriptor*)(u64)(fd);
+    return (OsFileDescriptor*)(u64)(fd);
 }
 
-BUSTER_GLOBAL_LOCAL int generic_fd_to_posix(FileDescriptor* fd)
+BUSTER_GLOBAL_LOCAL int generic_fd_to_posix(OsFileDescriptor* fd)
 {
     BUSTER_CHECK(fd);
     return (int)(u64)fd;
@@ -137,13 +138,13 @@ BUSTER_GLOBAL_LOCAL void* generic_fd_to_windows(FileDescriptor* fd)
 #endif
 
 #if defined(__linux__) || defined(__APPLE__)
-BUSTER_GLOBAL_LOCAL ThreadHandle* os_posix_thread_to_generic(pthread_t handle)
+BUSTER_GLOBAL_LOCAL OsThreadHandle* os_posix_thread_to_generic(pthread_t handle)
 {
     BUSTER_CHECK(handle != 0);
-    return (ThreadHandle*)handle;
+    return (OsThreadHandle*)handle;
 }
 
-BUSTER_GLOBAL_LOCAL pthread_t os_posix_thread_from_generic(ThreadHandle* handle)
+BUSTER_GLOBAL_LOCAL pthread_t os_posix_thread_from_generic(OsThreadHandle* handle)
 {
     BUSTER_CHECK(handle != 0);
     return (pthread_t)handle;
@@ -223,9 +224,9 @@ BUSTER_IMPL void* os_reserve(void* base, u64 size, ProtectionFlags protection, M
     return address;
 }
 
-BUSTER_IMPL FileDescriptor* os_get_standard_stream(StandardStream stream)
+BUSTER_IMPL OsFileDescriptor* os_get_standard_stream(StandardStream stream)
 {
-    FileDescriptor* result = {};
+    OsFileDescriptor* result = {};
 #if defined(__linux__) || defined(__APPLE__)
     int fds[] = {
         [STANDARD_STREAM_INPUT] = STDIN_FILENO,
@@ -245,9 +246,9 @@ BUSTER_IMPL FileDescriptor* os_get_standard_stream(StandardStream stream)
     return result;
 }
 
-BUSTER_IMPL FileDescriptor* os_get_stdout()
+BUSTER_IMPL OsFileDescriptor* os_get_stdout()
 {
-    FileDescriptor* result = {};
+    OsFileDescriptor* result = {};
 #if defined(__linux__) || defined(__APPLE__)
     result = posix_fd_to_generic_fd(STDOUT_FILENO);
 #elif defined(_WIN32)
@@ -293,10 +294,10 @@ BUSTER_GLOBAL_LOCAL HANDLE os_windows_thread_from_generic(ThreadHandle* handle)
 }
 #endif
 
-BUSTER_IMPL ThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOptions options)
+BUSTER_IMPL OsThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOptions options)
 {
     BUSTER_UNUSED(options);
-    ThreadHandle* result = 0;
+    OsThreadHandle* result = 0;
 #if defined (__linux__) || defined(__APPLE__)
 #if BUSTER_USE_PTHREAD
     pthread_t handle;
@@ -314,7 +315,7 @@ BUSTER_IMPL ThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreat
     return result;
 }
 
-BUSTER_IMPL u32 os_thread_join(ThreadHandle* handle)
+BUSTER_IMPL u32 os_thread_join(OsThreadHandle* handle)
 {
     u32 return_code = 1;
 
@@ -379,10 +380,10 @@ BUSTER_IMPL void os_make_directory(StringOs path)
 #endif
 }
 
-BUSTER_IMPL FileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPermissions permissions)
+BUSTER_IMPL OsFileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPermissions permissions)
 {
     BUSTER_CHECK(!path.pointer[path.length]);
-    FileDescriptor* result = 0;
+    OsFileDescriptor* result = 0;
 #if defined (__linux__) || defined(__APPLE__)
     int o = 0;
     if (flags.read & flags.write)
@@ -411,7 +412,7 @@ BUSTER_IMPL FileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPer
 
     if (fd >= 0)
     {
-        result = (FileDescriptor*)(u64)fd;
+        result = (OsFileDescriptor*)(u64)fd;
     }
 #elif defined(_WIN32)
     DWORD desired_access = 0;
@@ -476,7 +477,7 @@ BUSTER_IMPL Arena* thread_arena()
     return thread->arena;
 }
 
-BUSTER_GLOBAL_LOCAL u64 os_file_write_partially(FileDescriptor* file_descriptor, void* pointer, u64 length)
+BUSTER_GLOBAL_LOCAL u64 os_file_write_partially(OsFileDescriptor* file_descriptor, void* pointer, u64 length)
 {
 #if defined(__linux__) || defined(__APPLE__)
     let fd = generic_fd_to_posix(file_descriptor);
@@ -492,7 +493,7 @@ BUSTER_GLOBAL_LOCAL u64 os_file_write_partially(FileDescriptor* file_descriptor,
 #endif
 }
 
-BUSTER_IMPL void os_file_write(FileDescriptor* file_descriptor, ByteSlice buffer)
+BUSTER_IMPL void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer)
 {
     u64 total_written_byte_count = 0;
 
@@ -503,7 +504,7 @@ BUSTER_IMPL void os_file_write(FileDescriptor* file_descriptor, ByteSlice buffer
     }
 }
 
-BUSTER_GLOBAL_LOCAL u64 os_file_read_partially(FileDescriptor* file_descriptor, void* buffer, u64 byte_count)
+BUSTER_GLOBAL_LOCAL u64 os_file_read_partially(OsFileDescriptor* file_descriptor, void* buffer, u64 byte_count)
 {
     u64 result = 0;
     bool success = true;
@@ -532,7 +533,7 @@ BUSTER_GLOBAL_LOCAL u64 os_file_read_partially(FileDescriptor* file_descriptor, 
     return result;
 }
 
-BUSTER_IMPL u64 os_file_read(FileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count)
+BUSTER_IMPL u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count)
 {
     u64 read_byte_count = 0;
     let pointer = buffer.pointer;
@@ -550,7 +551,7 @@ BUSTER_IMPL u64 os_file_read(FileDescriptor* file_descriptor, ByteSlice buffer, 
     return read_byte_count;
 }
 
-BUSTER_IMPL FileStats os_file_get_stats(FileDescriptor* file_descriptor, FileStatsOptions options)
+BUSTER_IMPL FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options)
 {
     FileStats result = {};
 
@@ -584,7 +585,7 @@ BUSTER_IMPL FileStats os_file_get_stats(FileDescriptor* file_descriptor, FileSta
     return result;
 }
 
-BUSTER_IMPL bool os_file_close(FileDescriptor* file_descriptor)
+BUSTER_IMPL bool os_file_close(OsFileDescriptor* file_descriptor)
 {
     bool result = false;
     if (file_descriptor)
@@ -758,10 +759,10 @@ BUSTER_IMPL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringO
     posix_spawn_file_actions_destroy(&file_actions);
     posix_spawnattr_destroy(&attributes);
 
-    result.handle = pid == -1 ? (ProcessHandle*)0 : (ProcessHandle*)(u64)pid;
+    result.handle = (OsProcessHandle*)(pid == -1 ? 0 : (u64)pid);
 #endif
 
-    if (program_state->input.verbose)
+    if (flag_get(program_state->input.flags, PROGRAM_FLAG_COUNT, PROGRAM_FLAG_VERBOSE))
     {
         string8_print(result.handle ? S8("Launched: ") : S8("Failed to launch: "));
 
@@ -950,7 +951,7 @@ BUSTER_IMPL StringOs os_get_environment_variable(StringOs variable)
     return result;
 }
 
-BUSTER_IMPL u64 os_file_get_size(FileDescriptor* file_descriptor)
+BUSTER_IMPL u64 os_file_get_size(OsFileDescriptor* file_descriptor)
 {
 #if defined(__linux__) || defined(__APPLE__)
     int fd = generic_fd_to_posix(file_descriptor);
@@ -968,7 +969,7 @@ BUSTER_IMPL u64 os_file_get_size(FileDescriptor* file_descriptor)
 #endif
 }
 
-BUSTER_IMPL bool os_is_tty(FileDescriptor* file)
+BUSTER_IMPL bool os_is_tty(OsFileDescriptor* file)
 {
     bool result = false;
 #if defined(_WIN32)
@@ -1000,3 +1001,38 @@ BUSTER_IMPL bool os_unreserve(void* address, u64 size)
     return result;
 }
 
+BUSTER_IMPL OsModule* os_dynamic_library_load(StringOs library)
+{
+    OsModule* result = {};
+    BUSTER_CHECK(BUSTER_SLICE_IS_ZERO_TERMINATED(library));
+
+#if defined(_WIN32)
+    result = (OSModule*)LoadLibraryW(library.pointer);
+#else
+    result = (OsModule*) dlopen(library.pointer, RTLD_NOW | RTLD_LOCAL);
+#endif
+
+    return result;
+}
+
+BUSTER_IMPL void os_dynamic_library_unload(OsModule* module)
+{
+#if defined(_WIN32)
+    result = (OSModule*)LoadLibraryW(library.pointer);
+#else
+    dlclose(module);
+#endif
+}
+
+BUSTER_IMPL OsSymbol* os_dynamic_library_function_load(OsModule* module, String8 symbol)
+{
+    OsSymbol* result = {};
+
+#if defined(_WIN32)
+    result = GetProcAddress((HMODULE)module, symbol.pointer);
+#else
+    result = (OsSymbol*)dlsym((void*)module, symbol.pointer);
+#endif
+
+    return result;
+}

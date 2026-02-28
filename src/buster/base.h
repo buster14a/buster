@@ -120,6 +120,8 @@
 #include <stdlib.h>
 #endif
 
+#define DECLARE_VECTOR(name, T, count) typedef T name __attribute__((ext_vector_type(count)))
+
 typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -132,11 +134,27 @@ typedef int32_t s32;
 typedef int64_t s64;
 typedef signed __int128 s128;
 
+typedef unsigned int uint;
+
+DECLARE_VECTOR(uint2, uint, 2);
+DECLARE_VECTOR(uint3, uint, 3);
+DECLARE_VECTOR(uint4, uint, 4);
+DECLARE_VECTOR(uint8, uint, 8);
+DECLARE_VECTOR(uint16, uint, 16);
+
 typedef float f32;
 typedef double f64;
+
+DECLARE_VECTOR(float2, f32, 2);
+DECLARE_VECTOR(float3, f32, 3);
+DECLARE_VECTOR(float4, f32, 4);
 #if defined (__SIZEOF_FLOAT128__)
 typedef __float128 f128;
 #endif
+
+typedef float2 vec2;
+typedef float3 vec3;
+typedef float4 vec4;
 
 #if defined(_WIN32)
 #define ENUM_START(E, T) enum E
@@ -148,14 +166,23 @@ typedef __float128 f128;
 #define ENUM_T(E, T, ...) ENUM_START(E, T) { __VA_ARGS__ } ENUM_END(E, T)
 #define ENUM(E, ...) typedef enum E { __VA_ARGS__ } E
 
-STRUCT(ByteSlice)
-{
-    u8* pointer;
-    u64 length;
-};
+#define SLICE(name, T) STRUCT(name) { T* pointer; u64 length; }
+
+SLICE(u8Slice,  u8);
+SLICE(u16Slice, u16);
+SLICE(u32Slice, u32);
+SLICE(u64Slice, u64);
+
+SLICE(s8Slice,  s8);
+SLICE(s16Slice, s16);
+SLICE(s32Slice, s32);
+SLICE(s64Slice, s64);
+
+typedef u8Slice ByteSlice;
 
 #define BUSTER_SLICE_SIZE(slice) ((slice).length * sizeof(*((slice).pointer)))
-#define BUSTER_ARRAY_TO_SLICE(T, arr) ((T) { (arr), BUSTER_ARRAY_LENGTH(arr) })
+#define BUSTER_ARRAY_TO_SLICE(arr) { (arr), BUSTER_ARRAY_LENGTH(arr) }
+#define BUSTER_ARRAY_TO_BYTE_SLICE(arr) ((ByteSlice) { .pointer = (u8*)(arr), .length = sizeof(arr) })
 
 #define BUSTER_GB(x) (u64)(1024) * BUSTER_MB(x)
 #define BUSTER_MB(x) (u64)(1024) * BUSTER_KB(x)
@@ -196,54 +223,59 @@ typedef char char8_t;
 
 typedef char char8;
 static_assert(sizeof(char8) == 1);
-#if _WIN32
+#if defined(_WIN32)
 typedef wchar_t char16;
 #else
 typedef char16_t char16;
 #endif
 static_assert(sizeof(char16) == 2);
-#if _WIN32
+#if defined(_WIN32)
 typedef char32_t char32;
 #else
 typedef wchar_t char32;
 #endif
 static_assert(sizeof(char32) == 4);
 
-STRUCT(String8)
-{
-    char8* pointer;
-    u64 length;
-};
+SLICE(String8, char8);
+SLICE(String8Slice, String8);
+SLICE(SliceOfString8Slice, String8Slice);
 
-STRUCT(String8Slice)
-{
-    String8* pointer;
-    u64 length;
-};
+SLICE(String16, char16);
+SLICE(String16Slice, String16);
+SLICE(SliceOfString16Slice, String16Slice);
 
-STRUCT(SliceOfString8Slice)
-{
-    String8Slice* pointer;
-    u64 length;
-};
+SLICE(float4Slice, float4);
 
-STRUCT(String16)
-{
-    char16* pointer;
-    u64 length;
-};
+// Math types and enums for UI
+ENUM(Axis2,
+    AXIS2_X,
+    AXIS2_Y,
+    AXIS2_COUNT,
+);
 
-STRUCT(String16Slice)
-{
-    String16* pointer;
-    u64 length;
-};
+ENUM(Corner,
+    CORNER_00,
+    CORNER_01,
+    CORNER_10,
+    CORNER_11,
+    CORNER_COUNT,
+);
 
-STRUCT(SliceOfString16Slice)
+UNION(F32Interval2)
 {
-    String16Slice* pointer;
-    u64 length;
+    struct { float2 min; float2 max; };
+    struct { float2 p0; float2 p1; };
+    struct { f32 x0, y0, x1, y1; };
+    float2 v[2];
 };
+static_assert(sizeof(F32Interval2) == 4 * sizeof(f32));
+
+#define BUSTER_CLAMP(a, x, b) (((a) > (x)) ? (a) : ((b) < (x)) ? (b) : (x))
+
+static inline bool is_power_of_two(u64 value)
+{
+    return value && !(value & (value - 1));
+}
 
 #define is_one_or_another(i, a, b) (((i) == (a)) | ((i) == (b)))
 #define is_between_range_included(i, a, b) (((i) >= (a)) & ((i) <= (b)))
@@ -261,9 +293,11 @@ STRUCT(SliceOfString16Slice)
 #define code_point_is_identifier_start(ch) (code_point_is_alpha_upper(ch) | code_point_is_alpha_lower(ch) | ((ch) == '_'))
 #define code_point_is_identifier(ch) (code_point_is_identifier_start(ch) | code_point_is_decimal(ch))
 
-typedef struct FileDescriptor FileDescriptor;
-typedef struct ProcessHandle ProcessHandle;
-typedef struct ThreadHandle ThreadHandle;
+typedef struct OsFileDescriptor OsFileDescriptor;
+typedef struct OsProcessHandle OsProcessHandle;
+typedef struct OsThreadHandle OsThreadHandle;
+typedef struct OsModule OsModule;
+typedef struct OsSymbol OsSymbol;
 
 ENUM(ProcessResult,
     PROCESS_RESULT_SUCCESS,
@@ -294,3 +328,126 @@ typedef CharOs** StringOsList;
 typedef String8Slice StringOsSlice;
 typedef SliceOfString8Slice SliceOfStringOsSlice;
 #endif
+
+STRUCT(TextureIndex)
+{
+    u32 value;
+};
+
+STRUCT(FontCharacter)
+{
+    u32 advance;
+    u32 left_bearing;
+    u32 x;
+    u32 y;
+    u32 width;
+    u32 height;
+    s32 x_offset;
+    s32 y_offset;
+};
+
+STRUCT(FontTextureAtlasDescription)
+{
+    u32* pointer;
+    FontCharacter* characters;
+    s32* kerning_tables;
+    u32 width;
+    u32 height;
+    s32 ascent;
+    s32 descent;
+    s32 line_gap;
+    u8 reserved[4];
+};
+
+STRUCT(FontTextureAtlasCreate)
+{
+    StringOs font_path;
+    u32 text_height;
+    u8 reserved[4];
+};
+
+STRUCT(FontTextureAtlas)
+{
+    FontTextureAtlasDescription description;
+    TextureIndex texture;
+    u8 reserved[4];
+};
+
+// typedef enum OS_EventKind
+// {
+//   OS_EventKind_Null,
+//   OS_EventKind_Press,
+//   OS_EventKind_Release,
+//   OS_EventKind_MouseMove,
+//   OS_EventKind_Text,
+//   OS_EventKind_Scroll,
+//   OS_EventKind_WindowLoseFocus,
+//   OS_EventKind_WindowClose,
+//   OS_EventKind_FileDrop,
+//   OS_EventKind_Wakeup,
+//   OS_EventKind_COUNT
+// }
+// OS_EventKind;
+//
+// typedef U32 OS_Modifiers;
+// enum
+// {
+//   OS_Modifier_Ctrl  = (1<<0),
+//   OS_Modifier_Shift = (1<<1),
+//   OS_Modifier_Alt   = (1<<2),
+// };
+//
+// typedef struct OS_Event OS_Event;
+// struct OS_Event
+// {
+//   OS_Event *next;
+//   OS_Event *prev;
+//   U64 timestamp_us;
+//   OS_Handle window;
+//   OS_EventKind kind;
+//   OS_Modifiers modifiers;
+//   OS_Key key;
+//   B32 is_repeat;
+//   B32 right_sided;
+//   U32 character;
+//   U32 repeat_count;
+//   Vec2F32 pos;
+//   Vec2F32 delta;
+//   String8List strings;
+// };
+
+typedef struct OsWindowHandle OsWindowHandle;
+
+ENUM(OsWindowingEventKind,
+    OS_WINDOWING_EVENT_WINDOW_CLOSE,
+);
+
+STRUCT(OsWindowingEvent)
+{
+    OsWindowingEvent* previous;
+    OsWindowingEvent* next;
+    OsWindowHandle* window;
+    OsWindowingEventKind kind;
+    u8 reserved[4];
+};
+
+STRUCT(OsWindowingEventList)
+{
+    OsWindowingEvent* first;
+    OsWindowingEvent* last;
+    u64 count;
+};
+
+#define FLAG_ARRAY_LENGTH(T, count) ((count) / sizeof(T) + ((count) % sizeof(T) != 0))
+#define FLAG_ARRAY_GENERIC(T, N, count) T N[FLAG_ARRAY_LENGTH(T, count)]
+#define FLAG_ARRAY_U64(N, count) FLAG_ARRAY_GENERIC(u64, N, (count))
+
+#if defined(__SANITIZE_ADDRESS__)
+#include <sanitizer/lsan_interface.h>
+#define BUSTER_LSAN_DISABLE() __lsan_disable()
+#define BUSTER_LSAN_ENABLE()  __lsan_enable()
+#else
+#define BUSTER_LSAN_DISABLE()
+#define BUSTER_LSAN_ENABLE()
+#endif
+

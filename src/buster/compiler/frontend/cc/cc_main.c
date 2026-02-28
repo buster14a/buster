@@ -25,7 +25,7 @@
 #include <buster/string.c>
 #include <buster/arena.c>
 #include <buster/string_os.c>
-#if _WIN32
+#if defined(_WIN32)
 #include <buster/string16.c>
 #endif
 #include <buster/integer.c>
@@ -34,6 +34,7 @@
 #include <buster/compiler/backend/code_generation.c>
 #include <buster/path.c>
 #include <buster/test.c>
+#include <buster/arguments.c>
 #endif
 
 ENUM(CompilerCommand, 
@@ -77,7 +78,7 @@ BUSTER_GLOBAL_LOCAL File file_from_path(Arena* arena, CompilerFileReadOptions op
         SOs("/"),
         options.relative_path,
     };
-    let absolute_path = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, parts), true);
+    let absolute_path = string_os_join_arena(arena, (StringOsSlice)BUSTER_ARRAY_TO_SLICE(parts), true);
     let file_content = file_read(arena, options.relative_path, (FileReadOptions) {});
 
     return (File) {
@@ -157,7 +158,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_tests(UnitTestArguments* arguments)
 #endif
 
 #if BUSTER_FUZZING
-BUSTER_DECL s32 buster_fuzz(const u8* pointer, size_t size)
+BUSTER_IMPL s32 buster_fuzz(const u8* pointer, size_t size)
 {
     BUSTER_UNUSED(pointer);
     BUSTER_UNUSED(size);

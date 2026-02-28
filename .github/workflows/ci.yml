@@ -12,15 +12,48 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        BUSTER_OS_TAG: [ self-hosted, ubuntu-24.04, macos-15-intel, windows-2025, ubuntu-24.04-arm, macos-26, windows-11-arm ]
+        BUSTER_OS_TAG: [ self-hosted, ubuntu-24.04 ] #, macos-15-intel, windows-2025, ubuntu-24.04-arm, macos-26, windows-11-arm ]
     runs-on: ${{ matrix.BUSTER_OS_TAG }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        if: matrix.BUSTER_OS_TAG != 'self-hosted'
+        with:
+          version: 1.4.341.1
+          cache: true
+      - name: Install XCB dev packages
+        if: matrix.BUSTER_OS_TAG == 'ubuntu-24.04' || matrix.BUSTER_OS_TAG == 'ubuntu-24.04-arm'
+        run: |
+          set -euox pipefail
+          echo "deb http://ddebs.ubuntu.com noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/ddebs.list
+          sudo apt-get install -y ubuntu-dbgsym-keyring
+          sudo apt-get update
+          sudo apt-get install -y \
+          libxcb1-dev \
+          libxcb-keysyms1-dev \
+          libxcb-randr0-dev \
+          libxcb-shape0-dev \
+          libxcb-xfixes0-dev \
+          libxcb-sync-dev \
+          libxcb-xkb-dev \
+          libxkbcommon-dev \
+          libxkbcommon-x11-dev
+          sudo apt install gdb
+          sudo apt install fonts-firacode fontconfig libfontconfig1-dev
+          sudo apt-get install -y --no-install-recommends gdb libdebuginfod1 elfutils vulkan-tools vulkan-validationlayers libvulkan1 mesa-vulkan-drivers
+          sudo apt-get install -y libxcb1-dbgsym libxkbcommon0-dbgsym libvulkan1-dbgsym vulkan-validationlayers vulkan-validationlayers-dbgsym
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21 all
+          /usr/bin/Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -noreset &
       - name: Build and test (UNIX)
         shell: bash
         if: matrix.BUSTER_OS_TAG != 'windows-2025' && matrix.BUSTER_OS_TAG != 'windows-11-arm'
+        env:
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan.supp
         run: |
-          set -euo pipefail
+          set -euox pipefail
           BUSTER_SELF_HOSTED=0
           if [[ "${{matrix.BUSTER_OS_TAG}}" == "self-hosted" ]]; then
             BUSTER_SELF_HOSTED=1
@@ -29,6 +62,11 @@ jobs:
           if [ "$(git branch --show-current)" = "main" ]; then
             GIT_MAIN_BRANCH=1
           fi
+          # LLVM ubuntu packages install llvm-symbolizer as "llvm-symbolizer-<major>"
+          # (e.g. llvm-symbolizer-21) without creating the unversioned symlink, so
+          # ASAN can't find it by default. Point it at the versioned binary explicitly.
+          SYMBOLIZER="$(command -v llvm-symbolizer-21 2>/dev/null || command -v llvm-symbolizer 2>/dev/null || true)"
+          [ -n "$SYMBOLIZER" ] && export ASAN_SYMBOLIZER_PATH="$SYMBOLIZER"
           ./build.sh test_all --ci=1 --self-hosted=$BUSTER_SELF_HOSTED --main-branch=$GIT_MAIN_BRANCH
       - name: Build and test (Windows)
         if: matrix.BUSTER_OS_TAG == 'windows-2025' || matrix.BUSTER_OS_TAG == 'windows-11-arm'

@@ -36,8 +36,8 @@
 #define string_os_parse_u64_binary(p) string8_parse_u64_binary(p)
 #define string_os_length(s) string8_length(s)
 #define string_os_format_arena(arena, format, ...) string8_format_arena((arena), true, (format), __VA_ARGS__)
-#define string_os_join_arena string8_join_arena
-#define string_os_duplicate_arena string8_duplicate_arena
+#define string_os_join_arena(arena, parts, nt) string8_join_arena(arena, parts, nt)
+#define string_os_duplicate_arena(arena, s, nt) string8_duplicate_arena(arena, s, nt)
 #endif
 
 #define string_os_to_c(s) (OsChar*)((s).pointer)
@@ -67,3 +67,4 @@ BUSTER_DECL StringOsList string_os_list_duplicate_and_substitute_first_argument(
 
 BUSTER_DECL StringOsListIterator string_os_list_iterator_initialize(StringOsList list);
 BUSTER_DECL StringOs string_os_list_iterator_next(StringOsListIterator* iterator);
+BUSTER_DECL StringOsList string_os_list_create_from(Arena* arena, StringOsSlice arguments);

@@ -1,0 +1,24 @@
+# Vulkan loader allocates global state via pthread_once inside vkCreateInstance
+# that is never freed, even after vkDestroyInstance. The Swiftshader/Vulkan frames
+# are <unknown module> so we match on our own function in the call stack.
+leak:rendering_initialize
+
+# Swiftshader's JIT compiler allocates internal state on the first queue submission
+# that it never frees on vkDestroyDevice. BUSTER_LSAN_DISABLE/ENABLE in
+# rendering_texture_create only covers the calling thread; Swiftshader also uses
+# internal worker threads that allocate outside our disable scope.
+leak:immediate_end
+
+# Swiftshader allocates internal JIT/device state during vk_image_create and
+# vk_buffer_create inside rendering_texture_create. Those allocations happen on
+# Swiftshader's own worker threads, so BUSTER_LSAN_DISABLE/ENABLE on the calling
+# thread cannot cover them.
+leak:rendering_texture_create
+
+# Mesa lavapipe (and other dlopen'd Vulkan ICDs) spawn internal util_queue worker
+# threads during vkCreateDevice. Those threads allocate driver state that is freed
+# via Mesa code — but Mesa is dlclose'd by vkDestroyInstance before LSan's
+# exit-time check runs. After dlclose the thread stacks are entirely
+# <unknown module>, so no user-code anchor is available. Suppress on start_thread,
+# which is the only stable resolved frame in these stacks.
+leak:start_thread

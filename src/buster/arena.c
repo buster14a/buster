@@ -8,8 +8,6 @@ BUSTER_GLOBAL_LOCAL bool arena_lock_pages = true;
 __attribute__((used)) BUSTER_GLOBAL_LOCAL u64 page_size = BUSTER_KB(4);
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_MB(2);
 
-BUSTER_GLOBAL_LOCAL u64 minimum_position = sizeof(Arena);
-
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_GB(4);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 
@@ -40,7 +38,7 @@ BUSTER_IMPL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 
 BUSTER_IMPL void arena_reset_to_start(Arena* arena)
 {
-    arena_set_position(arena, minimum_position);
+    arena_set_position(arena, arena_minimum_position);
 }
 
 BUSTER_IMPL void arena_set_position(Arena* arena, u64 position)
@@ -48,7 +46,7 @@ BUSTER_IMPL void arena_set_position(Arena* arena, u64 position)
     arena->position = position;
 }
 
-BUSTER_IMPL Arena* arena_create(ArenaInitialization initialization)
+BUSTER_IMPL Arena* arena_create(ArenaCreation initialization)
 {
     if (!initialization.reserved_size)
     {
@@ -84,7 +82,7 @@ BUSTER_IMPL Arena* arena_create(ArenaInitialization initialization)
         os_commit(arena, initialization.initial_size, protection_flags, arena_lock_pages);
         *arena = (Arena){ 
             .reserved_size = individual_reserved_size,
-            .position = minimum_position,
+            .position = arena_minimum_position,
             .os_position = initialization.initial_size,
             .granularity = initialization.granularity,
         };

@@ -7,8 +7,8 @@
 BUSTER_IMPL CodeGeneration module_generation_initialize()
 {
     return (CodeGeneration){
-        .code_arena = arena_create((ArenaInitialization){}),
-        .data_arena = arena_create((ArenaInitialization){}),
+        .code_arena = arena_create((ArenaCreation){}),
+        .data_arena = arena_create((ArenaCreation){}),
     };
 }
 

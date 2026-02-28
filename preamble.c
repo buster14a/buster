@@ -30,6 +30,7 @@
 #include <buster/aarch64.c>
 #endif
 #include <buster/entry_point.c>
+#include <buster/arguments.c>
 
 STRUCT(PreambleProgramState)
 {
@@ -44,9 +45,9 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     let clang_path = toolchain_information.clang_path;
 
 #if BUSTER_CI
-    bool successfully_downloaded = build_flag_get(BUILD_FLAG_SELF_HOSTED);
+    bool success = build_flag_get(BUILD_FLAG_SELF_HOSTED) || build_flag_get(BUILD_FLAG_AVOID_DOWNLOAD);
 
-    if (!successfully_downloaded)
+    if (!success)
     {
         let filename = SOs("toolchain.7z");
 
@@ -55,7 +56,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             SOs("7z"),
         };
 
-#if _WIN32
+#if defined(_WIN32)
         CharOs buffer[BUSTER_MAX_PATH_LENGTH + 1];
 
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(executables); i += 1)
@@ -72,7 +73,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     buffer_slice,
                     // SOs("\""),
                 };
-                executables[i] = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, parts), true);
+                executables[i] = string_os_join_arena(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(parts), true);
             }
 
         }
@@ -84,7 +85,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             filename,
             toolchain_information.url,
         };
-        let curl_arguments = string_os_list_create_from(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, curl_arguments_parts));
+        let curl_arguments = string_os_list_create_from(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(curl_arguments_parts));
         let curl_process = os_process_spawn(curl_arguments_parts[0], curl_arguments, program_state->input.envp, (ProcessSpawnOptions){});
         if (curl_process.handle)
         {
@@ -94,7 +95,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     SOs("-o"),
                     toolchain_information.install_path,
                 };
-                let o_arg = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, o_arg_parts), true);
+                let o_arg = string_os_join_arena(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(o_arg_parts), true);
                 StringOs arguments_7z_parts[] = {
                     executables[1],
                     SOs("x"),
@@ -102,18 +103,18 @@ BUSTER_IMPL ProcessResult thread_entry_point()
                     o_arg,
                     SOs("-y"),
                 };
-                let argumentz_7z = string_os_list_create_from(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, arguments_7z_parts));
+                let argumentz_7z = string_os_list_create_from(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(arguments_7z_parts));
                 let process_7z = os_process_spawn(arguments_7z_parts[0], argumentz_7z, program_state->input.envp, (ProcessSpawnOptions){});
 
                 if (process_7z.handle)
                 {
-                    successfully_downloaded = os_process_wait_sync(arena, process_7z).result == PROCESS_RESULT_SUCCESS;
+                    success = os_process_wait_sync(arena, process_7z).result == PROCESS_RESULT_SUCCESS;
                 }
             }
         }
     }
 
-    if (successfully_downloaded)
+    if (success)
 #endif
     {
         let cwd = path_absolute_arena(arena, SOs("."));
@@ -131,7 +132,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             }
         }
 
-        let build_executable_directory_path = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, build_executable_directory_parts), true);
+        let build_executable_directory_path = string_os_join_arena(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(build_executable_directory_parts), true);
         os_make_directory(build_executable_directory_path);
 
         StringOs build_executable_parts[] = {
@@ -169,7 +170,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         }
 #endif
 
-        let build_executable = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, build_executable_parts), true);
+        let build_executable = string_os_join_arena(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(build_executable_parts), true);
         StringOs source_paths[] = {
             SOs("src/buster/build/build.c"),
         };
@@ -211,10 +212,10 @@ BUSTER_IMPL ProcessResult thread_entry_point()
             BUSTER_UNUSED(xc_sdk_path_argument_parts);
             StringOs extra_arguments[] = {
 #if defined(__APPLE__)
-                string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, xc_sdk_path_argument_parts), true),
+                string_os_join_arena(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(xc_sdk_path_argument_parts), true),
 #endif
             };
-            let build_arguments = string_os_list_duplicate_and_substitute_first_argument(arena, program_state->input.argv, build_executable, BUSTER_ARRAY_TO_SLICE(StringOsSlice, extra_arguments));
+            let build_arguments = string_os_list_duplicate_and_substitute_first_argument(arena, program_state->input.argv, build_executable, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(extra_arguments));
             let build_process = os_process_spawn(build_executable, build_arguments, program_state->input.envp, (ProcessSpawnOptions){ .capture = 0 });
             if (build_process.handle)
             {
