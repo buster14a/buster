@@ -15,7 +15,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_x86_64()
 {
     let vendor_cpuid = cpuid(0, 0);
     char8 vendor_buffer[3 * sizeof(vendor_cpuid.eax)];
-    let vendor_string = BUSTER_ARRAY_TO_SLICE(String8, vendor_buffer);
+    let vendor_string = (String8) BUSTER_ARRAY_TO_SLICE(vendor_buffer);
     *(u32*)(vendor_buffer + 0 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.ebx;
     *(u32*)(vendor_buffer + 1 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.edx;
     *(u32*)(vendor_buffer + 2 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.ecx;

@@ -9,8 +9,8 @@ BUSTER_GLOBAL_LOCAL IrModule* ir_module_create(Arena* arena, Target* target, Str
     *module = (IrModule){
         .arena = arena,
         .default_target = target ? target : &target_native,
-        .function_arena = arena_create((ArenaInitialization){}),
-        .global_variable_arena = arena_create((ArenaInitialization){}),
+        .function_arena = arena_create((ArenaCreation){}),
+        .global_variable_arena = arena_create((ArenaCreation){}),
         .name = name,
     };
     return module;

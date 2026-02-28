@@ -103,8 +103,8 @@ ENUM_T(StandardStream, u8,
 
 STRUCT(ProcessSpawnResult)
 {
-    ProcessHandle* handle;
-    FileDescriptor* pipes[STANDARD_STREAM_COUNT][2];
+    OsProcessHandle* handle;
+    OsFileDescriptor* pipes[STANDARD_STREAM_COUNT][2];
 };
 
 STRUCT(ProcessSpawnOptions)
@@ -134,28 +134,36 @@ BUSTER_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnRes
 BUSTER_DECL StringOs os_get_environment_variable(StringOs variable);
 
 BUSTER_DECL void os_make_directory(StringOs path);
-BUSTER_DECL FileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPermissions permissions);
-BUSTER_DECL u64 os_file_get_size(FileDescriptor* file_descriptor);
-BUSTER_DECL FileStats os_file_get_stats(FileDescriptor* file_descriptor, FileStatsOptions options);
-BUSTER_DECL void os_file_write(FileDescriptor* file_descriptor, ByteSlice buffer);
-BUSTER_DECL u64 os_file_read(FileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count);
-BUSTER_DECL bool os_file_close(FileDescriptor* file_descriptor);
+BUSTER_DECL OsFileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPermissions permissions);
+BUSTER_DECL u64 os_file_get_size(OsFileDescriptor* file_descriptor);
+BUSTER_DECL FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options);
+BUSTER_DECL void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer);
+BUSTER_DECL u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count);
+BUSTER_DECL bool os_file_close(OsFileDescriptor* file_descriptor);
 
 BUSTER_DECL StringOs os_path_absolute(StringOs buffer, StringOs relative_file_path);
-BUSTER_DECL FileDescriptor* os_get_stdout();
-BUSTER_DECL ThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOptions options);
-BUSTER_DECL u32 os_thread_join(ThreadHandle* handle);
+BUSTER_DECL OsFileDescriptor* os_get_stdout();
+BUSTER_DECL OsThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOptions options);
+BUSTER_DECL u32 os_thread_join(OsThreadHandle* handle);
 
 BUSTER_DECL BUSTER_THREAD_LOCAL_DECL Thread* thread;
 #include <buster/string_os.h>
+
+ENUM(ProgramFlag,
+    PROGRAM_FLAG_VERBOSE,
+    PROGRAM_FLAG_CI,
+    PROGRAM_FLAG_COUNT,
+);
 STRUCT(ProgramInput)
 {
     StringOsList argv;
     StringOsList envp;
+    FLAG_ARRAY_U64(flags, PROGRAM_FLAG_COUNT);
     ThreadSpawnPolicy thread_spawn_policy;
-    u32 verbose:1;
-    u32 reserved:31;
+    u8 reserved[4];
 };
+
+#define PROGRAM_FLAG_GET()
 
 STRUCT(ProgramState)
 {
@@ -175,9 +183,12 @@ BUSTER_DECL bool os_initialize_time();
 
 BUSTER_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
 BUSTER_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
-BUSTER_IMPL bool os_unreserve(void* address, u64 size);
+BUSTER_DECL bool os_unreserve(void* address, u64 size);
 
-BUSTER_DECL bool os_is_tty(FileDescriptor* file);
+BUSTER_DECL bool os_is_tty(OsFileDescriptor* file);
+BUSTER_DECL OsModule* os_dynamic_library_load(StringOs library);
+BUSTER_DECL void os_dynamic_library_unload(OsModule* module);
+BUSTER_DECL OsSymbol* os_dynamic_library_function_load(OsModule* module, String8 symbol);
 
 [[gnu::cold]] BUSTER_DECL bool is_debugger_present();
 

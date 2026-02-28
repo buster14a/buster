@@ -17,7 +17,7 @@
 #include <buster/string.c>
 #include <buster/string8.c>
 #include <buster/string_os.c>
-#if _WIN32
+#if defined(_WIN32)
 #include <buster/string16.c>
 #endif
 #include <buster/memory.c>
@@ -26,6 +26,7 @@
 #include <buster/arena.c>
 #include <buster/integer.c>
 #include <buster/test.c>
+#include <buster/arguments.c>
 #endif
 
 STRUCT(AsmProgramState)
@@ -40,7 +41,7 @@ BUSTER_GLOBAL_LOCAL AsmProgramState asm_program_state = {
 BUSTER_IMPL ProgramState* program_state = &asm_program_state.general_program_state;
 
 #if BUSTER_FUZZING
-BUSTER_DECL s32 buster_fuzz(const u8* pointer, size_t size)
+BUSTER_IMPL s32 buster_fuzz(const u8* pointer, size_t size)
 {
     BUSTER_UNUSED(pointer);
     BUSTER_UNUSED(size);

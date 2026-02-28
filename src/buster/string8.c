@@ -703,7 +703,7 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
 
                     let prefix_character_count = (u64)prefix << 1;
                     char8 integer_format_buffer[(sizeof(u64) * 8) + BUSTER_FORMAT_INTEGER_MAX_WIDTH + 2];
-                    let number_string_buffer = BUSTER_ARRAY_TO_SLICE(String8, integer_format_buffer);
+                    let number_string_buffer = (String8)BUSTER_ARRAY_TO_SLICE(integer_format_buffer);
 
                     String8 format_result;
 
@@ -842,7 +842,7 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
                     }
 
                     char8 integer_format_buffer[sizeof(u64) * 8 + 1]; // 1 for the sign (needed?)
-                    let string_buffer = BUSTER_ARRAY_TO_SLICE(String8, integer_format_buffer);
+                    let string_buffer = (String8) BUSTER_ARRAY_TO_SLICE(integer_format_buffer);
                     String8 format_result;
 
                     switch (format_kind)
@@ -876,7 +876,7 @@ BUSTER_IMPL StringFormatResult string8_format_va(String8 buffer_slice, String8 f
                 {
                     let os_error = va_arg(variable_arguments, OsError);
                     CharOs error_buffer[BUSTER_OS_ERROR_BUFFER_MAX_LENGTH];
-                    let error_string = os_error_write_message(BUSTER_ARRAY_TO_SLICE(StringOs, error_buffer), os_error);
+                    let error_string = os_error_write_message((String8)BUSTER_ARRAY_TO_SLICE(error_buffer), os_error);
 
                     written = result.real_buffer_index + error_string.length <= buffer_slice.length;
 
@@ -986,7 +986,7 @@ BUSTER_IMPL String8 string8_format(String8 buffer_slice, String8 format, ...)
 BUSTER_IMPL void string8_print(String8 format, ...)
 {
     char8 buffer[8192];
-    let buffer_slice = BUSTER_ARRAY_TO_SLICE(String8, buffer);
+    let buffer_slice = (String8)BUSTER_ARRAY_TO_SLICE(buffer);
     buffer_slice.length -= 1;
     va_list variable_arguments;
     va_start(variable_arguments);
@@ -1054,6 +1054,42 @@ BUSTER_IMPL u64 string8_copy(String8 destination, String8 source)
         memcpy(destination.pointer, source.pointer, result);
     }
 
+    return result;
+}
+
+BUSTER_IMPL u64 string8_first_sequence(String8 s, String8 sub)
+{
+    u64 result = BUSTER_STRING_NO_MATCH;
+
+    if (sub.length == 0)
+    {
+        result = 0;
+    }
+    else if (s.length >= sub.length)
+    {
+        u64 end = s.length - sub.length + 1;
+        for (u64 i = 0; i < end; i += 1)
+        {
+            let chunk = string8_from_pointer_length(s.pointer + i, sub.length);
+            if (string_equal(chunk, sub))
+            {
+                result = i;
+                break;
+            }
+        }
+    }
+
+    return result;
+}
+
+BUSTER_IMPL bool string8_ends_with_sequence(String8 s, String8 ending)
+{
+    bool result = s.length >= ending.length;
+    if (result)
+    {
+        let last_chunk = string8_from_pointer_length(s.pointer + s.length - ending.length, ending.length);
+        result = string_equal(last_chunk, ending);
+    }
     return result;
 }
 
@@ -6267,6 +6303,141 @@ BUSTER_IMPL UnitTestResult string8_tests(UnitTestArguments* arguments)
                     }
                 }
             }
+        }
+    }
+
+    // string8_first_sequence
+    {
+        {
+            // Basic match at start
+            bool success = string8_first_sequence(S8("hello world"), S8("hello")) == 0;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // Match in middle
+            bool success = string8_first_sequence(S8("hello world"), S8("world")) == 6;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // Match at end
+            bool success = string8_first_sequence(S8("hello.txt"), S8(".txt")) == 5;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // No match
+            bool success = string8_first_sequence(S8("hello world"), S8("foo")) == BUSTER_STRING_NO_MATCH;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // Empty substring matches at 0
+            bool success = string8_first_sequence(S8("hello"), S8("")) == 0;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // Empty string with empty substring
+            bool success = string8_first_sequence(S8(""), S8("")) == 0;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // Empty string with non-empty substring
+            bool success = string8_first_sequence(S8(""), S8("a")) == BUSTER_STRING_NO_MATCH;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // Substring longer than string
+            bool success = string8_first_sequence(S8("hi"), S8("hello")) == BUSTER_STRING_NO_MATCH;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // Exact match
+            bool success = string8_first_sequence(S8("abc"), S8("abc")) == 0;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // Multiple occurrences - should return first
+            bool success = string8_first_sequence(S8("abcabc"), S8("abc")) == 0;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // Single character match
+            bool success = string8_first_sequence(S8("hello"), S8("l")) == 2;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            // Partial match should not count
+            bool success = string8_first_sequence(S8("abcd"), S8("abd")) == BUSTER_STRING_NO_MATCH;
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+    }
+
+    // string8_ends_with_sequence
+    {
+        {
+            bool success = string8_ends_with_sequence(S8("hello.txt"), S8(".txt"));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            bool success = string8_ends_with_sequence(S8("test.vert.spv"), S8(".vert.spv"));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            bool success = string8_ends_with_sequence(S8("abc"), S8("abc"));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            bool success = string8_ends_with_sequence(S8("hello"), S8(""));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            bool success = !string8_ends_with_sequence(S8("hello.txt"), S8(".c"));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            bool success = !string8_ends_with_sequence(S8("ab"), S8("abc"));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            bool success = !string8_ends_with_sequence(S8("hi"), S8("hello"));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            bool success = string8_ends_with_sequence(S8(""), S8(""));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            bool success = !string8_ends_with_sequence(S8(""), S8("a"));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            bool success = !string8_ends_with_sequence(S8("abcde"), S8("cdf"));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
+        }
+        {
+            bool success = !string8_ends_with_sequence(S8("txtfile"), S8("txt"));
+            result.succeeded_test_count += success;
+            result.test_count += 1;
         }
     }
 

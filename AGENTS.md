@@ -32,7 +32,12 @@
 ## Coding Style & Naming Conventions
 - Indent with 4 spaces, braces on their own line, and keep line widths readable.
 - Naming: `snake_case` for functions/variables, `PascalCase` for types, and `UPPER_SNAKE_CASE` for macros/constants.
+- Prefer `let` for variable declarations over explicit type specifiers to avoid type mismatch bugs.
+- Avoid abbreviations in variable/function names; use full words (e.g., `pointer` instead of `ptr`, `record` instead of `rec`).
+- Prefer `..._count` suffix over `num_...` prefix for count variables (e.g., `table_count` instead of `num_tables`).
 - Prefer adding `.h` and `.c` pairs under `src/buster/` and keep module names consistent with directory names.
+- When a function takes an `Arena*` parameter, it should be the first parameter.
+- Avoid early returns; prefer a result variable and a single return at end of function scope.
 
 ## Testing Guidelines
 - Use the custom test macros in `src/buster/test.h` for unit-style tests:

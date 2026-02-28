@@ -1,6 +1,8 @@
 #pragma once
 #include <buster/build/build_common.h>
 
+BUSTER_IMPL StringOs vulkan_sdk_path;
+
 BUSTER_IMPL BuildTarget build_target_native = {
     .pointer = &target_native,
 };
@@ -43,7 +45,7 @@ BUSTER_GLOBAL_LOCAL StringOs enable_warning_flags[] = {
     SOs("-Wimplicit-void-ptr-cast"),
     SOs("-Winfinite-recursion"),
     SOs("-Winvalid-utf8"),
-    SOs("-Wlarge-by-value-copy"),
+    // SOs("-Wlarge-by-value-copy"),
     SOs("-Wlinker-warnings"),
     SOs("-Wloop-analysis"),
     SOs("-Wmain"),
@@ -119,6 +121,18 @@ BUSTER_GLOBAL_LOCAL StringOs std_flags[] = {
 BUSTER_IMPL StringOsList build_compile_link_arguments(Arena* arena, const CompileLinkOptions * const restrict options)
 {
     // Forced to do it so early because we would need another arena here otherwise (since arena is used for the argument builder)
+    StringOs vulkan_include_flag = {};
+    if (vulkan_sdk_path.pointer)
+    {
+        StringOs parts[] = {
+            SOs("-I"),
+            vulkan_sdk_path,
+            SOs("/include"),
+        };
+
+        vulkan_include_flag = string_os_join_arena(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(parts), true);
+    }
+
     StringOs march_string_os = options->target->march_string;
 
     let builder = string_os_list_builder_create(arena, options->clang_path);
@@ -185,6 +199,11 @@ BUSTER_IMPL StringOsList build_compile_link_arguments(Arena* arena, const Compil
             string_os_list_builder_append(builder, include_flag);
         }
 
+        if (vulkan_sdk_path.pointer)
+        {
+            string_os_list_builder_append(builder, vulkan_include_flag);
+        }
+
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(std_flags); i += 1)
         {
             let std_flag = std_flags[i];
@@ -240,10 +259,27 @@ BUSTER_IMPL StringOsList build_compile_link_arguments(Arena* arena, const Compil
             string_os_list_builder_append(builder, SOs("-luring"));
         }
 
+        if (options->use_graphics)
+        {
+            switch (options->target->pointer->os)
+            {
+                break; case OPERATING_SYSTEM_LINUX:
+                {
+                    string_os_list_builder_append(builder, SOs("-lxcb"));
+                    string_os_list_builder_append(builder, SOs("-lfontconfig"));
+                }
+                break; default:
+                {
+                }
+            }
+        }
+
         if (options->target->pointer->os == OPERATING_SYSTEM_WINDOWS)
         {
             string_os_list_builder_append(builder, SOs("-lws2_32"));
         }
+
+        string_os_list_builder_append(builder, SOs("-lm"));
     }
 
     return string_os_list_builder_end(builder);
@@ -260,13 +296,13 @@ ENUM(BuildCommand,
 ENUM(BuildFlag,
     BUILD_FLAG_OPTIMIZE,
     BUILD_FLAG_FUZZ,
-    BUILD_FLAG_CI,
     BUILD_FLAG_HAS_DEBUG_INFORMATION,
     BUILD_FLAG_UNITY_BUILD,
     BUILD_FLAG_JUST_PREPROCESSOR,
     BUILD_FLAG_SELF_HOSTED,
     BUILD_FLAG_SANITIZE,
     BUILD_FLAG_MAIN_BRANCH,
+    BUILD_FLAG_AVOID_DOWNLOAD,
     BUILD_FLAG_COUNT,
 );
 
@@ -324,38 +360,34 @@ STRUCT(BuildStringOptions)
     u8 reserved[7];
 };
 
-typedef u64 FlagBackingType;
-
 STRUCT(BuildProgramState)
 {
     ProgramState general_state;
-    FlagBackingType value_flags;
-    FlagBackingType set_flags;
+    FLAG_ARRAY_U64(value_flags, BUILD_FLAG_COUNT);
+    FLAG_ARRAY_U64(set_flags, BUILD_FLAG_COUNT);
     BuildIntegerOptions integer;
     BuildStringOptions string;
     BuildCommand command;
     u8 reserved[4];
 };
 
-static_assert(sizeof(FlagBackingType) * 8 > BUILD_FLAG_COUNT);
-
 BUSTER_GLOBAL_LOCAL BuildProgramState build_program_state = {};
 BUSTER_IMPL ProgramState* program_state = &build_program_state.general_state;
 
 BUSTER_GLOBAL_LOCAL bool build_flag_is_set(BuildFlag flag)
 {
-    return (build_program_state.set_flags & ((FlagBackingType)1 << flag)) != 0;
+    return flag_get(build_program_state.set_flags, BUILD_FLAG_COUNT, flag);
 }
 
 BUSTER_GLOBAL_LOCAL bool build_flag_get(BuildFlag flag)
 {
-    return (build_program_state.value_flags & ((FlagBackingType)1 << flag)) != 0;
+    return flag_get(build_program_state.value_flags, BUILD_FLAG_COUNT, flag);
 }
 
 BUSTER_GLOBAL_LOCAL void build_flag_set(BuildFlag flag, bool value)
 {
-    build_program_state.value_flags |= (FlagBackingType)value << flag;
-    build_program_state.set_flags |= (FlagBackingType)1 << flag;
+    flag_set(build_program_state.value_flags, BUILD_FLAG_COUNT, flag, value);
+    flag_set(build_program_state.set_flags, BUILD_FLAG_COUNT, flag, true);
 }
 
 BUSTER_GLOBAL_LOCAL u64 build_integer_option_get_unsigned(BuildIntegerOption option_id)
@@ -425,51 +457,27 @@ BUSTER_IMPL ProcessResult process_arguments()
         while ((argument = string_os_list_iterator_next(&arg_it)).pointer)
         {
             string8_print(S8("Argument: {SOs}\n"), argument);
+
             StringOs build_flag_strings[] = {
                 [BUILD_FLAG_OPTIMIZE] = SOs("--optimize="),
                 [BUILD_FLAG_FUZZ] = SOs("--fuzz="),
-                [BUILD_FLAG_CI] = SOs("--ci="),
                 [BUILD_FLAG_HAS_DEBUG_INFORMATION] = SOs("--has-debug-information="),
                 [BUILD_FLAG_UNITY_BUILD] = SOs("--unity-build="),
                 [BUILD_FLAG_JUST_PREPROCESSOR] = SOs("--just-preprocessor="),
                 [BUILD_FLAG_SELF_HOSTED] = SOs("--self-hosted="),
                 [BUILD_FLAG_SANITIZE] = SOs("--sanitize="),
                 [BUILD_FLAG_MAIN_BRANCH] = SOs("--main-branch="),
+                [BUILD_FLAG_AVOID_DOWNLOAD] = SOs("--avoid-download="),
             };
             static_assert(BUSTER_ARRAY_LENGTH(build_flag_strings) == BUILD_FLAG_COUNT);
 
-            BuildFlag build_flag;
-            for (build_flag = 0; build_flag < BUILD_FLAG_COUNT; build_flag += 1)
+            let boolean_result = boolean_argument_process(build_flag_strings, BUSTER_ARRAY_LENGTH(build_flag_strings), build_program_state.value_flags, BUILD_FLAG_COUNT, argument);
+            bool found = boolean_result.valid && boolean_result.index < BUILD_FLAG_COUNT;
+
+            if (found)
             {
-                let build_flag_string = build_flag_strings[build_flag];
-                if (string_os_starts_with_sequence(argument, build_flag_string))
-                {
-                    bool is_valid_value = argument.length == build_flag_string.length + 1;
-
-                    if (is_valid_value)
-                    {
-                        let arg_value = argument.pointer[build_flag_string.length];
-                        switch (arg_value)
-                        {
-                            break; case '1': case '0': build_flag_set(build_flag, arg_value == '1');
-                            break; default:
-                            {
-                                is_valid_value = false;
-                            }
-                        }
-                    }
-
-                    if (!is_valid_value)
-                    {
-                        string8_print(S8("For argument '{SOs}', unrecognized value\n"), argument);
-                        result = PROCESS_RESULT_FAILED;
-                    }
-
-                    break;
-                }
+                flag_set(build_program_state.set_flags, BUILD_FLAG_COUNT, boolean_result.index, true);
             }
-
-            bool found = build_flag != BUILD_FLAG_COUNT;
 
             if (!found)
             {
@@ -589,7 +597,7 @@ BUSTER_IMPL ProcessResult process_arguments()
 
             if (!found)
             {
-                let os_argument_process_result = buster_argument_process(argv, envp, argument_count, command);
+                let os_argument_process_result = buster_argument_process(argv, envp, argument_count, argument);
                 if (os_argument_process_result != PROCESS_RESULT_SUCCESS)
                 {
                     string8_print(S8("Unrecognized argument: '{SOs}'\n"), argument);
@@ -612,9 +620,9 @@ BUSTER_IMPL ProcessResult process_arguments()
         build_flag_set(BUILD_FLAG_UNITY_BUILD, build_flag_get(BUILD_FLAG_OPTIMIZE));
     }
 
-    if (is_command_present & !program_state->input.verbose)
+    if (is_command_present & !flag_get(program_state->input.flags, PROGRAM_FLAG_COUNT, PROGRAM_FLAG_VERBOSE))
     {
-        program_state->input.verbose = true;
+        flag_set(program_state->input.flags, PROGRAM_FLAG_COUNT, PROGRAM_FLAG_VERBOSE, true);
     }
 
     return result;
@@ -632,7 +640,7 @@ BUSTER_IMPL ToolchainInformation toolchain_get_information(Arena* arena, LLVMVer
         home_path,
         SOs("/dev/toolchain/install"),
     };
-    let install_path = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, install_path_parts), true);
+    let install_path = string_os_join_arena(arena, (StringOsSlice)BUSTER_ARRAY_TO_SLICE(install_path_parts), true);
     StringOs llvm_basename_parts[] = {
         SOs("llvm_"),
         llvm_version.string,
@@ -652,7 +660,7 @@ BUSTER_IMPL ToolchainInformation toolchain_get_information(Arena* arena, LLVMVer
 #endif
         SOs("-Release"),
     };
-    let llvm_basename = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, llvm_basename_parts), true);
+    let llvm_basename = string_os_join_arena(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(llvm_basename_parts), true);
 
     StringOs url_parts[] = {
         SOs("https://github.com/buster14a/toolchain/releases/download/v"),
@@ -661,14 +669,14 @@ BUSTER_IMPL ToolchainInformation toolchain_get_information(Arena* arena, LLVMVer
         llvm_basename,
         SOs(".7z"),
     };
-    let url = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, url_parts), true);
+    let url = string_os_join_arena(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(url_parts), true);
 
     StringOs prefix_path_parts[] = {
         install_path,
         SOs("/"),
         llvm_basename,
     };
-    let prefix_path = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, prefix_path_parts), true);
+    let prefix_path = string_os_join_arena(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(prefix_path_parts), true);
     StringOs clang_path_parts[] = {
         prefix_path,
         SOs("/bin/clang"),
@@ -678,7 +686,7 @@ BUSTER_IMPL ToolchainInformation toolchain_get_information(Arena* arena, LLVMVer
         SOs(""),
 #endif
     };
-    let clang_path = string_os_join_arena(arena, BUSTER_ARRAY_TO_SLICE(StringOsSlice, clang_path_parts), true);
+    let clang_path = string_os_join_arena(arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(clang_path_parts), true);
     return (ToolchainInformation) {
         .clang_path = clang_path,
         .prefix_path = prefix_path,

@@ -5,6 +5,7 @@
 #include <buster/target.h>
 #include <buster/assertion.h>
 #include <buster/arena.h>
+#include <buster/arguments.h>
 
 #if BUSTER_LINK_LIBC
 BUSTER_IMPL BUSTER_THREAD_LOCAL_DECL Thread* thread;
@@ -20,15 +21,19 @@ BUSTER_IMPL ProcessResult buster_argument_process(StringOsList argument_pointer,
     BUSTER_UNUSED(argument_pointer);
     BUSTER_UNUSED(environment_pointer);
     BUSTER_UNUSED(argument_index);
-    ProcessResult result = PROCESS_RESULT_SUCCESS;
 
-    if (string_equal(argument, SOs("--verbose")))
+    StringOs flag_string_starts[] = {
+        [PROGRAM_FLAG_VERBOSE] = SOs("--verbose="),
+        [PROGRAM_FLAG_CI] = SOs("--ci="),
+    };
+
+    static_assert(BUSTER_ARRAY_LENGTH(flag_string_starts) == PROGRAM_FLAG_COUNT);
+
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    let process_result = boolean_argument_process(flag_string_starts, BUSTER_ARRAY_LENGTH(flag_string_starts), program_state->input.flags, PROGRAM_FLAG_COUNT, argument);
+    if (process_result.valid && process_result.index < PROGRAM_FLAG_COUNT)
     {
-        program_state->input.verbose = true;
-    }
-    else
-    {
-        result = PROCESS_RESULT_FAILED;
+        result = PROCESS_RESULT_SUCCESS;
     }
 
     return result;
@@ -38,7 +43,7 @@ BUSTER_IMPL ProcessResult buster_argument_process(StringOsList argument_pointer,
 [[gnu::cold]] BUSTER_GLOBAL_LOCAL ThreadReturnType thread_os_entry_point(void* context)
 {
     thread = (Thread*)context;
-    thread->arena = arena_create((ArenaInitialization){});
+    thread->arena = arena_create((ArenaCreation){});
 #if BUSTER_USE_IO_RING
     io_ring_init(&thread->ring, 4096);
 #endif
@@ -61,7 +66,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
 #else
 #endif
 
-    program_state->arena = arena_create((ArenaInitialization){});
+    program_state->arena = arena_create((ArenaCreation){});
     program_state->input.argv = argv;
     program_state->input.envp = envp;
 
@@ -132,7 +137,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
                 Thread thread_buffer = {};
                 thread = &thread_buffer;
                 thread->entry_point = thread_entry_point;
-                thread->arena = arena_create((ArenaInitialization){});
+                thread->arena = arena_create((ArenaCreation){});
                 BUSTER_CHECK(program_state->input.thread_spawn_policy == THREAD_SPAWN_POLICY_SINGLE_THREADED);
                 result = thread->entry_point();
             }
@@ -144,7 +149,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
 BUSTER_EXPORT int main(int argc, char* argv[], char* envp[])
 {
     BUSTER_UNUSED(argc);
-#if _WIN32
+#if defined(_WIN32)
     BUSTER_UNUSED(argv);
     BUSTER_UNUSED(envp);
     let result = buster_entry_point(GetCommandLineW(), GetEnvironmentStringsW());
