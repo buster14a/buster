@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euox pipefail
+set -euo pipefail
 
 BUSTER_CI=0
 EXTRA_FLAGS=""
@@ -24,6 +24,7 @@ if [[ "$BUSTER_CI" == "1" ]]; then
     export ASAN_OPTIONS="symbolize=1:fast_unwind_on_malloc=0"
     export UBSAN_OPTIONS="symbolize=1:print_stacktrace=1"
     mkdir -p "$DEBUGINFOD_CACHE_PATH"
+    set -x
 fi
 
 BUSTER_BUILD_DIRECTORY=build
