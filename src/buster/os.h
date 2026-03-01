@@ -152,6 +152,7 @@ BUSTER_DECL BUSTER_THREAD_LOCAL_DECL Thread* thread;
 ENUM(ProgramFlag,
     PROGRAM_FLAG_VERBOSE,
     PROGRAM_FLAG_CI,
+    PROGRAM_FLAG_TEST_PERSIST,
     PROGRAM_FLAG_COUNT,
 );
 STRUCT(ProgramInput)
@@ -162,8 +163,6 @@ STRUCT(ProgramInput)
     ThreadSpawnPolicy thread_spawn_policy;
     u8 reserved[4];
 };
-
-#define PROGRAM_FLAG_GET()
 
 STRUCT(ProgramState)
 {
@@ -176,6 +175,8 @@ STRUCT(ProgramState)
 
 BUSTER_DECL ProgramState* program_state;
 BUSTER_DECL Arena* thread_arena();
+
+#define PROGRAM_FLAG_GET(f) (((program_state->input.flags[(f) / PROGRAM_FLAG_COUNT]) & ((u64)1 << ((f) % PROGRAM_FLAG_COUNT))) != 0)
 
 [[noreturn]] [[gnu::cold]] BUSTER_DECL void os_fail();
 [[gnu::noreturn]] BUSTER_DECL void os_exit(u32 code);
