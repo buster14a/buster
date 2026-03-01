@@ -25,6 +25,7 @@ BUSTER_IMPL ProcessResult buster_argument_process(StringOsList argument_pointer,
     StringOs flag_string_starts[] = {
         [PROGRAM_FLAG_VERBOSE] = SOs("--verbose="),
         [PROGRAM_FLAG_CI] = SOs("--ci="),
+        [PROGRAM_FLAG_TEST_PERSIST] = SOs("--test-persist="),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(flag_string_starts) == PROGRAM_FLAG_COUNT);

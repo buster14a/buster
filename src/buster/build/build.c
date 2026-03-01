@@ -1160,9 +1160,15 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                             max_total_time_argument,
                         };
 
+                        StringOs test_persist_parts[] = {
+                            SOs("--test-persist="),
+                            PROGRAM_FLAG_GET(PROGRAM_FLAG_TEST_PERSIST) && link_unit_i == default_target ? SOs("1") : SOs("0"),
+                        };
+
                         StringOs test_arguments[] = {
                             program,
                             SOs("test"),
+                            string_os_join_arena(general_arena, (StringOsSlice) BUSTER_ARRAY_TO_SLICE(test_persist_parts), true),
                         };
 
                         StringOs test_debug_arguments[] = {
