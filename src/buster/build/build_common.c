@@ -243,6 +243,7 @@ BUSTER_IMPL StringOsList build_compile_link_arguments(Arena* arena, const Compil
         string_os_list_builder_append(builder, BUILD_BOOLEAN_DEFINE(options->fuzz, BUSTER_FUZZING));
         string_os_list_builder_append(builder, BUILD_BOOLEAN_DEFINE(options->use_io_ring, BUSTER_USE_IO_RING));
         string_os_list_builder_append(builder, BUILD_BOOLEAN_DEFINE(options->include_tests, BUSTER_INCLUDE_TESTS));
+        string_os_list_builder_append(builder, BUILD_BOOLEAN_DEFINE(options->optimize, BUSTER_OPTIMIZE));
 
         string_os_list_builder_append(builder, march_string_os);
 

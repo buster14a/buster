@@ -324,7 +324,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app()
 
                     state.last_frame_timestamp = timestamp_take();
 
-                    bool test = state.test;
+                    bool test = state.test && !PROGRAM_FLAG_GET(PROGRAM_FLAG_TEST_PERSIST);
                     let loop_times = test ? (u64)3 : UINT64_MAX;
                     for (u64 i = 0; i < loop_times && state.first_window; i += 1)
                     {
