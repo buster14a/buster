@@ -11,4 +11,4 @@ STRUCT(CpuId)
     u32 edx;
 };
 
-BUSTER_DECL CpuModel cpu_detect_model_x86_64();
+BUSTER_F_DECL CpuModel cpu_detect_model_x86_64();

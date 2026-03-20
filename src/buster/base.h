@@ -1,11 +1,19 @@
 #pragma once
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #ifndef BUSTER_KERNEL
 #define BUSTER_KERNEL 0
 #endif
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
+#ifndef BUSTER_SINGLE_THREADED
+#define BUSTER_SINGLE_THREADED 0
+#endif
+
+#ifndef BUSTER_OPTIMIZE
+#define BUSTER_OPTIMIZE 0
 #endif
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -27,17 +35,11 @@
 #if BUSTER_LINK_LIBC
 #define BUSTER_THREAD_LOCAL_DECL __thread
 #else
-#if defined(_WIN32)
-#define BUSTER_THREAD_LOCAL_DECL
-#else
 #pragma error
 #endif
-#endif
 
-#if BUSTER_LINK_LIBC
-#define thread_local_get(x) (x)
-#else
-#define thread_local_get(x) TlsGetValue(x)
+#if defined(__cplusplus)
+#define restrict __restrict
 #endif
 
 #if defined(__APPLE__)
@@ -47,7 +49,7 @@
 #endif
 
 #ifndef BUSTER_INCLUDE_TESTS
-#define BUSTER_INCLUDE_TESTS 1
+#define BUSTER_INCLUDE_TESTS 0
 #endif
 
 #if defined(__cplusplus)
@@ -61,19 +63,21 @@
 #endif
 
 #if BUSTER_UNITY_BUILD
-#define BUSTER_DECL static
-#define BUSTER_IMPL static
+#define BUSTER_F_DECL static
+#define BUSTER_F_IMPL 
+
+#define BUSTER_V_DECL extern
+#define BUSTER_V_IMPL 
 #else
-#define BUSTER_DECL extern
-#define BUSTER_IMPL
+#define BUSTER_F_DECL extern
+#define BUSTER_F_IMPL 
+
+#define BUSTER_V_DECL extern
+#define BUSTER_V_IMPL 
 #endif
 
 #ifndef BUSTER_USE_IO_RING
 #define BUSTER_USE_IO_RING 0
-#endif
-
-#ifndef BUSTER_USE_PTHREAD
-#define BUSTER_USE_PTHREAD 0
 #endif
 
 #define BUSTER_PACKED __attribute__((packed))
@@ -82,14 +86,17 @@
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
 
-#define BUSTER_FIELD_PARENT_POINTER(type, field, pointer) ((type*)((char*)(pointer) - __builtin_offsetof(type, field)))
+#define BUSTER_OFFSET_OF(T, field) __builtin_offsetof(T, field)
+#define BUSTER_FIELD_PARENT_POINTER(type, field, pointer) ((type*)((char8*)(pointer) - BUSTER_OFFSET_OF(T, field)))
 
 #define BUSTER_UNPREDICTABLE(cond) __builtin_unpredictable(cond)
 #define BUSTER_SELECT(cond, a, b) BUSTER_UNPREDICTABLE(cond) ? (a) : (b)
 
 #define let __auto_type
-#define STRUCT(n) typedef struct n n; struct n
-#define UNION(n) typedef union n n; union n
+#define FORWARD_DECLARE(T, N) typedef T N N
+#define STRUCT(n) FORWARD_DECLARE(struct, n); struct n
+#define UNION(n) FORWARD_DECLARE(union, n); union n
+#define OPAQUE(n) FORWARD_DECLARE(struct, n)
 #define BUSTER_TRAP() __builtin_trap()
 #define BUSTER_BREAKPOINT() __builtin_debugtrap()
 #define BUSTER_LIKELY(x) __builtin_expect(!!(x), 1)
@@ -98,6 +105,10 @@
 
 #define BUSTER_MIN(a,b) (((a) < (b)) ? (a) : (b))
 #define BUSTER_MAX(a,b) (((a) > (b)) ? (a) : (b))
+
+#define BUSTER_CLAMP_TOP(a,x) BUSTER_MIN(a, x)
+#define BUSTER_CLAMP_BOT(x,b) BUSTER_MAX(x, b)
+#define BUSTER_CLAMP(a,x,b) (((x) < (a)) ? (a) : ((x) > (b)) ? (b) : (x))
 
 #if defined(__APPLE__) &&  defined(__aarch64__)
 #define BUSTER_CACHE_LINE_GUESS (128)
@@ -160,28 +171,28 @@ typedef float4 vec4;
 #define ENUM_START(E, T) enum E
 #define ENUM_END(E, T); typedef T E
 #else
-#define ENUM_START(E, T) typedef enum E : T
-#define ENUM_END(E, T) E
+#define ENUM_START(E, T) enum class E : T
+#define ENUM_END(E, T)
 #endif
-#define ENUM_T(E, T, ...) ENUM_START(E, T) { __VA_ARGS__ } ENUM_END(E, T)
-#define ENUM(E, ...) typedef enum E { __VA_ARGS__ } E
+#define ENUM_T(E, T, ...) ENUM_START(E, T) { __VA_ARGS__, Count } ENUM_END(E, T)
+#define ENUM(E, ...) ENUM_T(E, u32, __VA_ARGS__)
 
-#define SLICE(name, T) STRUCT(name) { T* pointer; u64 length; }
+template <typename T>
+struct Slice
+{
+    T* pointer;
+    u64 length;
 
-SLICE(u8Slice,  u8);
-SLICE(u16Slice, u16);
-SLICE(u32Slice, u32);
-SLICE(u64Slice, u64);
+    T* begin();
+    T* end();
+};
 
-SLICE(s8Slice,  s8);
-SLICE(s16Slice, s16);
-SLICE(s32Slice, s32);
-SLICE(s64Slice, s64);
+#define EACH_SLICE(i, s) u64 i = 0; i < (s).length; i += 1
 
-typedef u8Slice ByteSlice;
+typedef Slice<u8> ByteSlice;
 
 #define BUSTER_SLICE_SIZE(slice) ((slice).length * sizeof(*((slice).pointer)))
-#define BUSTER_ARRAY_TO_SLICE(arr) { (arr), BUSTER_ARRAY_LENGTH(arr) }
+#define BUSTER_ARRAY_TO_SLICE(arr) { .pointer = (arr), .length = BUSTER_ARRAY_LENGTH(arr) }
 #define BUSTER_ARRAY_TO_BYTE_SLICE(arr) ((ByteSlice) { .pointer = (u8*)(arr), .length = sizeof(arr) })
 
 #define BUSTER_GB(x) (u64)(1024) * BUSTER_MB(x)
@@ -195,10 +206,10 @@ STRUCT(IntegerParsingU64)
 };
 
 ENUM(IntegerFormat,
-    INTEGER_FORMAT_DECIMAL,
-    INTEGER_FORMAT_HEXADECIMAL,
-    INTEGER_FORMAT_OCTAL,
-    INTEGER_FORMAT_BINARY,
+    Decimal,
+    Hexadecimal,
+    Octal,
+    Binary
 );
 
 #define BUSTER_SLICE_TO_BYTE_SLICE(s) (ByteSlice){ .pointer = (u8*)((s).pointer), .length = BUSTER_SLICE_SIZE(s) }
@@ -236,30 +247,25 @@ typedef wchar_t char32;
 #endif
 static_assert(sizeof(char32) == 4);
 
-SLICE(String8, char8);
-SLICE(String8Slice, String8);
-SLICE(SliceOfString8Slice, String8Slice);
+template<typename T>
+using String = Slice<T>;
 
-SLICE(String16, char16);
-SLICE(String16Slice, String16);
-SLICE(SliceOfString16Slice, String16Slice);
+using String8 = String<char8>;
+using String16 = String<char16>;
 
-SLICE(float4Slice, float4);
+#define S8(strlit) ((String8) { .pointer = (char8*)(strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) })
+#define S16(strlit) ((String16) { .pointer = (char16*)(u ## strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) })
 
 // Math types and enums for UI
 ENUM(Axis2,
-    AXIS2_X,
-    AXIS2_Y,
-    AXIS2_COUNT,
-);
+    X,
+    Y);
 
 ENUM(Corner,
     CORNER_00,
     CORNER_01,
     CORNER_10,
-    CORNER_11,
-    CORNER_COUNT,
-);
+    CORNER_11);
 
 UNION(F32Interval2)
 {
@@ -270,48 +276,33 @@ UNION(F32Interval2)
 };
 static_assert(sizeof(F32Interval2) == 4 * sizeof(f32));
 
-#define BUSTER_CLAMP(a, x, b) (((a) > (x)) ? (a) : ((b) < (x)) ? (b) : (x))
-
 static inline bool is_power_of_two(u64 value)
 {
     return value && !(value & (value - 1));
 }
 
-#define is_one_or_another(i, a, b) (((i) == (a)) | ((i) == (b)))
-#define is_between_range_included(i, a, b) (((i) >= (a)) & ((i) <= (b)))
-
-#define code_point_is_space(ch) (is_one_or_another(ch, ' ', '\t') | is_one_or_another(ch, '\r', '\n'))
-#define code_point_is_decimal(ch) is_between_range_included(ch, '0', '9')
-#define code_point_is_octal(ch) is_between_range_included(ch, '0', '7')
-#define code_point_is_binary(ch) is_one_or_another(ch, '0', '1')
-#define code_point_is_hexadecimal_alpha_lower(ch) is_between_range_included(ch, 'a', 'f')
-#define code_point_is_hexadecimal_alpha_upper(ch) is_between_range_included(ch, 'A', 'F')
-#define code_point_is_hexadecimal_alpha(ch) (code_point_is_hexadecimal_alpha_lower(ch) | code_point_is_hexadecimal_alpha_upper(ch))
-#define code_point_is_hexadecimal(ch) (code_point_is_decimal(ch) | code_point_is_hexadecimal_alpha(ch))
-#define code_point_is_alpha_lower(ch) is_between_range_included(ch, 'a', 'z')
-#define code_point_is_alpha_upper(ch) is_between_range_included(ch, 'A', 'Z')
-#define code_point_is_identifier_start(ch) (code_point_is_alpha_upper(ch) | code_point_is_alpha_lower(ch) | ((ch) == '_'))
-#define code_point_is_identifier(ch) (code_point_is_identifier_start(ch) | code_point_is_decimal(ch))
-
-typedef struct OsFileDescriptor OsFileDescriptor;
-typedef struct OsProcessHandle OsProcessHandle;
-typedef struct OsThreadHandle OsThreadHandle;
-typedef struct OsModule OsModule;
-typedef struct OsSymbol OsSymbol;
+OPAQUE(OsFileDescriptor);
+OPAQUE(OsProcessHandle);
+OPAQUE(OsThreadHandle);
+OPAQUE(OsModuleHandle);
+OPAQUE(OsSymbol);
+OPAQUE(OsBarrierHandle);
+OPAQUE(OsConditionVariableHandle);
+OPAQUE(OsMutexHandle);
 
 ENUM(ProcessResult,
-    PROCESS_RESULT_SUCCESS,
-    PROCESS_RESULT_FAILED,
-    PROCESS_RESULT_FAILED_TRY_AGAIN,
-    PROCESS_RESULT_CRASH,
-    PROCESS_RESULT_NOT_EXISTENT,
-    PROCESS_RESULT_RUNNING,
-    PROCESS_RESULT_UNKNOWN,
-);
+    Success,
+    Failed,
+    Failed_try_again,
+    Crash,
+    Not_existent,
+    Running,
+    Unknown);
 
 typedef struct Thread Thread;
 typedef struct Arena Arena;
 typedef ProcessResult ThreadEntryPoint(void);
+
 
 #if defined(_WIN32)
 typedef String16 StringOs;
@@ -320,14 +311,16 @@ static_assert(sizeof(CharOs) == 2);
 typedef CharOs* StringOsList;
 typedef String16Slice StringOsSlice;
 typedef SliceOfString16Slice SliceOfStringOsSlice;
+#define SOs(strlit) S16(strlit)
 #else
 typedef String8 StringOs;
 typedef char CharOs;
 static_assert(sizeof(CharOs) == 1);
 typedef CharOs** StringOsList;
-typedef String8Slice StringOsSlice;
-typedef SliceOfString8Slice SliceOfStringOsSlice;
+#define SOs(strlit) S8(strlit)
 #endif
+
+#define BUSTER_SLICE(p, l) (Slice<decltype(*(p))>){ .pointer = (typeof(*(p))*) (p), .length = (l) }
 
 STRUCT(TextureIndex)
 {
@@ -419,8 +412,7 @@ STRUCT(FontTextureAtlas)
 typedef struct OsWindowHandle OsWindowHandle;
 
 ENUM(OsWindowingEventKind,
-    OS_WINDOWING_EVENT_WINDOW_CLOSE,
-);
+    OS_WINDOWING_EVENT_WINDOW_CLOSE);
 
 STRUCT(OsWindowingEvent)
 {
@@ -440,7 +432,7 @@ STRUCT(OsWindowingEventList)
 
 #define FLAG_ARRAY_LENGTH(T, count) ((count) / sizeof(T) + ((count) % sizeof(T) != 0))
 #define FLAG_ARRAY_GENERIC(T, N, count) T N[FLAG_ARRAY_LENGTH(T, count)]
-#define FLAG_ARRAY_U64(N, count) FLAG_ARRAY_GENERIC(u64, N, (count))
+#define FLAG_ARRAY_U64(N, E) FLAG_ARRAY_GENERIC(u64, N, (u64)E::Count)
 
 #if defined(__SANITIZE_ADDRESS__)
 #include <sanitizer/lsan_interface.h>
@@ -451,3 +443,11 @@ STRUCT(OsWindowingEventList)
 #define BUSTER_LSAN_ENABLE()
 #endif
 
+ENUM(ScratchArenaId,
+    SCRATCH_ARENA_0,
+    SCRATCH_ARENA_1);
+
+#define EACH_ENUM_FREE(E, e) e = (E)0; e < E::Count; e = (E)((__underlying_type(E))e + 1)
+#define EACH_ENUM(E, e) E EACH_ENUM_FREE(E, e)
+#define EACH_ENUM_INT_FREE(E, e) e = 0; e < (__underlying_type(E))(E::Count); e += 1
+#define EACH_ENUM_INT(E, e) __underlying_type(E) EACH_ENUM_INT_FREE(E, e)

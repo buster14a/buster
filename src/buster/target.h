@@ -1,12 +1,10 @@
 #pragma once
 
 #include <buster/base.h>
-#include <buster/string_os.h>
 
 ENUM_T(CpuArch, u8,
     CPU_ARCH_X86_64,
-    CPU_ARCH_AARCH64,
-);
+    CPU_ARCH_AARCH64);
 
 ENUM_T(OperatingSystem, u8, 
     OPERATING_SYSTEM_LINUX,
@@ -15,8 +13,7 @@ ENUM_T(OperatingSystem, u8,
     OPERATING_SYSTEM_UEFI,
     OPERATING_SYSTEM_ANDROID,
     OPERATING_SYSTEM_IOS,
-    OPERATING_SYSTEM_FREESTANDING,
-);
+    OPERATING_SYSTEM_FREESTANDING);
 
 ENUM_T(CpuModel, u8, 
     CPU_MODEL_ERROR,
@@ -168,19 +165,14 @@ ENUM_T(CpuModel, u8,
     CPU_MODEL_A64_APPLE_M2,
     CPU_MODEL_A64_APPLE_A17,
     CPU_MODEL_A64_APPLE_M3,
-    CPU_MODEL_A64_APPLE_M4,
-
-    CPU_MODEL_COUNT,
-);
+    CPU_MODEL_A64_APPLE_M4);
 
 typedef u64 TargetCpuFeatures;
 
 ENUM(TargetStringComponents,
     TARGET_CPU_ARCH,
     TARGET_OPERATING_SYSTEM,
-    TARGET_CPU_MODEL,
-    TARGET_STRING_COMPONENT_COUNT,
-);
+    TARGET_CPU_MODEL);
 
 STRUCT(Target)
 {
@@ -193,15 +185,15 @@ STRUCT(Target)
 
 STRUCT(TargetStringSplit)
 {
-    StringOs s[TARGET_STRING_COMPONENT_COUNT];
+    StringOs s[(u64)TargetStringComponents::Count];
 };
 
-BUSTER_DECL Target target_native;
+BUSTER_V_DECL Target target_native;
 
-BUSTER_DECL bool cpu_is_native(CpuModel model);
-BUSTER_DECL CpuModel cpu_detect_model();
-BUSTER_DECL TargetStringSplit target_to_split_string_os(Target target);
-BUSTER_DECL StringOs target_to_string(Arena* arena, Target target);
-BUSTER_DECL StringOs cpu_arch_to_string_os(CpuArch arch);
-BUSTER_DECL StringOs operating_system_to_string_os(OperatingSystem os);
-BUSTER_DECL StringOs cpu_model_to_string_os(CpuModel model);
+BUSTER_F_DECL bool cpu_is_native(CpuModel model);
+BUSTER_F_DECL CpuModel cpu_detect_model();
+BUSTER_F_DECL TargetStringSplit target_to_split_string_os(Target target);
+BUSTER_F_DECL StringOs target_to_string(Arena* arena, Target target);
+BUSTER_F_DECL StringOs cpu_arch_to_string_os(CpuArch arch);
+BUSTER_F_DECL StringOs operating_system_to_string_os(OperatingSystem os);
+BUSTER_F_DECL StringOs cpu_model_to_string_os(CpuModel model);

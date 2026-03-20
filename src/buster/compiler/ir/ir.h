@@ -2,7 +2,7 @@
 #include <buster/base.h>
 #include <buster/target.h>
 
-ENUM(IrTypeId,
+ENUM_T(IrTypeId, u8,
     IR_TYPE_VOID,
     IR_TYPE_NORETURN,
     IR_TYPE_I1,
@@ -31,7 +31,7 @@ STRUCT(IrValue)
     u8 reserved[4];
 };
 
-ENUM(IrCallingConvention,
+ENUM_T(IrCallingConvention, u8,
     IR_CALLING_CONVENTION_C,
     IR_CALLING_CONVENTION_SYSTEM_V,
     IR_CALLING_CONVENTION_WIN64,
@@ -67,12 +67,13 @@ STRUCT(IrFunctionTypeBase)
 
 STRUCT(IrFunctionType)
 {
-    IrType type;
-    IrCallingConvention calling_convention;
     IrType* return_type;
     IrType** argument_types;
     u64 argument_count;
     Target* target;
+    IrType type;
+    IrCallingConvention calling_convention;
+    u8 reserved[6];
 };
 
 ENUM(IrGlobalSymbolId,

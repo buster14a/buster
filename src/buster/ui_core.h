@@ -13,8 +13,7 @@ ENUM(WindowingEventType,
     WINDOWING_EVENT_TYPE_CURSOR_ENTER,
     WINDOWING_EVENT_TYPE_WINDOW_FOCUS,
     WINDOWING_EVENT_TYPE_WINDOW_POSITION,
-    WINDOWING_EVENT_TYPE_WINDOW_CLOSE,
-);
+    WINDOWING_EVENT_TYPE_WINDOW_CLOSE);
 
 ENUM_T(WindowingEventMouseButtonKind, u8,
     WINDOWING_EVENT_MOUSE_BUTTON_1 = 0,
@@ -27,16 +26,14 @@ ENUM_T(WindowingEventMouseButtonKind, u8,
     WINDOWING_EVENT_MOUSE_BUTTON_8 = 7,
     WINDOWING_EVENT_MOUSE_LEFT = 0,
     WINDOWING_EVENT_MOUSE_RIGHT = 1,
-    WINDOWING_EVENT_MOUSE_MIDDLE = 2,
-);
-#define WINDOWING_EVENT_MOUSE_BUTTON_COUNT (WINDOWING_EVENT_MOUSE_BUTTON_8 + 1)
+    WINDOWING_EVENT_MOUSE_MIDDLE = 2);
+#define WINDOWING_EVENT_MOUSE_BUTTON_COUNT ((u64)WindowingEventMouseButtonKind::WINDOWING_EVENT_MOUSE_BUTTON_8 + 1)
 
 ENUM_T(WindowingEventMouseButtonAction, u8,
     WINDOWING_EVENT_MOUSE_RELAX = 0,
     WINDOWING_EVENT_MOUSE_RELEASE = 1,
     WINDOWING_EVENT_MOUSE_PRESS = 2,
-    WINDOWING_EVENT_MOUSE_REPEAT = 3,
-);
+    WINDOWING_EVENT_MOUSE_REPEAT = 3);
 
 STRUCT(WindowingEventMouseButtonEvent)
 {
@@ -93,9 +90,7 @@ STRUCT(WindowingEventQueue)
 ENUM_T(UI_SizeKind, u8,
     UI_SIZE_PIXEL_COUNT,
     UI_SIZE_PERCENTAGE,
-    UI_SIZE_BY_CHILDREN,
-    UI_SIZE_COUNT,
-);
+    UI_SIZE_BY_CHILDREN);
 
 STRUCT(UI_Size)
 {
@@ -126,8 +121,7 @@ ENUM_T(UI_WidgetFlagEnum, u64,
     UI_WIDGET_FLAG_OVERFLOW_X                    = 1 << 5,
     UI_WIDGET_FLAG_OVERFLOW_Y                    = 1 << 6,
     UI_WIDGET_FLAG_FLOATING_X                    = 1 << 7,
-    UI_WIDGET_FLAG_FLOATING_Y                    = 1 << 8,
-);
+    UI_WIDGET_FLAG_FLOATING_Y                    = 1 << 8);
 
 UNION(UI_WidgetFlags)
 {
@@ -165,7 +159,7 @@ STRUCT(UI_Widget)
     UI_Key key;
 
     // Input parameters
-    UI_Size pref_size[AXIS2_COUNT];
+    UI_Size pref_size[(u64)Axis2::Count];
     Axis2 child_layout_axis;
     u8 reserved[4];
     UI_WidgetFlags flags;
@@ -177,7 +171,7 @@ STRUCT(UI_Widget)
     // Data known after layout computation happens
     F32Interval2 relative_rect;
     F32Interval2 rect;
-    float2 relative_corner_delta[CORNER_COUNT];
+    float2 relative_corner_delta[(u64)Corner::Count];
 
     // Persistent data across frames
     u64 last_build_touched;
@@ -191,7 +185,6 @@ STRUCT(UI_WidgetSlot)
     UI_Widget* first;
     UI_Widget* last;
 };
-SLICE(UI_WidgetSlotSlice, UI_WidgetSlot);
 
 #define UI_STACK_CAPACITY (64)
 
@@ -251,7 +244,7 @@ STRUCT(UI_State)
     f64 frame_time;
     UI_Widget* root;
     UI_MousePosition mouse_position;
-    UI_WidgetSlotSlice widget_table;
+    Slice<UI_WidgetSlot> widget_table;
     UI_Widget* free_widget_list;
     u64 free_widget_count;
     WindowingEventMouseButtonEvent mouse_button_events[WINDOWING_EVENT_MOUSE_BUTTON_COUNT];
@@ -265,8 +258,7 @@ STRUCT(UI_State)
 };
 
 ENUM(UI_SignalFlag,
-    UI_SIGNAL_FLAG_CLICKED_LEFT = (1 << 0),
-);
+    UI_SIGNAL_FLAG_CLICKED_LEFT = (1 << 0));
 
 typedef u32 UI_SignalFlags;
 
@@ -310,19 +302,20 @@ STRUCT(UI_Signal)
         : ui_state->stack_nulls.field_name \
 )
 
-BUSTER_DECL UI_State* ui_state;
+BUSTER_V_DECL UI_State* ui_state;
 
 // Function declarations
-BUSTER_DECL UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* window);
-BUSTER_DECL void ui_state_select(UI_State* state);
-BUSTER_DECL u8 ui_build_begin(OsWindowingHandle* windowing, OsWindowHandle* window, f64 frame_time, OsWindowingEventList* event_queue);
-BUSTER_DECL void ui_build_end(void);
-BUSTER_DECL void ui_draw(void);
-BUSTER_DECL UI_Signal ui_signal_from_widget(UI_Widget* widget);
-BUSTER_DECL UI_State* ui_state_get(void);
+BUSTER_F_DECL UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* window);
+BUSTER_F_DECL void ui_state_deinitialize(UI_State* state);
+BUSTER_F_DECL void ui_state_select(UI_State* state);
+BUSTER_F_DECL u8 ui_build_begin(OsWindowingHandle* windowing, OsWindowHandle* window, f64 frame_time, OsWindowingEventList* event_queue);
+BUSTER_F_DECL void ui_build_end(void);
+BUSTER_F_DECL void ui_draw(void);
+BUSTER_F_DECL UI_Signal ui_signal_from_widget(UI_Widget* widget);
+BUSTER_F_DECL UI_State* ui_state_get(void);
 
-BUSTER_DECL UI_Widget* ui_widget_make(UI_WidgetFlags flags, String8 string);
-BUSTER_DECL UI_Widget* ui_widget_make_format(UI_WidgetFlags flags, String8 format, ...);
-BUSTER_DECL UI_Size ui_pixels(u32 width, f32 strictness);
-BUSTER_DECL UI_Size ui_percentage(f32 percentage, f32 strictness);
-BUSTER_DECL UI_Size ui_em(f32 value, f32 strictness);
+BUSTER_F_DECL UI_Widget* ui_widget_make(UI_WidgetFlags flags, String8 string);
+BUSTER_F_DECL UI_Widget* ui_widget_make_format(UI_WidgetFlags flags, String8 format, ...);
+BUSTER_F_DECL UI_Size ui_pixels(u32 width, f32 strictness);
+BUSTER_F_DECL UI_Size ui_percentage(f32 percentage, f32 strictness);
+BUSTER_F_DECL UI_Size ui_em(f32 value, f32 strictness);

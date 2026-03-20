@@ -22,11 +22,11 @@ STRUCT(OsWindowCreate)
     u8 reserved[4];
 };
 
-BUSTER_DECL OsWindowingHandle* os_windowing_initialize();
-BUSTER_DECL void os_windowing_deinitialize(OsWindowingHandle* windowing);
-BUSTER_DECL OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate create);
-BUSTER_DECL OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWindowHandle* os_window);
-BUSTER_DECL OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* windowing);
+BUSTER_F_DECL OsWindowingHandle* os_windowing_initialize();
+BUSTER_F_DECL void os_windowing_deinitialize(OsWindowingHandle* windowing);
+BUSTER_F_DECL OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate create);
+BUSTER_F_DECL OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWindowHandle* os_window);
+BUSTER_F_DECL OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* windowing);
 
-BUSTER_DECL void* native_windowing_handle_from_os_windowing_handle(OsWindowingHandle* windowing);
-BUSTER_DECL void* native_window_handle_from_os_window_handle(OsWindowHandle* window);
+BUSTER_F_DECL void* native_windowing_handle_from_os_windowing_handle(OsWindowingHandle* windowing);
+BUSTER_F_DECL void* native_window_handle_from_os_window_handle(OsWindowHandle* window);

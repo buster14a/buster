@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        BUSTER_OS_TAG: [ self-hosted, ubuntu-24.04 ] #, macos-15-intel, windows-2025, ubuntu-24.04-arm, macos-26, windows-11-arm ]
+        BUSTER_OS_TAG: [ self-hosted ] #, ubuntu-24.04 ] , macos-15-intel, windows-2025, ubuntu-24.04-arm, macos-26, windows-11-arm ]
     runs-on: ${{ matrix.BUSTER_OS_TAG }}
     steps:
       - uses: actions/checkout@v4
