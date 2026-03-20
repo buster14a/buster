@@ -1,6 +1,6 @@
 #pragma once
 
-#include <buster/string_os.h>
+#include <buster/string.h>
 #include <buster/target.h>
 
 STRUCT(BuildTarget)
@@ -20,6 +20,8 @@ STRUCT(CompileLinkOptions)
     u64 source_count;
     BuildTarget* target;
 
+    StringOs function_optimization_log;
+
     u64 optimize:1;
     u64 fuzz:1;
     u64 time_build:1;
@@ -36,7 +38,7 @@ STRUCT(CompileLinkOptions)
     u64 reserved:51;
 };
 
-BUSTER_DECL BuildTarget build_target_native;
+BUSTER_V_DECL BuildTarget build_target_native;
 
 STRUCT(ToolchainInformation)
 {
@@ -58,7 +60,7 @@ STRUCT(LLVMVersion)
 #define LLVM_VERSION(maj, min, rev) (LLVMVersion) { .major = (maj), .minor = (min), .revision = (rev), .string = SOs(#maj "." #min "." #rev) }
 BUSTER_GLOBAL_LOCAL let current_llvm_version = LLVM_VERSION(21, 1, 8);
 
-BUSTER_DECL StringOs vulkan_sdk_path;
+BUSTER_V_DECL StringOs vulkan_sdk_path;
 
-BUSTER_DECL StringOsList build_compile_link_arguments(Arena* arena, const CompileLinkOptions * const options);
-BUSTER_DECL ToolchainInformation toolchain_get_information(Arena* arena, LLVMVersion version);
+BUSTER_V_DECL StringOsList build_compile_link_arguments(Arena* arena, const CompileLinkOptions * const options);
+BUSTER_V_DECL ToolchainInformation toolchain_get_information(Arena* arena, LLVMVersion version);

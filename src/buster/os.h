@@ -5,8 +5,7 @@ ENUM(ThreadSpawnPolicy,
     THREAD_SPAWN_POLICY_SINGLE_THREADED,
     THREAD_SPAWN_POLICY_SPAWN_SINGLE_THREAD,
     THREAD_SPAWN_POLICY_SATURATE_LOGICAL_CORES,
-    THREAD_SPAWN_POLICY_SATURATE_PHYSICAL_CORES,
-);
+    THREAD_SPAWN_POLICY_SATURATE_PHYSICAL_CORES);
 
 STRUCT(ProtectionFlags)
 {
@@ -18,7 +17,7 @@ STRUCT(ProtectionFlags)
 
 STRUCT(MapFlags)
 {
-    u64 private:1;
+    u64 priv:1;
     u64 anonymous:1;
     u64 no_reserve:1;
     u64 populate:1;
@@ -65,21 +64,15 @@ STRUCT(FileStatsOptions)
     };
 };
 
+#if BUSTER_KERNEL == 0
+
+typedef void ThreadReturnType;
+typedef ThreadReturnType ThreadCallback(void*);
 STRUCT(ThreadCreateOptions)
 {
-    u8 reserved[4];
+    ThreadCallback* callback;
+    void* argument;
 };
-
-#if BUSTER_KERNEL == 0
-typedef
-#if defined(__linux__) || defined(__APPLE__)
-void*
-#elif defined(_WIN32)
-unsigned long
-#endif
-ThreadReturnType;
-
-typedef ThreadReturnType ThreadCallback(void*);
 
 typedef 
 #ifdef _WIN32
@@ -95,27 +88,25 @@ STRUCT(ThreadInitialization)
 };
 
 ENUM_T(StandardStream, u8,
-    STANDARD_STREAM_INPUT,
-    STANDARD_STREAM_OUTPUT,
-    STANDARD_STREAM_ERROR,
-    STANDARD_STREAM_COUNT,
-);
+    Input,
+    Output,
+    Error);
 
 STRUCT(ProcessSpawnResult)
 {
     OsProcessHandle* handle;
-    OsFileDescriptor* pipes[STANDARD_STREAM_COUNT][2];
+    OsFileDescriptor* pipes[(size_t)StandardStream::Count][2];
 };
 
 STRUCT(ProcessSpawnOptions)
 {
-    u64 capture:STANDARD_STREAM_COUNT;
-    u64 reserved:sizeof(u64)*8-STANDARD_STREAM_COUNT;
+    u64 capture:(size_t)StandardStream::Count;
+    u64 reserved:sizeof(u64)*8-(size_t)StandardStream::Count;
 };
 
 STRUCT(ProcessWaitResult)
 {
-    ByteSlice streams[STANDARD_STREAM_COUNT];
+    ByteSlice streams[(size_t)StandardStream::Count];
     ProcessResult result;
     u8 reserved[4];
 };
@@ -127,39 +118,34 @@ STRUCT(OsError)
 
 #define BUSTER_OS_ERROR_BUFFER_MAX_LENGTH (BUSTER_KB(64))
 
-BUSTER_DECL OsError os_get_last_error();
-BUSTER_DECL StringOs os_error_write_message(StringOs string, OsError error);
-BUSTER_DECL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, StringOsList envp, ProcessSpawnOptions options);
-BUSTER_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
-BUSTER_DECL StringOs os_get_environment_variable(StringOs variable);
+BUSTER_F_DECL OsError os_get_last_error();
+BUSTER_F_DECL StringOs os_error_write_message(StringOs string, OsError error);
+BUSTER_F_DECL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, StringOsList envp, ProcessSpawnOptions options);
+BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
+BUSTER_F_DECL StringOs os_get_environment_variable(StringOs variable);
 
-BUSTER_DECL void os_make_directory(StringOs path);
-BUSTER_DECL OsFileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPermissions permissions);
-BUSTER_DECL u64 os_file_get_size(OsFileDescriptor* file_descriptor);
-BUSTER_DECL FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options);
-BUSTER_DECL void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer);
-BUSTER_DECL u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count);
-BUSTER_DECL bool os_file_close(OsFileDescriptor* file_descriptor);
+BUSTER_F_DECL void os_make_directory(StringOs path);
+BUSTER_F_DECL OsFileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPermissions permissions);
+BUSTER_F_DECL u64 os_file_get_size(OsFileDescriptor* file_descriptor);
+BUSTER_F_DECL FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options);
+BUSTER_F_DECL void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer);
+BUSTER_F_DECL u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count);
+BUSTER_F_DECL bool os_file_close(OsFileDescriptor* file_descriptor);
 
-BUSTER_DECL StringOs os_path_absolute(StringOs buffer, StringOs relative_file_path);
-BUSTER_DECL OsFileDescriptor* os_get_stdout();
-BUSTER_DECL OsThreadHandle* os_thread_create(ThreadCallback* callback, ThreadCreateOptions options);
-BUSTER_DECL u32 os_thread_join(OsThreadHandle* handle);
-
-BUSTER_DECL BUSTER_THREAD_LOCAL_DECL Thread* thread;
-#include <buster/string_os.h>
+BUSTER_F_DECL StringOs os_path_absolute(StringOs buffer, StringOs relative_file_path);
+BUSTER_F_DECL OsFileDescriptor* os_get_stdout();
+BUSTER_F_DECL OsThreadHandle* os_thread_create(ThreadCreateOptions options);
+BUSTER_F_DECL bool os_thread_join(OsThreadHandle* handle);
 
 ENUM(ProgramFlag,
-    PROGRAM_FLAG_VERBOSE,
-    PROGRAM_FLAG_CI,
-    PROGRAM_FLAG_TEST_PERSIST,
-    PROGRAM_FLAG_COUNT,
-);
+    Verbose,
+    Ci,
+    Test_Persist);
 STRUCT(ProgramInput)
 {
     StringOsList argv;
     StringOsList envp;
-    FLAG_ARRAY_U64(flags, PROGRAM_FLAG_COUNT);
+    FLAG_ARRAY_U64(flags, ProgramFlag);
     ThreadSpawnPolicy thread_spawn_policy;
     u8 reserved[4];
 };
@@ -173,25 +159,64 @@ STRUCT(ProgramState)
     u64 reserved:62;
 };
 
-BUSTER_DECL ProgramState* program_state;
-BUSTER_DECL Arena* thread_arena();
+STRUCT(LaneContext)
+{
+    u64 lane_index;
+    u64 lane_count;
+    OsBarrierHandle* barrier;
+    u64* broadcast_memory;
+};
 
-#define PROGRAM_FLAG_GET(f) (((program_state->input.flags[(f) / PROGRAM_FLAG_COUNT]) & ((u64)1 << ((f) % PROGRAM_FLAG_COUNT))) != 0)
+STRUCT(ThreadContext)
+{
+    Arena* arenas[(u64)ScratchArenaId::Count];
+    LaneContext lane_context;
+};
 
-[[noreturn]] [[gnu::cold]] BUSTER_DECL void os_fail();
-[[gnu::noreturn]] BUSTER_DECL void os_exit(u32 code);
-BUSTER_DECL bool os_initialize_time();
+BUSTER_V_DECL ProgramState* program_state;
 
-BUSTER_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
-BUSTER_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
-BUSTER_DECL bool os_unreserve(void* address, u64 size);
+[[noreturn]] [[gnu::cold]] BUSTER_F_DECL void os_fail();
+[[gnu::noreturn]] BUSTER_F_DECL void os_exit(u32 code);
 
-BUSTER_DECL bool os_is_tty(OsFileDescriptor* file);
-BUSTER_DECL OsModule* os_dynamic_library_load(StringOs library);
-BUSTER_DECL void os_dynamic_library_unload(OsModule* module);
-BUSTER_DECL OsSymbol* os_dynamic_library_function_load(OsModule* module, String8 symbol);
+BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
+BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
+BUSTER_F_DECL bool os_unreserve(void* address, u64 size);
 
-[[gnu::cold]] BUSTER_DECL bool is_debugger_present();
+BUSTER_F_DECL bool os_is_tty(OsFileDescriptor* file);
+BUSTER_F_DECL OsModuleHandle* os_dynamic_library_load(StringOs library);
+BUSTER_F_DECL void os_dynamic_library_unload(OsModuleHandle* module);
+BUSTER_F_DECL OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbol);
+BUSTER_F_DECL u32 os_get_logical_thread_count();
+BUSTER_F_DECL u64 os_get_page_size();
+BUSTER_F_DECL OsProcessHandle* os_get_current_process_handle();
+BUSTER_F_DECL OsThreadHandle* os_get_current_thread_handle();
+BUSTER_F_DECL void os_thread_set_name(StringOs thread_name);
+
+[[gnu::cold]] BUSTER_F_DECL bool is_debugger_present();
+
+BUSTER_F_DECL u64 os_now_microseconds();
+
+BUSTER_F_DECL ThreadContext* thread_context_allocate();
+BUSTER_F_DECL void thread_context_select(ThreadContext* context);
+BUSTER_F_DECL void thread_context_release(ThreadContext* context);
+BUSTER_F_DECL LaneContext thread_context_set_lane(LaneContext lane_context);
+BUSTER_F_DECL void thread_context_lane_barrier_wait(void* broadcast_pointer, u64 broadcast_size, u64 broadcast_source_lane_index);
+BUSTER_F_DECL Arena* thread_context_get_scratch(Arena** conflicts, u64 count);
+
+BUSTER_F_DECL OsMutexHandle* os_mutex_allocate();
+BUSTER_F_DECL void os_mutex_take(OsMutexHandle* mutex);
+BUSTER_F_DECL void os_mutex_drop(OsMutexHandle* mutex);
+
+BUSTER_F_DECL OsConditionVariableHandle* os_condition_variable_allocate();
+BUSTER_F_DECL void os_condition_variable_release(OsConditionVariableHandle* condition_variable);
+BUSTER_F_DECL bool os_condition_variable_wait(OsConditionVariableHandle* condition_variable, OsMutexHandle* mutex, u64 endt_us);
+BUSTER_F_DECL void os_condition_variable_broadcast(OsConditionVariableHandle* condition_variable);
+
+BUSTER_F_DECL OsBarrierHandle* os_barrier_allocate(u32 count);
+
+BUSTER_F_DECL void lane_sync();
+BUSTER_F_DECL u64 lane_index();
+#define lane_sync_u64(pointer, source_lane_index) thread_context_lane_barrier_wait((pointer), sizeof(*(pointer)), (source_lane_index))
 
 #if BUSTER_USE_IO_RING
 BUSTER_DECL IoRingSubmission io_ring_prepare_open(char* path, u64 user_data);

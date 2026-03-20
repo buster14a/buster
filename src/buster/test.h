@@ -1,4 +1,6 @@
 #pragma once
+
+#if BUSTER_INCLUDE_TESTS
 #include <buster/base.h>
 
 #define BUSTER_TEST_ERROR(format, ...) buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), (format), __VA_ARGS__);
@@ -52,15 +54,17 @@ STRUCT(UnitTestResult)
 
 typedef UnitTestResult TestFunction(UnitTestArguments*);
 
-BUSTER_DECL bool batch_test_succeeded(BatchTestResult test);
-BUSTER_DECL bool unit_test_succeeded(UnitTestResult result);
-BUSTER_DECL void consume_unit_tests(BatchTestResult* batch, UnitTestResult unit_test);
-BUSTER_DECL void consume_external_tests(BatchTestResult* batch, ProcessResult result);
+BUSTER_F_DECL bool batch_test_succeeded(BatchTestResult test);
+BUSTER_F_DECL bool unit_test_succeeded(UnitTestResult result);
+BUSTER_F_DECL void consume_unit_tests(BatchTestResult* batch, UnitTestResult unit_test);
+BUSTER_F_DECL void consume_external_tests(BatchTestResult* batch, ProcessResult result);
 
-BUSTER_DECL void buster_test_error(u32 line, String8 function, String8 file_path, String8 format, ...);
+BUSTER_F_DECL void buster_test_error(u32 line, String8 function, String8 file_path, String8 format, ...);
 
-BUSTER_DECL BatchTestResult library_tests(UnitTestArguments* arguments);
+BUSTER_F_DECL BatchTestResult library_tests(UnitTestArguments* arguments);
 
-BUSTER_DECL void default_show(UnitTestArguments* arguments, String8 format, ...);
+BUSTER_F_DECL void default_show(UnitTestArguments* arguments, String8 format, ...);
 #endif
-BUSTER_IMPL bool batch_test_report(UnitTestArguments* arguments, BatchTestResult test);
+BUSTER_F_DECL bool batch_test_report(UnitTestArguments* arguments, BatchTestResult test);
+
+#endif

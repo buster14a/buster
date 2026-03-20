@@ -9,8 +9,8 @@ STRUCT(FileReadOptions)
     u32 end_alignment;
 };
 
-BUSTER_DECL ByteSlice file_read(Arena* arena, StringOs path, FileReadOptions options);
-BUSTER_DECL bool file_write(StringOs path, ByteSlice content);
+BUSTER_F_DECL ByteSlice file_read(Arena* arena, StringOs path, FileReadOptions options);
+BUSTER_F_DECL bool file_write(StringOs path, ByteSlice content);
 
 
 STRUCT(CopyFileArguments)
@@ -18,4 +18,4 @@ STRUCT(CopyFileArguments)
     StringOs original_path;
     StringOs new_path;
 };
-BUSTER_DECL bool file_copy(CopyFileArguments arguments);
+BUSTER_F_DECL bool file_copy(CopyFileArguments arguments);

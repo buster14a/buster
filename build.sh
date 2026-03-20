@@ -29,6 +29,6 @@ fi
 
 BUSTER_BUILD_DIRECTORY=build
 mkdir -p $BUSTER_BUILD_DIRECTORY
-clang preamble.c -o $BUSTER_BUILD_DIRECTORY/preamble -Isrc -Wall -Werror -std=gnu2x -Wno-unused-function -funsigned-char -DBUSTER_CI=$BUSTER_CI -g
+clang++ preamble.cpp -o $BUSTER_BUILD_DIRECTORY/preamble -Isrc -Wall -Werror -std=gnu++2c -Wno-unused-function -Wno-c99-designator -funsigned-char -DBUSTER_CI=$BUSTER_CI -g -DBUSTER_INCLUDE_TESTS=0
 $BUSTER_BUILD_DIRECTORY/preamble $@
 exit $?

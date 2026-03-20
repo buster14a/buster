@@ -16,3 +16,4 @@ STRUCT(CodeGenerationOptions)
 
 BUSTER_DECL CodeGeneration module_generation_initialize();
 BUSTER_DECL bool function_generate(CodeGeneration* generation, Arena* arena, IrModule* module, IrFunction* function, CodeGenerationOptions options);
+BUSTER_DECL void parse_assembly(Arena* arena);
