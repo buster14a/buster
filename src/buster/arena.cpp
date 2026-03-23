@@ -5,9 +5,9 @@
 #include <buster/integer.h>
 
 BUSTER_GLOBAL_LOCAL bool arena_lock_pages = true;
-BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_MB(2);
+BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
-BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_GB(4);
+BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(64);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 
 BUSTER_F_IMPL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
