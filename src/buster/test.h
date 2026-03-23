@@ -1,7 +1,18 @@
 #pragma once
 
-#if BUSTER_INCLUDE_TESTS
 #include <buster/base.h>
+#include <buster/arena.h>
+STRUCT(BatchTestResult)
+{
+    u64 succeeded_unit_test_count;
+    u64 unit_test_count;
+    u64 succeeded_module_test_count;
+    u64 module_test_count;
+    u64 external_test_count;
+    u64 succeeded_external_test_count;
+    ProcessResult process;
+    u8 reserved[4];
+};
 
 #define BUSTER_TEST_ERROR(format, ...) buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), (format), __VA_ARGS__);
 #define BUSTER_STRING_TEST(args, a, b) do\
@@ -22,21 +33,6 @@
 #else
 #define BUSTER_OS_STRING_TEST(args, a, b) BUSTER_STRING8_TEST(args, a, b)
 #endif
-
-#if BUSTER_INCLUDE_TESTS
-typedef struct Arena Arena;
-
-STRUCT(BatchTestResult)
-{
-    u64 succeeded_unit_test_count;
-    u64 unit_test_count;
-    u64 succeeded_module_test_count;
-    u64 module_test_count;
-    u64 external_test_count;
-    u64 succeeded_external_test_count;
-    ProcessResult process;
-    u8 reserved[4];
-};
 
 typedef struct UnitTestArguments UnitTestArguments;
 typedef void ShowCallback(UnitTestArguments*,String8, ...);
@@ -64,7 +60,4 @@ BUSTER_F_DECL void buster_test_error(u32 line, String8 function, String8 file_pa
 BUSTER_F_DECL BatchTestResult library_tests(UnitTestArguments* arguments);
 
 BUSTER_F_DECL void default_show(UnitTestArguments* arguments, String8 format, ...);
-#endif
 BUSTER_F_DECL bool batch_test_report(UnitTestArguments* arguments, BatchTestResult test);
-
-#endif

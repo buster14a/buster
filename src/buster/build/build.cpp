@@ -1,6 +1,5 @@
 #pragma once
 
-#define BUSTER_INCLUDE_TESTS 1
 #define BUSTER_USE_PADDING 0
 
 #include <buster/base.h>
@@ -17,10 +16,7 @@
 #include <buster/os.h>
 #include <buster/arguments.h>
 
-#if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
-#endif
-
 #if BUSTER_UNITY_BUILD
 #include <buster/os.cpp>
 #include <buster/arena.cpp>
@@ -41,9 +37,7 @@
 #include <buster/path.cpp>
 #include <buster/file.cpp>
 #include <buster/arguments.cpp>
-#if BUSTER_INCLUDE_TESTS
 #include <buster/test.cpp>
-#endif
 #endif
 
 BUSTER_GLOBAL_LOCAL __attribute__((used)) StringOs toolchain_path = {};
@@ -91,19 +85,21 @@ ENUM_T(ModuleId, u64,
     MODULE_ARGUMENTS,
     MODULE_SCRAPE_XED,
     MODULE_SCRAPE_LLVM,
-    MODULE_SIMD);
+    MODULE_SIMD,
+    MODULE_BUSTER_PARSER);
 
 ENUM(DirectoryId,
     DIRECTORY_SRC_BUSTER,
     DIRECTORY_SRC_MARTINS,
     DIRECTORY_ROOT,
-    DIRECTORY_CC,
-    DIRECTORY_ASM,
+    DIRECTORY_FRONTEND_CC,
+    DIRECTORY_FRONTEND_ASM,
     DIRECTORY_IR,
     DIRECTORY_BACKEND,
     DIRECTORY_LINK,
     DIRECTORY_BUILD,
-    DIRECTORY_IDE);
+    DIRECTORY_IDE,
+    DIRECTORY_FRONTEND_BUSTER);
 
 STRUCT(Module)
 {
@@ -174,11 +170,11 @@ BUSTER_GLOBAL_LOCAL Module modules[] = {
         .no_source = true,
     },
     [(u64)ModuleId::MODULE_CC_MAIN] = {
-        .directory = DirectoryId::DIRECTORY_CC,
+        .directory = DirectoryId::DIRECTORY_FRONTEND_CC,
         .no_header = true,
     },
     [(u64)ModuleId::MODULE_ASM_MAIN] = {
-        .directory = DirectoryId::DIRECTORY_ASM,
+        .directory = DirectoryId::DIRECTORY_FRONTEND_ASM,
         .no_header = true,
     },
     [(u64)ModuleId::MODULE_IR] = {
@@ -211,6 +207,9 @@ BUSTER_GLOBAL_LOCAL Module modules[] = {
     [(u64)ModuleId::MODULE_SCRAPE_XED] = { .no_header = true },
     [(u64)ModuleId::MODULE_SCRAPE_LLVM] = { .no_header = true },
     [(u64)ModuleId::MODULE_SIMD] = {},
+    [(u64)ModuleId::MODULE_BUSTER_PARSER] = {
+        .directory = DirectoryId::DIRECTORY_FRONTEND_BUSTER,
+    },
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == (u64)ModuleId::Count);
@@ -319,6 +318,7 @@ BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) ide_modules[] = {
     { .id = ModuleId::MODULE_UI_BUILDER },
     { .id = ModuleId::MODULE_TIME },
     { .id = ModuleId::MODULE_ARGUMENTS },
+    { .id = ModuleId::MODULE_BUSTER_PARSER },
 };
 
 BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) scrape_xed_modules[] = {
@@ -436,14 +436,12 @@ BUSTER_GLOBAL_LOCAL bool target_equal(BuildTarget* a, BuildTarget* b)
     return result;
 }
 
-#if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL UnitTestResult builder_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {};
     return result;
 }
-#endif
 
 ENUM(BatchArena,
     BATCH_ARENA_GENERAL,
@@ -649,13 +647,14 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)DirectoryId::DIRECTORY_SRC_BUSTER] = SOs("src/buster"),
         [(u64)DirectoryId::DIRECTORY_SRC_MARTINS] = SOs("src/martins"),
         [(u64)DirectoryId::DIRECTORY_ROOT] = SOs(""),
-        [(u64)DirectoryId::DIRECTORY_CC] = SOs("src/buster/compiler/frontend/cc"),
-        [(u64)DirectoryId::DIRECTORY_ASM] = SOs("src/buster/compiler/frontend/asm"),
+        [(u64)DirectoryId::DIRECTORY_FRONTEND_CC] = SOs("src/buster/compiler/frontend/cc"),
+        [(u64)DirectoryId::DIRECTORY_FRONTEND_ASM] = SOs("src/buster/compiler/frontend/asm"),
         [(u64)DirectoryId::DIRECTORY_IR] = SOs("src/buster/compiler/ir"),
         [(u64)DirectoryId::DIRECTORY_BACKEND] = SOs("src/buster/compiler/backend"),
         [(u64)DirectoryId::DIRECTORY_LINK] = SOs("src/buster/compiler/link"),
         [(u64)DirectoryId::DIRECTORY_BUILD] = SOs("src/buster/build"),
         [(u64)DirectoryId::DIRECTORY_IDE] = SOs("src/buster/ide"),
+        [(u64)DirectoryId::DIRECTORY_FRONTEND_BUSTER] = SOs("src/buster/compiler/frontend/buster"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == (u64)DirectoryId::Count);
@@ -699,6 +698,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)ModuleId::MODULE_SCRAPE_XED] = SOs("scrape_xed"),
         [(u64)ModuleId::MODULE_SCRAPE_LLVM] = SOs("scrape_llvm"),
         [(u64)ModuleId::MODULE_SIMD] = SOs("simd"),
+        [(u64)ModuleId::MODULE_BUSTER_PARSER] = SOs("parser"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(module_names) == (u64)ModuleId::Count);
@@ -1038,7 +1038,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 let unit = &selected_compilation_units[unit_i];
                 let unit_compilation_result = os_process_wait_sync(general_arena, unit->compile_spawn);
 
-                for (__underlying_type(StandardStream) stream = (u64)StandardStream::Output; stream < (u64)StandardStream::Count; stream += 1)
+                for (EACH_ENUM_INT(StandardStream, stream))
                 {
                     let standard_stream = unit_compilation_result.streams[stream];
                     if (standard_stream.length)
@@ -1120,7 +1120,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 let link_unit = &specifications[link_unit_i];
                 let link_result = os_process_wait_sync(general_arena, link_unit->link_spawn);
 
-                for (__underlying_type(StandardStream) stream = (u64)StandardStream::Output; stream < (u64)StandardStream::Count; stream += 1)
+                for (EACH_ENUM_INT(StandardStream, stream))
                 {
                     let standard_stream = link_result.streams[stream];
                     if (standard_stream.length)
@@ -1151,7 +1151,6 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 // TODO: fill
                 break; case BuildCommand::BUILD_COMMAND_TEST_ALL: case BuildCommand::BUILD_COMMAND_TEST:
                 {
-#if BUSTER_INCLUDE_TESTS
                     UnitTestArguments arguments = {
                         .arena = general_arena,
                     };
@@ -1225,7 +1224,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                         let link_unit = &specifications[link_unit_i];
                         let test_result = os_process_wait_sync(general_arena, link_unit->run_spawn);
 
-                        for (__underlying_type(StandardStream) stream = (u64)StandardStream::Output; stream < (u64)StandardStream::Count; stream += 1)
+                        for (EACH_ENUM_INT(StandardStream, stream))
                         {
                             let standard_stream = test_result.streams[stream];
                             if (standard_stream.length)
@@ -1245,7 +1244,6 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                             }
                         }
                     }
-#endif
                 }
                 break; case BuildCommand::BUILD_COMMAND_DEBUG:
                 {
@@ -1351,6 +1349,7 @@ BUSTER_F_IMPL ProcessResult entry_point()
     }
 
     bool is_test = build_program_state.command == BuildCommand::BUILD_COMMAND_TEST_ALL || build_program_state.command == BuildCommand::BUILD_COMMAND_TEST;
+
     if (build_program_state.command == BuildCommand::BUILD_COMMAND_TEST_ALL)
     {
         u64 succeeded_configuration_run = 0;

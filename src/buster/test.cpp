@@ -1,7 +1,6 @@
 #pragma once
 #include <buster/test.h>
 
-#if BUSTER_INCLUDE_TESTS
 #include <buster/os.h>
 #include <buster/arena.h>
 #include <buster/string.h>
@@ -33,22 +32,6 @@ BUSTER_F_IMPL void buster_test_error(u32 line, String8 function, String8 file_pa
     {
         os_fail();
     }
-}
-
-BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
-    &string_tests,
-};
-
-BUSTER_F_IMPL BatchTestResult library_tests(UnitTestArguments* arguments)
-{
-    BatchTestResult result = {};
-    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(test_functions); i += 1)
-    {
-        let unit_test_result = test_functions[i](arguments);
-        consume_unit_tests(&result, unit_test_result);
-    }
-
-    return result;
 }
 
 BUSTER_F_IMPL void default_show(UnitTestArguments* arguments, String8 format, ...)
@@ -84,5 +67,22 @@ BUSTER_F_IMPL bool batch_test_report(UnitTestArguments* arguments, BatchTestResu
     arguments->show(arguments, S8("[{u64}/{u64}] Module tests\n"), test.succeeded_module_test_count, test.module_test_count);
     arguments->show(arguments, S8("[{u64}/{u64}] External tests\n"), test.succeeded_external_test_count, test.external_test_count);
     return batch_test_succeeded(test);
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
+    &string_tests,
+};
+
+BUSTER_F_IMPL BatchTestResult library_tests(UnitTestArguments* arguments)
+{
+    BatchTestResult result = {};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(test_functions); i += 1)
+    {
+        let unit_test_result = test_functions[i](arguments);
+        consume_unit_tests(&result, unit_test_result);
+    }
+
+    return result;
 }
 #endif

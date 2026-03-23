@@ -104,6 +104,7 @@ BUSTER_GLOBAL_LOCAL StringOs disable_warning_flags[] = {
     SOs("-Wno-gnu-anonymous-struct"),
     SOs("-Wno-nested-anon-types"),
     SOs("-Wno-c99-extensions"),
+    SOs("-Wno-c2y-extensions"),
 };
 
 BUSTER_GLOBAL_LOCAL StringOs f_flags[] = {
@@ -112,6 +113,7 @@ BUSTER_GLOBAL_LOCAL StringOs f_flags[] = {
     SOs("-funsigned-char"),
     SOs("-fno-exceptions"),
     SOs("-fno-rtti"),
+    SOs("-fdefer-ts"),
 };
 
 BUSTER_GLOBAL_LOCAL StringOs include_flags[] = {
@@ -327,7 +329,7 @@ BUSTER_F_IMPL ProcessResult process_arguments()
                 };
                 static_assert(BUSTER_ARRAY_LENGTH(integer_option_strings) == (u64)BuildIntegerOption::Count);
 
-                __underlying_type(BuildIntegerOption) build_integer_option;
+                BUSTER_UNDERLYING_TYPE(BuildIntegerOption) build_integer_option;
                 for (EACH_ENUM_INT_FREE(BuildIntegerOption, build_integer_option))
                 {
                     let integer_option_string = integer_option_strings[build_integer_option];
@@ -416,7 +418,7 @@ BUSTER_F_IMPL ProcessResult process_arguments()
                 };
                 static_assert(BUSTER_ARRAY_LENGTH(string_option_strings) == (u64)BuildStringOption::Count);
 
-                __underlying_type(BuildStringOption) build_string_option;
+                BUSTER_UNDERLYING_TYPE(BuildStringOption) build_string_option;
                 for (EACH_ENUM_INT_FREE(BuildStringOption, build_string_option))
                 // for (build_string_option = 0; build_string_option < BUILD_OPTION_STRING_COUNT; build_string_option += 1)
                 {
