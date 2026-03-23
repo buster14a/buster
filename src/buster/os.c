@@ -2,7 +2,6 @@
 #include <buster/os.h>
 #include <buster/system_headers.h>
 #include <buster/arena.h>
-#include <buster/arguments.h>
 #include <buster/string.h>
 
 //- rjf: doubly-linked-lists

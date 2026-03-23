@@ -4,7 +4,6 @@
 #include <buster/arena.h>
 #include <buster/string.h>
 #include <buster/file.h>
-#include <buster/arguments.h>
 #include <buster/compiler/ir/ir.h>
 
 #define first_keyword TOKEN_KEYWORD_RETURN

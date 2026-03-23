@@ -13,7 +13,6 @@
 #include <buster/file.h>
 #include <buster/build/build_common.h>
 #include <buster/os.h>
-#include <buster/arguments.h>
 
 #include <buster/test.h>
 #if BUSTER_UNITY_BUILD
@@ -35,7 +34,6 @@
 #include <buster/entry_point.c>
 #include <buster/path.c>
 #include <buster/file.c>
-#include <buster/arguments.c>
 #include <buster/test.c>
 #endif
 
@@ -85,11 +83,14 @@ ENUM_T(ModuleId, u64,
     MODULE_SCRAPE_XED,
     MODULE_SCRAPE_LLVM,
     MODULE_SIMD,
+<<<<<<< HEAD:src/buster/build/build.c
     MODULE_BUSTER_PARSER,
     MODULE_OPTIMIZING_IR,
     MODULE_BUSTER_ANALYSIS,
     MODULE_XXHASH,
     MODULE_STB_TRUETYPE);
+=======
+    MODULE_BUSTER_PARSER);
 
 ENUM(DirectoryId,
     DIRECTORY_SRC_BUSTER,
@@ -106,6 +107,9 @@ ENUM(DirectoryId,
     DIRECTORY_SRC_XXHASH,
     DIRECTORY_COMPILER,
     DIRECTORY_SRC_STB);
+=======
+    DIRECTORY_FRONTEND_BUSTER);
+>>>>>>> 3db4c25 (Some random bits):src/buster/build/build.cpp
 
 STRUCT(Module)
 {
@@ -218,6 +222,7 @@ BUSTER_GLOBAL_LOCAL Module modules[] = {
     [(u64)ModuleId::MODULE_BUSTER_PARSER] = {
         .directory = DirectoryId::DIRECTORY_FRONTEND_BUSTER,
     },
+<<<<<<< HEAD:src/buster/build/build.c
     [(u64)ModuleId::MODULE_OPTIMIZING_IR] = {
         .directory = DirectoryId::DIRECTORY_IR,
     },
@@ -232,6 +237,8 @@ BUSTER_GLOBAL_LOCAL Module modules[] = {
         .directory = DirectoryId::DIRECTORY_SRC_STB,
         .no_source = true,
     },
+=======
+>>>>>>> 3db4c25 (Some random bits):src/buster/build/build.cpp
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == (u64)ModuleId::Count);
@@ -341,9 +348,12 @@ BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) ide_modules[] = {
     { .id = ModuleId::MODULE_TIME },
     { .id = ModuleId::MODULE_ARGUMENTS },
     { .id = ModuleId::MODULE_BUSTER_PARSER },
+<<<<<<< HEAD:src/buster/build/build.c
     { .id = ModuleId::MODULE_IR },
     { .id = ModuleId::MODULE_BUSTER_ANALYSIS },
     { .id = ModuleId::MODULE_XXHASH },
+=======
+>>>>>>> 3db4c25 (Some random bits):src/buster/build/build.cpp
 };
 
 BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) scrape_xed_modules[] = {
@@ -680,9 +690,12 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)DirectoryId::DIRECTORY_BUILD] = SOs("src/buster/build"),
         [(u64)DirectoryId::DIRECTORY_IDE] = SOs("src/buster/ide"),
         [(u64)DirectoryId::DIRECTORY_FRONTEND_BUSTER] = SOs("src/buster/compiler/frontend/buster"),
+<<<<<<< HEAD:src/buster/build/build.c
         [(u64)DirectoryId::DIRECTORY_SRC_XXHASH] = SOs("src/xxhash"),
         [(u64)DirectoryId::DIRECTORY_COMPILER] = SOs("src/buster/compiler"),
         [(u64)DirectoryId::DIRECTORY_SRC_STB] = SOs("src/stb"),
+=======
+>>>>>>> 3db4c25 (Some random bits):src/buster/build/build.cpp
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == (u64)DirectoryId::Count);
@@ -727,10 +740,13 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)ModuleId::MODULE_SCRAPE_LLVM] = SOs("scrape_llvm"),
         [(u64)ModuleId::MODULE_SIMD] = SOs("simd"),
         [(u64)ModuleId::MODULE_BUSTER_PARSER] = SOs("parser"),
+<<<<<<< HEAD:src/buster/build/build.c
         [(u64)ModuleId::MODULE_OPTIMIZING_IR] = SOs("optimizing_ir"),
         [(u64)ModuleId::MODULE_BUSTER_ANALYSIS] = SOs("analysis"),
         [(u64)ModuleId::MODULE_XXHASH] = SOs("xxhash"),
         [(u64)ModuleId::MODULE_STB_TRUETYPE] = SOs("stb_truetype"),
+=======
+>>>>>>> 3db4c25 (Some random bits):src/buster/build/build.cpp
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(module_names) == (u64)ModuleId::Count);

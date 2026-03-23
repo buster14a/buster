@@ -22,7 +22,6 @@
 #include <buster/file.h>
 #include <buster/path.h>
 #include <buster/entry_point.h>
-#include <buster/arguments.h>
 #include <buster/string.h>
 
 #include <dirent.h>

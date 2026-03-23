@@ -4,7 +4,6 @@
 #include <buster/system_headers.h>
 #include <buster/target.h>
 #include <buster/arena.h>
-#include <buster/arguments.h>
 #include <buster/string.h>
 
 #include <stdatomic.h>

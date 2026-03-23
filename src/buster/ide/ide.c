@@ -8,7 +8,6 @@
 #include <buster/font_provider.h>
 #include <buster/time.h>
 #include <buster/ui_builder.h>
-#include <buster/arguments.h>
 #include <buster/arena.h>
 #include <buster/compiler/frontend/buster/parser.h>
 #include <buster/compiler/frontend/buster/analysis.h>
