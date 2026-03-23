@@ -59,6 +59,7 @@ CheckNil(nil,p) ? \
 #define SLLStackPush(f,n) SLLStackPush_N(f,n,next)
 #define SLLStackPop(f) SLLStackPop_N(f,next)
 
+BUSTER_V_DECL OsState os_state;
 
 BUSTER_GLOBAL_LOCAL OsEntity* os_entity_allocate(OsEntityKind kind)
 {

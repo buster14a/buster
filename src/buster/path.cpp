@@ -3,6 +3,7 @@
 #include <buster/os.h>
 #include <buster/system_headers.h>
 #include <buster/string.h>
+#include <buster/arena.h>
 
 BUSTER_F_IMPL StringOs path_absolute_arena(Arena* arena, StringOs relative_file_path)
 {

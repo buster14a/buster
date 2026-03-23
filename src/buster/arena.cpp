@@ -22,7 +22,8 @@ BUSTER_F_IMPL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
         let target_committed_size = align_forward(aligned_size_after, arena->granularity);
         let size_to_commit = target_committed_size - os_position;
         let commit_pointer = arena_byte_pointer + os_position;
-        if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags) { .read = 1, .write = 1 }, arena_lock_pages))
+
+        if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags) { .read = 1, .write = 1, .execute = arena->flags.execute }, arena_lock_pages))
         {
             arena->os_position = target_committed_size;
         }
@@ -33,6 +34,11 @@ BUSTER_F_IMPL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
     BUSTER_CHECK(arena->position <= arena->os_position);
 
     return result;
+}
+
+BUSTER_F_IMPL u8* arena_get_byte_pointer(Arena* arena, u64 position)
+{
+    return (u8*)arena + position;
 }
 
 BUSTER_F_IMPL void arena_reset_to_start(Arena* arena)
@@ -61,7 +67,7 @@ BUSTER_F_IMPL Arena* arena_create(ArenaCreation initialization)
     let individual_reserved_size = initialization.reserved_size;
     let total_reserved_size = individual_reserved_size * count;
 
-    ProtectionFlags protection_flags = { .read = 1, .write = 1 };
+    ProtectionFlags protection_flags = { .read = 1, .write = 1, .execute = initialization.flags.execute };
     MapFlags map_flags = { .priv = 1, .anonymous = 1, .no_reserve = 1, .populate = 0 };
     let raw_pointer = os_reserve(0, total_reserved_size, protection_flags, map_flags);
 

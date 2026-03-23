@@ -243,6 +243,11 @@ BUSTER_F_IMPL StringOs string_os_join_arena(Arena* arena, Slice<StringOs> string
     return string_join_arena(arena, strings, zero_terminate);
 }
 
+BUSTER_F_IMPL String8 string8_join_arena(Arena* arena, Slice<String8> strings, bool zero_terminate)
+{
+    return string_join_arena(arena, strings, zero_terminate);
+}
+
 template <typename Char>
 BUSTER_F_IMPL bool string_ends_with_sequence(String<Char> string, String<Char> ending)
 {
@@ -290,6 +295,11 @@ BUSTER_F_IMPL bool string_os_starts_with_sequence(StringOs string, StringOs sequ
     return string_starts_with_sequence(string, sequence);
 }
 
+BUSTER_F_IMPL bool string8_starts_with_sequence(String8 string, String8 sequence)
+{
+    return string_starts_with_sequence(string, sequence);
+}
+
 template <typename Char>
 BUSTER_GLOBAL_LOCAL bool string_equal(String<Char> s1, String<Char> s2)
 {
@@ -325,7 +335,7 @@ BUSTER_GLOBAL_LOCAL u64 string_first_code_unit(String<Char> string, Char code_un
 {
     u64 result = BUSTER_STRING_NO_MATCH;
 
-    for (EACH_SLICE(i, string))
+    for (EACH_SLICE_INT(i, string))
     {
         let cu = string.pointer[i];
         if (cu == code_unit)
@@ -1283,6 +1293,17 @@ BUSTER_F_IMPL String8 string8_format(Arena* arena, String8 format, ...)
     va_start(variable_arguments, format);
     let result = string8_format_va(arena, format, variable_arguments);
     va_end(variable_arguments);
+
+    return result;
+}
+
+BUSTER_F_IMPL String8 string8_format_z(Arena* arena, String8 format, ...)
+{
+    va_list variable_arguments;
+    va_start(variable_arguments, format);
+    let result = string8_format_va(arena, format, variable_arguments);
+    va_end(variable_arguments);
+    *arena_allocate(arena, char8, 1) = 0;
 
     return result;
 }

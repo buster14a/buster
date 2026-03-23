@@ -9,6 +9,17 @@ STRUCT(ParserResult)
 {
 };
 
+ENUM_T(TokenId, u8,
+    Error);
+
+STRUCT(Token)
+{
+    TokenId id;
+    u8 length;
+};
+
+static_assert(sizeof(Token) == 2);
+
 BUSTER_F_DECL void parser_experiments()
 {
 }

@@ -216,11 +216,13 @@ struct Slice
     T* pointer;
     u64 length;
 
-    T* begin();
-    T* end();
+    BUSTER_INLINE T* begin() { return pointer; }
+    BUSTER_INLINE T* end() { return pointer + length; }
 };
 
-#define EACH_SLICE(i, s) u64 i = 0; i < (s).length; i += 1
+#define EACH_SLICE_INT(i, s) u64 i = 0; i < (s).length; i += 1
+#define EACH_SLICE_REF(e, s) let & e : (s)
+#define EACH_SLICE_VALUE(e, s) let e : (s)
 
 typedef Slice<u8> ByteSlice;
 
@@ -484,3 +486,6 @@ ENUM(ScratchArenaId,
 #define EACH_ENUM(E, e) E EACH_ENUM_FREE(E, e)
 #define EACH_ENUM_INT_FREE(E, e) e = 0; e < (BUSTER_UNDERLYING_TYPE(E))(E::Count); e += 1
 #define EACH_ENUM_INT(E, e) BUSTER_UNDERLYING_TYPE(E) EACH_ENUM_INT_FREE(E, e)
+
+typedef void ThreadReturnType;
+typedef ThreadReturnType ThreadCallback(void*);

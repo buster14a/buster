@@ -86,7 +86,8 @@ ENUM_T(ModuleId, u64,
     MODULE_SCRAPE_XED,
     MODULE_SCRAPE_LLVM,
     MODULE_SIMD,
-    MODULE_BUSTER_PARSER);
+    MODULE_BUSTER_PARSER,
+    MODULE_OPTIMIZING_IR);
 
 ENUM(DirectoryId,
     DIRECTORY_SRC_BUSTER,
@@ -210,6 +211,9 @@ BUSTER_GLOBAL_LOCAL Module modules[] = {
     [(u64)ModuleId::MODULE_BUSTER_PARSER] = {
         .directory = DirectoryId::DIRECTORY_FRONTEND_BUSTER,
     },
+    [(u64)ModuleId::MODULE_OPTIMIZING_IR] = {
+        .directory = DirectoryId::DIRECTORY_IR,
+    },
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == (u64)ModuleId::Count);
@@ -319,6 +323,7 @@ BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) ide_modules[] = {
     { .id = ModuleId::MODULE_TIME },
     { .id = ModuleId::MODULE_ARGUMENTS },
     { .id = ModuleId::MODULE_BUSTER_PARSER },
+    { .id = ModuleId::MODULE_IR },
 };
 
 BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) scrape_xed_modules[] = {
@@ -493,7 +498,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         { .name = SOs("ide"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(ide_modules), },
         // { .name = SOs("cc"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(cc_modules), },
         // { .name = SOs("asm"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(asm_modules), },
-        // { .name = SOs("scrape_xed"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(scrape_xed_modules), },
+        { .name = SOs("scrape_xed"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(scrape_xed_modules), },
         // { .name = SOs("scrape_llvm"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(scrape_llvm_modules), },
     };
     constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);
@@ -699,6 +704,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)ModuleId::MODULE_SCRAPE_LLVM] = SOs("scrape_llvm"),
         [(u64)ModuleId::MODULE_SIMD] = SOs("simd"),
         [(u64)ModuleId::MODULE_BUSTER_PARSER] = SOs("parser"),
+        [(u64)ModuleId::MODULE_OPTIMIZING_IR] = SOs("optimizing_ir"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(module_names) == (u64)ModuleId::Count);

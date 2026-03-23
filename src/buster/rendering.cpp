@@ -1937,15 +1937,14 @@ BUSTER_GLOBAL_LOCAL bool immediate_end(ImmediateContext context)
             }
         };
 
-        if (vkQueueSubmit2(context.queue, BUSTER_ARRAY_LENGTH(submit_info), submit_info, context.fence) == VK_SUCCESS)
+        let submit_result = vkQueueSubmit2(context.queue, BUSTER_ARRAY_LENGTH(submit_info), submit_info, context.fence);
+        if (submit_result == VK_SUCCESS)
         {
             VkBool32 wait_all = 1;
             let timeout = ~(u64)0;
 
-            if (vkWaitForFences(context.device, BUSTER_ARRAY_LENGTH(fences), fences, wait_all, timeout) == VK_SUCCESS)
-            {
-                result = true;
-            }
+            let wait_result = vkWaitForFences(context.device, BUSTER_ARRAY_LENGTH(fences), fences, wait_all, timeout);
+            result = wait_result == VK_SUCCESS;
         }
     }
 
@@ -2164,7 +2163,9 @@ BUSTER_F_IMPL void rendering_window_frame_begin(RenderingHandle* rendering, Rend
 
     u32 fence_count = 1;
     VkBool32 wait_all = 1;
-    if (vkWaitForFences(rendering->device, fence_count, &frame->render_fence, wait_all, timeout) == VK_SUCCESS)
+    let wait_result = vkWaitForFences(rendering->device, fence_count, &frame->render_fence, wait_all, timeout);
+
+    if (wait_result == VK_SUCCESS)
     {
         VkFence image_fence = 0;
         VkResult next_image_result = vkAcquireNextImageKHR(rendering->device, window->swapchain, timeout, frame->swapchain_semaphore, image_fence, &window->swapchain_image_index);
@@ -2179,7 +2180,9 @@ BUSTER_F_IMPL void rendering_window_frame_begin(RenderingHandle* rendering, Rend
         }
 
         VkCommandBufferResetFlags reset_flags = 0;
-        bool success = vkResetFences(rendering->device, fence_count, &frame->render_fence) == VK_SUCCESS && vkResetCommandBuffer(frame->command_buffer, reset_flags) == VK_SUCCESS;
+        let reset_fence_result = vkResetFences(rendering->device, fence_count, &frame->render_fence);
+        let reset_command_buffer_result = vkResetCommandBuffer(frame->command_buffer, reset_flags);
+        bool success = reset_fence_result == VK_SUCCESS && reset_command_buffer_result == VK_SUCCESS;
         if (!success)
         {
             os_fail();

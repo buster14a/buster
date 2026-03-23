@@ -89,9 +89,6 @@ STRUCT(OsState)
     ProcessInformation process;
 };
 
-BUSTER_V_DECL OsState os_state;
-BUSTER_V_DECL BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
-
 #ifdef _WIN32
 #define BUSTER_MAX_PATH_LENGTH (u64)MAX_PATH
 #else

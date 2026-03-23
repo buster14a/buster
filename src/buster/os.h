@@ -66,8 +66,6 @@ STRUCT(FileStatsOptions)
 
 #if BUSTER_KERNEL == 0
 
-typedef void ThreadReturnType;
-typedef ThreadReturnType ThreadCallback(void*);
 STRUCT(ThreadCreateOptions)
 {
     ThreadCallback* callback;
@@ -174,6 +172,8 @@ STRUCT(ThreadContext)
 };
 
 BUSTER_V_DECL ProgramState* program_state;
+BUSTER_V_DECL BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
+
 
 [[noreturn]] [[gnu::cold]] BUSTER_F_DECL void os_fail();
 [[gnu::noreturn]] BUSTER_F_DECL void os_exit(u32 code);

@@ -1,7 +1,7 @@
 #pragma once
 #include <buster/compiler/ir/ir.h>
 #include <buster/arena.h>
-#include <buster/string8.h>
+#include <buster/string.h>
 
 BUSTER_GLOBAL_LOCAL IrModule* ir_module_create(Arena* arena, Target* target, String8 name)
 {
@@ -60,7 +60,7 @@ BUSTER_GLOBAL_LOCAL IrInstruction* ir_create_return(IrModule* module, IrFunction
     let result = arena_allocate(module->arena, IrInstruction, 1);
     *result = (IrInstruction) {
         .value = value,
-        .id = IR_INSTRUCTION_RETURN,
+        .id = IrInstructionId::Return,
     };
     ir_function_append_instruction(function, result);
     return result;
@@ -72,7 +72,7 @@ BUSTER_GLOBAL_LOCAL IrValue* ir_constant_integer(IrModule* module, IrType* type,
     *result = (IrValue) {
         .constant_integer = value,
         .type = type,
-        .id = IR_VALUE_ID_CONSTANT_INTEGER,
+        .id = IrValueId::ConstantInteger,
     };
     return result;
 }
@@ -80,7 +80,7 @@ BUSTER_GLOBAL_LOCAL IrValue* ir_constant_integer(IrModule* module, IrType* type,
 BUSTER_GLOBAL_LOCAL IrFunction* ir_function_create(IrModule* module, IrGlobalSymbol symbol)
 {
     IrFunction* function = 0;
-    symbol.id = IR_GLOBAL_SYMBOL_FUNCTION;
+    symbol.id = IrGlobalSymbolId::Function;
 
     if (symbol.type)
     {
@@ -99,7 +99,7 @@ BUSTER_GLOBAL_LOCAL IrFunction* ir_function_create(IrModule* module, IrGlobalSym
 BUSTER_GLOBAL_LOCAL IrGlobalVariable* ir_global_variable_create(IrModule* module, IrGlobalSymbol symbol)
 {
     IrGlobalVariable* result = 0;
-    symbol.id = IR_GLOBAL_SYMBOL_VARIABLE;
+    symbol.id = IrGlobalSymbolId::Variable;
 
     if (symbol.type)
     {
@@ -112,28 +112,27 @@ BUSTER_GLOBAL_LOCAL IrGlobalVariable* ir_global_variable_create(IrModule* module
     return result;
 }
 
-BUSTER_DECL IrFunctions ir_module_get_functions(IrModule* module)
+BUSTER_F_IMPL Slice<IrFunction> ir_module_get_functions(IrModule* module)
 {
     let arena_pointer = (u8*)module->function_arena;
     let start = (u8*)(module->function_arena + 1);
-    return (IrFunctions) {
+    return {
         .pointer = (IrFunction*)start,
         .length = (u64)((arena_pointer + module->function_arena->position) - start) / sizeof(IrFunction),
     };
 }
 
-#if BUSTER_INCLUDE_TESTS
-BUSTER_IMPL IrModule* ir_create_mock_module(Arena* arena)
+BUSTER_F_IMPL IrModule* ir_create_mock_module(Arena* arena)
 {
     let module = ir_module_create(arena, 0, S8("basic"));
     let i32_type = ir_create_type(module, (IrType) {
-        .id = IR_TYPE_I32,
+        .id = IrTypeId::I32,
     });
     let function = ir_function_create(module, (IrGlobalSymbol) {
-        .linkage = IR_LINKAGE_EXTERNAL,
+        .linkage = IrLinkage::External,
         .type = &ir_function_type_get(module, (IrFunctionType) {
             .return_type = i32_type,
-            .calling_convention = IR_CALLING_CONVENTION_C,
+            .calling_convention = IrCallingConvention::C,
         })->type,
     });
     ir_create_return(module, function, ir_constant_integer(module, i32_type, 0));
@@ -141,6 +140,7 @@ BUSTER_IMPL IrModule* ir_create_mock_module(Arena* arena)
     return module;
 }
 
+#if BUSTER_INCLUDE_TESTS
 BUSTER_IMPL bool ir_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);

@@ -11,6 +11,9 @@
 #include <buster/arguments.h>
 #include <buster/arena.h>
 #include <buster/compiler/frontend/buster/parser.h>
+#include <buster/compiler/ir/ir.h>
+#include <buster/simd.h>
+#include <buster/integer.h>
 
 #if BUSTER_UNITY_BUILD
 #include <buster/arena.cpp>
@@ -37,6 +40,9 @@
 #include <buster/time.cpp>
 #include <buster/float.cpp>
 #include <buster/compiler/frontend/buster/parser.cpp>
+#include <buster/compiler/ir/ir.cpp>
+#include <buster/simd.cpp>
+#include <buster/integer.cpp>
 #endif
 
 STRUCT(IdePanel)
@@ -283,12 +289,672 @@ BUSTER_F_IMPL void async_user_tick()
 {
 }
 
+constexpr u64 operand_count = 4;
+
+ENUM_T(MachineOperandId, u8,
+        None,
+        VirtualRegister,
+        PhysicalRegister,
+        Immediate,
+        Memory);
+
+ENUM_T(MachineInstructionId, u64,
+        Return,
+        Move08RegImm,
+        Move16RegImm,
+        Move32RegImm,
+        Move64RegImm,
+        Zero08GPR,
+        Zero16GPR,
+        Zero32GPR,
+        Zero64GPR,
+        Copy08,
+        Copy16,
+        Copy32,
+        Copy64,
+        Ret08,
+        Ret16,
+        Ret32,
+        Ret64,
+        Load08,
+        Load16,
+        Load32,
+        Load64,
+        Store08,
+        Store16,
+        Store32,
+        Store64);
+
+ENUM_T(MachineSize, u8,
+    One,
+    Two,
+    Four,
+    Eight,
+    Sixteen,
+    ThirtyTwo,
+    SixtyFour);
+
+BUSTER_GLOBAL_LOCAL u32 machine_size_to_int(MachineSize size)
+{
+    return (u32)1 << (u32)size;
+}
+
+STRUCT(MachineOperandFlags)
+{
+    u8 def:1;
+    u8 use:1;
+    u8 implicit:1;
+    u8 reserved:5;
+};
+
+ENUM_T(RegisterBase, u8,
+        BasePointer);
+
+STRUCT(OperandMemory)
+{
+    s32 offset;
+    RegisterBase base;
+    u8 reserved[3];
+};
+
+UNION(OperandValue)
+{
+    u64 integer;
+    u64 index;
+    OperandMemory memory;
+};
+
+static_assert(sizeof(OperandValue) == sizeof(u64));
+
+STRUCT(MachineInstruction)
+{
+    OperandValue operand_values[operand_count];
+    MachineInstructionId id;
+    MachineOperandId operand_ids[operand_count];
+    MachineOperandFlags operand_flags[operand_count];
+    u8 reserved[16];
+};
+
+static_assert(sizeof(MachineInstruction) == 64);
+
+ENUM(PhysicalRegisterX8664,
+        RAX = 0,
+        RCX = 1,
+        RDX = 2,
+        RBX = 3,
+        RSP = 4,
+        RBP = 5,
+        RSI = 6,
+        RDI = 7,
+        R8 = 8,
+        R9 = 9,
+        R10 = 10,
+        R11 = 11,
+        R12 = 12,
+        R13 = 13,
+        R14 = 14,
+        R15 = 15,
+
+        ZMM0,
+        ZMM1,
+        ZMM2,
+        ZMM3,
+        ZMM4,
+        ZMM5,
+        ZMM6,
+        ZMM7,
+        ZMM8,
+        ZMM9,
+        ZMM10,
+        ZMM11,
+        ZMM12,
+        ZMM13,
+        ZMM14,
+        ZMM15,
+        ZMM16,
+        ZMM17,
+        ZMM18,
+        ZMM19,
+        ZMM20,
+        ZMM21,
+        ZMM22,
+        ZMM23,
+        ZMM24,
+        ZMM25,
+        ZMM26,
+        ZMM27,
+        ZMM28,
+        ZMM29,
+        ZMM30,
+        ZMM31,
+
+        K0,
+        K1,
+        K2,
+        K3,
+        K4,
+        K5,
+        K6,
+        K7);
+
+ENUM_T(RegisterClass, u8,
+    GPR,
+    GPR8,
+    XMM,
+    XMM32,
+    YMM,
+    YMM32,
+    ZMM,
+    Mask,
+    MaskNoZero);
+
+// BUSTER_GLOBAL_LOCAL u8 register_class_to_size(RegisterClass rc)
+// {
+//     u8 result;
+//
+//     switch (rc)
+//     {
+//         break; case RegisterClass::GPR: result = sizeof(u64);
+//         break; case RegisterClass::GPR8: result = sizeof(u8);
+//         break; case RegisterClass::XMM: result = sizeof(__m128);
+//         break; case RegisterClass::XMM32: result = sizeof(__m128);
+//         break; case RegisterClass::YMM: result = sizeof(__m256);
+//         break; case RegisterClass::YMM32: result = sizeof(__m256);
+//         break; case RegisterClass::ZMM: result = sizeof(__m512);
+//         break; case RegisterClass::Mask: result = sizeof(__mmask64);
+//         break; case RegisterClass::MaskNoZero: result = sizeof(__mmask64);
+//         break; case RegisterClass::Count: BUSTER_UNREACHABLE();
+//     }
+//
+//     return result;
+// }
+//
+// BUSTER_GLOBAL_LOCAL u8 register_class_to_alignment(RegisterClass rc)
+// {
+//     u8 result;
+//
+//     switch (rc)
+//     {
+//         break; case RegisterClass::GPR: result = alignof(u64);
+//         break; case RegisterClass::GPR8: result = alignof(u8);
+//         break; case RegisterClass::XMM: result = alignof(__m128);
+//         break; case RegisterClass::XMM32: result = alignof(__m128);
+//         break; case RegisterClass::YMM: result = alignof(__m256);
+//         break; case RegisterClass::YMM32: result = alignof(__m256);
+//         break; case RegisterClass::ZMM: result = alignof(__m512);
+//         break; case RegisterClass::Mask: result = alignof(__mmask64);
+//         break; case RegisterClass::MaskNoZero: result = alignof(__mmask64);
+//         break; case RegisterClass::Count: BUSTER_UNREACHABLE();
+//     }
+//
+//     return result;
+// }
+
+STRUCT(VirtualRegister)
+{
+    s32 offset;
+    RegisterClass register_class;
+    u8 physical;
+    MachineSize size;
+    u8 reserved[1];
+};
+
+BUSTER_GLOBAL_LOCAL constexpr u8 physical_not_assigned = UINT8_MAX;
+
+STRUCT(ISelArena)
+{
+    Arena* arena;
+    u64 original_position;
+};
+
+STRUCT(FunctionIsel)
+{
+    ISelArena virtual_registers;
+    ISelArena instructions;
+};
+
+BUSTER_GLOBAL_LOCAL MachineInstruction* allocate_instruction(FunctionIsel* isel, u64 count)
+{
+    let result = arena_allocate(isel->instructions.arena, MachineInstruction, count);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL MachineInstruction* allocate_instruction(ISelArena* isel_arena, u64 count)
+{
+    let result = arena_allocate(isel_arena->arena, MachineInstruction, count);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL OperandValue new_virtual_register(FunctionIsel* isel, RegisterClass register_class, MachineSize size)
+{
+    let index = (isel->virtual_registers.arena->position - arena_minimum_position) / sizeof(VirtualRegister);
+    let virtual_register = arena_allocate(isel->virtual_registers.arena, VirtualRegister, 1);
+    *virtual_register = {
+        .register_class = register_class,
+        .physical = physical_not_assigned,
+        .size = size,
+    };
+    return { .index = index };
+}
+
+BUSTER_GLOBAL_LOCAL void instruction_new_virtual_register(FunctionIsel* isel, MachineInstruction& i, RegisterClass register_class, MachineSize size, u8 index)
+{
+    let virtual_register = new_virtual_register(isel, register_class, size);
+    i.operand_values[index] = virtual_register;
+    i.operand_ids[index] = MachineOperandId::VirtualRegister;
+    i.operand_flags[index] = { .def = 1 };
+}
+
+BUSTER_GLOBAL_LOCAL MachineInstruction mov_imm(FunctionIsel* isel, u64 immediate, MachineSize size)
+{
+    BUSTER_CHECK(size <= MachineSize::Eight);
+    MachineInstruction i = {};
+
+    instruction_new_virtual_register(isel, i, RegisterClass::GPR, size, 0);
+    
+    bool is_zero = immediate == 0;
+
+    if (!is_zero)
+    {
+        i.operand_values[1] = { .integer = immediate };
+        i.operand_ids[1] = MachineOperandId::Immediate;
+    }
+
+    i.id = (MachineInstructionId)((u64)size + (u64)(is_zero ? MachineInstructionId::Zero08GPR : MachineInstructionId::Move08RegImm));
+
+    return i;
+}
+
+BUSTER_GLOBAL_LOCAL MachineInstruction copy(FunctionIsel* isel, PhysicalRegisterX8664 physical_register, u64 virtual_register, MachineSize size)
+{
+    BUSTER_UNUSED(isel);
+
+    MachineInstruction i = {};
+    
+    i.operand_values[0] = { .index = (u64)physical_register };
+    i.operand_ids[0] = MachineOperandId::PhysicalRegister;
+    i.operand_flags[0] = { .def = 1 };
+
+    i.operand_values[1] = { .index = virtual_register };
+    i.operand_ids[1] = MachineOperandId::VirtualRegister;
+    i.operand_flags[1] = { .use = 1 };
+
+    i.id = (MachineInstructionId)((u64)size + (u64)(MachineInstructionId::Copy08));
+
+    return i;
+}
+
+BUSTER_GLOBAL_LOCAL MachineInstruction ret(FunctionIsel* isel, PhysicalRegisterX8664 physical_register, MachineSize size)
+{
+    BUSTER_UNUSED(isel);
+
+    MachineInstruction i = {};
+    
+    i.operand_values[0] = { .index = (u64)physical_register };
+    i.operand_ids[0] = MachineOperandId::PhysicalRegister;
+    i.operand_flags[0] = { .use = 1, .implicit = 1 };
+
+    i.id = (MachineInstructionId)((u64)size + (u64)(MachineInstructionId::Ret08));
+
+    return i;
+}
+
+BUSTER_GLOBAL_LOCAL MachineInstruction consume_spill(PhysicalRegisterX8664 physical_register, s32 offset, MachineSize size)
+{
+    MachineInstruction i = {};
+
+    i.operand_values[0] = { .index = (u64)physical_register };
+    i.operand_ids[0] = MachineOperandId::PhysicalRegister;
+    i.operand_flags[0] = { .def = 1 };
+
+    i.operand_values[1] = { .memory = { .offset = offset, .base = RegisterBase::BasePointer } };
+    i.operand_ids[1] = MachineOperandId::Memory;
+    i.operand_flags[1] = { .use = 1 };
+
+    i.id = (MachineInstructionId)((u64)MachineInstructionId::Load08 + (u64)size);
+
+    return i;
+}
+
+BUSTER_GLOBAL_LOCAL MachineInstruction produce_spill(s32 offset, PhysicalRegisterX8664 physical_register, MachineSize size)
+{
+    MachineInstruction i = {};
+
+    i.operand_values[0] = { .memory = { .offset = offset, .base = RegisterBase::BasePointer } };
+    i.operand_ids[0] = MachineOperandId::Memory;
+    i.operand_flags[0] = { .def = 1 };
+
+    i.operand_values[1] = { .index = (u64)physical_register };
+    i.operand_ids[1] = MachineOperandId::PhysicalRegister;
+    i.operand_flags[1] = { .use = 1 };
+
+    i.id = (MachineInstructionId)((u64)MachineInstructionId::Store08 + (u64)size);
+
+    return i;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice module_lower(IrModule* module)
+{
+    let functions = ir_module_get_functions(module);
+    let instruction_arena = arena_create({});
+    let virtual_register_arena = arena_create({});
+    let emitter_arena = arena_create({ .flags = { .execute = 1 }});
+    let emitter_position = emitter_arena->position;
+
+    for (EACH_SLICE_REF(function, functions))
+    {
+        IrBasicBlock* queue[64];
+        u64 queue_count = 0;
+
+        queue[0] = function.entry_block;
+        queue_count = 1;
+
+        FunctionIsel function_isel = {
+            .virtual_registers = {
+                .arena = virtual_register_arena,
+                .original_position = virtual_register_arena->position,
+            },
+            .instructions = {
+                .arena = instruction_arena,
+                .original_position = instruction_arena->position,
+            },
+        };
+        FunctionIsel* isel = &function_isel;
+
+        while (queue_count)
+        {
+            let block = queue[queue_count - 1];
+            queue_count -= 1;
+
+            for (IrInstruction* instruction = block->first; instruction; instruction = instruction->next)
+            {
+                switch (instruction->id)
+                {
+                    break; case IrInstructionId::Return:
+                    {
+                        let value = instruction->value;
+
+                        switch (value->id)
+                        {
+                            break; case IrValueId::ConstantInteger:
+                            {
+                                let instructions = allocate_instruction(isel, 3);
+                                let size = MachineSize::Four;
+                                instructions[0] = mov_imm(isel, value->constant_integer, size);
+                                instructions[1] = copy(isel, PhysicalRegisterX8664::RAX, instructions[0].operand_values[0].integer, size);
+                                instructions[2] = ret(isel, PhysicalRegisterX8664::RAX, size);
+                            }
+                            break; case IrValueId::Count: BUSTER_UNREACHABLE();
+                        }
+                    }
+
+                    break; case IrInstructionId::Count: BUSTER_UNREACHABLE();
+                }
+            }
+        }
+
+        let isel_instructions = arena_get_slice(isel->instructions.arena, MachineInstruction, isel->instructions.original_position, isel->instructions.arena->position);
+        let virtual_registers = arena_get_slice(isel->virtual_registers.arena, VirtualRegister, isel->virtual_registers.original_position, isel->virtual_registers.arena->position);
+
+        s32 frame_offset = 0;
+
+        for (EACH_SLICE_REF(virtual_register, virtual_registers))
+        {
+            let size = machine_size_to_int(virtual_register.size);
+            let alignment = size;
+            virtual_register.offset = -(s32)((u32)align_forward((u32)-frame_offset, alignment) + size);
+            frame_offset = virtual_register.offset;
+        }
+
+        ISelArena ni = {
+            .arena = isel->instructions.arena,
+            .original_position = isel->instructions.arena->position,
+        };
+
+        ISelArena* register_allocation_instructions = &ni;
+
+        PhysicalRegisterX8664 scratch_gpr[] = { PhysicalRegisterX8664::R10, PhysicalRegisterX8664::R11 };
+
+        for (EACH_SLICE_REF(instruction, isel_instructions))
+        {
+            u8 gpr_index = 0;
+
+            for (u64 operand_i = 0; operand_i < operand_count; operand_i += 1)
+            {
+                let id = instruction.operand_ids[operand_i];
+                if (id == MachineOperandId::None)
+                {
+                    break;
+                }
+
+                if (id == MachineOperandId::VirtualRegister)
+                {
+                    let flags = instruction.operand_flags[operand_i];
+                    let virtual_register_index = instruction.operand_values[operand_i].index;
+                    let virtual_register = virtual_registers.pointer[virtual_register_index];
+
+                    if (flags.use)
+                    {
+                        PhysicalRegisterX8664 scratch;
+                        switch (virtual_register.register_class)
+                        {
+                            break; case RegisterClass::GPR: scratch = scratch_gpr[gpr_index++];
+                            break; default: BUSTER_UNREACHABLE();
+                        }
+
+                        *allocate_instruction(register_allocation_instructions, 1) = consume_spill(scratch, virtual_register.offset, virtual_register.size);
+
+                        instruction.operand_values[operand_i] = { .index = (u64)scratch };
+                        instruction.operand_ids[operand_i] = MachineOperandId::PhysicalRegister;
+                    }
+                }
+            }
+
+            STRUCT(DefScratch)
+            {
+                u64 virtual_register;
+                PhysicalRegisterX8664 physical_register;
+                u8 reserved[4];
+            };
+
+            DefScratch def_scratches[operand_count];
+            u32 def_count = 0;
+
+            for (u64 operand_i = 0; operand_i < operand_count; operand_i += 1)
+            {
+                let id = instruction.operand_ids[operand_i];
+                if (id == MachineOperandId::None)
+                {
+                    break;
+                }
+
+                if (id == MachineOperandId::VirtualRegister)
+                {
+                    let flags = instruction.operand_flags[operand_i];
+                    let virtual_register_index = instruction.operand_values[operand_i].index;
+                    let virtual_register = virtual_registers.pointer[virtual_register_index];
+
+                    if (flags.def)
+                    {
+                        PhysicalRegisterX8664 scratch;
+                        switch (virtual_register.register_class)
+                        {
+                            break; case RegisterClass::GPR: scratch = scratch_gpr[gpr_index++];
+                            break; default: BUSTER_UNREACHABLE();
+                        }
+
+                        def_scratches[def_count++] = {
+                            .virtual_register = virtual_register_index,
+                            .physical_register = scratch,
+                        };
+
+                        instruction.operand_values[operand_i] = { .index = (u64)scratch };
+                        instruction.operand_ids[operand_i] = MachineOperandId::PhysicalRegister;
+                    }
+                }
+            }
+
+            *allocate_instruction(register_allocation_instructions, 1) = instruction;
+
+            for (u32 def_i = 0; def_i < def_count; def_i += 1)
+            {
+                let def = def_scratches[def_i];
+                let virtual_register_index = def.virtual_register;
+                let virtual_register = &virtual_registers.pointer[virtual_register_index];
+                *allocate_instruction(register_allocation_instructions, 1) = produce_spill(virtual_register->offset, def.physical_register, virtual_register->size);
+            }
+        }
+
+        let ra_instructions = arena_get_slice(register_allocation_instructions->arena, MachineInstruction, register_allocation_instructions->original_position, register_allocation_instructions->arena->position);
+
+        for (EACH_SLICE_REF(instruction, ra_instructions))
+        {
+            switch (instruction.id)
+            {
+                break; case MachineInstructionId::Return: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Move08RegImm: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Move16RegImm: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Move32RegImm: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Move64RegImm: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Zero08GPR: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Zero16GPR: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Zero32GPR:
+                {
+                    let reg = (PhysicalRegisterX8664)instruction.operand_values[0].index;
+                    bool use_rex = reg >= PhysicalRegisterX8664::R8;
+                    u64 byte_count = 2 + use_rex;
+                    let allocation = arena_allocate(emitter_arena, u8, byte_count);
+                    allocation[0] = 0x45;
+                    allocation[use_rex + 0] = 0x31;
+                    let encoding_reg = (u8)reg & 0b111;
+                    allocation[use_rex + 1] = 0xc0 | (u8)(encoding_reg << 3) | (u8)(encoding_reg << 0);
+                }
+                break; case MachineInstructionId::Zero64GPR: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Copy08: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Copy16: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Copy32:
+                {
+                    BUSTER_CHECK(instruction.operand_ids[0] == MachineOperandId::PhysicalRegister);
+                    BUSTER_CHECK(instruction.operand_ids[1] == MachineOperandId::PhysicalRegister);
+
+                    let destination = (PhysicalRegisterX8664)instruction.operand_values[0].index;
+                    let source = (PhysicalRegisterX8664)instruction.operand_values[1].index;
+
+                    bool is_destination_reg64 = destination >= PhysicalRegisterX8664::R8;
+                    bool is_source_reg64 = source >= PhysicalRegisterX8664::R8;
+                    bool use_rex = is_destination_reg64 || is_source_reg64;
+                    u64 byte_count = 2 + use_rex;
+
+                    let encoding_source = (u8)source & 0b111;
+                    let encoding_destination = (u8)destination & 0b111;
+
+                    let allocation = arena_allocate(emitter_arena, u8, byte_count);
+
+                    if (is_destination_reg64 && is_source_reg64)
+                    {
+                        BUSTER_TRAP();
+                    }
+                    else if (is_source_reg64)
+                    {
+                        allocation[0] = 0x44;
+                        allocation[use_rex + 0] = 0x89;
+                        allocation[use_rex + 1] = (1 << 7) | (1 << 6) | (u8)(encoding_source << 3) | (u8)(encoding_destination << 0);
+                    }
+                    else if (is_destination_reg64)
+                    {
+                        BUSTER_TRAP();
+                    }
+                    else
+                    {
+                        BUSTER_TRAP();
+                    }
+                }
+                break; case MachineInstructionId::Copy64: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Ret08: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Ret16: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Ret32:
+                {
+                    *arena_allocate(emitter_arena, u8, 1) = 0xc3;
+                }
+                break; case MachineInstructionId::Ret64: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Load08: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Load16: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Load32:
+                {
+                    BUSTER_CHECK(instruction.operand_ids[0] == MachineOperandId::PhysicalRegister);
+                    BUSTER_CHECK(instruction.operand_ids[1] == MachineOperandId::Memory);
+                    let destination_reg = (PhysicalRegisterX8664)instruction.operand_values[0].index;
+                    let source = instruction.operand_values[1];
+                    BUSTER_CHECK(source.memory.base == RegisterBase::BasePointer);
+                    bool use_rex = destination_reg >= PhysicalRegisterX8664::R8;
+                    u64 byte_count = 3 + use_rex;
+                    let allocation = arena_allocate(emitter_arena, u8, byte_count);
+
+                    if (source.memory.offset >= INT8_MIN && source.memory.offset <= INT8_MAX)
+                    {
+                        let encoding_reg = (u8)destination_reg & 0b111;
+                        allocation[0] = 0x44;
+                        allocation[use_rex + 0] = 0x8b;
+                        allocation[use_rex + 1] = (1 << 6) | (u8)(encoding_reg << 3) | (u8)PhysicalRegisterX8664::RBP;
+                        allocation[use_rex + 2] = (u8)(s8)source.memory.offset;
+                    }
+                    else
+                    {
+                        BUSTER_TRAP();
+                    }
+                }
+                break; case MachineInstructionId::Load64: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Store08: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Store16: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Store32:
+                {
+                    BUSTER_CHECK(instruction.operand_ids[0] == MachineOperandId::Memory);
+                    BUSTER_CHECK(instruction.operand_ids[1] == MachineOperandId::PhysicalRegister);
+                    let source_reg = (PhysicalRegisterX8664)instruction.operand_values[1].index;
+                    let destination = instruction.operand_values[0];
+                    BUSTER_CHECK(destination.memory.base == RegisterBase::BasePointer);
+
+                    bool use_rex = source_reg >= PhysicalRegisterX8664::R8;
+                    u64 byte_count = 3 + use_rex;
+                    let allocation = arena_allocate(emitter_arena, u8, byte_count);
+
+                    if (destination.memory.offset >= INT8_MIN && destination.memory.offset <= INT8_MAX)
+                    {
+                        let encoding_reg = (u8)source_reg & 0b111;
+                        allocation[0] = 0x44;
+                        allocation[use_rex + 0] = 0x89;
+                        allocation[use_rex + 1] = (1 << 6) | (u8)(encoding_reg << 3) | (u8)PhysicalRegisterX8664::RBP;
+                        allocation[use_rex + 2] = (u8)(s8)destination.memory.offset;
+                    }
+                    else
+                    {
+                        BUSTER_TRAP();
+                    }
+                }
+                break; case MachineInstructionId::Store64: BUSTER_UNREACHABLE();
+                break; case MachineInstructionId::Count: BUSTER_UNREACHABLE();
+            }
+        }
+    }
+
+    let code = arena_get_slice(emitter_arena, u8, emitter_position, emitter_arena->position);
+    return code;
+}
+
+typedef int MainFunction();
+
+BUSTER_GLOBAL_LOCAL void compiler_experiments()
+{
+    let arena = arena_create({});
+    let module = ir_create_mock_module(arena);
+    let code = module_lower(module);
+    let fn = (MainFunction*)code.pointer;
+    BUSTER_CHECK(fn() == 0);
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_app()
 {
     ProcessResult result = ProcessResult::Success;
-#if 0
-    parser_experiments();
-#else
 
 #if BUSTER_INCLUDE_TESTS
     if (state.test)
@@ -312,6 +978,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app()
         }
 
         arena_destroy(arena, 1);
+
+        compiler_experiments();
     }
 #endif
 
@@ -412,7 +1080,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app()
             result = ProcessResult::Failed;
         }
     }
-#endif
 
     return result;
 }

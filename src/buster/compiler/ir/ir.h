@@ -3,16 +3,15 @@
 #include <buster/target.h>
 
 ENUM_T(IrTypeId, u8,
-    IR_TYPE_VOID,
-    IR_TYPE_NORETURN,
-    IR_TYPE_I1,
-    IR_TYPE_I8,
-    IR_TYPE_I16,
-    IR_TYPE_I32,
-    IR_TYPE_I64,
-    IR_TYPE_F32,
-    IR_TYPE_F64,
-);
+    Void,
+    Noreturn,
+    I1,
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64);
 
 STRUCT(IrType)
 {
@@ -20,8 +19,7 @@ STRUCT(IrType)
 };
 
 ENUM(IrValueId,
-    IR_VALUE_ID_CONSTANT_INTEGER,
-);
+    ConstantInteger);
 
 STRUCT(IrValue)
 {
@@ -32,14 +30,12 @@ STRUCT(IrValue)
 };
 
 ENUM_T(IrCallingConvention, u8,
-    IR_CALLING_CONVENTION_C,
-    IR_CALLING_CONVENTION_SYSTEM_V,
-    IR_CALLING_CONVENTION_WIN64,
-);
+    C,
+    SystemV,
+    Win64);
 
 ENUM(IrInstructionId,
-    IR_INSTRUCTION_RETURN,
-);
+    Return);
 
 STRUCT(IrInstruction)
 {
@@ -77,14 +73,12 @@ STRUCT(IrFunctionType)
 };
 
 ENUM(IrGlobalSymbolId,
-    IR_GLOBAL_SYMBOL_FUNCTION,
-    IR_GLOBAL_SYMBOL_VARIABLE,
-);
+    Function,
+    Variable);
 
 ENUM(IrLinkage, 
-    IR_LINKAGE_INTERNAL,
-    IR_LINKAGE_EXTERNAL,
-);
+    Internal,
+    External);
 
 STRUCT(IrGlobalSymbol)
 {
@@ -117,16 +111,10 @@ STRUCT(IrModule)
     String8 name;
 };
 
-STRUCT(IrFunctions)
-{
-    IrFunction* pointer;
-    u64 length;
-};
-
-BUSTER_DECL IrFunctions ir_module_get_functions(IrModule* module);
+BUSTER_F_DECL Slice<IrFunction> ir_module_get_functions(IrModule* module);
+BUSTER_F_DECL IrModule* ir_create_mock_module(Arena* arena);
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
-BUSTER_DECL IrModule* ir_create_mock_module(Arena* arena);
 BUSTER_DECL bool ir_tests(UnitTestArguments* arguments);
 #endif

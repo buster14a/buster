@@ -433,6 +433,7 @@ BUSTER_F_IMPL OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWind
                 //
                 // X Version 11                                                                             libxcb 1.17.0                                                             xcb_motion_notify_event_t(3)
 
+                unimplemented = false;
                 BUSTER_UNUSED(k);
             }
             break;

@@ -24,6 +24,10 @@ BUSTER_F_DECL u64 string8_first_sequence(String8 string, String8 sequence);
 BUSTER_F_DECL String8 string8_slice(String8 slice, u64 start, u64 end);
 BUSTER_F_DECL String8 string8_format_va(Arena* arena, String8 format, va_list variable_arguments);
 BUSTER_F_DECL String8 string8_duplicate_arena(Arena* arena, String8 string, bool zero_terminate);
+BUSTER_F_DECL bool string8_starts_with_sequence(String8 string, String8 sequence);
+BUSTER_F_DECL String8 string8_from_pointer_length(const char8* pointer, u64 length);
+BUSTER_F_DECL String8 string8_join_arena(Arena* arena, Slice<String8> strings, bool zero_terminate);
+BUSTER_F_DECL String8 string8_format_z(Arena* arena, String8 format, ...);
 
 BUSTER_F_DECL bool string16_equal(String16 s1, String16 s2);
 BUSTER_F_DECL bool string16_ends_with_sequence(String16 string, String16 ending);
