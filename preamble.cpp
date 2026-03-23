@@ -190,7 +190,7 @@ BUSTER_F_IMPL ProcessResult entry_point()
             .unity_build = 1,
             .use_io_ring = 0,
             .just_preprocessor = 0,
-            .include_tests = 1,
+            .include_tests = 0,
             .compile = 1,
             .link = 1,
         };

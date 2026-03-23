@@ -10,6 +10,7 @@
 #include <buster/ui_builder.h>
 #include <buster/arguments.h>
 #include <buster/arena.h>
+#include <buster/compiler/frontend/buster/parser.h>
 
 #if BUSTER_UNITY_BUILD
 #include <buster/arena.cpp>
@@ -35,6 +36,7 @@
 #include <buster/font_provider.cpp>
 #include <buster/time.cpp>
 #include <buster/float.cpp>
+#include <buster/compiler/frontend/buster/parser.cpp>
 #endif
 
 STRUCT(IdePanel)
@@ -284,14 +286,31 @@ BUSTER_F_IMPL void async_user_tick()
 BUSTER_GLOBAL_LOCAL ProcessResult run_app()
 {
     ProcessResult result = ProcessResult::Success;
+#if 0
+    parser_experiments();
+#else
 
 #if BUSTER_INCLUDE_TESTS
     if (state.test)
     {
         let arena = arena_create((ArenaCreation){});
-        UnitTestArguments arguments = { arena, &default_show };
-        let batch_test_result = library_tests(&arguments);
-        result = batch_test_report(&arguments, batch_test_result) ? ProcessResult::Success : ProcessResult::Failed;
+
+        {
+            let position = arena->position;
+            defer { arena->position = position; };
+            UnitTestArguments arguments = { arena, &default_show };
+            let batch_test_result = library_tests(&arguments);
+            result = batch_test_report(&arguments, batch_test_result) ? ProcessResult::Success : ProcessResult::Failed;
+        }
+
+        {
+            let position = arena->position;
+            defer { arena->position = position; };
+            UnitTestArguments arguments = { arena, &default_show };
+            let batch_test_result = parser_tests(&arguments);
+            result = batch_test_report(&arguments, batch_test_result) ? ProcessResult::Success : ProcessResult::Failed;
+        }
+
         arena_destroy(arena, 1);
     }
 #endif
@@ -393,6 +412,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app()
             result = ProcessResult::Failed;
         }
     }
+#endif
 
     return result;
 }

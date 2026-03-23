@@ -42,6 +42,15 @@
 #define restrict __restrict
 #endif
 
+#define BUSTER_TYPE_EQUAL(T1, T2) __is_same(T1, T2)
+#define BUSTER_UNDERLYING_TYPE(E) __underlying_type(E)
+
+#if BUSTER_OPTIMIZE
+#define BUSTER_INLINE __attribute__((always_inline))
+#else
+#define BUSTER_INLINE inline
+#endif
+
 #if defined(__APPLE__)
 #define BUSTER_APPLE 1
 #else
@@ -56,6 +65,30 @@
 #define BUSTER_EXPORT extern "C"
 #else
 #define BUSTER_EXPORT
+#endif
+
+#define CONCAT_HELPER(a, b) a##b
+#define CONCAT(a, b) CONCAT_HELPER(a, b)
+#define COUNTER_NAME(x) CONCAT(x, __COUNTER__)
+
+#if defined(__cplusplus)
+template <typename F>
+struct ScopeExit
+{
+    ScopeExit( F f_ ) : f( f_ ) { }
+    ~ScopeExit() { f(); }
+    F f;
+};
+
+struct DeferHelper
+{
+    template <typename F>
+    ScopeExit<F> operator+(F f) { return f; }
+};
+
+#define defer [[maybe_unused]] const auto & COUNTER_NAME( DEFER_ ) = DeferHelper() + [&]()
+#else
+#include <stddefer.h>
 #endif
 
 #ifndef BUSTER_UNITY_BUILD
@@ -276,7 +309,7 @@ UNION(F32Interval2)
 };
 static_assert(sizeof(F32Interval2) == 4 * sizeof(f32));
 
-static inline bool is_power_of_two(u64 value)
+static BUSTER_INLINE bool is_power_of_two(u64 value)
 {
     return value && !(value & (value - 1));
 }
@@ -447,7 +480,7 @@ ENUM(ScratchArenaId,
     SCRATCH_ARENA_0,
     SCRATCH_ARENA_1);
 
-#define EACH_ENUM_FREE(E, e) e = (E)0; e < E::Count; e = (E)((__underlying_type(E))e + 1)
+#define EACH_ENUM_FREE(E, e) e = (E)0; e < E::Count; e = (E)((BUSTER_UNDERLYING_TYPE(E))e + 1)
 #define EACH_ENUM(E, e) E EACH_ENUM_FREE(E, e)
-#define EACH_ENUM_INT_FREE(E, e) e = 0; e < (__underlying_type(E))(E::Count); e += 1
-#define EACH_ENUM_INT(E, e) __underlying_type(E) EACH_ENUM_INT_FREE(E, e)
+#define EACH_ENUM_INT_FREE(E, e) e = 0; e < (BUSTER_UNDERLYING_TYPE(E))(E::Count); e += 1
+#define EACH_ENUM_INT(E, e) BUSTER_UNDERLYING_TYPE(E) EACH_ENUM_INT_FREE(E, e)

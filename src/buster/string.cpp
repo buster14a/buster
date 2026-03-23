@@ -4,7 +4,7 @@
 #include <buster/assertion.h>
 #include <buster/os.h>
 
-#define STRING_OF_CHAR(strlit, Char) ((String<Char>) { .pointer = (Char*)(__is_same(Char, char16) ? (void const*)(u ## strlit) : (void const*)(strlit)), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) })
+#define STRING_OF_CHAR(strlit, Char) ((String<Char>) { .pointer = (Char*)(BUSTER_TYPE_EQUAL(Char, char16) ? (void const*)(u ## strlit) : (void const*)(strlit)), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) })
 
 template<typename Char>
 BUSTER_GLOBAL_LOCAL bool code_unit_is_binary(Char code_unit)
@@ -578,7 +578,7 @@ BUSTER_GLOBAL_LOCAL void string_append_slice_different(Arena* arena, String<Sour
 {
     let destination = arena_allocate(arena, DestinationChar, string.length);
 
-    if constexpr (__is_same(DestinationChar, SourceChar))
+    if constexpr (BUSTER_TYPE_EQUAL(DestinationChar, SourceChar))
     {
         memcpy(destination, string.pointer, sizeof(SourceChar) * string.length);
     }
@@ -658,11 +658,12 @@ BUSTER_GLOBAL_LOCAL String<Char> string_format_va(Arena* arena, String<Char> for
                 format_index += whole_format_string.length;
 
                 ENUM(FormatTypeId, 
-                        CHAR_OS,
                         STRING_OS,
                         STRING_OS_LIST,
                         STRING8,
                         STRING16,
+                        CHAR_OS,
+                        CHAR8,
                         UNSIGNED_INTEGER_8,
                         UNSIGNED_INTEGER_16,
                         UNSIGNED_INTEGER_32,
@@ -675,11 +676,12 @@ BUSTER_GLOBAL_LOCAL String<Char> string_format_va(Arena* arena, String<Char> for
                         SIGNED_INTEGER_128,
                         OS_ERROR);
                 String<Char> possible_format_strings[(u64)FormatTypeId::Count] = {
-                    [(u64)FormatTypeId::CHAR_OS] = STRING_OF_CHAR("COs", Char),
                     [(u64)FormatTypeId::STRING_OS] = STRING_OF_CHAR("SOs", Char),
                     [(u64)FormatTypeId::STRING_OS_LIST] = STRING_OF_CHAR("SOsL", Char),
                     [(u64)FormatTypeId::STRING8] = STRING_OF_CHAR("S8", Char),
                     [(u64)FormatTypeId::STRING16] = STRING_OF_CHAR("S16", Char),
+                    [(u64)FormatTypeId::CHAR_OS] = STRING_OF_CHAR("CharOs", Char),
+                    [(u64)FormatTypeId::CHAR8] = STRING_OF_CHAR("char8", Char),
                     [(u64)FormatTypeId::UNSIGNED_INTEGER_8] = STRING_OF_CHAR("u8", Char),
                     [(u64)FormatTypeId::UNSIGNED_INTEGER_16] = STRING_OF_CHAR("u16", Char),
                     [(u64)FormatTypeId::UNSIGNED_INTEGER_32] = STRING_OF_CHAR("u32", Char),
@@ -958,11 +960,6 @@ BUSTER_GLOBAL_LOCAL String<Char> string_format_va(Arena* arena, String<Char> for
                         let string = va_arg(variable_arguments, StringOs);
                         string_append_slice_different<Char, CharOs>(arena, string);
                     }
-                    break; case FormatTypeId::CHAR_OS:
-                    {
-                        let os_char = (CharOs)va_arg(variable_arguments, int);
-                        *arena_allocate(arena, Char, 1) = (Char)os_char;
-                    }
                     break; case FormatTypeId::STRING8:
                     {
                         let string = va_arg(variable_arguments, String8);
@@ -972,6 +969,16 @@ BUSTER_GLOBAL_LOCAL String<Char> string_format_va(Arena* arena, String<Char> for
                     {
                         let string16 = va_arg(variable_arguments, String16);
                         string_append_slice_different<Char, char16>(arena, string16);
+                    }
+                    break; case FormatTypeId::CHAR_OS:
+                    {
+                        let os_char = (CharOs)va_arg(variable_arguments, int);
+                        *arena_allocate(arena, Char, 1) = (Char)os_char;
+                    }
+                    break; case FormatTypeId::CHAR8:
+                    {
+                        let ch = (char8)va_arg(variable_arguments, int);
+                        *arena_allocate(arena, Char, 1) = (Char)ch;
                     }
                     break; case FormatTypeId::UNSIGNED_INTEGER_8: case FormatTypeId::UNSIGNED_INTEGER_16: case FormatTypeId::UNSIGNED_INTEGER_32: case FormatTypeId::UNSIGNED_INTEGER_64:
                     {
@@ -1418,7 +1425,7 @@ template <typename Char>
 BUSTER_F_IMPL u64 string_length(const Char* pointer)
 {
     u64 result;
-    if constexpr (__is_same(Char, char8))
+    if constexpr (BUSTER_TYPE_EQUAL(Char, char8))
     {
         result = string8_length(pointer);
     }
@@ -1683,7 +1690,7 @@ BUSTER_F_IMPL UnitTestResult string_tests(UnitTestArguments* arguments)
     {
         {
             String<Char> formatted;
-            if constexpr (__is_same(Char, char16))
+            if constexpr (BUSTER_TYPE_EQUAL(Char, char16))
             {
                 formatted = string_format(arena, STRING_TEST_LITERAL("{{ {S16} }}"), STRING_TEST_LITERAL("value"));
             }
