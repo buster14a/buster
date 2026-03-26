@@ -979,10 +979,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app()
 
         arena_destroy(arena, 1);
 
-        compiler_experiments();
     }
 #endif
+    parser_experiments();
+    compiler_experiments();
 
+#if 0
     if (result == ProcessResult::Success)
     {
         let windowing = state.windowing = os_windowing_initialize();
@@ -1080,6 +1082,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app()
             result = ProcessResult::Failed;
         }
     }
+#endif
 
     return result;
 }

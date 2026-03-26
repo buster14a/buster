@@ -4,7 +4,7 @@
 
 ENUM_T(IrTypeId, u8,
     Void,
-    Noreturn,
+    NoReturn,
     I1,
     I8,
     I16,
@@ -116,5 +116,5 @@ BUSTER_F_DECL IrModule* ir_create_mock_module(Arena* arena);
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
-BUSTER_DECL bool ir_tests(UnitTestArguments* arguments);
+BUSTER_F_DECL bool ir_tests(UnitTestArguments* arguments);
 #endif

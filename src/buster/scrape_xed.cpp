@@ -29,25 +29,25 @@
 #include <sys/stat.h>
 
 #if BUSTER_UNITY_BUILD
-#include <buster/entry_point.c>
-#include <buster/target.c>
+#include <buster/entry_point.cpp>
+#include <buster/target.cpp>
 #if defined(__x86_64__)
-#include <buster/x86_64.c>
+#include <buster/x86_64.cpp>
 #endif
 #if defined(__aarch64__)
-#include <buster/aarch64.c>
+#include <buster/aarch64.cpp>
 #endif
-#include <buster/assertion.c>
-#include <buster/memory.c>
-#include <buster/os.c>
-#include <buster/string.c>
-#include <buster/arena.c>
-#include <buster/integer.c>
-#include <buster/file.c>
-#include <buster/path.c>
-#include <buster/arguments.c>
+#include <buster/assertion.cpp>
+#include <buster/memory.cpp>
+#include <buster/os.cpp>
+#include <buster/string.cpp>
+#include <buster/arena.cpp>
+#include <buster/integer.cpp>
+#include <buster/file.cpp>
+#include <buster/path.cpp>
+#include <buster/arguments.cpp>
 #if BUSTER_INCLUDE_TESTS
-#include <buster/test.c>
+#include <buster/test.cpp>
 #endif
 #endif
 
