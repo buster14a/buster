@@ -15,6 +15,8 @@ BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
     [-1 + (u64)TokenId::Keyword_Else - (u64)TokenId::Keyword_First] = S8("else"),
     [-1 + (u64)TokenId::Keyword_Return - (u64)TokenId::Keyword_First] = S8("return"),
     [-1 + (u64)TokenId::Keyword_Let - (u64)TokenId::Keyword_First] = S8("let"),
+    [-1 + (u64)TokenId::Keyword_For - (u64)TokenId::Keyword_First] = S8("for"),
+    [-1 + (u64)TokenId::Keyword_While - (u64)TokenId::Keyword_First] = S8("while"),
 };
 static_assert(BUSTER_ARRAY_LENGTH(keyword_names) == keyword_count);
 
@@ -86,7 +88,7 @@ static_assert(sizeof(Token) == 2);
     case '8':\
     case '9'
 
-BUSTER_GLOBAL_LOCAL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length)
+BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length)
 {
     TokenizerResult result = {};
 
@@ -203,7 +205,19 @@ BUSTER_GLOBAL_LOCAL TokenizerResult tokenize(Arena* arena, const char8* restrict
                 break; case ')': { id = TokenId::RightParenthesis; it += 1; }
                 break; case '<': { id = TokenId::Less; it += 1; }
                 break; case '>': { id = TokenId::Greater; it += 1; }
-                break; case '+': { id = TokenId::Plus; it += 1; }
+                break; case '+':
+                {
+                    if (it + 1 < top && it[1] == '=')
+                    {
+                        id = TokenId::PlusEqual;
+                        it += 2;
+                    }
+                    else
+                    {
+                        id = TokenId::Plus;
+                        it += 1;
+                    }
+                }
                 break; case '-': { id = TokenId::Minus; it += 1; }
                 break; case '*': { id = TokenId::Asterisk; it += 1; }
                 break; case '/': { id = TokenId::Slash; it += 1; }
@@ -212,6 +226,23 @@ BUSTER_GLOBAL_LOCAL TokenizerResult tokenize(Arena* arena, const char8* restrict
                 break; case ';': { id = TokenId::Semicolon; it += 1; }
                 break; case ',': { id = TokenId::Comma; it += 1; }
                 break; case '&': { id = TokenId::Ampersand; it += 1; }
+                break; case '.':
+                {
+                    if (it + 2 < top && it[1] == '.' && it[2] == '.')
+                    {
+                        id = TokenId::TripleDot;
+                    }
+                    else if (it + 1 < top && it[1] == '.')
+                    {
+                        id = TokenId::DoubleDot;
+                    }
+                    else
+                    {
+                        id = TokenId::Dot;
+                    }
+
+                    it += (u64)id - (u64)TokenId::Dot + 1;
+                }
                 break; default: BUSTER_UNREACHABLE();
             }
 
@@ -338,7 +369,7 @@ STRUCT(RopeArena)
 // Prefix output: flat array of token indices in preorder
 // ============================================================
 
-BUSTER_GLOBAL_LOCAL ParserResult flatten_rope(const char8* restrict source, TokenizerResult tokenizer, RopeArena* rope_arena, RopeRef ref, Arena* output)
+BUSTER_GLOBAL_LOCAL ParserResult flatten_rope(const char8* restrict source, TokenizerResult tokenizer, RopeArena* rope_arena, RopeRef ref, Arena* output, u64 error_count)
 {
     u32* start = (u32*)arena_current_pointer(output, alignof(u32));
     u32 count = 0;
@@ -353,10 +384,11 @@ BUSTER_GLOBAL_LOCAL ParserResult flatten_rope(const char8* restrict source, Toke
     }
 
     ParserResult result = {
-        .lexer_tokens = tokenizer.tokens.pointer,
-        .lexer_token_count = (u32)tokenizer.tokens.length,
         .parser_token_indices = start,
+        .lexer_tokens = tokenizer.tokens.pointer,
         .parser_token_count = count,
+        .lexer_token_count = (u32)tokenizer.tokens.length,
+        .error_count = error_count,
         .source = source,
     };
     return result;
@@ -372,6 +404,7 @@ BUSTER_GLOBAL_LOCAL u8 infix_precedence(TokenId id)
     switch (id)
     {
         break; case TokenId::Equal:      result = 1;
+        break; case TokenId::PlusEqual:  result = 1;
         break; case TokenId::Colon:      result = 2;
         break; case TokenId::Greater:    result = 3;
         break; case TokenId::Less:       result = 3;
@@ -391,6 +424,7 @@ BUSTER_GLOBAL_LOCAL bool token_is_right_associative(TokenId id)
     switch (id)
     {
         break; case TokenId::Equal: result = true;
+        break; case TokenId::PlusEqual: result = true;
         break; default: result = false;
     }
     return result;
@@ -478,6 +512,7 @@ STRUCT(ShuntingYard)
     // Shunting-yard stacks
     OperatorStack operators;
     OperandStack operands;
+    u64 error_count;
 
     BUSTER_INLINE bool at_end()
     {
@@ -582,13 +617,36 @@ STRUCT(ShuntingYard)
     }
 };
 
+BUSTER_GLOBAL_LOCAL void sy_consume_disallowed_semicolons(ShuntingYard* restrict sy)
+{
+    let token = sy->peek();
+
+    while (token.id == TokenId::Semicolon)
+    {
+        sy->error_count += 1;
+        sy->advance();
+        token = sy->peek();
+    }
+}
+
+STRUCT(ParsedOperand)
+{
+    RopeRef rope;
+    TokenId tail_token_id;
+    u8 reserved[3];
+};
+
 // Forward declarations
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_bracket_group(ShuntingYard* restrict sy);
+BUSTER_GLOBAL_LOCAL ParsedOperand sy_parse_primary_operand(ShuntingYard* restrict sy);
 BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy);
 BUSTER_GLOBAL_LOCAL RopeRef sy_parse_attribute_list(ShuntingYard* restrict sy);
 BUSTER_GLOBAL_LOCAL RopeRef sy_parse_argument_list(ShuntingYard* restrict sy);
 BUSTER_GLOBAL_LOCAL RopeRef sy_parse_block(ShuntingYard* restrict sy);
 BUSTER_GLOBAL_LOCAL RopeRef sy_parse_function(ShuntingYard* restrict sy);
 BUSTER_GLOBAL_LOCAL RopeRef sy_parse_if(ShuntingYard* restrict sy);
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_for(ShuntingYard* restrict sy);
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_while(ShuntingYard* restrict sy);
 BUSTER_GLOBAL_LOCAL RopeRef sy_parse_statement(ShuntingYard* restrict sy);
 
 // ============================================================
@@ -602,6 +660,116 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_statement(ShuntingYard* restrict sy);
 // same way with high precedence and arity 1.
 // Parentheses act as grouping with sentinels on the op stack.
 // ============================================================
+
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_bracket_group(ShuntingYard* restrict sy)
+{
+    RopeRef result = sy->rope.make_leaf(sy->index); // [
+    sy->advance();
+
+    while (!sy->at_end())
+    {
+        let token = sy->peek();
+
+        if (token.id == TokenId::RightBracket)
+        {
+            result = sy->rope.concat(result, sy->rope.make_leaf(sy->index));
+            sy->advance();
+            break;
+        }
+
+        u32 before = sy->index;
+        if (token.id == TokenId::LeftBracket)
+        {
+            result = sy->rope.concat(result, sy_parse_bracket_group(sy));
+        }
+        else
+        {
+            result = sy->rope.concat(result, sy->rope.make_leaf(sy->index));
+            sy->advance();
+        }
+
+        if (sy->index == before)
+        {
+            sy->advance();
+        }
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ParsedOperand sy_parse_primary_operand(ShuntingYard* restrict sy)
+{
+    ParsedOperand result = {
+        .rope = no_rope,
+        .tail_token_id = TokenId::Error,
+    };
+
+    let token = sy->peek();
+
+    switch (token.id)
+    {
+        break; case TokenId::Identifier:
+        {
+            result.rope = sy->rope.make_leaf(sy->index);
+            result.tail_token_id = TokenId::Identifier;
+            sy->advance();
+        }
+        break; case TokenId::Number:
+        {
+            result.rope = sy->rope.make_leaf(sy->index);
+            result.tail_token_id = TokenId::Number;
+            sy->advance();
+        }
+        break; case TokenId::LeftBracket:
+        {
+            result.rope = sy_parse_bracket_group(sy);
+            result.tail_token_id = TokenId::RightBracket;
+        }
+        break; default: break;
+    }
+
+    while (result.rope.head != no_node && !sy->at_end())
+    {
+        token = sy->peek();
+
+        bool should_consume_suffix = token.id == TokenId::LeftBracket;
+        should_consume_suffix = should_consume_suffix
+            || ((result.tail_token_id == TokenId::RightBracket)
+            && (token.id == TokenId::Identifier || token.id == TokenId::Number));
+
+        if (!should_consume_suffix)
+        {
+            break;
+        }
+
+        RopeRef suffix = no_rope;
+        switch (token.id)
+        {
+            break; case TokenId::LeftBracket:
+            {
+                suffix = sy_parse_bracket_group(sy);
+                result.tail_token_id = TokenId::RightBracket;
+            }
+            break; case TokenId::Identifier:
+            {
+                suffix = sy->rope.make_leaf(sy->index);
+                result.tail_token_id = TokenId::Identifier;
+                sy->advance();
+            }
+            break; case TokenId::Number:
+            {
+                suffix = sy->rope.make_leaf(sy->index);
+                result.tail_token_id = TokenId::Number;
+                sy->advance();
+            }
+            break; default: break;
+        }
+
+        result.rope = sy->rope.concat(result.rope, suffix);
+    }
+
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
 {
@@ -618,16 +786,15 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
             switch (token.id)
             {
                 break; case TokenId::Identifier:
+                case TokenId::Number:
+                case TokenId::LeftBracket:
                 {
-                    sy->operands.push(sy->rope.make_leaf(token_index));
-                    sy->advance();
-                    expect_operand = false;
-                }
-                break; case TokenId::Number:
-                {
-                    sy->operands.push(sy->rope.make_leaf(token_index));
-                    sy->advance();
-                    expect_operand = false;
+                    let operand = sy_parse_primary_operand(sy);
+                    if (operand.rope.head != no_node)
+                    {
+                        sy->operands.push(operand.rope);
+                        expect_operand = false;
+                    }
                 }
                 break; case TokenId::LeftParenthesis:
                 {
@@ -834,7 +1001,7 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_argument_list(ShuntingYard* restrict sy)
     return result;
 }
 
-// Block: { statement; statement; ... }
+// Block: { statement statement ... }
 BUSTER_GLOBAL_LOCAL RopeRef sy_parse_block(ShuntingYard* restrict sy)
 {
     RopeRef result = sy->rope.make_leaf(sy->index); // {
@@ -862,6 +1029,46 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_block(ShuntingYard* restrict sy)
         {
             sy->advance();
         }
+    }
+
+    return result;
+}
+
+// for (binding_or_range) { body }
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_for(ShuntingYard* restrict sy)
+{
+    RopeRef result = sy->rope.make_leaf(sy->index); // for
+    sy->advance();
+
+    let range = sy_parse_expression(sy);
+    if (range.head != no_node)
+    {
+        result = sy->rope.concat(result, range);
+    }
+
+    if (sy->peek().id == TokenId::LeftBrace)
+    {
+        result = sy->rope.concat(result, sy_parse_block(sy));
+    }
+
+    return result;
+}
+
+// while (condition) { body }
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_while(ShuntingYard* restrict sy)
+{
+    RopeRef result = sy->rope.make_leaf(sy->index); // while
+    sy->advance();
+
+    let condition = sy_parse_expression(sy);
+    if (condition.head != no_node)
+    {
+        result = sy->rope.concat(result, condition);
+    }
+
+    if (sy->peek().id == TokenId::LeftBrace)
+    {
+        result = sy->rope.concat(result, sy_parse_block(sy));
     }
 
     return result;
@@ -962,33 +1169,53 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_if(ShuntingYard* restrict sy)
 
 BUSTER_GLOBAL_LOCAL RopeRef sy_parse_statement(ShuntingYard* restrict sy)
 {
-    let token = sy->peek();
     RopeRef result = no_rope;
+    let token = sy->peek();
 
-    if (token.id == TokenId::Semicolon)
+    while (token.id == TokenId::Semicolon)
     {
-        result = sy->rope.make_leaf(sy->index); // ;
+        sy->error_count += 1;
         sy->advance();
+        token = sy->peek();
+    }
 
-        let next = sy->peek();
-
-        switch (next.id)
+    switch (token.id)
+    {
+        break; case TokenId::Keyword_Function:
         {
-            break; case TokenId::Keyword_Function:
+            result = sy->rope.concat(result, sy_parse_function(sy));
+            sy_consume_disallowed_semicolons(sy);
+        }
+        break; case TokenId::Keyword_If:
+        {
+            result = sy->rope.concat(result, sy_parse_if(sy));
+            sy_consume_disallowed_semicolons(sy);
+        }
+        break; case TokenId::Keyword_For:
+        {
+            result = sy->rope.concat(result, sy_parse_for(sy));
+            sy_consume_disallowed_semicolons(sy);
+        }
+        break; case TokenId::Keyword_While:
+        {
+            result = sy->rope.concat(result, sy_parse_while(sy));
+            sy_consume_disallowed_semicolons(sy);
+        }
+        break; default:
+        {
+            // Expression statement: source syntax stays `expr;`, but the
+            // prefix reorder treats `;` as the unary statement operator.
+            let expr = sy_parse_expression(sy);
+            if (expr.head != no_node)
             {
-                result = sy->rope.concat(result, sy_parse_function(sy));
-            }
-            break; case TokenId::Keyword_If:
-            {
-                result = sy->rope.concat(result, sy_parse_if(sy));
-            }
-            break; default:
-            {
-                // Expression statement: let, return, assignment, etc.
-                let expr = sy_parse_expression(sy);
-                if (expr.head != no_node)
+                if (sy->peek().id == TokenId::Semicolon)
                 {
-                    result = sy->rope.concat(result, expr);
+                    result = sy->rope.combine_unary(sy->index, expr);
+                    sy->advance();
+                }
+                else
+                {
+                    sy->error_count += 1;
                 }
             }
         }
@@ -1010,6 +1237,7 @@ BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult t
         .rope = { .arena = arena_create({}) },
         .operators = { .arena = arena_create({}) },
         .operands = { .arena = arena_create({}) },
+        .error_count = tokenizer.error_count,
     };
 
     // Skip SOF
@@ -1037,10 +1265,14 @@ BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult t
     }
 
     ParserResult result = {};
+    result.lexer_tokens = tokenizer.tokens.pointer;
+    result.lexer_token_count = (u32)tokenizer.tokens.length;
+    result.error_count = sy.error_count;
+    result.source = source;
     if (top.head != no_node)
     {
         let output_arena = arena_create({});
-        result = flatten_rope(source, tokenizer, &sy.rope, top, output_arena);
+        result = flatten_rope(source, tokenizer, &sy.rope, top, output_arena, sy.error_count);
     }
 
     return result;
@@ -1105,6 +1337,7 @@ BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, StringOs path)
     let result = parse(source.pointer, tokenizer);
 
     string8_print(S8("=== Input ===\n{S8}\n"), source);
+    string8_print(S8("=== Error Count ===\n{u64}\n"), result.error_count);
     string8_print(S8("=== Prefix Output (token reordering) ===\n"));
     print_prefix(result, tokenizer.tokens.pointer, source.pointer);
 }
@@ -1114,13 +1347,135 @@ BUSTER_F_IMPL void parser_experiments()
     let arena = arena_create({});
     parse_experiment(arena, SOs("tests/basic.bbb"));
     parse_experiment(arena, SOs("tests/if_else.bbb"));
+    parse_experiment(arena, SOs("tests/array_slices.bbb"));
 }
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL u32 parser_token_length(Token* tokens, u32 token_index)
+{
+    u32 result = tokens[token_index].length;
+    if (result == 0)
+    {
+        result = *(u32*)(&tokens[token_index + 1]);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 parser_token_next_index(Token* tokens, u32 token_index)
+{
+    u32 result = token_index + 1;
+    if (tokens[token_index].length == 0)
+    {
+        result = token_index + 3;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 parser_token_text(const char8* restrict source, Token* tokens, u32 token_index)
+{
+    u64 offset = 0;
+    for (u32 i = 0; i < token_index; i = parser_token_next_index(tokens, i))
+    {
+        let token = tokens[i];
+        if (token.id != TokenId::SOF && token.id != TokenId::EOF)
+        {
+            offset += parser_token_length(tokens, i);
+        }
+    }
+
+    String8 result = {};
+    let token = tokens[token_index];
+    if (token.id != TokenId::SOF && token.id != TokenId::EOF)
+    {
+        result = string8_from_pointer_length(source + offset, parser_token_length(tokens, token_index));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 parser_prefix_text(Arena* arena, ParserResult parser_result)
+{
+    let parts = arena_allocate(arena, String8, parser_result.parser_token_count * 2);
+    u64 part_count = 0;
+
+    for (u32 i = 0; i < parser_result.parser_token_count; i += 1)
+    {
+        let text = parser_token_text(parser_result.source, parser_result.lexer_tokens, parser_result.parser_token_indices[i]);
+        if (text.length)
+        {
+            parts[part_count++] = text;
+            if (i + 1 < parser_result.parser_token_count)
+            {
+                parts[part_count++] = S8(" ");
+            }
+        }
+    }
+
+    let result = string8_join_arena(arena, {
+            .pointer = parts,
+            .length = part_count,
+            }, true);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult parser_statement_semicolon_tests(UnitTestArguments* arguments)
+{
+    STRUCT(ParserStatementSemicolonTestCase)
+    {
+        String8 source;
+        String8 expected_prefix;
+        u64 expected_error_count;
+    };
+
+    BUSTER_GLOBAL_LOCAL ParserStatementSemicolonTestCase test_cases[] = {
+        {
+            .source = S8("a = 1;"),
+            .expected_prefix = S8("; = a 1"),
+            .expected_error_count = 0,
+        },
+        {
+            .source = S8("return value;"),
+            .expected_prefix = S8("; return value"),
+            .expected_error_count = 0,
+        },
+    };
+
+    UnitTestResult result = {};
+    let arena = arguments->arena;
+
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(test_cases); i += 1)
+    {
+        let reset_position = arena->position;
+        let test_case = test_cases[i];
+        let tokenizer = tokenize(arena, test_case.source.pointer, test_case.source.length);
+        let parser_result = parse(test_case.source.pointer, tokenizer);
+        let prefix_text = parser_prefix_text(arena, parser_result);
+
+        bool has_expected_prefix = string8_equal(prefix_text, test_case.expected_prefix);
+        if (!has_expected_prefix)
+        {
+            buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected prefix {S8}, got {S8}"), test_case.expected_prefix, prefix_text);
+        }
+        result.succeeded_test_count += has_expected_prefix;
+        result.test_count += 1;
+
+        bool has_expected_error_count = parser_result.error_count == test_case.expected_error_count;
+        if (!has_expected_error_count)
+        {
+            buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected error count {u64}, got {u64}"), test_case.expected_error_count, parser_result.error_count);
+        }
+        result.succeeded_test_count += has_expected_error_count;
+        result.test_count += 1;
+
+        arena->position = reset_position;
+    }
+
+    return result;
+}
+
 BUSTER_F_IMPL BatchTestResult parser_tests(UnitTestArguments* arguments)
 {
     BatchTestResult result = {};
-    BUSTER_UNUSED(arguments);
+    consume_unit_tests(&result, parser_statement_semicolon_tests(arguments));
     return result;
 }
 #endif

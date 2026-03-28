@@ -87,7 +87,8 @@ ENUM_T(ModuleId, u64,
     MODULE_SCRAPE_LLVM,
     MODULE_SIMD,
     MODULE_BUSTER_PARSER,
-    MODULE_OPTIMIZING_IR);
+    MODULE_OPTIMIZING_IR,
+    MODULE_BUSTER_ANALYSIS);
 
 ENUM(DirectoryId,
     DIRECTORY_SRC_BUSTER,
@@ -214,6 +215,9 @@ BUSTER_GLOBAL_LOCAL Module modules[] = {
     [(u64)ModuleId::MODULE_OPTIMIZING_IR] = {
         .directory = DirectoryId::DIRECTORY_IR,
     },
+    [(u64)ModuleId::MODULE_BUSTER_ANALYSIS] = {
+        .directory = DirectoryId::DIRECTORY_FRONTEND_BUSTER,
+    },
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == (u64)ModuleId::Count);
@@ -324,6 +328,7 @@ BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) ide_modules[] = {
     { .id = ModuleId::MODULE_ARGUMENTS },
     { .id = ModuleId::MODULE_BUSTER_PARSER },
     { .id = ModuleId::MODULE_IR },
+    { .id = ModuleId::MODULE_BUSTER_ANALYSIS },
 };
 
 BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) scrape_xed_modules[] = {
@@ -705,6 +710,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)ModuleId::MODULE_SIMD] = SOs("simd"),
         [(u64)ModuleId::MODULE_BUSTER_PARSER] = SOs("parser"),
         [(u64)ModuleId::MODULE_OPTIMIZING_IR] = SOs("optimizing_ir"),
+        [(u64)ModuleId::MODULE_BUSTER_ANALYSIS] = SOs("analysis"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(module_names) == (u64)ModuleId::Count);

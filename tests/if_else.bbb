@@ -1,14 +1,14 @@
-; fn [cc] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+fn [cc] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32
 {
-    ; let a: s32 = 0
-        ; let b: s32 = 0
-        ; if (a > 0)
-        {
-            ; a = b
-        }
+    let a: s32 = 0;
+    let b: s32 = 0;
+    if (a > 0)
+    {
+        a = b;
+    }
     else
     {
-        ; b = a
+        b = a;
     }
-    ; return a + b
+    return a + b;
 }

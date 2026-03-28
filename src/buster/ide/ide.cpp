@@ -11,6 +11,7 @@
 #include <buster/arguments.h>
 #include <buster/arena.h>
 #include <buster/compiler/frontend/buster/parser.h>
+#include <buster/compiler/frontend/buster/analysis.h>
 #include <buster/compiler/ir/ir.h>
 #include <buster/simd.h>
 #include <buster/integer.h>
@@ -983,6 +984,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app()
 #endif
     parser_experiments();
     compiler_experiments();
+    analysis_experiments();
 
 #if 0
     if (result == ProcessResult::Success)

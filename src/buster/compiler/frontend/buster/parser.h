@@ -27,6 +27,7 @@ ENUM_T(TokenId, u8,
     Greater,
     Less,
     Plus,
+    PlusEqual,
     Minus,
     Asterisk,
     Slash,
@@ -34,6 +35,9 @@ ENUM_T(TokenId, u8,
     Colon,
     Semicolon,
     Comma,
+    Dot,
+    DoubleDot,
+    TripleDot,
     Ampersand,
     Keyword_First,
     Keyword_Return,
@@ -41,6 +45,8 @@ ENUM_T(TokenId, u8,
     Keyword_Else,
     Keyword_Function,
     Keyword_Let,
+    Keyword_For,
+    Keyword_While,
     Keyword_Last,
     Nonsense);
 
@@ -56,6 +62,7 @@ STRUCT(ParserResult)
     Token* restrict lexer_tokens;
     u32 parser_token_count;
     u32 lexer_token_count;
+    u64 error_count;
     const char8* restrict source;
 };
 
@@ -66,4 +73,5 @@ STRUCT(TokenizerResult)
 };
 
 BUSTER_F_DECL void parser_experiments();
+BUSTER_F_DECL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length);
 BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult tokenizer);
