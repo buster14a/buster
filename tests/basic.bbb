@@ -1,0 +1,4 @@
+; fn [cc] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+{
+    ; return 0
+}

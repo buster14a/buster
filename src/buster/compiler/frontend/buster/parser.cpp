@@ -4,44 +4,8 @@
 #include <buster/arena.h>
 #include <buster/string.h>
 #include <buster/assertion.h>
+#include <buster/file.h>
 
-ENUM_T(TokenId, u8,
-    Error,
-    Space,
-    LineFeed,
-    CarriageReturn,
-    SOF,
-    EOF,
-    Identifier,
-    Number,
-    LeftBracket,
-    RightBracket,
-    LeftBrace,
-    RightBrace,
-    LeftParenthesis,
-    RightParenthesis,
-    ListStart,
-    ListEnd,
-    Equal,
-    Greater,
-    Less,
-    Plus,
-    Minus,
-    Asterisk,
-    Slash,
-    Percentage,
-    Colon,
-    Semicolon,
-    Comma,
-    Ampersand,
-    Keyword_First,
-    Keyword_Return,
-    Keyword_If,
-    Keyword_Else,
-    Keyword_Function,
-    Keyword_Let,
-    Keyword_Last,
-    Nonsense);
 
 BUSTER_GLOBAL_LOCAL constexpr u64 keyword_count = (u64)TokenId::Keyword_Last - (u64)TokenId::Keyword_First - 1;
 
@@ -54,19 +18,7 @@ BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
 };
 static_assert(BUSTER_ARRAY_LENGTH(keyword_names) == keyword_count);
 
-STRUCT(Token)
-{
-    TokenId id;
-    u8 length;
-};
-
 static_assert(sizeof(Token) == 2);
-
-STRUCT(TokenizerResult)
-{
-    Slice<Token> tokens;
-    u64 error_count;
-};
 
 #define SWITCH_ALPHA_UPPER \
                 case 'A':\
@@ -386,13 +338,7 @@ STRUCT(RopeArena)
 // Prefix output: flat array of token indices in preorder
 // ============================================================
 
-STRUCT(PrefixResult)
-{
-    u32* token_indices;
-    u64 count;
-};
-
-BUSTER_GLOBAL_LOCAL PrefixResult flatten_rope(RopeArena* rope_arena, RopeRef ref, Arena* output)
+BUSTER_GLOBAL_LOCAL ParserResult flatten_rope(const char8* restrict source, TokenizerResult tokenizer, RopeArena* rope_arena, RopeRef ref, Arena* output)
 {
     u32* start = (u32*)arena_current_pointer(output, alignof(u32));
     u32 count = 0;
@@ -406,9 +352,12 @@ BUSTER_GLOBAL_LOCAL PrefixResult flatten_rope(RopeArena* rope_arena, RopeRef ref
         current = node->next;
     }
 
-    PrefixResult result = {
-        .token_indices = start,
-        .count = count,
+    ParserResult result = {
+        .lexer_tokens = tokenizer.tokens.pointer,
+        .lexer_token_count = (u32)tokenizer.tokens.length,
+        .parser_token_indices = start,
+        .parser_token_count = count,
+        .source = source,
     };
     return result;
 }
@@ -519,7 +468,7 @@ STRUCT(ShuntingYard)
 {
     // Input
     Token* restrict tokens;
-    const char8* restrict source;
+    // const char8* restrict source;
     u32 token_count;
     u32 index;
 
@@ -1052,11 +1001,10 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_statement(ShuntingYard* restrict sy)
 // Top-level parse
 // ============================================================
 
-BUSTER_GLOBAL_LOCAL PrefixResult parse(TokenizerResult tokenizer, const char8* source)
+BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult tokenizer)
 {
     ShuntingYard sy = {
         .tokens = tokenizer.tokens.pointer,
-        .source = source,
         .token_count = (u32)tokenizer.tokens.length,
         .index = 0,
         .rope = { .arena = arena_create({}) },
@@ -1088,12 +1036,13 @@ BUSTER_GLOBAL_LOCAL PrefixResult parse(TokenizerResult tokenizer, const char8* s
         }
     }
 
-    PrefixResult result = {};
+    ParserResult result = {};
     if (top.head != no_node)
     {
         let output_arena = arena_create({});
-        result = flatten_rope(&sy.rope, top, output_arena);
+        result = flatten_rope(source, tokenizer, &sy.rope, top, output_arena);
     }
+
     return result;
 }
 
@@ -1101,11 +1050,11 @@ BUSTER_GLOBAL_LOCAL PrefixResult parse(TokenizerResult tokenizer, const char8* s
 // Debug: print token source text for each index in prefix order
 // ============================================================
 
-BUSTER_GLOBAL_LOCAL void print_prefix(PrefixResult prefix, Token* tokens, const char8* source)
+BUSTER_GLOBAL_LOCAL void print_prefix(ParserResult parser_result, Token* tokens, const char8* source)
 {
-    for (u64 i = 0; i < prefix.count; i += 1)
+    for (u64 i = 0; i < parser_result.parser_token_count; i += 1)
     {
-        u32 token_index = prefix.token_indices[i];
+        u32 token_index = parser_result.parser_token_indices[i];
 
         // Compute source byte offset by summing prior token lengths
         // Skip SOF (index 0) since it has no source bytes
@@ -1145,32 +1094,26 @@ BUSTER_GLOBAL_LOCAL void print_prefix(PrefixResult prefix, Token* tokens, const 
 // Experiments
 // ============================================================
 
-BUSTER_F_DECL void parser_experiments()
+BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, StringOs path)
 {
-    let arena = arena_create((ArenaCreation){});
-    String8 source = S8(
-            "; fn [cc] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32\n"
-            "{\n"
-            "    ; let a: s32 = 0\n"
-            "    ; let b: s32 = 0\n"
-            "    ; if (a > 0)\n"
-            "    {\n"
-            "        ; a = b\n"
-            "    }\n"
-            "    else\n"
-            "    {\n"
-            "        ; b = a\n"
-            "    }\n"
-            "    ; return a + b\n"
-            "}\n"
-            );
+    let position = arena->position;
+    defer { arena->position = position; };
+
+    let source = BYTE_SLICE_TO_STRING(8, file_read(arena, path, {}));
 
     let tokenizer = tokenize(arena, source.pointer, source.length);
-    let result = parse(tokenizer, source.pointer);
+    let result = parse(source.pointer, tokenizer);
 
     string8_print(S8("=== Input ===\n{S8}\n"), source);
     string8_print(S8("=== Prefix Output (token reordering) ===\n"));
     print_prefix(result, tokenizer.tokens.pointer, source.pointer);
+}
+
+BUSTER_F_IMPL void parser_experiments()
+{
+    let arena = arena_create({});
+    parse_experiment(arena, SOs("tests/basic.bbb"));
+    parse_experiment(arena, SOs("tests/if_else.bbb"));
 }
 
 #if BUSTER_INCLUDE_TESTS
