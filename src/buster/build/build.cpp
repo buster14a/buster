@@ -498,7 +498,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         { .name = SOs("ide"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(ide_modules), },
         // { .name = SOs("cc"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(cc_modules), },
         // { .name = SOs("asm"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(asm_modules), },
-        { .name = SOs("scrape_xed"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(scrape_xed_modules), },
+        // { .name = SOs("scrape_xed"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(scrape_xed_modules), },
         // { .name = SOs("scrape_llvm"), .modules = (ModuleSlice) BUSTER_ARRAY_TO_SLICE(scrape_llvm_modules), },
     };
     constexpr u64 link_unit_count = BUSTER_ARRAY_LENGTH(specifications);

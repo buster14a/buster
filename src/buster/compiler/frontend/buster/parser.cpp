@@ -292,617 +292,864 @@ BUSTER_GLOBAL_LOCAL TokenizerResult tokenize(Arena* arena, const char8* restrict
     return result;
 }
 
-STRUCT(ParserResult)
+// ============================================================
+// Shunting-yard parser producing prefix (Polish notation) output.
+//
+// Following Validark's approach: the parse tree is a reordering
+// of token indices into preorder. No AST nodes are allocated.
+// Operands stay in original relative order; only operators are
+// repositioned (moved before their operands).
+//
+// A rope (linked list of token indices) provides O(1) concatenation
+// during the shunting-yard. Flattening the rope at the end yields
+// the contiguous prefix token-index array.
+// ============================================================
+
+// ============================================================
+// Rope: linked list of token indices for O(1) concat
+// ============================================================
+
+constexpr u32 no_node = UINT32_MAX;
+
+STRUCT(RopeNode)
 {
-    Token* restrict pointer;
-    u32 count;
-    u8 reserved[4];
+    u32 token_index;
+    u32 next; // index of next RopeNode, no_node = end
 };
 
-BUSTER_GLOBAL_LOCAL void print_token(TokenId id)
+STRUCT(RopeRef)
 {
-    bool a = true;
-    String8 result = {};
-    switch (id)
-    {
-        break;
-        case TokenId::SOF:
-        case TokenId::EOF:
-        {}
-        break; case TokenId::Semicolon: result = S8("; ");
-        break; case TokenId::ListStart: result = S8("[ ");
-        break; case TokenId::ListEnd: result = S8("] ");
-        break; case TokenId::Identifier: result = S8("Identifier ");
-        break; case TokenId::LeftParenthesis: result = S8("( ");
-        break; case TokenId::RightParenthesis: result = S8(") ");
-        break; case TokenId::LeftBrace: result = S8("{{ ");
-        break; case TokenId::RightBrace: result = S8("}} ");
-        break; case TokenId::Colon: result = S8(": ");
-        break; case TokenId::Comma: result = S8(", ");
-        break; case TokenId::Ampersand: result = S8("& ");
-        break; case TokenId::Keyword_Return: result = S8("return ");
-        break; case TokenId::Number: result = S8("Number ");
-        break; default: if (a) BUSTER_UNREACHABLE();
-    }
-
-    if (result.pointer)
-    {
-        string8_print(result);
-    }
-}
-
-STRUCT(TokenGet)
-{
-    u32 index;
-    Token token;
-    u8 reserved[2];
+    u32 head;
+    u32 tail;
 };
 
-STRUCT(TokenArray)
-{
-    Arena* token_arena;
-    Arena* index_arena;
+constexpr RopeRef no_rope = { .head = no_node, .tail = no_node };
 
-    BUSTER_INLINE void append(TokenGet get)
-    {
-        print_token(get.token.id);
-        *arena_allocate(token_arena, Token, 1) = get.token;
-        *arena_allocate(token_arena, u32, 1) = get.index;
-    }
-};
-
-STRUCT(TokenPlusIndex)
-{
-    Token token;
-    u16 index_low;
-    u16 index_high;
-};
-
-STRUCT(TokenStack)
+STRUCT(RopeArena)
 {
     Arena* arena;
 
-    BUSTER_INLINE void push(Token token, u32 index)
+    BUSTER_INLINE u32 count()
     {
-        let allocation = arena_allocate(arena, TokenPlusIndex, 1);
-        *allocation = {
-            .token = token,
-            .index_low = (u16)(index >> 0),
-            .index_high = (u16)(index >> 16),
-        };
+        return (u32)(arena_buffer_size(arena) / sizeof(RopeNode));
+    }
+
+    BUSTER_INLINE RopeNode* at(u32 index)
+    {
+        return arena_get_pointer(arena, RopeNode, arena_minimum_position + index * sizeof(RopeNode));
+    }
+
+    RopeRef make_leaf(u32 token_index)
+    {
+        u32 index = count();
+        let node = arena_allocate(arena, RopeNode, 1);
+        *node = { .token_index = token_index, .next = no_node };
+        RopeRef result = { .head = index, .tail = index };
+        return result;
+    }
+
+    // Concatenate: a then b
+    RopeRef concat(RopeRef a, RopeRef b)
+    {
+        RopeRef result;
+        if (a.head == no_node) { result = b; }
+        else if (b.head == no_node) { result = a; }
+        else
+        {
+            at(a.tail)->next = b.head;
+            result = { .head = a.head, .tail = b.tail };
+        }
+        return result;
+    }
+
+    // Prefix-combine binary: op -> left -> right
+    RopeRef combine_binary(u32 op_token_index, RopeRef left, RopeRef right)
+    {
+        let op = make_leaf(op_token_index);
+        at(op.tail)->next = left.head;
+        at(left.tail)->next = right.head;
+        RopeRef result = { .head = op.head, .tail = right.tail };
+        return result;
+    }
+
+    // Prefix-combine unary: op -> child
+    RopeRef combine_unary(u32 op_token_index, RopeRef child)
+    {
+        let op = make_leaf(op_token_index);
+        at(op.tail)->next = child.head;
+        RopeRef result = { .head = op.head, .tail = child.tail };
+        return result;
+    }
+};
+
+// ============================================================
+// Prefix output: flat array of token indices in preorder
+// ============================================================
+
+STRUCT(PrefixResult)
+{
+    u32* token_indices;
+    u64 count;
+};
+
+BUSTER_GLOBAL_LOCAL PrefixResult flatten_rope(RopeArena* rope_arena, RopeRef ref, Arena* output)
+{
+    u32* start = (u32*)arena_current_pointer(output, alignof(u32));
+    u32 count = 0;
+    u32 current = ref.head;
+
+    while (current != no_node)
+    {
+        let node = rope_arena->at(current);
+        *arena_allocate(output, u32, 1) = node->token_index;
+        count += 1;
+        current = node->next;
+    }
+
+    PrefixResult result = {
+        .token_indices = start,
+        .count = count,
+    };
+    return result;
+}
+
+// ============================================================
+// Operator precedence
+// ============================================================
+
+BUSTER_GLOBAL_LOCAL u8 infix_precedence(TokenId id)
+{
+    u8 result;
+    switch (id)
+    {
+        break; case TokenId::Equal:      result = 1;
+        break; case TokenId::Colon:      result = 2;
+        break; case TokenId::Greater:    result = 3;
+        break; case TokenId::Less:       result = 3;
+        break; case TokenId::Plus:       result = 4;
+        break; case TokenId::Minus:      result = 4;
+        break; case TokenId::Asterisk:   result = 5;
+        break; case TokenId::Slash:      result = 5;
+        break; case TokenId::Percentage: result = 5;
+        break; default: result = 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool token_is_right_associative(TokenId id)
+{
+    bool result;
+    switch (id)
+    {
+        break; case TokenId::Equal: result = true;
+        break; default: result = false;
+    }
+    return result;
+}
+
+// ============================================================
+// Shunting-yard stacks
+// ============================================================
+
+STRUCT(OperatorEntry)
+{
+    u32 token_index;
+    u8 precedence;
+    u8 arity; // 1 = unary prefix, 2 = binary infix
+    bool right_associative;
+    bool is_sentinel; // for ( grouping
+};
+
+STRUCT(OperatorStack)
+{
+    Arena* arena;
+
+    BUSTER_INLINE void push(OperatorEntry entry)
+    {
+        *arena_allocate(arena, OperatorEntry, 1) = entry;
     }
 
     BUSTER_INLINE bool is_empty()
     {
-        return arena->position == arena_minimum_position;
+        return arena_buffer_is_empty(arena);
     }
 
-    BUSTER_INLINE Token pop()
+    BUSTER_INLINE OperatorEntry top()
     {
-        let position = arena->position - sizeof(TokenPlusIndex);
-        let token = arena_get_pointer(arena, TokenPlusIndex, position);
-        BUSTER_CHECK(position >= arena_minimum_position);
+        return *arena_get_pointer(arena, OperatorEntry, arena->position - sizeof(OperatorEntry));
+    }
+
+    BUSTER_INLINE OperatorEntry pop()
+    {
+        let position = arena->position - sizeof(OperatorEntry);
+        let result = *arena_get_pointer(arena, OperatorEntry, position);
         arena->position = position;
-        return token->token;
-    }
-
-    BUSTER_INLINE TokenPlusIndex top()
-    {
-        let token = arena_get_pointer(arena, TokenPlusIndex, arena->position - sizeof(TokenPlusIndex));
-        return *token;
+        return result;
     }
 };
 
-STRUCT(StateFlags)
-{
-    bool is_function;
-    bool is_declaration;
-};
-
-STRUCT(StateStack)
+STRUCT(OperandStack)
 {
     Arena* arena;
 
-    BUSTER_INLINE void push(StateFlags state)
+    BUSTER_INLINE void push(RopeRef ref)
     {
-        let allocation = arena_allocate(arena, StateFlags, 1);
-        *allocation = state;
+        *arena_allocate(arena, RopeRef, 1) = ref;
     }
 
-    BUSTER_INLINE void pop()
+    BUSTER_INLINE bool is_empty()
     {
-        let position = arena->position - sizeof(StateFlags);
-        // let token = arena_get_pointer(arena, Token, position);
+        return arena_buffer_is_empty(arena);
+    }
+
+    BUSTER_INLINE RopeRef pop()
+    {
+        let position = arena->position - sizeof(RopeRef);
+        let result = *arena_get_pointer(arena, RopeRef, position);
         arena->position = position;
-    }
-
-    BUSTER_INLINE StateFlags top()
-    {
-        StateFlags result = {};
-        let position = arena->position - sizeof(StateFlags);
-        if (position >= arena_minimum_position)
-        {
-            result = *arena_get_pointer(arena, StateFlags, position);
-        }
         return result;
     }
 };
 
-STRUCT(State)
+// ============================================================
+// Shunting-yard parser state
+// ============================================================
+
+STRUCT(ShuntingYard)
 {
-    TokenStack operators;
-    TokenStack operands;
-    StateStack states;
-};
-
-// TODO: transform
-// BUSTER_GLOBAL_LOCAL u32 token_hierarchy(TokenId id)
-// {
-//     u32 result;
-//
-//     switch (id)
-//     {
-//         break;
-//         case TokenId::ListStart:
-//         case TokenId::LeftParenthesis:
-//         {
-//             return 0;
-//         }
-//         break; case TokenId::Colon:
-//         {
-//             return 1;
-//         }
-//         break; case TokenId::Keyword_Function:
-//         {
-//             return 2;
-//         }
-//         break;
-//         case TokenId::RightParenthesis:
-//         case TokenId::RightBracket:
-//         case TokenId::ListEnd:
-//         {
-//             return UINT32_MAX;
-//         }
-//         break; default: BUSTER_UNREACHABLE();
-//     }
-//
-//     return result;
-// }
-
-// BUSTER_GLOBAL_LOCAL ParserResult parse(TokenizerResult tokenizer)
-// {
-//     ParserResult result = {};
-//     // TokenArray output = {
-//     //     .token_arena = arena_create((ArenaCreation){}),
-//     //     .index_arena = arena_create((ArenaCreation){}),
-//     // };
-//     State state = {
-//         .operators = { .arena = arena_create({}) },
-//         .operands = { .arena = arena_create({}) },
-//         .states = { .arena = arena_create({}) },
-//     };
-//
-//     Token* restrict tokens = tokenizer.tokens.pointer;
-//     let token_count = tokenizer.tokens.length;
-//     BUSTER_UNUSED(tokens);
-//     BUSTER_UNUSED(token_count);
-//     u32 token_index = 0;
-//     BUSTER_UNUSED(token_index);
-//
-//     while (token_index < token_count)
-//     {
-//
-//         Token token = tokens[token_index];
-//
-//         bool is_operand;
-//         switch (token.id)
-//         {
-//             break;
-//             case TokenId::Keyword_Function:
-//             case TokenId::LeftBracket:
-//             case TokenId::ListStart:
-//             case TokenId::ListEnd:
-//             case TokenId::LeftParenthesis:
-//             case TokenId::RightParenthesis:
-//             case TokenId::Colon:
-//             {
-//                 is_operand = false;
-//             }
-//             break; case TokenId::Identifier:
-//             {
-//                 is_operand = true;
-//             }
-//             break; default: BUSTER_UNREACHABLE();
-//         }
-//
-//         if (is_operand)
-//         {
-//             state.operands.push(token, token_index);
-//         }
-//         else
-//         {
-//             if (token.id == TokenId::LeftParenthesis || state.operators.is_empty() || token_hierarchy(token.id) < token_hierarchy(state.operators.top().token.id))
-//             {
-//                 state.operators.push(token, token_index);
-//             }
-//             else if (token.id == TokenId::RightParenthesis || token.id == TokenId::ListEnd)
-//             {
-//                 TokenId matching;
-//                 switch (token.id)
-//                 {
-//                     break; case TokenId::RightParenthesis: matching = TokenId::LeftParenthesis;
-//                     break; case TokenId::ListEnd: matching = TokenId::ListStart;
-//                     break; default: BUSTER_UNREACHABLE();
-//                 }
-//
-//                 while (!state.operators.is_empty() && state.operators.top().token.id != matching)
-//                 {
-//                     BUSTER_TRAP();
-//                 }
-//
-//                 state.operators.pop();
-//             }
-//             else if (token_hierarchy(token.id) >= token_hierarchy(state.operators.top().token.id))
-//             {
-//                 while (!state.operators.is_empty() && token_hierarchy(token.id) >= token_hierarchy(state.operators.top().token.id))
-//                 {
-//                     let op = state.operators.pop();
-//                     let operand1 = state.operands.pop();
-//                     let operand2 = state.operands.pop();
-//
-//                     BUSTER_UNUSED(op);
-//                     BUSTER_UNUSED(operand1);
-//                     BUSTER_UNUSED(operand2);
-//                     BUSTER_TRAP();
-//                 }
-//                 BUSTER_TRAP();
-//             }
-//         }
-//
-//         token_index += 1;
-//     }
-//
-//     bool v = true;
-//     if (v) BUSTER_TRAP();
-//
-//     return result;
-// }
-
-STRUCT(ParserInputIterator)
-{
-    Token* restrict pointer;
-    u32 count;
+    // Input
+    Token* restrict tokens;
+    const char8* restrict source;
+    u32 token_count;
     u32 index;
-    StateStack state;
-};
 
-STRUCT(Parser)
-{
-    ParserInputIterator tokens;
-    TokenArray output;
+    // Rope output
+    RopeArena rope;
 
-    TokenGet get()
+    // Shunting-yard stacks
+    OperatorStack operators;
+    OperandStack operands;
+
+    BUSTER_INLINE bool at_end()
     {
-        bool is_ready = false;
-        while (!is_ready)
+        return index >= token_count;
+    }
+
+    // Skip whitespace, advancing index
+    void skip_whitespace()
+    {
+        while (index < token_count)
         {
-            Token* restrict token = &tokens.pointer[tokens.index];
-            switch (token->id)
+            let id = tokens[index].id;
+            if (id == TokenId::Space || id == TokenId::LineFeed || id == TokenId::CarriageReturn)
             {
-                break;
-                case TokenId::Keyword_Function:
-                case TokenId::Keyword_Let:
-                case TokenId::Keyword_Return:
-                case TokenId::ListStart:
-                case TokenId::ListEnd:
-                case TokenId::Identifier:
-                case TokenId::LeftParenthesis:
-                case TokenId::RightParenthesis:
-                case TokenId::Colon:
-                case TokenId::Semicolon:
-                case TokenId::Comma:
-                case TokenId::Ampersand:
-                case TokenId::LeftBrace:
-                case TokenId::RightBrace:
-                case TokenId::Equal:
-                case TokenId::Number:
-                case TokenId::SOF:
-                case TokenId::EOF:
-                {
-                    is_ready = true;
-                }
-                break; case TokenId::LeftBracket:
-                {
-                    bool is_function_attribute = tokens.state.top().is_function;
-                    bool is_declaration_attribute = tokens.state.top().is_declaration;
-
-                    if (is_function_attribute || is_declaration_attribute)
-                    {
-                        token->id = TokenId::ListStart;
-                    }
-                }
-                break; case TokenId::RightBracket:
-                {
-                    // TODO: do it properly
-                    token->id = TokenId::ListEnd;
-                }
-                break;
-                case TokenId::Space:
-                case TokenId::LineFeed:
-                {
-                    tokens.index += 1;
-                }
-                break; default: BUSTER_UNREACHABLE(); 
+                advance();
             }
-        }
-
-        TokenGet result = {
-            .token = tokens.pointer[tokens.index],
-            .index = tokens.index,
-        };
-
-        return result;
-    }
-
-    TokenGet consume_if(TokenId id)
-    {
-        TokenGet result = {};
-        let t = get();
-        if (t.token.id == id)
-        {
-            tokens.index += 1;
-            result = t;
-        }
-        else
-        {
-            BUSTER_TRAP();
-        }
-
-        return result;
-    }
-
-    void consume_and_append_if(TokenId id)
-    {
-        let t = get();
-        if (t.token.id == id)
-        {
-            output.append(t);
-            tokens.index += 1;
-        }
-        else
-        {
-            BUSTER_TRAP();
-        }
-    }
-};
-
-// TODO: more correct
-BUSTER_GLOBAL_LOCAL void parse_attribute_list(Parser* restrict parser)
-{
-    if (parser->get().token.id == TokenId::ListStart)
-    {
-        while (true)
-        {
-            let t = parser->get();
-            bool a = true;
-            parser->tokens.index += 1;
-            if (a) BUSTER_TRAP();
-
-            if (t.token.id == TokenId::ListEnd)
+            else
             {
                 break;
             }
         }
     }
+
+    // Peek at next significant token
+    Token peek()
+    {
+        skip_whitespace();
+        Token result = {};
+        if (index < token_count)
+        {
+            result = tokens[index];
+        }
+        return result;
+    }
+
+    // Advance past current token (handles big-length encoding)
+    void advance()
+    {
+        if (index < token_count)
+        {
+            u32 length = tokens[index].length;
+            if (length == 0)
+            {
+                index += 3;
+            }
+            else
+            {
+                index += 1;
+            }
+        }
+    }
+
+    // Pop top operator and combine with operands into a rope
+    void combine_top()
+    {
+        let op = operators.pop();
+
+        if (op.arity == 2)
+        {
+            let right = operands.pop();
+            let left = operands.pop();
+            operands.push(rope.combine_binary(op.token_index, left, right));
+        }
+        else if (op.arity == 1)
+        {
+            let child = operands.pop();
+            operands.push(rope.combine_unary(op.token_index, child));
+        }
+    }
+
+    // Drain operators with precedence >= threshold
+    void drain_operators(u8 precedence, bool right_associative)
+    {
+        while (!operators.is_empty())
+        {
+            let top = operators.top();
+            if (top.is_sentinel) { break; }
+
+            bool should_pop = false;
+            if (top.precedence > precedence)
+            {
+                should_pop = true;
+            }
+            else if (top.precedence == precedence && !right_associative)
+            {
+                should_pop = true;
+            }
+
+            if (!should_pop) { break; }
+            combine_top();
+        }
+    }
+
+    // Drain all non-sentinel operators
+    void drain_all()
+    {
+        while (!operators.is_empty())
+        {
+            if (operators.top().is_sentinel) { break; }
+            combine_top();
+        }
+    }
+};
+
+// Forward declarations
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy);
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_attribute_list(ShuntingYard* restrict sy);
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_argument_list(ShuntingYard* restrict sy);
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_block(ShuntingYard* restrict sy);
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_function(ShuntingYard* restrict sy);
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_if(ShuntingYard* restrict sy);
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_statement(ShuntingYard* restrict sy);
+
+// ============================================================
+// Expression parsing — core shunting-yard
+//
+// Operands (identifiers, numbers) pass through in order.
+// Infix operators (+, -, *, /, %, >, <, =, :) are reordered
+// via the operator stack so they appear before their operands
+// in the output (prefix position).
+// Unary prefix operators (&, -, return, let) are handled the
+// same way with high precedence and arity 1.
+// Parentheses act as grouping with sentinels on the op stack.
+// ============================================================
+
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
+{
+    bool expect_operand = true;
+    bool running = true;
+
+    while (running && !sy->at_end())
+    {
+        let token = sy->peek();
+        let token_index = sy->index;
+
+        if (expect_operand)
+        {
+            switch (token.id)
+            {
+                break; case TokenId::Identifier:
+                {
+                    sy->operands.push(sy->rope.make_leaf(token_index));
+                    sy->advance();
+                    expect_operand = false;
+                }
+                break; case TokenId::Number:
+                {
+                    sy->operands.push(sy->rope.make_leaf(token_index));
+                    sy->advance();
+                    expect_operand = false;
+                }
+                break; case TokenId::LeftParenthesis:
+                {
+                    // Grouping: push sentinel with ( token index
+                    sy->operators.push({
+                        .token_index = token_index,
+                        .precedence = 0,
+                        .arity = 0,
+                        .right_associative = false,
+                        .is_sentinel = true,
+                    });
+                    sy->advance();
+                }
+                break; case TokenId::Ampersand:
+                {
+                    // Unary prefix: address-of
+                    sy->operators.push({
+                        .token_index = token_index,
+                        .precedence = 6,
+                        .arity = 1,
+                        .right_associative = true,
+                        .is_sentinel = false,
+                    });
+                    sy->advance();
+                }
+                break; case TokenId::Minus:
+                {
+                    // Unary prefix: negation
+                    sy->operators.push({
+                        .token_index = token_index,
+                        .precedence = 6,
+                        .arity = 1,
+                        .right_associative = true,
+                        .is_sentinel = false,
+                    });
+                    sy->advance();
+                }
+                break; case TokenId::Keyword_Return:
+                {
+                    // Prefix unary keyword (very low precedence)
+                    sy->operators.push({
+                        .token_index = token_index,
+                        .precedence = 0,
+                        .arity = 1,
+                        .right_associative = true,
+                        .is_sentinel = false,
+                    });
+                    sy->advance();
+                }
+                break; case TokenId::Keyword_Let:
+                {
+                    // Prefix unary keyword (very low precedence)
+                    sy->operators.push({
+                        .token_index = token_index,
+                        .precedence = 0,
+                        .arity = 1,
+                        .right_associative = true,
+                        .is_sentinel = false,
+                    });
+                    sy->advance();
+                }
+                break; default:
+                {
+                    // Not a valid operand start — end of expression
+                    running = false;
+                }
+            }
+        }
+        else
+        {
+            // After an operand: expect infix operator, ), or end
+            let prec = infix_precedence(token.id);
+
+            if (prec > 0)
+            {
+                // Infix binary operator
+                let right_assoc = token_is_right_associative(token.id);
+                sy->drain_operators(prec, right_assoc);
+                sy->operators.push({
+                    .token_index = token_index,
+                    .precedence = prec,
+                    .arity = 2,
+                    .right_associative = right_assoc,
+                    .is_sentinel = false,
+                });
+                sy->advance();
+                expect_operand = true;
+            }
+            else if (token.id == TokenId::RightParenthesis)
+            {
+                // Drain to matching ( sentinel, wrap with ( )
+                sy->drain_all();
+                if (!sy->operators.is_empty() && sy->operators.top().is_sentinel)
+                {
+                    let sentinel = sy->operators.pop();
+                    let inner = sy->operands.pop();
+                    let open_leaf = sy->rope.make_leaf(sentinel.token_index);
+                    let close_leaf = sy->rope.make_leaf(token_index);
+                    let wrapped = sy->rope.concat(open_leaf, sy->rope.concat(inner, close_leaf));
+                    sy->operands.push(wrapped);
+                    sy->advance();
+                    // After ), we still have a complete operand
+                }
+                else
+                {
+                    // No matching ( — this ) belongs to an outer construct
+                    running = false;
+                }
+            }
+            else
+            {
+                // Not an infix operator — end of expression
+                running = false;
+            }
+        }
+    }
+
+    sy->drain_all();
+
+    RopeRef result = no_rope;
+    if (!sy->operands.is_empty())
+    {
+        result = sy->operands.pop();
+    }
+    return result;
 }
 
-BUSTER_GLOBAL_LOCAL void parse_argument_declaration_list(Parser* restrict parser)
+// ============================================================
+// Compound constructs — parsed as sub-invocations, producing
+// single rope segments that include delimiter tokens
+// ============================================================
+
+// Attribute list: [ expr, expr, ... ]
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_attribute_list(ShuntingYard* restrict sy)
 {
-    parser->consume_and_append_if(TokenId::LeftParenthesis);
+    RopeRef result = sy->rope.make_leaf(sy->index); // [
+    sy->advance();
 
-    while (true)
+    while (!sy->at_end())
     {
-        let t = parser->get();
-        bool a = true;
-        if (a) BUSTER_TRAP();
+        let token = sy->peek();
 
-        if (t.token.id == TokenId::RightParenthesis)
+        if (token.id == TokenId::RightBracket)
         {
+            result = sy->rope.concat(result, sy->rope.make_leaf(sy->index));
+            sy->advance();
             break;
         }
-    }
-}
 
-// TODO:
-BUSTER_GLOBAL_LOCAL void parse_type(Parser* restrict parser)
-{
-    BUSTER_UNUSED(parser);
-    bool a = true;
-    if (a) BUSTER_TRAP();
-    // parser->expect(TokenId::Identifier);
-}
-
-ENUM_T(Precedence, u8,
-      None,
-      Assignment,
-      BooleanOr,
-      BooleanAnd,
-      Comparison,
-      Bitwise,
-      Shifting,
-      Add,
-      Div,
-      Prefix,
-      AggregateInitialization,
-      Postfix);
-
-STRUCT(ExpressionParser)
-{
-    TokenGet token;
-    Precedence precedence;
-    u8 reserved[3];
-};
-
-// BUSTER_GLOBAL_LOCAL void parse_left(Parser* restrict parser)
-// {
-// }
-
-BUSTER_GLOBAL_LOCAL void parse_expression(Parser* restrict parser, ExpressionParser expression_parser)
-{
-    bool a = true;
-
-    BUSTER_UNUSED(expression_parser);
-
-    let t = parser->get();
-    switch (t.token.id)
-    {
-        break; case TokenId::Number:
+        if (token.id == TokenId::Comma)
         {
-            if (a) BUSTER_TRAP();
-            // parser->expect(t.token.id);
+            result = sy->rope.concat(result, sy->rope.make_leaf(sy->index));
+            sy->advance();
+            continue;
         }
-        break; default: if (a) BUSTER_UNREACHABLE();
+
+        u32 before = sy->index;
+        let expr = sy_parse_expression(sy);
+        if (expr.head != no_node)
+        {
+            result = sy->rope.concat(result, expr);
+        }
+        if (sy->index == before) { sy->advance(); }
     }
+
+    return result;
 }
 
-BUSTER_GLOBAL_LOCAL void parse_variable_declaration(Parser* restrict parser)
+// Argument/parameter list: ( name: type, ... )
+// Each parameter is parsed as an expression (: is infix, prec 2)
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_argument_list(ShuntingYard* restrict sy)
 {
-    BUSTER_UNUSED(parser);
-    let let_t = parser->consume_if(TokenId::Keyword_Let);
-    let identifier_t = parser->consume_if(TokenId::Identifier);
-    let colon_t = parser->consume_if(TokenId::Colon);
-    BUSTER_UNUSED(let_t);
-    BUSTER_UNUSED(identifier_t);
-    BUSTER_UNUSED(colon_t);
+    RopeRef result = sy->rope.make_leaf(sy->index); // (
+    sy->advance();
 
-    bool parse_t = parser->get().token.id != TokenId::Equal;
-    if (parse_t)
+    while (!sy->at_end())
     {
-        parse_type(parser);
+        let token = sy->peek();
+
+        if (token.id == TokenId::RightParenthesis)
+        {
+            result = sy->rope.concat(result, sy->rope.make_leaf(sy->index));
+            sy->advance();
+            break;
+        }
+
+        if (token.id == TokenId::Comma)
+        {
+            result = sy->rope.concat(result, sy->rope.make_leaf(sy->index));
+            sy->advance();
+            continue;
+        }
+
+        // Each param is an expression: name : type (: is infix prec 2)
+        u32 before = sy->index;
+        let param = sy_parse_expression(sy);
+        if (param.head != no_node)
+        {
+            result = sy->rope.concat(result, param);
+        }
+        if (sy->index == before) { sy->advance(); }
     }
 
-    let equal_t = parser->consume_if(TokenId::Equal);
-    BUSTER_UNUSED(equal_t);
-
-    parse_expression(parser, {});
+    return result;
 }
 
-BUSTER_GLOBAL_LOCAL void parse_return(Parser* restrict parser)
+// Block: { statement; statement; ... }
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_block(ShuntingYard* restrict sy)
 {
-    parser->consume_and_append_if(TokenId::Keyword_Return);
+    RopeRef result = sy->rope.make_leaf(sy->index); // {
+    sy->advance();
 
-    parse_expression(parser, {});
+    while (!sy->at_end())
+    {
+        let token = sy->peek();
+
+        if (token.id == TokenId::RightBrace)
+        {
+            result = sy->rope.concat(result, sy->rope.make_leaf(sy->index));
+            sy->advance();
+            break;
+        }
+
+        u32 before = sy->index;
+        let stmt = sy_parse_statement(sy);
+        if (stmt.head != no_node)
+        {
+            result = sy->rope.concat(result, stmt);
+        }
+
+        if (sy->index == before)
+        {
+            sy->advance();
+        }
+    }
+
+    return result;
 }
 
-BUSTER_GLOBAL_LOCAL void parse_block(Parser* restrict parser, TokenId start_token, TokenId end_token);
+// ============================================================
+// Keyword constructs — structurally parsed, building ropes
+// in prefix order. Expressions within are handled by the
+// shunting-yard.
+// ============================================================
 
-BUSTER_GLOBAL_LOCAL void parse_function(Parser* restrict parser)
+// fn [attrs] name [attrs] (params) ret_type { body }
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_function(ShuntingYard* restrict sy)
 {
-    parser->tokens.index += 1;
+    RopeRef result = sy->rope.make_leaf(sy->index); // fn
+    sy->advance();
 
-    let state = parser->tokens.state.top();
-    state.is_function = true;
-    parser->tokens.state.push(state);
-    defer { parser->tokens.state.pop(); };
-
-    // Function attribute list
-    parse_attribute_list(parser);
+    // Optional first attribute list
+    if (sy->peek().id == TokenId::LeftBracket)
+    {
+        result = sy->rope.concat(result, sy_parse_attribute_list(sy));
+    }
 
     // Function name
-    let identifier_t = parser->consume_if(TokenId::Identifier);
+    sy->peek(); // skip whitespace
+    result = sy->rope.concat(result, sy->rope.make_leaf(sy->index));
+    sy->advance();
 
-    // Symbol attribute list
-    parse_attribute_list(parser);
-
-    parse_argument_declaration_list(parser);
-
-    // Return type
-    parse_type(parser);
-
-    parse_block(parser, TokenId::LeftBrace, TokenId::RightBrace);
-}
-
-BUSTER_GLOBAL_LOCAL void parse_block(Parser* restrict parser, TokenId start_token, TokenId end_token)
-{
-    parser->expect(start_token);
-
-    while (parser->get().token.id != end_token)
+    // Optional second attribute list
+    if (sy->peek().id == TokenId::LeftBracket)
     {
-        parser->expect(TokenId::Semicolon);
-
-        let t = parser->get();
-
-        switch (t.token.id)
-        {
-            break; case TokenId::Keyword_Let: parse_variable_declaration(parser);
-            break; case TokenId::Keyword_Return: parse_return(parser);
-            break; case TokenId::Keyword_Function: parse_function(parser);
-            break; default: BUSTER_UNREACHABLE();
-        }
+        result = sy->rope.concat(result, sy_parse_attribute_list(sy));
     }
 
-    parser->expect(end_token);
-}
-
-BUSTER_GLOBAL_LOCAL void parse_statements(Parser* restrict parser)
-{
-    while (parser->get().token.id != TokenId::EOF)
+    // Argument list
+    if (sy->peek().id == TokenId::LeftParenthesis)
     {
-        parser->expect(TokenId::Semicolon);
-
-        let t = parser->get();
-
-        bool a = true;
-        switch (t.token.id)
-        {
-            break; case TokenId::Keyword_Function: parse_function(parser);
-            break; default: if (a) BUSTER_UNREACHABLE();
-        }
-
-        if (a) BUSTER_TRAP();
-        break;
+        result = sy->rope.concat(result, sy_parse_argument_list(sy));
     }
-}
 
-BUSTER_GLOBAL_LOCAL ParserResult parser_consume(Parser* restrict parser)
-{
-    ParserResult result = {};
-    let tokens = arena_get_slice(parser->output.token_arena, Token, arena_minimum_position, parser->output.token_arena->position);
-    result.pointer = tokens.pointer;
-    result.count = (u32)tokens.length;
+    // Return type (parsed as expression)
+    let ret_type = sy_parse_expression(sy);
+    if (ret_type.head != no_node)
+    {
+        result = sy->rope.concat(result, ret_type);
+    }
+
+    // Body block
+    if (sy->peek().id == TokenId::LeftBrace)
+    {
+        result = sy->rope.concat(result, sy_parse_block(sy));
+    }
+
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ParserResult parse(TokenizerResult tokenizer)
+// if (condition) { then } [else { else }]
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_if(ShuntingYard* restrict sy)
 {
-    Parser parser = {
-        .tokens = {
-            .pointer = tokenizer.tokens.pointer,
-            .count = (u32)tokenizer.tokens.length,
-            .state = {
-                .arena = arena_create({}),
-            },
-        },
-        .output = {
-            .token_arena = arena_create({}),
-            .index_arena = arena_create({}),
-        },
+    RopeRef result = sy->rope.make_leaf(sy->index); // if
+    sy->advance();
+
+    // Condition (parenthesized expression — SY handles the grouping)
+    let condition = sy_parse_expression(sy);
+    if (condition.head != no_node)
+    {
+        result = sy->rope.concat(result, condition);
+    }
+
+    // Then block
+    if (sy->peek().id == TokenId::LeftBrace)
+    {
+        result = sy->rope.concat(result, sy_parse_block(sy));
+    }
+
+    // Optional else
+    if (sy->peek().id == TokenId::Keyword_Else)
+    {
+        result = sy->rope.concat(result, sy->rope.make_leaf(sy->index)); // else
+        sy->advance();
+
+        if (sy->peek().id == TokenId::Keyword_If)
+        {
+            result = sy->rope.concat(result, sy_parse_if(sy));
+        }
+        else if (sy->peek().id == TokenId::LeftBrace)
+        {
+            result = sy->rope.concat(result, sy_parse_block(sy));
+        }
+    }
+
+    return result;
+}
+
+// ============================================================
+// Statement parsing
+// ============================================================
+
+BUSTER_GLOBAL_LOCAL RopeRef sy_parse_statement(ShuntingYard* restrict sy)
+{
+    let token = sy->peek();
+    RopeRef result = no_rope;
+
+    if (token.id == TokenId::Semicolon)
+    {
+        result = sy->rope.make_leaf(sy->index); // ;
+        sy->advance();
+
+        let next = sy->peek();
+
+        switch (next.id)
+        {
+            break; case TokenId::Keyword_Function:
+            {
+                result = sy->rope.concat(result, sy_parse_function(sy));
+            }
+            break; case TokenId::Keyword_If:
+            {
+                result = sy->rope.concat(result, sy_parse_if(sy));
+            }
+            break; default:
+            {
+                // Expression statement: let, return, assignment, etc.
+                let expr = sy_parse_expression(sy);
+                if (expr.head != no_node)
+                {
+                    result = sy->rope.concat(result, expr);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+// ============================================================
+// Top-level parse
+// ============================================================
+
+BUSTER_GLOBAL_LOCAL PrefixResult parse(TokenizerResult tokenizer, const char8* source)
+{
+    ShuntingYard sy = {
+        .tokens = tokenizer.tokens.pointer,
+        .source = source,
+        .token_count = (u32)tokenizer.tokens.length,
+        .index = 0,
+        .rope = { .arena = arena_create({}) },
+        .operators = { .arena = arena_create({}) },
+        .operands = { .arena = arena_create({}) },
     };
 
-    parse_block(&parser, TokenId::SOF, TokenId::EOF);
+    // Skip SOF
+    if (sy.peek().id == TokenId::SOF)
+    {
+        sy.advance();
+    }
 
-    let result = parser_consume(&parser);
+    RopeRef top = no_rope;
 
+    while (!sy.at_end() && sy.peek().id != TokenId::EOF)
+    {
+        u32 before = sy.index;
+        let stmt = sy_parse_statement(&sy);
+        if (stmt.head != no_node)
+        {
+            top = sy.rope.concat(top, stmt);
+        }
+
+        // Safety: if no progress was made, skip one token to avoid infinite loop
+        if (sy.index == before)
+        {
+            sy.advance();
+        }
+    }
+
+    PrefixResult result = {};
+    if (top.head != no_node)
+    {
+        let output_arena = arena_create({});
+        result = flatten_rope(&sy.rope, top, output_arena);
+    }
     return result;
 }
+
+// ============================================================
+// Debug: print token source text for each index in prefix order
+// ============================================================
+
+BUSTER_GLOBAL_LOCAL void print_prefix(PrefixResult prefix, Token* tokens, const char8* source)
+{
+    for (u64 i = 0; i < prefix.count; i += 1)
+    {
+        u32 token_index = prefix.token_indices[i];
+
+        // Compute source byte offset by summing prior token lengths
+        // Skip SOF (index 0) since it has no source bytes
+        u64 offset = 0;
+        for (u32 t = 0; t < token_index; )
+        {
+            let id = tokens[t].id;
+            u32 length = tokens[t].length;
+            if (length == 0) { length = *(u32*)(&tokens[t + 1]); t += 3; }
+            else { t += 1; }
+
+            if (id != TokenId::SOF && id != TokenId::EOF)
+            {
+                offset += length;
+            }
+        }
+
+        u32 length = tokens[token_index].length;
+        if (length == 0) { length = *(u32*)(&tokens[token_index + 1]); }
+
+        let id = tokens[token_index].id;
+        if (id == TokenId::SOF || id == TokenId::EOF)
+        {
+            string8_print(S8("[{u8}] "), (u8)id);
+        }
+        else
+        {
+            let text = (String8){ .pointer = (char8*)(source + offset), .length = length };
+            string8_print(S8("{S8} "), text);
+        }
+    }
+
+    string8_print(S8("\n"));
+}
+
+// ============================================================
+// Experiments
+// ============================================================
 
 BUSTER_F_DECL void parser_experiments()
 {
     let arena = arena_create((ArenaCreation){});
-    String8 source = 
-#if 0
-        S8(
-            "; fn[cc(c)] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32\n"
+    String8 source = S8(
+            "; fn [cc] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32\n"
             "{\n"
             "    ; let a: s32 = 0\n"
             "    ; let b: s32 = 0\n"
@@ -915,23 +1162,15 @@ BUSTER_F_DECL void parser_experiments()
             "        ; b = a\n"
             "    }\n"
             "    ; return a + b\n"
-            "    ; return a;\n"
             "}\n"
             );
-#else
-        S8(
-            "; fn[cc(c)] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32\n"
-            "{\n"
-            "    ; return 0\n"
-            "}\n"
-            );
-        // postfix attribute
-        // fn
-        //
-#endif
-    // [ .. ] fn  [ .. ] main 
+
     let tokenizer = tokenize(arena, source.pointer, source.length);
-    parse(tokenizer);
+    let result = parse(tokenizer, source.pointer);
+
+    string8_print(S8("=== Input ===\n{S8}\n"), source);
+    string8_print(S8("=== Prefix Output (token reordering) ===\n"));
+    print_prefix(result, tokenizer.tokens.pointer, source.pointer);
 }
 
 #if BUSTER_INCLUDE_TESTS
