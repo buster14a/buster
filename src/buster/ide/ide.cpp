@@ -44,6 +44,7 @@
 #include <buster/compiler/ir/ir.cpp>
 #include <buster/simd.cpp>
 #include <buster/integer.cpp>
+#include <buster/compiler/frontend/buster/analysis.cpp>
 #endif
 
 STRUCT(IdePanel)

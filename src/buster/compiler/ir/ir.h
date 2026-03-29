@@ -11,7 +11,12 @@ ENUM_T(IrTypeId, u8,
     I32,
     I64,
     F32,
-    F64);
+    F64,
+    V32,
+    V64,
+    V128,
+    V256,
+    V512);
 
 STRUCT(IrType)
 {

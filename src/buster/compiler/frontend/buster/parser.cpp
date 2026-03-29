@@ -369,24 +369,40 @@ STRUCT(RopeArena)
 // Prefix output: flat array of token indices in preorder
 // ============================================================
 
-BUSTER_GLOBAL_LOCAL ParserResult flatten_rope(const char8* restrict source, TokenizerResult tokenizer, RopeArena* rope_arena, RopeRef ref, Arena* output, u64 error_count)
+BUSTER_GLOBAL_LOCAL ParserResult flatten_top_level_declarations(
+    const char8* restrict source,
+    TokenizerResult tokenizer,
+    RopeArena* rope_arena,
+    Slice<RopeRef> top_level_declarations,
+    Arena* output,
+    u64 error_count)
 {
-    u32* start = (u32*)arena_current_pointer(output, alignof(u32));
     u32 count = 0;
-    u32 current = ref.head;
+    let declarations = arena_allocate(output, TopLevelDeclaration, top_level_declarations.length);
+    u32* start = (u32*)arena_current_pointer(output, alignof(u32));
 
-    while (current != no_node)
+    for (u32 i = 0; i < top_level_declarations.length; i += 1)
     {
-        let node = rope_arena->at(current);
-        *arena_allocate(output, u32, 1) = node->token_index;
-        count += 1;
-        current = node->next;
+        declarations[i].parser_token_start = count;
+
+        u32 current = top_level_declarations.pointer[i].head;
+        while (current != no_node)
+        {
+            let node = rope_arena->at(current);
+            *arena_allocate(output, u32, 1) = node->token_index;
+            count += 1;
+            current = node->next;
+        }
+
+        declarations[i].parser_token_end = count;
     }
 
     ParserResult result = {
         .parser_token_indices = start,
+        .top_level_declarations = declarations,
         .lexer_tokens = tokenizer.tokens.pointer,
         .parser_token_count = count,
+        .top_level_declaration_count = (u32)top_level_declarations.length,
         .lexer_token_count = (u32)tokenizer.tokens.length,
         .error_count = error_count,
         .source = source,
@@ -1230,6 +1246,8 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_statement(ShuntingYard* restrict sy)
 
 BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult tokenizer)
 {
+    let top_level_declaration_arena = arena_create({});
+
     ShuntingYard sy = {
         .tokens = tokenizer.tokens.pointer,
         .token_count = (u32)tokenizer.tokens.length,
@@ -1246,15 +1264,13 @@ BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult t
         sy.advance();
     }
 
-    RopeRef top = no_rope;
-
     while (!sy.at_end() && sy.peek().id != TokenId::EOF)
     {
         u32 before = sy.index;
         let stmt = sy_parse_statement(&sy);
         if (stmt.head != no_node)
         {
-            top = sy.rope.concat(top, stmt);
+            *arena_allocate(top_level_declaration_arena, RopeRef, 1) = stmt;
         }
 
         // Safety: if no progress was made, skip one token to avoid infinite loop
@@ -1269,10 +1285,15 @@ BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult t
     result.lexer_token_count = (u32)tokenizer.tokens.length;
     result.error_count = sy.error_count;
     result.source = source;
-    if (top.head != no_node)
+    let top_level_declaration_count = (u32)(arena_buffer_size(top_level_declaration_arena) / sizeof(RopeRef));
+    result.top_level_declaration_count = top_level_declaration_count;
+    if (top_level_declaration_count)
     {
         let output_arena = arena_create({});
-        result = flatten_rope(source, tokenizer, &sy.rope, top, output_arena, sy.error_count);
+        result = flatten_top_level_declarations(source, tokenizer, &sy.rope, {
+                .pointer = (RopeRef*)arena_buffer_start(top_level_declaration_arena),
+                .length = top_level_declaration_count,
+                }, output_arena, sy.error_count);
     }
 
     return result;
@@ -1417,6 +1438,33 @@ BUSTER_GLOBAL_LOCAL String8 parser_prefix_text(Arena* arena, ParserResult parser
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 parser_top_level_declaration_prefix_text(Arena* arena, ParserResult parser_result, u32 declaration_index)
+{
+    let declaration = parser_result.top_level_declarations[declaration_index];
+    let parser_token_count = declaration.parser_token_end - declaration.parser_token_start;
+    let parts = arena_allocate(arena, String8, parser_token_count * 2);
+    u64 part_count = 0;
+
+    for (u32 i = declaration.parser_token_start; i < declaration.parser_token_end; i += 1)
+    {
+        let text = parser_token_text(parser_result.source, parser_result.lexer_tokens, parser_result.parser_token_indices[i]);
+        if (text.length)
+        {
+            parts[part_count++] = text;
+            if (i + 1 < declaration.parser_token_end)
+            {
+                parts[part_count++] = S8(" ");
+            }
+        }
+    }
+
+    let result = string8_join_arena(arena, {
+            .pointer = parts,
+            .length = part_count,
+            }, true);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult parser_statement_semicolon_tests(UnitTestArguments* arguments)
 {
     STRUCT(ParserStatementSemicolonTestCase)
@@ -1472,10 +1520,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult parser_statement_semicolon_tests(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult parser_top_level_declaration_tests(UnitTestArguments* arguments)
+{
+    STRUCT(ParserTopLevelDeclarationTestCase)
+    {
+        String8 source;
+        String8 expected_prefixes[2];
+        u32 expected_parser_token_starts[2];
+        u32 expected_parser_token_ends[2];
+        u32 expected_top_level_declaration_count;
+        u32 reserved;
+    };
+
+    BUSTER_GLOBAL_LOCAL ParserTopLevelDeclarationTestCase test_cases[] = {
+        {
+            .source = S8("a = 1; b = 2;"),
+            .expected_prefixes = {
+                S8("; = a 1"),
+                S8("; = b 2"),
+            },
+            .expected_parser_token_starts = { 0, 4 },
+            .expected_parser_token_ends = { 4, 8 },
+            .expected_top_level_declaration_count = 2,
+        },
+    };
+
+    UnitTestResult result = {};
+    let arena = arguments->arena;
+
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(test_cases); i += 1)
+    {
+        let reset_position = arena->position;
+        let test_case = test_cases[i];
+        let tokenizer = tokenize(arena, test_case.source.pointer, test_case.source.length);
+        let parser_result = parse(test_case.source.pointer, tokenizer);
+
+        bool has_expected_declaration_count = parser_result.top_level_declaration_count == test_case.expected_top_level_declaration_count;
+        if (!has_expected_declaration_count)
+        {
+            buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected top-level declaration count {u32}, got {u32}"), test_case.expected_top_level_declaration_count, parser_result.top_level_declaration_count);
+        }
+        result.succeeded_test_count += has_expected_declaration_count;
+        result.test_count += 1;
+
+        for (u32 declaration_index = 0; declaration_index < parser_result.top_level_declaration_count; declaration_index += 1)
+        {
+            let prefix_text = parser_top_level_declaration_prefix_text(arena, parser_result, declaration_index);
+
+            bool has_expected_prefix = string8_equal(prefix_text, test_case.expected_prefixes[declaration_index]);
+            if (!has_expected_prefix)
+            {
+                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected declaration prefix {S8}, got {S8}"), test_case.expected_prefixes[declaration_index], prefix_text);
+            }
+            result.succeeded_test_count += has_expected_prefix;
+            result.test_count += 1;
+
+            let declaration = parser_result.top_level_declarations[declaration_index];
+            bool has_expected_start = declaration.parser_token_start == test_case.expected_parser_token_starts[declaration_index];
+            if (!has_expected_start)
+            {
+                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected parser token start {u32}, got {u32}"), test_case.expected_parser_token_starts[declaration_index], declaration.parser_token_start);
+            }
+            result.succeeded_test_count += has_expected_start;
+            result.test_count += 1;
+
+            bool has_expected_end = declaration.parser_token_end == test_case.expected_parser_token_ends[declaration_index];
+            if (!has_expected_end)
+            {
+                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected parser token end {u32}, got {u32}"), test_case.expected_parser_token_ends[declaration_index], declaration.parser_token_end);
+            }
+            result.succeeded_test_count += has_expected_end;
+            result.test_count += 1;
+        }
+
+        arena->position = reset_position;
+    }
+
+    return result;
+}
+
 BUSTER_F_IMPL BatchTestResult parser_tests(UnitTestArguments* arguments)
 {
     BatchTestResult result = {};
     consume_unit_tests(&result, parser_statement_semicolon_tests(arguments));
+    consume_unit_tests(&result, parser_top_level_declaration_tests(arguments));
     return result;
 }
 #endif

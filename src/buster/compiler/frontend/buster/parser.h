@@ -56,14 +56,23 @@ STRUCT(Token)
     u8 length;
 };
 
+STRUCT(TopLevelDeclaration)
+{
+    u32 parser_token_start;
+    u32 parser_token_end;
+};
+
 STRUCT(ParserResult)
 {
     u32* restrict parser_token_indices;
+    TopLevelDeclaration* restrict top_level_declarations;
     Token* restrict lexer_tokens;
-    u32 parser_token_count;
-    u32 lexer_token_count;
-    u64 error_count;
     const char8* restrict source;
+    u64 error_count;
+    u32 parser_token_count;
+    u32 top_level_declaration_count;
+    u32 lexer_token_count;
+    u32 reserved;
 };
 
 STRUCT(TokenizerResult)

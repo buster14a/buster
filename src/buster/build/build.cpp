@@ -88,7 +88,8 @@ ENUM_T(ModuleId, u64,
     MODULE_SIMD,
     MODULE_BUSTER_PARSER,
     MODULE_OPTIMIZING_IR,
-    MODULE_BUSTER_ANALYSIS);
+    MODULE_BUSTER_ANALYSIS,
+    MODULE_XXHASH);
 
 ENUM(DirectoryId,
     DIRECTORY_SRC_BUSTER,
@@ -101,7 +102,8 @@ ENUM(DirectoryId,
     DIRECTORY_LINK,
     DIRECTORY_BUILD,
     DIRECTORY_IDE,
-    DIRECTORY_FRONTEND_BUSTER);
+    DIRECTORY_FRONTEND_BUSTER,
+    DIRECTORY_SRC_XXHASH);
 
 STRUCT(Module)
 {
@@ -218,6 +220,10 @@ BUSTER_GLOBAL_LOCAL Module modules[] = {
     [(u64)ModuleId::MODULE_BUSTER_ANALYSIS] = {
         .directory = DirectoryId::DIRECTORY_FRONTEND_BUSTER,
     },
+    [(u64)ModuleId::MODULE_XXHASH] = {
+        .directory = DirectoryId::DIRECTORY_SRC_XXHASH,
+        .no_source = true,
+    },
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == (u64)ModuleId::Count);
@@ -329,6 +335,7 @@ BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) ide_modules[] = {
     { .id = ModuleId::MODULE_BUSTER_PARSER },
     { .id = ModuleId::MODULE_IR },
     { .id = ModuleId::MODULE_BUSTER_ANALYSIS },
+    { .id = ModuleId::MODULE_XXHASH },
 };
 
 BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) scrape_xed_modules[] = {
@@ -665,6 +672,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)DirectoryId::DIRECTORY_BUILD] = SOs("src/buster/build"),
         [(u64)DirectoryId::DIRECTORY_IDE] = SOs("src/buster/ide"),
         [(u64)DirectoryId::DIRECTORY_FRONTEND_BUSTER] = SOs("src/buster/compiler/frontend/buster"),
+        [(u64)DirectoryId::DIRECTORY_SRC_XXHASH] = SOs("src/xxhash"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == (u64)DirectoryId::Count);
@@ -711,6 +719,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)ModuleId::MODULE_BUSTER_PARSER] = SOs("parser"),
         [(u64)ModuleId::MODULE_OPTIMIZING_IR] = SOs("optimizing_ir"),
         [(u64)ModuleId::MODULE_BUSTER_ANALYSIS] = SOs("analysis"),
+        [(u64)ModuleId::MODULE_XXHASH] = SOs("xxhash"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(module_names) == (u64)ModuleId::Count);
