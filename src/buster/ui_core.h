@@ -3,7 +3,6 @@
 #include <buster/base.h>
 #include <buster/arena.h>
 #include <buster/rendering.h>
-#include <buster/assertion.h>
 
 
 // Windowing event types

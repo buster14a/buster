@@ -5,7 +5,7 @@
 #include <buster/arena.h>
 #include <buster/system_headers.h>
 #include <buster/float.h>
-#include <buster/assertion.h>
+#include <buster/string.h>
 
 #if defined(__linux__)
 #include <fontconfig/fontconfig.h>
@@ -105,7 +105,7 @@ BUSTER_F_IMPL StringOs font_file_get_path(Arena* arena, FontIndex index)
 #define STBTT_memcpy       memcpy
 #define STBTT_memset       memset
 
-#include <buster/stb_truetype.h>
+#include <stb/stb_truetype.h>
 
 #if defined(__clang__)
 #pragma clang diagnostic pop

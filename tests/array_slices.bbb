@@ -1,4 +1,4 @@
-fn [cc] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+fn [cc(c)] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32
 {
     let array_a: [_]s32 = [ 2 ];
     let array_b: [1]s32 = [ 2 ];

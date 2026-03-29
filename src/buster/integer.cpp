@@ -8,3 +8,15 @@ BUSTER_F_IMPL u64 align_forward(u64 n, u64 a)
     return result;
 }
 
+BUSTER_F_IMPL u64 next_power_of_two(u64 n)
+{
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    n |= n >> 32;
+    n++;
+    return n;
+}

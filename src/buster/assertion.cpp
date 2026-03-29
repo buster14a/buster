@@ -1,5 +1,4 @@
 #pragma once
-#include <buster/assertion.h>
 #include <buster/string.h>
 #include <buster/os.h>
 #include <buster/arena.h>

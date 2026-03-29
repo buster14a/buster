@@ -3,7 +3,6 @@
 #include <buster/integer.h>
 #include <buster/arena.h>
 #include <buster/string.h>
-#include <buster/assertion.h>
 #include <buster/file.h>
 
 
@@ -106,6 +105,8 @@ BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_
             .length = 1,
         };
 
+        u32 line_count = 0;
+
         while (true)
         {
             if (it >= top)
@@ -116,151 +117,179 @@ BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_
             let start = it;
             let ch = *start;
 
-            TokenId id;
-
-            switch (ch)
+            if (ch == '\n')
             {
-                break;
-                SWITCH_ALPHA_UPPER:
-                SWITCH_ALPHA_LOWER:
-                case '_':
+                let line_offset = (u32)(it - file_pointer);
+                let line_index = line_count++;
+
+                let token_offset = sizeof(u32) / sizeof(Token) + 1;
+                let line_offset_index = (u32)token_count;
+                let line_number_index = (u32)(line_offset_index + token_offset);
+                token_count = line_offset_index + 2 * token_offset;
+
+                u32 values[] = { line_offset, line_index };
+                u32 indices[] = { line_offset_index, line_number_index };
+                TokenId ids[] = { TokenId::LineOffset, TokenId::LineNumber };
+
+                for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(values); i += 1)
                 {
-                    while (true)
-                    {
-                        let it_start = it;
-                        switch (*it_start)
-                        {
-                            break;
-                            SWITCH_ALPHA_UPPER:
-                            SWITCH_ALPHA_LOWER:
-                            SWITCH_DIGIT:
-                            case '_':
-                            {
-                                it += 1;
-                            }
-                            break; default: break;
-                        }
+                    let token = &tokens[indices[i]];
+                    *token = {
+                        .id = ids[i],
+                        .length = 0,
+                    };
 
-                        if (it - it_start == 0)
-                        {
-                            break;
-                        }
-                    }
-
-                    let identifier = string8_from_pointer_length(start, (u64)(it - start));
-
-                    u64 i;
-                    for (i = 0; i < keyword_count; i += 1)
-                    {
-                        if (string8_equal(identifier, keyword_names[i]))
-                        {
-                            break;
-                        }
-                    }
-
-                    if (i == keyword_count)
-                    {
-                        id = TokenId::Identifier;
-                    }
-                    else
-                    {
-                        id = (TokenId)(i + 1 + (u64)TokenId::Keyword_First);
-                    }
+                    *(u32*)(token + 1) = values[i];
                 }
-                break; case ' ':
-                {
-                    id = TokenId::Space;
-
-                    while (*it == ' ')
-                    {
-                        it += 1;
-                    }
-                }
-                break; SWITCH_DIGIT:
-                {
-                    id = TokenId::Number;
-
-                    while (true)
-                    {
-                        let it_start = it;
-
-                        switch (*it_start)
-                        {
-                            break; SWITCH_DIGIT: it += 1;
-                            break; default: break;
-                        }
-
-                        if (it - it_start == 0)
-                        {
-                            break;
-                        }
-                    }
-                }
-                break; case '\n': { id = TokenId::LineFeed; it += 1; }
-                break; case '[': { id = TokenId::LeftBracket; it += 1; }
-                break; case ']': { id = TokenId::RightBracket; it += 1; }
-                break; case '{': { id = TokenId::LeftBrace; it += 1; }
-                break; case '}': { id = TokenId::RightBrace; it += 1; }
-                break; case '(': { id = TokenId::LeftParenthesis; it += 1; }
-                break; case ')': { id = TokenId::RightParenthesis; it += 1; }
-                break; case '<': { id = TokenId::Less; it += 1; }
-                break; case '>': { id = TokenId::Greater; it += 1; }
-                break; case '+':
-                {
-                    if (it + 1 < top && it[1] == '=')
-                    {
-                        id = TokenId::PlusEqual;
-                        it += 2;
-                    }
-                    else
-                    {
-                        id = TokenId::Plus;
-                        it += 1;
-                    }
-                }
-                break; case '-': { id = TokenId::Minus; it += 1; }
-                break; case '*': { id = TokenId::Asterisk; it += 1; }
-                break; case '/': { id = TokenId::Slash; it += 1; }
-                break; case '=': { id = TokenId::Equal; it += 1; }
-                break; case ':': { id = TokenId::Colon; it += 1; }
-                break; case ';': { id = TokenId::Semicolon; it += 1; }
-                break; case ',': { id = TokenId::Comma; it += 1; }
-                break; case '&': { id = TokenId::Ampersand; it += 1; }
-                break; case '.':
-                {
-                    if (it + 2 < top && it[1] == '.' && it[2] == '.')
-                    {
-                        id = TokenId::TripleDot;
-                    }
-                    else if (it + 1 < top && it[1] == '.')
-                    {
-                        id = TokenId::DoubleDot;
-                    }
-                    else
-                    {
-                        id = TokenId::Dot;
-                    }
-
-                    it += (u64)id - (u64)TokenId::Dot + 1;
-                }
-                break; default: BUSTER_UNREACHABLE();
             }
 
-            let end = it;
-            let length = (u32)(end - start);
+            {
+                TokenId id;
 
-            bool big_length = length > UINT8_MAX;
+                switch (ch)
+                {
+                    break;
+SWITCH_ALPHA_UPPER:
+SWITCH_ALPHA_LOWER:
+                    case '_':
+                    {
+                        while (true)
+                        {
+                            let it_start = it;
+                            switch (*it_start)
+                            {
+                                break;
+SWITCH_ALPHA_UPPER:
+SWITCH_ALPHA_LOWER:
+SWITCH_DIGIT:
+                                case '_':
+                                {
+                                    it += 1;
+                                }
+                                break; default: break;
+                            }
 
-            let token_index = token_count;
-            tokens[token_index] = { 
-                .id = id,
-                .length = BUSTER_SELECT(big_length, (u8)0, (u8)length),
-            };
+                            if (it - it_start == 0)
+                            {
+                                break;
+                            }
+                        }
 
-            static_assert(sizeof(Token) * 2 == sizeof(u32));
+                        let identifier = string8_from_pointer_length(start, (u64)(it - start));
 
-            *(u32*)(&tokens[token_index + 1]) = length;
-            token_count = token_index + 1 + ((u32)big_length << 1);
+                        u64 i;
+                        for (i = 0; i < keyword_count; i += 1)
+                        {
+                            if (string8_equal(identifier, keyword_names[i]))
+                            {
+                                break;
+                            }
+                        }
+
+                        if (i == keyword_count)
+                        {
+                            id = TokenId::Identifier;
+                        }
+                        else
+                        {
+                            id = (TokenId)(i + 1 + (u64)TokenId::Keyword_First);
+                        }
+                    }
+                    break; case ' ':
+                    {
+                        id = TokenId::Space;
+
+                        while (*it == ' ')
+                        {
+                            it += 1;
+                        }
+                    }
+                    break; SWITCH_DIGIT:
+                    {
+                        id = TokenId::Number;
+
+                        while (true)
+                        {
+                            let it_start = it;
+
+                            switch (*it_start)
+                            {
+                                break; SWITCH_DIGIT: it += 1;
+                                break; default: break;
+                            }
+
+                            if (it - it_start == 0)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    break; case '\n': { id = TokenId::LineFeed; it += 1; }
+                    break; case '[': { id = TokenId::LeftBracket; it += 1; }
+                    break; case ']': { id = TokenId::RightBracket; it += 1; }
+                    break; case '{': { id = TokenId::LeftBrace; it += 1; }
+                    break; case '}': { id = TokenId::RightBrace; it += 1; }
+                    break; case '(': { id = TokenId::LeftParenthesis; it += 1; }
+                    break; case ')': { id = TokenId::RightParenthesis; it += 1; }
+                    break; case '<': { id = TokenId::Less; it += 1; }
+                    break; case '>': { id = TokenId::Greater; it += 1; }
+                    break; case '+':
+                    {
+                        if (it + 1 < top && it[1] == '=')
+                        {
+                            id = TokenId::PlusEqual;
+                            it += 2;
+                        }
+                        else
+                        {
+                            id = TokenId::Plus;
+                            it += 1;
+                        }
+                    }
+                    break; case '-': { id = TokenId::Minus; it += 1; }
+                    break; case '*': { id = TokenId::Asterisk; it += 1; }
+                    break; case '/': { id = TokenId::Slash; it += 1; }
+                    break; case '=': { id = TokenId::Equal; it += 1; }
+                    break; case ':': { id = TokenId::Colon; it += 1; }
+                    break; case ';': { id = TokenId::Semicolon; it += 1; }
+                    break; case ',': { id = TokenId::Comma; it += 1; }
+                    break; case '&': { id = TokenId::Ampersand; it += 1; }
+                    break; case '.':
+                    {
+                        if (it + 2 < top && it[1] == '.' && it[2] == '.')
+                        {
+                            id = TokenId::TripleDot;
+                        }
+                        else if (it + 1 < top && it[1] == '.')
+                        {
+                            id = TokenId::DoubleDot;
+                        }
+                        else
+                        {
+                            id = TokenId::Dot;
+                        }
+
+                        it += (u64)id - (u64)TokenId::Dot + 1;
+                    }
+                    break; default: BUSTER_UNREACHABLE();
+                }
+
+                let end = it;
+                let length = (u32)(end - start);
+
+                bool big_length = length > UINT8_MAX;
+
+                let token_index = token_count;
+                tokens[token_index] = { 
+                    .id = id,
+                    .length = BUSTER_SELECT(big_length, (u8)0, (u8)length),
+                };
+
+                static_assert(sizeof(Token) * 2 == sizeof(u32));
+
+                *(u32*)(&tokens[token_index + 1]) = length;
+                token_count = token_index + 1 + ((u32)big_length << 1);
+            }
         }
 
         tokens[token_count++] = {
@@ -296,7 +325,7 @@ constexpr u32 no_node = UINT32_MAX;
 
 STRUCT(RopeNode)
 {
-    u32 token_index;
+    LexerTokenIndex lexer_token_index;
     u32 next; // index of next RopeNode, no_node = end
 };
 
@@ -319,14 +348,14 @@ STRUCT(RopeArena)
 
     BUSTER_INLINE RopeNode* at(u32 index)
     {
-        return arena_get_pointer(arena, RopeNode, arena_minimum_position + index * sizeof(RopeNode));
+        return arena_get_pointer_at_position(arena, RopeNode, arena_minimum_position + index * sizeof(RopeNode));
     }
 
-    RopeRef make_leaf(u32 token_index)
+    RopeRef make_leaf(LexerTokenIndex lexer_token_index)
     {
         u32 index = count();
         let node = arena_allocate(arena, RopeNode, 1);
-        *node = { .token_index = token_index, .next = no_node };
+        *node = { .lexer_token_index = lexer_token_index, .next = no_node };
         RopeRef result = { .head = index, .tail = index };
         return result;
     }
@@ -346,9 +375,9 @@ STRUCT(RopeArena)
     }
 
     // Prefix-combine binary: op -> left -> right
-    RopeRef combine_binary(u32 op_token_index, RopeRef left, RopeRef right)
+    RopeRef combine_binary(LexerTokenIndex operator_lexer_token_index, RopeRef left, RopeRef right)
     {
-        let op = make_leaf(op_token_index);
+        let op = make_leaf(operator_lexer_token_index);
         at(op.tail)->next = left.head;
         at(left.tail)->next = right.head;
         RopeRef result = { .head = op.head, .tail = right.tail };
@@ -356,9 +385,9 @@ STRUCT(RopeArena)
     }
 
     // Prefix-combine unary: op -> child
-    RopeRef combine_unary(u32 op_token_index, RopeRef child)
+    RopeRef combine_unary(LexerTokenIndex operator_lexer_token_index, RopeRef child)
     {
-        let op = make_leaf(op_token_index);
+        let op = make_leaf(operator_lexer_token_index);
         at(op.tail)->next = child.head;
         RopeRef result = { .head = op.head, .tail = child.tail };
         return result;
@@ -366,7 +395,7 @@ STRUCT(RopeArena)
 };
 
 // ============================================================
-// Prefix output: flat array of token indices in preorder
+// Prefix output: flat array of lexer token indices in preorder
 // ============================================================
 
 BUSTER_GLOBAL_LOCAL ParserResult flatten_top_level_declarations(
@@ -377,31 +406,33 @@ BUSTER_GLOBAL_LOCAL ParserResult flatten_top_level_declarations(
     Arena* output,
     u64 error_count)
 {
-    u32 count = 0;
-    let declarations = arena_allocate(output, TopLevelDeclaration, top_level_declarations.length);
-    u32* start = (u32*)arena_current_pointer(output, alignof(u32));
+    ParserTokenIndex count = {};
+    let declarations = arena_allocate(output, TopLevelDeclarationRange, top_level_declarations.length);
+    let parser_to_lexer_indices = arena_current_pointer(output, LexerTokenIndex);
 
     for (u32 i = 0; i < top_level_declarations.length; i += 1)
     {
-        declarations[i].parser_token_start = count;
+        declarations[i].start = count;
 
         u32 current = top_level_declarations.pointer[i].head;
         while (current != no_node)
         {
             let node = rope_arena->at(current);
-            *arena_allocate(output, u32, 1) = node->token_index;
-            count += 1;
+            *arena_allocate(output, LexerTokenIndex, 1) = node->lexer_token_index;
+            count.v += 1;
             current = node->next;
         }
 
-        declarations[i].parser_token_end = count;
+        declarations[i].end = count;
+        // TODO?
+        declarations[i].first_body_index = count;
     }
 
     ParserResult result = {
-        .parser_token_indices = start,
+        .parser_to_lexer_indices = parser_to_lexer_indices,
         .top_level_declarations = declarations,
         .lexer_tokens = tokenizer.tokens.pointer,
-        .parser_token_count = count,
+        .parser_token_count = count.v,
         .top_level_declaration_count = (u32)top_level_declarations.length,
         .lexer_token_count = (u32)tokenizer.tokens.length,
         .error_count = error_count,
@@ -452,7 +483,7 @@ BUSTER_GLOBAL_LOCAL bool token_is_right_associative(TokenId id)
 
 STRUCT(OperatorEntry)
 {
-    u32 token_index;
+    LexerTokenIndex lexer_token_index;
     u8 precedence;
     u8 arity; // 1 = unary prefix, 2 = binary infix
     bool right_associative;
@@ -475,13 +506,13 @@ STRUCT(OperatorStack)
 
     BUSTER_INLINE OperatorEntry top()
     {
-        return *arena_get_pointer(arena, OperatorEntry, arena->position - sizeof(OperatorEntry));
+        return *arena_get_pointer_at_position(arena, OperatorEntry, arena->position - sizeof(OperatorEntry));
     }
 
     BUSTER_INLINE OperatorEntry pop()
     {
         let position = arena->position - sizeof(OperatorEntry);
-        let result = *arena_get_pointer(arena, OperatorEntry, position);
+        let result = *arena_get_pointer_at_position(arena, OperatorEntry, position);
         arena->position = position;
         return result;
     }
@@ -504,7 +535,7 @@ STRUCT(OperandStack)
     BUSTER_INLINE RopeRef pop()
     {
         let position = arena->position - sizeof(RopeRef);
-        let result = *arena_get_pointer(arena, RopeRef, position);
+        let result = *arena_get_pointer_at_position(arena, RopeRef, position);
         arena->position = position;
         return result;
     }
@@ -518,9 +549,8 @@ STRUCT(ShuntingYard)
 {
     // Input
     Token* restrict tokens;
-    // const char8* restrict source;
     u32 token_count;
-    u32 index;
+    LexerTokenIndex index;
 
     // Rope output
     RopeArena rope;
@@ -532,16 +562,16 @@ STRUCT(ShuntingYard)
 
     BUSTER_INLINE bool at_end()
     {
-        return index >= token_count;
+        return index.v >= token_count;
     }
 
     // Skip whitespace, advancing index
     void skip_whitespace()
     {
-        while (index < token_count)
+        while (index.v < token_count)
         {
-            let id = tokens[index].id;
-            if (id == TokenId::Space || id == TokenId::LineFeed || id == TokenId::CarriageReturn)
+            let id = tokens[index.v].id;
+            if (id == TokenId::Space || id == TokenId::LineNumber || id == TokenId::LineOffset || id == TokenId::LineFeed || id == TokenId::CarriageReturn)
             {
                 advance();
             }
@@ -557,9 +587,9 @@ STRUCT(ShuntingYard)
     {
         skip_whitespace();
         Token result = {};
-        if (index < token_count)
+        if (index.v < token_count)
         {
-            result = tokens[index];
+            result = tokens[index.v];
         }
         return result;
     }
@@ -567,16 +597,16 @@ STRUCT(ShuntingYard)
     // Advance past current token (handles big-length encoding)
     void advance()
     {
-        if (index < token_count)
+        if (index.v < token_count)
         {
-            u32 length = tokens[index].length;
+            u32 length = tokens[index.v].length;
             if (length == 0)
             {
-                index += 3;
+                index.v += 3;
             }
             else
             {
-                index += 1;
+                index.v += 1;
             }
         }
     }
@@ -590,12 +620,12 @@ STRUCT(ShuntingYard)
         {
             let right = operands.pop();
             let left = operands.pop();
-            operands.push(rope.combine_binary(op.token_index, left, right));
+            operands.push(rope.combine_binary(op.lexer_token_index, left, right));
         }
         else if (op.arity == 1)
         {
             let child = operands.pop();
-            operands.push(rope.combine_unary(op.token_index, child));
+            operands.push(rope.combine_unary(op.lexer_token_index, child));
         }
     }
 
@@ -693,7 +723,7 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_bracket_group(ShuntingYard* restrict sy)
             break;
         }
 
-        u32 before = sy->index;
+        LexerTokenIndex before = sy->index;
         if (token.id == TokenId::LeftBracket)
         {
             result = sy->rope.concat(result, sy_parse_bracket_group(sy));
@@ -704,7 +734,7 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_bracket_group(ShuntingYard* restrict sy)
             sy->advance();
         }
 
-        if (sy->index == before)
+        if (sy->index.v == before.v)
         {
             sy->advance();
         }
@@ -795,7 +825,7 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
     while (running && !sy->at_end())
     {
         let token = sy->peek();
-        let token_index = sy->index;
+        let lexer_token_index = sy->index;
 
         if (expect_operand)
         {
@@ -816,7 +846,7 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
                 {
                     // Grouping: push sentinel with ( token index
                     sy->operators.push({
-                        .token_index = token_index,
+                        .lexer_token_index = lexer_token_index,
                         .precedence = 0,
                         .arity = 0,
                         .right_associative = false,
@@ -828,7 +858,7 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
                 {
                     // Unary prefix: address-of
                     sy->operators.push({
-                        .token_index = token_index,
+                        .lexer_token_index = lexer_token_index,
                         .precedence = 6,
                         .arity = 1,
                         .right_associative = true,
@@ -840,7 +870,7 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
                 {
                     // Unary prefix: negation
                     sy->operators.push({
-                        .token_index = token_index,
+                        .lexer_token_index = lexer_token_index,
                         .precedence = 6,
                         .arity = 1,
                         .right_associative = true,
@@ -852,7 +882,7 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
                 {
                     // Prefix unary keyword (very low precedence)
                     sy->operators.push({
-                        .token_index = token_index,
+                        .lexer_token_index = lexer_token_index,
                         .precedence = 0,
                         .arity = 1,
                         .right_associative = true,
@@ -864,7 +894,7 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
                 {
                     // Prefix unary keyword (very low precedence)
                     sy->operators.push({
-                        .token_index = token_index,
+                        .lexer_token_index = lexer_token_index,
                         .precedence = 0,
                         .arity = 1,
                         .right_associative = true,
@@ -890,7 +920,7 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
                 let right_assoc = token_is_right_associative(token.id);
                 sy->drain_operators(prec, right_assoc);
                 sy->operators.push({
-                    .token_index = token_index,
+                    .lexer_token_index = lexer_token_index,
                     .precedence = prec,
                     .arity = 2,
                     .right_associative = right_assoc,
@@ -907,8 +937,8 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_expression(ShuntingYard* restrict sy)
                 {
                     let sentinel = sy->operators.pop();
                     let inner = sy->operands.pop();
-                    let open_leaf = sy->rope.make_leaf(sentinel.token_index);
-                    let close_leaf = sy->rope.make_leaf(token_index);
+                    let open_leaf = sy->rope.make_leaf(sentinel.lexer_token_index);
+                    let close_leaf = sy->rope.make_leaf(lexer_token_index);
                     let wrapped = sy->rope.concat(open_leaf, sy->rope.concat(inner, close_leaf));
                     sy->operands.push(wrapped);
                     sy->advance();
@@ -967,13 +997,13 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_attribute_list(ShuntingYard* restrict sy)
             continue;
         }
 
-        u32 before = sy->index;
+        LexerTokenIndex before = sy->index;
         let expr = sy_parse_expression(sy);
         if (expr.head != no_node)
         {
             result = sy->rope.concat(result, expr);
         }
-        if (sy->index == before) { sy->advance(); }
+        if (sy->index.v == before.v) { sy->advance(); }
     }
 
     return result;
@@ -1005,13 +1035,13 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_argument_list(ShuntingYard* restrict sy)
         }
 
         // Each param is an expression: name : type (: is infix prec 2)
-        u32 before = sy->index;
+        LexerTokenIndex before = sy->index;
         let param = sy_parse_expression(sy);
         if (param.head != no_node)
         {
             result = sy->rope.concat(result, param);
         }
-        if (sy->index == before) { sy->advance(); }
+        if (sy->index.v == before.v) { sy->advance(); }
     }
 
     return result;
@@ -1034,14 +1064,14 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_block(ShuntingYard* restrict sy)
             break;
         }
 
-        u32 before = sy->index;
+        LexerTokenIndex before = sy->index;
         let stmt = sy_parse_statement(sy);
         if (stmt.head != no_node)
         {
             result = sy->rope.concat(result, stmt);
         }
 
-        if (sy->index == before)
+        if (sy->index.v == before.v)
         {
             sy->advance();
         }
@@ -1240,102 +1270,242 @@ BUSTER_GLOBAL_LOCAL RopeRef sy_parse_statement(ShuntingYard* restrict sy)
     return result;
 }
 
-// ============================================================
-// Top-level parse
-// ============================================================
+ENUM_T(TopLevelDeclarationId, u8,
+        None,
+        Function);
+
+ENUM(FunctionState, u8,
+    FunctionAttributeListParsed,
+    NameParsed,
+    SymbolAttributeListParsed,
+    ArgumentListParsed,
+    ReturnTypeParsed);
+STRUCT(ParticularParserState)
+{
+    struct
+    {
+        FLAG_ARRAY_U64(flags, FunctionState);
+    } function;
+};
+
+BUSTER_GLOBAL_LOCAL void reset(ParticularParserState& state)
+{
+}
+
+STRUCT(Parser)
+{
+    ParticularParserState state;
+    TopLevelDeclarationId tld_id;
+    Slice<Token> tokens;
+    u32 token_index;
+
+    BUSTER_INLINE Token& get()
+    {
+        Token& result = tokens[token_index];
+        return result;
+    }
+};
 
 BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult tokenizer)
 {
-    let top_level_declaration_arena = arena_create({});
-
-    ShuntingYard sy = {
-        .tokens = tokenizer.tokens.pointer,
-        .token_count = (u32)tokenizer.tokens.length,
-        .index = 0,
-        .rope = { .arena = arena_create({}) },
-        .operators = { .arena = arena_create({}) },
-        .operands = { .arena = arena_create({}) },
-        .error_count = tokenizer.error_count,
-    };
-
-    // Skip SOF
-    if (sy.peek().id == TokenId::SOF)
-    {
-        sy.advance();
-    }
-
-    while (!sy.at_end() && sy.peek().id != TokenId::EOF)
-    {
-        u32 before = sy.index;
-        let stmt = sy_parse_statement(&sy);
-        if (stmt.head != no_node)
-        {
-            *arena_allocate(top_level_declaration_arena, RopeRef, 1) = stmt;
-        }
-
-        // Safety: if no progress was made, skip one token to avoid infinite loop
-        if (sy.index == before)
-        {
-            sy.advance();
-        }
-    }
-
     ParserResult result = {};
-    result.lexer_tokens = tokenizer.tokens.pointer;
-    result.lexer_token_count = (u32)tokenizer.tokens.length;
-    result.error_count = sy.error_count;
-    result.source = source;
-    let top_level_declaration_count = (u32)(arena_buffer_size(top_level_declaration_arena) / sizeof(RopeRef));
-    result.top_level_declaration_count = top_level_declaration_count;
-    if (top_level_declaration_count)
+
+    let tokens = tokenizer.tokens;
+    BUSTER_CHECK(tokens[0].id == TokenId::SOF);
+    Parser parser = {};
+    parser.token_index += 1;
+    parser.tokens = tokenizer.tokens;
+
+    while (true)
     {
-        let output_arena = arena_create({});
-        result = flatten_top_level_declarations(source, tokenizer, &sy.rope, {
-                .pointer = (RopeRef*)arena_buffer_start(top_level_declaration_arena),
-                .length = top_level_declaration_count,
-                }, output_arena, sy.error_count);
+        switch (parser.tld_id)
+        {
+            break; case TopLevelDeclarationId::None:
+            {
+                memset(&parser.state, 0, sizeof(parser.state));
+
+                auto& token = tokens[parser.token_index];
+
+                switch (token.id)
+                {
+                    break; case TokenId::Keyword_Function:
+                    {
+                        parser.tld_id = TopLevelDeclarationId::Function;
+                        parser.token_index += 1;
+                    }
+                    break; default: BUSTER_UNREACHABLE();
+                }
+            }
+            break; case TopLevelDeclarationId::Function:
+            {
+                BUSTER_TRAP();
+            }
+            break; case TopLevelDeclarationId::Count: BUSTER_UNREACHABLE();
+        }
     }
 
     return result;
 }
 
+
+// BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult tokenizer)
+// {
+//     let top_level_declaration_arena = arena_create({});
+//
+//     ShuntingYard sy = {
+//         .tokens = tokenizer.tokens.pointer,
+//         .token_count = (u32)tokenizer.tokens.length,
+//         .index = {},
+//         .rope = { .arena = arena_create({}) },
+//         .operators = { .arena = arena_create({}) },
+//         .operands = { .arena = arena_create({}) },
+//         .error_count = tokenizer.error_count,
+//     };
+//
+//     // Skip SOF
+//     if (sy.peek().id == TokenId::SOF)
+//     {
+//         sy.advance();
+//     }
+//
+//     while (!sy.at_end() && sy.peek().id != TokenId::EOF)
+//     {
+//         LexerTokenIndex before = sy.index;
+//         let stmt = sy_parse_statement(&sy);
+//         if (stmt.head != no_node)
+//         {
+//             *arena_allocate(top_level_declaration_arena, RopeRef, 1) = stmt;
+//         }
+//
+//         // Safety: if no progress was made, skip one token to avoid infinite loop
+//         if (sy.index.v == before.v)
+//         {
+//             sy.advance();
+//         }
+//     }
+//
+//     ParserResult result = {};
+//     result.lexer_tokens = tokenizer.tokens.pointer;
+//     result.lexer_token_count = (u32)tokenizer.tokens.length;
+//     result.error_count = sy.error_count;
+//     result.source = source;
+//     let top_level_declaration_count = (u32)(arena_buffer_size(top_level_declaration_arena) / sizeof(RopeRef));
+//     result.top_level_declaration_count = top_level_declaration_count;
+//     if (top_level_declaration_count)
+//     {
+//         let output_arena = arena_create({});
+//         result = flatten_top_level_declarations(source, tokenizer, &sy.rope, {
+//                 .pointer = (RopeRef*)arena_buffer_start(top_level_declaration_arena),
+//                 .length = top_level_declaration_count,
+//                 }, output_arena, sy.error_count);
+//     }
+//
+//     return result;
+// }
+
 // ============================================================
 // Debug: print token source text for each index in prefix order
 // ============================================================
+
+BUSTER_GLOBAL_LOCAL bool token_has_source_bytes(TokenId id);
+
+BUSTER_F_IMPL u32 get_token_offset(Token* restrict tokens, LexerTokenIndex lexer_token_index)
+{
+    // Compute source byte offset by summing prior token lengths
+    // Skip SOF (index 0) since it has no source bytes
+    BUSTER_CHECK(tokens[0].id == TokenId::SOF);
+    u32 offset = 0;
+    for (u32 t = 1; t < lexer_token_index.v; )
+    {
+        let token = &tokens[t];
+        u32 length = token->length;
+        if (length == 0) { length = *(u32*)(&tokens[t + 1]); t += 3; }
+        else { t += 1; }
+
+        if (token_has_source_bytes(token->id))
+        {
+            offset += length;
+        }
+    }
+
+    return offset;
+}
+
+BUSTER_GLOBAL_LOCAL u32 get_token_length(Token* restrict token)
+{
+    u32 length = token->length;
+    if (length == 0)
+    {
+        length = *(u32*)(token + 1);
+    }
+    return length;
+}
+
+BUSTER_GLOBAL_LOCAL bool token_has_source_bytes(TokenId id)
+{
+    bool result;
+    switch (id)
+    {
+        break; case TokenId::SOF:
+        case TokenId::EOF:
+        case TokenId::LineOffset:
+        case TokenId::LineNumber:
+        {
+            result = false;
+        }
+        break; default:
+        {
+            result = true;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL Token* get_token(Token* restrict tokens, LexerTokenIndex index)
+{
+    return &tokens[index.v];
+}
+
+BUSTER_F_IMPL u32 get_token_length(Token* restrict tokens, LexerTokenIndex lexer_token_index)
+{
+    return get_token_length(get_token(tokens, lexer_token_index));
+}
+
+BUSTER_GLOBAL_LOCAL String8 get_token_content_from_offset_and_length(const char8* source, u32 offset, u32 length)
+{
+    let text = (String8){ .pointer = (char8*)(source + offset), .length = length };
+    return text;
+}
+
+BUSTER_F_IMPL String8 get_token_content(const char8* source, Token* restrict tokens, LexerTokenIndex lexer_token_index)
+{
+    let offset = get_token_offset(tokens, lexer_token_index);
+    let length = get_token_length(tokens, lexer_token_index);
+    return get_token_content_from_offset_and_length(source, offset, length);
+}
+
+BUSTER_F_IMPL LineAndColumn get_token_line_and_column(const char* source, Token* restrict tokens, LexerTokenIndex lexer_token_index)
+{
+    BUSTER_TRAP();
+}
 
 BUSTER_GLOBAL_LOCAL void print_prefix(ParserResult parser_result, Token* tokens, const char8* source)
 {
     for (u64 i = 0; i < parser_result.parser_token_count; i += 1)
     {
-        u32 token_index = parser_result.parser_token_indices[i];
+        let lexer_token_index = parser_result.parser_to_lexer_indices[i];
 
-        // Compute source byte offset by summing prior token lengths
-        // Skip SOF (index 0) since it has no source bytes
-        u64 offset = 0;
-        for (u32 t = 0; t < token_index; )
-        {
-            let id = tokens[t].id;
-            u32 length = tokens[t].length;
-            if (length == 0) { length = *(u32*)(&tokens[t + 1]); t += 3; }
-            else { t += 1; }
+        let offset = get_token_offset(tokens, lexer_token_index);
+        let length = get_token_length(tokens, lexer_token_index);
 
-            if (id != TokenId::SOF && id != TokenId::EOF)
-            {
-                offset += length;
-            }
-        }
-
-        u32 length = tokens[token_index].length;
-        if (length == 0) { length = *(u32*)(&tokens[token_index + 1]); }
-
-        let id = tokens[token_index].id;
+        let id = tokens[lexer_token_index.v].id;
         if (id == TokenId::SOF || id == TokenId::EOF)
         {
             string8_print(S8("[{u8}] "), (u8)id);
         }
-        else
+        else if (token_has_source_bytes(id))
         {
-            let text = (String8){ .pointer = (char8*)(source + offset), .length = length };
+            let text = get_token_content_from_offset_and_length(source, offset, length);
             string8_print(S8("{S8} "), text);
         }
     }
@@ -1372,43 +1542,13 @@ BUSTER_F_IMPL void parser_experiments()
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL u32 parser_token_length(Token* tokens, u32 token_index)
+BUSTER_GLOBAL_LOCAL String8 lexer_token_text(const char8* restrict source, Token* tokens, LexerTokenIndex lexer_token_index)
 {
-    u32 result = tokens[token_index].length;
-    if (result == 0)
-    {
-        result = *(u32*)(&tokens[token_index + 1]);
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL u32 parser_token_next_index(Token* tokens, u32 token_index)
-{
-    u32 result = token_index + 1;
-    if (tokens[token_index].length == 0)
-    {
-        result = token_index + 3;
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL String8 parser_token_text(const char8* restrict source, Token* tokens, u32 token_index)
-{
-    u64 offset = 0;
-    for (u32 i = 0; i < token_index; i = parser_token_next_index(tokens, i))
-    {
-        let token = tokens[i];
-        if (token.id != TokenId::SOF && token.id != TokenId::EOF)
-        {
-            offset += parser_token_length(tokens, i);
-        }
-    }
-
     String8 result = {};
-    let token = tokens[token_index];
-    if (token.id != TokenId::SOF && token.id != TokenId::EOF)
+    let token = get_token(tokens, lexer_token_index);
+    if (token_has_source_bytes(token->id))
     {
-        result = string8_from_pointer_length(source + offset, parser_token_length(tokens, token_index));
+        result = get_token_content(source, tokens, lexer_token_index);
     }
     return result;
 }
@@ -1420,7 +1560,8 @@ BUSTER_GLOBAL_LOCAL String8 parser_prefix_text(Arena* arena, ParserResult parser
 
     for (u32 i = 0; i < parser_result.parser_token_count; i += 1)
     {
-        let text = parser_token_text(parser_result.source, parser_result.lexer_tokens, parser_result.parser_token_indices[i]);
+        let lexer_token_index = parser_result.parser_to_lexer_indices[i];
+        let text = lexer_token_text(parser_result.source, parser_result.lexer_tokens, lexer_token_index);
         if (text.length)
         {
             parts[part_count++] = text;
@@ -1441,17 +1582,18 @@ BUSTER_GLOBAL_LOCAL String8 parser_prefix_text(Arena* arena, ParserResult parser
 BUSTER_GLOBAL_LOCAL String8 parser_top_level_declaration_prefix_text(Arena* arena, ParserResult parser_result, u32 declaration_index)
 {
     let declaration = parser_result.top_level_declarations[declaration_index];
-    let parser_token_count = declaration.parser_token_end - declaration.parser_token_start;
+    let parser_token_count = declaration.end.v - declaration.start.v;
     let parts = arena_allocate(arena, String8, parser_token_count * 2);
     u64 part_count = 0;
 
-    for (u32 i = declaration.parser_token_start; i < declaration.parser_token_end; i += 1)
+    for (ParserTokenIndex i = declaration.start; i.v < declaration.end.v; i.v += 1)
     {
-        let text = parser_token_text(parser_result.source, parser_result.lexer_tokens, parser_result.parser_token_indices[i]);
+        let lexer_token_index = parser_result.parser_to_lexer_indices[i.v];
+        let text = lexer_token_text(parser_result.source, parser_result.lexer_tokens, lexer_token_index);
         if (text.length)
         {
             parts[part_count++] = text;
-            if (i + 1 < declaration.parser_token_end)
+            if (i.v + 1 < declaration.end.v)
             {
                 parts[part_count++] = S8(" ");
             }
@@ -1543,6 +1685,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult parser_top_level_declaration_tests(UnitTestAr
             .expected_parser_token_ends = { 4, 8 },
             .expected_top_level_declaration_count = 2,
         },
+        {
+            .source = S8("fn [cc(c)] main() s32 { return 0; }"),
+            .expected_prefixes = {
+                S8("fn [ cc ( c ) ] main ( ) s32 { ; return 0 }"),
+            },
+            .expected_parser_token_starts = { 0 },
+            .expected_parser_token_ends = { 16 },
+            .expected_top_level_declaration_count = 1,
+        },
     };
 
     UnitTestResult result = {};
@@ -1576,22 +1727,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult parser_top_level_declaration_tests(UnitTestAr
             result.test_count += 1;
 
             let declaration = parser_result.top_level_declarations[declaration_index];
-            bool has_expected_start = declaration.parser_token_start == test_case.expected_parser_token_starts[declaration_index];
+            bool has_expected_start = declaration.start.v == test_case.expected_parser_token_starts[declaration_index];
             if (!has_expected_start)
             {
-                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected parser token start {u32}, got {u32}"), test_case.expected_parser_token_starts[declaration_index], declaration.parser_token_start);
+                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected parser token start {u32}, got {u32}"), test_case.expected_parser_token_starts[declaration_index], declaration.start);
             }
             result.succeeded_test_count += has_expected_start;
             result.test_count += 1;
 
-            bool has_expected_end = declaration.parser_token_end == test_case.expected_parser_token_ends[declaration_index];
+            bool has_expected_end = declaration.end.v == test_case.expected_parser_token_ends[declaration_index];
             if (!has_expected_end)
             {
-                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected parser token end {u32}, got {u32}"), test_case.expected_parser_token_ends[declaration_index], declaration.parser_token_end);
+                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected parser token end {u32}, got {u32}"), test_case.expected_parser_token_ends[declaration_index], declaration.end);
             }
             result.succeeded_test_count += has_expected_end;
             result.test_count += 1;
         }
+
+        arena->position = reset_position;
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult parser_multiline_prefix_tests(UnitTestArguments* arguments)
+{
+    STRUCT(ParserMultilinePrefixTestCase)
+    {
+        String8 source;
+        String8 expected_prefix;
+        u64 expected_error_count;
+    };
+
+    BUSTER_GLOBAL_LOCAL ParserMultilinePrefixTestCase test_cases[] = {
+        {
+            .source = S8("fn [cc(c)] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32\n{\n    return 0;\n}"),
+            .expected_prefix = S8("fn [ cc ( c ) ] main [ export ] ( : argument_count u32 , : argv & & u8 , : envp & & u8 ) s32 { ; return 0 }"),
+            .expected_error_count = 0,
+        },
+    };
+
+    UnitTestResult result = {};
+    let arena = arguments->arena;
+
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(test_cases); i += 1)
+    {
+        let reset_position = arena->position;
+        let test_case = test_cases[i];
+        let tokenizer = tokenize(arena, test_case.source.pointer, test_case.source.length);
+        let parser_result = parse(test_case.source.pointer, tokenizer);
+        let prefix_text = parser_prefix_text(arena, parser_result);
+
+        bool has_expected_prefix = string8_equal(prefix_text, test_case.expected_prefix);
+        if (!has_expected_prefix)
+        {
+            buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected prefix {S8}, got {S8}"), test_case.expected_prefix, prefix_text);
+        }
+        result.succeeded_test_count += has_expected_prefix;
+        result.test_count += 1;
+
+        bool has_expected_error_count = parser_result.error_count == test_case.expected_error_count;
+        if (!has_expected_error_count)
+        {
+            buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected error count {u64}, got {u64}"), test_case.expected_error_count, parser_result.error_count);
+        }
+        result.succeeded_test_count += has_expected_error_count;
+        result.test_count += 1;
 
         arena->position = reset_position;
     }
@@ -1604,6 +1805,7 @@ BUSTER_F_IMPL BatchTestResult parser_tests(UnitTestArguments* arguments)
     BatchTestResult result = {};
     consume_unit_tests(&result, parser_statement_semicolon_tests(arguments));
     consume_unit_tests(&result, parser_top_level_declaration_tests(arguments));
+    consume_unit_tests(&result, parser_multiline_prefix_tests(arguments));
     return result;
 }
 #endif

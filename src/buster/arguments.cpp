@@ -1,7 +1,7 @@
 #pragma once
 
 #include <buster/arguments.h>
-#include <buster/assertion.h>
+#include <buster/string.h>
 
 BUSTER_F_IMPL void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value)
 {
