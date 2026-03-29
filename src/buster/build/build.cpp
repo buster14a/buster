@@ -7,7 +7,6 @@
 #include <buster/arena.h>
 #include <buster/target.h>
 #include <buster/entry_point.h>
-#include <buster/assertion.h>
 // #include <martins/md5.h>
 #include <buster/system_headers.h>
 #include <buster/path.h>
@@ -89,7 +88,8 @@ ENUM_T(ModuleId, u64,
     MODULE_BUSTER_PARSER,
     MODULE_OPTIMIZING_IR,
     MODULE_BUSTER_ANALYSIS,
-    MODULE_XXHASH);
+    MODULE_XXHASH,
+    MODULE_STB_TRUETYPE);
 
 ENUM(DirectoryId,
     DIRECTORY_SRC_BUSTER,
@@ -103,7 +103,9 @@ ENUM(DirectoryId,
     DIRECTORY_BUILD,
     DIRECTORY_IDE,
     DIRECTORY_FRONTEND_BUSTER,
-    DIRECTORY_SRC_XXHASH);
+    DIRECTORY_SRC_XXHASH,
+    DIRECTORY_COMPILER,
+    DIRECTORY_SRC_STB);
 
 STRUCT(Module)
 {
@@ -148,7 +150,9 @@ STRUCT(ModuleSlice)
 
 BUSTER_GLOBAL_LOCAL Module modules[] = {
     [(u64)ModuleId::MODULE_ARENA] = {},
-    [(u64)ModuleId::MODULE_ASSERTION] = {},
+    [(u64)ModuleId::MODULE_ASSERTION] = {
+        .no_header = true,
+    },
     [(u64)ModuleId::MODULE_BUILD_COMMON] = {},
     [(u64)ModuleId::MODULE_FILE] = {},
     [(u64)ModuleId::MODULE_FLOAT] = {},
@@ -222,6 +226,10 @@ BUSTER_GLOBAL_LOCAL Module modules[] = {
     },
     [(u64)ModuleId::MODULE_XXHASH] = {
         .directory = DirectoryId::DIRECTORY_SRC_XXHASH,
+        .no_source = true,
+    },
+    [(u64)ModuleId::MODULE_STB_TRUETYPE] = {
+        .directory = DirectoryId::DIRECTORY_SRC_STB,
         .no_source = true,
     },
 };
@@ -673,6 +681,8 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)DirectoryId::DIRECTORY_IDE] = SOs("src/buster/ide"),
         [(u64)DirectoryId::DIRECTORY_FRONTEND_BUSTER] = SOs("src/buster/compiler/frontend/buster"),
         [(u64)DirectoryId::DIRECTORY_SRC_XXHASH] = SOs("src/xxhash"),
+        [(u64)DirectoryId::DIRECTORY_COMPILER] = SOs("src/buster/compiler"),
+        [(u64)DirectoryId::DIRECTORY_SRC_STB] = SOs("src/stb"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == (u64)DirectoryId::Count);
@@ -720,6 +730,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)ModuleId::MODULE_OPTIMIZING_IR] = SOs("optimizing_ir"),
         [(u64)ModuleId::MODULE_BUSTER_ANALYSIS] = SOs("analysis"),
         [(u64)ModuleId::MODULE_XXHASH] = SOs("xxhash"),
+        [(u64)ModuleId::MODULE_STB_TRUETYPE] = SOs("stb_truetype"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(module_names) == (u64)ModuleId::Count);
@@ -1270,7 +1281,8 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 {
                     let default_unit = &specifications[default_target];
                     StringOs argument_descriptions[] = {
-                        SOs("gf2"),
+                        SOs("gdb"),
+                        SOs("--args"),
                         default_unit->artifact_path,
                     };
                     let arguments = string_os_list_create_from(general_arena, (Slice<StringOs>) BUSTER_ARRAY_TO_SLICE(argument_descriptions));
@@ -1310,6 +1322,34 @@ BUSTER_F_IMPL ProcessResult entry_point()
     }
 
     xc_sdk_path = build_program_state.string.values[(u64)BuildStringOption::BUILD_OPTION_STRING_XC_SDK_PATH];
+
+#if defined(__APPLE__)
+    if (!xc_sdk_path.pointer)
+    {
+        StringOs xc_first_argument = SOs("xcrun");
+        CharOs* xc_sdk_path_process_argv[] = {
+            xc_first_argument.pointer,
+            "--show-sdk-path",
+            0,
+        };
+        let xc_process = os_process_spawn(xc_first_argument, xc_sdk_path_process_argv, program_state->input.envp, (ProcessSpawnOptions){
+                .cppapture = 1 << STANDARD_STREAM_OUTPUT,
+                });
+
+        if (xc_process.handle)
+        {
+            let xc_process_result = os_process_wait_sync(arena, xc_process);
+            if (xc_process_result.result == PROCESS_RESULT_SUCCESS)
+            {
+                xc_sdk_path = BYTE_SLICE_TO_STRING(8, xc_process_result.streams[STANDARD_STREAM_OUTPUT]);
+                // There's a line feed character before the null terminator
+                xc_sdk_path.length -= 1;
+                xc_sdk_path.pointer[xc_sdk_path.length] = 0;
+            }
+        }
+    }
+#endif
+
     let toolchain_information = toolchain_get_information(arenas[(u64)BatchArena::BATCH_ARENA_GENERAL], current_llvm_version);
     clang_path = toolchain_information.clang_path;
     toolchain_path = toolchain_information.prefix_path;

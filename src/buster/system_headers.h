@@ -19,6 +19,7 @@ BUSTER_GLOBAL_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/sysinfo.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>

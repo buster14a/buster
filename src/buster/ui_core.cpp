@@ -5,7 +5,6 @@
 #pragma once
 #include <buster/ui_core.h>
 #include <buster/string.h>
-#include <buster/assertion.h>
 #include <buster/float.h>
 
 BUSTER_V_IMPL UI_State* ui_state;

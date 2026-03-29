@@ -3,9 +3,9 @@
 #include <buster/entry_point.h>
 #include <buster/system_headers.h>
 #include <buster/target.h>
-#include <buster/assertion.h>
 #include <buster/arena.h>
 #include <buster/arguments.h>
+#include <buster/string.h>
 
 BUSTER_V_IMPL BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
 BUSTER_V_IMPL OsState os_state;

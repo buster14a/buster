@@ -26,7 +26,14 @@ BUSTER_F_IMPL void consume_external_tests(BatchTestResult* batch, ProcessResult 
 
 BUSTER_F_IMPL void buster_test_error(u32 line, String8 function, String8 file_path, String8 format, ...)
 {
-    string8_print(S8("{S8} failed at {S8}:{S8}:{u32}\n"), format, file_path, function, line);
+    let scratch = scratch_begin(0, 0);
+    va_list variable_arguments;
+    va_start(variable_arguments, format);
+    let message = string8_format_va(scratch.arena, format, variable_arguments);
+    va_end(variable_arguments);
+
+    string8_print(S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
+    scratch_end(scratch);
 
     if (is_debugger_present())
     {

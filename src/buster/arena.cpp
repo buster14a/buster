@@ -1,7 +1,6 @@
 #pragma once
 #include <buster/arena.h>
 #include <buster/os.h>
-#include <buster/assertion.h>
 #include <buster/integer.h>
 
 BUSTER_GLOBAL_LOCAL bool arena_lock_pages = true;
@@ -104,7 +103,7 @@ BUSTER_F_IMPL bool arena_destroy(Arena* arena, u64 count)
     return os_unreserve(arena, size);
 }
 
-BUSTER_F_IMPL void* arena_current_pointer(Arena* arena, u64 alignment)
+BUSTER_F_IMPL void* arena_current_byte_pointer(Arena* arena, u64 alignment)
 {
     return (u8*)arena + align_forward(arena->position, alignment);
 }

@@ -1,7 +1,6 @@
 #pragma once
 #include <buster/time.h>
 #include <buster/system_headers.h>
-#include <buster/assertion.h>
 
 BUSTER_F_IMPL TimeDataType timestamp_take()
 {

@@ -1,9 +1,9 @@
 #pragma once
 #include <buster/os.h>
 #include <buster/system_headers.h>
-#include <buster/assertion.h>
 #include <buster/arena.h>
 #include <buster/arguments.h>
+#include <buster/string.h>
 
 //- rjf: doubly-linked-lists
 #define DLLInsert_NPZ(nil,f,l,p,n,next,prev) (CheckNil(nil,f) ? \
@@ -832,15 +832,7 @@ BUSTER_F_IMPL ProcessSpawnResult os_process_spawn(StringOs first_argument, Strin
 
     if (flag_get(program_state->input.flags, ProgramFlag::Verbose))
     {
-        string8_print(result.handle ? S8("Launched: ") : S8("Failed to launch: "));
-
-        let list = string_os_list_iterator_initialize(argv);
-        for (let a = string_os_list_iterator_next(&list); a.pointer; a = string_os_list_iterator_next(&list))
-        {
-            string8_print(S8("{SOs} "), a);
-        }
-
-        string8_print(S8("\n"));
+        string8_print(S8("{S8} [{u64}]: \"{SOsL}\" \n"), result.handle ? S8("Launched") : S8("Failed to launch"), result.handle, argv);
     }
 
     return result;
@@ -941,8 +933,14 @@ BUSTER_F_IMPL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnR
 
         int status;
         int options = 0;
-        struct rusage* usage = {};
-        let wait_result = wait4(pid, &status, options, usage);
+        struct rusage usage;
+        let wait_result = wait4(pid, &status, options, &usage);
+
+        if (flag_get(program_state->input.flags, ProgramFlag::Verbose))
+        {
+            string8_print(S8("Process [{s32}]: Time (user): {s64}:{s64} s,us, (system): {s64}:{s64} s,us. Max RSS: {s64} KB. PF (soft): {s64}, (hard): {s64}. Block (input): {s64}, (output): {s64}. CTX SW (vol): {s64}, (invol): {s64}\n"), pid, usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, usage.ru_stime.tv_sec, usage.ru_stime.tv_usec, usage.ru_maxrss, usage.ru_minflt, usage.ru_majflt, usage.ru_inblock, usage.ru_oublock, usage.ru_nvcsw, usage.ru_nivcsw);
+        }
+
         // Normal exit
         if ((wait_result == pid) & WIFEXITED(status))
         {

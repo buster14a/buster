@@ -51,7 +51,6 @@ BUSTER_GLOBAL_LOCAL StringOs enable_warning_flags[] = {
     SOs("-Wmain"),
     SOs("-Wmisleading-indentation"),
     SOs("-Wmissing-braces"),
-    SOs("-Wmissing-noreturn"),
     SOs("-Wnon-power-of-two-alignment"),
     SOs("-Woption-ignored"),
     SOs("-Woverlength-strings"),
@@ -86,6 +85,15 @@ BUSTER_GLOBAL_LOCAL StringOs enable_warning_flags[] = {
     SOs("-Wunreachable-code"),
     SOs("-Wunreachable-code-return"),
     SOs("-Wvector-conversion"),
+};
+
+BUSTER_GLOBAL_LOCAL StringOs enable_strict_warnings[] = {
+    SOs("-Wmissing-noreturn"),
+};
+
+BUSTER_GLOBAL_LOCAL StringOs disable_non_strict_warnings[] = {
+    SOs("-Wno-unused-variable"),
+    SOs("-Wno-unused-parameter"),
 };
 
 BUSTER_GLOBAL_LOCAL StringOs disable_warning_flags[] = {
@@ -144,7 +152,8 @@ ENUM(BuildFlag,
     BUILD_OPTION_FLAG_SANITIZE,
     BUILD_OPTION_FLAG_MAIN_BRANCH,
     BUILD_OPTION_FLAG_AVOID_DOWNLOAD,
-    BUILD_OPTION_FLAG_TIME_COMPILATION);
+    BUILD_OPTION_FLAG_TIME_COMPILATION,
+    BUILD_OPTION_FLAG_STRICT);
 
 ENUM(BuildIntegerOption,
     BUILD_OPTION_INTEGER_FUZZ_DURATION_SECONDS);
@@ -311,6 +320,7 @@ BUSTER_F_IMPL ProcessResult process_arguments()
                 [(u64)BuildFlag::BUILD_OPTION_FLAG_MAIN_BRANCH] = SOs("--main-branch="),
                 [(u64)BuildFlag::BUILD_OPTION_FLAG_AVOID_DOWNLOAD] = SOs("--avoid-download="),
                 [(u64)BuildFlag::BUILD_OPTION_FLAG_TIME_COMPILATION] = SOs("--time-compilation="),
+                [(u64)BuildFlag::BUILD_OPTION_FLAG_STRICT] = SOs("--strict="),
             };
             static_assert(BUSTER_ARRAY_LENGTH(build_flag_strings) == (u64)BuildFlag::Count);
 
@@ -464,6 +474,11 @@ BUSTER_F_IMPL ProcessResult process_arguments()
     if (!build_flag_is_set(BuildFlag::BUILD_OPTION_FLAG_UNITY_BUILD))
     {
         build_flag_set(BuildFlag::BUILD_OPTION_FLAG_UNITY_BUILD, build_flag_get(BuildFlag::BUILD_OPTION_FLAG_OPTIMIZE));
+    }
+
+    if (!build_flag_is_set(BuildFlag::BUILD_OPTION_FLAG_STRICT))
+    {
+        build_flag_set(BuildFlag::BUILD_OPTION_FLAG_STRICT, flag_get(program_state->input.flags, ProgramFlag::Ci));
     }
  
     if (is_command_present & !flag_get(program_state->input.flags, ProgramFlag::Verbose))
@@ -662,6 +677,21 @@ BUSTER_F_IMPL StringOsList build_compile_link_arguments(Arena* arena, const Comp
         {
             let enable_warning_flag = enable_warning_flags[i];
             string_os_list_builder_append(builder, enable_warning_flag);
+        }
+
+        if (build_flag_get(BuildFlag::BUILD_OPTION_FLAG_STRICT))
+        {
+            for (auto enable_warning : enable_strict_warnings)
+            {
+                string_os_list_builder_append(builder, enable_warning);
+            }
+        }
+        else
+        {
+            for (auto disable_warning : disable_non_strict_warnings)
+            {
+                string_os_list_builder_append(builder, disable_warning);
+            }
         }
 
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(disable_warning_flags); i += 1)

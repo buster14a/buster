@@ -5,7 +5,6 @@
 #endif
 #include <buster/string.h>
 #include <buster/os.h>
-#include <buster/assertion.h>
 #include <buster/arena.h>
 #include <buster/file.h>
 #include <buster/font_provider.h>

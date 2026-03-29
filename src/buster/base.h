@@ -44,6 +44,8 @@
 
 #define BUSTER_TYPE_EQUAL(T1, T2) __is_same(T1, T2)
 #define BUSTER_UNDERLYING_TYPE(E) __underlying_type(E)
+#define BUSTER_LEADING_ZEROES(n) __builtin_clzg(n)
+#define BUSTER_TRAILING_ZEROES(n) __builtin_ctzg(n)
 
 #if BUSTER_OPTIMIZE
 #define BUSTER_INLINE __attribute__((always_inline))
@@ -123,7 +125,7 @@ struct DeferHelper
 #define BUSTER_FIELD_PARENT_POINTER(type, field, pointer) ((type*)((char8*)(pointer) - BUSTER_OFFSET_OF(T, field)))
 
 #define BUSTER_UNPREDICTABLE(cond) __builtin_unpredictable(cond)
-#define BUSTER_SELECT(cond, a, b) BUSTER_UNPREDICTABLE(cond) ? (a) : (b)
+#define BUSTER_SELECT(cond, a, b) (BUSTER_UNPREDICTABLE(cond) ? (a) : (b))
 
 #define let __auto_type
 #define FORWARD_DECLARE(T, N) typedef T N N
@@ -216,6 +218,7 @@ struct Slice
     T* pointer;
     u64 length;
 
+    BUSTER_INLINE T& operator[](u64 index);
     BUSTER_INLINE T* begin() { return pointer; }
     BUSTER_INLINE T* end() { return pointer + length; }
 };
@@ -489,3 +492,14 @@ ENUM(ScratchArenaId,
 
 typedef void ThreadReturnType;
 typedef ThreadReturnType ThreadCallback(void*);
+
+#ifdef NDEBUG
+#define BUSTER_CHECK(ok) ({ if (BUSTER_UNLIKELY(!(ok))) BUSTER_UNREACHABLE(); })
+#else
+#define BUSTER_CHECK(ok) ({ if (BUSTER_UNLIKELY(!(ok))) buster_failed_assertion(__LINE__, S8(__FUNCTION__), S8(__FILE__)); })
+#endif
+
+[[noreturn]] [[gnu::cold]] BUSTER_F_DECL void buster_failed_assertion(u32 line, String8 function_name, String8 file_path);
+
+template<typename T>
+BUSTER_INLINE T& Slice<T>::operator[](u64 index) { BUSTER_CHECK(index < length); return pointer[index]; }

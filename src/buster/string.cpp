@@ -1,7 +1,6 @@
 #pragma once
 #include <buster/string.h>
 #include <buster/arena.h>
-#include <buster/assertion.h>
 #include <buster/os.h>
 
 #define STRING_OF_CHAR(strlit, Char) ((String<Char>) { .pointer = (Char*)(BUSTER_TYPE_EQUAL(Char, char16) ? (void const*)(u ## strlit) : (void const*)(strlit)), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) })
@@ -47,6 +46,11 @@ template<typename Char>
 BUSTER_GLOBAL_LOCAL bool code_unit_is_hexadecimal(Char code_unit)
 {
     return (int)code_unit_is_decimal(code_unit) | code_unit_is_hexadecimal_alpha(code_unit);
+}
+
+BUSTER_F_IMPL bool code_unit8_is_decimal(char8 code_unit)
+{
+    return code_unit_is_decimal(code_unit);
 }
 
 template<typename Char>
@@ -275,6 +279,23 @@ BUSTER_F_IMPL bool string_os_ends_with_sequence(StringOs string, StringOs ending
 {
     return string_ends_with_sequence(string, ending);
 }
+
+BUSTER_F_IMPL u64 string8_array_match(Slice<String8> names, String8 name)
+{
+    u64 result = BUSTER_STRING_NO_MATCH;
+
+    for (u64 i = 0; i < names.length; i += 1)
+    {
+        if (string8_equal(name, names.pointer[i]))
+        {
+            result = i;
+            break;
+        }
+    }
+
+    return result;
+}
+
 
 template <typename Char>
 BUSTER_F_IMPL bool string_starts_with_sequence(String<Char> string, String<Char> sequence)
