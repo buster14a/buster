@@ -56,15 +56,25 @@ STRUCT(Token)
     u8 length;
 };
 
+STRUCT(LexerTokenIndex)
+{
+    u32 v;
+};
+
+STRUCT(ParserTokenIndex)
+{
+    u32 v;
+};
+
 STRUCT(TopLevelDeclaration)
 {
-    u32 parser_token_start;
-    u32 parser_token_end;
+    ParserTokenIndex start;
+    ParserTokenIndex end;
 };
 
 STRUCT(ParserResult)
 {
-    u32* restrict parser_token_indices;
+    ParserTokenIndex* restrict parser_indices;
     TopLevelDeclaration* restrict top_level_declarations;
     Token* restrict lexer_tokens;
     const char8* restrict source;
@@ -83,4 +93,7 @@ STRUCT(TokenizerResult)
 
 BUSTER_F_DECL void parser_experiments();
 BUSTER_F_DECL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length);
-BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult tokenizer);
+BUSTER_F_DECL ParserResult parse(const char8* restrict source, TokenizerResult tokenizer);
+BUSTER_F_DECL u32 get_token_offset(Token* restrict tokens, u32 token_index);
+BUSTER_F_DECL u32 get_token_length(Token* restrict tokens, u32 token_index);
+BUSTER_F_IMPL String8 get_token_content(const char8* source, Token* restrict tokens, u32 token_index);

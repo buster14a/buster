@@ -377,31 +377,31 @@ BUSTER_GLOBAL_LOCAL ParserResult flatten_top_level_declarations(
     Arena* output,
     u64 error_count)
 {
-    u32 count = 0;
+    ParserTokenIndex count = {};
     let declarations = arena_allocate(output, TopLevelDeclaration, top_level_declarations.length);
-    u32* start = (u32*)arena_current_pointer(output, alignof(u32));
+    let start = arena_current_pointer(output, ParserTokenIndex);
 
     for (u32 i = 0; i < top_level_declarations.length; i += 1)
     {
-        declarations[i].parser_token_start = count;
+        declarations[i].start = count;
 
         u32 current = top_level_declarations.pointer[i].head;
         while (current != no_node)
         {
             let node = rope_arena->at(current);
             *arena_allocate(output, u32, 1) = node->token_index;
-            count += 1;
+            count.v += 1;
             current = node->next;
         }
 
-        declarations[i].parser_token_end = count;
+        declarations[i].end = count;
     }
 
     ParserResult result = {
-        .parser_token_indices = start,
+        .parser_indices = start,
         .top_level_declarations = declarations,
         .lexer_tokens = tokenizer.tokens.pointer,
-        .parser_token_count = count,
+        .parser_token_count = count.v,
         .top_level_declaration_count = (u32)top_level_declarations.length,
         .lexer_token_count = (u32)tokenizer.tokens.length,
         .error_count = error_count,
@@ -518,7 +518,6 @@ STRUCT(ShuntingYard)
 {
     // Input
     Token* restrict tokens;
-    // const char8* restrict source;
     u32 token_count;
     u32 index;
 
@@ -1303,30 +1302,60 @@ BUSTER_F_IMPL ParserResult parse(const char8* restrict source, TokenizerResult t
 // Debug: print token source text for each index in prefix order
 // ============================================================
 
+BUSTER_F_IMPL u32 get_token_offset(Token* restrict tokens, u32 token_index)
+{
+    // Compute source byte offset by summing prior token lengths
+    // Skip SOF (index 0) since it has no source bytes
+    BUSTER_CHECK(tokens[0].id == TokenId::SOF);
+    u32 offset = 0;
+    for (u32 t = 1; t < token_index; )
+    {
+        u32 length = tokens[t].length;
+        if (length == 0) { length = *(u32*)(&tokens[t + 1]); t += 3; }
+        else { t += 1; }
+
+        offset += length;
+    }
+
+    return offset;
+}
+
+BUSTER_F_IMPL u32 get_token_length(Token* restrict token)
+{
+    u32 length = token->length;
+    if (length == 0)
+    {
+        length = *(u32*)(token + 1);
+    }
+    return length;
+}
+
+BUSTER_F_IMPL u32 get_token_length(Token* restrict tokens, u32 token_index)
+{
+    return get_token_length(&tokens[token_index]);
+}
+
+BUSTER_F_IMPL String8 get_token_content_from_offset_and_length(const char8* source, u32 offset, u32 length)
+{
+    let text = (String8){ .pointer = (char8*)(source + offset), .length = length };
+    return text;
+}
+
+BUSTER_F_IMPL String8 get_token_content(const char8* source, Token* restrict tokens, u32 token_index)
+{
+    let offset = get_token_offset(tokens, token_index);
+    let length = get_token_length(tokens, token_index);
+    return get_token_content_from_offset_and_length(source, offset, length);
+}
+
 BUSTER_GLOBAL_LOCAL void print_prefix(ParserResult parser_result, Token* tokens, const char8* source)
 {
     for (u64 i = 0; i < parser_result.parser_token_count; i += 1)
     {
-        u32 token_index = parser_result.parser_token_indices[i];
+        let token_index = parser_result.parser_indices[i].v;
 
-        // Compute source byte offset by summing prior token lengths
-        // Skip SOF (index 0) since it has no source bytes
-        u64 offset = 0;
-        for (u32 t = 0; t < token_index; )
-        {
-            let id = tokens[t].id;
-            u32 length = tokens[t].length;
-            if (length == 0) { length = *(u32*)(&tokens[t + 1]); t += 3; }
-            else { t += 1; }
-
-            if (id != TokenId::SOF && id != TokenId::EOF)
-            {
-                offset += length;
-            }
-        }
-
-        u32 length = tokens[token_index].length;
-        if (length == 0) { length = *(u32*)(&tokens[token_index + 1]); }
+        let offset = get_token_offset(tokens, token_index);
+        let length = get_token_length(tokens, token_index);
 
         let id = tokens[token_index].id;
         if (id == TokenId::SOF || id == TokenId::EOF)
@@ -1335,7 +1364,7 @@ BUSTER_GLOBAL_LOCAL void print_prefix(ParserResult parser_result, Token* tokens,
         }
         else
         {
-            let text = (String8){ .pointer = (char8*)(source + offset), .length = length };
+            let text = get_token_content_from_offset_and_length(source, offset, length);
             string8_print(S8("{S8} "), text);
         }
     }
@@ -1372,32 +1401,32 @@ BUSTER_F_IMPL void parser_experiments()
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL u32 parser_token_length(Token* tokens, u32 token_index)
+BUSTER_GLOBAL_LOCAL u32 parser_token_length(Token* tokens, ParserTokenIndex token_index)
 {
-    u32 result = tokens[token_index].length;
+    u32 result = tokens[token_index.v].length;
     if (result == 0)
     {
-        result = *(u32*)(&tokens[token_index + 1]);
+        result = *(u32*)(&tokens[token_index.v + 1]);
     }
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u32 parser_token_next_index(Token* tokens, u32 token_index)
+BUSTER_GLOBAL_LOCAL ParserTokenIndex parser_token_next_index(Token* tokens, ParserTokenIndex token_index)
 {
-    u32 result = token_index + 1;
-    if (tokens[token_index].length == 0)
+    ParserTokenIndex result = { token_index.v + 1 };
+    if (tokens[token_index.v].length == 0)
     {
-        result = token_index + 3;
+        result = {token_index.v + 3 };
     }
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL String8 parser_token_text(const char8* restrict source, Token* tokens, u32 token_index)
+BUSTER_GLOBAL_LOCAL String8 parser_token_text(const char8* restrict source, Token* tokens, ParserTokenIndex token_index)
 {
     u64 offset = 0;
-    for (u32 i = 0; i < token_index; i = parser_token_next_index(tokens, i))
+    for (ParserTokenIndex i = {}; i.v < token_index.v; i = parser_token_next_index(tokens, i))
     {
-        let token = tokens[i];
+        let token = tokens[i.v];
         if (token.id != TokenId::SOF && token.id != TokenId::EOF)
         {
             offset += parser_token_length(tokens, i);
@@ -1405,7 +1434,7 @@ BUSTER_GLOBAL_LOCAL String8 parser_token_text(const char8* restrict source, Toke
     }
 
     String8 result = {};
-    let token = tokens[token_index];
+    let token = tokens[token_index.v];
     if (token.id != TokenId::SOF && token.id != TokenId::EOF)
     {
         result = string8_from_pointer_length(source + offset, parser_token_length(tokens, token_index));
@@ -1420,7 +1449,7 @@ BUSTER_GLOBAL_LOCAL String8 parser_prefix_text(Arena* arena, ParserResult parser
 
     for (u32 i = 0; i < parser_result.parser_token_count; i += 1)
     {
-        let text = parser_token_text(parser_result.source, parser_result.lexer_tokens, parser_result.parser_token_indices[i]);
+        let text = parser_token_text(parser_result.source, parser_result.lexer_tokens, parser_result.parser_indices[i]);
         if (text.length)
         {
             parts[part_count++] = text;
@@ -1441,17 +1470,17 @@ BUSTER_GLOBAL_LOCAL String8 parser_prefix_text(Arena* arena, ParserResult parser
 BUSTER_GLOBAL_LOCAL String8 parser_top_level_declaration_prefix_text(Arena* arena, ParserResult parser_result, u32 declaration_index)
 {
     let declaration = parser_result.top_level_declarations[declaration_index];
-    let parser_token_count = declaration.parser_token_end - declaration.parser_token_start;
+    let parser_token_count = declaration.end.v - declaration.start.v;
     let parts = arena_allocate(arena, String8, parser_token_count * 2);
     u64 part_count = 0;
 
-    for (u32 i = declaration.parser_token_start; i < declaration.parser_token_end; i += 1)
+    for (ParserTokenIndex i = declaration.start; i.v < declaration.end.v; i.v += 1)
     {
-        let text = parser_token_text(parser_result.source, parser_result.lexer_tokens, parser_result.parser_token_indices[i]);
+        let text = parser_token_text(parser_result.source, parser_result.lexer_tokens, parser_result.parser_indices[i.v]);
         if (text.length)
         {
             parts[part_count++] = text;
-            if (i + 1 < declaration.parser_token_end)
+            if (i.v + 1 < declaration.end.v)
             {
                 parts[part_count++] = S8(" ");
             }
@@ -1543,6 +1572,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult parser_top_level_declaration_tests(UnitTestAr
             .expected_parser_token_ends = { 4, 8 },
             .expected_top_level_declaration_count = 2,
         },
+        {
+            .source = S8("fn [cc(c)] main() s32 { return 0; }"),
+            .expected_prefixes = {
+                S8("fn [ cc ( c ) ] main ( ) s32 { ; return 0 }"),
+            },
+            .expected_parser_token_starts = { 0 },
+            .expected_parser_token_ends = { 16 },
+            .expected_top_level_declaration_count = 1,
+        },
     };
 
     UnitTestResult result = {};
@@ -1576,18 +1614,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult parser_top_level_declaration_tests(UnitTestAr
             result.test_count += 1;
 
             let declaration = parser_result.top_level_declarations[declaration_index];
-            bool has_expected_start = declaration.parser_token_start == test_case.expected_parser_token_starts[declaration_index];
+            bool has_expected_start = declaration.start.v == test_case.expected_parser_token_starts[declaration_index];
             if (!has_expected_start)
             {
-                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected parser token start {u32}, got {u32}"), test_case.expected_parser_token_starts[declaration_index], declaration.parser_token_start);
+                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected parser token start {u32}, got {u32}"), test_case.expected_parser_token_starts[declaration_index], declaration.start);
             }
             result.succeeded_test_count += has_expected_start;
             result.test_count += 1;
 
-            bool has_expected_end = declaration.parser_token_end == test_case.expected_parser_token_ends[declaration_index];
+            bool has_expected_end = declaration.end.v == test_case.expected_parser_token_ends[declaration_index];
             if (!has_expected_end)
             {
-                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected parser token end {u32}, got {u32}"), test_case.expected_parser_token_ends[declaration_index], declaration.parser_token_end);
+                buster_test_error(__LINE__, S8(__FUNCTION__), S8(__FILE__), S8("expected parser token end {u32}, got {u32}"), test_case.expected_parser_token_ends[declaration_index], declaration.end);
             }
             result.succeeded_test_count += has_expected_end;
             result.test_count += 1;

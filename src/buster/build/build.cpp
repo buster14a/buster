@@ -89,7 +89,8 @@ ENUM_T(ModuleId, u64,
     MODULE_BUSTER_PARSER,
     MODULE_OPTIMIZING_IR,
     MODULE_BUSTER_ANALYSIS,
-    MODULE_XXHASH);
+    MODULE_XXHASH,
+    MODULE_INTERN_TABLE);
 
 ENUM(DirectoryId,
     DIRECTORY_SRC_BUSTER,
@@ -103,7 +104,8 @@ ENUM(DirectoryId,
     DIRECTORY_BUILD,
     DIRECTORY_IDE,
     DIRECTORY_FRONTEND_BUSTER,
-    DIRECTORY_SRC_XXHASH);
+    DIRECTORY_SRC_XXHASH,
+    DIRECTORY_COMPILER);
 
 STRUCT(Module)
 {
@@ -224,6 +226,9 @@ BUSTER_GLOBAL_LOCAL Module modules[] = {
         .directory = DirectoryId::DIRECTORY_SRC_XXHASH,
         .no_source = true,
     },
+    [(u64)ModuleId::MODULE_INTERN_TABLE] = {
+        .directory = DirectoryId::DIRECTORY_COMPILER,
+    },
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(modules) == (u64)ModuleId::Count);
@@ -336,6 +341,7 @@ BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) ide_modules[] = {
     { .id = ModuleId::MODULE_IR },
     { .id = ModuleId::MODULE_BUSTER_ANALYSIS },
     { .id = ModuleId::MODULE_XXHASH },
+    { .id = ModuleId::MODULE_INTERN_TABLE },
 };
 
 BUSTER_GLOBAL_LOCAL LinkModule __attribute__((unused)) scrape_xed_modules[] = {
@@ -673,6 +679,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)DirectoryId::DIRECTORY_IDE] = SOs("src/buster/ide"),
         [(u64)DirectoryId::DIRECTORY_FRONTEND_BUSTER] = SOs("src/buster/compiler/frontend/buster"),
         [(u64)DirectoryId::DIRECTORY_SRC_XXHASH] = SOs("src/xxhash"),
+        [(u64)DirectoryId::DIRECTORY_COMPILER] = SOs("src/buster/compiler"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(directory_paths) == (u64)DirectoryId::Count);
@@ -720,6 +727,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
         [(u64)ModuleId::MODULE_OPTIMIZING_IR] = SOs("optimizing_ir"),
         [(u64)ModuleId::MODULE_BUSTER_ANALYSIS] = SOs("analysis"),
         [(u64)ModuleId::MODULE_XXHASH] = SOs("xxhash"),
+        [(u64)ModuleId::MODULE_INTERN_TABLE] = SOs("intern_table"),
     };
 
     static_assert(BUSTER_ARRAY_LENGTH(module_names) == (u64)ModuleId::Count);

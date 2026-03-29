@@ -123,7 +123,7 @@ struct DeferHelper
 #define BUSTER_FIELD_PARENT_POINTER(type, field, pointer) ((type*)((char8*)(pointer) - BUSTER_OFFSET_OF(T, field)))
 
 #define BUSTER_UNPREDICTABLE(cond) __builtin_unpredictable(cond)
-#define BUSTER_SELECT(cond, a, b) BUSTER_UNPREDICTABLE(cond) ? (a) : (b)
+#define BUSTER_SELECT(cond, a, b) (BUSTER_UNPREDICTABLE(cond) ? (a) : (b))
 
 #define let __auto_type
 #define FORWARD_DECLARE(T, N) typedef T N N

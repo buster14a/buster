@@ -1,37 +1,26 @@
 #pragma once
 #include <buster/base.h>
 #include <buster/target.h>
-
-ENUM_T(IrTypeId, u8,
-    Void,
-    NoReturn,
-    I1,
-    I8,
-    I16,
-    I32,
-    I64,
-    F32,
-    F64,
-    V32,
-    V64,
-    V128,
-    V256,
-    V512);
-
-STRUCT(IrType)
-{
-    IrTypeId id;
-};
+#include <buster/compiler/intern_table.h>
 
 ENUM(IrValueId,
     ConstantInteger);
 
+STRUCT(IrTypeRef)
+{
+    u32 v;
+
+    BUSTER_INLINE bool is_valid()
+    {
+        return v != 0;
+    }
+};
+
 STRUCT(IrValue)
 {
     u64 constant_integer;
-    IrType* type;
+    IrTypeRef type;
     IrValueId id;
-    u8 reserved[4];
 };
 
 ENUM_T(IrCallingConvention, u8,
@@ -57,40 +46,49 @@ STRUCT(IrBasicBlock)
     IrInstruction* last;
 };
 
-STRUCT(IrFunctionTypeBase)
+ENUM(IrFunctionAttribute,
+    CallingConvention);
+
+STRUCT(IrFunctionAttributes)
 {
-    IrType* return_type;
-    IrType** argument_types;
-    u64 argument_count;
     IrCallingConvention calling_convention;
-    Target* target;
+};
+
+ENUM_T(IrLinkage, u8,
+    Internal,
+    External);
+
+ENUM_T(IrSymbolAttribute, u8,
+      Export);
+
+STRUCT(IrSymbolAttributes)
+{
+    IrLinkage linkage;
+    bool exported;
 };
 
 STRUCT(IrFunctionType)
 {
-    IrType* return_type;
-    IrType** argument_types;
+    // IrType* return_type;
+    // IrType** argument_types;
     u64 argument_count;
     Target* target;
-    IrType type;
-    IrCallingConvention calling_convention;
-    u8 reserved[6];
+    // IrType type;
+    IrFunctionAttributes attributes;
+    u8 reserved[7];
 };
 
-ENUM(IrGlobalSymbolId,
+ENUM_T(IrGlobalSymbolId, u8,
     Function,
     Variable);
-
-ENUM(IrLinkage, 
-    Internal,
-    External);
 
 STRUCT(IrGlobalSymbol)
 {
     String8 name;
-    IrType* type;
+    IrTypeRef type;
     IrGlobalSymbolId id;
     IrLinkage linkage;
+    u8 reserved[2];
 };
 
 STRUCT(IrGlobalVariable)
@@ -101,10 +99,51 @@ STRUCT(IrGlobalVariable)
 STRUCT(IrFunction)
 {
     IrGlobalSymbol symbol;
-    IrType* function_type;
     IrBasicBlock* entry_block;
     IrBasicBlock* current_basic_block;
     u64 code_position;
+    IrTypeRef function_type;
+    u8 reserved[4];
+};
+
+BUSTER_GLOBAL_LOCAL constexpr u64 builtin_per_sign_integer_ir_type_count = 64;
+BUSTER_GLOBAL_LOCAL constexpr u64 builtin_ir_float_type_count = 2;
+BUSTER_GLOBAL_LOCAL constexpr u64 ir_void_type_count = 1;
+BUSTER_GLOBAL_LOCAL constexpr u64 ir_builtin_type_count = builtin_per_sign_integer_ir_type_count + builtin_ir_float_type_count + ir_void_type_count;
+
+ENUM(BuiltinIrTypeId,
+        IntegerFirst = 0,
+        FloatFirst = IntegerFirst + builtin_per_sign_integer_ir_type_count,
+        VoidTypeFirst = FloatFirst + builtin_ir_float_type_count);
+
+static_assert((u64)BuiltinIrTypeId::Count == ir_builtin_type_count);
+
+STRUCT(BuiltinIrTypes)
+{
+    IrTypeRef v[ir_builtin_type_count];
+};
+
+STRUCT(DebugTypeRef)
+{
+    u32 v;
+};
+
+BUSTER_GLOBAL_LOCAL constexpr u64 builtin_per_sign_integer_debug_type_count = 64;
+BUSTER_GLOBAL_LOCAL constexpr u64 builtin_debug_float_type_count = 2;
+BUSTER_GLOBAL_LOCAL constexpr u64 debug_void_type_count = 1;
+BUSTER_GLOBAL_LOCAL constexpr u64 debug_builtin_type_count = builtin_per_sign_integer_debug_type_count * 2+ builtin_debug_float_type_count + debug_void_type_count;
+
+ENUM(BuiltinDebugTypeId,
+        UnsignedFirst = 0,
+        SignedFirst = builtin_per_sign_integer_ir_type_count,
+        FloatFirst = SignedFirst + builtin_per_sign_integer_ir_type_count,
+        VoidTypeFirst = FloatFirst + builtin_ir_float_type_count);
+
+static_assert((u64)BuiltinIrTypeId::Count == ir_builtin_type_count);
+
+STRUCT(BuiltinDebugTypes)
+{
+    DebugTypeRef v[debug_builtin_type_count];
 };
 
 STRUCT(IrModule)
@@ -112,12 +151,21 @@ STRUCT(IrModule)
     Arena* arena;
     Arena* function_arena;
     Arena* global_variable_arena;
+    Arena* ir_type_arena;
+    Arena* debug_type_arena;
     Target* default_target;
+    InternTable* intern_table;
     String8 name;
+    struct
+    {
+        BuiltinIrTypes ir_types;
+        BuiltinDebugTypes debug_types;
+    } builtin;
 };
 
 BUSTER_F_DECL Slice<IrFunction> ir_module_get_functions(IrModule* module);
 BUSTER_F_DECL IrModule* ir_create_mock_module(Arena* arena);
+BUSTER_F_DECL IrModule* ir_module_create(Arena* arena, Target* target, String8 name, InternTable* table);
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
