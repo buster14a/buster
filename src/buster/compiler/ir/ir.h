@@ -104,9 +104,6 @@ STRUCT(IrBasicBlock)
     IrInstructionRef last;
 };
 
-ENUM(IrFunctionAttribute,
-    CallingConvention);
-
 STRUCT(IrFunctionAttributes)
 {
     IrCallingConvention calling_convention;
@@ -115,9 +112,6 @@ STRUCT(IrFunctionAttributes)
 ENUM_T(IrLinkage, u8,
     Internal,
     External);
-
-ENUM_T(IrSymbolAttribute, u8,
-      Export);
 
 STRUCT(IrSymbolAttributes)
 {

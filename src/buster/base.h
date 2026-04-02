@@ -50,7 +50,7 @@
 #if BUSTER_OPTIMIZE
 #define BUSTER_INLINE __attribute__((always_inline))
 #else
-#define BUSTER_INLINE inline
+#define BUSTER_INLINE 
 #endif
 
 #if defined(__APPLE__)

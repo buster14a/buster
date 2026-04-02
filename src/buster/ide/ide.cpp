@@ -944,7 +944,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app()
 #endif
     parser_experiments();
     // compiler_experiments();
-    analysis_experiments();
+    // analysis_experiments();
 
 #if 0
     if (result == ProcessResult::Success)
