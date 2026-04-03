@@ -12,20 +12,20 @@ BUSTER_GLOBAL_LOCAL constexpr let array_slice_token_start = TokenId::LeftBracket
 BUSTER_GLOBAL_LOCAL constexpr let array_slice_token_end = (TokenId)((u64)array_slice_token_start + 1);
 BUSTER_GLOBAL_LOCAL constexpr let block_end_of_statement_token = TokenId::Semicolon;
 
-BUSTER_GLOBAL_LOCAL constexpr u64 keyword_count = (u64)TokenId::Keyword_Last - (u64)TokenId::Keyword_First - 1;
+BUSTER_GLOBAL_LOCAL constexpr u64 keyword_count = (u64)last_keyword - (u64)first_keyword + 1;
 
 BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
-    [-1 + (u64)TokenId::Keyword_Function - (u64)TokenId::Keyword_First] = S8("fn"),
-    [-1 + (u64)TokenId::Keyword_If - (u64)TokenId::Keyword_First] = S8("if"),
-    [-1 + (u64)TokenId::Keyword_Else - (u64)TokenId::Keyword_First] = S8("else"),
-    [-1 + (u64)TokenId::Keyword_Return - (u64)TokenId::Keyword_First] = S8("return"),
-    [-1 + (u64)TokenId::Keyword_For - (u64)TokenId::Keyword_First] = S8("for"),
-    [-1 + (u64)TokenId::Keyword_While - (u64)TokenId::Keyword_First] = S8("while"),
-    [-1 + (u64)TokenId::Keyword_Code - (u64)TokenId::Keyword_First] = S8("code"),
-    [-1 + (u64)TokenId::Keyword_Data - (u64)TokenId::Keyword_First] = S8("data"),
-    [-1 + (u64)TokenId::Keyword_Type - (u64)TokenId::Keyword_First] = S8("type"),
-    [-1 + (u64)TokenId::Keyword_Struct - (u64)TokenId::Keyword_First] = S8("struct"),
-    [-1 + (u64)TokenId::Keyword_Union - (u64)TokenId::Keyword_First] = S8("union"),
+    [(u64)TokenId::Keyword_Function - (u64)first_keyword] = S8("fn"),
+    [(u64)TokenId::Keyword_If - (u64)first_keyword] = S8("if"),
+    [(u64)TokenId::Keyword_Else - (u64)first_keyword] = S8("else"),
+    [(u64)TokenId::Keyword_Return - (u64)first_keyword] = S8("return"),
+    [(u64)TokenId::Keyword_For - (u64)first_keyword] = S8("for"),
+    [(u64)TokenId::Keyword_While - (u64)first_keyword] = S8("while"),
+    [(u64)TokenId::Keyword_Code - (u64)first_keyword] = S8("code"),
+    [(u64)TokenId::Keyword_Data - (u64)first_keyword] = S8("data"),
+    [(u64)TokenId::Keyword_Type - (u64)first_keyword] = S8("type"),
+    [(u64)TokenId::Keyword_Struct - (u64)first_keyword] = S8("struct"),
+    [(u64)TokenId::Keyword_Union - (u64)first_keyword] = S8("union"),
 };
 
 static_assert(BUSTER_ARRAY_LENGTH(keyword_names) == keyword_count);
@@ -84,7 +84,7 @@ static_assert(BUSTER_ARRAY_LENGTH(keyword_names) == keyword_count);
                 case 'y':\
                 case 'z'
 
-#define SWITCH_DIGIT \
+#define DECIMAL_DIGIT \
     case '0':\
     case '1':\
     case '2':\
@@ -95,6 +95,55 @@ static_assert(BUSTER_ARRAY_LENGTH(keyword_names) == keyword_count);
     case '7':\
     case '8':\
     case '9'
+
+#define HEX_ALPHA_LOWER \
+                case 'a':\
+                case 'b':\
+                case 'c':\
+                case 'd':\
+                case 'e':\
+                case 'f'
+
+#define HEX_ALPHA_UPPER \
+                case 'A':\
+                case 'B':\
+                case 'C':\
+                case 'D':\
+                case 'E':\
+                case 'F'
+
+#define HEX_ALPHA HEX_ALPHA_UPPER: HEX_ALPHA_LOWER
+
+ENUM(Format,
+        Hexadecimal,
+        Decimal,
+        Octal,
+        Binary
+    );
+
+// STRUCT(LexInteger)
+// {
+//     IntegerParsingU64 parsing;
+//     const char8* restrict it;
+//     Format format;
+// };
+// BUSTER_GLOBAL_LOCAL LexInteger lex_integer(const char8* restrict it)
+// {
+// }
+
+BUSTER_GLOBAL_LOCAL bool is_valid_character_after_digit(char8 ch)
+{
+    switch (ch)
+    {
+        break;
+        case ' ':
+        case ';':
+        {
+            return true;
+        }
+        break; default: BUSTER_TRAP();
+    }
+}
 
 BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length)
 {
@@ -119,16 +168,14 @@ BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_
             }
 
             let start = it;
-            let ch = *start;
+            let start_ch = *start;
 
             {
                 TokenId id;
 
-                switch (ch)
+                switch (start_ch)
                 {
-                    break;
-SWITCH_ALPHA_UPPER:
-SWITCH_ALPHA_LOWER:
+                    break; SWITCH_ALPHA_UPPER: SWITCH_ALPHA_LOWER:
                     case '_':
                     {
                         while (true)
@@ -136,10 +183,7 @@ SWITCH_ALPHA_LOWER:
                             let it_start = it;
                             switch (*it_start)
                             {
-                                break;
-SWITCH_ALPHA_UPPER:
-SWITCH_ALPHA_LOWER:
-SWITCH_DIGIT:
+                                break; SWITCH_ALPHA_UPPER: SWITCH_ALPHA_LOWER: DECIMAL_DIGIT:
                                 case '_':
                                 {
                                     it += 1;
@@ -170,7 +214,7 @@ SWITCH_DIGIT:
                         }
                         else
                         {
-                            id = (TokenId)(i + 1 + (u64)TokenId::Keyword_First);
+                            id = (TokenId)(i + (u64)first_keyword);
                         }
                     }
                     break; case ' ':
@@ -182,24 +226,212 @@ SWITCH_DIGIT:
                             it += 1;
                         }
                     }
-                    break; SWITCH_DIGIT:
+                    break; DECIMAL_DIGIT:
                     {
-                        id = TokenId::Number;
+                        bool is_valid = true;
 
-                        while (true)
+                        let format = Format::Decimal;
+
+                        if (start_ch == '0')
+                        {
+                            let second_ch = *(it + 1);
+                            switch (second_ch)
+                            {
+                                break; case 'x': it += 2; format = Format::Hexadecimal;
+                                break; case 'o': it += 2; format = Format::Octal;
+                                break; case 'b': it += 2; format = Format::Binary;
+                                break; default: {}
+                            }
+                        }
+
+                        bool increment;
+
+                        do
                         {
                             let it_start = it;
 
-                            switch (*it_start)
+                            let ch = *it_start;
+
+                            switch (format)
                             {
-                                break; SWITCH_DIGIT: it += 1;
-                                break; default: break;
+                                break; case Format::Hexadecimal:
+                                {
+                                    switch (ch)
+                                    {
+                                        break; 
+                                        DECIMAL_DIGIT:
+                                        HEX_ALPHA:
+                                        case '_':
+                                        {
+                                            increment = true;
+                                        }
+                                        break; default: increment = false;
+                                    }
+                                }
+                                break; case Format::Decimal:
+                                {
+                                    switch (ch)
+                                    {
+                                        break; 
+                                        DECIMAL_DIGIT:
+                                        case '_':
+                                        {
+                                            increment = true;
+                                        }
+                                        break; default: increment = false;
+                                    }
+                                }
+                                break; case Format::Octal:
+                                {
+                                    switch (ch)
+                                    {
+                                        break; 
+                                        case '0':
+                                        case '1':
+                                        case '2':
+                                        case '3':
+                                        case '4':
+                                        case '5':
+                                        case '6':
+                                        case '7':
+                                        case '_':
+                                        {
+                                            increment = true;
+                                        }
+                                        break; default: increment = false;
+                                    }
+                                }
+                                break; case Format::Binary:
+                                {
+                                    switch (ch)
+                                    {
+                                        break; 
+                                        case '0':
+                                        case '1':
+                                        case '_':
+                                        {
+                                            increment = true;
+                                        }
+                                        break; default: increment = false;
+                                    }
+                                }
+                                break; case Format::Count: BUSTER_UNREACHABLE();
                             }
 
-                            if (it - it_start == 0)
+                            it += increment;
+                        } while (increment);
+
+                        let maybe_float_separator = *it;
+                        bool is_float = maybe_float_separator == '.';
+                        is_valid = is_valid && is_valid_character_after_digit(maybe_float_separator);
+
+                        if (is_float)
+                        {
+                            is_valid = is_valid && (format == Format::Decimal || format == Format::Hexadecimal);
+
+                            it += 1;
+
+                            do
+                            {
+                                let ch = *it;
+
+                                switch (format)
+                                {
+                                    break; case Format::Hexadecimal:
+                                    {
+                                        switch (ch)
+                                        {
+                                            break; DECIMAL_DIGIT: HEX_ALPHA: case '_': increment = true;
+                                            break; default: increment = false;
+                                        }
+                                    }
+                                    break; case Format::Decimal:
+                                    {
+                                        switch (ch)
+                                        {
+                                            break; DECIMAL_DIGIT: HEX_ALPHA: case '_': increment = true;
+                                            break; default: increment = false;
+                                        }
+                                    }
+                                    break; default: BUSTER_UNREACHABLE();
+                                }
+
+                                it += increment;
+                            } while (increment);
+
+                            let exponent_ch = *it;
+
+                            switch (exponent_ch)
                             {
                                 break;
+                                case 'E':
+                                case 'e':
+                                case 'P':
+                                case 'p':
+                                {
+                                    switch (format)
+                                    {
+                                        break; case Format::Hexadecimal:
+                                        {
+                                            id = TokenId::HexadecimalFloatLiteralExponent;
+                                            is_valid = is_valid && (exponent_ch == 'P' || exponent_ch == 'p');
+                                        }
+                                        break; case Format::Decimal:
+                                        {
+                                            id = TokenId::DecimalFloatLiteralExponent;
+                                            is_valid = is_valid && (exponent_ch == 'E' || exponent_ch == 'e');
+                                        }
+                                        break; default: BUSTER_UNREACHABLE();
+                                    }
+
+                                    it += 1;
+
+                                    let exponent_sign = *it; // '+' or '-'
+                                    is_valid = is_valid && (exponent_sign == '+' || exponent_sign == '-');
+                                    it += 1;
+
+                                    do
+                                    {
+                                        let it_start = it;
+
+                                        switch (*it_start)
+                                        {
+                                            break; DECIMAL_DIGIT: increment = true;
+                                            break; default: increment = false;
+                                        }
+
+                                        it += increment;
+                                    }
+                                    while (increment);
+                                }
+                                break; default:
+                                {
+                                    switch (format)
+                                    {
+                                        break; case Format::Hexadecimal: id = TokenId::HexadecimalFloatLiteral;
+                                        break; case Format::Decimal: id = TokenId::DecimalFloatLiteral;
+                                        break; default: BUSTER_UNREACHABLE();
+                                    }
+                                }
                             }
+                        }
+                        else
+                        {
+                            switch (format)
+                            {
+                                break; case Format::Hexadecimal: id = TokenId::HexadecimalIntegerLiteral;
+                                break; case Format::Decimal: id = TokenId::DecimalIntegerLiteral;
+                                break; case Format::Octal: id = TokenId::OctalIntegerLiteral;
+                                break; case Format::Binary: id = TokenId::BinaryIntegerLiteral;
+                                break; case Format::Count: BUSTER_UNREACHABLE();
+                            }
+                        }
+
+                        is_valid = is_valid && is_valid_character_after_digit(*it);
+
+                        if (!is_valid)
+                        {
+                            BUSTER_TRAP();
                         }
                     }
                     break; case '\n': { id = TokenId::LineFeed; it += 1; }
@@ -272,7 +504,7 @@ SWITCH_DIGIT:
 
         tokens[token_count++] = {
             .id = TokenId::EOF,
-            .length = 1,
+            .length = 0,
         };
 
         result.tokens.pointer = token_start;
@@ -291,7 +523,8 @@ ENUM_T(ParserDeclaration, u8,
         Statement,
         ReturnStatement,
         TypeDeclaration,
-        DataDeclaration);
+        DataDeclaration,
+        Expression);
 
 ENUM_T(CodeState, u8,
     BeforeName,
@@ -345,6 +578,10 @@ ENUM_T(ReturnStatementState, u8,
 ENUM_T(StatementId, u8,
       Return);
 
+ENUM_T(ExpressionState, u8,
+    Prefix,
+    Tail);
+
 STRUCT(ParserState)
 {
     ParserDeclaration id;
@@ -383,13 +620,21 @@ STRUCT(ParserState)
         {
             StatementStateId state;
             StatementId id;
-            TokenId end_of_statement_token;
+            TokenId end_token;
         } statement;
 
         struct
         {
             ReturnStatementState state;
         } return_statement;
+
+        struct
+        {
+            u8 minimum_binding_power;
+            ExpressionState state;
+            AstNode* current;
+            TokenId end_token;
+        } expression;
     };
 };
 
@@ -439,53 +684,76 @@ STRUCT(StateStack)
         *state = {};
         return state;
     }
-
 };
 
-STRUCT(Parser)
+STRUCT(TokenIterator)
 {
-    StateStack state_stack;
     Slice<Token> tokens;
-    u32 token_index;
     const char8* source;
+    u32 token_index;
     u32 line_index;
     u32 line_offset;
     u32 column_index;
-    Arena* node_arena;
 };
 
-BUSTER_GLOBAL_LOCAL void consume(Parser& restrict parser, Token* restrict token)
+BUSTER_GLOBAL_LOCAL TokenIterator token_initialize(Slice<Token> tokens, const char8* source)
 {
-    let length = get_token_length(token);
-    parser.line_index += token->id == TokenId::LineFeed;
-    parser.line_offset = token->id == TokenId::LineFeed ? parser.column_index : parser.line_offset;
-    parser.column_index = token->id == TokenId::LineFeed ? 0 : length + parser.column_index;
-    parser.token_index += 1;
+    TokenIterator result = {
+        .tokens = tokens,
+        .source = source,
+    };
+
+    return result;
 }
 
-BUSTER_GLOBAL_LOCAL void consume(Parser& restrict parser)
+BUSTER_GLOBAL_LOCAL ExtendedToken to_extended(TokenIterator& restrict iterator, Token token)
 {
-    consume(parser, &parser.tokens[parser.token_index]);
+    ExtendedToken result = {
+        .id = token.id,
+        .column = iterator.column_index,
+        .length = token.length,
+        .line = iterator.line_index,
+        .offset = iterator.line_offset + iterator.column_index,
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ExtendedToken token_get(TokenIterator& restrict iterator)
+{
+    auto& restrict token = iterator.tokens[iterator.token_index];
+    let result = to_extended(iterator, token);
+    return result;
+}
+
+STRUCT(Parser)
+{
+    TokenIterator iterator;
+    StateStack state_stack;
+    Arena* restrict node_arena;
+};
+
+BUSTER_GLOBAL_LOCAL void consume(TokenIterator& restrict iterator, Token& restrict token)
+{
+    iterator.line_index += token.id == TokenId::LineFeed;
+    iterator.line_offset = token.id == TokenId::LineFeed ? iterator.line_offset + iterator.column_index + 1 : iterator.line_offset;
+    iterator.column_index = token.id == TokenId::LineFeed ? 0 : token.length + iterator.column_index;
+    iterator.token_index += 1;
+}
+
+BUSTER_GLOBAL_LOCAL void consume(TokenIterator& restrict iterator)
+{
+    consume(iterator, iterator.tokens[iterator.token_index]);
 }
 
 BUSTER_GLOBAL_LOCAL ExtendedToken peek_extended(Parser& restrict parser, bool consume_result)
 {
-    ExtendedToken result = {};
+    ExtendedToken result;
     bool is_noise = true;
 
     do
     {
-        let restrict token = &parser.tokens[parser.token_index];
-        let id = token->id;
-        let token_length = token->length;
-        result = {
-            .id = id,
-            .column = parser.column_index,
-            .length = get_token_length(token),
-            .line = parser.line_index,
-            .offset = parser.line_offset + parser.column_index,
-        };
-
+        result = token_get(parser.iterator);
+        let id = result.id;
         is_noise =
             id == TokenId::LineFeed ||
             id == TokenId::Tab ||
@@ -495,7 +763,7 @@ BUSTER_GLOBAL_LOCAL ExtendedToken peek_extended(Parser& restrict parser, bool co
 
         if (is_noise || consume_result)
         {
-            consume(parser, token);
+            consume(parser.iterator);
         }
     } while (is_noise);
 
@@ -512,15 +780,21 @@ BUSTER_GLOBAL_LOCAL ExtendedToken peek_and_consume(Parser& restrict parser)
     return peek_extended(parser, true);
 }
 
-BUSTER_GLOBAL_LOCAL String8 get_string(Parser& parser, ExtendedToken token)
+BUSTER_GLOBAL_LOCAL String8 get_string(const char8* source, ExtendedToken token)
 {
-    String8 result = {};
-    if (token.length)
-    {
-        result = { .pointer = (char8*)&parser.source[token.offset], .length = token.length };
-    }
+    String8 result = { .pointer = (char8*)&source[token.offset], .length = token.length };
     return result;
 }
+
+// BUSTER_GLOBAL_LOCAL String8 get_string(Parser& parser, ExtendedToken token)
+// {
+//     String8 result = {};
+//     if (token.length)
+//     {
+//         result = { .pointer = (char8*)&parser.source[token.offset], .length = token.length };
+//     }
+//     return result;
+// }
 
 BUSTER_GLOBAL_LOCAL ExtendedToken expect(Parser& parser, TokenId id)
 {
@@ -528,7 +802,7 @@ BUSTER_GLOBAL_LOCAL ExtendedToken expect(Parser& parser, TokenId id)
 
     if (token.id != id)
     {
-        let string = get_string(parser, token);
+        let string = get_string(parser.iterator.source, token);
         BUSTER_TRAP();
     }
 
@@ -545,7 +819,7 @@ BUSTER_GLOBAL_LOCAL bool token_matches(Parser& parser, ExtendedToken token, Stri
     bool result = false;
     if (token.id == TokenId::Identifier)
     {
-        result = string8_equal(get_string(parser, token), expected);
+        result = string8_equal(get_string(parser.iterator.source, token), expected);
     }
     return result;
 }
@@ -555,7 +829,7 @@ BUSTER_GLOBAL_LOCAL bool token_matches_any(Parser& parser, ExtendedToken token, 
     bool result = false;
     if (token.id == TokenId::Identifier)
     {
-        let candidate = get_string(parser, token);
+        let candidate = get_string(parser.iterator.source, token);
         for (u64 i = 0; i < name_count; i += 1)
         {
             if (string8_equal(candidate, names[i]))
@@ -670,7 +944,8 @@ STRUCT(AstBlock)
 ENUM_T(AstNodeId, u8,
     FunctionDefinition,
     FunctionDeclaration,
-    Block);
+    Block,
+    ConstantInteger);
 
 ENUM_T(CodeAttributeId, u8,
         Inline);
@@ -692,19 +967,20 @@ STRUCT(AstNode)
     {
         AstCode code;
         AstBlock block;
+        u64 constant_integer;
     };
 
     AstNodeId id;
 };
 
-BUSTER_GLOBAL_LOCAL AstNode* allocate_node(Parser& parser)
+BUSTER_GLOBAL_LOCAL AstNode* allocate_node(Parser& restrict parser)
 {
     let node = arena_allocate(parser.node_arena, AstNode, 1);
     *node = {};
     return node;
 }
 
-BUSTER_GLOBAL_LOCAL void block_start(Parser& parser)
+BUSTER_GLOBAL_LOCAL void parse_block(Parser& restrict parser)
 {
     let block_state = parser.state_stack.push();
     block_state->id = ParserDeclaration::Block;
@@ -714,11 +990,33 @@ BUSTER_GLOBAL_LOCAL void block_start(Parser& parser)
     block_state->block.node = node;
 }
 
+BUSTER_GLOBAL_LOCAL void parse_expression(Parser& restrict parser, TokenId end_of_statement_token)
+{
+    let state = parser.state_stack.push();
+    state->id = ParserDeclaration::Expression;
+    state->expression.state = ExpressionState::Prefix;
+    state->expression.end_token = end_of_statement_token;
+}
+
+BUSTER_GLOBAL_LOCAL void finish_expression(Parser& restrict parser)
+{
+    parser.state_stack.pop();
+
+    let resume_state = state(parser);
+
+    switch (resume_state->id)
+    {
+        break; case ParserDeclaration::ReturnStatement:
+        {}
+        break; default: BUSTER_TRAP();
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tokenizer)
 {
     Parser parser = {};
-    parser.tokens = tokenizer.tokens;
-    parser.source = source;
+    parser.iterator.tokens = tokenizer.tokens;
+    parser.iterator.source = source;
     parser.state_stack.arena = arena_create({});
     parser.node_arena = arena_create({});
 
@@ -761,7 +1059,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                 {
                     break; case CodeState::BeforeName:
                     {
-                        consume(parser);
+                        consume(parser.iterator);
 
                         switch (token.id)
                         {
@@ -775,7 +1073,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             }
                             break; case TokenId::Identifier:
                             {
-                                code_state->code.node->code.name = get_string(parser, token);
+                                code_state->code.node->code.name = get_string(parser.iterator.source, token);
                                 code_state->code.current_state = CodeState::AfterName;
                             }
                             break; default: BUSTER_TRAP();
@@ -783,7 +1081,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     }
                     break; case CodeState::AfterName:
                     {
-                        consume(parser);
+                        consume(parser.iterator);
 
                         switch (token.id)
                         {
@@ -820,20 +1118,20 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                         {
                             break; case TokenId::LeftBrace:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
 
                                 code_state->code.current_state = CodeState::Body;
 
-                                block_start(parser);
+                                parse_block(parser);
                             }
                             break; case TokenId::Semicolon:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 parser.state_stack.pop();
                             }
                             break; case TokenId::Equal:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 code_state->code.current_state = CodeState::AfterEqual;
                             }
                             break; default: BUSTER_TRAP();
@@ -846,11 +1144,11 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             BUSTER_TRAP();
                         }
 
-                        consume(parser);
+                        consume(parser.iterator);
 
                         code_state->code.current_state = CodeState::Body;
 
-                        block_start(parser);
+                        parse_block(parser);
                     }
                     break; case CodeState::Body:
                     {
@@ -872,21 +1170,21 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                         {
                             break; case pointer_token:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                             }
                             break; case array_slice_token_start:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 type_state->type.current_state = TypeState::AfterArraySliceStart;
                             }
                             break; case TokenId::Identifier:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 finish_type_reference(parser);
                             }
                             break; case TokenId::Keyword_Function:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 type_state->type.current_state = TypeState::AfterFunctionKeyword;
                             }
                             break; default: BUSTER_TRAP();
@@ -898,17 +1196,17 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                         {
                             break; case array_slice_token_end:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 type_state->type.current_state = TypeState::PrefixOrBase;
                             }
-                            break; case TokenId::Number:
-                            {
-                                consume(parser);
-                                type_state->type.current_state = TypeState::AfterArrayCount;
-                            }
+                            // break; case TokenId::Number:
+                            // {
+                            //     consume(parser);
+                            //     type_state->type.current_state = TypeState::AfterArrayCount;
+                            // }
                             break; case TokenId::Underscore:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 type_state->type.current_state = TypeState::AfterArrayInferMarker;
                             }
                             break; default: BUSTER_TRAP();
@@ -921,7 +1219,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             BUSTER_TRAP();
                         }
 
-                        consume(parser);
+                        consume(parser.iterator);
                         type_state->type.current_state = TypeState::PrefixOrBase;
                     }
                     break; case TypeState::AfterArrayInferMarker:
@@ -931,7 +1229,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             BUSTER_TRAP();
                         }
 
-                        consume(parser);
+                        consume(parser.iterator);
                         type_state->type.current_state = TypeState::PrefixOrBase;
                     }
                     break; case TypeState::AfterFunctionKeyword:
@@ -940,7 +1238,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                         {
                             break; case TokenId::LeftBracket:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
 
                                 let attribute_list_state = parser.state_stack.push();
                                 attribute_list_state->id = ParserDeclaration::AttributeList;
@@ -949,7 +1247,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             }
                             break; case TokenId::LeftParenthesis:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 type_state->type.current_state = TypeState::FunctionArgumentNameOrClose;
                             }
                             break; default: BUSTER_TRAP();
@@ -961,12 +1259,12 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                         {
                             break; case TokenId::RightParenthesis:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 type_state->type.current_state = TypeState::FunctionReturnType;
                             }
                             break; case TokenId::Identifier:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 type_state->type.current_state = TypeState::FunctionArgumentAfterNameSegment;
                             }
                             break; default: BUSTER_TRAP();
@@ -979,7 +1277,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             BUSTER_TRAP();
                         }
 
-                        consume(parser);
+                        consume(parser.iterator);
                         type_state->type.current_state = TypeState::FunctionArgumentAfterColon;
                     }
                     break; case TypeState::FunctionArgumentAfterColon:
@@ -989,7 +1287,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             let next = peek_ahead(parser, 1);
                             if (next.id == TokenId::Colon)
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 type_state->type.current_state = TypeState::FunctionArgumentAfterNameSegment;
                                 break;
                             }
@@ -1016,12 +1314,12 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                         {
                             break; case TokenId::Comma:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 type_state->type.current_state = TypeState::FunctionArgumentNameOrClose;
                             }
                             break; case TokenId::RightParenthesis:
                             {
-                                consume(parser);
+                                consume(parser.iterator);
                                 type_state->type.current_state = TypeState::FunctionReturnType;
                             }
                             break; default: BUSTER_TRAP();
@@ -1062,7 +1360,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             }
                             break; case TokenId::Identifier:
                             {
-                                let attribute_name = get_string(parser, token);
+                                let attribute_name = get_string(parser.iterator.source, token);
 
                                 switch (attribute_list_state->attribute_list.kind)
                                 {
@@ -1152,7 +1450,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                 {
                     break; case TokenId::RightBrace:
                     {
-                        consume(parser);
+                        consume(parser.iterator);
 
                         if (block_state->block.brace_depth == 0)
                         {
@@ -1176,14 +1474,16 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
             break; case ParserDeclaration::Statement:
             {
                 let statement_state = state(parser);
-                let token = peek_and_consume(parser);
+                let token = peek(parser);
 
                 switch (statement_state->statement.state)
                 {
                     break; case StatementStateId::Start:
                     {
                         statement_state->statement.state = StatementStateId::End;
-                        statement_state->statement.end_of_statement_token = block_end_of_statement_token;
+                        statement_state->statement.end_token = block_end_of_statement_token;
+
+                        consume(parser.iterator);
 
                         switch (token.id)
                         {
@@ -1200,14 +1500,16 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     }
                     break; case StatementStateId::End:
                     {
-                        bool has_end_of_statement = statement_state->statement.end_of_statement_token != TokenId::Error;
+                        bool has_end_of_statement = statement_state->statement.end_token != TokenId::Error;
 
                         if (has_end_of_statement)
                         {
-                            if (token.id != statement_state->statement.end_of_statement_token)
+                            if (token.id != statement_state->statement.end_token)
                             {
                                 BUSTER_TRAP();
                             }
+
+                            consume(parser.iterator);
                         }
 
                         parser.state_stack.pop();
@@ -1222,7 +1524,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
 
                 let previous_state = return_statement_state - 1;
                 BUSTER_CHECK(previous_state->id == ParserDeclaration::Statement);
-                let end_of_statement_token = previous_state->statement.end_of_statement_token;
+                let end_of_statement_token = previous_state->statement.end_token;
 
                 switch (return_statement_state->return_statement.state)
                 {
@@ -1234,7 +1536,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                         }
                         else
                         {
-                            BUSTER_TRAP();
+                            parse_expression(parser, end_of_statement_token);
                         }
                     }
                     break; case ReturnStatementState::End:
@@ -1244,10 +1546,94 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             BUSTER_TRAP();
                         }
 
-                        consume(parser);
                         parser.state_stack.pop();
                     }
                     break; case ReturnStatementState::Count: BUSTER_UNREACHABLE();
+                }
+            }
+            break; case ParserDeclaration::Expression:
+            {
+                let st = state(parser);
+                let token = peek(parser);
+
+                switch (st->expression.state)
+                {
+                    break; case ExpressionState::Prefix:
+                    {
+                        switch (token.id)
+                        {
+                            break;
+                            case TokenId::HexadecimalIntegerLiteral:
+                            case TokenId::DecimalIntegerLiteral:
+                            case TokenId::OctalIntegerLiteral:
+                            case TokenId::BinaryIntegerLiteral:
+                            {
+                                consume(parser.iterator);
+                                let number_node = allocate_node(parser);
+                                st->expression.current = number_node;
+
+                                let number_string = get_string(parser.iterator.source, token);
+
+                                IntegerParsingU64 number_parsing;
+                                switch (token.id)
+                                {
+                                    break; case TokenId::HexadecimalIntegerLiteral:
+                                    {
+                                        BUSTER_CHECK(number_string.length >= 3);
+                                        BUSTER_CHECK(number_string.pointer[0] == '0');
+                                        BUSTER_CHECK(number_string.pointer[1] == 'x');
+                                        number_parsing = string8_parse_u64_hexadecimal(number_string.pointer + 2);
+                                    }
+                                    break; case TokenId::DecimalIntegerLiteral:
+                                    {
+                                        number_parsing = string8_parse_u64_decimal(number_string.pointer);
+                                    }
+                                    break; case TokenId::OctalIntegerLiteral:
+                                    {
+                                        BUSTER_CHECK(number_string.length >= 3);
+                                        BUSTER_CHECK(number_string.pointer[0] == '0');
+                                        BUSTER_CHECK(number_string.pointer[1] == 'o');
+                                        number_parsing = string8_parse_u64_hexadecimal(number_string.pointer + 2);
+                                    }
+                                    break; case TokenId::BinaryIntegerLiteral:
+                                    {
+                                        BUSTER_CHECK(number_string.length >= 3);
+                                        BUSTER_CHECK(number_string.pointer[0] == '0');
+                                        BUSTER_CHECK(number_string.pointer[1] == 'b');
+                                        number_parsing = string8_parse_u64_hexadecimal(number_string.pointer + 2);
+                                    }
+                                    break; default: BUSTER_UNREACHABLE();
+                                }
+
+                                *number_node = {
+                                    .id = AstNodeId::ConstantInteger,
+                                    .constant_integer = number_parsing.value,
+                                };
+
+                                st->expression.state = ExpressionState::Tail;
+                            }
+                            break; default: BUSTER_TRAP();
+                        }
+                    }
+                    break; case ExpressionState::Tail:
+                    {
+                        if (token.id == st->expression.end_token)
+                        {
+                            finish_expression(parser);
+                        }
+                        else
+                        {
+                            switch (token.id)
+                            {
+                                break; case TokenId::Plus:
+                                {
+                                    BUSTER_TRAP();
+                                }
+                                break; default: BUSTER_TRAP();
+                            }
+                        }
+                    }
+                    break; case ExpressionState::Count: BUSTER_UNREACHABLE();
                 }
             }
             break; case ParserDeclaration::TypeDeclaration:
@@ -1264,6 +1650,78 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
     // return result;
 }
 
+BUSTER_GLOBAL_LOCAL void print_tokenizer_result(TokenizerResult tokenizer, const char8* restrict source)
+{
+    let iterator = token_initialize(tokenizer.tokens, source);
+    for (u64 i = 0; i < tokenizer.tokens.length; i += 1)
+    {
+        let token = token_get(iterator);
+        let string = get_string(source, token);
+
+        String8 token_id;
+
+        switch (token.id)
+        {
+            break; case TokenId::Error: token_id = S8("Error");
+            break; case TokenId::Space: token_id = S8("Space");
+            break; case TokenId::Tab: token_id = S8("Tab");
+            break; case TokenId::LineFeed: token_id = S8("LineFeed");
+            break; case TokenId::CarriageReturn: token_id = S8("CarriageReturn");
+            break; case TokenId::Comment: token_id = S8("Comment");
+            break; case TokenId::EOF: token_id = S8("EOF");
+            break; case TokenId::Identifier: token_id = S8("Identifier");
+            break; case TokenId::HexadecimalIntegerLiteral: token_id = S8("HexadecimalIntegerLiteral");
+            break; case TokenId::DecimalIntegerLiteral: token_id = S8("DecimalIntegerLiteral");
+            break; case TokenId::OctalIntegerLiteral: token_id = S8("OctalIntegerLiteral");
+            break; case TokenId::BinaryIntegerLiteral: token_id = S8("BinaryIntegerLiteral");
+            break; case TokenId::DecimalFloatLiteral: token_id = S8("DecimalFloatLiteral");
+            break; case TokenId::DecimalFloatLiteralExponent: token_id = S8("DecimalFloatLiteralExponent");
+            break; case TokenId::HexadecimalFloatLiteral: token_id = S8("HexadecimalFloatLiteral");
+            break; case TokenId::HexadecimalFloatLiteralExponent: token_id = S8("HexadecimalFloatLiteralExponent");
+            break; case TokenId::FloatLiteral: token_id = S8("FloatLiteral");
+            break; case TokenId::Underscore: token_id = S8("Underscore");
+            break; case TokenId::LeftBracket: token_id = S8("LeftBracket");
+            break; case TokenId::RightBracket: token_id = S8("RightBracket");
+            break; case TokenId::LeftBrace: token_id = S8("LeftBrace");
+            break; case TokenId::RightBrace: token_id = S8("RightBrace");
+            break; case TokenId::LeftParenthesis: token_id = S8("LeftParenthesis");
+            break; case TokenId::RightParenthesis: token_id = S8("RightParenthesis");
+            break; case TokenId::Equal: token_id = S8("Equal");
+            break; case TokenId::Greater: token_id = S8("Greater");
+            break; case TokenId::Less: token_id = S8("Less");
+            break; case TokenId::Plus: token_id = S8("Plus");
+            break; case TokenId::PlusEqual: token_id = S8("PlusEqual");
+            break; case TokenId::Minus: token_id = S8("Minus");
+            break; case TokenId::Asterisk: token_id = S8("Asterisk");
+            break; case TokenId::Slash: token_id = S8("Slash");
+            break; case TokenId::Percentage: token_id = S8("Percentage");
+            break; case TokenId::Colon: token_id = S8("Colon");
+            break; case TokenId::Semicolon: token_id = S8("Semicolon");
+            break; case TokenId::Comma: token_id = S8("Comma");
+            break; case TokenId::Dot: token_id = S8("Dot");
+            break; case TokenId::DoubleDot: token_id = S8("DoubleDot");
+            break; case TokenId::TripleDot: token_id = S8("TripleDot");
+            break; case TokenId::Ampersand: token_id = S8("Ampersand");
+            break; case TokenId::Keyword_Return: token_id = S8("Keyword_Return");
+            break; case TokenId::Keyword_If: token_id = S8("Keyword_If");
+            break; case TokenId::Keyword_Else: token_id = S8("Keyword_Else");
+            break; case TokenId::Keyword_Function: token_id = S8("Keyword_Function");
+            break; case TokenId::Keyword_For: token_id = S8("Keyword_For");
+            break; case TokenId::Keyword_While: token_id = S8("Keyword_While");
+            break; case TokenId::Keyword_Code: token_id = S8("Keyword_Code");
+            break; case TokenId::Keyword_Data: token_id = S8("Keyword_Data");
+            break; case TokenId::Keyword_Type: token_id = S8("Keyword_Type");
+            break; case TokenId::Keyword_Struct: token_id = S8("Keyword_Struct");
+            break; case TokenId::Keyword_Union: token_id = S8("Keyword_Union");
+            break; case TokenId::Count: BUSTER_UNREACHABLE();
+        }
+
+        string8_print(S8("[{u64}] {u32}:{u32} at {u32} {S8} \"{S8}\"\n"), i, token.line, token.column, token.offset, token_id, string.pointer[0] >= ' ' ? string : S8(""));
+
+        consume(iterator);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, StringOs path)
 {
     let position = arena->position;
@@ -1272,6 +1730,7 @@ BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, StringOs path)
     let source = BYTE_SLICE_TO_STRING(8, file_read(arena, path, {}));
 
     let tokenizer = tokenize(arena, source.pointer, source.length);
+    print_tokenizer_result(tokenizer, source.pointer);
     parse(source.pointer, tokenizer);
 
     // string8_print(S8("=== Input ===\n{S8}\n"), source);
@@ -1284,8 +1743,12 @@ BUSTER_F_IMPL void parser_experiments()
 {
     let arena = arena_create({});
     parse_experiment(arena, SOs("tests/basic.bbb"));
-    parse_experiment(arena, SOs("tests/if_else.bbb"));
-    parse_experiment(arena, SOs("tests/array_slices.bbb"));
+    parse_experiment(arena, SOs("tests/basic_hexadecimal.bbb"));
+    parse_experiment(arena, SOs("tests/basic_octal.bbb"));
+    parse_experiment(arena, SOs("tests/basic_binary.bbb"));
+    parse_experiment(arena, SOs("tests/basic_sum.bbb"));
+    // parse_experiment(arena, SOs("tests/if_else.bbb"));
+    // parse_experiment(arena, SOs("tests/array_slices.bbb"));
 }
 
 #if BUSTER_INCLUDE_TESTS

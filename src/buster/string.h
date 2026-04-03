@@ -99,11 +99,10 @@ BUSTER_F_DECL UnitTestResult string_tests(UnitTestArguments* arguments);
 // #define string8_from_pointer_start_end(p, start, end) string_from_pointer_length(8, p, start, end)
 // #define string8_starts_with_sequence(s, beginning) string_starts_with_sequence(8, (s), (beginning))
 //
-// BUSTER_F_DECL u64 string8_parse_u64_decimal_assume_valid(String8 string);
-// BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_hexadecimal(const char8* restrict p);
+BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_hexadecimal(const char8* restrict p);
 BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_decimal(const char8* restrict p);
-// BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_octal(const char8* restrict p);
-// BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_binary(const char8* restrict p);
+BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_octal(const char8* restrict p);
+BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_binary(const char8* restrict p);
 // BUSTER_F_DECL String8 string8_format(Arena* arena, String8 format, ...);
 // BUSTER_F_DECL String8 string8_format_va(Arena* arena, String8 format, va_list variable_arguments);
 // BUSTER_F_DECL u64 string8_last_code_point(String8 s, char8 ch);
