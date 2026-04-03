@@ -10,6 +10,7 @@
 BUSTER_GLOBAL_LOCAL constexpr let pointer_token = TokenId::Ampersand;
 BUSTER_GLOBAL_LOCAL constexpr let array_slice_token_start = TokenId::LeftBracket;
 BUSTER_GLOBAL_LOCAL constexpr let array_slice_token_end = (TokenId)((u64)array_slice_token_start + 1);
+BUSTER_GLOBAL_LOCAL constexpr let block_end_of_statement_token = TokenId::Semicolon;
 
 BUSTER_GLOBAL_LOCAL constexpr u64 keyword_count = (u64)TokenId::Keyword_Last - (u64)TokenId::Keyword_First - 1;
 
@@ -101,7 +102,6 @@ BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_
 
     if (file_length)
     {
-        // Newlines can expand into line metadata plus the newline token itself.
         let token_start = arena_allocate(arena, Token, file_length + 1);
         let tokens = token_start;
         u64 token_count = 0;
@@ -259,7 +259,6 @@ SWITCH_DIGIT:
                     BUSTER_TRAP(); // TODO: error
                 }
 
-
                 let token_index = token_count;
 
                 tokens[token_index] = { 
@@ -284,11 +283,13 @@ SWITCH_DIGIT:
 }
 
 ENUM_T(ParserDeclaration, u8,
-        None,
+        Root,
         Code,
         TypeReference,
         AttributeList,
         Block,
+        Statement,
+        ReturnStatement,
         TypeDeclaration,
         DataDeclaration);
 
@@ -327,6 +328,23 @@ ENUM_T(AttributeListState, u8,
     CallingConventionName,
     CallingConventionClose);
 
+struct AstNode;
+
+STRUCT(CodeAttributes)
+{
+};
+
+ENUM_T(StatementStateId, u8,
+        Start,
+        End);
+
+ENUM_T(ReturnStatementState, u8,
+    ValueOrEnd,
+    End);
+
+ENUM_T(StatementId, u8,
+      Return);
+
 STRUCT(ParserState)
 {
     ParserDeclaration id;
@@ -335,7 +353,7 @@ STRUCT(ParserState)
         struct
         {
             CodeState current_state;
-            String8 name;
+            AstNode* node;
         } code;
 
         struct
@@ -347,8 +365,9 @@ STRUCT(ParserState)
         {
             union
             {
-                IrSymbolAttributes symbol;
-                IrFunctionAttributes function;
+                IrSymbolAttributes* symbol;
+                IrFunctionAttributes* function;
+                CodeAttributes* code;
             };
             AttributeListKind kind;
             AttributeListState current_state;
@@ -356,8 +375,21 @@ STRUCT(ParserState)
 
         struct
         {
+            AstNode* node;
             u32 brace_depth;
         } block;
+
+        struct
+        {
+            StatementStateId state;
+            StatementId id;
+            TokenId end_of_statement_token;
+        } statement;
+
+        struct
+        {
+            ReturnStatementState state;
+        } return_statement;
     };
 };
 
@@ -419,6 +451,7 @@ STRUCT(Parser)
     u32 line_index;
     u32 line_offset;
     u32 column_index;
+    Arena* node_arena;
 };
 
 BUSTER_GLOBAL_LOCAL void consume(Parser& restrict parser, Token* restrict token)
@@ -639,17 +672,47 @@ ENUM_T(AstNodeId, u8,
     FunctionDeclaration,
     Block);
 
+ENUM_T(CodeAttributeId, u8,
+        Inline);
+
+BUSTER_GLOBAL_LOCAL String8 code_attributes_names[] = {
+    [(u64)CodeAttributeId::Inline] = S8("inline"),
+};
+
+STRUCT(AstCode)
+{
+    CodeAttributes code_attributes;
+    IrSymbolAttributes symbol_attributes;
+    String8 name;
+};
+
 STRUCT(AstNode)
 {
     union
     {
-        AstFunctionDefinition function_definition;
-        AstFunctionDeclaration function_declaration;
+        AstCode code;
         AstBlock block;
     };
 
     AstNodeId id;
 };
+
+BUSTER_GLOBAL_LOCAL AstNode* allocate_node(Parser& parser)
+{
+    let node = arena_allocate(parser.node_arena, AstNode, 1);
+    *node = {};
+    return node;
+}
+
+BUSTER_GLOBAL_LOCAL void block_start(Parser& parser)
+{
+    let block_state = parser.state_stack.push();
+    block_state->id = ParserDeclaration::Block;
+    block_state->block.brace_depth = 1;
+    let node = allocate_node(parser);
+    node->id = AstNodeId::Block;
+    block_state->block.node = node;
+}
 
 BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tokenizer)
 {
@@ -657,6 +720,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
     parser.tokens = tokenizer.tokens;
     parser.source = source;
     parser.state_stack.arena = arena_create({});
+    parser.node_arena = arena_create({});
 
     // Push a dummy state so the stack is never empty
     parser.state_stack.push();
@@ -668,7 +732,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
         switch (state(parser)->id)
         {
             break; case ParserDeclaration::Count: BUSTER_UNREACHABLE();
-            break; case ParserDeclaration::None:
+            break; case ParserDeclaration::Root:
             {
                 let token = peek_and_consume(parser);
 
@@ -679,6 +743,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                         let function_state = parser.state_stack.push();
                         function_state->id = ParserDeclaration::Code;
                         function_state->code.current_state = CodeState::BeforeName;
+                        function_state->code.node = allocate_node(parser);
                     }
                     break; case TokenId::EOF:
                     {
@@ -706,10 +771,11 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 attribute_list_state->id = ParserDeclaration::AttributeList;
                                 attribute_list_state->attribute_list.kind = AttributeListKind::Code;
                                 attribute_list_state->attribute_list.current_state = AttributeListState::ItemOrClose;
+                                attribute_list_state->attribute_list.code = &code_state->code.node->code.code_attributes;
                             }
                             break; case TokenId::Identifier:
                             {
-                                code_state->code.name = get_string(parser, token);
+                                code_state->code.node->code.name = get_string(parser, token);
                                 code_state->code.current_state = CodeState::AfterName;
                             }
                             break; default: BUSTER_TRAP();
@@ -739,6 +805,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 attribute_list_state->id = ParserDeclaration::AttributeList;
                                 attribute_list_state->attribute_list.kind = AttributeListKind::Symbol;
                                 attribute_list_state->attribute_list.current_state = AttributeListState::ItemOrClose;
+                                attribute_list_state->attribute_list.symbol = &code_state->code.node->code.symbol_attributes;
                             }
                             break; default: BUSTER_TRAP();
                         }
@@ -757,9 +824,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
 
                                 code_state->code.current_state = CodeState::Body;
 
-                                let block_state = parser.state_stack.push();
-                                block_state->id = ParserDeclaration::Block;
-                                block_state->block.brace_depth = 1;
+                                block_start(parser);
                             }
                             break; case TokenId::Semicolon:
                             {
@@ -785,9 +850,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
 
                         code_state->code.current_state = CodeState::Body;
 
-                        let block_state = parser.state_stack.push();
-                        block_state->id = ParserDeclaration::Block;
-                        block_state->block.brace_depth = 1;
+                        block_start(parser);
                     }
                     break; case CodeState::Body:
                     {
@@ -1028,8 +1091,8 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                         {
                                             break; case IrSymbolAttribute::Export:
                                             {
-                                                attribute_list_state->attribute_list.symbol.exported = true;
-                                                attribute_list_state->attribute_list.symbol.linkage = IrLinkage::External;
+                                                attribute_list_state->attribute_list.symbol->exported = true;
+                                                attribute_list_state->attribute_list.symbol->linkage = IrLinkage::External;
                                             }
                                             break; case IrSymbolAttribute::Count: BUSTER_TRAP();
                                           break;
@@ -1083,16 +1146,14 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
             break; case ParserDeclaration::Block:
             {
                 let block_state = state(parser);
-                let token = peek_and_consume(parser);
+                let token = peek(parser);
 
                 switch (token.id)
                 {
-                    break; case TokenId::LeftBrace:
-                    {
-                        block_state->block.brace_depth += 1;
-                    }
                     break; case TokenId::RightBrace:
                     {
+                        consume(parser);
+
                         if (block_state->block.brace_depth == 0)
                         {
                             BUSTER_TRAP();
@@ -1104,13 +1165,89 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             parser.state_stack.pop();
                         }
                     }
-                    break; case TokenId::EOF:
-                    {
-                        BUSTER_TRAP();
-                    }
                     break; default:
                     {
+                        let statement_state = parser.state_stack.push();
+                        statement_state->id = ParserDeclaration::Statement;
+                        statement_state->statement.state = StatementStateId::Start;
                     }
+                }
+            }
+            break; case ParserDeclaration::Statement:
+            {
+                let statement_state = state(parser);
+                let token = peek_and_consume(parser);
+
+                switch (statement_state->statement.state)
+                {
+                    break; case StatementStateId::Start:
+                    {
+                        statement_state->statement.state = StatementStateId::End;
+                        statement_state->statement.end_of_statement_token = block_end_of_statement_token;
+
+                        switch (token.id)
+                        {
+                            break; case TokenId::Keyword_Return:
+                            {
+                                statement_state->statement.id = StatementId::Return;
+
+                                let state = parser.state_stack.push();
+                                state->id = ParserDeclaration::ReturnStatement;
+                                state->return_statement.state = ReturnStatementState::ValueOrEnd;
+                            }
+                            break; default: BUSTER_TRAP();
+                        }
+                    }
+                    break; case StatementStateId::End:
+                    {
+                        bool has_end_of_statement = statement_state->statement.end_of_statement_token != TokenId::Error;
+
+                        if (has_end_of_statement)
+                        {
+                            if (token.id != statement_state->statement.end_of_statement_token)
+                            {
+                                BUSTER_TRAP();
+                            }
+                        }
+
+                        parser.state_stack.pop();
+                    }
+                    break; case StatementStateId::Count: BUSTER_UNREACHABLE();
+                }
+            }
+            break; case ParserDeclaration::ReturnStatement:
+            {
+                let return_statement_state = state(parser);
+                let token = peek(parser);
+
+                let previous_state = return_statement_state - 1;
+                BUSTER_CHECK(previous_state->id == ParserDeclaration::Statement);
+                let end_of_statement_token = previous_state->statement.end_of_statement_token;
+
+                switch (return_statement_state->return_statement.state)
+                {
+                    break; case ReturnStatementState::ValueOrEnd:
+                    {
+                        if (token.id == end_of_statement_token)
+                        {
+                            return_statement_state->return_statement.state = ReturnStatementState::End;
+                        }
+                        else
+                        {
+                            BUSTER_TRAP();
+                        }
+                    }
+                    break; case ReturnStatementState::End:
+                    {
+                        if (token.id != end_of_statement_token)
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        consume(parser);
+                        parser.state_stack.pop();
+                    }
+                    break; case ReturnStatementState::Count: BUSTER_UNREACHABLE();
                 }
             }
             break; case ParserDeclaration::TypeDeclaration:
