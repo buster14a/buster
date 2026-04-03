@@ -226,6 +226,7 @@ struct Slice
 #define EACH_SLICE_INT(i, s) u64 i = 0; i < (s).length; i += 1
 #define EACH_SLICE_REF(e, s) let & e : (s)
 #define EACH_SLICE_VALUE(e, s) let e : (s)
+#define EACH_ARRAY_INDEX(i, a) u64 i = 0; i < BUSTER_ARRAY_LENGTH(a); i += 1
 
 typedef Slice<u8> ByteSlice;
 

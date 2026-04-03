@@ -1,18 +1,18 @@
-fn [cc(c)] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+code main[export] : fn [cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32
 {
-    let array_a: [_]s32 = [ 2 ];
-    let array_b: [1]s32 = [ 2 ];
-    let slice_a = array_a[..];
-    let slice_b: []s32 = array_b[..];
+    data array_a: [_]s32 = [ 2 ];
+    data array_b: [1]s32 = [ 2 ];
+    data slice_a = array_a[..];
+    data slice_b: []s32 = array_b[..];
 
-    let total_a: s32 = 0;
-    for (let a: slice_a)
+    data total_a: s32 = 0;
+    for (data a: slice_a)
     {
         total_a += a;
     }
 
-    let total_b: s32 = 0;
-    for (let b: slice_b)
+    data total_b: s32 = 0;
+    for (data b: slice_b)
     {
         total_b += b;
     }

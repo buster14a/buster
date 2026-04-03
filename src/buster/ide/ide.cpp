@@ -82,9 +82,9 @@ STRUCT(IdeProgram)
     TimeDataType last_frame_timestamp;
 };
 
-BUSTER_GLOBAL_LOCAL IdeProgram state = {};
+BUSTER_GLOBAL_LOCAL IdeProgram ide_state = {};
 
-BUSTER_F_IMPL ProgramState* program_state = &state.state;
+BUSTER_F_IMPL ProgramState* program_state = &ide_state.state;
 
 #if BUSTER_FUZZING
 BUSTER_F_IMPL s32 buster_fuzz(const u8* pointer, size_t size)
@@ -121,7 +121,7 @@ BUSTER_F_IMPL ProcessResult process_arguments()
         }
         else
         {
-            state.test = true;
+            ide_state.test = true;
         }
     }
 
@@ -171,17 +171,17 @@ BUSTER_GLOBAL_LOCAL void ui_node(UI_Node node)
 BUSTER_GLOBAL_LOCAL void app_update()
 {
     let frame_end = timestamp_take();
-    state.event_list = os_windowing_poll_events(state.state.arena, state.windowing);
-    let frame_ms = (f64)timestamp_ns_between(state.last_frame_timestamp, frame_end) / (1000 * 1000);
-    state.last_frame_timestamp = frame_end;
+    ide_state.event_list = os_windowing_poll_events(ide_state.state.arena, ide_state.windowing);
+    let frame_ms = (f64)timestamp_ns_between(ide_state.last_frame_timestamp, frame_end) / (1000 * 1000);
+    ide_state.last_frame_timestamp = frame_end;
 
-    for (OsWindowingEvent* os_event = state.event_list.first; os_event; os_event = os_event->next)
+    for (OsWindowingEvent* os_event = ide_state.event_list.first; os_event; os_event = os_event->next)
     {
         switch (os_event->kind)
         {
             case OsWindowingEventKind::OS_WINDOWING_EVENT_WINDOW_CLOSE:
             {
-                for (IdeWindow* window = state.first_window; window; window = window->next)
+                for (IdeWindow* window = ide_state.first_window; window; window = window->next)
                 {
                     if (window->os == os_event->window)
                     {
@@ -195,19 +195,19 @@ BUSTER_GLOBAL_LOCAL void app_update()
                             window->next->previous = window->previous;
                         }
 
-                        if (state.first_window == window)
+                        if (ide_state.first_window == window)
                         {
-                            state.first_window = window->next;
+                            ide_state.first_window = window->next;
                         }
 
-                        if (state.last_window == window)
+                        if (ide_state.last_window == window)
                         {
-                            state.last_window = window->previous;
+                            ide_state.last_window = window->previous;
                         }
 
                         ui_state_deinitialize(window->ui);
                         window->ui = 0;
-                        rendering_window_deinitialize(state.rendering, window->render);
+                        rendering_window_deinitialize(ide_state.rendering, window->render);
                         window->render = 0;
 
                         break;
@@ -218,17 +218,17 @@ BUSTER_GLOBAL_LOCAL void app_update()
         }
     }
 
-    let window = state.first_window;
+    let window = ide_state.first_window;
     while (window)
     {
         let next = window->next;
 
         let render_window = window->render;
-        rendering_window_frame_begin(state.rendering, render_window);
+        rendering_window_frame_begin(ide_state.rendering, render_window);
 
         ui_state_select(window->ui);
 
-        ui_build_begin(state.windowing, window->os, frame_ms, &state.event_list);
+        ui_build_begin(ide_state.windowing, window->os, frame_ms, &ide_state.event_list);
 
         ui_push(font_size, 24);
 
@@ -275,7 +275,7 @@ BUSTER_GLOBAL_LOCAL void app_update()
 
         ui_pop(font_size);
 
-        rendering_window_frame_end(state.rendering, render_window);
+        rendering_window_frame_end(ide_state.rendering, render_window);
 
         window = next;
     }
@@ -918,7 +918,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app()
     ProcessResult result = ProcessResult::Success;
 
 #if BUSTER_INCLUDE_TESTS
-    if (state.test)
+    if (ide_state.test)
     {
         let arena = arena_create((ArenaCreation){});
 

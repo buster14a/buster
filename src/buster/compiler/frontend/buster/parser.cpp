@@ -7,6 +7,10 @@
 #include <buster/arguments.h>
 #include <buster/compiler/ir/ir.h>
 
+BUSTER_GLOBAL_LOCAL constexpr let pointer_token = TokenId::Ampersand;
+BUSTER_GLOBAL_LOCAL constexpr let array_slice_token_start = TokenId::LeftBracket;
+BUSTER_GLOBAL_LOCAL constexpr let array_slice_token_end = (TokenId)((u64)array_slice_token_start + 1);
+
 BUSTER_GLOBAL_LOCAL constexpr u64 keyword_count = (u64)TokenId::Keyword_Last - (u64)TokenId::Keyword_First - 1;
 
 BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
@@ -14,13 +18,16 @@ BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
     [-1 + (u64)TokenId::Keyword_If - (u64)TokenId::Keyword_First] = S8("if"),
     [-1 + (u64)TokenId::Keyword_Else - (u64)TokenId::Keyword_First] = S8("else"),
     [-1 + (u64)TokenId::Keyword_Return - (u64)TokenId::Keyword_First] = S8("return"),
-    [-1 + (u64)TokenId::Keyword_Let - (u64)TokenId::Keyword_First] = S8("let"),
     [-1 + (u64)TokenId::Keyword_For - (u64)TokenId::Keyword_First] = S8("for"),
     [-1 + (u64)TokenId::Keyword_While - (u64)TokenId::Keyword_First] = S8("while"),
+    [-1 + (u64)TokenId::Keyword_Code - (u64)TokenId::Keyword_First] = S8("code"),
+    [-1 + (u64)TokenId::Keyword_Data - (u64)TokenId::Keyword_First] = S8("data"),
+    [-1 + (u64)TokenId::Keyword_Type - (u64)TokenId::Keyword_First] = S8("type"),
+    [-1 + (u64)TokenId::Keyword_Struct - (u64)TokenId::Keyword_First] = S8("struct"),
+    [-1 + (u64)TokenId::Keyword_Union - (u64)TokenId::Keyword_First] = S8("union"),
 };
-static_assert(BUSTER_ARRAY_LENGTH(keyword_names) == keyword_count);
 
-static_assert(sizeof(Token) == 2);
+static_assert(BUSTER_ARRAY_LENGTH(keyword_names) == keyword_count);
 
 #define SWITCH_ALPHA_UPPER \
                 case 'A':\
@@ -95,17 +102,12 @@ BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_
     if (file_length)
     {
         // Newlines can expand into line metadata plus the newline token itself.
-        let token_start = arena_allocate(arena, Token, (file_length * 7) + 2); // SOF, EOF
+        let token_start = arena_allocate(arena, Token, file_length + 1);
         let tokens = token_start;
         u64 token_count = 0;
 
         let it = file_pointer;
         let top = file_pointer + file_length;
-
-        tokens[token_count++] = {
-            .id = TokenId::SOF,
-            .length = 1,
-        };
 
         u32 line_count = 0;
 
@@ -118,36 +120,6 @@ BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_
 
             let start = it;
             let ch = *start;
-
-            if (ch == '\n')
-            {
-                let line_offset = (u32)(it - file_pointer) + 1;
-                let line_index = line_count++;
-
-                let line_offset_token_count = 3u;
-                let line_index_token_count = 3u;
-
-                let line_offset_token_index = (u32)token_count;
-                let line_index_token_index = (u32)(line_offset_token_index + line_offset_token_count);
-
-                token_count = line_offset_token_index + line_offset_token_count + line_index_token_count;
-
-                u32 values[] = { line_offset, line_index };
-                u32 indices[] = { line_offset_token_index, line_index_token_index };
-                TokenId ids[] = { TokenId::LineOffset, TokenId::LineIndex };
-
-                for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(values); i += 1)
-                {
-                    let token = &tokens[indices[i]];
-                    let value = values[i];
-                    *token = {
-                        .id = ids[i],
-                        .length = 0,
-                    };
-
-                    *(u32*)(token + 1) = value;
-                }
-            }
 
             {
                 TokenId id;
@@ -194,7 +166,7 @@ SWITCH_DIGIT:
 
                         if (i == keyword_count)
                         {
-                            id = TokenId::Identifier;
+                            id = identifier.length == 1 && identifier[0] == '_' ? TokenId::Underscore : TokenId::Identifier;
                         }
                         else
                         {
@@ -281,23 +253,21 @@ SWITCH_DIGIT:
                 }
 
                 let end = it;
-                let length = (u32)(end - start);
-
-                bool big_length = length > UINT8_MAX;
-
-                let token_index = token_count;
-                tokens[token_index] = { 
-                    .id = id,
-                    .length = BUSTER_SELECT(big_length, (u8)0, (u8)length),
-                };
-
-                if (big_length)
+                let length = (u64)(end - start);
+                if (length > (((u64)1 << 24) - 1))
                 {
-                    static_assert(sizeof(Token) * 2 == sizeof(u32));
-                    *(u32*)(&tokens[token_index + 1]) = length;
+                    BUSTER_TRAP(); // TODO: error
                 }
 
-                token_count = token_index + 1 + ((u32)big_length << 1);
+
+                let token_index = token_count;
+
+                tokens[token_index] = { 
+                    .length = (u32)length,
+                    .id = id,
+                };
+
+                token_count = token_index + 1;
             }
         }
 
@@ -315,30 +285,41 @@ SWITCH_DIGIT:
 
 ENUM_T(ParserDeclaration, u8,
         None,
-        Function,
-        Type,
+        Code,
+        TypeReference,
         AttributeList,
-        Block);
+        Block,
+        TypeDeclaration,
+        DataDeclaration);
 
-ENUM_T(FunctionState, u8,
+ENUM_T(CodeState, u8,
     BeforeName,
     AfterName,
-    ArgumentNameOrClose,
-    ArgumentColon,
-    ArgumentType,
-    ArgumentDelimiterOrClose,
-    ReturnType,
+    Type,
+    AfterType,
+    AfterEqual,
     Body);
 
 ENUM_T(TypeState, u8,
     PrefixOrBase,
-    AfterLeftBracket,
+    AfterArraySliceStart,
     AfterArrayCount,
-    AfterArrayInferMarker);
+    AfterArrayInferMarker,
+    AfterFunctionKeyword,
+    FunctionArgumentNameOrClose,
+    FunctionArgumentAfterNameSegment,
+    FunctionArgumentAfterColon,
+    FunctionArgumentType,
+    FunctionArgumentDelimiterOrClose,
+    FunctionReturnType,
+    AfterFunctionReturnType);
 
 ENUM_T(AttributeListKind, u8,
-    Function,
-    Symbol);
+    Code,
+    Data,
+    Symbol,
+    Function);
+// TODO add more
 
 ENUM_T(AttributeListState, u8,
     ItemOrClose,
@@ -348,13 +329,14 @@ ENUM_T(AttributeListState, u8,
 
 STRUCT(ParserState)
 {
-    ParserDeclaration declaration_id;
+    ParserDeclaration id;
     union
     {
         struct
         {
-            FunctionState current_state;
-        } function;
+            CodeState current_state;
+            String8 name;
+        } code;
 
         struct
         {
@@ -363,6 +345,11 @@ STRUCT(ParserState)
 
         struct
         {
+            union
+            {
+                IrSymbolAttributes symbol;
+                IrFunctionAttributes function;
+            };
             AttributeListKind kind;
             AttributeListState current_state;
         } attribute_list;
@@ -385,19 +372,11 @@ STRUCT(ExtendedToken)
 
 static_assert(sizeof(ExtendedToken) == 16);
 
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 get_token_length(Token* restrict token,
-        // These are pre-read
-        TokenId token_id, u8 token_length)
-{
-    bool extended_length = token_length == 0;
-    bool has_fake_length = token_id == TokenId::LineFeed || token_id == TokenId::SOF || token_id == TokenId::EOF;
-    u32 length = has_fake_length ? 0 : (extended_length ? *(u32*)(token + 1) : token_length);
-    return length;
-}
-
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 get_token_length(Token* restrict token)
 {
-    return get_token_length(token, token->id, token->length);
+    bool has_fake_length = token->id == TokenId::EOF;
+    u32 length = has_fake_length ? 0 : token->length;
+    return length;
 }
 
 STRUCT(StateStack)
@@ -444,15 +423,19 @@ STRUCT(Parser)
 
 BUSTER_GLOBAL_LOCAL void consume(Parser& restrict parser, Token* restrict token)
 {
-    // Line number and line offset are always 32-bit length
     let length = get_token_length(token);
-    parser.line_index = token->id == TokenId::LineIndex ? length : parser.line_index;
-    parser.line_offset = token->id == TokenId::LineOffset ? length : parser.line_offset;
-    parser.column_index = token->id == TokenId::LineFeed ? 0 : (parser.column_index + ((token->id == TokenId::LineIndex || token->id == TokenId::LineOffset) ? 0 : length));
-    parser.token_index += 1 + ((u32)(token->length == 0) << 1);
+    parser.line_index += token->id == TokenId::LineFeed;
+    parser.line_offset = token->id == TokenId::LineFeed ? parser.column_index : parser.line_offset;
+    parser.column_index = token->id == TokenId::LineFeed ? 0 : length + parser.column_index;
+    parser.token_index += 1;
 }
 
-BUSTER_GLOBAL_LOCAL ExtendedToken peek(Parser& restrict parser, bool consume_result = false)
+BUSTER_GLOBAL_LOCAL void consume(Parser& restrict parser)
+{
+    consume(parser, &parser.tokens[parser.token_index]);
+}
+
+BUSTER_GLOBAL_LOCAL ExtendedToken peek_extended(Parser& restrict parser, bool consume_result)
 {
     ExtendedToken result = {};
     bool is_noise = true;
@@ -472,8 +455,6 @@ BUSTER_GLOBAL_LOCAL ExtendedToken peek(Parser& restrict parser, bool consume_res
 
         is_noise =
             id == TokenId::LineFeed ||
-            id == TokenId::LineOffset ||
-            id == TokenId::LineIndex ||
             id == TokenId::Tab ||
             id == TokenId::Space ||
             id == TokenId::Comment ||
@@ -488,9 +469,14 @@ BUSTER_GLOBAL_LOCAL ExtendedToken peek(Parser& restrict parser, bool consume_res
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL ExtendedToken peek(Parser& restrict parser)
+{
+    return peek_extended(parser, false);
+}
+
 BUSTER_GLOBAL_LOCAL ExtendedToken peek_and_consume(Parser& restrict parser)
 {
-    return peek(parser, true);
+    return peek_extended(parser, true);
 }
 
 BUSTER_GLOBAL_LOCAL String8 get_string(Parser& parser, ExtendedToken token)
@@ -549,6 +535,67 @@ BUSTER_GLOBAL_LOCAL bool token_matches_any(Parser& parser, ExtendedToken token, 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool token_begins_type(TokenId id)
+{
+    bool result =
+        id == TokenId::Identifier ||
+        id == pointer_token ||
+        id == array_slice_token_start ||
+        id == TokenId::Keyword_Function;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ExtendedToken peek_ahead(Parser& parser, u32 count)
+{
+    Parser copy = parser;
+    ExtendedToken result = {};
+
+    for (u32 i = 0; i <= count; i += 1)
+    {
+        result = peek_and_consume(copy);
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void finish_type_reference(Parser& parser)
+{
+    parser.state_stack.pop();
+
+    let resume_state = state(parser);
+
+    switch (resume_state->id)
+    {
+        break; case ParserDeclaration::Code:
+        {
+            if (resume_state->code.current_state != CodeState::Type)
+            {
+                BUSTER_TRAP();
+            }
+
+            resume_state->code.current_state = CodeState::AfterType;
+        }
+        break; case ParserDeclaration::TypeReference:
+        {
+            switch (resume_state->type.current_state)
+            {
+                break; case TypeState::FunctionArgumentType:
+                {
+                    resume_state->type.current_state = TypeState::FunctionArgumentDelimiterOrClose;
+                }
+                break; case TypeState::FunctionReturnType:
+                {
+                    resume_state->type.current_state = TypeState::AfterFunctionReturnType;
+                }
+                break; default: BUSTER_TRAP();
+            }
+        }
+        break; default:
+        {
+        }
+    }
+}
+
 ENUM(IrFunctionAttribute,
     CallingConvention);
 
@@ -575,35 +622,63 @@ BUSTER_GLOBAL_LOCAL String8 symbol_attribute_names[] = {
 
 static_assert(BUSTER_ARRAY_LENGTH(symbol_attribute_names) == (u64)IrSymbolAttribute::Count);
 
+STRUCT(AstFunctionDeclaration)
+{
+};
+
+STRUCT(AstFunctionDefinition)
+{
+};
+
+STRUCT(AstBlock)
+{
+};
+
+ENUM_T(AstNodeId, u8,
+    FunctionDefinition,
+    FunctionDeclaration,
+    Block);
+
+STRUCT(AstNode)
+{
+    union
+    {
+        AstFunctionDefinition function_definition;
+        AstFunctionDeclaration function_declaration;
+        AstBlock block;
+    };
+
+    AstNodeId id;
+};
+
 BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tokenizer)
 {
     Parser parser = {};
-    parser.token_index += 1;
     parser.tokens = tokenizer.tokens;
     parser.source = source;
     parser.state_stack.arena = arena_create({});
-
-    BUSTER_CHECK(parser.tokens[0].id == TokenId::SOF);
 
     // Push a dummy state so the stack is never empty
     parser.state_stack.push();
 
     bool is_running = true;
+
     while (is_running)
     {
-        switch (state(parser)->declaration_id)
+        switch (state(parser)->id)
         {
+            break; case ParserDeclaration::Count: BUSTER_UNREACHABLE();
             break; case ParserDeclaration::None:
             {
                 let token = peek_and_consume(parser);
 
                 switch (token.id)
                 {
-                    break; case TokenId::Keyword_Function:
+                    break; case TokenId::Keyword_Code:
                     {
                         let function_state = parser.state_stack.push();
-                        function_state->declaration_id = ParserDeclaration::Function;
-                        function_state->function.current_state = FunctionState::BeforeName;
+                        function_state->id = ParserDeclaration::Code;
+                        function_state->code.current_state = CodeState::BeforeName;
                     }
                     break; case TokenId::EOF:
                     {
@@ -612,188 +687,165 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     break; default: BUSTER_TRAP();
                 }
             }
-            break; case ParserDeclaration::Function:
+            break; case ParserDeclaration::Code:
             {
-                let function_state = state(parser);
-                let token = peek_and_consume(parser);
+                let code_state = state(parser);
+                let token = peek(parser);
 
-                switch (function_state->function.current_state)
+                switch (code_state->code.current_state)
                 {
-                    break; case FunctionState::BeforeName:
+                    break; case CodeState::BeforeName:
                     {
+                        consume(parser);
+
                         switch (token.id)
                         {
                             break; case TokenId::LeftBracket:
                             {
                                 let attribute_list_state = parser.state_stack.push();
-                                attribute_list_state->declaration_id = ParserDeclaration::AttributeList;
-                                attribute_list_state->attribute_list.kind = AttributeListKind::Function;
+                                attribute_list_state->id = ParserDeclaration::AttributeList;
+                                attribute_list_state->attribute_list.kind = AttributeListKind::Code;
                                 attribute_list_state->attribute_list.current_state = AttributeListState::ItemOrClose;
                             }
                             break; case TokenId::Identifier:
                             {
-                                function_state->function.current_state = FunctionState::AfterName;
+                                code_state->code.name = get_string(parser, token);
+                                code_state->code.current_state = CodeState::AfterName;
                             }
                             break; default: BUSTER_TRAP();
                         }
                     }
-                    break; case FunctionState::AfterName:
+                    break; case CodeState::AfterName:
                     {
+                        consume(parser);
+
                         switch (token.id)
                         {
+                            break; case TokenId::Colon:
+                            {
+                                code_state->code.current_state = CodeState::Type;
+
+                                let type_state = parser.state_stack.push();
+                                type_state->id = ParserDeclaration::TypeReference;
+                                type_state->type.current_state = TypeState::PrefixOrBase;
+                            }
+                            break; case TokenId::Equal:
+                            {
+                                BUSTER_TRAP();
+                            }
                             break; case TokenId::LeftBracket:
                             {
                                 let attribute_list_state = parser.state_stack.push();
-                                attribute_list_state->declaration_id = ParserDeclaration::AttributeList;
+                                attribute_list_state->id = ParserDeclaration::AttributeList;
                                 attribute_list_state->attribute_list.kind = AttributeListKind::Symbol;
                                 attribute_list_state->attribute_list.current_state = AttributeListState::ItemOrClose;
                             }
-                            break; case TokenId::LeftParenthesis:
-                            {
-                                function_state->function.current_state = FunctionState::ArgumentNameOrClose;
-                            }
                             break; default: BUSTER_TRAP();
                         }
                     }
-                    break; case FunctionState::ArgumentNameOrClose:
+                    break; case CodeState::Type:
+                    {
+                        BUSTER_UNREACHABLE();
+                    }
+                    break; case CodeState::AfterType:
                     {
                         switch (token.id)
                         {
-                            break; case TokenId::RightParenthesis:
+                            break; case TokenId::LeftBrace:
                             {
-                                function_state->function.current_state = FunctionState::ReturnType;
+                                consume(parser);
 
-                                let type_state = parser.state_stack.push();
-                                type_state->declaration_id = ParserDeclaration::Type;
-                                type_state->type.current_state = TypeState::PrefixOrBase;
+                                code_state->code.current_state = CodeState::Body;
+
+                                let block_state = parser.state_stack.push();
+                                block_state->id = ParserDeclaration::Block;
+                                block_state->block.brace_depth = 1;
                             }
-                            break; case TokenId::Identifier:
+                            break; case TokenId::Semicolon:
                             {
-                                function_state->function.current_state = FunctionState::ArgumentColon;
+                                consume(parser);
+                                parser.state_stack.pop();
                             }
-                            break; default: BUSTER_TRAP();
-                        }
-                    }
-                    break; case FunctionState::ArgumentColon:
-                    {
-                        if (token.id != TokenId::Colon)
-                        {
-                            BUSTER_TRAP();
-                        }
-
-                        function_state->function.current_state = FunctionState::ArgumentType;
-
-                        let type_state = parser.state_stack.push();
-                        type_state->declaration_id = ParserDeclaration::Type;
-                        type_state->type.current_state = TypeState::PrefixOrBase;
-                    }
-                    break; case FunctionState::ArgumentType:
-                    {
-                        BUSTER_TRAP();
-                    }
-                    break; case FunctionState::ArgumentDelimiterOrClose:
-                    {
-                        switch (token.id)
-                        {
-                            break; case TokenId::Comma:
+                            break; case TokenId::Equal:
                             {
-                                function_state->function.current_state = FunctionState::ArgumentNameOrClose;
-                            }
-                            break; case TokenId::RightParenthesis:
-                            {
-                                function_state->function.current_state = FunctionState::ReturnType;
-
-                                let type_state = parser.state_stack.push();
-                                type_state->declaration_id = ParserDeclaration::Type;
-                                type_state->type.current_state = TypeState::PrefixOrBase;
+                                consume(parser);
+                                code_state->code.current_state = CodeState::AfterEqual;
                             }
                             break; default: BUSTER_TRAP();
                         }
                     }
-                    break; case FunctionState::ReturnType:
-                    {
-                        BUSTER_TRAP();
-                    }
-                    break; case FunctionState::Body:
+                    break; case CodeState::AfterEqual:
                     {
                         if (token.id != TokenId::LeftBrace)
                         {
                             BUSTER_TRAP();
                         }
 
-                        // The block frame owns brace balancing for the whole body.
-                        parser.state_stack.pop();
+                        consume(parser);
+
+                        code_state->code.current_state = CodeState::Body;
 
                         let block_state = parser.state_stack.push();
-                        block_state->declaration_id = ParserDeclaration::Block;
+                        block_state->id = ParserDeclaration::Block;
                         block_state->block.brace_depth = 1;
                     }
-                    break; case FunctionState::Count: BUSTER_UNREACHABLE();
+                    break; case CodeState::Body:
+                    {
+                        parser.state_stack.pop();
+                    }
+                    break; case CodeState::Count: BUSTER_UNREACHABLE();
                 }
             }
-            break; case ParserDeclaration::Type:
+            break; case ParserDeclaration::TypeReference:
             {
                 let type_state = state(parser);
-                let token = peek_and_consume(parser);
-
+                let token = peek(parser);
+                
                 switch (type_state->type.current_state)
                 {
                     break; case TypeState::PrefixOrBase:
                     {
                         switch (token.id)
                         {
-                            break; case TokenId::Ampersand:
+                            break; case pointer_token:
                             {
+                                consume(parser);
                             }
-                            break; case TokenId::LeftBracket:
+                            break; case array_slice_token_start:
                             {
-                                type_state->type.current_state = TypeState::AfterLeftBracket;
+                                consume(parser);
+                                type_state->type.current_state = TypeState::AfterArraySliceStart;
                             }
                             break; case TokenId::Identifier:
                             {
-                                parser.state_stack.pop();
-
-                                let resume_state = state(parser);
-                                if (resume_state->declaration_id == ParserDeclaration::Function)
-                                {
-                                    switch (resume_state->function.current_state)
-                                    {
-                                        break; case FunctionState::ArgumentType:
-                                        {
-                                            resume_state->function.current_state = FunctionState::ArgumentDelimiterOrClose;
-                                        }
-                                        break; case FunctionState::ReturnType:
-                                        {
-                                            resume_state->function.current_state = FunctionState::Body;
-                                        }
-                                        break; default:
-                                        {
-                                        }
-                                    }
-                                }
+                                consume(parser);
+                                finish_type_reference(parser);
+                            }
+                            break; case TokenId::Keyword_Function:
+                            {
+                                consume(parser);
+                                type_state->type.current_state = TypeState::AfterFunctionKeyword;
                             }
                             break; default: BUSTER_TRAP();
                         }
                     }
-                    break; case TypeState::AfterLeftBracket:
+                    break; case TypeState::AfterArraySliceStart:
                     {
                         switch (token.id)
                         {
-                            break; case TokenId::RightBracket:
+                            break; case array_slice_token_end:
                             {
+                                consume(parser);
                                 type_state->type.current_state = TypeState::PrefixOrBase;
                             }
                             break; case TokenId::Number:
                             {
+                                consume(parser);
                                 type_state->type.current_state = TypeState::AfterArrayCount;
                             }
-                            break; case TokenId::Identifier:
+                            break; case TokenId::Underscore:
                             {
-                                if (!token_matches(parser, token, S8("_")))
-                                {
-                                    BUSTER_TRAP();
-                                }
-
+                                consume(parser);
                                 type_state->type.current_state = TypeState::AfterArrayInferMarker;
                             }
                             break; default: BUSTER_TRAP();
@@ -806,6 +858,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             BUSTER_TRAP();
                         }
 
+                        consume(parser);
                         type_state->type.current_state = TypeState::PrefixOrBase;
                     }
                     break; case TypeState::AfterArrayInferMarker:
@@ -815,7 +868,116 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             BUSTER_TRAP();
                         }
 
+                        consume(parser);
                         type_state->type.current_state = TypeState::PrefixOrBase;
+                    }
+                    break; case TypeState::AfterFunctionKeyword:
+                    {
+                        switch (token.id)
+                        {
+                            break; case TokenId::LeftBracket:
+                            {
+                                consume(parser);
+
+                                let attribute_list_state = parser.state_stack.push();
+                                attribute_list_state->id = ParserDeclaration::AttributeList;
+                                attribute_list_state->attribute_list.kind = AttributeListKind::Function;
+                                attribute_list_state->attribute_list.current_state = AttributeListState::ItemOrClose;
+                            }
+                            break; case TokenId::LeftParenthesis:
+                            {
+                                consume(parser);
+                                type_state->type.current_state = TypeState::FunctionArgumentNameOrClose;
+                            }
+                            break; default: BUSTER_TRAP();
+                        }
+                    }
+                    break; case TypeState::FunctionArgumentNameOrClose:
+                    {
+                        switch (token.id)
+                        {
+                            break; case TokenId::RightParenthesis:
+                            {
+                                consume(parser);
+                                type_state->type.current_state = TypeState::FunctionReturnType;
+                            }
+                            break; case TokenId::Identifier:
+                            {
+                                consume(parser);
+                                type_state->type.current_state = TypeState::FunctionArgumentAfterNameSegment;
+                            }
+                            break; default: BUSTER_TRAP();
+                        }
+                    }
+                    break; case TypeState::FunctionArgumentAfterNameSegment:
+                    {
+                        if (token.id != TokenId::Colon)
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        consume(parser);
+                        type_state->type.current_state = TypeState::FunctionArgumentAfterColon;
+                    }
+                    break; case TypeState::FunctionArgumentAfterColon:
+                    {
+                        if (token.id == TokenId::Identifier)
+                        {
+                            let next = peek_ahead(parser, 1);
+                            if (next.id == TokenId::Colon)
+                            {
+                                consume(parser);
+                                type_state->type.current_state = TypeState::FunctionArgumentAfterNameSegment;
+                                break;
+                            }
+                        }
+
+                        if (!token_begins_type(token.id))
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        type_state->type.current_state = TypeState::FunctionArgumentType;
+
+                        let child_type_state = parser.state_stack.push();
+                        child_type_state->id = ParserDeclaration::TypeReference;
+                        child_type_state->type.current_state = TypeState::PrefixOrBase;
+                    }
+                    break; case TypeState::FunctionArgumentType:
+                    {
+                        BUSTER_TRAP();
+                    }
+                    break; case TypeState::FunctionArgumentDelimiterOrClose:
+                    {
+                        switch (token.id)
+                        {
+                            break; case TokenId::Comma:
+                            {
+                                consume(parser);
+                                type_state->type.current_state = TypeState::FunctionArgumentNameOrClose;
+                            }
+                            break; case TokenId::RightParenthesis:
+                            {
+                                consume(parser);
+                                type_state->type.current_state = TypeState::FunctionReturnType;
+                            }
+                            break; default: BUSTER_TRAP();
+                        }
+                    }
+                    break; case TypeState::FunctionReturnType:
+                    {
+                        if (!token_begins_type(token.id))
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        let child_type_state = parser.state_stack.push();
+                        child_type_state->id = ParserDeclaration::TypeReference;
+                        child_type_state->type.current_state = TypeState::PrefixOrBase;
+                    }
+                    break; case TypeState::AfterFunctionReturnType:
+                    {
+                        finish_type_reference(parser);
                     }
                     break; case TypeState::Count: BUSTER_UNREACHABLE();
                 }
@@ -829,29 +991,63 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                 {
                     break; case AttributeListState::ItemOrClose:
                     {
-                        if (token.id == TokenId::RightBracket)
+                        switch (token.id)
                         {
-                            parser.state_stack.pop();
-                        }
-                        else if (attribute_list_state->attribute_list.kind == AttributeListKind::Function)
-                        {
-                            if (!token_matches(parser, token, function_attribute_names[(u64)IrFunctionAttribute::CallingConvention]))
+                            break; case TokenId::RightBracket:
                             {
-                                BUSTER_TRAP();
+                                parser.state_stack.pop();
                             }
+                            break; case TokenId::Identifier:
+                            {
+                                let attribute_name = get_string(parser, token);
 
-                            attribute_list_state->attribute_list.current_state = AttributeListState::CallingConventionOpen;
-                        }
-                        else if (attribute_list_state->attribute_list.kind == AttributeListKind::Symbol)
-                        {
-                            if (!token_matches_any(parser, token, symbol_attribute_names, BUSTER_ARRAY_LENGTH(symbol_attribute_names)))
-                            {
-                                BUSTER_TRAP();
+                                switch (attribute_list_state->attribute_list.kind)
+                                {
+                                    break; case AttributeListKind::Code:
+                                    {
+                                        BUSTER_TRAP();
+                                    }
+                                    break; case AttributeListKind::Data:
+                                    {
+                                        BUSTER_TRAP();
+                                    }
+                                    break; case AttributeListKind::Symbol:
+                                    {
+                                        let attribute = IrSymbolAttribute::Count;
+
+                                        for (EACH_ARRAY_INDEX(i, symbol_attribute_names))
+                                        {
+                                            if (string8_equal(attribute_name, symbol_attribute_names[i]))
+                                            {
+                                                attribute = (IrSymbolAttribute)i;
+                                                break;
+                                            }
+                                        }
+
+                                        switch (attribute)
+                                        {
+                                            break; case IrSymbolAttribute::Export:
+                                            {
+                                                attribute_list_state->attribute_list.symbol.exported = true;
+                                                attribute_list_state->attribute_list.symbol.linkage = IrLinkage::External;
+                                            }
+                                            break; case IrSymbolAttribute::Count: BUSTER_TRAP();
+                                          break;
+                                        }
+                                    }
+                                    break; case AttributeListKind::Function:
+                                    {
+                                        if (!string8_equal(attribute_name, function_attribute_names[(u64)IrFunctionAttribute::CallingConvention]))
+                                        {
+                                            BUSTER_TRAP();
+                                        }
+
+                                        attribute_list_state->attribute_list.current_state = AttributeListState::CallingConventionOpen;
+                                    }
+                                    break; case AttributeListKind::Count: BUSTER_UNREACHABLE();
+                                }
                             }
-                        }
-                        else
-                        {
-                            BUSTER_UNREACHABLE();
+                            break; default: BUSTER_TRAP();
                         }
                     }
                     break; case AttributeListState::CallingConventionOpen:
@@ -917,7 +1113,14 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     }
                 }
             }
-            break; case ParserDeclaration::Count: BUSTER_UNREACHABLE();
+            break; case ParserDeclaration::TypeDeclaration:
+            {
+                BUSTER_TRAP();
+            }
+            break; case ParserDeclaration::DataDeclaration:
+            {
+                BUSTER_TRAP();
+            }
         }
     }
 
@@ -952,9 +1155,7 @@ BUSTER_F_IMPL void parser_experiments()
 BUSTER_F_IMPL BatchTestResult parser_tests(UnitTestArguments* arguments)
 {
     BatchTestResult result = {};
-    consume_unit_tests(&result, parser_statement_semicolon_tests(arguments));
-    consume_unit_tests(&result, parser_top_level_declaration_tests(arguments));
-    consume_unit_tests(&result, parser_multiline_prefix_tests(arguments));
+    parser_experiments();
     return result;
 }
 #endif

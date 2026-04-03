@@ -1,4 +1,4 @@
-fn [cc(c)] main [export] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+code main[export] : fn[cc(c)] (argument:count: s32, argv: &&u8, envp: &&u8) s32
 {
     return 0;
 }

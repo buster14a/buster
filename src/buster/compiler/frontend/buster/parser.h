@@ -10,15 +10,13 @@ ENUM_T(TokenId, u8,
     Error,
     Space,
     Tab,
-    LineOffset,
-    LineIndex,
     LineFeed,
     CarriageReturn,
     Comment,
-    SOF,
     EOF,
     Identifier,
     Number,
+    Underscore,
     LeftBracket,
     RightBracket,
     LeftBrace,
@@ -48,37 +46,23 @@ ENUM_T(TokenId, u8,
     Keyword_If,
     Keyword_Else,
     Keyword_Function,
-    Keyword_Let,
     Keyword_For,
     Keyword_While,
+    Keyword_Code,
+    Keyword_Data,
+    Keyword_Type,
+    Keyword_Struct,
+    Keyword_Union,
     Keyword_Last,
     Nonsense);
 
 STRUCT(Token)
 {
+    u32 length:24;
     TokenId id;
-    u8 length;
 };
 
-// STRUCT(ParserResult)
-// {
-//     LexerTokenIndex* restrict parser_to_lexer_indices;
-//     TopLevelDeclarationRange* restrict top_level_declarations;
-//     Token* restrict lexer_tokens;
-//     const char8* restrict source;
-//     u64 error_count;
-//     u32 parser_token_count;
-//     u32 top_level_declaration_count;
-//     u32 lexer_token_count;
-//     u32 reserved;
-//
-//     BUSTER_INLINE Token* get_token(ParserTokenIndex index) const
-//     {
-//         let i = parser_to_lexer_indices[index.v];
-//         let token = &lexer_tokens[i.v];
-//         return token;
-//     }
-// };
+static_assert(sizeof(Token) == sizeof(u32));
 
 STRUCT(TokenizerResult)
 {
@@ -94,5 +78,4 @@ STRUCT(LineAndColumn)
 
 BUSTER_F_DECL void parser_experiments();
 BUSTER_F_DECL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length);
-// BUSTER_F_DECL ParserResult parse(const char8* restrict source, TokenizerResult tokenizer);
 BUSTER_F_IMPL String8 get_token_content(const char8* source, Token* restrict tokens, u32 lexer_token_index);
