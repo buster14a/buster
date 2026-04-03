@@ -94,7 +94,8 @@ BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_
 
     if (file_length)
     {
-        let token_start = arena_allocate(arena, Token, file_length + 2); // SOF, EOF
+        // Newlines can expand into line metadata plus the newline token itself.
+        let token_start = arena_allocate(arena, Token, (file_length * 7) + 2); // SOF, EOF
         let tokens = token_start;
         u64 token_count = 0;
 
@@ -123,8 +124,8 @@ BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_
                 let line_offset = (u32)(it - file_pointer) + 1;
                 let line_index = line_count++;
 
-                let line_offset_token_count = ((u32)(line_offset > UINT8_MAX) << 1) + 1;
-                let line_index_token_count = ((u32)(line_offset > UINT8_MAX) << 1) + 1;
+                let line_offset_token_count = 3u;
+                let line_index_token_count = 3u;
 
                 let line_offset_token_index = (u32)token_count;
                 let line_index_token_index = (u32)(line_offset_token_index + line_offset_token_count);
@@ -141,10 +142,9 @@ BUSTER_F_IMPL TokenizerResult tokenize(Arena* arena, const char8* restrict file_
                     let value = values[i];
                     *token = {
                         .id = ids[i],
-                        .length = value > UINT8_MAX ? (u8)0 : (u8)value,
+                        .length = 0,
                     };
 
-                    // We write here any way because why not
                     *(u32*)(token + 1) = value;
                 }
             }
@@ -291,9 +291,12 @@ SWITCH_DIGIT:
                     .length = BUSTER_SELECT(big_length, (u8)0, (u8)length),
                 };
 
-                static_assert(sizeof(Token) * 2 == sizeof(u32));
+                if (big_length)
+                {
+                    static_assert(sizeof(Token) * 2 == sizeof(u32));
+                    *(u32*)(&tokens[token_index + 1]) = length;
+                }
 
-                *(u32*)(&tokens[token_index + 1]) = length;
                 token_count = token_index + 1 + ((u32)big_length << 1);
             }
         }
@@ -313,22 +316,62 @@ SWITCH_DIGIT:
 ENUM_T(ParserDeclaration, u8,
         None,
         Function,
-        Type);
+        Type,
+        AttributeList,
+        Block);
 
-ENUM(FunctionState, u8,
-    FunctionAttributeListParse,
-    NameParse,
-    SymbolAttributeListParse,
-    ArgumentListParse,
-    ReturnTypeParse);
+ENUM_T(FunctionState, u8,
+    BeforeName,
+    AfterName,
+    ArgumentNameOrClose,
+    ArgumentColon,
+    ArgumentType,
+    ArgumentDelimiterOrClose,
+    ReturnType,
+    Body);
+
+ENUM_T(TypeState, u8,
+    PrefixOrBase,
+    AfterLeftBracket,
+    AfterArrayCount,
+    AfterArrayInferMarker);
+
+ENUM_T(AttributeListKind, u8,
+    Function,
+    Symbol);
+
+ENUM_T(AttributeListState, u8,
+    ItemOrClose,
+    CallingConventionOpen,
+    CallingConventionName,
+    CallingConventionClose);
+
 STRUCT(ParserState)
 {
-    struct
-    {
-        FunctionState current_state;
-        FLAG_ARRAY_U64(flags, FunctionState);
-    } function;
     ParserDeclaration declaration_id;
+    union
+    {
+        struct
+        {
+            FunctionState current_state;
+        } function;
+
+        struct
+        {
+            TypeState current_state;
+        } type;
+
+        struct
+        {
+            AttributeListKind kind;
+            AttributeListState current_state;
+        } attribute_list;
+
+        struct
+        {
+            u32 brace_depth;
+        } block;
+    };
 };
 
 STRUCT(ExtendedToken)
@@ -405,7 +448,7 @@ BUSTER_GLOBAL_LOCAL void consume(Parser& restrict parser, Token* restrict token)
     let length = get_token_length(token);
     parser.line_index = token->id == TokenId::LineIndex ? length : parser.line_index;
     parser.line_offset = token->id == TokenId::LineOffset ? length : parser.line_offset;
-    parser.column_index = parser.column_index + ((token->id == TokenId::LineIndex || token->id == TokenId::LineOffset) ? 0 : length);
+    parser.column_index = token->id == TokenId::LineFeed ? 0 : (parser.column_index + ((token->id == TokenId::LineIndex || token->id == TokenId::LineOffset) ? 0 : length));
     parser.token_index += 1 + ((u32)(token->length == 0) << 1);
 }
 
@@ -416,7 +459,7 @@ BUSTER_GLOBAL_LOCAL ExtendedToken peek(Parser& restrict parser, bool consume_res
 
     do
     {
-        auto* restrict token = &parser.tokens[parser.token_index];
+        let restrict token = &parser.tokens[parser.token_index];
         let id = token->id;
         let token_length = token->length;
         result = {
@@ -478,6 +521,34 @@ BUSTER_GLOBAL_LOCAL ParserState* state(Parser& parser)
     return parser.state_stack.top();
 }
 
+BUSTER_GLOBAL_LOCAL bool token_matches(Parser& parser, ExtendedToken token, String8 expected)
+{
+    bool result = false;
+    if (token.id == TokenId::Identifier)
+    {
+        result = string8_equal(get_string(parser, token), expected);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool token_matches_any(Parser& parser, ExtendedToken token, String8* names, u64 name_count)
+{
+    bool result = false;
+    if (token.id == TokenId::Identifier)
+    {
+        let candidate = get_string(parser, token);
+        for (u64 i = 0; i < name_count; i += 1)
+        {
+            if (string8_equal(candidate, names[i]))
+            {
+                result = true;
+                break;
+            }
+        }
+    }
+    return result;
+}
+
 ENUM(IrFunctionAttribute,
     CallingConvention);
 
@@ -517,13 +588,14 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
     // Push a dummy state so the stack is never empty
     parser.state_stack.push();
 
-    while (true)
+    bool is_running = true;
+    while (is_running)
     {
         switch (state(parser)->declaration_id)
         {
             break; case ParserDeclaration::None:
             {
-                auto token = peek_and_consume(parser);
+                let token = peek_and_consume(parser);
 
                 switch (token.id)
                 {
@@ -531,215 +603,319 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     {
                         let function_state = parser.state_stack.push();
                         function_state->declaration_id = ParserDeclaration::Function;
+                        function_state->function.current_state = FunctionState::BeforeName;
                     }
-                    break; default: BUSTER_UNREACHABLE();
+                    break; case TokenId::EOF:
+                    {
+                        is_running = false;
+                    }
+                    break; default: BUSTER_TRAP();
                 }
             }
             break; case ParserDeclaration::Function:
             {
-                auto token = peek_and_consume(parser);
-                let initial_state = state(parser);
+                let function_state = state(parser);
+                let token = peek_and_consume(parser);
 
-                let has_parsed_return_type = flag_get(initial_state->function.flags, FunctionState::ReturnTypeParse);
-                let has_parsed_argument_list = flag_get(initial_state->function.flags, FunctionState::ArgumentListParse);
-                let has_parsed_symbol_attributes = flag_get(initial_state->function.flags, FunctionState::SymbolAttributeListParse);
-                let has_parsed_function_name = flag_get(initial_state->function.flags, FunctionState::NameParse);
-                let has_parsed_function_attributes = flag_get(initial_state->function.flags, FunctionState::FunctionAttributeListParse);
-
-                switch (token.id)
+                switch (function_state->function.current_state)
                 {
-                    break; case TokenId::LeftBracket:
+                    break; case FunctionState::BeforeName:
                     {
-                        bool error =
-                            has_parsed_return_type ||
-                            has_parsed_argument_list ||
-                            has_parsed_symbol_attributes ||
-                            (has_parsed_function_name && has_parsed_function_attributes && has_parsed_symbol_attributes);
-
-                        if (error)
+                        switch (token.id)
                         {
-                            BUSTER_TRAP();
-                        }
-
-                        if (has_parsed_function_name)
-                        {
-                            if (has_parsed_symbol_attributes)
+                            break; case TokenId::LeftBracket:
                             {
-                                BUSTER_UNREACHABLE();
+                                let attribute_list_state = parser.state_stack.push();
+                                attribute_list_state->declaration_id = ParserDeclaration::AttributeList;
+                                attribute_list_state->attribute_list.kind = AttributeListKind::Function;
+                                attribute_list_state->attribute_list.current_state = AttributeListState::ItemOrClose;
                             }
-
-                            // parse symbol attributes
-
-                            IrSymbolAttributes result = {};
-                            state(parser)->function.current_state = FunctionState::SymbolAttributeListParse;
-
-                            while (true)
+                            break; case TokenId::Identifier:
                             {
-                                let symbol_attribute_name_token = peek_and_consume(parser);
-                                if (symbol_attribute_name_token.id == TokenId::RightBracket)
-                                {
-                                    break;
-                                }
-
-                                switch (symbol_attribute_name_token.id)
-                                {
-                                    break; case TokenId::Identifier:
-                                    {
-                                        let symbol_attribute_name = get_string(parser, symbol_attribute_name_token);
-
-                                        let symbol_attribute = IrSymbolAttribute::Count;
-
-                                        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(symbol_attribute_names); i += 1)
-                                        {
-                                            if (string8_equal(symbol_attribute_name, symbol_attribute_names[i]))
-                                            {
-                                                symbol_attribute = (IrSymbolAttribute)i;
-                                                break;
-                                            }
-                                        }
-
-                                        switch (symbol_attribute)
-                                        {
-                                            break; case IrSymbolAttribute::Export:
-                                            {
-                                                result.linkage = IrLinkage::External;
-                                                result.exported = true;
-                                            }
-                                            break; break; case IrSymbolAttribute::Count: BUSTER_TRAP();
-                                        }
-                                    }
-                                    break; default: BUSTER_TRAP();
-                                }
+                                function_state->function.current_state = FunctionState::AfterName;
                             }
-                        }
-                        else
-                        {
-                            if (has_parsed_function_attributes)
-                            {
-                                BUSTER_UNREACHABLE();
-                            }
-
-                            // parse function attributes
-                            IrFunctionAttributes result = {};
-                            state(parser)->function.current_state = FunctionState::FunctionAttributeListParse;
-
-                            while (true)
-                            {
-                                let attribute_name_token = peek_and_consume(parser);
-                                if (attribute_name_token.id == TokenId::RightBracket)
-                                {
-                                    break;
-                                }
-
-                                switch (attribute_name_token.id)
-                                {
-                                    break; case TokenId::Identifier:
-                                    {
-                                        let attribute_name_candidate = get_string(parser, attribute_name_token);
-
-                                        let attribute = IrFunctionAttribute::Count;
-
-                                        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(function_attribute_names); i += 1)
-                                        {
-                                            if (string8_equal(attribute_name_candidate, function_attribute_names[i]))
-                                            {
-                                                attribute = (IrFunctionAttribute)i;
-                                                break;
-                                            }
-                                        }
-
-                                        switch (attribute)
-                                        {
-                                            break; case IrFunctionAttribute::CallingConvention:
-                                            {
-                                                expect(parser, TokenId::LeftParenthesis);
-                                                let calling_convention_name_candidate_token = expect(parser, TokenId::Identifier);
-                                                expect(parser, TokenId::RightParenthesis);
-
-                                                let calling_convention_name_candidate = get_string(parser, calling_convention_name_candidate_token);
-
-                                                let calling_convention = IrCallingConvention::Count;
-
-                                                for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(calling_convention_names); i += 1)
-                                                {
-                                                    if (string8_equal(calling_convention_name_candidate, calling_convention_names[i]))
-                                                    {
-                                                        calling_convention = (IrCallingConvention)i;
-                                                        break;
-                                                    }
-                                                }
-
-                                                if (calling_convention == IrCallingConvention::Count)
-                                                {
-                                                    BUSTER_TRAP();
-                                                }
-
-                                                result.calling_convention = calling_convention;
-                                            }
-                                            break; case IrFunctionAttribute::Count: BUSTER_TRAP();
-                                        }
-                                    }
-                                    break; default: BUSTER_TRAP();
-                                }
-                            }
+                            break; default: BUSTER_TRAP();
                         }
                     }
-                    break; case TokenId::Identifier:
+                    break; case FunctionState::AfterName:
                     {
-                        if (!has_parsed_return_type && !has_parsed_argument_list && !has_parsed_symbol_attributes && !has_parsed_function_name)
+                        switch (token.id)
                         {
-                            state(parser)->function.current_state = FunctionState::NameParse;
-                            let function_name = get_string(parser, token);
-                        }
-                        else
-                        {
-                            BUSTER_TRAP();
+                            break; case TokenId::LeftBracket:
+                            {
+                                let attribute_list_state = parser.state_stack.push();
+                                attribute_list_state->declaration_id = ParserDeclaration::AttributeList;
+                                attribute_list_state->attribute_list.kind = AttributeListKind::Symbol;
+                                attribute_list_state->attribute_list.current_state = AttributeListState::ItemOrClose;
+                            }
+                            break; case TokenId::LeftParenthesis:
+                            {
+                                function_state->function.current_state = FunctionState::ArgumentNameOrClose;
+                            }
+                            break; default: BUSTER_TRAP();
                         }
                     }
-                    break; case TokenId::LeftParenthesis:
+                    break; case FunctionState::ArgumentNameOrClose:
                     {
-                        if (!has_parsed_function_name || has_parsed_return_type || has_parsed_argument_list)
+                        switch (token.id)
                         {
-                            BUSTER_TRAP();
-                        }
-
-                        state(parser)->function.current_state = FunctionState::ArgumentListParse;
-
-                        while (true)
-                        {
-                            let argument_name_token = peek_and_consume(parser);
-                            if (argument_name_token.id == TokenId::RightParenthesis)
+                            break; case TokenId::RightParenthesis:
                             {
-                                break;
-                            }
-
-                            if (argument_name_token.id == TokenId::Identifier)
-                            {
-                                let argument_name = get_string(parser, argument_name_token);
-                                expect(parser, TokenId::Colon);
+                                function_state->function.current_state = FunctionState::ReturnType;
 
                                 let type_state = parser.state_stack.push();
                                 type_state->declaration_id = ParserDeclaration::Type;
+                                type_state->type.current_state = TypeState::PrefixOrBase;
                             }
-                            else
+                            break; case TokenId::Identifier:
                             {
-                                BUSTER_TRAP();
+                                function_state->function.current_state = FunctionState::ArgumentColon;
                             }
+                            break; default: BUSTER_TRAP();
+                        }
+                    }
+                    break; case FunctionState::ArgumentColon:
+                    {
+                        if (token.id != TokenId::Colon)
+                        {
+                            BUSTER_TRAP();
                         }
 
+                        function_state->function.current_state = FunctionState::ArgumentType;
+
+                        let type_state = parser.state_stack.push();
+                        type_state->declaration_id = ParserDeclaration::Type;
+                        type_state->type.current_state = TypeState::PrefixOrBase;
+                    }
+                    break; case FunctionState::ArgumentType:
+                    {
                         BUSTER_TRAP();
                     }
-                    break; default: BUSTER_UNREACHABLE();
-                }
+                    break; case FunctionState::ArgumentDelimiterOrClose:
+                    {
+                        switch (token.id)
+                        {
+                            break; case TokenId::Comma:
+                            {
+                                function_state->function.current_state = FunctionState::ArgumentNameOrClose;
+                            }
+                            break; case TokenId::RightParenthesis:
+                            {
+                                function_state->function.current_state = FunctionState::ReturnType;
 
-                if (initial_state == state(parser))
-                {
-                    flag_set(state(parser)->function.flags, state(parser)->function.current_state, true);
+                                let type_state = parser.state_stack.push();
+                                type_state->declaration_id = ParserDeclaration::Type;
+                                type_state->type.current_state = TypeState::PrefixOrBase;
+                            }
+                            break; default: BUSTER_TRAP();
+                        }
+                    }
+                    break; case FunctionState::ReturnType:
+                    {
+                        BUSTER_TRAP();
+                    }
+                    break; case FunctionState::Body:
+                    {
+                        if (token.id != TokenId::LeftBrace)
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        // The block frame owns brace balancing for the whole body.
+                        parser.state_stack.pop();
+
+                        let block_state = parser.state_stack.push();
+                        block_state->declaration_id = ParserDeclaration::Block;
+                        block_state->block.brace_depth = 1;
+                    }
+                    break; case FunctionState::Count: BUSTER_UNREACHABLE();
                 }
             }
             break; case ParserDeclaration::Type:
             {
-                BUSTER_TRAP();
+                let type_state = state(parser);
+                let token = peek_and_consume(parser);
+
+                switch (type_state->type.current_state)
+                {
+                    break; case TypeState::PrefixOrBase:
+                    {
+                        switch (token.id)
+                        {
+                            break; case TokenId::Ampersand:
+                            {
+                            }
+                            break; case TokenId::LeftBracket:
+                            {
+                                type_state->type.current_state = TypeState::AfterLeftBracket;
+                            }
+                            break; case TokenId::Identifier:
+                            {
+                                parser.state_stack.pop();
+
+                                let resume_state = state(parser);
+                                if (resume_state->declaration_id == ParserDeclaration::Function)
+                                {
+                                    switch (resume_state->function.current_state)
+                                    {
+                                        break; case FunctionState::ArgumentType:
+                                        {
+                                            resume_state->function.current_state = FunctionState::ArgumentDelimiterOrClose;
+                                        }
+                                        break; case FunctionState::ReturnType:
+                                        {
+                                            resume_state->function.current_state = FunctionState::Body;
+                                        }
+                                        break; default:
+                                        {
+                                        }
+                                    }
+                                }
+                            }
+                            break; default: BUSTER_TRAP();
+                        }
+                    }
+                    break; case TypeState::AfterLeftBracket:
+                    {
+                        switch (token.id)
+                        {
+                            break; case TokenId::RightBracket:
+                            {
+                                type_state->type.current_state = TypeState::PrefixOrBase;
+                            }
+                            break; case TokenId::Number:
+                            {
+                                type_state->type.current_state = TypeState::AfterArrayCount;
+                            }
+                            break; case TokenId::Identifier:
+                            {
+                                if (!token_matches(parser, token, S8("_")))
+                                {
+                                    BUSTER_TRAP();
+                                }
+
+                                type_state->type.current_state = TypeState::AfterArrayInferMarker;
+                            }
+                            break; default: BUSTER_TRAP();
+                        }
+                    }
+                    break; case TypeState::AfterArrayCount:
+                    {
+                        if (token.id != TokenId::RightBracket)
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        type_state->type.current_state = TypeState::PrefixOrBase;
+                    }
+                    break; case TypeState::AfterArrayInferMarker:
+                    {
+                        if (token.id != TokenId::RightBracket)
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        type_state->type.current_state = TypeState::PrefixOrBase;
+                    }
+                    break; case TypeState::Count: BUSTER_UNREACHABLE();
+                }
+            }
+            break; case ParserDeclaration::AttributeList:
+            {
+                let attribute_list_state = state(parser);
+                let token = peek_and_consume(parser);
+
+                switch (attribute_list_state->attribute_list.current_state)
+                {
+                    break; case AttributeListState::ItemOrClose:
+                    {
+                        if (token.id == TokenId::RightBracket)
+                        {
+                            parser.state_stack.pop();
+                        }
+                        else if (attribute_list_state->attribute_list.kind == AttributeListKind::Function)
+                        {
+                            if (!token_matches(parser, token, function_attribute_names[(u64)IrFunctionAttribute::CallingConvention]))
+                            {
+                                BUSTER_TRAP();
+                            }
+
+                            attribute_list_state->attribute_list.current_state = AttributeListState::CallingConventionOpen;
+                        }
+                        else if (attribute_list_state->attribute_list.kind == AttributeListKind::Symbol)
+                        {
+                            if (!token_matches_any(parser, token, symbol_attribute_names, BUSTER_ARRAY_LENGTH(symbol_attribute_names)))
+                            {
+                                BUSTER_TRAP();
+                            }
+                        }
+                        else
+                        {
+                            BUSTER_UNREACHABLE();
+                        }
+                    }
+                    break; case AttributeListState::CallingConventionOpen:
+                    {
+                        if (token.id != TokenId::LeftParenthesis)
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        attribute_list_state->attribute_list.current_state = AttributeListState::CallingConventionName;
+                    }
+                    break; case AttributeListState::CallingConventionName:
+                    {
+                        if (!token_matches_any(parser, token, calling_convention_names, BUSTER_ARRAY_LENGTH(calling_convention_names)))
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        attribute_list_state->attribute_list.current_state = AttributeListState::CallingConventionClose;
+                    }
+                    break; case AttributeListState::CallingConventionClose:
+                    {
+                        if (token.id != TokenId::RightParenthesis)
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        attribute_list_state->attribute_list.current_state = AttributeListState::ItemOrClose;
+                    }
+                    break; case AttributeListState::Count: BUSTER_UNREACHABLE();
+                }
+            }
+            break; case ParserDeclaration::Block:
+            {
+                let block_state = state(parser);
+                let token = peek_and_consume(parser);
+
+                switch (token.id)
+                {
+                    break; case TokenId::LeftBrace:
+                    {
+                        block_state->block.brace_depth += 1;
+                    }
+                    break; case TokenId::RightBrace:
+                    {
+                        if (block_state->block.brace_depth == 0)
+                        {
+                            BUSTER_TRAP();
+                        }
+
+                        block_state->block.brace_depth -= 1;
+                        if (block_state->block.brace_depth == 0)
+                        {
+                            parser.state_stack.pop();
+                        }
+                    }
+                    break; case TokenId::EOF:
+                    {
+                        BUSTER_TRAP();
+                    }
+                    break; default:
+                    {
+                    }
+                }
             }
             break; case ParserDeclaration::Count: BUSTER_UNREACHABLE();
         }
