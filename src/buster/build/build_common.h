@@ -58,7 +58,7 @@ STRUCT(LLVMVersion)
 };
 
 #define LLVM_VERSION(maj, min, rev) (LLVMVersion) { .major = (maj), .minor = (min), .revision = (rev), .string = SOs(#maj "." #min "." #rev) }
-BUSTER_GLOBAL_LOCAL let current_llvm_version = LLVM_VERSION(21, 1, 8);
+BUSTER_GLOBAL_LOCAL let current_llvm_version = LLVM_VERSION(22, 1, 1);
 
 BUSTER_V_DECL StringOs vulkan_sdk_path;
 

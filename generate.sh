@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euox pipefail
+
+if [[ -z "${BUSTER_BUILD_DIRECTORY:-}" ]]; then
+    BUSTER_BUILD_DIRECTORY=build
+fi
+echo "BUSTER_BUILD_DIRECTORY: $BUSTER_BUILD_DIRECTORY"
+
+rm -rf $BUSTER_BUILD_DIRECTORY
+mkdir -p $BUSTER_BUILD_DIRECTORY
+
+if [[ -z "${BUSTER_CC:-}" ]]; then
+    BUSTER_CC=clang
+fi
+echo "BUSTER_CC: $BUSTER_CC"
+CMAKE_EXTRA_ARGS=""
+if [[ "$BUSTER_CC" == *zig* ]]; then
+    CMAKE_EXTRA_ARGS="-DCMAKE_C_LINKER_DEPFILE_SUPPORTED=FALSE -DCMAKE_C_LINK_DEPENDS_USE_LINKER=FALSE"
+    BUSTER_ASM=$BUSTER_CC
+    BUSTER_CXX="${BUSTER_CC/cc/c++}"
+elif [[ "$BUSTER_CC" == *clang* ]]; then
+    BUSTER_ASM=$BUSTER_CC
+    BUSTER_CXX="${BUSTER_CC/clang/clang++}"
+elif [[ "$BUSTER_CC" == *gcc* ]]; then
+    BUSTER_ASM=$BUSTER_CC
+    BUSTER_CXX="${BUSTER_CC/gcc/g++}"
+else
+    BUSTER_ASM=$BUSTER_CC
+    BUSTER_CXX=clang++
+fi
+
+if [[ -z "${BUSTER_LINKER:-}" ]]; then
+    BUSTER_LINKER=DEFAULT
+fi
+echo "BUSTER_LINKER: $BUSTER_LINKER"
+
+cmake --warn-uninitialized -Werror=dev -B $BUSTER_BUILD_DIRECTORY -G Ninja -DCMAKE_C_COMPILER=$BUSTER_CC -DCMAKE_CXX_COMPILER=$BUSTER_CXX -DCMAKE_ASM_COMPILER=$BUSTER_ASM -DCMAKE_LINKER_TYPE=$BUSTER_LINKER $CMAKE_EXTRA_ARGS

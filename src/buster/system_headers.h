@@ -19,6 +19,7 @@ BUSTER_GLOBAL_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/sysinfo.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -38,14 +39,17 @@ BUSTER_GLOBAL_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 #endif
 #endif
 
-ENUM(OsEntityKind,
+typedef enum OsEntityKind
+{
     OS_ENTITY_KIND_THREAD,
     OS_ENTITY_KIND_MUTEX,
     OS_ENTITY_KIND_RW_MUTEX,
     OS_ENTITY_KIND_CONDITION_VARIABLE,
-    OS_ENTITY_KIND_BARRIER);
+    OS_ENTITY_KIND_BARRIER,
+} OsEntityKind;
 
-STRUCT(OsEntity)
+typedef struct OsEntity OsEntity;
+struct OsEntity
 {
     OsEntity* next;
     OsEntityKind kind;
@@ -68,12 +72,14 @@ STRUCT(OsEntity)
     };
 };
 
-STRUCT(ProcessInformation)
+typedef struct ProcessInformation ProcessInformation;
+struct ProcessInformation
 {
     OsProcessHandle* handle;
 };
 
-STRUCT(OsState)
+typedef struct OsState OsState;
+struct OsState
 {
     Arena* arena;
     Arena* entity_arena;
@@ -88,9 +94,6 @@ STRUCT(OsState)
     u64 allocation_granularity;
     ProcessInformation process;
 };
-
-BUSTER_V_DECL OsState os_state;
-BUSTER_V_DECL BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
 
 #ifdef _WIN32
 #define BUSTER_MAX_PATH_LENGTH (u64)MAX_PATH

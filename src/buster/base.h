@@ -1,5 +1,7 @@
 #pragma once
 
+// This should be enough to achieve compilation of headers
+
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -33,13 +35,24 @@
 #endif
 
 #if BUSTER_LINK_LIBC
+#if defined(__clang__)
 #define BUSTER_THREAD_LOCAL_DECL __thread
 #else
-#pragma error
+#define BUSTER_THREAD_LOCAL_DECL
+#endif
 #endif
 
 #if defined(__cplusplus)
 #define restrict __restrict
+#endif
+
+#define BUSTER_TYPE_EQUAL(T1, T2) __is_same(T1, T2)
+#define BUSTER_UNDERLYING_TYPE(E) __underlying_type(E)
+
+#if BUSTER_OPTIMIZE
+#define BUSTER_INLINE __attribute__((always_inline))
+#else
+#define BUSTER_INLINE 
 #endif
 
 #if defined(__APPLE__)
@@ -58,22 +71,45 @@
 #define BUSTER_EXPORT
 #endif
 
+#define BUSTER_CONCAT_HELPER(a, b) a ## b
+#define BUSTER_CONCAT(a, b) BUSTER_CONCAT_HELPER(a, b)
+#define BUSTER_COUNTER_NAME(x) BUSTER_CONCAT(x, __COUNTER__)
+#define BUSTER_STRINGIFY(x) #x
+
+#if defined(__cplusplus)
+template <typename F>
+struct ScopeExit
+{
+    ScopeExit( F f_ ) : f( f_ ) { }
+    ~ScopeExit() { f(); }
+    F f;
+};
+
+struct DeferHelper
+{
+    template <typename F>
+    ScopeExit<F> operator+(F f) { return f; }
+};
+
+#define defer [[maybe_unused]] const auto & COUNTER_NAME( DEFER_ ) = DeferHelper() + [&]()
+#endif
+
 #ifndef BUSTER_UNITY_BUILD
 #define BUSTER_UNITY_BUILD 0
 #endif
 
 #if BUSTER_UNITY_BUILD
 #define BUSTER_F_DECL static
-#define BUSTER_F_IMPL 
 
-#define BUSTER_V_DECL extern
-#define BUSTER_V_IMPL 
+#if defined __cplusplus
+#define BUSTER_V_DECL "This is an error to be fixed" + 123 - 0.012312;
 #else
-#define BUSTER_F_DECL extern
-#define BUSTER_F_IMPL 
+#define BUSTER_V_DECL
+#endif
+#else
+#define BUSTER_F_DECL
 
 #define BUSTER_V_DECL extern
-#define BUSTER_V_IMPL 
 #endif
 
 #ifndef BUSTER_USE_IO_RING
@@ -90,14 +126,22 @@
 #define BUSTER_FIELD_PARENT_POINTER(type, field, pointer) ((type*)((char8*)(pointer) - BUSTER_OFFSET_OF(T, field)))
 
 #define BUSTER_UNPREDICTABLE(cond) __builtin_unpredictable(cond)
-#define BUSTER_SELECT(cond, a, b) BUSTER_UNPREDICTABLE(cond) ? (a) : (b)
+#if defined(__clang__)
+#define BUSTER_SELECT(cond, a, b) (BUSTER_UNPREDICTABLE(cond) ? (a) : (b))
+#else
+#define BUSTER_SELECT(cond, a, b) ((cond) ? (a) : (b))
+#endif
 
-#define let __auto_type
-#define FORWARD_DECLARE(T, N) typedef T N N
-#define STRUCT(n) FORWARD_DECLARE(struct, n); struct n
-#define UNION(n) FORWARD_DECLARE(union, n); union n
-#define OPAQUE(n) FORWARD_DECLARE(struct, n)
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_trap)
 #define BUSTER_TRAP() __builtin_trap()
+#endif
+#endif
+
+#ifndef BUSTER_TRAP
+#define BUSTER_TRAP() do { __asm__ __volatile__("ud2"); } while (1)
+#endif
+
 #define BUSTER_BREAKPOINT() __builtin_debugtrap()
 #define BUSTER_LIKELY(x) __builtin_expect(!!(x), 1)
 #define BUSTER_UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -116,34 +160,52 @@
 #define BUSTER_CACHE_LINE_GUESS (64)
 #endif
 
+#define BUSTER_RAW_UNREACHABLE() __builtin_unreachable()
+
 #define BUSTER_ASSUME(x) __builtin_assume(x)
 #ifdef NDEBUG
-#define BUSTER_UNREACHABLE() __builtin_unreachable()
+#define BUSTER_UNREACHABLE() BUSTER_RAW_UNREACHABLE()
 #else
-#define BUSTER_UNREACHABLE() __builtin_trap()
+#define BUSTER_UNREACHABLE() BUSTER_TRAP()
 #endif
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <stdalign.h>
 #if BUSTER_KERNEL == 0
 #include <string.h>
 #include <stdlib.h>
 #endif
 
+#if defined __clang__
 #define DECLARE_VECTOR(name, T, count) typedef T name __attribute__((ext_vector_type(count)))
+#else
+#define DECLARE_VECTOR(name, T, count) typedef struct name name; struct name { T v[(count)]; }
+#endif
 
 typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+
+#if defined(__clang__)
 typedef unsigned __int128 u128;
+#else
+typedef struct u128 u128;
+struct u128
+{
+    u64 v[2];
+};
+#endif
 
 typedef int8_t  s8;
 typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
+#if defined(__clang__)
 typedef signed __int128 s128;
+#endif
 
 typedef unsigned int uint;
 
@@ -167,29 +229,60 @@ typedef float2 vec2;
 typedef float3 vec3;
 typedef float4 vec4;
 
-#if defined(_WIN32)
-#define ENUM_START(E, T) enum E
-#define ENUM_END(E, T); typedef T E
-#else
-#define ENUM_START(E, T) enum class E : T
-#define ENUM_END(E, T)
-#endif
-#define ENUM_T(E, T, ...) ENUM_START(E, T) { __VA_ARGS__, Count } ENUM_END(E, T)
-#define ENUM(E, ...) ENUM_T(E, u32, __VA_ARGS__)
+#define float2_element(vector, index) (((f32*)&(vector))[(index)])
+#define float4_element(vector, index) (((f32*)&(vector))[(index)])
 
-template <typename T>
-struct Slice
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE float2 float2_make(f32 x, f32 y)
 {
-    T* pointer;
-    u64 length;
+    float2 result = (float2){0};
+    f32 elements[] = { x, y };
+    memcpy(&result, elements, sizeof(result));
+    return result;
+}
 
-    T* begin();
-    T* end();
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE float4 float4_make(f32 x, f32 y, f32 z, f32 w)
+{
+    float4 result = (float4){0};
+    f32 elements[] = { x, y, z, w };
+    memcpy(&result, elements, sizeof(result));
+    return result;
+}
+
+#define EACH_SLICE_INT(i, s) u64 i = 0; i < (s).length; i += 1
+#define EACH_SLICE_REF(e, s) let & e : (s)
+#define EACH_SLICE_VALUE(e, s) let e : (s)
+#define EACH_ARRAY_INDEX(i, a) u64 i = 0; i < BUSTER_ARRAY_LENGTH(a); i += 1
+
+typedef struct SliceU8 SliceU8;
+struct SliceU8
+{
+    u8* pointer;
+    u64 length;
 };
 
-#define EACH_SLICE(i, s) u64 i = 0; i < (s).length; i += 1
+typedef SliceU8 ByteSlice;
 
-typedef Slice<u8> ByteSlice;
+typedef struct SliceU16 SliceU16;
+struct SliceU16
+{
+    u16* pointer;
+    u64 length;
+
+};
+
+typedef struct SliceU32 SliceU32;
+struct SliceU32
+{
+    u32* pointer;
+    u64 length;
+};
+
+typedef struct SliceU64 SliceU64;
+struct SliceU64
+{
+    u64* pointer;
+    u64 length;
+};
 
 #define BUSTER_SLICE_SIZE(slice) ((slice).length * sizeof(*((slice).pointer)))
 #define BUSTER_ARRAY_TO_SLICE(arr) { .pointer = (arr), .length = BUSTER_ARRAY_LENGTH(arr) }
@@ -199,23 +292,26 @@ typedef Slice<u8> ByteSlice;
 #define BUSTER_MB(x) (u64)(1024) * BUSTER_KB(x)
 #define BUSTER_KB(x) (u64)(1024) * (x)
 
-STRUCT(IntegerParsingU64)
+typedef struct IntegerParsingU64 IntegerParsingU64;
+struct IntegerParsingU64
 {
     u64 value;
     u64 length;
 };
 
-ENUM(IntegerFormat,
-    Decimal,
-    Hexadecimal,
-    Octal,
-    Binary
-);
+typedef enum IntegerFormat
+{
+    INTEGER_FORMAT_DECIMAL,
+    INTEGER_FORMAT_HEXADECIMAL,
+    INTEGER_FORMAT_OCTAL,
+    INTEGER_FORMAT_BINARY,
+    INTEGER_FORMAT_COUNT,
+} IntegerFormat;
 
 #define BUSTER_SLICE_TO_BYTE_SLICE(s) (ByteSlice){ .pointer = (u8*)((s).pointer), .length = BUSTER_SLICE_SIZE(s) }
 #define BYTE_SLICE_TO_STRING(char_byte_count, bs) ((String ## char_byte_count) { .pointer = (char ## char_byte_count*)(bs).pointer, .length = ((bs).length / sizeof(char ## char_byte_count)) })
 #define BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) (BUSTER_ARRAY_LENGTH(strlit) - 1)
-#define BUSTER_SLICE_START(s, start) ((typeof(s)) { (s).pointer + (start), (s).length - (start) })
+#define BUSTER_SLICE_START(s, start) ((__typeof__(s)) { (s).pointer + (start), (s).length - (start) })
 #define BUSTER_STRING_NO_MATCH UINT64_MAX
 
 #define BUSTER_SLICE_IS_ZERO_TERMINATED(s) (((s).pointer[(s).length]) == 0)
@@ -232,72 +328,108 @@ typedef u32 char32_t;
 typedef char char8_t;
 #endif
 
+// #ifdef __clang__
+#define BUSTER_CT_CHECK(x) _Static_assert((x), "BUSTER_CT_CHECK failed")
+// #else
+// #define BUSTER_CT_CHECK(x) typedef u8 BUSTER_CONCAT(static_assert_failed_, __LINE__)[(x) ? 1 : -1]
+// #endif
+
+
 typedef char char8;
-static_assert(sizeof(char8) == 1);
+BUSTER_CT_CHECK(sizeof(char8) == 1);
 #if defined(_WIN32)
 typedef wchar_t char16;
 #else
 typedef char16_t char16;
 #endif
-static_assert(sizeof(char16) == 2);
+BUSTER_CT_CHECK(sizeof(char16) == 2);
 #if defined(_WIN32)
 typedef char32_t char32;
 #else
 typedef wchar_t char32;
 #endif
-static_assert(sizeof(char32) == 4);
+BUSTER_CT_CHECK(sizeof(char32) == 4);
 
-template<typename T>
-using String = Slice<T>;
+typedef struct String8 String8;
+struct String8
+{
+    char8* pointer;
+    u64 length;
+};
 
-using String8 = String<char8>;
-using String16 = String<char16>;
+typedef struct SliceString8 SliceString8;
+struct SliceString8
+{
+    String8* pointer;
+    u64 length;
+};
+
+typedef struct String16 String16;
+struct String16
+{
+    char16* pointer;
+    u64 length;
+};
+
+typedef struct SliceString16 SliceString16;
+struct SliceString16
+{
+    String16* pointer;
+    u64 length;
+};
 
 #define S8(strlit) ((String8) { .pointer = (char8*)(strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) })
 #define S16(strlit) ((String16) { .pointer = (char16*)(u ## strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) })
 
 // Math types and enums for UI
-ENUM(Axis2,
-    X,
-    Y);
+typedef enum Axis2
+{
+    AXIS2_X,
+    AXIS2_Y,
+    AXIS2_COUNT,
+} Axis2;
 
-ENUM(Corner,
+typedef enum Corner
+{
     CORNER_00,
     CORNER_01,
     CORNER_10,
-    CORNER_11);
+    CORNER_11,
+    CORNER_COUNT,
+} Corner;
 
-UNION(F32Interval2)
+typedef union F32Interval2 F32Interval2;
+union F32Interval2
 {
     struct { float2 min; float2 max; };
     struct { float2 p0; float2 p1; };
     struct { f32 x0, y0, x1, y1; };
     float2 v[2];
 };
-static_assert(sizeof(F32Interval2) == 4 * sizeof(f32));
+BUSTER_CT_CHECK(sizeof(F32Interval2) == 4 * sizeof(f32));
 
-static inline bool is_power_of_two(u64 value)
+#define BUSTER_IS_POWER_OF_TWO(value) ((value) && !((value) & ((value) - 1)))
+
+typedef struct OsFileDescriptor OsFileDescriptor;
+typedef struct OsProcessHandle OsProcessHandle;
+typedef struct OsThreadHandle OsThreadHandle;
+typedef struct OsModuleHandle OsModuleHandle;
+typedef struct OsSymbol OsSymbol;
+typedef struct OsBarrierHandle OsBarrierHandle;
+typedef struct OsConditionVariableHandle OsConditionVariableHandle;
+typedef struct OsMutexHandle OsMutexHandle;
+
+typedef enum ProcessResult
 {
-    return value && !(value & (value - 1));
-}
-
-OPAQUE(OsFileDescriptor);
-OPAQUE(OsProcessHandle);
-OPAQUE(OsThreadHandle);
-OPAQUE(OsModuleHandle);
-OPAQUE(OsSymbol);
-OPAQUE(OsBarrierHandle);
-OPAQUE(OsConditionVariableHandle);
-OPAQUE(OsMutexHandle);
-
-ENUM(ProcessResult,
-    Success,
-    Failed,
-    Failed_try_again,
-    Crash,
-    Not_existent,
-    Running,
-    Unknown);
+    PROCESS_RESULT_SUCCESS,
+    PROCESS_RESULT_FAILED,
+    PROCESS_RESULT_FAILED_TRY_AGAIN,
+    PROCESS_RESULT_CRASH,
+    PROCESS_RESULT_NOT_EXISTENT,
+    PROCESS_RESULT_RUNNING,
+    PROCESS_RESULT_UNKNOWN,
+    PROCESS_RESULT_COUNT,
+} ProcessResult;
 
 typedef struct Thread Thread;
 typedef struct Arena Arena;
@@ -309,25 +441,27 @@ typedef String16 StringOs;
 typedef wchar_t CharOs;
 static_assert(sizeof(CharOs) == 2);
 typedef CharOs* StringOsList;
-typedef String16Slice StringOsSlice;
-typedef SliceOfString16Slice SliceOfStringOsSlice;
-#define SOs(strlit) S16(strlit)
+typedef SliceString16 SliceStringOs;
+#define SOs(x) S16(x)
 #else
 typedef String8 StringOs;
 typedef char CharOs;
-static_assert(sizeof(CharOs) == 1);
+BUSTER_CT_CHECK(sizeof(CharOs) == 1);
 typedef CharOs** StringOsList;
-#define SOs(strlit) S8(strlit)
+typedef SliceString8 SliceStringOs;
+#define SOs(x) S8(x)
 #endif
 
 #define BUSTER_SLICE(p, l) (Slice<decltype(*(p))>){ .pointer = (typeof(*(p))*) (p), .length = (l) }
 
-STRUCT(TextureIndex)
+typedef struct TextureIndex TextureIndex;
+struct TextureIndex
 {
     u32 value;
 };
 
-STRUCT(FontCharacter)
+typedef struct FontCharacter FontCharacter;
+struct FontCharacter
 {
     u32 advance;
     u32 left_bearing;
@@ -339,7 +473,8 @@ STRUCT(FontCharacter)
     s32 y_offset;
 };
 
-STRUCT(FontTextureAtlasDescription)
+typedef struct FontTextureAtlasDescription FontTextureAtlasDescription;
+struct FontTextureAtlasDescription
 {
     u32* pointer;
     FontCharacter* characters;
@@ -352,14 +487,16 @@ STRUCT(FontTextureAtlasDescription)
     u8 reserved[4];
 };
 
-STRUCT(FontTextureAtlasCreate)
+typedef struct FontTextureAtlasCreate FontTextureAtlasCreate;
+struct FontTextureAtlasCreate
 {
     StringOs font_path;
     u32 text_height;
     u8 reserved[4];
 };
 
-STRUCT(FontTextureAtlas)
+typedef struct FontTextureAtlas FontTextureAtlas;
+struct FontTextureAtlas
 {
     FontTextureAtlasDescription description;
     TextureIndex texture;
@@ -411,10 +548,14 @@ STRUCT(FontTextureAtlas)
 
 typedef struct OsWindowHandle OsWindowHandle;
 
-ENUM(OsWindowingEventKind,
-    OS_WINDOWING_EVENT_WINDOW_CLOSE);
+typedef enum OsWindowingEventKind
+{
+    OS_WINDOWING_EVENT_WINDOW_CLOSE,
+    OS_WINDOWING_EVENT_COUNT,
+} OsWindowingEventKind;
 
-STRUCT(OsWindowingEvent)
+typedef struct OsWindowingEvent OsWindowingEvent;
+struct OsWindowingEvent
 {
     OsWindowingEvent* previous;
     OsWindowingEvent* next;
@@ -423,7 +564,8 @@ STRUCT(OsWindowingEvent)
     u8 reserved[4];
 };
 
-STRUCT(OsWindowingEventList)
+typedef struct OsWindowingEventList OsWindowingEventList;
+struct OsWindowingEventList
 {
     OsWindowingEvent* first;
     OsWindowingEvent* last;
@@ -432,7 +574,7 @@ STRUCT(OsWindowingEventList)
 
 #define FLAG_ARRAY_LENGTH(T, count) ((count) / sizeof(T) + ((count) % sizeof(T) != 0))
 #define FLAG_ARRAY_GENERIC(T, N, count) T N[FLAG_ARRAY_LENGTH(T, count)]
-#define FLAG_ARRAY_U64(N, E) FLAG_ARRAY_GENERIC(u64, N, (u64)E::Count)
+#define FLAG_ARRAY_U64(N, E, Count) FLAG_ARRAY_GENERIC(u64, N, (u64)(Count))
 
 #if defined(__SANITIZE_ADDRESS__)
 #include <sanitizer/lsan_interface.h>
@@ -443,11 +585,34 @@ STRUCT(OsWindowingEventList)
 #define BUSTER_LSAN_ENABLE()
 #endif
 
-ENUM(ScratchArenaId,
+typedef enum ScratchArenaId
+{
     SCRATCH_ARENA_0,
-    SCRATCH_ARENA_1);
+    SCRATCH_ARENA_1,
+    SCRATCH_ARENA_COUNT,
+} ScratchArenaId;
 
-#define EACH_ENUM_FREE(E, e) e = (E)0; e < E::Count; e = (E)((__underlying_type(E))e + 1)
+#define EACH_ENUM_FREE(E, e) e = (E)0; e < E::Count; e = (E)((BUSTER_UNDERLYING_TYPE(E))e + 1)
 #define EACH_ENUM(E, e) E EACH_ENUM_FREE(E, e)
-#define EACH_ENUM_INT_FREE(E, e) e = 0; e < (__underlying_type(E))(E::Count); e += 1
-#define EACH_ENUM_INT(E, e) __underlying_type(E) EACH_ENUM_INT_FREE(E, e)
+#define EACH_ENUM_INT_FREE(E, e) e = 0; e < (BUSTER_UNDERLYING_TYPE(E))(E::Count); e += 1
+#define EACH_ENUM_INT(E, e) BUSTER_UNDERLYING_TYPE(E) EACH_ENUM_INT_FREE(E, e)
+
+typedef void ThreadReturnType;
+typedef ThreadReturnType ThreadCallback(void*);
+
+#if defined (__clang__)
+#define BUSTER_FUNCTION ((String8){ .pointer = (char8*)__func__, .length = __builtin_strlen(__func__) })
+#else
+#define BUSTER_FUNCTION ((String8){ .pointer = (char8*)__func__, .length = strlen(__func__) })
+#endif
+
+#ifdef NDEBUG
+#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
+#else
+#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (buster_failed_assertion(__LINE__, BUSTER_FUNCTION, S8(__FILE__)), 0) : 0))
+#endif
+
+#define BUSTER_NORETURN __attribute__((noreturn))
+#define BUSTER_COLD __attribute__((cold))
+
+BUSTER_F_DECL BUSTER_NORETURN BUSTER_COLD void buster_failed_assertion(u32 line, String8 function_name, String8 file_path);

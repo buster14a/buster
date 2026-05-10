@@ -1,0 +1,5 @@
+code main[export] : fn[cc(c)] (argument:count: s32, argv: &&u8, envp: &&u8) s32
+{
+    return 0b0;
+}
+

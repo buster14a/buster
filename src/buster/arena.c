@@ -1,0 +1,126 @@
+#pragma once
+#include <buster/arena.h>
+#include <buster/os.h>
+#include <buster/integer.h>
+
+BUSTER_GLOBAL_LOCAL bool arena_lock_pages = true;
+BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
+
+BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(64);
+BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
+
+void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
+{
+    u64 aligned_offset = align_forward(arena->position, alignment);
+    u64 aligned_size_after = aligned_offset + size;
+    u8* arena_byte_pointer = (u8*)arena;
+    u64 os_position = arena->os_position;
+
+    if (BUSTER_UNLIKELY(aligned_size_after > os_position))
+    {
+        u64 target_committed_size = align_forward(aligned_size_after, arena->granularity);
+        u64 size_to_commit = target_committed_size - os_position;
+        u8* commit_pointer = arena_byte_pointer + os_position;
+
+        if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags) { .read = 1, .write = 1, .execute = arena->flags.execute }, arena_lock_pages))
+        {
+            arena->os_position = target_committed_size;
+        }
+    }
+
+    u8* result = arena_byte_pointer + aligned_offset;
+    arena->position = aligned_size_after;
+    BUSTER_CHECK(arena->position <= arena->os_position);
+
+    return result;
+}
+
+u8* arena_get_byte_pointer(Arena* arena, u64 position)
+{
+    return (u8*)arena + position;
+}
+
+void arena_reset_to_start(Arena* arena)
+{
+    arena_set_position(arena, arena_minimum_position);
+}
+
+void arena_set_position(Arena* arena, u64 position)
+{
+    arena->position = position;
+}
+
+Arena* arena_create(ArenaCreation initialization)
+{
+    if (!initialization.reserved_size)
+    {
+        initialization.reserved_size = default_reserve_size;
+    }
+
+    if (!initialization.count)
+    {
+        initialization.count = 1;
+    }
+
+    u64 count = initialization.count;
+    u64 individual_reserved_size = initialization.reserved_size;
+    u64 total_reserved_size = individual_reserved_size * count;
+
+    ProtectionFlags protection_flags = { .read = 1, .write = 1, .execute = initialization.flags.execute };
+    MapFlags map_flags = { .priv = 1, .anonymous = 1, .no_reserve = 1, .populate = 0 };
+    u8* raw_pointer = (u8*)os_reserve(0, total_reserved_size, protection_flags, map_flags);
+
+    if (!initialization.granularity)
+    {
+        initialization.granularity = default_granularity;
+    }
+
+    if (!initialization.initial_size)
+    {
+        initialization.initial_size = default_granularity * initial_size_granularity_factor;
+    }
+
+    for (u64 i = 0; i < count; i += 1)
+    {
+        Arena* arena = (Arena*)((u8*)raw_pointer + (individual_reserved_size * i));
+        os_commit(arena, initialization.initial_size, protection_flags, arena_lock_pages);
+        *arena = (Arena){ 
+            .reserved_size = individual_reserved_size,
+            .position = arena_minimum_position,
+            .os_position = initialization.initial_size,
+            .granularity = initialization.granularity,
+        };
+    }
+
+    return (Arena*)raw_pointer;
+}
+
+bool arena_destroy(Arena* arena, u64 count)
+{
+    count = count == 0 ? 1 : count;
+    u64 reserved_size = arena->reserved_size;
+    u64 size = reserved_size * count;
+    return os_unreserve(arena, size);
+}
+
+void* arena_current_byte_pointer(Arena* arena, u64 alignment)
+{
+    return (u8*)arena + align_forward(arena->position, alignment);
+}
+
+TemporalArena arena_begin_temporal(Arena* arena)
+{
+    TemporalArena result = { .arena = arena, .position = arena->position };
+    return result;
+}
+
+TemporalArena scratch_begin(Arena** conflicts, u64 count)
+{
+    return arena_begin_temporal(thread_context_get_scratch(conflicts, count));
+}
+
+void scratch_end(TemporalArena temporal)
+{
+    Arena* arena = temporal.arena;
+    arena->position = temporal.position;
+}

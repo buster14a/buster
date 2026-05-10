@@ -6,20 +6,30 @@
 typedef struct RenderingHandle RenderingHandle;
 typedef struct RenderingWindowHandle RenderingWindowHandle;
 
-ENUM(RectTextureSlot,
+typedef enum RectTextureSlot
+{
     RECT_TEXTURE_SLOT_WHITE,
-    RECT_TEXTURE_SLOT_MONOSPACE_FONT);
+    RECT_TEXTURE_SLOT_MONOSPACE_FONT,
     // RECT_TEXTURE_SLOT_PROPORTIONAL_FONT,
+    RECT_TEXTURE_SLOT_COUNT,
+} RectTextureSlot;
 
-ENUM(RenderFontType,
+typedef enum RenderFontType
+{
     RENDER_FONT_TYPE_MONOSPACE,
-    RENDER_FONT_TYPE_PROPORTIONAL);
+    RENDER_FONT_TYPE_PROPORTIONAL,
+    RENDER_FONT_TYPE_COUNT,
+} RenderFontType;
 
-ENUM(TextureFormat,
+typedef enum TextureFormat
+{
     TEXTURE_FORMAT_R8_UNORM,
-    TEXTURE_FORMAT_R8G8B8A8_SRGB);
+    TEXTURE_FORMAT_R8G8B8A8_SRGB,
+    TEXTURE_FORMAT_COUNT,
+} TextureFormat;
 
-STRUCT(TextureMemory)
+typedef struct TextureMemory TextureMemory;
+struct TextureMemory
 {
     void* pointer;
     u32 width;
@@ -28,7 +38,8 @@ STRUCT(TextureMemory)
     TextureFormat format;
 };
 
-STRUCT(RectDraw)
+typedef struct RectDraw RectDraw;
+struct RectDraw
 {
     F32Interval2 vertex;
     F32Interval2 texture;

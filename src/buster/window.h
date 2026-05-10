@@ -5,7 +5,8 @@
 typedef struct OsWindowingHandle OsWindowingHandle;
 typedef struct OsWindowHandle OsWindowHandle;
 
-STRUCT(OsWindowSize)
+typedef struct OsWindowSize OsWindowSize;
+struct OsWindowSize
 {
     u16 width;
     u16 height;
@@ -13,7 +14,8 @@ STRUCT(OsWindowSize)
 
 typedef void OsWindowRefresh(OsWindowHandle* window, void* context);
 
-STRUCT(OsWindowCreate)
+typedef struct OsWindowCreate OsWindowCreate;
+struct OsWindowCreate
 {
     StringOs name;
     void* context;
@@ -22,7 +24,7 @@ STRUCT(OsWindowCreate)
     u8 reserved[4];
 };
 
-BUSTER_F_DECL OsWindowingHandle* os_windowing_initialize();
+BUSTER_F_DECL OsWindowingHandle* os_windowing_initialize(void);
 BUSTER_F_DECL void os_windowing_deinitialize(OsWindowingHandle* windowing);
 BUSTER_F_DECL OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate create);
 BUSTER_F_DECL OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWindowHandle* os_window);

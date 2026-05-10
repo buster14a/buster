@@ -2,20 +2,27 @@
 
 #include <buster/base.h>
 
-ENUM_T(CpuArch, u8,
+typedef enum CpuArch
+{
     CPU_ARCH_X86_64,
-    CPU_ARCH_AARCH64);
+    CPU_ARCH_AARCH64,
+    CPU_ARCH_COUNT,
+} CpuArch;
 
-ENUM_T(OperatingSystem, u8, 
+typedef enum OperatingSystem
+{
     OPERATING_SYSTEM_LINUX,
     OPERATING_SYSTEM_MACOS,
     OPERATING_SYSTEM_WINDOWS,
     OPERATING_SYSTEM_UEFI,
     OPERATING_SYSTEM_ANDROID,
     OPERATING_SYSTEM_IOS,
-    OPERATING_SYSTEM_FREESTANDING);
+    OPERATING_SYSTEM_FREESTANDING,
+    OPERATING_SYSTEM_COUNT,
+} OperatingSystem;
 
-ENUM_T(CpuModel, u8, 
+typedef enum CpuModel
+{
     CPU_MODEL_ERROR,
     CPU_MODEL_BASELINE,
     CPU_MODEL_NATIVE,
@@ -165,16 +172,23 @@ ENUM_T(CpuModel, u8,
     CPU_MODEL_A64_APPLE_M2,
     CPU_MODEL_A64_APPLE_A17,
     CPU_MODEL_A64_APPLE_M3,
-    CPU_MODEL_A64_APPLE_M4);
+    CPU_MODEL_A64_APPLE_M4,
+
+    CPU_MODEL_COUNT,
+} CpuModel;
 
 typedef u64 TargetCpuFeatures;
 
-ENUM(TargetStringComponents,
-    TARGET_CPU_ARCH,
-    TARGET_OPERATING_SYSTEM,
-    TARGET_CPU_MODEL);
+typedef enum TargetStringComponents
+{
+    TARGET_STRING_COMPONENT_CPU_ARCH,
+    TARGET_STRING_COMPONENT_OPERATING_SYSTEM,
+    TARGET_STRING_COMPONENT_CPU_MODEL,
+    TARGET_STRING_COMPONENT_COUNT,
+} TargetStringComponent;
 
-STRUCT(Target)
+typedef struct Target Target;
+struct Target
 {
     CpuArch cpu_arch;
     CpuModel cpu_model;
@@ -183,15 +197,16 @@ STRUCT(Target)
     TargetCpuFeatures* cpu_features;
 };
 
-STRUCT(TargetStringSplit)
+typedef struct TargetStringSplit TargetStringSplit;
+struct TargetStringSplit
 {
-    StringOs s[(u64)TargetStringComponents::Count];
+    StringOs s[(u64)TARGET_STRING_COMPONENT_COUNT];
 };
 
 BUSTER_V_DECL Target target_native;
 
 BUSTER_F_DECL bool cpu_is_native(CpuModel model);
-BUSTER_F_DECL CpuModel cpu_detect_model();
+BUSTER_F_DECL CpuModel cpu_detect_model(void);
 BUSTER_F_DECL TargetStringSplit target_to_split_string_os(Target target);
 BUSTER_F_DECL StringOs target_to_string(Arena* arena, Target target);
 BUSTER_F_DECL StringOs cpu_arch_to_string_os(CpuArch arch);

@@ -3,19 +3,21 @@
 #include <buster/base.h>
 #include <buster/arena.h>
 #include <buster/rendering.h>
-#include <buster/assertion.h>
-
 
 // Windowing event types
-ENUM(WindowingEventType,
+typedef enum WindowingEventType
+{
     WINDOWING_EVENT_TYPE_MOUSE_BUTTON,
     WINDOWING_EVENT_TYPE_CURSOR_POSITION,
     WINDOWING_EVENT_TYPE_CURSOR_ENTER,
     WINDOWING_EVENT_TYPE_WINDOW_FOCUS,
     WINDOWING_EVENT_TYPE_WINDOW_POSITION,
-    WINDOWING_EVENT_TYPE_WINDOW_CLOSE);
+    WINDOWING_EVENT_TYPE_WINDOW_CLOSE,
+    WINDOWING_EVENT_TYPE_COUNT,
+} WindowingEventType;
 
-ENUM_T(WindowingEventMouseButtonKind, u8,
+typedef enum WindowingEventMouseButtonKind
+{
     WINDOWING_EVENT_MOUSE_BUTTON_1 = 0,
     WINDOWING_EVENT_MOUSE_BUTTON_2 = 1,
     WINDOWING_EVENT_MOUSE_BUTTON_3 = 2,
@@ -24,18 +26,23 @@ ENUM_T(WindowingEventMouseButtonKind, u8,
     WINDOWING_EVENT_MOUSE_BUTTON_6 = 5,
     WINDOWING_EVENT_MOUSE_BUTTON_7 = 6,
     WINDOWING_EVENT_MOUSE_BUTTON_8 = 7,
+    WINDOWING_EVENT_MOUSE_COUNT,
     WINDOWING_EVENT_MOUSE_LEFT = 0,
     WINDOWING_EVENT_MOUSE_RIGHT = 1,
-    WINDOWING_EVENT_MOUSE_MIDDLE = 2);
-#define WINDOWING_EVENT_MOUSE_BUTTON_COUNT ((u64)WindowingEventMouseButtonKind::WINDOWING_EVENT_MOUSE_BUTTON_8 + 1)
+    WINDOWING_EVENT_MOUSE_MIDDLE = 2,
+} WindowingEventMouseButtonKind;
 
-ENUM_T(WindowingEventMouseButtonAction, u8,
+typedef enum WindowingEventMouseButtonAction
+{
     WINDOWING_EVENT_MOUSE_RELAX = 0,
     WINDOWING_EVENT_MOUSE_RELEASE = 1,
     WINDOWING_EVENT_MOUSE_PRESS = 2,
-    WINDOWING_EVENT_MOUSE_REPEAT = 3);
+    WINDOWING_EVENT_MOUSE_REPEAT = 3,
+    WINDOWING_EVENT_MOUSE_ACTION_COUNT,
+} WindowingEventMouseButtonAction;
 
-STRUCT(WindowingEventMouseButtonEvent)
+typedef struct WindowingEventMouseButtonEvent WindowingEventMouseButtonEvent;
+struct WindowingEventMouseButtonEvent
 {
     WindowingEventMouseButtonAction action;
     u8 mod_shift:1;
@@ -47,26 +54,30 @@ STRUCT(WindowingEventMouseButtonEvent)
     u8 reserved:2;
 };
 
-STRUCT(WindowingEventMouseButton)
+typedef struct WindowingEventMouseButton WindowingEventMouseButton;
+struct WindowingEventMouseButton 
 {
     WindowingEventMouseButtonKind button;
     WindowingEventMouseButtonEvent event;
 };
 
-STRUCT(WindowingEventDescriptor)
+typedef struct WindowingEventDescriptor WindowingEventDescriptor;
+struct WindowingEventDescriptor
 {
     u32 index:24;
     WindowingEventType type:8;
 };
-static_assert(sizeof(WindowingEventDescriptor) == 4);
+BUSTER_CT_CHECK(sizeof(WindowingEventDescriptor) == 4);
 
-STRUCT(WindowingEventCursorPosition)
+typedef struct WindowingEventCursorPosition WindowingEventCursorPosition;
+struct WindowingEventCursorPosition
 {
     f64 x;
     f64 y;
 };
 
-STRUCT(WindowingEventWindowPosition)
+typedef struct WindowingEventWindowPosition WindowingEventWindowPosition;
+struct WindowingEventWindowPosition
 {
     u32 x;
     u32 y;
@@ -74,7 +85,8 @@ STRUCT(WindowingEventWindowPosition)
 
 #define UI_EVENT_QUEUE_CAPACITY (256)
 
-STRUCT(WindowingEventQueue)
+typedef struct WindowingEventQueue WindowingEventQueue;
+struct WindowingEventQueue
 {
     WindowingEventDescriptor descriptors[UI_EVENT_QUEUE_CAPACITY];
     u32 descriptor_count;
@@ -87,32 +99,41 @@ STRUCT(WindowingEventQueue)
 };
 
 // UI types
-ENUM_T(UI_SizeKind, u8,
+enum UI_SizeKind
+{
     UI_SIZE_PIXEL_COUNT,
     UI_SIZE_PERCENTAGE,
-    UI_SIZE_BY_CHILDREN);
+    UI_SIZE_BY_CHILDREN,
+    UI_SIZE_KIND_COUNT,
+};
 
-STRUCT(UI_Size)
+typedef u8 UI_SizeKind;
+
+typedef struct UI_Size UI_Size;
+struct UI_Size
 {
     f32 value;
     f32 strictness;
     UI_SizeKind kind;
     u8 reserved[3];
 };
-static_assert(sizeof(UI_Size) == 12);
+BUSTER_CT_CHECK(sizeof(UI_Size) == 12);
 
-STRUCT(UI_Key)
+typedef struct UI_Key UI_Key;
+struct UI_Key
 {
     u64 value;
 };
 
-STRUCT(UI_MousePosition)
+typedef struct UI_MousePosition UI_MousePosition;
+struct UI_MousePosition
 {
     f64 x;
     f64 y;
 };
 
-ENUM_T(UI_WidgetFlagEnum, u64,
+enum UI_WidgetFlagEnum
+{
     UI_WIDGET_FLAG_DISABLED                      = 1 << 0,
     UI_WIDGET_FLAG_MOUSE_CLICKABLE               = 1 << 1,
     UI_WIDGET_FLAG_KEYBOARD_PRESSABLE            = 1 << 2,
@@ -121,9 +142,11 @@ ENUM_T(UI_WidgetFlagEnum, u64,
     UI_WIDGET_FLAG_OVERFLOW_X                    = 1 << 5,
     UI_WIDGET_FLAG_OVERFLOW_Y                    = 1 << 6,
     UI_WIDGET_FLAG_FLOATING_X                    = 1 << 7,
-    UI_WIDGET_FLAG_FLOATING_Y                    = 1 << 8);
+    UI_WIDGET_FLAG_FLOATING_Y                    = 1 << 8,
+};
 
-UNION(UI_WidgetFlags)
+typedef union UI_WidgetFlags UI_WidgetFlags;
+union UI_WidgetFlags
 {
     struct
     {
@@ -140,9 +163,10 @@ UNION(UI_WidgetFlags)
     };
     u64 v;
 };
-static_assert(sizeof(UI_WidgetFlags) == sizeof(u64));
+BUSTER_CT_CHECK(sizeof(UI_WidgetFlags) == sizeof(u64));
 
-STRUCT(UI_Widget)
+typedef struct UI_Widget UI_Widget;
+struct UI_Widget
 {
     String8 text;
 
@@ -159,7 +183,7 @@ STRUCT(UI_Widget)
     UI_Key key;
 
     // Input parameters
-    UI_Size pref_size[(u64)Axis2::Count];
+    UI_Size pref_size[(u64)AXIS2_COUNT];
     Axis2 child_layout_axis;
     u8 reserved[4];
     UI_WidgetFlags flags;
@@ -171,7 +195,7 @@ STRUCT(UI_Widget)
     // Data known after layout computation happens
     F32Interval2 relative_rect;
     F32Interval2 rect;
-    float2 relative_corner_delta[(u64)Corner::Count];
+    float2 relative_corner_delta[(u64)CORNER_COUNT];
 
     // Persistent data across frames
     u64 last_build_touched;
@@ -180,7 +204,8 @@ STRUCT(UI_Widget)
     float4 text_color;
 };
 
-STRUCT(UI_WidgetSlot)
+typedef struct UI_WidgetSlot UI_WidgetSlot;
+struct UI_WidgetSlot
 {
     UI_Widget* first;
     UI_Widget* last;
@@ -188,7 +213,8 @@ STRUCT(UI_WidgetSlot)
 
 #define UI_STACK_CAPACITY (64)
 
-STRUCT(UI_StateStackAutoPops)
+typedef struct UI_StateStackAutoPops UI_StateStackAutoPops;
+struct UI_StateStackAutoPops 
 {
     u64 parent:1;
     u64 pref_width:1;
@@ -199,9 +225,10 @@ STRUCT(UI_StateStackAutoPops)
     u64 font_size:1;
     u64 reserved:57;
 };
-static_assert(sizeof(UI_StateStackAutoPops) % sizeof(u64) == 0);
+BUSTER_CT_CHECK(sizeof(UI_StateStackAutoPops) % sizeof(u64) == 0);
 
-STRUCT(UI_StateStackNulls)
+typedef struct UI_StateStackNulls UI_StateStackNulls;
+struct UI_StateStackNulls
 {
     float4 text_color;
     float4 background_color;
@@ -213,7 +240,8 @@ STRUCT(UI_StateStackNulls)
     u8 reserved[8];
 };
 
-STRUCT(UI_StateStacks)
+typedef struct UI_StateStacks UI_StateStacks;
+struct UI_StateStacks
 {
     UI_Widget* parent[UI_STACK_CAPACITY];
     u32 parent_length;
@@ -233,7 +261,8 @@ STRUCT(UI_StateStacks)
     u8 reserved2[8];
 };
 
-STRUCT(UI_State)
+typedef struct UI_State UI_State;
+struct UI_State
 {
     Arena* arena;
     Arena* build_arenas[2];
@@ -244,10 +273,14 @@ STRUCT(UI_State)
     f64 frame_time;
     UI_Widget* root;
     UI_MousePosition mouse_position;
-    Slice<UI_WidgetSlot> widget_table;
+    struct
+    {
+        UI_WidgetSlot* pointer;
+        u64 length;
+    } widget_table;
     UI_Widget* free_widget_list;
     u64 free_widget_count;
-    WindowingEventMouseButtonEvent mouse_button_events[WINDOWING_EVENT_MOUSE_BUTTON_COUNT];
+    WindowingEventMouseButtonEvent mouse_button_events[WINDOWING_EVENT_MOUSE_COUNT];
     u64 focused:1;
     u64 reserved:63;
 
@@ -257,12 +290,15 @@ STRUCT(UI_State)
     u8 reserved2[8];
 };
 
-ENUM(UI_SignalFlag,
-    UI_SIGNAL_FLAG_CLICKED_LEFT = (1 << 0));
-
+enum UI_SignalFlag
+{
+    UI_SIGNAL_FLAG_CLICKED_LEFT = (1 << 0),
+    UI_SIGNAL_FLAG_COUNT,
+};
 typedef u32 UI_SignalFlags;
 
-STRUCT(UI_Signal)
+typedef struct UI_Signal UI_Signal;
+struct UI_Signal
 {
     UI_Widget* widget;
     union

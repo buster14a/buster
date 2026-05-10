@@ -1,13 +1,8 @@
 #pragma once
 #include <buster/base.h>
 
-ENUM(ThreadSpawnPolicy,
-    THREAD_SPAWN_POLICY_SINGLE_THREADED,
-    THREAD_SPAWN_POLICY_SPAWN_SINGLE_THREAD,
-    THREAD_SPAWN_POLICY_SATURATE_LOGICAL_CORES,
-    THREAD_SPAWN_POLICY_SATURATE_PHYSICAL_CORES);
-
-STRUCT(ProtectionFlags)
+typedef struct ProtectionFlags ProtectionFlags;
+struct ProtectionFlags
 {
     u64 read:1;
     u64 write:1;
@@ -15,7 +10,8 @@ STRUCT(ProtectionFlags)
     u64 reserved:61;
 };
 
-STRUCT(MapFlags)
+typedef struct MapFlags MapFlags;
+struct MapFlags
 {
     u64 priv:1;
     u64 anonymous:1;
@@ -24,7 +20,8 @@ STRUCT(MapFlags)
     u64 reserved:60;
 };
 
-STRUCT(OpenFlags)
+typedef struct OpenFlags OpenFlags;
+struct OpenFlags
 {
     u64 truncate:1;
     u64 execute:1;
@@ -35,7 +32,8 @@ STRUCT(OpenFlags)
     u64 reserved:58;
 };
 
-STRUCT(OpenPermissions)
+typedef struct OpenPermissions OpenPermissions;
+struct OpenPermissions
 {
     u64 read:1;
     u64 write:1;
@@ -43,14 +41,16 @@ STRUCT(OpenPermissions)
     u64 reserved:61;
 };
 
-STRUCT(FileStats)
+typedef struct FileStats FileStats;
+struct FileStats
 {
     u64 modified_time_s;
     u64 modified_time_ns;
     u64 size;
 };
 
-STRUCT(FileStatsOptions)
+typedef struct FileStatsOptions FileStatsOptions;
+struct FileStatsOptions
 {
     union
     {
@@ -66,9 +66,8 @@ STRUCT(FileStatsOptions)
 
 #if BUSTER_KERNEL == 0
 
-typedef void ThreadReturnType;
-typedef ThreadReturnType ThreadCallback(void*);
-STRUCT(ThreadCreateOptions)
+typedef struct ThreadCreateOptions ThreadCreateOptions;
+struct ThreadCreateOptions
 {
     ThreadCallback* callback;
     void* argument;
@@ -83,42 +82,51 @@ u128
 TimeDataType;
 #endif
 
-STRUCT(ThreadInitialization)
+typedef struct ThreadInitialization ThreadInitialization;
+struct ThreadInitialization
 {
+    u8 foo;
 };
 
-ENUM_T(StandardStream, u8,
-    Input,
-    Output,
-    Error);
+typedef enum StandardStream
+{
+    STANDARD_STREAM_INPUT,
+    STANDARD_STREAM_OUTPUT,
+    STANDARD_STREAM_ERROR,
+    STANDARD_STREAM_COUNT,
+} StandardStream;
 
-STRUCT(ProcessSpawnResult)
+typedef struct ProcessSpawnResult ProcessSpawnResult;
+struct ProcessSpawnResult
 {
     OsProcessHandle* handle;
-    OsFileDescriptor* pipes[(size_t)StandardStream::Count][2];
+    OsFileDescriptor* pipes[STANDARD_STREAM_COUNT][2];
 };
 
-STRUCT(ProcessSpawnOptions)
+typedef struct ProcessSpawnOptions ProcessSpawnOptions;
+struct ProcessSpawnOptions
 {
-    u64 capture:(size_t)StandardStream::Count;
-    u64 reserved:sizeof(u64)*8-(size_t)StandardStream::Count;
+    u64 capture:(size_t)STANDARD_STREAM_COUNT;
+    u64 reserved:sizeof(u64)*8-(size_t)STANDARD_STREAM_COUNT;
 };
 
-STRUCT(ProcessWaitResult)
+typedef struct ProcessWaitResult ProcessWaitResult;
+struct ProcessWaitResult
 {
-    ByteSlice streams[(size_t)StandardStream::Count];
+    ByteSlice streams[(size_t)STANDARD_STREAM_COUNT];
     ProcessResult result;
     u8 reserved[4];
 };
 
-STRUCT(OsError)
+typedef struct OsError OsError;
+struct OsError
 {
     u32 v;
 };
 
 #define BUSTER_OS_ERROR_BUFFER_MAX_LENGTH (BUSTER_KB(64))
 
-BUSTER_F_DECL OsError os_get_last_error();
+BUSTER_F_DECL OsError os_get_last_error(void);
 BUSTER_F_DECL StringOs os_error_write_message(StringOs string, OsError error);
 BUSTER_F_DECL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, StringOsList envp, ProcessSpawnOptions options);
 BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
@@ -133,24 +141,29 @@ BUSTER_F_DECL u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buff
 BUSTER_F_DECL bool os_file_close(OsFileDescriptor* file_descriptor);
 
 BUSTER_F_DECL StringOs os_path_absolute(StringOs buffer, StringOs relative_file_path);
-BUSTER_F_DECL OsFileDescriptor* os_get_stdout();
+BUSTER_F_DECL OsFileDescriptor* os_get_stdout(void);
 BUSTER_F_DECL OsThreadHandle* os_thread_create(ThreadCreateOptions options);
 BUSTER_F_DECL bool os_thread_join(OsThreadHandle* handle);
 
-ENUM(ProgramFlag,
-    Verbose,
-    Ci,
-    Test_Persist);
-STRUCT(ProgramInput)
+typedef enum ProgramFlag
+{
+    PROGRAM_FLAG_VERBOSE,
+    PROGRAM_FLAG_CI,
+    PROGRAM_FLAG_TEST_PERSIST,
+    PROGRAM_FLAG_COUNT,
+} ProgramFlag;
+
+typedef struct ProgramInput ProgramInput;
+struct ProgramInput
 {
     StringOsList argv;
     StringOsList envp;
-    FLAG_ARRAY_U64(flags, ProgramFlag);
-    ThreadSpawnPolicy thread_spawn_policy;
+    FLAG_ARRAY_U64(flags, ProgramFlag, PROGRAM_FLAG_COUNT);
     u8 reserved[4];
 };
 
-STRUCT(ProgramState)
+typedef struct ProgramState ProgramState;
+struct ProgramState
 {
     ProgramInput input;
     Arena* arena;
@@ -159,7 +172,8 @@ STRUCT(ProgramState)
     u64 reserved:62;
 };
 
-STRUCT(LaneContext)
+typedef struct LaneContext LaneContext;
+struct LaneContext
 {
     u64 lane_index;
     u64 lane_count;
@@ -167,16 +181,18 @@ STRUCT(LaneContext)
     u64* broadcast_memory;
 };
 
-STRUCT(ThreadContext)
+typedef struct ThreadContext ThreadContext;
+struct ThreadContext
 {
-    Arena* arenas[(u64)ScratchArenaId::Count];
+    Arena* arenas[(u64)SCRATCH_ARENA_COUNT];
     LaneContext lane_context;
 };
 
 BUSTER_V_DECL ProgramState* program_state;
+BUSTER_V_DECL BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
 
-[[noreturn]] [[gnu::cold]] BUSTER_F_DECL void os_fail();
-[[gnu::noreturn]] BUSTER_F_DECL void os_exit(u32 code);
+BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail(void);
+BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);
 
 BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
 BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
@@ -186,37 +202,54 @@ BUSTER_F_DECL bool os_is_tty(OsFileDescriptor* file);
 BUSTER_F_DECL OsModuleHandle* os_dynamic_library_load(StringOs library);
 BUSTER_F_DECL void os_dynamic_library_unload(OsModuleHandle* module);
 BUSTER_F_DECL OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbol);
-BUSTER_F_DECL u32 os_get_logical_thread_count();
-BUSTER_F_DECL u64 os_get_page_size();
-BUSTER_F_DECL OsProcessHandle* os_get_current_process_handle();
-BUSTER_F_DECL OsThreadHandle* os_get_current_thread_handle();
+BUSTER_F_DECL u32 os_get_logical_thread_count(void);
+BUSTER_F_DECL u64 os_get_page_size(void);
+BUSTER_F_DECL OsProcessHandle* os_get_current_process_handle(void);
+BUSTER_F_DECL OsThreadHandle* os_get_current_thread_handle(void);
 BUSTER_F_DECL void os_thread_set_name(StringOs thread_name);
 
-[[gnu::cold]] BUSTER_F_DECL bool is_debugger_present();
+BUSTER_COLD BUSTER_F_DECL bool is_debugger_present(void);
 
-BUSTER_F_DECL u64 os_now_microseconds();
+BUSTER_F_DECL u64 os_now_microseconds(void);
 
-BUSTER_F_DECL ThreadContext* thread_context_allocate();
+BUSTER_F_DECL ThreadContext* thread_context_allocate(void);
 BUSTER_F_DECL void thread_context_select(ThreadContext* context);
 BUSTER_F_DECL void thread_context_release(ThreadContext* context);
 BUSTER_F_DECL LaneContext thread_context_set_lane(LaneContext lane_context);
 BUSTER_F_DECL void thread_context_lane_barrier_wait(void* broadcast_pointer, u64 broadcast_size, u64 broadcast_source_lane_index);
 BUSTER_F_DECL Arena* thread_context_get_scratch(Arena** conflicts, u64 count);
 
-BUSTER_F_DECL OsMutexHandle* os_mutex_allocate();
+BUSTER_F_DECL OsMutexHandle* os_mutex_allocate(void);
 BUSTER_F_DECL void os_mutex_take(OsMutexHandle* mutex);
 BUSTER_F_DECL void os_mutex_drop(OsMutexHandle* mutex);
 
-BUSTER_F_DECL OsConditionVariableHandle* os_condition_variable_allocate();
+BUSTER_F_DECL OsConditionVariableHandle* os_condition_variable_allocate(void);
 BUSTER_F_DECL void os_condition_variable_release(OsConditionVariableHandle* condition_variable);
 BUSTER_F_DECL bool os_condition_variable_wait(OsConditionVariableHandle* condition_variable, OsMutexHandle* mutex, u64 endt_us);
 BUSTER_F_DECL void os_condition_variable_broadcast(OsConditionVariableHandle* condition_variable);
 
 BUSTER_F_DECL OsBarrierHandle* os_barrier_allocate(u32 count);
 
-BUSTER_F_DECL void lane_sync();
-BUSTER_F_DECL u64 lane_index();
+BUSTER_F_DECL void lane_sync(void);
+BUSTER_F_DECL u64 lane_index(void);
 #define lane_sync_u64(pointer, source_lane_index) thread_context_lane_barrier_wait((pointer), sizeof(*(pointer)), (source_lane_index))
+
+BUSTER_F_DECL void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value);
+BUSTER_F_DECL bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index);
+
+#define flag_get(arr, Count, e) flag_get_ex((arr), (Count), (e))
+#define flag_set(arr, Count, e, v) flag_set_ex((arr), (Count), (e), (v))
+
+typedef struct BooleanArgumentProcessResult BooleanArgumentProcessResult;
+struct BooleanArgumentProcessResult
+{
+    u64 index;
+    bool valid;
+    u8 reserved[7];
+};
+BUSTER_F_DECL BooleanArgumentProcessResult boolean_argument_process(StringOs* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer, u64 flag_count, StringOs argument);
+
+BUSTER_F_DECL bool program_flag_get(ProgramFlag flag);
 
 #if BUSTER_USE_IO_RING
 BUSTER_DECL IoRingSubmission io_ring_prepare_open(char* path, u64 user_data);

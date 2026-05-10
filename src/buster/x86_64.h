@@ -3,7 +3,8 @@
 #include <buster/base.h>
 #include <buster/target.h>
 
-STRUCT(CpuId)
+typedef struct CpuId CpuId;
+struct CpuId
 {
     u32 eax;
     u32 ebx;
@@ -11,4 +12,4 @@ STRUCT(CpuId)
     u32 edx;
 };
 
-BUSTER_F_DECL CpuModel cpu_detect_model_x86_64();
+BUSTER_F_DECL CpuModel cpu_detect_model_x86_64(void);
