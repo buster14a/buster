@@ -1,0 +1,6 @@
+on: [push]
+jobs:
+  test:
+    runs-on: zen5-linux
+    steps:
+      - run: echo All good!
