@@ -11,7 +11,7 @@ BUSTER_F_DECL s32 buster_fuzz(const u8* pointer, size_t size);
 #else
 BUSTER_F_DECL ProcessResult process_arguments(void);
 BUSTER_F_DECL ProcessResult entry_point(void);
-BUSTER_F_DECL ProcessResult buster_argument_process(StringOsList argument_pointer, StringOsList environment_pointer, u64 argument_index, StringOs argument);
+BUSTER_F_DECL ProcessResult buster_argument_process(SliceString8 argument_pointer, SliceString8 environment_pointer, u64 argument_index, String8 argument);
 #endif
 #endif
 

@@ -1435,3 +1435,23 @@ bool program_flag_get(ProgramFlag flag)
 {
     return flag_get(program_state->input.flags, PROGRAM_FLAG_COUNT, flag);
 }
+
+SliceString8 os_string_list_to_slice_string(Arena* arena, StringOsList string_os_list)
+{
+    SliceString8 result = {0};
+#if defined(_WIN32)
+#else
+    CharOs** it;
+    for (it = string_os_list; *it; it += 1) { }
+
+    u64 string_count = (u64)(it - string_os_list);
+    result = (SliceString8) { .pointer = arena_allocate(arena, String8, string_count), .length = string_count };
+
+    for (u64 i = 0; i < string_count; i += 1)
+    {
+        const char* string = string_os_list[i];
+        result.pointer[i] = (String8){ .pointer = (char*)string, .length = strlen(string) };
+    }
+#endif
+    return result;
+}

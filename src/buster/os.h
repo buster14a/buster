@@ -156,8 +156,8 @@ typedef enum ProgramFlag
 typedef struct ProgramInput ProgramInput;
 struct ProgramInput
 {
-    StringOsList argv;
-    StringOsList envp;
+    SliceString8 arguments;
+    SliceString8 environment;
     FLAG_ARRAY_U64(flags, ProgramFlag, PROGRAM_FLAG_COUNT);
     u8 reserved[4];
 };
@@ -239,6 +239,8 @@ BUSTER_F_DECL bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index
 
 #define flag_get(arr, Count, e) flag_get_ex((arr), (Count), (e))
 #define flag_set(arr, Count, e, v) flag_set_ex((arr), (Count), (e), (v))
+
+BUSTER_F_DECL SliceString8 os_string_list_to_slice_string(Arena* arena, StringOsList string_os_list);
 
 typedef struct BooleanArgumentProcessResult BooleanArgumentProcessResult;
 struct BooleanArgumentProcessResult

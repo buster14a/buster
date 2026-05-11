@@ -263,7 +263,7 @@ function(executable_add name is_buster_program main_file)
         add_dependencies(${name} metaprogram_generate)
     endif()
 
-    add_custom_target(${name}_run
+    add_custom_target(run_${name}
         COMMAND "$<TARGET_FILE:${name}>"
         DEPENDS ${name}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -271,8 +271,16 @@ function(executable_add name is_buster_program main_file)
         COMMENT "Running ${name}"
         VERBATIM)
 
+    add_custom_target(test_${name}
+        COMMAND "$<TARGET_FILE:${name}>" test
+        DEPENDS ${name}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        USES_TERMINAL
+        COMMENT "Running ${name}"
+        VERBATIM)
+
     if(gdb_executable)
-        add_custom_target(${name}_debug
+        add_custom_target(debug_${name}
             COMMAND "${gdb_executable}" --args "$<TARGET_FILE:${name}>"
             DEPENDS ${name}
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -280,7 +288,7 @@ function(executable_add name is_buster_program main_file)
             COMMENT "Debugging ${name} with gdb"
             VERBATIM)
     elseif(lldb_executable)
-        add_custom_target(${name}_debug
+        add_custom_target(debug_${name}
             COMMAND "${lldb_executable}" -- "$<TARGET_FILE:${name}>"
             DEPENDS ${name}
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -334,3 +342,11 @@ buster_add_executable(ide src/buster/ide/ide.c
     ${BUSTER_MODULE_FONT_PROVIDER}
 )
 #buster_add_executable(compiler src/buster/compiler/frontend/buster/main.c)
+
+add_custom_target(test_all
+    COMMAND $<TARGET_FILE:ide> test
+    DEPENDS ide
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Test all"
+    VERBATIM
+)

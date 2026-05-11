@@ -33,7 +33,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool is_async_thread = false;
 #define ins_atomic_u32_inc_eval(x)              (__atomic_fetch_add((u32*)(x), 1, __ATOMIC_SEQ_CST) + 1)
 #define ins_atomic_u32_eval_assign(x,c)         __atomic_store_n((x), (c), __ATOMIC_SEQ_CST)
 
-ProcessResult buster_argument_process(StringOsList argument_pointer, StringOsList environment_pointer, u64 argument_index, StringOs argument)
+ProcessResult buster_argument_process(SliceString8 argument_pointer, SliceString8 environment_pointer, u64 argument_index, String8 argument)
 {
     BUSTER_UNUSED(argument_pointer);
     BUSTER_UNUSED(environment_pointer);
@@ -133,6 +133,10 @@ BUSTER_GLOBAL_LOCAL void async_thread_entry_point(void* arg)
 
 BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOsList envp)
 {
+    os_state.arena = arena_create((ArenaCreation){0});
+    SliceString8 arguments = os_string_list_to_slice_string(os_state.arena, argv);
+    SliceString8 environment = os_string_list_to_slice_string(os_state.arena, envp);
+    
 #ifdef _WIN32
     {
         LARGE_INTEGER i;
@@ -150,7 +154,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     closesocket(Sock);
 #else
 #endif
-    os_state.arena = arena_create((ArenaCreation){0});
     os_state.entity_arena = arena_create((ArenaCreation){0});
     pthread_mutex_init(&os_state.entity_mutex, 0);
     os_state.logical_thread_count = os_get_logical_thread_count();
@@ -171,8 +174,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     async_tick_stop_mutex = os_mutex_allocate();
 
     program_state->arena = arena_create((ArenaCreation){0});
-    program_state->input.argv = argv;
-    program_state->input.envp = envp;
+    program_state->input.arguments = arguments;
+    program_state->input.environment = environment;
 
     ProcessResult result = process_arguments();
 

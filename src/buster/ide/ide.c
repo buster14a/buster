@@ -99,30 +99,30 @@ ProcessResult process_arguments(void)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
 
-    StringOsList argv = program_state->input.argv;
-    // StringOsList envp = program_state->input.envp;
+    SliceString8 arguments = program_state->input.arguments;
+    SliceString8 environment = program_state->input.environment;
 
-    StringOsListIterator arg_it = string_os_list_iterator_initialize(argv);
+    // StringOsListIterator arg_it = string_os_list_iterator_initialize(argv);
+    //
+    // string_os_list_iterator_next(&arg_it);
 
-    string_os_list_iterator_next(&arg_it);
-
-    for (StringOs arg = string_os_list_iterator_next(&arg_it); arg.pointer; arg = string_os_list_iterator_next(&arg_it))
+    for (u64 i = 1; i < arguments.length; i += 1)
     {
-        BUSTER_TRAP();
-        // if (!string_os_equal(arg, SOs("test")))
-        // {
-        //     let r = buster_argument_process(argv, envp, i, arg);
-        //     if (r != ProcessResult::Success)
-        //     {
-        //         string8_print(S8("Failed to process argument {SOs}\n"), arg);
-        //         result = r;
-        //         break;
-        //     }
-        // }
-        // else
-        // {
-        //     ide_state.test = true;
-        // }
+        String8 arg = arguments.pointer[i];
+        if (!string_equal(arg, S8("test")))
+        {
+            ProcessResult r = buster_argument_process(arguments, environment, i, arg);
+            if (r != PROCESS_RESULT_SUCCESS)
+            {
+                string_print(S8("Failed to process argument {SOs}\n"), arg);
+                result = r;
+                break;
+            }
+        }
+        else
+        {
+            ide_state.test = true;
+        }
     }
 
     return result;
