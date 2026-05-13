@@ -1,0 +1,32 @@
+name: CI UNIX pipeline
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label to execute the UNIX pipeline on
+        required: true
+        type: string
+
+env:
+  BUSTER_CI: 'ON'
+
+jobs:
+  test:
+    name: Test [${{ inputs.runner }}]
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Checkout
+        uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test (cc=clang, fuzz=0, unity_build=0, optimize=0, sanitize=0)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'OFF'
+          BUSTER_UNITY_BUILD: 'OFF'
+          BUSTER_OPTIMIZE: 'OFF'
+          BUSTER_SANITIZE: 'OFF'
+        run: |
+          ci/unix.sh

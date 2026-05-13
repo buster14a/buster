@@ -1,14 +1,14 @@
 on: [push]
 
-BUSTER_CI: ON
+env:
+  BUSTER_CI: 'ON'
 
 jobs:
-  test:
-    runs-on: zen5-linux
-    steps:
-      - name: Checkout
-        uses: https://data.forgejo.org/actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Test all
-        uses: ./.forgejo/actions/unix
+  test_controller:
+    strategy:
+      matrix:
+        runner: [zen5-linux]
+    name: All [${{matrix.runner}}]
+    uses: ./.forgejo/workflows/unix.yml
+    with:
+      runner: ${{ matrix.runner }}
