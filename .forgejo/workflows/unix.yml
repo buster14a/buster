@@ -13,13 +13,12 @@ env:
 
 jobs:
   test:
-    name: Test [${{ inputs.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, unity_build=${{ matrix.unity_build }}, optimize=${{ matrix.optimize }}, sanitize=${{ matrix.sanitize }}]
+    name: Test [${{ inputs.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, optimize=${{ matrix.optimize }}, sanitize=${{ matrix.sanitize }}]
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
         fuzz: [OFF, ON]
-        unity_build: [OFF, ON]
         optimize: [OFF, ON]
         sanitize: [OFF, ON]
         cc: [clang, gcc]
@@ -36,7 +35,6 @@ jobs:
         env:
           BUSTER_CC: ${{ matrix.cc }}
           BUSTER_FUZZ: ${{ matrix.fuzz }}
-          BUSTER_UNITY_BUILD: ${{ matrix.unity_build }}
           BUSTER_OPTIMIZE: ${{ matrix.optimize }}
           BUSTER_SANITIZE: ${{ matrix.sanitize }}
         run: |
