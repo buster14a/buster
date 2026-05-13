@@ -13,170 +13,28 @@ env:
 
 jobs:
   test:
-    name: Test [${{ inputs.runner }}]
+    name: Test [${{ inputs.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, unity_build=${{ matrix.unity_build }}, optimize=${{ matrix.optimize }}, sanitize=${{ matrix.sanitize }}]
     runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [clang]
+        fuzz: ['OFF', 'ON']
+        unity_build: ['OFF', 'ON']
+        optimize: ['OFF', 'ON']
+        sanitize: ['OFF', 'ON']
     steps:
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Test (cc=clang, fuzz=0, unity_build=0, optimize=0, sanitize=0)
+      - name: Test
         shell: bash
         env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'OFF'
-          BUSTER_UNITY_BUILD: 'OFF'
-          BUSTER_OPTIMIZE: 'OFF'
-          BUSTER_SANITIZE: 'OFF'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=0, unity_build=0, optimize=0, sanitize=1)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'OFF'
-          BUSTER_UNITY_BUILD: 'OFF'
-          BUSTER_OPTIMIZE: 'OFF'
-          BUSTER_SANITIZE: 'ON'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=0, unity_build=0, optimize=1, sanitize=0)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'OFF'
-          BUSTER_UNITY_BUILD: 'OFF'
-          BUSTER_OPTIMIZE: 'ON'
-          BUSTER_SANITIZE: 'OFF'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=0, unity_build=0, optimize=1, sanitize=1)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'OFF'
-          BUSTER_UNITY_BUILD: 'OFF'
-          BUSTER_OPTIMIZE: 'ON'
-          BUSTER_SANITIZE: 'ON'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=0, unity_build=1, optimize=0, sanitize=0)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'OFF'
-          BUSTER_UNITY_BUILD: 'ON'
-          BUSTER_OPTIMIZE: 'OFF'
-          BUSTER_SANITIZE: 'OFF'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=0, unity_build=1, optimize=0, sanitize=1)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'OFF'
-          BUSTER_UNITY_BUILD: 'ON'
-          BUSTER_OPTIMIZE: 'OFF'
-          BUSTER_SANITIZE: 'ON'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=0, unity_build=1, optimize=1, sanitize=0)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'OFF'
-          BUSTER_UNITY_BUILD: 'ON'
-          BUSTER_OPTIMIZE: 'ON'
-          BUSTER_SANITIZE: 'OFF'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=0, unity_build=1, optimize=1, sanitize=1)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'OFF'
-          BUSTER_UNITY_BUILD: 'ON'
-          BUSTER_OPTIMIZE: 'ON'
-          BUSTER_SANITIZE: 'ON'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=1, unity_build=0, optimize=0, sanitize=0)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'ON'
-          BUSTER_UNITY_BUILD: 'OFF'
-          BUSTER_OPTIMIZE: 'OFF'
-          BUSTER_SANITIZE: 'OFF'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=1, unity_build=0, optimize=0, sanitize=1)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'ON'
-          BUSTER_UNITY_BUILD: 'OFF'
-          BUSTER_OPTIMIZE: 'OFF'
-          BUSTER_SANITIZE: 'ON'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=1, unity_build=0, optimize=1, sanitize=0)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'ON'
-          BUSTER_UNITY_BUILD: 'OFF'
-          BUSTER_OPTIMIZE: 'ON'
-          BUSTER_SANITIZE: 'OFF'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=1, unity_build=0, optimize=1, sanitize=1)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'ON'
-          BUSTER_UNITY_BUILD: 'OFF'
-          BUSTER_OPTIMIZE: 'ON'
-          BUSTER_SANITIZE: 'ON'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=1, unity_build=1, optimize=0, sanitize=0)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'ON'
-          BUSTER_UNITY_BUILD: 'ON'
-          BUSTER_OPTIMIZE: 'OFF'
-          BUSTER_SANITIZE: 'OFF'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=1, unity_build=1, optimize=0, sanitize=1)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'ON'
-          BUSTER_UNITY_BUILD: 'ON'
-          BUSTER_OPTIMIZE: 'OFF'
-          BUSTER_SANITIZE: 'ON'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=1, unity_build=1, optimize=1, sanitize=0)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'ON'
-          BUSTER_UNITY_BUILD: 'ON'
-          BUSTER_OPTIMIZE: 'ON'
-          BUSTER_SANITIZE: 'OFF'
-        run: |
-          ci/unix.sh
-      - name: Test (cc=clang, fuzz=1, unity_build=1, optimize=1, sanitize=1)
-        shell: bash
-        env:
-          BUSTER_CC: clang
-          BUSTER_FUZZ: 'ON'
-          BUSTER_UNITY_BUILD: 'ON'
-          BUSTER_OPTIMIZE: 'ON'
-          BUSTER_SANITIZE: 'ON'
+          BUSTER_CC: ${{ matrix.cc }}
+          BUSTER_FUZZ: ${{ matrix.fuzz }}
+          BUSTER_UNITY_BUILD: ${{ matrix.unity_build }}
+          BUSTER_OPTIMIZE: ${{ matrix.optimize }}
+          BUSTER_SANITIZE: ${{ matrix.sanitize }}
         run: |
           ci/unix.sh
