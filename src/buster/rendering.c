@@ -356,7 +356,7 @@ BUSTER_GLOBAL_LOCAL VkDescriptorType vulkan_descriptor_type(DescriptorType type)
 
 BUSTER_GLOBAL_LOCAL VkShaderStageFlags vulkan_shader_stage(ShaderStage shader_stage)
 {
-    VkShaderStageFlags result;
+    VkShaderStageFlags result = {0};
 
     switch (shader_stage)
     {
@@ -1874,7 +1874,7 @@ void rendering_window_rect_texture_update_end(RenderingHandle* rendering, Render
 
 BUSTER_GLOBAL_LOCAL VkFormat vk_texture_format(TextureFormat format)
 {
-    VkFormat result;
+    VkFormat result = {0};
     switch (format)
     {
         break; case TEXTURE_FORMAT_R8_UNORM: result = VK_FORMAT_R8_UNORM;

@@ -4,6 +4,8 @@
 #include <buster/arena.h>
 #include <buster/string.h>
 
+BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
+
 //- rjf: doubly-linked-lists
 #define DLLInsert_NPZ(nil,f,l,p,n,next,prev) (CheckNil(nil,f) ? \
 ((f) = (l) = (n), SetNil(nil,(n)->next), SetNil(nil,(n)->prev)) :\

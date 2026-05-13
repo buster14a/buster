@@ -8,7 +8,6 @@
 
 #include <stdatomic.h>
 
-BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
 OsState os_state;
 
 #if BUSTER_LINK_LIBC

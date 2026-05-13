@@ -189,7 +189,6 @@ struct ThreadContext
 };
 
 BUSTER_V_DECL ProgramState* program_state;
-BUSTER_V_DECL BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
 
 BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail(void);
 BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);

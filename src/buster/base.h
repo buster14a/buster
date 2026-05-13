@@ -35,8 +35,14 @@
 #endif
 
 #if BUSTER_LINK_LIBC
-#if defined(__clang__)
+#if defined(__cplusplus)
+#define BUSTER_THREAD_LOCAL_DECL thread_local
+#elif defined(_MSC_VER)
+#define BUSTER_THREAD_LOCAL_DECL __declspec(thread)
+#elif defined(__GNUC__) || defined(__clang__)
 #define BUSTER_THREAD_LOCAL_DECL __thread
+#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+#define BUSTER_THREAD_LOCAL_DECL _Thread_local
 #else
 #define BUSTER_THREAD_LOCAL_DECL
 #endif
@@ -50,7 +56,7 @@
 #define BUSTER_UNDERLYING_TYPE(E) __underlying_type(E)
 
 #if BUSTER_OPTIMIZE
-#define BUSTER_INLINE __attribute__((always_inline))
+#define BUSTER_INLINE __attribute__((always_inline)) inline
 #else
 #define BUSTER_INLINE 
 #endif

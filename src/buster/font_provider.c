@@ -156,10 +156,10 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
 
     for (u32 i = first_character; i <= last_character; i += 1)
     {
-        u32 width;
-        u32 height;
-        int advance;
-        int left_bearing;
+        u32 width = 0;
+        u32 height = 0;
+        int advance = 0;
+        int left_bearing = 0;
 
         u32 ch = i;
         FontCharacter* character = &result.characters[i];
