@@ -1,13 +1,14 @@
 on: [push]
+
+BUSTER_CI: ON
+
 jobs:
   test:
     runs-on: zen5-linux
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
-      - name: Test
-        shell: bash
-        run: |
-          set -euox pipefail
-          ./generate.sh
-          ./build.sh test_all
+        uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test all
+        uses: ./.forgejo/actions/unix

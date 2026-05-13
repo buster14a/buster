@@ -196,7 +196,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_tests(UnitTestArguments* arguments)
 }
 #endif
 
-#if BUSTER_FUZZING
+#if BUSTER_FUZZ
 BUSTER_IMPL s32 buster_fuzz(const u8* pointer, size_t size)
 {
     BUSTER_UNUSED(pointer);

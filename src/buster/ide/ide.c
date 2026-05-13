@@ -87,7 +87,7 @@ BUSTER_GLOBAL_LOCAL IdeProgram ide_state = {0};
 
 ProgramState* program_state = &ide_state.state;
 
-#if BUSTER_FUZZING
+#if BUSTER_FUZZ
 BUSTER_EXPORT s32 buster_fuzz(const u8* pointer, size_t size)
 {
     BUSTER_UNUSED(pointer);

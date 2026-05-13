@@ -6,7 +6,7 @@
 typedef struct Thread Thread;
 
 #if BUSTER_LINK_LIBC
-#if BUSTER_FUZZING
+#if BUSTER_FUZZ
 BUSTER_F_DECL s32 buster_fuzz(const u8* pointer, size_t size);
 #else
 BUSTER_F_DECL ProcessResult process_arguments(void);

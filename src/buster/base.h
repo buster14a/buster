@@ -30,8 +30,8 @@
 #define BUSTER_LINK_LIBC 1
 #endif
 
-#ifndef BUSTER_FUZZING
-#define BUSTER_FUZZING 0
+#ifndef BUSTER_FUZZ
+#define BUSTER_FUZZ 0
 #endif
 
 #if BUSTER_LINK_LIBC

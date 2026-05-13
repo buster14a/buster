@@ -12,7 +12,7 @@ BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
 OsState os_state;
 
 #if BUSTER_LINK_LIBC
-#if BUSTER_FUZZING
+#if BUSTER_FUZZ
 BUSTER_EXPORT s32 LLVMFuzzerTestOneInput(const u8* pointer, size_t size)
 {
     return buster_fuzz(pointer, size);

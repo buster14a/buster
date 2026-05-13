@@ -1,0 +1,22 @@
+name: CI UNIX pipeline
+description: CI UNIX pipeline to be run on Linux and MacOS
+
+BUSTER_CI: ON
+
+inputs:
+runs:
+  using: composite
+  steps:
+    - name: Test
+      shell: bash
+      env:
+        BUSTER_CC: clang
+        BUSTER_FUZZ: OFF
+        BUSTER_UNITY_BUILD: OFF
+        BUSTER_OPTIMIZE: OFF
+        BUSTER_SANITIZE: OFF
+      run: |
+        set -euox pipefail
+        BUSTER_BUILD_DIRECTORY=build_ci-cc_${BUSTER_CC}-optimize_${BUSTER_OPTIMIZE}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}-unity_build_${BUSTER_UNITY_BUILD}
+        source ./generate.sh
+        source ./build.sh test_all
