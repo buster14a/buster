@@ -27,7 +27,6 @@ BUSTER_GLOBAL_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 #if defined(__linux__)
 #include <sys/ptrace.h>
 #include <linux/limits.h>
-#include <linux/fs.h>
 #if BUSTER_USE_IO_RING
 #include <liburing.h>
 #endif

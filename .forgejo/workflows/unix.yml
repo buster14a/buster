@@ -21,10 +21,16 @@ jobs:
         fuzz: [OFF, ON]
         optimize: [OFF, ON]
         sanitize: [OFF, ON]
-        cc: [clang, gcc]
+        cc: [clang, gcc, tcc]
         exclude:
           - cc: gcc
             fuzz: ON
+          - cc: tcc
+            fuzz: ON
+          - cc: tcc
+            sanitize: ON
+          - cc: tcc
+            optimize: ON
     steps:
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4
