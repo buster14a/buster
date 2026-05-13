@@ -26,7 +26,6 @@
 #include <buster/arena.c>
 #include <buster/integer.c>
 #include <buster/test.c>
-#include <buster/arguments.c>
 #endif
 
 STRUCT(AsmProgramState)

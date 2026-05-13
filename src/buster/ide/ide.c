@@ -21,7 +21,6 @@
 #include <buster/os.c>
 #include <buster/string.c>
 #include <buster/assertion.c>
-#include <buster/arguments.c>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.c>
 #endif

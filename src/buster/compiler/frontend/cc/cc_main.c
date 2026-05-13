@@ -36,7 +36,6 @@
 #include <buster/compiler/backend/code_generation.c>
 #include <buster/path.c>
 #include <buster/test.c>
-#include <buster/arguments.c>
 #endif
 
 ENUM(CompilerCommand, 

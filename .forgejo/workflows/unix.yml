@@ -30,3 +30,153 @@ jobs:
           BUSTER_SANITIZE: 'OFF'
         run: |
           ci/unix.sh
+      - name: Test (cc=clang, fuzz=0, unity_build=0, optimize=0, sanitize=1)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'OFF'
+          BUSTER_UNITY_BUILD: 'OFF'
+          BUSTER_OPTIMIZE: 'OFF'
+          BUSTER_SANITIZE: 'ON'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=0, unity_build=0, optimize=1, sanitize=0)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'OFF'
+          BUSTER_UNITY_BUILD: 'OFF'
+          BUSTER_OPTIMIZE: 'ON'
+          BUSTER_SANITIZE: 'OFF'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=0, unity_build=0, optimize=1, sanitize=1)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'OFF'
+          BUSTER_UNITY_BUILD: 'OFF'
+          BUSTER_OPTIMIZE: 'ON'
+          BUSTER_SANITIZE: 'ON'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=0, unity_build=1, optimize=0, sanitize=0)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'OFF'
+          BUSTER_UNITY_BUILD: 'ON'
+          BUSTER_OPTIMIZE: 'OFF'
+          BUSTER_SANITIZE: 'OFF'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=0, unity_build=1, optimize=0, sanitize=1)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'OFF'
+          BUSTER_UNITY_BUILD: 'ON'
+          BUSTER_OPTIMIZE: 'OFF'
+          BUSTER_SANITIZE: 'ON'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=0, unity_build=1, optimize=1, sanitize=0)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'OFF'
+          BUSTER_UNITY_BUILD: 'ON'
+          BUSTER_OPTIMIZE: 'ON'
+          BUSTER_SANITIZE: 'OFF'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=0, unity_build=1, optimize=1, sanitize=1)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'OFF'
+          BUSTER_UNITY_BUILD: 'ON'
+          BUSTER_OPTIMIZE: 'ON'
+          BUSTER_SANITIZE: 'ON'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=1, unity_build=0, optimize=0, sanitize=0)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'ON'
+          BUSTER_UNITY_BUILD: 'OFF'
+          BUSTER_OPTIMIZE: 'OFF'
+          BUSTER_SANITIZE: 'OFF'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=1, unity_build=0, optimize=0, sanitize=1)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'ON'
+          BUSTER_UNITY_BUILD: 'OFF'
+          BUSTER_OPTIMIZE: 'OFF'
+          BUSTER_SANITIZE: 'ON'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=1, unity_build=0, optimize=1, sanitize=0)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'ON'
+          BUSTER_UNITY_BUILD: 'OFF'
+          BUSTER_OPTIMIZE: 'ON'
+          BUSTER_SANITIZE: 'OFF'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=1, unity_build=0, optimize=1, sanitize=1)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'ON'
+          BUSTER_UNITY_BUILD: 'OFF'
+          BUSTER_OPTIMIZE: 'ON'
+          BUSTER_SANITIZE: 'ON'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=1, unity_build=1, optimize=0, sanitize=0)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'ON'
+          BUSTER_UNITY_BUILD: 'ON'
+          BUSTER_OPTIMIZE: 'OFF'
+          BUSTER_SANITIZE: 'OFF'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=1, unity_build=1, optimize=0, sanitize=1)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'ON'
+          BUSTER_UNITY_BUILD: 'ON'
+          BUSTER_OPTIMIZE: 'OFF'
+          BUSTER_SANITIZE: 'ON'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=1, unity_build=1, optimize=1, sanitize=0)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'ON'
+          BUSTER_UNITY_BUILD: 'ON'
+          BUSTER_OPTIMIZE: 'ON'
+          BUSTER_SANITIZE: 'OFF'
+        run: |
+          ci/unix.sh
+      - name: Test (cc=clang, fuzz=1, unity_build=1, optimize=1, sanitize=1)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: 'ON'
+          BUSTER_UNITY_BUILD: 'ON'
+          BUSTER_OPTIMIZE: 'ON'
+          BUSTER_SANITIZE: 'ON'
+        run: |
+          ci/unix.sh

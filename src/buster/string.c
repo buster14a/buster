@@ -235,7 +235,7 @@ bool string_equal(String8 s1, String8 s2)
     if (is_equal & (s1.pointer != 0) & (s1.pointer != s2.pointer))
     {
 #if BUSTER_OPTIMIZE
-        is_equal = memory_compare(s1.pointer, s2.pointer, s1.length * sizeof(Char));
+        is_equal = memory_compare(s1.pointer, s2.pointer, s1.length * sizeof(char8));
 #else
         for (u64 i = 0; i < s1.length; i += 1)
         {

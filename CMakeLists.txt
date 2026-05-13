@@ -169,6 +169,12 @@ set(CLANG_GNU_FAMILY_WARNINGS
     -Wunique-object-duplication
 )
 
+if (BUSTER_FUZZ)
+    set(TEST_ARGUMENTS -max_len=4096;-max_total_time=2)
+else()
+    set(TEST_ARGUMENTS test)
+endif()
+
 function(executable_add name is_buster_program main_file)
     set(target_sources ${ARGN})
 
@@ -282,7 +288,7 @@ function(executable_add name is_buster_program main_file)
         VERBATIM)
 
     add_custom_target(test_${name}
-        COMMAND "$<TARGET_FILE:${name}>" test
+        COMMAND "$<TARGET_FILE:${name}>" ${TEST_ARGUMENTS}
         DEPENDS ${name}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         USES_TERMINAL
@@ -354,7 +360,7 @@ buster_add_executable(ide src/buster/ide/ide.c
 #buster_add_executable(compiler src/buster/compiler/frontend/buster/main.c)
 
 add_custom_target(test_all
-    COMMAND $<TARGET_FILE:ide> test
+    COMMAND $<TARGET_FILE:ide> ${TEST_ARGUMENTS}
     DEPENDS ide
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Test all"

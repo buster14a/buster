@@ -43,7 +43,6 @@
 #include <buster/integer.c>
 #include <buster/file.c>
 #include <buster/path.c>
-#include <buster/arguments.c>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.c>
 #endif
