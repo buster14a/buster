@@ -9,6 +9,9 @@
 #define XXH_IMPLEMENTATION
 #define XXH_STATIC_LINKING_ONLY
 #define XXH_INLINE_ALL
+#if defined(__TINYC__)
+#define XXH_VECTOR 0
+#endif
 #include <xxhash/xxhash.h>
 
 #define first_arena_multiplier ((u64)sizeof(u64))
@@ -43,20 +46,20 @@ BUSTER_GLOBAL_LOCAL IrBlock* ir_block_get(IrModule* module, IrBlockRef reference
     return pointer_from_ref(module->block_arena, IrBlock, reference);
 }
 
-BUSTER_INLINE u64 get_hash_table_allocation_size(InternTable* table)
+BUSTER_GLOBAL_LOCAL u64 get_hash_table_allocation_size(InternTable* table)
 {
     u64 byte_size = table->hash_table_arena->position - arena_minimum_position;
     return byte_size;
 }
 
-BUSTER_INLINE u32 get_hash_table_capacity(InternTable* table)
+BUSTER_GLOBAL_LOCAL u32 get_hash_table_capacity(InternTable* table)
 {
     u64 byte_size = get_hash_table_allocation_size(table);
     BUSTER_CHECK(byte_size % divisor == 0);
     return (u32)(byte_size / divisor);
 }
 
-BUSTER_INLINE u32* get_slot_index(InternTable* table, u32 index)
+BUSTER_GLOBAL_LOCAL u32* get_slot_index(InternTable* table, u32 index)
 {
     u32 capacity = get_hash_table_capacity(table);
     BUSTER_CHECK(index < capacity);
@@ -64,7 +67,7 @@ BUSTER_INLINE u32* get_slot_index(InternTable* table, u32 index)
     return result;
 }
 
-BUSTER_INLINE u32 get_slot_count(InternTable* table)
+BUSTER_GLOBAL_LOCAL u32 get_slot_count(InternTable* table)
 {
     u64 byte_size = table->slot_arena->position - arena_minimum_position;
     BUSTER_CHECK(byte_size % sizeof(InternSlot) == 0);

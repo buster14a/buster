@@ -130,10 +130,10 @@ BUSTER_F_DECL OsError os_get_last_error(void);
 BUSTER_F_DECL StringOs os_error_write_message(StringOs string, OsError error);
 BUSTER_F_DECL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, StringOsList envp, ProcessSpawnOptions options);
 BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
-BUSTER_F_DECL StringOs os_get_environment_variable(StringOs variable);
+BUSTER_F_DECL StringOs get_environment_variable(String8 variable);
 
 BUSTER_F_DECL void os_make_directory(StringOs path);
-BUSTER_F_DECL OsFileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPermissions permissions);
+BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_F_DECL u64 os_file_get_size(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options);
 BUSTER_F_DECL void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer);
@@ -205,7 +205,7 @@ BUSTER_F_DECL u32 os_get_logical_thread_count(void);
 BUSTER_F_DECL u64 os_get_page_size(void);
 BUSTER_F_DECL OsProcessHandle* os_get_current_process_handle(void);
 BUSTER_F_DECL OsThreadHandle* os_get_current_thread_handle(void);
-BUSTER_F_DECL void os_thread_set_name(StringOs thread_name);
+BUSTER_F_DECL void os_thread_set_name(String8 thread_name);
 
 BUSTER_COLD BUSTER_F_DECL bool is_debugger_present(void);
 
@@ -219,7 +219,7 @@ BUSTER_F_DECL Arena* thread_context_get_scratch(Arena** conflicts, u64 count);
 BUSTER_F_DECL void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value);
 BUSTER_F_DECL bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index);
 
-#define flag_get(arr, Count, e) flag_get_ex((arr), (Count), (e))
+#define flag_get(arr, Count, e) flag_get_ex((arr), (Count), (u64)(e))
 #define flag_set(arr, Count, e, v) flag_set_ex((arr), (Count), (e), (v))
 
 BUSTER_F_DECL SliceString8 os_string_list_to_slice_string(Arena* arena, StringOsList string_os_list);
@@ -231,7 +231,7 @@ struct BooleanArgumentProcessResult
     bool valid;
     u8 reserved[7];
 };
-BUSTER_F_DECL BooleanArgumentProcessResult boolean_argument_process(StringOs* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer, u64 flag_count, StringOs argument);
+BUSTER_F_DECL BooleanArgumentProcessResult boolean_argument_process(String8* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer, u64 flag_count, String8 argument);
 
 BUSTER_F_DECL bool program_flag_get(ProgramFlag flag);
 

@@ -7,8 +7,9 @@
 *.bat    text eol=lf
 *.cmake text eol=lf
 *.md    text eol=lf
+*.bbb   text eol=lf
 
-# Binary files — never touch
+# Binary files - never touch
 *.png   binary
 *.jpg   binary
 *.zip   binary

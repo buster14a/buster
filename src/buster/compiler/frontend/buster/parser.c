@@ -428,6 +428,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                         }
                     }
                     break; case '\n': { id = TOKEN_LINE_FEED; it += 1; }
+                    break; case '\r': { id = TOKEN_CARRIAGE_RETURN; it += 1; }
                     break; case '[': { id = TOKEN_LEFT_BRACKET; it += 1; }
                     break; case ']': { id = TOKEN_RIGHT_BRACKET; it += 1; }
                     break; case '{': { id = TOKEN_LEFT_BRACE; it += 1; }
@@ -1779,7 +1780,7 @@ BUSTER_GLOBAL_LOCAL void print_tokenizer_result(TokenizerResult tokenizer, const
     }
 }
 
-BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, StringOs path)
+BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, String8 path)
 {
     u64 position = arena->position;
 
@@ -1800,10 +1801,10 @@ BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, StringOs path)
 void parser_experiments(void)
 {
     Arena* arena = arena_create((ArenaCreation){0});
-    parse_experiment(arena, SOs("tests/basic.bbb"));
-    parse_experiment(arena, SOs("tests/basic_hexadecimal.bbb"));
-    parse_experiment(arena, SOs("tests/basic_octal.bbb"));
-    parse_experiment(arena, SOs("tests/basic_binary.bbb"));
+    parse_experiment(arena, S8("tests/basic.bbb"));
+    parse_experiment(arena, S8("tests/basic_hexadecimal.bbb"));
+    parse_experiment(arena, S8("tests/basic_octal.bbb"));
+    parse_experiment(arena, S8("tests/basic_binary.bbb"));
     // parse_experiment(arena, SOs("tests/basic_sum.bbb"));
     // parse_experiment(arena, SOs("tests/if_else.bbb"));
     // parse_experiment(arena, SOs("tests/array_slices.bbb"));

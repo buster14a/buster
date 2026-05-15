@@ -121,15 +121,20 @@ def main(argv):
         asm_compiler = cc
     else:
         c_compiler = cc
-        cxx_compiler = "clang++"
-        asm_compiler = cc
+        cxx_compiler = ""
+        asm_compiler = ""
 
     if not cmake_compiler_args:
-        cmake_compiler_args = [
-            f"-DCMAKE_C_COMPILER={c_compiler}",
-            f"-DCMAKE_CXX_COMPILER={cxx_compiler}",
-            f"-DCMAKE_ASM_COMPILER={asm_compiler}",
-        ]
+        if cxx_compiler == "" or asm_compiler == "":
+            cmake_compiler_args = [
+                f"-DCMAKE_C_COMPILER={c_compiler}",
+            ]
+        else:
+            cmake_compiler_args = [
+                f"-DCMAKE_C_COMPILER={c_compiler}",
+                f"-DCMAKE_CXX_COMPILER={cxx_compiler}",
+                f"-DCMAKE_ASM_COMPILER={asm_compiler}",
+            ]
 
     linker = arguments.linker
     if not linker:

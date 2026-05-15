@@ -108,7 +108,6 @@ struct DeferHelper
 
 #if BUSTER_UNITY_BUILD
 #define BUSTER_F_DECL static
-
 #if defined __cplusplus
 #define BUSTER_V_DECL "This is an error to be fixed" + 123 - 0.012312;
 #else
@@ -116,7 +115,6 @@ struct DeferHelper
 #endif
 #else
 #define BUSTER_F_DECL
-
 #define BUSTER_V_DECL extern
 #endif
 
@@ -360,7 +358,11 @@ typedef char16_t char16;
 #endif
 BUSTER_CT_CHECK(sizeof(char16) == 2);
 #if defined(_WIN32)
+#if defined(__TINYC__)
+typedef uint32_t char32;
+#else
 typedef char32_t char32;
+#endif
 #else
 typedef wchar_t char32;
 #endif
@@ -455,7 +457,7 @@ typedef ProcessResult ThreadEntryPoint(void);
 #if defined(_WIN32)
 typedef String16 StringOs;
 typedef wchar_t CharOs;
-static_assert(sizeof(CharOs) == 2);
+BUSTER_CT_CHECK(sizeof(CharOs) == 2);
 typedef CharOs* StringOsList;
 typedef SliceString16 SliceStringOs;
 #define SOs(x) S16(x)

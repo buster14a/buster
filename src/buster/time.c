@@ -1,5 +1,6 @@
 #pragma once
 #include <buster/time.h>
+#include <buster/os.h>
 #include <buster/system_headers.h>
 
 TimeDataType timestamp_take(void)
@@ -13,7 +14,7 @@ TimeDataType timestamp_take(void)
     LARGE_INTEGER c;
     BOOL result = QueryPerformanceCounter(&c);
     BUSTER_CHECK(result);
-    return c.QuadPart;
+    return (TimeDataType)c.QuadPart;
 #endif
 }
 
@@ -28,7 +29,7 @@ u64 timestamp_ns_between(TimeDataType start, TimeDataType end)
     u64 result = (u64)second_diff * 1000000000ULL + (u64)ns_diff;
     return result;
 #elif defined(_WIN32)
-    let ns = (f64)((end - start) * 1000 * 1000 * 1000) / frequency;
+    u64 ns = (u64)((f64)((end - start) * 1000 * 1000 * 1000) / (f64)os_state.frequency);
     return ns;
 #endif
 }

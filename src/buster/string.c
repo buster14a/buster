@@ -172,26 +172,6 @@ IntegerParsingU64 string8_parse_u64_binary(const char8* restrict p)
     return string_parse_u64_binary(p);
 }
 
-IntegerParsingU64 string_os_parse_u64_hexadecimal(const CharOs* pointer)
-{
-    return string_parse_u64_hexadecimal(pointer);
-}
-
-IntegerParsingU64 string_os_parse_u64_decimal(const CharOs* pointer)
-{
-    return string_parse_u64_decimal(pointer);
-}
-
-IntegerParsingU64 string_os_parse_u64_octal(const CharOs* pointer)
-{
-    return string_parse_u64_binary(pointer);
-}
-
-IntegerParsingU64 string_os_parse_u64_binary(const CharOs* pointer)
-{
-    return string_parse_u64_binary(pointer);
-}
-
 String8 string_slice(String8 slice, u64 start, u64 end)
 {
     return (String8){ .pointer = (slice).pointer + (start), .length = (end) - (start) };
@@ -246,6 +226,23 @@ bool string_equal(String8 s1, String8 s2)
             }
         }
 #endif
+    }
+    return is_equal;
+}
+
+bool string16_equal(String16 s1, String16 s2)
+{
+    bool is_equal = s1.length == s2.length;
+    if (is_equal & (s1.pointer != 0) & (s1.pointer != s2.pointer))
+    {
+        for (u64 i = 0; i < s1.length; i += 1)
+        {
+            if (s1.pointer[i] != s2.pointer[i])
+            {
+                is_equal = false;
+                break;
+            }
+        }
     }
     return is_equal;
 }
@@ -307,6 +304,23 @@ BUSTER_GLOBAL_LOCAL u64 string_first_code_unit(String8 string, char8 code_unit)
     return result;
 }
 
+u64 string16_first_code_unit(String16 string, char16 code_unit)
+{
+    u64 result = BUSTER_STRING_NO_MATCH;
+
+    for (EACH_SLICE_INT(i, string))
+    {
+        char16 cu = string.pointer[i];
+        if (cu == code_unit)
+        {
+            result = i;
+            break;
+        }
+    }
+
+    return result;
+}
+
 String8 string_from_pointer_length(const char8* pointer, u64 length)
 {
     return (String8){ .pointer = (char8*)pointer, .length = length };
@@ -352,15 +366,15 @@ String16 string8_to_string16_arena(Arena* arena, String8 s, bool null_terminate)
     return result;
 }
 
-String8 string_os_to_string8_arena(Arena* arena, StringOs string)
-{
-#if defined(_WIN32)
-    return string16_to_string8_arena(a, s, true);
-#else
-    BUSTER_UNUSED(arena);
-    return string;
-#endif
-}
+// String8 string_os_to_string8_arena(Arena* arena, StringOs string)
+// {
+// #if defined(_WIN32)
+//     return string16_to_string8_arena(arena, s, true);
+// #else
+//     BUSTER_UNUSED(arena);
+//     return string;
+// #endif
+// }
 
 BUSTER_GLOBAL_LOCAL void string_reverse(String8 s)
 {
@@ -550,6 +564,44 @@ BUSTER_GLOBAL_LOCAL void string_append_repeated_code_unit(Arena* arena, char8 co
 String8 string8_slice(String8 slice, u64 start, u64 end)
 {
     return string_slice(slice, start, end);
+}
+
+typedef struct Utf8Result Utf8Result;
+struct Utf8Result
+{
+    char8 buffer[4];
+    u32 count;
+};
+
+BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_other(u32 ch)
+{
+    Utf8Result result = {0};
+    result.buffer[0] = (char8)ch;
+    result.count = 1;
+    return result;
+}
+
+String8 string8_duplicate_from_string_os(Arena* arena, StringOs string, bool null_terminate)
+{
+    u64 position = arena->position;
+
+    for (u64 i = 0; i < string.length; i += 1)
+    {
+        char16 ch16 = string.pointer[i];
+        Utf8Result encoding_result = utf8_from_other(ch16);
+        char8* allocation = arena_allocate(arena, char8, encoding_result.count);
+
+        for (u32 encoding_i = 0; encoding_i < encoding_result.count; encoding_i += 1)
+        {
+            allocation[encoding_i] = encoding_result.buffer[encoding_i];
+        }
+    }
+
+    u64 result_length = arena->position - position;
+    if (null_terminate) *arena_allocate(arena, char8, 1) = 0;
+
+    String8 result = string_from_pointer_length((char8*)arena_get_byte_pointer(arena, position), result_length);
+    return result;
 }
 
 String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments)
@@ -867,41 +919,22 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                         StringOsList string_os_list = va_arg(variable_arguments, StringOsList);
                         StringOsListIterator it = string_os_list_iterator_initialize(string_os_list);
 
-                        u64 full_length = 0;
-
-                        // TODO: support Unicode
-                        StringOs string;
-                        while ((string = string_os_list_iterator_next(&it)).pointer)
-                        {
-                            full_length += string.length + 1; // space
-                        }
-
-                        full_length -= full_length != 0;
-
-                        char8* destination = arena_allocate(arena, char8, full_length);
-
-                        u64 offset = 0;
+                        StringOs string_os;
 
                         it = string_os_list_iterator_initialize(string_os_list);
-                        while ((string = string_os_list_iterator_next(&it)).pointer)
+                        while ((string_os = string_os_list_iterator_next(&it)).pointer)
                         {
-                            for (u64 string_i = 0; string_i < string.length; string_i += 1)
-                            {
-                                destination[offset + string_i] = string.pointer[string_i];
-                            }
-
-                            offset += string.length;
-                            if (BUSTER_LIKELY(offset < full_length))
-                            {
-                                destination[offset] = ' ';
-                                offset += 1;
-                            }
+                            string8_duplicate_from_string_os(arena, string_os, false);
+                            *arena_allocate(arena, char8, 1) = ' ';
                         }
+
+                        // Remove trailing space
+                        arena->position -= 1;
                     }
                     break; case FORMAT_TYPE_STRING_OS:
                     {
                         StringOs string = va_arg(variable_arguments, StringOs);
-                        arena_append_string(arena, string);
+                        string8_duplicate_from_string_os(arena, string, false);
                     }
                     break; case FORMAT_TYPE_STRING8:
                     {
@@ -1133,7 +1166,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                         CharOs error_buffer[BUSTER_OS_ERROR_BUFFER_MAX_LENGTH];
                         StringOs error_string = os_error_write_message((StringOs)BUSTER_ARRAY_TO_SLICE(error_buffer), os_error);
 
-                        arena_append_string(arena, error_string);
+                        string8_duplicate_from_string_os(arena, error_string, false);
                     }
                     break; case FORMAT_TYPE_COUNT:
                     {
@@ -1170,6 +1203,43 @@ String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate
         result.pointer[string.length] = 0;
     }
 
+    return result;
+}
+
+StringOs string_os_duplicate_arena(Arena* arena, StringOs string, bool zero_terminate)
+{
+    StringOs result = { .pointer = arena_allocate(arena, CharOs, string.length + zero_terminate), .length = string.length };
+    memcpy(result.pointer, string.pointer, sizeof(CharOs) * string.length);
+
+    if (zero_terminate)
+    {
+        result.pointer[string.length] = 0;
+    }
+
+    return result;
+}
+
+SliceString8 os_string_list_to_slice_string(Arena* arena, StringOsList string_os_list)
+{
+    StringOsListIterator iterator = string_os_list_iterator_initialize(string_os_list);
+    StringOs s;
+    u64 string_count = 0;
+
+    while ((s = string_os_list_iterator_next(&iterator)).pointer)
+    {
+        string_count += 1;
+    }
+
+    String8* slices = arena_allocate(arena, String8, string_count);
+    iterator = string_os_list_iterator_initialize(string_os_list);
+
+    for (u64 i = 0; i < string_count; i += 1)
+    {
+        s = string_os_list_iterator_next(&iterator);
+        slices[i] = string8_duplicate_from_string_os(arena, s, true);
+    }
+
+    SliceString8 result = (SliceString8){ .pointer = slices, .length = string_count };
     return result;
 }
 
@@ -1234,13 +1304,6 @@ u64 string_first_sequence(String8 s, String8 sub)
     return result;
 }
 
-u64 string16_length(const char16* s)
-{
-    const char16* restrict it = s;
-    while (*it++){};
-    return (u64)(it - s);
-}
-
 StringOsListIterator string_os_list_iterator_initialize(StringOsList list)
 {
     return (StringOsListIterator) {
@@ -1254,15 +1317,34 @@ u64 string8_length(const char8* pointer)
 
     if (pointer)
     {
+#if defined(__has_builtin) && __has_builtin(__builtin_strlen)
         result = __builtin_strlen(pointer);
+#else
+        result = strlen(pointer);
+#endif
     }
 
     return result;
 }
 
+u64 string16_length(const char16* s)
+{
+    const char16* restrict it = s;
+    while (*it)
+    {
+        it += 1;
+    }
+    return (u64)(it - s);
+}
+
 String8 string_from_pointer(const char8* pointer)
 {
     return (String8){ .pointer = (char8*)pointer, .length = string8_length(pointer) };
+}
+
+String16 string16_from_pointer(const char16* pointer)
+{
+    return (String16){ .pointer = (char16*)pointer, .length = string16_length(pointer) };
 }
 
 StringOs string_os_from_pointer(const CharOs* pointer)
@@ -1274,6 +1356,25 @@ StringOs string_os_from_pointer(const CharOs* pointer)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL u64 raw_string16_first_code_unit(const char16* pointer, char16 code_unit)
+{
+    u64 result = BUSTER_STRING_NO_MATCH;
+
+    if (pointer)
+    {
+        for (char16* it = (char16*)pointer; *it; it += 1)
+        {
+            if (*it == code_unit)
+            {
+                result = (u64)(it - pointer);
+                break;
+            }
+        }
+    }
+
+    return result;
+}
+
 StringOs string_os_list_iterator_next(StringOsListIterator* iterator)
 {
     StringOs result = {0};
@@ -1281,16 +1382,22 @@ StringOs string_os_list_iterator_next(StringOsListIterator* iterator)
     u64 original_position = iterator->position;
     u64 position = original_position;
 
-    CharOs* current = list[position];
+    CharOs* current;
+#if defined(_WIN32)
+    current = &list[position];
+    if (*current)
+#else
+    current = list[position];
     if (current)
+#endif
     {
 #if defined(_WIN32)
-        let original_pointer = &list[position];
-        let pointer = original_pointer;
+        CharOs* original_pointer = &list[position];
+        CharOs* pointer = original_pointer;
         if (*pointer == '"')
         {
             // TODO: handle escape
-            let double_quote = raw_string16_first_code_unit(pointer + 1, '"');
+            u64 double_quote = raw_string16_first_code_unit(pointer + 1, '"');
             if (double_quote == BUSTER_STRING_NO_MATCH)
             {
                 return result;
@@ -1300,12 +1407,12 @@ StringOs string_os_list_iterator_next(StringOsListIterator* iterator)
             pointer = &list[position];
         }
 
-        let space = raw_string16_first_code_unit(pointer, ' ');
-        let is_space = space != BUSTER_STRING_NO_MATCH;
+        u64 space = raw_string16_first_code_unit(pointer, ' ');
+        bool is_space = space != BUSTER_STRING_NO_MATCH;
         space = is_space ? space : 0;
         position += space;
         position += is_space ? 0 : string16_length(pointer);
-        let length = position - original_position;
+        u64 length = position - original_position;
 
         if (is_space)
         {
@@ -1339,7 +1446,7 @@ StringOs string_os_from_pointer_length(CharOs* pointer, u64 length)
 StringOsList string_os_list_builder_append(OsArgumentBuilder* builder, StringOs arg)
 {
 #if defined(_WIN32)
-    let result = string_os_duplicate_arena(builder->arena, arg, true);
+    StringOs result = string_os_duplicate_arena(builder->arena, arg, true);
     if (result.pointer)
     {
         result.pointer[arg.length] = ' ';
@@ -1391,11 +1498,11 @@ StringOsList string_os_list_create_from(Arena* arena, SliceStringOs arguments)
         allocation_length += arguments.pointer[i].length + 1;
     }
 
-    let allocation = arena_allocate(arena, CharOs, allocation_length);
+    CharOs* allocation = arena_allocate(arena, CharOs, allocation_length);
 
     for (u64 source_i = 0, destination_i = 0; source_i < arguments.length; source_i += 1)
     {
-        let source_argument = arguments.pointer[source_i];
+        StringOs source_argument = arguments.pointer[source_i];
         memcpy(&allocation[destination_i], source_argument.pointer, BUSTER_SLICE_SIZE(source_argument));
         destination_i += source_argument.length;
         allocation[destination_i] = ' ';
@@ -1419,84 +1526,23 @@ StringOsList string_os_list_create_from(Arena* arena, SliceStringOs arguments)
 #endif
 }
 
-StringOsList string_os_list_duplicate_and_substitute_first_argument(Arena* arena, StringOsList old_arguments, StringOs new_first_argument, SliceStringOs extra_arguments)
+// TODO: make this better
+String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate)
 {
-#if defined(_WIN32)
-    let space_index = raw_string16_first_code_unit(old_arguments, ' ');
-    let old_argument_length = string16_length(old_arguments);
-    let first_argument_end = space_index == BUSTER_STRING_NO_MATCH ? old_argument_length : space_index;
-    u64 extra_length = 0;
-    for (u64 i = 0; i < extra_arguments.length; i += 1)
+    char16* pointer = arena_allocate(arena, char16, string.length + null_terminate);
+
+    for (u64 i = 0; i < string.length; i += 1)
     {
-        let extra_argument = extra_arguments.pointer[i];
-        extra_length += extra_argument.length + 1;
+        pointer[i] = string.pointer[i];
     }
 
-    extra_length -= extra_length != 0;
-
-    let new_length = new_first_argument.length + (old_argument_length - first_argument_end + (extra_length == 0)) + extra_length;
-    let new_arguments = arena_allocate(arena, CharOs, new_length + 1);
-
-    let char_size = sizeof(new_first_argument.pointer[0]);
-    u64 i = 0;
-    let copy_length = new_first_argument.length;
-    memcpy(new_arguments + i, new_first_argument.pointer, copy_length * char_size);
-    i += copy_length;
-
-    new_arguments[i] = ' ';
-    i += 1;
-
-    if (first_argument_end != old_argument_length)
+    if (null_terminate)
     {
-        copy_length = old_argument_length - first_argument_end;
-        memcpy(new_arguments + i, old_arguments + first_argument_end, char_size * copy_length);
-        i += copy_length;
-
-        new_arguments[i] = ' ';
-        i += 1;
+        pointer[string.length] = 0;
     }
 
-    for (u64 extra_i = 0; extra_i < extra_arguments.length; extra_i += 1)
-    {
-        let extra_argument = extra_arguments.pointer[extra_i];
-        memcpy(new_arguments + i, extra_argument.pointer, char_size * extra_argument.length);
-        i += extra_argument.length;
-
-        new_arguments[i] = ' ';
-        i += 1;
-    }
-
-    new_arguments[new_length] = 0;
-
-    return new_arguments;
-#else
-    StringOsListIterator it = string_os_list_iterator_initialize(old_arguments);
-    StringOs arg;
-    u64 old_argument_count = 0;
-    while ((arg = string_os_list_iterator_next(&it)).pointer)
-    {
-        old_argument_count += 1;
-    }
-
-    u64 total_argument_count = old_argument_count + extra_arguments.length;
-    CharOs** new_arguments = arena_allocate(arena, CharOs*, total_argument_count + 1);
-    new_arguments[0] = new_first_argument.pointer;
-
-    if (old_argument_count > 1)
-    {
-        memcpy(new_arguments + 1, old_arguments + 1, sizeof(new_arguments[0]) * old_argument_count - 1); 
-    }
-
-    for (u64 i = 0; i < extra_arguments.length; i += 1)
-    {
-        String8 incoming_argument = extra_arguments.pointer[i];
-        new_arguments[old_argument_count + i] = incoming_argument.pointer;
-    }
-
-    new_arguments[total_argument_count] = 0;
-
-    return new_arguments;
-#endif
+    String16 result = (String16) { .pointer = pointer, .length = string.length };
+    return result;
 }
 
 #if BUSTER_INCLUDE_TESTS

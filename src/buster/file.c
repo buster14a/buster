@@ -3,8 +3,9 @@
 #include <buster/system_headers.h>
 #include <buster/integer.h>
 #include <buster/arena.h>
+#include <buster/string.h>
 
-bool file_write(StringOs path, ByteSlice content)
+bool file_write(String8 path, ByteSlice content)
 {
     OsFileDescriptor* fd = os_file_open(path, (OpenFlags) { .write = 1, .create = 1, .truncate = 1 }, (OpenPermissions){ .read = 1, .write = 1 });
     bool result = false;
@@ -19,7 +20,7 @@ bool file_write(StringOs path, ByteSlice content)
     return result;
 }
 
-ByteSlice file_read(Arena* arena, StringOs path, FileReadOptions options)
+ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
 {
     OsFileDescriptor* fd = os_file_open(path, (OpenFlags) { .read = 1 }, (OpenPermissions){ .read = 1 });
     ByteSlice result = {0};
@@ -58,12 +59,15 @@ bool file_copy(CopyFileArguments arguments)
 {
     bool result = true;
 #if defined(_WIN32)
-    result = CopyFileW(arguments.original_path.pointer, arguments.new_path.pointer, false) != 0;
+    TemporalArena temp = scratch_begin(0, 0);
+    String16 original_path = string16_from_string8(temp.arena, arguments.original_path, true);
+    String16 new_path = string16_from_string8(temp.arena, arguments.new_path, true);
+    result = CopyFileW(original_path.pointer, new_path.pointer, false) != 0;
     if (!result)
     {
         // If the copy failed (e.g., file is locked by another process), check if the destination already exists.
         // This handles the case where a DLL is already loaded by a running process - we can just use it.
-        DWORD attributes = GetFileAttributesW(arguments.new_path.pointer);
+        DWORD attributes = GetFileAttributesW(new_path.pointer);
         if (attributes != INVALID_FILE_ATTRIBUTES)
         {
             // Destination exists, assume it's correct
@@ -71,10 +75,11 @@ bool file_copy(CopyFileArguments arguments)
         }
         else
         {
-            string8_print(S8("Error message: {EOs}. Original: {SOs}. New: {SOs}\n"), os_get_last_error(), arguments.original_path, arguments.new_path);
+            string_print(S8("Error message: {EOs}. Original: {SOs}. New: {SOs}\n"), os_get_last_error(), arguments.original_path, arguments.new_path);
             os_fail();
         }
     }
+    scratch_end(temp);
 #else
     BUSTER_UNUSED(arguments);
 #endif

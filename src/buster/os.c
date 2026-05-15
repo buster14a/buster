@@ -35,6 +35,10 @@ BUSTER_GLOBAL_LOCAL void thread_context_tls_key_ensure_initialized(void)
 BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
 #endif
 
+#if defined(_MSC_VER)
+RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {0};
+#endif
+
 //- rjf: doubly-linked-lists
 #define DLLInsert_NPZ(nil,f,l,p,n,next,prev) (CheckNil(nil,f) ? \
 ((f) = (l) = (n), SetNil(nil,(n)->next), SetNil(nil,(n)->prev)) :\
@@ -89,37 +93,77 @@ CheckNil(nil,p) ? \
 #define SLLStackPush(f,n) SLLStackPush_N(f,n,next)
 #define SLLStackPop(f) SLLStackPop_N(f,next)
 
-BUSTER_V_DECL OsState os_state;
+#if defined(_WIN32)
+BUSTER_GLOBAL_LOCAL u64 w32_file_size_from_file_information(BY_HANDLE_FILE_INFORMATION file_information)
+{
+    return ((u64)file_information.nFileSizeHigh << 32) | (u64)file_information.nFileSizeLow;
+}
+
+BUSTER_GLOBAL_LOCAL void w32_file_stats_from_file_information(FileStats* stats, FileStatsOptions options, BY_HANDLE_FILE_INFORMATION file_information)
+{
+    if (options.size)
+    {
+        stats->size = w32_file_size_from_file_information(file_information);
+    }
+
+    if (options.modified_time)
+    {
+        u64 file_time_100ns = ((u64)file_information.ftLastWriteTime.dwHighDateTime << 32) | (u64)file_information.ftLastWriteTime.dwLowDateTime;
+        u64 unix_epoch_100ns = (u64)11644473600ULL * (u64)10000000ULL;
+        if (file_time_100ns >= unix_epoch_100ns)
+        {
+            u64 unix_time_100ns = file_time_100ns - unix_epoch_100ns;
+            stats->modified_time_s = unix_time_100ns / (u64)10000000;
+            stats->modified_time_ns = (unix_time_100ns % (u64)10000000) * (u64)100;
+        }
+    }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL void os_entity_lock(void)
+{
+#if defined(_WIN32)
+    EnterCriticalSection(&os_state.entity_mutex);
+#else
+    pthread_mutex_lock(&os_state.entity_mutex);
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL void os_entity_unlock(void)
+{
+#if defined(_WIN32)
+    LeaveCriticalSection(&os_state.entity_mutex);
+#else
+    pthread_mutex_unlock(&os_state.entity_mutex);
+#endif
+}
 
 BUSTER_GLOBAL_LOCAL OsEntity* os_entity_allocate(OsEntityKind kind)
 {
-    OsEntity* result = 0;
 
-    pthread_mutex_lock(&os_state.entity_mutex);
+    os_entity_lock();
+    OsEntity* result = os_state.entity_free_list;
+    if (result)
     {
-        result = os_state.entity_free_list;
-        if (result)
-        {
-            SLLStackPop(os_state.entity_free_list);
-        }
-        else
-        {
-            result = arena_allocate(os_state.entity_arena, OsEntity, 1);
-        }
+        SLLStackPop(os_state.entity_free_list);
     }
-    pthread_mutex_unlock(&os_state.entity_mutex);
+    else
+    {
+        result = arena_allocate(os_state.entity_arena, OsEntity, 1);
+    }
     memset(result, 0, sizeof(*result));
     result->kind = kind;
+    os_entity_unlock();
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL void os_entity_release(OsEntity* entity)
 {
-    pthread_mutex_lock(&os_state.entity_mutex);
+    os_entity_lock();
     {
         SLLStackPush(os_state.entity_free_list, entity);
     }
-    pthread_mutex_unlock(&os_state.entity_mutex);
+    os_entity_unlock();
 }
 
 BUSTER_COLD bool is_debugger_present(void)
@@ -132,7 +176,7 @@ BUSTER_COLD bool is_debugger_present(void)
         program_state->_is_debugger_present = os_result != 0;
 #elif defined(__APPLE__)
 #elif defined(_WIN32)
-        let os_result = IsDebuggerPresent();
+        BOOL os_result = IsDebuggerPresent();
         program_state->_is_debugger_present = os_result != 0;
 #else
     BUSTER_TRAP();
@@ -247,7 +291,7 @@ BUSTER_GLOBAL_LOCAL DWORD os_windows_allocation_flags(MapFlags flags)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void* generic_fd_to_windows(FileDescriptor* fd)
+BUSTER_GLOBAL_LOCAL void* generic_fd_to_windows(OsFileDescriptor* fd)
 {
     BUSTER_CHECK(fd);
     return (void*)fd;
@@ -281,6 +325,7 @@ BUSTER_GLOBAL_LOCAL bool os_lock_and_unlock(void* address, u64 size)
     }
     result = os_result == 0;
 #elif defined(_WIN32)
+#if defined(_MSC_VER)
     if (w32_rio_functions.RIORegisterBuffer)
     {
         RIO_BUFFERID buffer_id = w32_rio_functions.RIORegisterBuffer((PCHAR)address, (DWORD)size);
@@ -293,6 +338,10 @@ BUSTER_GLOBAL_LOCAL bool os_lock_and_unlock(void* address, u64 size)
             }
         }
     }
+#else
+    BUSTER_UNUSED(address);
+    BUSTER_UNUSED(size);
+#endif
 #endif
     return result;
 }
@@ -306,8 +355,8 @@ bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
     int os_result = mprotect(address, size, protection_flags);
     result = os_result == 0;
 #elif defined(_WIN32)
-    let protection_flags = os_windows_protection_flags(protection);
-    let os_result = VirtualAlloc(address, size, MEM_COMMIT, protection_flags);
+    DWORD protection_flags = os_windows_protection_flags(protection);
+    void* os_result = VirtualAlloc(address, size, MEM_COMMIT, protection_flags);
     result = os_result != 0;
 #endif
 
@@ -333,8 +382,8 @@ void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
         address = 0;
     }
 #elif defined(_WIN32)
-    let allocation_flags = os_windows_allocation_flags(map);
-    let protection_flags = os_windows_protection_flags(protection);
+    DWORD allocation_flags = os_windows_allocation_flags(map);
+    DWORD protection_flags = os_windows_protection_flags(protection);
     address = VirtualAlloc(base, size, allocation_flags, protection_flags);
 #endif
     return address;
@@ -357,7 +406,7 @@ OsFileDescriptor* os_get_standard_stream(StandardStream stream)
         [STANDARD_STREAM_OUTPUT] = STD_OUTPUT_HANDLE,
         [STANDARD_STREAM_ERROR] = STD_ERROR_HANDLE,
     };
-    result = (FileDescriptor*)GetStdHandle(descriptors[stream]);
+    result = (OsFileDescriptor*)GetStdHandle(descriptors[stream]);
 #endif
     return result;
 }
@@ -368,7 +417,7 @@ OsFileDescriptor* os_get_stdout(void)
 #if defined(__linux__) || defined(__APPLE__)
     result = posix_fd_to_generic_fd(STDOUT_FILENO);
 #elif defined(_WIN32)
-    result = (FileDescriptor*)GetStdHandle(STD_OUTPUT_HANDLE);
+    result = (OsFileDescriptor*)GetStdHandle(STD_OUTPUT_HANDLE);
 #endif
     return result;
 }
@@ -376,13 +425,13 @@ OsFileDescriptor* os_get_stdout(void)
 __attribute__((used)) BUSTER_GLOBAL_LOCAL TimeDataType frequency;
 
 #if defined(_WIN32)
-BUSTER_GLOBAL_LOCAL ThreadHandle* os_windows_thread_to_generic(HANDLE handle)
+BUSTER_GLOBAL_LOCAL OsThreadHandle* os_windows_thread_to_generic(HANDLE handle)
 {
     BUSTER_CHECK(handle != 0);
-    return (ThreadHandle*)handle;
+    return (OsThreadHandle*)handle;
 }
 
-BUSTER_GLOBAL_LOCAL HANDLE os_windows_thread_from_generic(ThreadHandle* handle)
+BUSTER_GLOBAL_LOCAL HANDLE os_windows_thread_from_generic(OsThreadHandle* handle)
 {
     BUSTER_CHECK(handle != 0);
     return (HANDLE)handle;
@@ -435,16 +484,20 @@ bool os_thread_join(OsThreadHandle* handle)
     int join_result = pthread_join(entity->thread.handle, &void_return_value);
     result = (join_result == 0);
 #elif defined(_WIN32)
-    WaitForSingleObject(thread_handle, INFINITE);
+    WaitForSingleObject(handle, INFINITE);
 
     DWORD exit_code;
-    let result = GetExitCodeThread(thread_handle, &exit_code) != 0;
-    if (result)
+    BOOL exit_code_result = GetExitCodeThread(handle, &exit_code);
+    if (exit_code_result)
     {
-        return_code = (u32)exit_code;
+        result = (u32)exit_code;
+    }
+    else
+    {
+        result = ~(DWORD)0;
     }
 
-    CloseHandle(thread_handle);
+    CloseHandle(handle);
 #endif
     os_entity_release(entity);
     return result;
@@ -482,7 +535,7 @@ void os_make_directory(StringOs path)
 #endif
 }
 
-OsFileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPermissions permissions)
+OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions)
 {
     BUSTER_CHECK(!path.pointer[path.length]);
     OsFileDescriptor* result = 0;
@@ -517,6 +570,8 @@ OsFileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPermissions p
         result = (OsFileDescriptor*)(u64)fd;
     }
 #elif defined(_WIN32)
+    TemporalArena scratch = scratch_begin(0, 0);
+
     DWORD desired_access = 0;
     DWORD shared_mode = 0;
     SECURITY_ATTRIBUTES security_attributes = { sizeof(security_attributes), 0, 0 };
@@ -558,18 +613,20 @@ OsFileDescriptor* os_file_open(StringOs path, OpenFlags flags, OpenPermissions p
         creation_disposition |= OPEN_EXISTING;
     }
 
-    let fd = CreateFileW(path.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
+    String16 path_w = string16_from_string8(scratch.arena, path, true);
+    HANDLE fd = CreateFileW(path_w.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
     if (fd != INVALID_HANDLE_VALUE)
     {
-        result = (FileDescriptor*)fd;
+        result = (OsFileDescriptor*)fd;
     }
     else
     {
-        if (program_state->input.verbose)
+        if (program_flag_get(PROGRAM_FLAG_VERBOSE))
         {
-            string8_print(S8("Error: {EOs}\n"), os_get_last_error());
+            string_print(S8("Error: {EOs}\n"), os_get_last_error());
         }
     }
+    scratch_end(scratch);
 #endif
     return result;
 }
@@ -582,7 +639,7 @@ BUSTER_GLOBAL_LOCAL u64 os_file_write_partially(OsFileDescriptor* file_descripto
     BUSTER_CHECK(result > 0);
     return (u64)result;
 #elif defined(_WIN32)
-    let fd = generic_fd_to_windows(file_descriptor);
+    HANDLE fd = generic_fd_to_windows(file_descriptor);
     DWORD written_byte_count = 0;
     BOOL result = WriteFile(fd, pointer, (u32)length, &written_byte_count, 0);
     BUSTER_CHECK(result);
@@ -614,7 +671,7 @@ BUSTER_GLOBAL_LOCAL u64 os_file_read_partially(OsFileDescriptor* file_descriptor
         result = (u64)read_byte_count;
     }
 #elif defined(_WIN32)
-    let fd = generic_fd_to_windows(file_descriptor);
+    HANDLE fd = generic_fd_to_windows(file_descriptor);
     DWORD read_byte_count = 0;
     success = ReadFile(fd, buffer, (u32)byte_count, &read_byte_count, 0) != 0;
     if (success)
@@ -672,10 +729,10 @@ FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions 
         }
 #elif defined(_WIN32)
         HANDLE fd = generic_fd_to_windows(file_descriptor);
-        LARGE_INTEGER file_size = {};
-        BOOL file_result = GetFileSizeEx(fd, &file_size);
+        BY_HANDLE_FILE_INFORMATION file_information = {0};
+        BOOL file_result = GetFileInformationByHandle(fd, &file_information);
         BUSTER_CHECK(file_result != 0);
-        result.size = (u64)file_size.QuadPart;
+        w32_file_stats_from_file_information(&result, options, file_information);
 #endif
     }
 
@@ -692,8 +749,8 @@ bool os_file_close(OsFileDescriptor* file_descriptor)
         int close_result = close(fd);
         result = close_result == 0;
 #elif defined(_WIN32)
-        let fd = generic_fd_to_windows(file_descriptor);
-        let close_result = CloseHandle(fd);
+        HANDLE fd = generic_fd_to_windows(file_descriptor);
+        BOOL close_result = CloseHandle(fd);
         result = close_result != 0;
 #endif
     }
@@ -725,8 +782,8 @@ ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, 
         if (options.capture & (1 << stream))
         {
             SECURITY_ATTRIBUTES security_attributes = { sizeof(security_attributes), 0, TRUE };
-            static_assert(sizeof(HANDLE) == sizeof(FileDescriptor*));
-            let pipe_creation_result = CreatePipe((PHANDLE)&result.pipes[stream][0], (PHANDLE)&result.pipes[stream][1], &security_attributes, 0) != 0;
+            BUSTER_CT_CHECK(sizeof(HANDLE) == sizeof(OsFileDescriptor*));
+            BOOL pipe_creation_result = CreatePipe((PHANDLE)&result.pipes[stream][0], (PHANDLE)&result.pipes[stream][1], &security_attributes, 0) != 0;
             pipe_creation_results[stream] = pipe_creation_result;
 
             if (pipe_creation_result)
@@ -745,7 +802,7 @@ ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, 
     if (pipe_result)
     {
         BUSTER_UNUSED(envp);
-        PROCESS_INFORMATION process_information = {};
+        PROCESS_INFORMATION process_information = {0};
         STARTUPINFOW startup_info = {sizeof(startup_info)};
 
         if (any_capture)
@@ -758,11 +815,11 @@ ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, 
 
         if (CreateProcessW(first_argument.pointer, argv, 0, 0, 1, 0, 0, 0, &startup_info, &process_information))
         {
-            result.handle = (ProcessHandle*)process_information.hProcess;
+            result.handle = (OsProcessHandle*)process_information.hProcess;
         }
         else
         {
-            string8_print(S8("Error creating a process: {EOs}\n{SOsL}\n"), os_get_last_error(), argv);
+            string_print(S8("Error creating a process: {EOs}\n{SOsL}\n"), os_get_last_error(), argv);
         }
     }
 
@@ -877,10 +934,10 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
 #if defined(_WIN32)
         for (StandardStream stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
         {
-            let read_pipe = (HANDLE)spawn.pipes[stream][0];
+            HANDLE read_pipe = (HANDLE)spawn.pipes[stream][0];
             if (read_pipe)
             {
-                let start_position = arena->position;
+                u64 start_position = arena->position;
 
                 u8 buffer[16 * 1024];
                 u64 total_read_byte_count = 0;
@@ -889,7 +946,7 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
                 bool iteration_read_result;
                 while ((iteration_read_result = ReadFile(read_pipe, buffer, sizeof(buffer), &iteration_read_byte_count, 0) != 0) && iteration_read_byte_count > 0)
                 {
-                    let iteration_buffer = arena_allocate(arena, u8, iteration_read_byte_count);
+                    u8* iteration_buffer = arena_allocate(arena, u8, iteration_read_byte_count);
                     memcpy(iteration_buffer, buffer, iteration_read_byte_count);
 
                     total_read_byte_count += iteration_read_byte_count;
@@ -897,23 +954,23 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
 
                 if (!iteration_read_result)
                 {
-                    let os_error = os_get_last_error();
+                    OsError os_error = os_get_last_error();
                     if (os_error.v != ERROR_BROKEN_PIPE)
                     {
-                        string8_print(S8("Failed to read from process pipe: {EOs}\n"), os_error);
+                        string_print(S8("Failed to read from process pipe: {EOs}\n"), os_error);
                     }
                 }
 
                 CloseHandle(read_pipe);
 
-                let length = arena->position - start_position;
+                u64 length = arena->position - start_position;
                 BUSTER_CHECK(total_read_byte_count == length);
 
                 result.streams[stream] = (ByteSlice) { (u8*)arena + start_position, length };
             }
         }
 
-        let wait_result = WaitForSingleObject(spawn.handle, INFINITE);
+        DWORD wait_result = WaitForSingleObject(spawn.handle, INFINITE);
         if (wait_result == WAIT_OBJECT_0)
         {
             DWORD exit_code;
@@ -1005,7 +1062,7 @@ StringOs os_error_write_message(StringOs string, OsError error)
     BUSTER_CHECK(string.length == BUSTER_OS_ERROR_BUFFER_MAX_LENGTH);
     StringOs result = {0};
 #if defined(_WIN32)
-    let length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)error.v, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), string.pointer, string.length > ~(DWORD)0 ? ~(DWORD)0 : (DWORD)string.length, 0);
+    DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)error.v, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), string.pointer, string.length > ~(DWORD)0 ? ~(DWORD)0 : (DWORD)string.length, 0);
     if (length != 0)
     {
         result = string_os_from_pointer_length(string.pointer, length - 1);
@@ -1024,16 +1081,16 @@ StringOs os_get_environment_variable(StringOs variable)
 {
     StringOs result = {0};
 #if defined(_WIN32)
-    let envp = GetEnvironmentStringsW();
-    let it = envp;
+    CharOs* envp = GetEnvironmentStringsW();
+    CharOs* it = envp;
     while (*it)
     {
-        let length = string16_length(it);
-        let full_env = string_os_from_pointer_length(it, length);
+        u64 length = string16_length(it);
+        StringOs full_env = string_os_from_pointer_length(it, length);
         it += length + 1;
-        let key_index = string_first_code_point(full_env, '=');
-        let key = string_os_from_pointer_length(full_env.pointer, key_index);
-        if (string_equal(key, variable))
+        u64 key_index = string16_first_code_unit(full_env, '=');
+        StringOs key = string_os_from_pointer_length(full_env.pointer, key_index);
+        if (string16_equal(key, variable))
         {
             result = string_os_from_pointer_length(full_env.pointer + (key_index + 1), full_env.length - (key_index + 1));
             break;
@@ -1057,10 +1114,10 @@ u64 os_file_get_size(OsFileDescriptor* file_descriptor)
     return (u64)sb.st_size;
 #elif defined(_WIN32)
     HANDLE fd = generic_fd_to_windows(file_descriptor);
-    LARGE_INTEGER file_size = {};
-    BOOL result = GetFileSizeEx(fd, &file_size);
+    BY_HANDLE_FILE_INFORMATION file_information = {0};
+    BOOL result = GetFileInformationByHandle(fd, &file_information);
     BUSTER_CHECK(result);
-    return (u64)file_size.QuadPart;
+    return w32_file_size_from_file_information(file_information);
 #endif
 }
 
@@ -1069,7 +1126,7 @@ bool os_is_tty(OsFileDescriptor* file)
     bool result = false;
 #if defined(_WIN32)
     DWORD mode;
-    let handle = (HANDLE)file;
+    HANDLE handle = (HANDLE)file;
     result = GetConsoleMode(handle, &mode) != 0;
 #else
     int fd = generic_fd_to_posix(file);
@@ -1085,7 +1142,7 @@ bool os_unreserve(void* address, u64 size)
     int unmap_result = munmap(address, size);
     result = unmap_result == 0;
 #elif defined(_WIN32)
-    let virtual_free_result = VirtualFree(address, size, MEM_DECOMMIT);
+    BOOL virtual_free_result = VirtualFree(address, size, MEM_DECOMMIT);
     result = virtual_free_result != 0;
     if (result)
     {
@@ -1102,7 +1159,7 @@ OsModuleHandle* os_dynamic_library_load(StringOs library)
     BUSTER_CHECK(BUSTER_SLICE_IS_ZERO_TERMINATED(library));
 
 #if defined(_WIN32)
-    result = (OSModuleHandle*)LoadLibraryW(library.pointer);
+    result = (OsModuleHandle*)LoadLibraryW(library.pointer);
 #else
     result = (OsModuleHandle*) dlopen(library.pointer, RTLD_NOW | RTLD_LOCAL);
 #endif
@@ -1112,11 +1169,14 @@ OsModuleHandle* os_dynamic_library_load(StringOs library)
 
 void os_dynamic_library_unload(OsModuleHandle* module)
 {
+    if (module)
+    {
 #if defined(_WIN32)
-    result = (OSModule*)LoadLibraryW(library.pointer);
+        FreeLibrary((HMODULE)module);
 #else
-    dlclose(module);
+        dlclose(module);
 #endif
+    }
 }
 
 OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbol)
@@ -1124,7 +1184,7 @@ OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbo
     OsSymbol* result = {0};
 
 #if defined(_WIN32)
-    result = GetProcAddress((HMODULE)module, symbol.pointer);
+    result = (OsSymbol*)GetProcAddress((HMODULE)module, symbol.pointer);
 #else
     result = (OsSymbol*)dlsym((void*)module, symbol.pointer);
 #endif
@@ -1138,7 +1198,7 @@ u32 os_get_logical_thread_count(void)
 
 #if defined(__linux__)
     result = (u32)get_nprocs();
-#else
+#elif defined(__APPLE__)
     int os_result = 1;
     size_t size = sizeof(result);
 
@@ -1148,6 +1208,10 @@ u32 os_get_logical_thread_count(void)
     }
 
     result = (u32)os_result;
+#elif defined(_WIN32)
+    SYSTEM_INFO sysinfo = {0};
+    GetSystemInfo(&sysinfo);
+    result = sysinfo.dwNumberOfProcessors;
 #endif
 
     return result;
@@ -1159,6 +1223,9 @@ u64 os_get_page_size(void)
 #if defined(__linux__) || defined(__APPLE__)
     page_size = (u64)getpagesize();
 #else
+    SYSTEM_INFO sysinfo = {0};
+    GetSystemInfo(&sysinfo);
+    page_size = sysinfo.dwPageSize;
 #endif
     return page_size;
 }
@@ -1169,6 +1236,7 @@ OsProcessHandle* os_get_current_process_handle(void)
 #if defined(__linux__) || defined(__APPLE__)
      result = (OsProcessHandle*)(u64)getpid();
 #else
+     result = (OsProcessHandle*)GetCurrentProcess();
 #endif
      return result;
 }
@@ -1179,18 +1247,26 @@ OsThreadHandle* os_get_current_thread_handle(void)
 #if defined(__linux__) || defined(__APPLE__)
     result = (OsThreadHandle*)(u64)pthread_self();
 #else
+    result = (OsThreadHandle*)GetCurrentThread();
 #endif
     return result;
 }
 
-void os_thread_set_name(StringOs thread_name)
+void os_thread_set_name(String8 thread_name)
 {
 #if defined(__linux__)
     pthread_setname_np(pthread_self(), thread_name.pointer);
 #elif defined(__APPLE__)
     pthread_setname_np(thread_name.pointer);
+#elif defined(_WIN32)
+#ifndef __TINYC__
+    TemporalArena scratch = scratch_begin(0, 0);
+    String16 string = string16_from_string8(scratch.arena, thread_name, true);
+    SetThreadDescription(GetCurrentThread(), string.pointer);
+    scratch_end(scratch);
+#endif
 #else
-    BUSTER_TRAP();
+#pragma error
 #endif
 }
 
@@ -1275,10 +1351,20 @@ Arena* thread_context_get_scratch(Arena** conflicts, u64 count)
 
 u64 os_now_microseconds(void)
 {
+#if defined(_WIN32)
+    u64 result = 0;
+    LARGE_INTEGER os_counter;
+    if(QueryPerformanceCounter(&os_counter))
+    {
+        result = (u64)(os_counter.QuadPart * 1000 * 1000) / os_state.frequency;
+    }
+    return result;
+#else
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   u64 result = (u64)(ts.tv_sec * (1000 * 1000) + (ts.tv_nsec / 1000));
   return result;
+#endif
 }
 
 void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value)
@@ -1299,7 +1385,7 @@ bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index)
     return (flag_pointer[element_index] & ((u64)1 << bit_index)) != 0;
 }
 
-BooleanArgumentProcessResult boolean_argument_process(StringOs* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer, u64 flag_count, StringOs argument)
+BooleanArgumentProcessResult boolean_argument_process(String8* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer, u64 flag_count, String8 argument)
 {
     BUSTER_CHECK(flag_string_start_count == flag_count);
 
@@ -1307,7 +1393,7 @@ BooleanArgumentProcessResult boolean_argument_process(StringOs* flag_string_star
     
     for (result.index = 0; result.index < flag_string_start_count; result.index += 1)
     {
-        StringOs flag_start = flag_string_start_pointer[result.index];
+        String8 flag_start = flag_string_start_pointer[result.index];
         if (string_starts_with_sequence(argument, flag_start))
         {
             if (argument.length == flag_start.length + 1)
@@ -1335,24 +1421,4 @@ BooleanArgumentProcessResult boolean_argument_process(StringOs* flag_string_star
 bool program_flag_get(ProgramFlag flag)
 {
     return flag_get(program_state->input.flags, PROGRAM_FLAG_COUNT, flag);
-}
-
-SliceString8 os_string_list_to_slice_string(Arena* arena, StringOsList string_os_list)
-{
-    SliceString8 result = {0};
-#if defined(_WIN32)
-#else
-    CharOs** it;
-    for (it = string_os_list; *it; it += 1) { }
-
-    u64 string_count = (u64)(it - string_os_list);
-    result = (SliceString8) { .pointer = arena_allocate(arena, String8, string_count), .length = string_count };
-
-    for (u64 i = 0; i < string_count; i += 1)
-    {
-        const char* string = string_os_list[i];
-        result.pointer[i] = (String8){ .pointer = (char*)string, .length = strlen(string) };
-    }
-#endif
-    return result;
 }

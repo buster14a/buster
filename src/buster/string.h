@@ -34,11 +34,14 @@ BUSTER_F_DECL u64 string_array_match(SliceString8 names, String8 name);
 BUSTER_F_DECL bool code_unit_is_decimal(char8 code_unit);
 
 BUSTER_F_DECL bool string16_equal(String16 s1, String16 s2);
+BUSTER_F_DECL bool string16_starts_with_sequence(String16 string, String16 ending);
 BUSTER_F_DECL bool string16_ends_with_sequence(String16 string, String16 ending);
 BUSTER_F_DECL u64 string16_first_sequence(String16 string, String16 sequence);
 BUSTER_F_DECL String16 string16_slice(String16 slice, u64 start, u64 end);
 BUSTER_F_DECL String16 string16_format_va(Arena* arena, String16 format, va_list variable_arguments);
 BUSTER_F_DECL String16 string16_duplicate_arena(Arena* arena, String16 string, bool zero_terminate);
+BUSTER_F_DECL u64 string16_length(const char16* s);
+BUSTER_F_DECL u64 string16_first_code_unit(String16 string, char16 code_unit);
 
 BUSTER_F_DECL bool string_os_equal(StringOs s1, StringOs s2);
 BUSTER_F_DECL StringOs string_os_from_pointer_length(CharOs* pointer, u64 length);
@@ -61,3 +64,5 @@ BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_hexadecimal(const char8* restr
 BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_decimal(const char8* restrict p);
 BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_octal(const char8* restrict p);
 BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_binary(const char8* restrict p);
+BUSTER_F_DECL String8 string8_duplicate_from_string_os(Arena* arena, StringOs string, bool null_terminate);
+BUSTER_F_DECL String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate);

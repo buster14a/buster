@@ -200,7 +200,7 @@ struct Target
 typedef struct TargetStringSplit TargetStringSplit;
 struct TargetStringSplit
 {
-    StringOs s[(u64)TARGET_STRING_COMPONENT_COUNT];
+    String8 s[(u64)TARGET_STRING_COMPONENT_COUNT];
 };
 
 BUSTER_V_DECL Target target_native;
@@ -208,7 +208,7 @@ BUSTER_V_DECL Target target_native;
 BUSTER_F_DECL bool cpu_is_native(CpuModel model);
 BUSTER_F_DECL CpuModel cpu_detect_model(void);
 BUSTER_F_DECL TargetStringSplit target_to_split_string_os(Target target);
-BUSTER_F_DECL StringOs target_to_string(Arena* arena, Target target);
-BUSTER_F_DECL StringOs cpu_arch_to_string_os(CpuArch arch);
-BUSTER_F_DECL StringOs operating_system_to_string_os(OperatingSystem os);
-BUSTER_F_DECL StringOs cpu_model_to_string_os(CpuModel model);
+BUSTER_F_DECL String8 target_to_string(Arena* arena, Target target);
+BUSTER_F_DECL String8 cpu_arch_to_string_os(CpuArch arch);
+BUSTER_F_DECL String8 operating_system_to_string_os(OperatingSystem os);
+BUSTER_F_DECL String8 cpu_model_to_string_os(CpuModel model);

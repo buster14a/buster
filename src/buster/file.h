@@ -10,14 +10,14 @@ struct FileReadOptions
     u32 end_alignment;
 };
 
-BUSTER_F_DECL ByteSlice file_read(Arena* arena, StringOs path, FileReadOptions options);
-BUSTER_F_DECL bool file_write(StringOs path, ByteSlice content);
+BUSTER_F_DECL ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options);
+BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 
 
 typedef struct CopyFileArguments CopyFileArguments;
 struct CopyFileArguments
 {
-    StringOs original_path;
-    StringOs new_path;
+    String8 original_path;
+    String8 new_path;
 };
 BUSTER_F_DECL bool file_copy(CopyFileArguments arguments);

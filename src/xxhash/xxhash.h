@@ -4496,7 +4496,7 @@ XXH_mult64to128(xxh_u64 lhs, xxh_u64 rhs)
      *
      * This compiles to single operand MUL on x64.
      */
-#elif (defined(_M_X64) || defined(_M_IA64)) && !defined(_M_ARM64EC)
+#elif (defined(_M_X64) || defined(_M_IA64)) && !defined(_M_ARM64EC) && !defined(__TINYC__)
 
 #ifndef _MSC_VER
 #   pragma intrinsic(_umul128)

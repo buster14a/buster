@@ -462,7 +462,7 @@ typedef enum PhysicalRegisterX8664
     PHYSICAL_REGISTER_X86_64_K7,
 } PhysicalRegisterX8664;
 
-enum RegisterClass
+enum RegisterClassX86_64
 {
     REGISTER_CLASS_GPR,
     REGISTER_CLASS_GPR8,
@@ -474,13 +474,13 @@ enum RegisterClass
     REGISTER_CLASS_MASK,
     REGISTER_CLASS_MASK_NO_ZERO,
 };
-typedef u8 RegisterClass;
+typedef u8 RegisterClassX86_64;
 
 typedef struct VirtualRegister VirtualRegister;
 struct VirtualRegister
 {
     s32 offset;
-    RegisterClass register_class;
+    RegisterClassX86_64 register_class;
     u8 physical;
     MachineSize size;
     u8 reserved[1];

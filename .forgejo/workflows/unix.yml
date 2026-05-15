@@ -19,7 +19,7 @@ jobs:
         fuzz: [OFF, ON]
         optimize: [OFF, ON]
         sanitize: [OFF, ON]
-        cc: [clang, gcc, tcc, zig]
+        cc: [gcc, tcc, zig]
         exclude:
           - cc: gcc
             fuzz: ON
@@ -33,6 +33,9 @@ jobs:
             fuzz: ON
           - runner: aarch64-macos-m1
             fuzz: ON
+          - runner: x86_64-windows-znver5
+            cc: gcc
+            sanitize: ON
     steps:
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4
@@ -40,15 +43,41 @@ jobs:
           persist-credentials: false
       - name: Test
         shell: bash
-        env:
-          BUSTER_CC: ${{ matrix.cc }}
-          BUSTER_FUZZ: ${{ matrix.fuzz }}
-          BUSTER_OPTIMIZE: ${{ matrix.optimize }}
-          BUSTER_SANITIZE: ${{ matrix.sanitize }}
+        if: ${{ !contains(matrix.runner, 'windows') }}
         run: |
           set -euox pipefail
-
+          BUSTER_CC='${{ matrix.cc }}'
           BUSTER_CC_DIRECTORY=${BUSTER_CC//[^A-Za-z0-9_.-]/_}
-          BUSTER_BUILD_DIRECTORY="build_ci-cc_${BUSTER_CC_DIRECTORY}-optimize_${BUSTER_OPTIMIZE}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}"
+          BUSTER_BUILD_DIRECTORY="build_ci-cc_${BUSTER_CC_DIRECTORY}-optimize_${{ matrix.optimize }}-sanitize_${{ matrix.sanitize }}-fuzz_${{ matrix.fuzz }}"
           ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc ${{ matrix.cc }} --fuzz ${{ matrix.fuzz }} --optimize ${{ matrix.optimize }} --sanitize ${{ matrix.sanitize }}
           ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --verbose test_all
+      - name: Test
+        if: ${{ contains(matrix.runner, 'windows') }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          echo $env:PATH
+
+          $BusterCcDirectory = '${{ matrix.cc }}' -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "build_ci-cc_$BusterCcDirectory-optimize_${{matrix.optimize}}-sanitize_${{matrix.sanitize}}-fuzz_${{matrix.fuzz}}"
+
+          $generateArguments = @(
+            '.\generate.py',
+            '--build-directory', $BusterBuildDirectory,
+            '--ci', 'ON',
+            '--cc', '${{ matrix.cc }}',
+            '--fuzz', '${{ matrix.fuzz }}',
+            '--optimize', '${{ matrix.optimize }}',
+            '--sanitize', '${{ matrix.sanitize }}'
+          )
+          & python @generateArguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $buildArguments = @(
+            '.\build.py',
+            '--build-directory', $BusterBuildDirectory,
+            '--verbose',
+            'test_all'
+          )
+          & python @buildArguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

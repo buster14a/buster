@@ -1,15 +1,17 @@
 #pragma once
-
 #include <buster/base.h>
 
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <windows.h>
-#include <mswsock.h>
 #include <limits.h>
 #include <setjmp.h>
 
-BUSTER_GLOBAL_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
+#if defined(_MSC_VER)
+#include <mswsock.h>
+BUSTER_V_DECL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions;
+#endif
+
 #elif defined(__APPLE__) || defined(__linux__)
 #include <errno.h>
 #include <dlfcn.h>
@@ -55,6 +57,24 @@ struct OsEntity
     u32 padding;
     union
     {
+#if defined(_WIN32)
+        u8 foo;
+        struct
+        {
+            HANDLE handle;
+            ThreadCallback* callback;
+            void* argument;
+        } thread;
+//         pthread_mutex_t mutex;
+// #if 0
+//         pthread_barrier_t barrier;
+// #endif
+//         struct
+//         {
+//             pthread_cond_t handle;
+//             pthread_mutex_t rw_lock;
+//         } condition_variable;
+#else
         struct
         {
             pthread_t handle;
@@ -70,6 +90,7 @@ struct OsEntity
             pthread_cond_t handle;
             pthread_mutex_t rw_lock;
         } condition_variable;
+#endif
     };
 };
 
@@ -87,6 +108,13 @@ struct OsState
     OsEntity* entity_free_list;
 #if defined(__linux__) || defined(__APPLE__)
     pthread_mutex_t entity_mutex;
+#elif defined(_WIN32)
+    CRITICAL_SECTION entity_mutex;
+#else
+#pragma error
+#endif
+#if defined(_WIN32)
+    u64 frequency;
 #endif
     u32 logical_thread_count;
     u32 padding;
@@ -95,6 +123,8 @@ struct OsState
     u64 allocation_granularity;
     ProcessInformation process;
 };
+
+BUSTER_V_DECL OsState os_state;
 
 #ifdef _WIN32
 #define BUSTER_MAX_PATH_LENGTH (u64)MAX_PATH

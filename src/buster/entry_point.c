@@ -23,10 +23,10 @@ ProcessResult buster_argument_process(SliceString8 argument_pointer, SliceString
     BUSTER_UNUSED(environment_pointer);
     BUSTER_UNUSED(argument_index);
 
-    StringOs flag_string_starts[] = {
-        [PROGRAM_FLAG_VERBOSE] = SOs("--verbose="),
-        [PROGRAM_FLAG_CI] = SOs("--ci="),
-        [PROGRAM_FLAG_TEST_PERSIST] = SOs("--test-persist="),
+    String8 flag_string_starts[] = {
+        [PROGRAM_FLAG_VERBOSE] = S8("--verbose="),
+        [PROGRAM_FLAG_CI] = S8("--ci="),
+        [PROGRAM_FLAG_TEST_PERSIST] = S8("--test-persist="),
     };
 
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(flag_string_starts) == PROGRAM_FLAG_COUNT);
@@ -80,20 +80,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
         LARGE_INTEGER i;
         if (QueryPerformanceFrequency(&i))
         {
-            (u64)
+            os_state.frequency = (u64)i.QuadPart;
         }
     }
     WSADATA WinSockData;
     WSAStartup(MAKEWORD(2, 2), &WinSockData);
+#if defined(_MSC_VER)
     GUID guid = WSAID_MULTIPLE_RIO;
     DWORD rio_byte = 0;
     SOCKET Sock = socket(AF_UNSPEC, SOCK_STREAM, IPPROTO_TCP);
     WSAIoctl(Sock, SIO_GET_MULTIPLE_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid), (void**)&w32_rio_functions, sizeof(w32_rio_functions), &rio_byte, 0, 0);
     closesocket(Sock);
-#else
+#endif
 #endif
     os_state.entity_arena = arena_create((ArenaCreation){0});
+#if defined(__linux__) || defined(__APPLE__)
     pthread_mutex_init(&os_state.entity_mutex, 0);
+#elif defined(_WIN32)
+    InitializeCriticalSection(&os_state.entity_mutex);
+#endif
     os_state.logical_thread_count = os_get_logical_thread_count();
     os_state.page_size = os_get_page_size();
     os_state.large_page_size = BUSTER_MB(2);
@@ -104,8 +109,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
 
     ThreadContext* thread_context = thread_context_allocate();
     thread_context_select(thread_context);
-
-    os_thread_set_name(SOs("main_thread"));
+    os_thread_set_name(S8("main_thread"));
 
     program_state->arena = arena_create((ArenaCreation){0});
     program_state->input.arguments = arguments;
@@ -128,7 +132,7 @@ int main(int argc, char* argv[], char* envp[])
 #if defined(_WIN32)
     BUSTER_UNUSED(argv);
     BUSTER_UNUSED(envp);
-    buster_entry_point(GetCommandLineW(), GetEnvironmentStringsW());
+    result = (int)buster_entry_point(GetCommandLineW(), GetEnvironmentStringsW());
 #else
     result = (int)buster_entry_point((StringOsList)argv, (StringOsList)envp);
 #endif
