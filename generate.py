@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os
+import argparse
 import platform
 import shutil
 import shlex
@@ -8,11 +8,64 @@ import sys
 from pathlib import Path
 
 
-def env_default(name, default):
-    value = os.environ.get(name)
-    if value == "" or value is None:
-        return default
-    return value
+def cmake_bool(value):
+    normalized = value.upper()
+    if normalized in ("ON", "TRUE", "YES", "1"):
+        return "ON"
+    if normalized in ("OFF", "FALSE", "NO", "0"):
+        return "OFF"
+    raise argparse.ArgumentTypeError(f"expected ON or OFF, got {value!r}")
+
+
+def add_cmake_bool_argument(parser, name, default):
+    option = name.replace("_", "-")
+    parser.add_argument(
+        f"--{option}",
+        dest=name,
+        nargs="?",
+        const="ON",
+        default=default,
+        type=cmake_bool,
+        metavar="ON|OFF",
+    )
+    parser.add_argument(
+        f"--no-{option}",
+        dest=name,
+        action="store_const",
+        const="OFF",
+    )
+
+
+def parse_arguments(argv):
+    parser = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Configure the buster CMake build.",
+    )
+    parser.add_argument(
+        "--build-directory",
+        "--build-dir",
+        default="build",
+        help="CMake build directory.",
+    )
+    parser.add_argument(
+        "--cc",
+        default="clang",
+        help="C compiler command.",
+    )
+    parser.add_argument(
+        "--linker",
+        default=None,
+        help="CMake linker type. Defaults to MOLD on Linux with clang/gcc, otherwise DEFAULT.",
+    )
+    add_cmake_bool_argument(parser, "ci", "OFF")
+    add_cmake_bool_argument(parser, "fuzz", "OFF")
+    add_cmake_bool_argument(parser, "optimize", "OFF")
+    add_cmake_bool_argument(parser, "sanitize", "OFF")
+    add_cmake_bool_argument(parser, "lto", "OFF")
+    add_cmake_bool_argument(parser, "time_trace", "OFF")
+    add_cmake_bool_argument(parser, "include_tests", "ON")
+    add_cmake_bool_argument(parser, "link_libc", "ON")
+    return parser.parse_known_args(argv)
 
 
 def remove_path(path):
@@ -27,70 +80,67 @@ def command_string(command):
 
 
 def main(argv):
-    build_directory = env_default("BUSTER_BUILD_DIRECTORY", "build")
+    arguments, cmake_arguments = parse_arguments(argv)
+
+    build_directory = arguments.build_directory
     print(f"BUSTER_BUILD_DIRECTORY: {build_directory}", flush=True)
 
     build_path = Path(build_directory)
     remove_path(build_path)
     build_path.mkdir(parents=True, exist_ok=True)
 
-    buster_ci = env_default("BUSTER_CI", "OFF")
-    buster_fuzz = env_default("BUSTER_FUZZ", "OFF")
-    buster_optimize = env_default("BUSTER_OPTIMIZE", "OFF")
-    buster_sanitize = env_default("BUSTER_SANITIZE", "OFF")
-    buster_lto = env_default("BUSTER_LTO", "OFF")
-    buster_time_trace = env_default("BUSTER_TIME_TRACE", "OFF")
-    buster_include_tests = env_default("BUSTER_INCLUDE_TESTS", "ON")
-    buster_link_libc = env_default("BUSTER_LINK_LIBC", "ON")
-    buster_cc = env_default("BUSTER_CC", "clang")
+    cc = arguments.cc
+    if cc in ("zig cc", "zig;cc"):
+        cc = "zig"
 
-    if buster_cc in ("zig cc", "zig;cc"):
-        buster_cc = "zig"
-
-    print(f"BUSTER_CC: {buster_cc}", flush=True)
+    print(f"BUSTER_CC: {cc}", flush=True)
 
     cmake_compiler_args = []
     cmake_extra_args = []
 
-    if "zig" in buster_cc:
+    if "zig" in cc:
         cmake_extra_args = [
             "-DCMAKE_C_LINKER_DEPFILE_SUPPORTED=FALSE",
             "-DCMAKE_C_LINK_DEPENDS_USE_LINKER=FALSE",
         ]
-        buster_asm = buster_cc
-        buster_cxx = buster_cc
+        c_compiler = cc
+        cxx_compiler = cc
+        asm_compiler = cc
         cmake_compiler_args = [
-            f"-DCMAKE_C_COMPILER={buster_cc};cc",
-            f"-DCMAKE_CXX_COMPILER={buster_cxx};c++",
-            f"-DCMAKE_ASM_COMPILER={buster_asm};cc",
+            f"-DCMAKE_C_COMPILER={c_compiler};cc",
+            f"-DCMAKE_CXX_COMPILER={cxx_compiler};c++",
+            f"-DCMAKE_ASM_COMPILER={asm_compiler};cc",
         ]
-    elif "clang" in buster_cc:
-        buster_asm = buster_cc
-        buster_cxx = buster_cc.replace("clang", "clang++", 1)
-    elif "gcc" in buster_cc:
-        buster_asm = buster_cc
-        buster_cxx = buster_cc.replace("gcc", "g++", 1)
+    elif "clang" in cc:
+        c_compiler = cc
+        cxx_compiler = cc.replace("clang", "clang++", 1)
+        asm_compiler = cc
+    elif "gcc" in cc:
+        c_compiler = cc
+        cxx_compiler = cc.replace("gcc", "g++", 1)
+        asm_compiler = cc
     else:
-        buster_asm = buster_cc
-        buster_cxx = "clang++"
+        c_compiler = cc
+        cxx_compiler = "clang++"
+        asm_compiler = cc
 
     if not cmake_compiler_args:
         cmake_compiler_args = [
-            f"-DCMAKE_C_COMPILER={buster_cc}",
-            f"-DCMAKE_CXX_COMPILER={buster_cxx}",
-            f"-DCMAKE_ASM_COMPILER={buster_asm}",
+            f"-DCMAKE_C_COMPILER={c_compiler}",
+            f"-DCMAKE_CXX_COMPILER={cxx_compiler}",
+            f"-DCMAKE_ASM_COMPILER={asm_compiler}",
         ]
 
-    buster_linker = os.environ.get("BUSTER_LINKER")
-    if not buster_linker:
+    linker = arguments.linker
+    if not linker:
         if platform.system() == "Linux":
-            if "zig" not in buster_cc and "tcc" not in buster_cc:
-                buster_linker = "MOLD"
+            if "zig" not in cc and "tcc" not in cc:
+                linker = "MOLD"
 
-    if not buster_linker:
-        buster_linker = "DEFAULT"
+    if not linker:
+        linker = "DEFAULT"
 
-    print(f"BUSTER_LINKER: {buster_linker}", flush=True)
+    print(f"BUSTER_LINKER: {linker}", flush=True)
 
     command = [
         "cmake",
@@ -101,17 +151,17 @@ def main(argv):
         "-G",
         "Ninja",
         *cmake_compiler_args,
-        f"-DCMAKE_LINKER_TYPE={buster_linker}",
-        f"-DBUSTER_FUZZ={buster_fuzz}",
-        f"-DBUSTER_OPTIMIZE={buster_optimize}",
-        f"-DBUSTER_SANITIZE={buster_sanitize}",
-        f"-DBUSTER_LTO={buster_lto}",
-        f"-DBUSTER_TIME_TRACE={buster_time_trace}",
-        f"-DBUSTER_INCLUDE_TESTS={buster_include_tests}",
-        f"-DBUSTER_CI={buster_ci}",
-        f"-DBUSTER_LINK_LIBC={buster_link_libc}",
+        f"-DCMAKE_LINKER_TYPE={linker}",
+        f"-DBUSTER_FUZZ={arguments.fuzz}",
+        f"-DBUSTER_OPTIMIZE={arguments.optimize}",
+        f"-DBUSTER_SANITIZE={arguments.sanitize}",
+        f"-DBUSTER_LTO={arguments.lto}",
+        f"-DBUSTER_TIME_TRACE={arguments.time_trace}",
+        f"-DBUSTER_INCLUDE_TESTS={arguments.include_tests}",
+        f"-DBUSTER_CI={arguments.ci}",
+        f"-DBUSTER_LINK_LIBC={arguments.link_libc}",
         *cmake_extra_args,
-        *argv,
+        *cmake_arguments,
     ]
 
     print(f"+ {command_string(command)}", flush=True)

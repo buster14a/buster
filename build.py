@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
-import os
+import argparse
 import subprocess
 import sys
 
 
-def main(argv):
-    build_directory = os.environ.get("BUSTER_BUILD_DIRECTORY")
-    if not build_directory:
-        build_directory = "build"
+def parse_arguments(argv):
+    parser = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Build buster with Ninja.",
+    )
+    parser.add_argument(
+        "--build-directory",
+        "--build-dir",
+        default="build",
+        help="Ninja build directory.",
+    )
+    return parser.parse_known_args(argv)
 
-    return subprocess.call(["ninja", "-C", build_directory, *argv])
+
+def main(argv):
+    arguments, ninja_arguments = parse_arguments(argv)
+
+    return subprocess.call(["ninja", "-C", arguments.build_directory, *ninja_arguments])
 
 
 if __name__ == "__main__":
