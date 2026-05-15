@@ -17,21 +17,6 @@ BUSTER_EXPORT s32 LLVMFuzzerTestOneInput(const u8* pointer, size_t size)
     return buster_fuzz(pointer, size);
 }
 #else
-BUSTER_GLOBAL_LOCAL OsThreadHandle** async_threads;
-BUSTER_GLOBAL_LOCAL u32 async_thread_count = 0;
-BUSTER_GLOBAL_LOCAL u32 global_async_exit = 0;
-BUSTER_GLOBAL_LOCAL OsConditionVariableHandle* async_tick_start_condition_variable;
-BUSTER_GLOBAL_LOCAL OsMutexHandle* async_tick_start_mutex;
-BUSTER_GLOBAL_LOCAL OsMutexHandle* async_tick_stop_mutex;
-BUSTER_GLOBAL_LOCAL u32 async_loop_again = 0;
-BUSTER_GLOBAL_LOCAL u32 async_loop_again_high_priority = 0;
-
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool is_async_thread = false;
-
-#define ins_atomic_u32_eval(x)                  __atomic_load_n(x, __ATOMIC_SEQ_CST)
-#define ins_atomic_u32_inc_eval(x)              (__atomic_fetch_add((u32*)(x), 1, __ATOMIC_SEQ_CST) + 1)
-#define ins_atomic_u32_eval_assign(x,c)         __atomic_store_n((x), (c), __ATOMIC_SEQ_CST)
-
 ProcessResult buster_argument_process(SliceString8 argument_pointer, SliceString8 environment_pointer, u64 argument_index, String8 argument)
 {
     BUSTER_UNUSED(argument_pointer);
@@ -84,52 +69,6 @@ BUSTER_GLOBAL_LOCAL void install_signal_handlers(void)
 #endif
 }
 
-#if !BUSTER_SINGLE_THREADED
-BUSTER_GLOBAL_LOCAL void async_thread_entry_point(void* arg)
-{
-    LaneContext lane = *(LaneContext*)arg;
-    thread_context_set_lane(lane);
-    is_async_thread = true;
-
-    TemporalArena scratch = scratch_begin(0, 0);
-    os_thread_set_name(string_format(scratch.arena, S8("async_thread_{u64}"), lane_index()));
-
-    u32 need_exit = 0;
-
-    while (!need_exit)
-    {
-        if (lane_index() == 0)
-        {
-            if (!ins_atomic_u32_eval(&async_loop_again))
-            {
-                os_mutex_take(async_tick_start_mutex);
-                os_condition_variable_wait(async_tick_start_condition_variable, async_tick_start_mutex, os_now_microseconds() + (1000 * 1000));
-                os_mutex_drop(async_tick_start_mutex);
-            }
-
-            ins_atomic_u32_eval_assign(&async_loop_again, 0);
-            ins_atomic_u32_eval_assign(&async_loop_again_high_priority, 0);
-        }
-
-        lane_sync();
-
-        // TODO: work
-        async_user_tick();
-
-        lane_sync();
-
-        if (lane_index() == 0)
-        {
-            need_exit = ins_atomic_u32_eval(&global_async_exit);
-        }
-
-        lane_sync_u64(&need_exit, 0);
-    }
-
-    scratch_end(scratch);
-}
-#endif
-
 BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOsList envp)
 {
     os_state.arena = arena_create((ArenaCreation){0});
@@ -168,10 +107,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
 
     os_thread_set_name(SOs("main_thread"));
 
-    async_tick_start_condition_variable = os_condition_variable_allocate();
-    async_tick_start_mutex = os_mutex_allocate();
-    async_tick_stop_mutex = os_mutex_allocate();
-
     program_state->arena = arena_create((ArenaCreation){0});
     program_state->input.arguments = arguments;
     program_state->input.environment = environment;
@@ -180,45 +115,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
 
     if (result == PROCESS_RESULT_SUCCESS)
     {
-#if !BUSTER_SINGLE_THREADED
-        u64 lane_broadcast_value = 0;
-        {
-            u32 main_thread_count = 1;
-            async_thread_count = os_state.logical_thread_count;
-            u32 clamped_main_thread_count = BUSTER_MIN(async_thread_count, main_thread_count);
-            async_thread_count -= clamped_main_thread_count;
-            // TODO: support argument
-            async_thread_count = BUSTER_MAX(1, async_thread_count);
-
-            Arena* arena = program_state->arena;
-            LaneContext* lane_contexts = arena_allocate(arena, LaneContext, async_thread_count);
-            OsBarrierHandle* barrier = os_barrier_allocate(async_thread_count);
-            async_threads = arena_allocate(arena, OsThreadHandle*, async_thread_count);
-
-            for (u32 i = 0; i < async_thread_count; i += 1)
-            {
-                LaneContext* lane_context = &lane_contexts[i];
-                lane_context->lane_index = i;
-                lane_context->lane_count = async_thread_count;
-                lane_context->barrier = barrier;
-                lane_context->broadcast_memory = &lane_broadcast_value;
-                async_threads[i] = os_thread_create((ThreadCreateOptions){ .callback = &async_thread_entry_point, .argument = lane_context });
-            }
-        }
-#endif
-
         result = entry_point();
-
-#if !BUSTER_SINGLE_THREADED
-        BUSTER_UNUSED(ins_atomic_u32_inc_eval(&global_async_exit));
-        os_condition_variable_broadcast(async_tick_start_condition_variable);
-
-        for (u64 i = 0; i < async_thread_count; i += 1)
-        {
-            OsThreadHandle* thread = async_threads[i];
-            os_thread_join(thread);
-        }
-#endif
     }
 
     return result;

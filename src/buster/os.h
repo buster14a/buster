@@ -214,24 +214,7 @@ BUSTER_F_DECL u64 os_now_microseconds(void);
 BUSTER_F_DECL ThreadContext* thread_context_allocate(void);
 BUSTER_F_DECL void thread_context_select(ThreadContext* context);
 BUSTER_F_DECL void thread_context_release(ThreadContext* context);
-BUSTER_F_DECL LaneContext thread_context_set_lane(LaneContext lane_context);
-BUSTER_F_DECL void thread_context_lane_barrier_wait(void* broadcast_pointer, u64 broadcast_size, u64 broadcast_source_lane_index);
 BUSTER_F_DECL Arena* thread_context_get_scratch(Arena** conflicts, u64 count);
-
-BUSTER_F_DECL OsMutexHandle* os_mutex_allocate(void);
-BUSTER_F_DECL void os_mutex_take(OsMutexHandle* mutex);
-BUSTER_F_DECL void os_mutex_drop(OsMutexHandle* mutex);
-
-BUSTER_F_DECL OsConditionVariableHandle* os_condition_variable_allocate(void);
-BUSTER_F_DECL void os_condition_variable_release(OsConditionVariableHandle* condition_variable);
-BUSTER_F_DECL bool os_condition_variable_wait(OsConditionVariableHandle* condition_variable, OsMutexHandle* mutex, u64 endt_us);
-BUSTER_F_DECL void os_condition_variable_broadcast(OsConditionVariableHandle* condition_variable);
-
-BUSTER_F_DECL OsBarrierHandle* os_barrier_allocate(u32 count);
-
-BUSTER_F_DECL void lane_sync(void);
-BUSTER_F_DECL u64 lane_index(void);
-#define lane_sync_u64(pointer, source_lane_index) thread_context_lane_barrier_wait((pointer), sizeof(*(pointer)), (source_lane_index))
 
 BUSTER_F_DECL void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value);
 BUSTER_F_DECL bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index);

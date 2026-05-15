@@ -4,7 +4,36 @@
 #include <buster/arena.h>
 #include <buster/string.h>
 
+#if BUSTER_LINK_LIBC && !BUSTER_SINGLE_THREADED && defined(__TINYC__) && defined(__APPLE__) && defined(__aarch64__)
+#define BUSTER_THREAD_CONTEXT_USE_PTHREAD_TLS 1
+#else
+#define BUSTER_THREAD_CONTEXT_USE_PTHREAD_TLS 0
+#endif
+
+#if BUSTER_THREAD_CONTEXT_USE_PTHREAD_TLS
+BUSTER_GLOBAL_LOCAL pthread_key_t thread_context_tls_key;
+BUSTER_GLOBAL_LOCAL pthread_once_t thread_context_tls_key_once = PTHREAD_ONCE_INIT;
+
+BUSTER_GLOBAL_LOCAL void thread_context_tls_key_initialize(void)
+{
+    int result = pthread_key_create(&thread_context_tls_key, 0);
+    if (result != 0)
+    {
+        BUSTER_TRAP();
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void thread_context_tls_key_ensure_initialized(void)
+{
+    int result = pthread_once(&thread_context_tls_key_once, thread_context_tls_key_initialize);
+    if (result != 0)
+    {
+        BUSTER_TRAP();
+    }
+}
+#else
 BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
+#endif
 
 //- rjf: doubly-linked-lists
 #define DLLInsert_NPZ(nil,f,l,p,n,next,prev) (CheckNil(nil,f) ? \
@@ -1110,6 +1139,15 @@ u32 os_get_logical_thread_count(void)
 #if defined(__linux__)
     result = (u32)get_nprocs();
 #else
+    int os_result = 1;
+    size_t size = sizeof(result);
+
+    if (sysctlbyname("hw.activecpu", &os_result, &size, 0, 0) != 0 || os_result < 1)
+    {
+        os_result = 1;
+    }
+
+    result = (u32)os_result;
 #endif
 
     return result;
@@ -1118,7 +1156,7 @@ u32 os_get_logical_thread_count(void)
 u64 os_get_page_size(void)
 {
     u64 page_size;
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     page_size = (u64)getpagesize();
 #else
 #endif
@@ -1147,36 +1185,23 @@ OsThreadHandle* os_get_current_thread_handle(void)
 
 void os_thread_set_name(StringOs thread_name)
 {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__)
     pthread_setname_np(pthread_self(), thread_name.pointer);
+#elif defined(__APPLE__)
+    pthread_setname_np(thread_name.pointer);
 #else
     BUSTER_TRAP();
 #endif
 }
 
-OsBarrierHandle* os_barrier_allocate(u32 count)
-{
-    OsEntity* entity = os_entity_allocate(OS_ENTITY_KIND_BARRIER);
-#if defined(__linux__) || defined(__APPLE__)
-    if (pthread_barrier_init(&entity->barrier, 0, count) != 0)
-    {
-        os_entity_release(entity);
-        entity = 0;
-    }
-#endif
-    return (OsBarrierHandle*)entity;
-}
-
-void os_barrier_release(OsBarrierHandle* barrier)
-{
-    OsEntity* entity = (OsEntity*)barrier;
-    pthread_barrier_destroy(&entity->barrier);
-    os_entity_release(entity);
-}
-
 ThreadContext* thread_context_selected(void)
 {
+#if BUSTER_THREAD_CONTEXT_USE_PTHREAD_TLS
+    thread_context_tls_key_ensure_initialized();
+    return (ThreadContext*)pthread_getspecific(thread_context_tls_key);
+#else
     return thread_context_thread_local;
+#endif
 }
 
 ThreadContext* thread_context_allocate(void)
@@ -1203,79 +1228,18 @@ void thread_context_release(ThreadContext* thread_context)
     }
 }
 
-LaneContext thread_context_set_lane(LaneContext lane_context)
-{
-    ThreadContext* thread_context = thread_context_selected();
-    LaneContext restore = thread_context->lane_context;
-    thread_context->lane_context = lane_context;
-    return restore;
-}
-
 void thread_context_select(ThreadContext* context)
 {
+#if BUSTER_THREAD_CONTEXT_USE_PTHREAD_TLS
+    thread_context_tls_key_ensure_initialized();
+    int result = pthread_setspecific(thread_context_tls_key, context);
+    if (result != 0)
+    {
+        BUSTER_TRAP();
+    }
+#else
     thread_context_thread_local = context;
-}
-
-void os_condition_variable_broadcast(OsConditionVariableHandle* condition_variable)
-{
-    OsEntity* entity = (OsEntity*)condition_variable;
-    pthread_cond_broadcast(&entity->condition_variable.handle);
-}
-
-OsConditionVariableHandle* os_condition_variable_allocate(void)
-{
-    OsEntity* entity = os_entity_allocate(OS_ENTITY_KIND_CONDITION_VARIABLE);
-    pthread_condattr_t attributes;
-    int result_code_attr = pthread_condattr_init(&attributes);
-    int result_code_clock = result_code_attr == 0 ? pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC) : -1;
-    int result_code_cv = (result_code_attr == 0 && result_code_clock == 0) ? pthread_cond_init(&entity->condition_variable.handle, &attributes) : -1;
-    int result_code_rw = result_code_cv == 0 ? pthread_mutex_init(&entity->condition_variable.rw_lock, 0) : 0;
-
-    if (result_code_attr == 0)
-    {
-        pthread_condattr_destroy(&attributes);
-    }
-
-    if (!(result_code_cv == 0 && result_code_rw == 0))
-    {
-        if (result_code_cv == 0)
-        {
-            pthread_cond_destroy(&entity->condition_variable.handle);
-        }
-
-        os_entity_release(entity);
-        entity = 0;
-    }
-
-    return (OsConditionVariableHandle*)entity;
-}
-
-void os_condition_variable_release(OsConditionVariableHandle* condition_variable)
-{
-    OsEntity* entity = (OsEntity*)condition_variable;
-    pthread_cond_destroy(&entity->condition_variable.handle);
-    pthread_mutex_destroy(&entity->condition_variable.rw_lock);
-    os_entity_release(entity);
-}
-
-OsMutexHandle* os_mutex_allocate(void)
-{
-    OsEntity* entity = os_entity_allocate(OS_ENTITY_KIND_MUTEX);
-    int result_code = pthread_mutex_init(&entity->mutex, 0);
-    bool success = result_code == 0;
-    if (!success)
-    {
-        os_entity_release(entity);
-        entity = 0;
-    }
-    return (OsMutexHandle*)entity;
-}
-
-void os_mutex_release(OsMutexHandle* mutex)
-{
-    OsEntity* entity = (OsEntity*)mutex;
-    pthread_mutex_destroy(&entity->mutex);
-    os_entity_release(entity);
+#endif
 }
 
 Arena* thread_context_get_scratch(Arena** conflicts, u64 count)
@@ -1306,71 +1270,6 @@ Arena* thread_context_get_scratch(Arena** conflicts, u64 count)
         }
     }
 
-    return result;
-}
-
-u64 lane_index(void)
-{
-    return thread_context_selected()->lane_context.lane_index;
-}
-
-void os_barrier_wait(OsBarrierHandle* barrier)
-{
-    OsEntity* entity = (OsEntity*)barrier;
-    pthread_barrier_wait(&entity->barrier);
-}
-
-void thread_context_lane_barrier_wait(void* broadcast_pointer, u64 broadcast_size, u64 broadcast_source_lane_index)
-{
-    ThreadContext* thread_context = thread_context_selected();
-    u64 broadcast_size_clamped = BUSTER_CLAMP_TOP(broadcast_size, sizeof(thread_context->lane_context.broadcast_memory[0]));
-
-    if (broadcast_pointer != 0 && lane_index() == broadcast_source_lane_index)
-    {
-        memcpy(thread_context->lane_context.broadcast_memory, broadcast_pointer, broadcast_size_clamped);
-    }
-
-    os_barrier_wait(thread_context->lane_context.barrier);
-
-    if (broadcast_pointer != 0 && lane_index() != broadcast_source_lane_index)
-    {
-        memcpy(broadcast_pointer, thread_context->lane_context.broadcast_memory, broadcast_size_clamped);
-    }
-
-    if (broadcast_pointer != 0)
-    {
-        os_barrier_wait(thread_context->lane_context.barrier);
-    }
-}
-
-void lane_sync(void)
-{
-    thread_context_lane_barrier_wait(0, 0, 0);
-}
-
-void os_mutex_take(OsMutexHandle* mutex)
-{
-    OsEntity* entity = (OsEntity*)mutex;
-    pthread_mutex_lock(&entity->mutex);
-}
-
-void os_mutex_drop(OsMutexHandle* mutex)
-{
-    OsEntity* entity = (OsEntity*)mutex;
-    pthread_mutex_unlock(&entity->mutex);
-}
-
-bool os_condition_variable_wait(OsConditionVariableHandle* condition_variable, OsMutexHandle* mutex, u64 endt_us)
-{
-    OsEntity* cv_entity = (OsEntity*)condition_variable;
-    OsEntity* mutex_entity = (OsEntity*)mutex;
-    u64 endt_seconds = endt_us / (1000 * 1000);
-
-    struct timespec endt_ts;
-    endt_ts.tv_sec = (time_t)endt_seconds;
-    endt_ts.tv_nsec = 1000 * ((s64)endt_us - ((s64)endt_us / (1000 * 1000)) * (1000 * 1000));
-    int wait_result = pthread_cond_timedwait(&cv_entity->condition_variable.handle, &mutex_entity->mutex, &endt_ts);
-    bool result = wait_result != ETIMEDOUT;
     return result;
 }
 

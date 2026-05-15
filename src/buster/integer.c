@@ -23,72 +23,74 @@ u64 next_power_of_two(u64 n)
 
 u8 trailing_zeroes_u32(u32 n)
 {
-#if defined(__clang__)
-    return (u8)__builtin_ctzg(n);
+    if (n == 0) return 32;
+
+#if defined(__has_builtin) && __has_builtin(__builtin_ctz)
+    return (u8)__builtin_ctz(n);
 #else
-    u32 result;
+    u8 result = 0;
+    while ((n & (u32)1) == 0)
+    {
+        result += 1;
+        n >>= 1;
+    }
 
-    __asm__ volatile (
-        "tzcnt %1, %0"
-        : "=r"(result)
-        : "rm"(n)
-        : "cc"
-    );
-
-    return (u8)result;
+    return result;
 #endif
 }
 
 u8 trailing_zeroes_u64(u64 n)
 {
-#if defined(__clang__)
-    return (u8)__builtin_ctzg(n);
+    if (n == 0) return 64;
+
+#if defined(__has_builtin) && __has_builtin(__builtin_ctzll)
+    return (u8)__builtin_ctzll(n);
 #else
-    u64 result;
+    u8 result = 0;
+    while ((n & (u64)1) == 0)
+    {
+        result += 1;
+        n >>= 1;
+    }
 
-    __asm__ volatile (
-        "tzcntq %1, %0"
-        : "=r"(result)
-        : "rm"(n)
-        : "cc"
-    );
-
-    return (u8)result;
+    return result;
 #endif
 }
 
 u8 leading_zeroes_u32(u32 n)
 {
-#if defined(__clang__)
-    return (u8)__builtin_clzg(n);
+    if (n == 0) return 32;
+
+#if defined(__has_builtin) && __has_builtin(__builtin_clz)
+    return (u8)__builtin_clz(n);
 #else
-    u32 result;
+    u8 result = 0;
+    u32 mask = (u32)1 << 31;
+    while ((n & mask) == 0)
+    {
+        result += 1;
+        mask >>= 1;
+    }
 
-    __asm__ volatile (
-        "lzcnt %1, %0"
-        : "=r"(result)
-        : "rm"(n)
-        : "cc"
-    );
-
-    return (u8)result;
+    return result;
 #endif
 }
 
 u8 leading_zeroes_u64(u64 n)
 {
-#if defined(__clang__)
-    return (u8)__builtin_clzg(n);
+    if (n == 0) return 64;
+
+#if defined(__has_builtin) && __has_builtin(__builtin_clzll)
+    return (u8)__builtin_clzll(n);
 #else
-    u64 result;
+    u8 result = 0;
+    u64 mask = (u64)1 << 63;
+    while ((n & mask) == 0)
+    {
+        result += 1;
+        mask >>= 1;
+    }
 
-    __asm__ volatile (
-        "lzcntq %1, %0"
-        : "=r"(result)
-        : "rm"(n)
-        : "cc"
-    );
-
-    return (u8)result;
+    return result;
 #endif
 }

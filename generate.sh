@@ -86,11 +86,15 @@ if [[ ${#CMAKE_COMPILER_ARGS[@]} -eq 0 ]]; then
 fi
 
 if [[ -z "${BUSTER_LINKER:-}" ]]; then
-    if [[ "$BUSTER_CC" == *zig* || "$BUSTER_CC" == *tcc* ]]; then
-        BUSTER_LINKER=DEFAULT
-    else
-        BUSTER_LINKER=MOLD
+    if [[ "$(uname -s)" == *Linux* ]]; then
+        if [[ "$BUSTER_CC" != *zig* && "$BUSTER_CC" != *tcc* ]]; then
+            BUSTER_LINKER=MOLD
+        fi
     fi
+fi
+
+if [[ -z "${BUSTER_LINKER:-}" ]]; then
+    BUSTER_LINKER=DEFAULT
 fi
 
 echo "BUSTER_LINKER: $BUSTER_LINKER"

@@ -52,6 +52,63 @@ if (C_COMPILER_NAME STREQUAL "zig" AND "${CMAKE_C_COMPILER_ARG1}" STREQUAL "cc")
     set(C_COMPILER_ZIG ON)
 endif()
 
+set(BUSTER_ZIG_DARWIN_ASAN_RUNTIME "")
+set(BUSTER_ZIG_DARWIN_UBSAN_RUNTIME "")
+set(BUSTER_ZIG_DARWIN_COMPILER_RT_DIR "")
+if (APPLE AND C_COMPILER_ZIG AND BUSTER_SANITIZE)
+    string(REGEX MATCH "^[0-9]+" BUSTER_ZIG_CLANG_MAJOR "${CMAKE_C_COMPILER_VERSION}")
+    find_program(BUSTER_DARWIN_CLANG
+        NAMES "clang-${BUSTER_ZIG_CLANG_MAJOR}" clang
+        PATHS
+            "/opt/homebrew/opt/llvm@${BUSTER_ZIG_CLANG_MAJOR}/bin"
+            "/usr/local/opt/llvm@${BUSTER_ZIG_CLANG_MAJOR}/bin"
+            "/opt/homebrew/opt/llvm/bin"
+            "/usr/local/opt/llvm/bin"
+        NO_DEFAULT_PATH
+    )
+    if (NOT BUSTER_DARWIN_CLANG)
+        find_program(BUSTER_DARWIN_CLANG NAMES "clang-${BUSTER_ZIG_CLANG_MAJOR}" clang)
+    endif()
+    if (NOT BUSTER_DARWIN_CLANG)
+        message(FATAL_ERROR "BUSTER_SANITIZE with zig on macOS requires clang to locate compiler-rt sanitizer runtimes")
+    endif()
+
+    execute_process(
+        COMMAND "${BUSTER_DARWIN_CLANG}" -print-resource-dir
+        OUTPUT_VARIABLE BUSTER_DARWIN_CLANG_RESOURCE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE BUSTER_DARWIN_CLANG_RESOURCE_RESULT
+    )
+    if (NOT BUSTER_DARWIN_CLANG_RESOURCE_RESULT EQUAL 0 OR BUSTER_DARWIN_CLANG_RESOURCE_DIR STREQUAL "")
+        message(FATAL_ERROR "Failed to query clang resource directory from ${BUSTER_DARWIN_CLANG}")
+    endif()
+
+    set(BUSTER_ZIG_DARWIN_COMPILER_RT_DIR "${BUSTER_DARWIN_CLANG_RESOURCE_DIR}/lib/darwin")
+    set(BUSTER_ZIG_DARWIN_ASAN_RUNTIME "${BUSTER_ZIG_DARWIN_COMPILER_RT_DIR}/libclang_rt.asan_osx_dynamic.dylib")
+    set(BUSTER_ZIG_DARWIN_UBSAN_RUNTIME "${BUSTER_ZIG_DARWIN_COMPILER_RT_DIR}/libclang_rt.ubsan_osx_dynamic.dylib")
+
+    foreach(runtime IN ITEMS BUSTER_ZIG_DARWIN_ASAN_RUNTIME BUSTER_ZIG_DARWIN_UBSAN_RUNTIME)
+        if (NOT EXISTS "${${runtime}}")
+            message(FATAL_ERROR "Could not find macOS sanitizer runtime at ${${runtime}}")
+        endif()
+    endforeach()
+endif()
+
+if (APPLE AND C_COMPILER_TCC)
+    # CMake's Darwin defaults are clang-style linker-driver flags.
+    # TinyCC links through its own driver and rejects these options.
+    foreach(flag_variable IN ITEMS
+        CMAKE_C_LINK_FLAGS
+        CMAKE_EXECUTABLE_CREATE_C_FLAGS
+        CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS
+        CMAKE_SHARED_MODULE_CREATE_C_FLAGS
+    )
+        string(REPLACE "-Wl,-search_paths_first" "" ${flag_variable} "${${flag_variable}}")
+        string(REPLACE "-Wl,-headerpad_max_install_names" "" ${flag_variable} "${${flag_variable}}")
+        string(STRIP "${${flag_variable}}" ${flag_variable})
+    endforeach()
+endif()
+
 set(C_COMPILER_CLANG_FAMILY OFF)
 if (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG OR C_COMPILER_TCC)
     set(C_COMPILER_CLANG_FAMILY ON)
@@ -62,7 +119,7 @@ if (C_COMPILER_CLANG_FAMILY OR C_COMPILER_GNU)
     set(C_COMPILER_GNU_FAMILY ON)
 endif()
 
-option(BUSTER_SINGLE_THREADED "Enable single-threaded mode" ${C_COMPILER_TCC})
+option(BUSTER_SINGLE_THREADED "Enable single-threaded mode" ON)
 
 message(STATUS "BUSTER_CI: ${BUSTER_CI}")
 message(STATUS "BUSTER_LINK_LIBC: ${BUSTER_LINK_LIBC}")
@@ -81,6 +138,7 @@ message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
 message(STATUS "CMAKE_C_COMPILER_ID: ${CMAKE_C_COMPILER_ID}")
 message(STATUS "CMAKE_CXX_COMPILER_ID: ${CMAKE_CXX_COMPILER_ID}")
 message(STATUS "CMAKE_ASM_COMPILER_ID: ${CMAKE_ASM_COMPILER_ID}")
+message(STATUS "CMAKE_LINKER_TYPE: ${CMAKE_LINKER_TYPE}")
 message(STATUS "C_COMPILER_ZIG: ${C_COMPILER_ZIG}")
 message(STATUS "CMAKE_COLOR_DIAGNOSTICS: ${CMAKE_COLOR_DIAGNOSTICS}")
 message(STATUS "CMAKE_EXPORT_COMPILE_COMMANDS: ${CMAKE_EXPORT_COMPILE_COMMANDS}")
@@ -110,6 +168,7 @@ set(BUSTER_MODULE_COMPILER_IR "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTEN
 set(BUSTER_MODULE_SIMD "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 set(BUSTER_MODULE_TARGET "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
 set(BUSTER_MODULE_X86_64 "${BUSTER_SOURCE_DIR}/x86_64${COMMON_EXTENSION}")
+set(BUSTER_MODULE_AARCH64 "${BUSTER_SOURCE_DIR}/aarch64${COMMON_EXTENSION}")
 set(BUSTER_MODULE_TEST "${BUSTER_SOURCE_DIR}/test${COMMON_EXTENSION}")
 set(BUSTER_MODULE_TIME "${BUSTER_SOURCE_DIR}/time${COMMON_EXTENSION}")
 set(BUSTER_MODULE_UI_CORE "${BUSTER_SOURCE_DIR}/ui_core${COMMON_EXTENSION}")
@@ -212,6 +271,8 @@ function(executable_add name is_buster_program main_file)
 
     if(${is_buster_program} AND ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^(x86_64|amd64)$")
         list(APPEND target_sources ${BUSTER_MODULE_X86_64})
+    elseif(${is_buster_program} AND ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^(aarch64|arm64)$")
+        list(APPEND target_sources ${BUSTER_MODULE_AARCH64})
     endif()
 
     message(STATUS "${name} files: ${main_file} ${target_sources}")
@@ -266,20 +327,29 @@ function(executable_add name is_buster_program main_file)
     endif()
 
     if (${BUSTER_SANITIZE})
+        set(sanitizers undefined bounds)
         if (NOT WIN32)
-            target_compile_options(${name} PRIVATE -fsanitize=address)
-            target_link_options(${name} PRIVATE -fsanitize=address)
-
-            if (C_COMPILER_ZIG)
-                target_link_libraries(${name} PRIVATE asan)
-            endif()
+            set(sanitizers address ${sanitizers})
         endif()
 
-        target_compile_options(${name} PRIVATE -fsanitize=undefined)
-        target_link_options(${name} PRIVATE -fsanitize=undefined)
+        string(REPLACE ";" "," sanitizer_flag "${sanitizers}")
+        target_compile_options(${name} PRIVATE "-fsanitize=${sanitizer_flag}")
+        target_link_options(${name} PRIVATE "-fsanitize=${sanitizer_flag}")
 
-        target_compile_options(${name} PRIVATE -fsanitize=bounds)
-        target_link_options(${name} PRIVATE -fsanitize=bounds)
+        if (NOT WIN32)
+            if (C_COMPILER_ZIG)
+                if (APPLE)
+                    target_link_libraries(${name} PRIVATE "${BUSTER_ZIG_DARWIN_ASAN_RUNTIME}")
+                    target_link_libraries(${name} PRIVATE "${BUSTER_ZIG_DARWIN_UBSAN_RUNTIME}")
+                    target_link_options(${name} PRIVATE
+                        "-Wl,-rpath,@executable_path"
+                        "-Wl,-rpath,${BUSTER_ZIG_DARWIN_COMPILER_RT_DIR}"
+                    )
+                elseif (UNIX)
+                    target_link_libraries(${name} PRIVATE asan)
+                endif()
+            endif()
+        endif()
 
         target_compile_options(${name} PRIVATE -fsanitize-recover=all)
         target_link_options(${name} PRIVATE -fsanitize-recover=all)
@@ -302,8 +372,8 @@ function(executable_add name is_buster_program main_file)
 
     if (${is_buster_program})
         target_link_libraries(${name} PRIVATE m)
-        target_link_libraries(${name} PRIVATE xcb)
-        target_link_libraries(${name} PRIVATE fontconfig)
+        # target_link_libraries(${name} PRIVATE xcb)
+        # target_link_libraries(${name} PRIVATE fontconfig)
     endif()
 
     # if (NOT ${BUSTER_CI})
@@ -385,15 +455,15 @@ buster_add_executable(ide src/buster/ide/ide.c
     ${BUSTER_MODULE_COMPILER_PARSER}
     ${BUSTER_MODULE_COMPILER_ANALYSIS}
     ${BUSTER_MODULE_COMPILER_IR}
-    ${BUSTER_MODULE_SIMD}
+    # ${BUSTER_MODULE_SIMD}
     ${BUSTER_MODULE_FILE}
     ${BUSTER_MODULE_TARGET}
     ${BUSTER_MODULE_TIME}
-    ${BUSTER_MODULE_UI_CORE}
-    ${BUSTER_MODULE_UI_BUILDER}
-    ${BUSTER_MODULE_WINDOW}
-    ${BUSTER_MODULE_RENDERING}
-    ${BUSTER_MODULE_FONT_PROVIDER}
+    # ${BUSTER_MODULE_UI_CORE}
+    # ${BUSTER_MODULE_UI_BUILDER}
+    # ${BUSTER_MODULE_WINDOW}
+    # ${BUSTER_MODULE_RENDERING}
+    # ${BUSTER_MODULE_FONT_PROVIDER}
 )
 #buster_add_executable(compiler src/buster/compiler/frontend/buster/main.c)
 

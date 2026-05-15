@@ -18,7 +18,7 @@ Target target_native = {
 #if defined(__x86_64__)
     .cpu_arch = CPU_ARCH_X86_64,
 #elif defined(__aarch64__)
-    .cpu_arch = CpuArch::CPU_ARCH_AARCH64,
+    .cpu_arch = CPU_ARCH_AARCH64,
 #else
 #pragma error
 #endif

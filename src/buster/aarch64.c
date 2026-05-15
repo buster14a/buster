@@ -4,8 +4,10 @@
 #include <buster/aarch64.h>
 #include <buster/system_headers.h>
 #include <buster/os.h>
+#include <buster/string.h>
 
-ENUM_T(A64Implementer, u8,
+enum A64Implementer
+{
     A64_IMPLEMENTER_ARM = 0x41,
     A64_IMPLEMENTER_BROADCOM = 0x42,
     A64_IMPLEMENTER_CAVIUM_MARVELL = 0x43,
@@ -19,9 +21,11 @@ ENUM_T(A64Implementer, u8,
     A64_IMPLEMENTER_MICROSOFT = 0x6d,
     A64_IMPLEMENTER_AMPERE = 0xc0,
     A64_IMPLEMENTER_UNKNOWN = 0xff,
-);
+};
+typedef u8 A64Implementer;
 
-ENUM_T(A64PartNumber, u16,
+enum A64PartNumber
+{
     A64_PART_CORTEX_A53                 = 0xD03,
     A64_PART_CORTEX_A55                 = 0xD05,
     A64_PART_CORTEX_A57                 = 0xD07,
@@ -35,9 +39,10 @@ ENUM_T(A64PartNumber, u16,
     A64_PART_NEOVERSE_N1                = 0xD49,
     A64_PART_NEOVERSE_N2                = 0xD4F,
     A64_PART_NEOVERSE_V1                = 0xD80,
-);
+};
 
-STRUCT(IdentificationRegister)
+typedef struct IdentificationRegister IdentificationRegister;
+struct IdentificationRegister
 {
     u16 revision:4;
     u16 part_number:12;
@@ -46,19 +51,19 @@ STRUCT(IdentificationRegister)
     A64Implementer implementer;
 };
 
-static_assert(sizeof(IdentificationRegister) == sizeof(u32));
+BUSTER_CT_CHECK(sizeof(IdentificationRegister) == sizeof(u32));
 
-BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
+CpuModel cpu_detect_model_aarch64(void)
 {
     CpuModel result = CPU_MODEL_ERROR;
 
 #if defined(__linux__)
 #define BUSTER_AARCH64_BUFFER_LENGTH (sizeof(u64) * 2 + 2)
     char8 buffer[BUSTER_AARCH64_BUFFER_LENGTH + 4096];
-    let fd = os_file_open(SOs("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"), (OpenFlags){ .read = 1 }, (OpenPermissions){});
-    let midr_el1_string = BUSTER_ARRAY_TO_SLICE(String8, buffer);
+    OsFileDescriptor* fd = os_file_open(SOs("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"), (OpenFlags){ .read = 1 }, (OpenPermissions){});
+    String8 midr_el1_string = (String8)BUSTER_ARRAY_TO_SLICE(buffer);
     midr_el1_string.length = BUSTER_AARCH64_BUFFER_LENGTH;
-    let file_size = os_file_read(fd, BUSTER_SLICE_TO_BYTE_SLICE(midr_el1_string), BUSTER_AARCH64_BUFFER_LENGTH);
+    u64 file_size = os_file_read(fd, BUSTER_SLICE_TO_BYTE_SLICE(midr_el1_string), BUSTER_AARCH64_BUFFER_LENGTH);
     buffer[file_size] = 0;
     os_file_close(fd);
 
@@ -66,12 +71,12 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
     {
         if (buffer[0] == '0' && buffer[1] == 'x')
         {
-            let value = string8_parse_u64_hexadecimal((char*)buffer + 2).value;
+            IntegerParsingU64 value = string_parse_u64_hexadecimal((char*)buffer + 2).value;
 
             if (value <= INT32_MAX)
             {
-                let value_u32 = (u32)value;
-                let id_register = *(IdentificationRegister*)&value_u32;
+                u32 value_u32 = (u32)value;
+                IdentificationRegister id_register = *(IdentificationRegister*)&value_u32;
 
                 result = CPU_MODEL_A64_GENERIC;
 
@@ -190,7 +195,7 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
     }
     else
     {
-        string8_print(S8("Error reading CPU model\n"));
+        string_print(S8("Error reading CPU model\n"));
     }
 #elif defined(__APPLE__)
       u32 family;
@@ -231,20 +236,20 @@ BUSTER_IMPL CpuModel cpu_detect_model_aarch64()
           {
               if (sysctlbyname("machdep.cpu.brand_string", 0, &buffer_length, 0, 0) == 0)
               {
-                  let brand_string = S8(buffer);
-                  if (string8_starts_with_sequence(brand_string, S8("Apple M1")))
+                  String8 brand_string = S8(buffer);
+                  if (string_starts_with_sequence(brand_string, S8("Apple M1")))
                   {
                       result = CPU_MODEL_A64_APPLE_M1;
                   }
-                  else if (string8_starts_with_sequence(brand_string, S8("Apple M2")))
+                  else if (string_starts_with_sequence(brand_string, S8("Apple M2")))
                   {
                       result = CPU_MODEL_A64_APPLE_M2;
                   }
-                  else if (string8_starts_with_sequence(brand_string, S8("Apple M3")))
+                  else if (string_starts_with_sequence(brand_string, S8("Apple M3")))
                   {
                       result = CPU_MODEL_A64_APPLE_M3;
                   }
-                  else if (string8_starts_with_sequence(brand_string, S8("Apple M4")))
+                  else if (string_starts_with_sequence(brand_string, S8("Apple M4")))
                   {
                       result = CPU_MODEL_A64_APPLE_M4;
                   }

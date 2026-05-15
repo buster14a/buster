@@ -35,7 +35,9 @@
 #endif
 
 #if BUSTER_LINK_LIBC
-#if defined(__cplusplus)
+#if BUSTER_SINGLE_THREADED
+#define BUSTER_THREAD_LOCAL_DECL
+#elif defined(__cplusplus)
 #define BUSTER_THREAD_LOCAL_DECL thread_local
 #elif defined(_MSC_VER)
 #define BUSTER_THREAD_LOCAL_DECL __declspec(thread)
@@ -138,14 +140,22 @@ struct DeferHelper
 #define BUSTER_SELECT(cond, a, b) ((cond) ? (a) : (b))
 #endif
 
-#if defined(__has_builtin)
-#if __has_builtin(__builtin_trap)
+#if defined(__has_builtin) && __has_builtin(__builtin_trap)
 #define BUSTER_TRAP() __builtin_trap()
+#else
+#if defined(__TINYC__) && BUSTER_LINK_LIBC
+#define BUSTER_TRAP() do { abort(); } while (1)
+#elif defined(__x86_64__)
+#define BUSTER_TRAP() do { __asm__ __volatile__("ud2"); } while (1)
+#elif defined(__aarch64__)
+#define BUSTER_TRAP() do { __asm__ volatile("brk #0"); } while (1)
 #endif
 #endif
 
-#ifndef BUSTER_TRAP
-#define BUSTER_TRAP() do { __asm__ __volatile__("ud2"); } while (1)
+#if defined(__has_builtin) && __has_builtin(__builtin_prefetch)
+#define BUSTER_PREFETCH(pointer) __builtin_prefetch((pointer), 0 /* rw==read */, 3 /* locality */)
+#else
+#define BUSTER_PREFETCH(pointer) (void)(pointer)
 #endif
 
 #define BUSTER_BREAKPOINT() __builtin_debugtrap()

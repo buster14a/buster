@@ -18,7 +18,6 @@ BUSTER_GLOBAL_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <sys/sysinfo.h>
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
@@ -26,6 +25,7 @@ BUSTER_GLOBAL_LOCAL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {};
 
 #if defined(__linux__)
 #include <sys/ptrace.h>
+#include <sys/sysinfo.h>
 #include <linux/limits.h>
 #if BUSTER_USE_IO_RING
 #include <liburing.h>
@@ -62,7 +62,9 @@ struct OsEntity
             void* argument;
         } thread;
         pthread_mutex_t mutex;
+#if 0
         pthread_barrier_t barrier;
+#endif
         struct
         {
             pthread_cond_t handle;

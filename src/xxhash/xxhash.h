@@ -4152,7 +4152,7 @@ XXH_FORCE_INLINE uint64x2_t XXH_vld1q_u64(void const* ptr)
  * inline assembly and were therefore incapable of merging the `vget_{low, high}_u32`
  * with `vmlal_u32`.
  */
-#if defined(__aarch64__) && defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 11
+#if defined(__aarch64__) && defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 11 && !defined(__TINYC__)
 XXH_FORCE_INLINE uint64x2_t
 XXH_vmlal_low_u32(uint64x2_t acc, uint32x4_t lhs, uint32x4_t rhs)
 {
@@ -4374,7 +4374,7 @@ do { \
 #    include <mmintrin.h>   /* https://msdn.microsoft.com/fr-fr/library/84szxsww(v=vs.90).aspx */
 #    define XXH_PREFETCH(ptr)  _mm_prefetch((const char*)(ptr), _MM_HINT_T0)
 #  elif defined(__GNUC__) && ( (__GNUC__ >= 4) || ( (__GNUC__ == 3) && (__GNUC_MINOR__ >= 1) ) )
-#    define XXH_PREFETCH(ptr)  __builtin_prefetch((ptr), 0 /* rw==read */, 3 /* locality */)
+#    define XXH_PREFETCH(ptr)  BUSTER_PREFETCH(ptr)
 #  else
 #    define XXH_PREFETCH(ptr) (void)(ptr)  /* disabled */
 #  endif
@@ -5967,7 +5967,7 @@ XXH3_initCustomSecret_rvv(void* XXH_RESTRICT customSecret, xxh_u64 seed64)
 
 /* scalar variants - universal */
 
-#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
 /*
  * In XXH3_scalarRound(), GCC and Clang have a similar codegen issue, where they
  * emit an excess mask and a full 64-bit multiply-add (MADD X-form).

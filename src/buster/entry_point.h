@@ -14,7 +14,3 @@ BUSTER_F_DECL ProcessResult entry_point(void);
 BUSTER_F_DECL ProcessResult buster_argument_process(SliceString8 argument_pointer, SliceString8 environment_pointer, u64 argument_index, String8 argument);
 #endif
 #endif
-
-#if !BUSTER_SINGLE_THREADED
-BUSTER_F_DECL void async_user_tick(void);
-#endif

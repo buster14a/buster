@@ -13,11 +13,12 @@ env:
 
 jobs:
   test:
-    name: Test [${{ inputs.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, optimize=${{ matrix.optimize }}, sanitize=${{ matrix.sanitize }}]
-    runs-on: ${{ inputs.runner }}
+    name: Test [${{ matrix.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, optimize=${{ matrix.optimize }}, sanitize=${{ matrix.sanitize }}]
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
+        runner: ['${{ inputs.runner }}']
         fuzz: [OFF, ON]
         optimize: [OFF, ON]
         sanitize: [OFF, ON]
@@ -32,6 +33,8 @@ jobs:
           - cc: tcc
             optimize: ON
           - cc: zig
+            fuzz: ON
+          - runner: aarch64-macos-m1
             fuzz: ON
     steps:
       - name: Checkout

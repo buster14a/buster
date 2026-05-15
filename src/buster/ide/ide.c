@@ -2,12 +2,12 @@
 
 #include <buster/base.h>
 #include <buster/entry_point.h>
-#include <buster/ui_core.h>
-#include <buster/rendering.h>
-#include <buster/window.h>
-#include <buster/font_provider.h>
+// #include <buster/ui_core.h>
+// #include <buster/rendering.h>
+// #include <buster/window.h>
+// #include <buster/font_provider.h>
 #include <buster/time.h>
-#include <buster/ui_builder.h>
+// #include <buster/ui_builder.h>
 #include <buster/arena.h>
 #include <buster/compiler/frontend/buster/parser.h>
 #include <buster/compiler/frontend/buster/analysis.h>
@@ -29,57 +29,59 @@
 #include <buster/target.c>
 #if defined(__x86_64__)
 #include <buster/x86_64.c>
+#elif defined(__aarch64__)
+#include <buster/aarch64.c>
 #endif
-#include <buster/ui_core.c>
-#include <buster/ui_builder.c>
-#include <buster/window.c>
-#include <buster/rendering.c>
+// #include <buster/ui_core.c>
+// #include <buster/ui_builder.c>
+// #include <buster/window.c>
+// #include <buster/rendering.c>
 #include <buster/file.c>
-#include <buster/font_provider.c>
+// #include <buster/font_provider.c>
 #include <buster/time.c>
 #include <buster/float.c>
 #include <buster/compiler/frontend/buster/parser.c>
 #include <buster/compiler/ir/ir.c>
-#include <buster/simd.c>
+// #include <buster/simd.c>
 #include <buster/integer.c>
 #include <buster/compiler/frontend/buster/analysis.c>
 #endif
 
-typedef struct IdePanel IdePanel;
-struct IdePanel
-{
-    IdePanel* first;
-    IdePanel* last;
-    IdePanel* previous;
-    IdePanel* next;
-    IdePanel* parent;
-    f32 parent_percentage;
-    Axis2 split_axis;
-};
-
-typedef struct IdeWindow IdeWindow;
-struct IdeWindow
-{
-    OsWindowHandle* os;
-    RenderingWindowHandle* render;
-    IdeWindow* previous;
-    IdeWindow* next;
-    IdePanel* root_panel;
-    UI_State* ui;
-};
-
+// typedef struct IdePanel IdePanel;
+// struct IdePanel
+// {
+//     IdePanel* first;
+//     IdePanel* last;
+//     IdePanel* previous;
+//     IdePanel* next;
+//     IdePanel* parent;
+//     f32 parent_percentage;
+//     Axis2 split_axis;
+// };
+//
+// typedef struct IdeWindow IdeWindow;
+// struct IdeWindow
+// {
+//     OsWindowHandle* os;
+//     RenderingWindowHandle* render;
+//     IdeWindow* previous;
+//     IdeWindow* next;
+//     IdePanel* root_panel;
+//     UI_State* ui;
+// };
+//
 typedef struct IdeProgram IdeProgram;
 struct IdeProgram
 {
     ProgramState state;
-    IdeWindow* first_window;
-    IdeWindow* last_window;
-    OsWindowingHandle* windowing;
-    RenderingHandle* rendering;
-    OsWindowingEventList event_list;
+    // IdeWindow* first_window;
+    // IdeWindow* last_window;
+    // OsWindowingHandle* windowing;
+    // RenderingHandle* rendering;
+    // OsWindowingEventList event_list;
     bool test;
-    u8 reserved[7];
-    TimeDataType last_frame_timestamp;
+    // u8 reserved[7];
+    // TimeDataType last_frame_timestamp;
 };
 
 BUSTER_GLOBAL_LOCAL IdeProgram ide_state = {0};
@@ -127,165 +129,165 @@ ProcessResult process_arguments(void)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void ui_top_bar(void)
-{
-    ui_push(pref_height, ui_em(1, 1));
-    {
-        ui_push(child_layout_axis, AXIS2_X);
-        UI_Widget* top_bar = ui_widget_make((UI_WidgetFlags) {0}, S8("top_bar"));
-        ui_push(parent, top_bar);
-        {
-            if (ui_button(S8("Button s")).clicked_left)
-            {
-                string_print(S8("Button pressed\n"));
-            }
-            ui_button(S8("Button 2"));
-            ui_button(S8("Button 3"));
-        }
-        BUSTER_UNUSED(ui_pop(parent));
-        BUSTER_UNUSED(ui_pop(child_layout_axis));
-    }
-    BUSTER_UNUSED(ui_pop(pref_height));
-}
+// BUSTER_GLOBAL_LOCAL void ui_top_bar(void)
+// {
+//     ui_push(pref_height, ui_em(1, 1));
+//     {
+//         ui_push(child_layout_axis, AXIS2_X);
+//         UI_Widget* top_bar = ui_widget_make((UI_WidgetFlags) {0}, S8("top_bar"));
+//         ui_push(parent, top_bar);
+//         {
+//             if (ui_button(S8("Button s")).clicked_left)
+//             {
+//                 string_print(S8("Button pressed\n"));
+//             }
+//             ui_button(S8("Button 2"));
+//             ui_button(S8("Button 3"));
+//         }
+//         BUSTER_UNUSED(ui_pop(parent));
+//         BUSTER_UNUSED(ui_pop(child_layout_axis));
+//     }
+//     BUSTER_UNUSED(ui_pop(pref_height));
+// }
 
-typedef struct UI_Node UI_Node;
-struct UI_Node
-{
-    String8 name;
-    String8 type;
-    String8 value;
-    String8 name_space;
-    String8 function;
-};
+// typedef struct UI_Node UI_Node;
+// struct UI_Node
+// {
+//     String8 name;
+//     String8 type;
+//     String8 value;
+//     String8 name_space;
+//     String8 function;
+// };
 
-BUSTER_GLOBAL_LOCAL void ui_node(UI_Node node)
-{
-    UI_Widget* node_widget = ui_widget_make_format((UI_WidgetFlags) {
-        .draw_background = 1,
-        .draw_text = 1,
-    }, S8("{S8} : {S8} = {S8}##{S8}{S8}"), node.name, node.type, node.value, node.function, node.name_space);
-    BUSTER_UNUSED(node_widget);
-}
+// BUSTER_GLOBAL_LOCAL void ui_node(UI_Node node)
+// {
+//     UI_Widget* node_widget = ui_widget_make_format((UI_WidgetFlags) {
+//         .draw_background = 1,
+//         .draw_text = 1,
+//     }, S8("{S8} : {S8} = {S8}##{S8}{S8}"), node.name, node.type, node.value, node.function, node.name_space);
+//     BUSTER_UNUSED(node_widget);
+// }
 
-BUSTER_GLOBAL_LOCAL void app_update(void)
-{
-    TimeDataType frame_end = timestamp_take();
-    ide_state.event_list = os_windowing_poll_events(ide_state.state.arena, ide_state.windowing);
-    f64 frame_ms = (f64)timestamp_ns_between(ide_state.last_frame_timestamp, frame_end) / (1000 * 1000);
-    ide_state.last_frame_timestamp = frame_end;
+// BUSTER_GLOBAL_LOCAL void app_update(void)
+// {
+//     TimeDataType frame_end = timestamp_take();
+//     ide_state.event_list = os_windowing_poll_events(ide_state.state.arena, ide_state.windowing);
+//     f64 frame_ms = (f64)timestamp_ns_between(ide_state.last_frame_timestamp, frame_end) / (1000 * 1000);
+//     ide_state.last_frame_timestamp = frame_end;
+//
+//     for (OsWindowingEvent* os_event = ide_state.event_list.first; os_event; os_event = os_event->next)
+//     {
+//         switch (os_event->kind)
+//         {
+//             case OS_WINDOWING_EVENT_WINDOW_CLOSE:
+//             {
+//                 for (IdeWindow* window = ide_state.first_window; window; window = window->next)
+//                 {
+//                     if (window->os == os_event->window)
+//                     {
+//                         if (window->previous)
+//                         {
+//                             window->previous->next = window->next;
+//                         }
+//
+//                         if (window->next)
+//                         {
+//                             window->next->previous = window->previous;
+//                         }
+//
+//                         if (ide_state.first_window == window)
+//                         {
+//                             ide_state.first_window = window->next;
+//                         }
+//
+//                         if (ide_state.last_window == window)
+//                         {
+//                             ide_state.last_window = window->previous;
+//                         }
+//
+//                         ui_state_deinitialize(window->ui);
+//                         window->ui = 0;
+//                         rendering_window_deinitialize(ide_state.rendering, window->render);
+//                         window->render = 0;
+//
+//                         break;
+//                     }
+//                 }
+//             } break;
+//             break; case OS_WINDOWING_EVENT_COUNT: BUSTER_UNREACHABLE();
+//         }
+//     }
+//
+//     IdeWindow* window = ide_state.first_window;
+//     while (window)
+//     {
+//         IdeWindow* next = window->next;
+//
+//         RenderingWindowHandle* render_window = window->render;
+//         rendering_window_frame_begin(ide_state.rendering, render_window);
+//
+//         ui_state_select(window->ui);
+//
+//         ui_build_begin(ide_state.windowing, window->os, frame_ms, &ide_state.event_list);
+//
+//         ui_push(font_size, 24);
+//
+//         ui_top_bar();
+//         ui_push(child_layout_axis, AXIS2_X);
+//         UI_Widget* workspace_widget = ui_widget_make_format((UI_WidgetFlags) {0}, S8("workspace{u64}"), window->os);
+//         ui_push(parent, workspace_widget);
+//         {
+//             // Node visualizer
+//             ui_push(child_layout_axis, AXIS2_Y);
+//             UI_Widget* node_visualizer_widget = ui_widget_make_format((UI_WidgetFlags) {
+//                 .draw_background = 1,
+//             }, S8("node_visualizer{u64}"), window->os);
+//
+//             ui_push(parent, node_visualizer_widget);
+//             {
+//                 ui_node((UI_Node) {
+//                     .name = S8("a"),
+//                     .type = S8("s32"),
+//                     .value = S8("1"),
+//                     .name_space = S8("foo"),
+//                     .function = S8("main"),
+//                 });
+//                 ui_node((UI_Node) {
+//                     .name = S8("b"),
+//                     .type = S8("s32"),
+//                     .value = S8("2"),
+//                     .name_space = S8("foo"),
+//                     .function = S8("main"),
+//                 });
+//             }
+//             BUSTER_UNUSED(ui_pop(parent));
+//             BUSTER_UNUSED(ui_pop(child_layout_axis));
+//
+//             // Side-panel stub
+//             ui_button(S8("Options"));
+//         }
+//         BUSTER_UNUSED(ui_pop(parent));
+//         BUSTER_UNUSED(ui_pop(child_layout_axis));
+//
+//         ui_build_end();
+//
+//         ui_draw();
+//
+//         BUSTER_UNUSED(ui_pop(font_size));
+//
+//         rendering_window_frame_end(ide_state.rendering, render_window);
+//
+//         window = next;
+//     }
+// }
 
-    for (OsWindowingEvent* os_event = ide_state.event_list.first; os_event; os_event = os_event->next)
-    {
-        switch (os_event->kind)
-        {
-            case OS_WINDOWING_EVENT_WINDOW_CLOSE:
-            {
-                for (IdeWindow* window = ide_state.first_window; window; window = window->next)
-                {
-                    if (window->os == os_event->window)
-                    {
-                        if (window->previous)
-                        {
-                            window->previous->next = window->next;
-                        }
-
-                        if (window->next)
-                        {
-                            window->next->previous = window->previous;
-                        }
-
-                        if (ide_state.first_window == window)
-                        {
-                            ide_state.first_window = window->next;
-                        }
-
-                        if (ide_state.last_window == window)
-                        {
-                            ide_state.last_window = window->previous;
-                        }
-
-                        ui_state_deinitialize(window->ui);
-                        window->ui = 0;
-                        rendering_window_deinitialize(ide_state.rendering, window->render);
-                        window->render = 0;
-
-                        break;
-                    }
-                }
-            } break;
-            break; case OS_WINDOWING_EVENT_COUNT: BUSTER_UNREACHABLE();
-        }
-    }
-
-    IdeWindow* window = ide_state.first_window;
-    while (window)
-    {
-        IdeWindow* next = window->next;
-
-        RenderingWindowHandle* render_window = window->render;
-        rendering_window_frame_begin(ide_state.rendering, render_window);
-
-        ui_state_select(window->ui);
-
-        ui_build_begin(ide_state.windowing, window->os, frame_ms, &ide_state.event_list);
-
-        ui_push(font_size, 24);
-
-        ui_top_bar();
-        ui_push(child_layout_axis, AXIS2_X);
-        UI_Widget* workspace_widget = ui_widget_make_format((UI_WidgetFlags) {0}, S8("workspace{u64}"), window->os);
-        ui_push(parent, workspace_widget);
-        {
-            // Node visualizer
-            ui_push(child_layout_axis, AXIS2_Y);
-            UI_Widget* node_visualizer_widget = ui_widget_make_format((UI_WidgetFlags) {
-                .draw_background = 1,
-            }, S8("node_visualizer{u64}"), window->os);
-
-            ui_push(parent, node_visualizer_widget);
-            {
-                ui_node((UI_Node) {
-                    .name = S8("a"),
-                    .type = S8("s32"),
-                    .value = S8("1"),
-                    .name_space = S8("foo"),
-                    .function = S8("main"),
-                });
-                ui_node((UI_Node) {
-                    .name = S8("b"),
-                    .type = S8("s32"),
-                    .value = S8("2"),
-                    .name_space = S8("foo"),
-                    .function = S8("main"),
-                });
-            }
-            BUSTER_UNUSED(ui_pop(parent));
-            BUSTER_UNUSED(ui_pop(child_layout_axis));
-
-            // Side-panel stub
-            ui_button(S8("Options"));
-        }
-        BUSTER_UNUSED(ui_pop(parent));
-        BUSTER_UNUSED(ui_pop(child_layout_axis));
-
-        ui_build_end();
-
-        ui_draw();
-
-        BUSTER_UNUSED(ui_pop(font_size));
-
-        rendering_window_frame_end(ide_state.rendering, render_window);
-
-        window = next;
-    }
-}
-
-BUSTER_GLOBAL_LOCAL void window_refresh_callback(OsWindowHandle* window, void* context)
-{
-    BUSTER_UNUSED(window);
-    BUSTER_UNUSED(context);
-    app_update();
-}
+// BUSTER_GLOBAL_LOCAL void window_refresh_callback(OsWindowHandle* window, void* context)
+// {
+//     BUSTER_UNUSED(window);
+//     BUSTER_UNUSED(context);
+//     app_update();
+// }
 
 void async_user_tick(void)
 {
