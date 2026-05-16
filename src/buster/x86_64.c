@@ -5,9 +5,20 @@
 BUSTER_GLOBAL_LOCAL CpuId cpuid(u32 leaf, u32 subleaf)
 {
     CpuId result = {0};
+#if BUSTER_COMPILER_MSVC
+    int cpu_info[4];
+
+    __cpuidex(cpu_info, (int)leaf, (int)subleaf);
+
+    result.eax = (u32)cpu_info[0];
+    result.ebx = (u32)cpu_info[1];
+    result.ecx = (u32)cpu_info[2];
+    result.edx = (u32)cpu_info[3];
+#else
     __asm__ volatile ("cpuid"
                         : "=a"(result.eax), "=b"(result.ebx), "=c"(result.ecx), "=d"(result.edx)
                         : "a"(leaf), "c"(subleaf));
+#endif
     return result;
 }
 

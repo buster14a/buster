@@ -16,22 +16,6 @@ BUSTER_GLOBAL_LOCAL TokenId block_end_of_statement_token = TOKEN_SEMICOLON;
 
 #define KEYWORD_COUNT ((u64)last_keyword - (u64)first_keyword + 1)
 
-BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
-    [TOKEN_KEYWORD_FUNCTION - first_keyword] = S8("fn"),
-    [TOKEN_KEYWORD_IF - first_keyword] = S8("if"),
-    [TOKEN_KEYWORD_ELSE - first_keyword] = S8("else"),
-    [TOKEN_KEYWORD_RETURN - first_keyword] = S8("return"),
-    [TOKEN_KEYWORD_FOR - first_keyword] = S8("for"),
-    [TOKEN_KEYWORD_WHILE - first_keyword] = S8("while"),
-    [TOKEN_KEYWORD_CODE - first_keyword] = S8("code"),
-    [TOKEN_KEYWORD_DATA - first_keyword] = S8("data"),
-    [TOKEN_KEYWORD_TYPE - first_keyword] = S8("type"),
-    [TOKEN_KEYWORD_STRUCT - first_keyword] = S8("struct"),
-    [TOKEN_KEYWORD_UNION - first_keyword] = S8("union"),
-};
-
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(keyword_names) == KEYWORD_COUNT);
-
 #define SWITCH_ALPHA_UPPER \
                 case 'A':\
                 case 'B':\
@@ -138,6 +122,8 @@ BUSTER_GLOBAL_LOCAL bool is_valid_character_after_digit(char8 ch)
         }
         break; default: BUSTER_TRAP();
     }
+
+    return false;
 }
 
 TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length)
@@ -191,6 +177,22 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                         }
 
                         String8 identifier = string_from_pointer_length(start, (u64)(it - start));
+
+                        BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
+                            [TOKEN_KEYWORD_FUNCTION - first_keyword] = S8_INITIALIZER("fn"),
+                            [TOKEN_KEYWORD_IF - first_keyword] = S8_INITIALIZER("if"),
+                            [TOKEN_KEYWORD_ELSE - first_keyword] = S8_INITIALIZER("else"),
+                            [TOKEN_KEYWORD_RETURN - first_keyword] = S8_INITIALIZER("return"),
+                            [TOKEN_KEYWORD_FOR - first_keyword] = S8_INITIALIZER("for"),
+                            [TOKEN_KEYWORD_WHILE - first_keyword] = S8_INITIALIZER("while"),
+                            [TOKEN_KEYWORD_CODE - first_keyword] = S8_INITIALIZER("code"),
+                            [TOKEN_KEYWORD_DATA - first_keyword] = S8_INITIALIZER("data"),
+                            [TOKEN_KEYWORD_TYPE - first_keyword] = S8_INITIALIZER("type"),
+                            [TOKEN_KEYWORD_STRUCT - first_keyword] = S8_INITIALIZER("struct"),
+                            [TOKEN_KEYWORD_UNION - first_keyword] = S8_INITIALIZER("union"),
+                        };
+
+                        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(keyword_names) == KEYWORD_COUNT);
 
                         u64 i;
                         for (i = 0; i < KEYWORD_COUNT; i += 1)
@@ -947,15 +949,15 @@ typedef enum IrFunctionAttribute
 }IrFunctionAttribute;
 
 BUSTER_GLOBAL_LOCAL String8 function_attribute_names[] = {
-    [IR_FUNCTION_ATTRIBUTE_CALLING_CONVENTION] = S8("cc"),
+    [IR_FUNCTION_ATTRIBUTE_CALLING_CONVENTION] = S8_INITIALIZER("cc"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(function_attribute_names) == IR_FUNCTION_ATTRIBUTE_COUNT);
 
 BUSTER_GLOBAL_LOCAL String8 calling_convention_names[] = {
-    [IR_CALLING_CONVENTION_C] = S8("c"),
-    [IR_CALLING_CONVENTION_SYSTEMV] = S8("systemv"),
-    [IR_CALLING_CONVENTION_WIN64] = S8("win64"),
+    [IR_CALLING_CONVENTION_C] = S8_INITIALIZER("c"),
+    [IR_CALLING_CONVENTION_SYSTEMV] = S8_INITIALIZER("systemv"),
+    [IR_CALLING_CONVENTION_WIN64] = S8_INITIALIZER("win64"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(calling_convention_names) == IR_CALLING_CONVENTION_COUNT);
@@ -967,7 +969,7 @@ typedef enum IrSymbolAttribute
 } IrSymbolAttribute;
 
 BUSTER_GLOBAL_LOCAL String8 symbol_attribute_names[] = {
-    [IR_SYMBOL_ATTRIBUTE_EXPORT] = S8("export"),
+    [IR_SYMBOL_ATTRIBUTE_EXPORT] = S8_INITIALIZER("export"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(symbol_attribute_names) == IR_SYMBOL_ATTRIBUTE_COUNT);
@@ -1006,7 +1008,7 @@ typedef enum CodeAttributeId
 } CodeAttributeId;
 
 BUSTER_GLOBAL_LOCAL String8 code_attributes_names[] = {
-    [CODE_ATTRIBUTE_INLINE] = S8("inline"),
+    [CODE_ATTRIBUTE_INLINE] = S8_INITIALIZER("inline"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(code_attributes_names) == CODE_ATTRIBUTE_COUNT);

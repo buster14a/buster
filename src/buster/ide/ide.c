@@ -27,11 +27,6 @@
 #include <buster/memory.c>
 #include <buster/entry_point.c>
 #include <buster/target.c>
-#if defined(__x86_64__)
-#include <buster/x86_64.c>
-#elif defined(__aarch64__)
-#include <buster/aarch64.c>
-#endif
 // #include <buster/ui_core.c>
 // #include <buster/ui_builder.c>
 // #include <buster/window.c>

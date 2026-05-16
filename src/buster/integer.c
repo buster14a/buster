@@ -25,7 +25,7 @@ u8 trailing_zeroes_u32(u32 n)
 {
     if (n == 0) return 32;
 
-#if defined(__has_builtin) && __has_builtin(__builtin_ctz)
+#if __has_builtin(__builtin_ctz)
     return (u8)__builtin_ctz(n);
 #else
     u8 result = 0;
@@ -43,7 +43,7 @@ u8 trailing_zeroes_u64(u64 n)
 {
     if (n == 0) return 64;
 
-#if defined(__has_builtin) && __has_builtin(__builtin_ctzll)
+#if __has_builtin(__builtin_ctzll)
     return (u8)__builtin_ctzll(n);
 #else
     u8 result = 0;
@@ -61,7 +61,7 @@ u8 leading_zeroes_u32(u32 n)
 {
     if (n == 0) return 32;
 
-#if defined(__has_builtin) && __has_builtin(__builtin_clz)
+#if __has_builtin(__builtin_clz)
     return (u8)__builtin_clz(n);
 #else
     u8 result = 0;
@@ -80,7 +80,7 @@ u8 leading_zeroes_u64(u64 n)
 {
     if (n == 0) return 64;
 
-#if defined(__has_builtin) && __has_builtin(__builtin_clzll)
+#if __has_builtin(__builtin_clzll)
     return (u8)__builtin_clzll(n);
 #else
     u8 result = 0;

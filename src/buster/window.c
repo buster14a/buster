@@ -29,8 +29,8 @@ typedef enum X11Atom
 } X11Atom;
 
 BUSTER_GLOBAL_LOCAL String8 atom_names[X11_ATOM_COUNT] = {
-    S8("WM_PROTOCOLS"),
-    S8("WM_DELETE_WINDOW"),
+    S8_INITIALIZER("WM_PROTOCOLS"),
+    S8_INITIALIZER("WM_DELETE_WINDOW"),
 };
 
 BUSTER_GLOBAL_LOCAL xcb_intern_atom_reply_t* atom_replies[BUSTER_ARRAY_LENGTH(atom_names)];

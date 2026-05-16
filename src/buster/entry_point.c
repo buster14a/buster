@@ -6,8 +6,6 @@
 #include <buster/arena.h>
 #include <buster/string.h>
 
-#include <stdatomic.h>
-
 OsState os_state;
 
 #if BUSTER_LINK_LIBC

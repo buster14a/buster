@@ -80,7 +80,7 @@ BUSTER_GLOBAL_LOCAL void table_allocate(InternTable* table, u32 count)
 {
     BUSTER_CHECK(table->hash_table_arena->position == arena_minimum_position);
     u64 allocation_size = (u64)count * divisor;
-    u8* allocation = (u8*)arena_allocate_bytes(table->hash_table_arena, allocation_size, alignof(u64));
+    u8* allocation = (u8*)arena_allocate_bytes(table->hash_table_arena, allocation_size, BUSTER_ALIGN_OF(u64));
     memset(allocation, 0, allocation_size);
 }
  
@@ -95,7 +95,7 @@ BUSTER_GLOBAL_LOCAL void table_grow(InternTable* table)
     {
         TemporalArena scratch = scratch_begin(0, 0);
 
-        u8* allocation = (u8*)arena_allocate_bytes(scratch.arena, get_hash_table_allocation_size(table), alignof(u64));
+        u8* allocation = (u8*)arena_allocate_bytes(scratch.arena, get_hash_table_allocation_size(table), BUSTER_ALIGN_OF(u64));
         memcpy(allocation, (u8*)table->hash_table_arena + arena_minimum_position, table->hash_table_arena->position - arena_minimum_position);
         table_allocate(table, target_capacity);
 

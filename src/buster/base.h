@@ -1,9 +1,12 @@
 #pragma once
 
 // This should be enough to achieve compilation of headers
-
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
+
+#ifndef __has_builtin
+#define __has_builtin(x) 0
 #endif
 
 #ifndef BUSTER_KERNEL
@@ -34,6 +37,46 @@
 #define BUSTER_FUZZ 0
 #endif
 
+#if defined(__TINYC__)
+#define BUSTER_COMPILER_TCC 1
+#elif defined(__clang__)
+#define BUSTER_COMPILER_CLANG 1
+#elif defined(_MSC_VER)
+#define BUSTER_COMPILER_MSVC 1
+#elif defined(__GNUC__)
+#define BUSTER_COMPILER_GCC 1
+#else
+#pragma error
+#endif
+
+#ifndef BUSTER_COMPILER_TCC
+#define BUSTER_COMPILER_TCC 0
+#endif
+
+#ifndef BUSTER_COMPILER_CLANG
+#define BUSTER_COMPILER_CLANG 0
+#endif
+
+#ifndef BUSTER_COMPILER_MSVC
+#define BUSTER_COMPILER_MSVC 0
+#endif
+
+#ifndef BUSTER_COMPILER_GCC
+#define BUSTER_COMPILER_GCC 0
+#endif
+
+#if (defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)) && !defined(_M_ARM64EC)
+#define BUSTER_CPU_ARCH_X86_64 1
+#else
+#define BUSTER_CPU_ARCH_X86_64 0
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define BUSTER_CPU_ARCH_AARCH64 1
+#else
+#define BUSTER_CPU_ARCH_AARCH64 0
+#endif
+
 #if BUSTER_LINK_LIBC
 #if BUSTER_SINGLE_THREADED
 #define BUSTER_THREAD_LOCAL_DECL
@@ -58,7 +101,11 @@
 #define BUSTER_UNDERLYING_TYPE(E) __underlying_type(E)
 
 #if BUSTER_OPTIMIZE
+#if BUSTER_COMPILER_MSVC
+#define BUSTER_INLINE __forceinline
+#else
 #define BUSTER_INLINE __attribute__((always_inline)) inline
+#endif
 #else
 #define BUSTER_INLINE 
 #endif
@@ -131,34 +178,58 @@ struct DeferHelper
 #define BUSTER_OFFSET_OF(T, field) __builtin_offsetof(T, field)
 #define BUSTER_FIELD_PARENT_POINTER(type, field, pointer) ((type*)((char8*)(pointer) - BUSTER_OFFSET_OF(T, field)))
 
+#if __has_builtin(__builtin_unpredictable)
 #define BUSTER_UNPREDICTABLE(cond) __builtin_unpredictable(cond)
-#if defined(__clang__)
-#define BUSTER_SELECT(cond, a, b) (BUSTER_UNPREDICTABLE(cond) ? (a) : (b))
 #else
-#define BUSTER_SELECT(cond, a, b) ((cond) ? (a) : (b))
+#define BUSTER_UNPREDICTABLE(cond) (cond)
 #endif
 
-#if defined(__has_builtin) && __has_builtin(__builtin_trap)
+#define BUSTER_SELECT(cond, a, b) (BUSTER_UNPREDICTABLE(cond) ? (a) : (b))
+
+#if __has_builtin(__builtin_trap)
 #define BUSTER_TRAP() __builtin_trap()
-#else
-#if defined(__TINYC__) && BUSTER_LINK_LIBC
+#elif defined(_MSC_VER)
+#include <intrin.h>
+#define BUSTER_TRAP() __fastfail(~0)
+#elif defined(__TINYC__) && BUSTER_LINK_LIBC
 #define BUSTER_TRAP() do { abort(); } while (1)
-#elif defined(__x86_64__)
+#elif BUSTER_CPU_ARCH_X86_64
 #define BUSTER_TRAP() do { __asm__ __volatile__("ud2"); } while (1)
-#elif defined(__aarch64__)
+#elif BUSTER_CPU_ARCH_AARCH64
 #define BUSTER_TRAP() do { __asm__ volatile("brk #0"); } while (1)
 #endif
-#endif
 
-#if defined(__has_builtin) && __has_builtin(__builtin_prefetch)
+#if __has_builtin(__builtin_prefetch)
 #define BUSTER_PREFETCH(pointer) __builtin_prefetch((pointer), 0 /* rw==read */, 3 /* locality */)
+#elif defined(_MSC_VER)
+#include <intrin.h>
+#define BUSTER_PREFETCH(pointer) _mm_prefetch((pointer), _MM_HINT_T0)
 #else
 #define BUSTER_PREFETCH(pointer) (void)(pointer)
 #endif
 
-#define BUSTER_BREAKPOINT() __builtin_debugtrap()
+#if __has_builtin(__builtin_expect)
 #define BUSTER_LIKELY(x) __builtin_expect(!!(x), 1)
 #define BUSTER_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define BUSTER_LIKELY(x) (x)
+#define BUSTER_UNLIKELY(x) (x)
+#endif
+
+#if __has_builtin(__builtin_debugtrap)
+#define BUSTER_BREAKPOINT() __builtin_debugtrap()
+#elif defined(_MSC_VER)
+#define BUSTER_BREAKPOINT() __debugbreak()
+#else
+#define BUSTER_BREAKPOINT() *(int*)(void*)0 = 0
+#endif
+
+#if BUSTER_COMPILER_MSVC
+#define BUSTER_UNUSED_DECL
+#else
+#define BUSTER_UNUSED_DECL __attribute__((unused))
+#endif
+
 #define BUSTER_UNUSED(x) ((void)(x))
 
 #define BUSTER_MIN(a,b) (((a) < (b)) ? (a) : (b))
@@ -168,7 +239,7 @@ struct DeferHelper
 #define BUSTER_CLAMP_BOT(x,b) BUSTER_MAX(x, b)
 #define BUSTER_CLAMP(a,x,b) (((x) < (a)) ? (a) : ((x) > (b)) ? (b) : (x))
 
-#if defined(__APPLE__) &&  defined(__aarch64__)
+#if defined(__APPLE__) && BUSTER_CPU_ARCH_AARCH64
 #define BUSTER_CACHE_LINE_GUESS (128)
 #else
 #define BUSTER_CACHE_LINE_GUESS (64)
@@ -342,12 +413,11 @@ typedef u32 char32_t;
 typedef char char8_t;
 #endif
 
-// #ifdef __clang__
+#if BUSTER_COMPILER_MSVC
+#define BUSTER_CT_CHECK(x) typedef u8 BUSTER_CONCAT(static_assert_failed_, __LINE__)[(x) ? 1 : -1]
+#else
 #define BUSTER_CT_CHECK(x) _Static_assert((x), "BUSTER_CT_CHECK failed")
-// #else
-// #define BUSTER_CT_CHECK(x) typedef u8 BUSTER_CONCAT(static_assert_failed_, __LINE__)[(x) ? 1 : -1]
-// #endif
-
+#endif
 
 typedef char char8;
 BUSTER_CT_CHECK(sizeof(char8) == 1);
@@ -396,8 +466,10 @@ struct SliceString16
     u64 length;
 };
 
-#define S8(strlit) ((String8) { .pointer = (char8*)(strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) })
-#define S16(strlit) ((String16) { .pointer = (char16*)(u ## strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) })
+#define S8_INITIALIZER(strlit) { .pointer = (char8*)(strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) }
+#define S16_INITIALIZER(strlit) { .pointer = (char16*)(u ## strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) }
+#define S8(strlit) ((String8) S8_INITIALIZER(strlit))
+#define S16(strlit) ((String16) S16_INITIALIZER(strlit))
 
 // Math types and enums for UI
 typedef enum Axis2
@@ -630,7 +702,30 @@ typedef ThreadReturnType ThreadCallback(void*);
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (buster_failed_assertion(__LINE__, BUSTER_FUNCTION, S8(__FILE__)), 0) : 0))
 #endif
 
+#if BUSTER_COMPILER_MSVC
+#define BUSTER_NORETURN __declspec(noreturn)
+#else
 #define BUSTER_NORETURN __attribute__((noreturn))
+#endif
+
+#if BUSTER_COMPILER_MSVC
+#define BUSTER_COLD
+#else
 #define BUSTER_COLD __attribute__((cold))
+#endif
+
+#if defined(__cplusplus)
+#define BUSTER_ALIGN_OF(T) alignof(T)
+#elif defined(_MSC_VER)
+#define BUSTER_ALIGN_OF(T) __alignof(T)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define BUSTER_ALIGN_OF(T) alignof(T)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define BUSTER_ALIGN_OF(T) _Alignof(T)
+#elif defined(__GNUC__) || defined(__clang__)
+#define BUSTER_ALIGN_OF(T) __alignof__(T)
+#else
+#define BUSTER_ALIGN_OF(T) alignof(T)
+#endif
 
 BUSTER_F_DECL BUSTER_NORETURN BUSTER_COLD void buster_failed_assertion(u32 line, String8 function_name, String8 file_path);

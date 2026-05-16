@@ -1,8 +1,5 @@
 on: [push]
 
-env:
-  BUSTER_CI: 'ON'
-
 jobs:
   test_controller:
     strategy:

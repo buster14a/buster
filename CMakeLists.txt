@@ -40,6 +40,7 @@ set(C_COMPILER_APPLE_CLANG OFF)
 set(C_COMPILER_CLANG OFF)
 set(C_COMPILER_TCC OFF)
 set(C_COMPILER_ZIG OFF)
+set(C_COMPILER_MSVC OFF)
 
 if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
     set(C_COMPILER_GNU ON)
@@ -49,6 +50,8 @@ elseif (CMAKE_C_COMPILER_ID STREQUAL "Clang")
     set(C_COMPILER_CLANG ON)
 elseif (CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
     set(C_COMPILER_TCC ON)
+elseif (CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    set(C_COMPILER_MSVC ON)
 endif()
 
 if (WIN32 AND C_COMPILER_TCC)
@@ -128,7 +131,35 @@ if (C_COMPILER_CLANG_FAMILY OR C_COMPILER_GNU)
     set(C_COMPILER_GNU_FAMILY ON)
 endif()
 
+set(C_COMPILER_MSVC_FAMILIY OFF)
+if (C_COMPILER_MSVC)
+    set(C_COMPILER_MSVC_FAMILIY ON)
+endif()
+
 option(BUSTER_SINGLE_THREADED "Enable single-threaded mode" ON)
+
+if (C_COMPILER_MSVC)
+    foreach(linker_flags IN ITEMS
+        CMAKE_EXE_LINKER_FLAGS_DEBUG
+        CMAKE_EXE_LINKER_FLAGS_RELEASE
+        CMAKE_EXE_LINKER_FLAGS_MINSIZEREL
+        CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO
+        CMAKE_MODULE_LINKER_FLAGS_DEBUG
+        CMAKE_MODULE_LINKER_FLAGS_RELEASE
+        CMAKE_MODULE_LINKER_FLAGS_MINSIZEREL
+        CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO
+        CMAKE_SHARED_LINKER_FLAGS_DEBUG
+        CMAKE_SHARED_LINKER_FLAGS_RELEASE
+        CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL
+        CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO
+    )
+        string(REPLACE "/INCREMENTAL:NO" "" "${linker_flags}" "${${linker_flags}}")
+        string(REPLACE "/INCREMENTAL:YES" "" "${linker_flags}" "${${linker_flags}}")
+        string(REPLACE "/INCREMENTAL" "" "${linker_flags}" "${${linker_flags}}")
+        string(STRIP "${${linker_flags}}" "${linker_flags}")
+        set("${linker_flags}" "${${linker_flags}}" CACHE STRING "CMake linker flags for ${linker_flags}" FORCE)
+    endforeach()
+endif()
 
 message(STATUS "BUSTER_CI: ${BUSTER_CI}")
 message(STATUS "BUSTER_LINK_LIBC: ${BUSTER_LINK_LIBC}")
@@ -183,6 +214,14 @@ set(BUSTER_MODULE_UI_BUILDER "${BUSTER_SOURCE_DIR}/ui_builder${COMMON_EXTENSION}
 set(BUSTER_MODULE_WINDOW "${BUSTER_SOURCE_DIR}/window${COMMON_EXTENSION}")
 set(BUSTER_MODULE_RENDERING "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSION}")
 set(BUSTER_MODULE_FONT_PROVIDER "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
+
+
+set(GNU_FAMILY_OPTIONS
+    -fwrapv
+    -fno-strict-aliasing
+    -funsigned-char
+    -fno-exceptions
+)
 
 set(GNU_FAMILY_WARNINGS
     -Werror
@@ -263,6 +302,18 @@ set(CLANG_GNU_FAMILY_WARNINGS
     -Wunique-object-duplication
 )
 
+set(GNU_FAMILY_DISABLE_WARNINGS
+    -Wno-pragma-once-outside-header
+    -Wno-unused-function
+    -Wno-missing-field-initializers
+)
+
+set(GNU_FAMILY_NATIVE_TARGET -march=native)
+
+set(MSVC_FAMILY_OPTIONS )
+set(MSVC_FAMILY_WARNINGS )
+set(MSVC_FAMILY_DISABLE_WARNINGS )
+
 if (BUSTER_FUZZ)
     set(TEST_ARGUMENTS -max_len=4096;-max_total_time=2)
 else()
@@ -295,6 +346,10 @@ function(executable_add name is_buster_program main_file)
         XCODE_SCHEME_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
 
+    if(C_COMPILER_MSVC)
+        target_link_options(${name} PRIVATE /INCREMENTAL:NO)
+    endif()
+
     target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_compile_definitions(${name} PRIVATE
         BUSTER_UNITY_BUILD=$<IF:$<BOOL:${BUSTER_UNITY_BUILD}>,1,0>
@@ -305,38 +360,33 @@ function(executable_add name is_buster_program main_file)
         BUSTER_SINGLE_THREADED=$<IF:$<BOOL:${BUSTER_SINGLE_THREADED}>,1,0>
     )
 
-    target_compile_options(${name} PRIVATE
-        -fwrapv
-        -fno-strict-aliasing
-        -funsigned-char
-        -fno-exceptions
-    )
-
     if (C_COMPILER_GNU_FAMILY)
+        target_compile_options(${name} PRIVATE ${GNU_FAMILY_OPTIONS})
         target_compile_options(${name} PRIVATE ${GNU_FAMILY_WARNINGS})
+        target_compile_options(${name} PRIVATE ${GNU_FAMILY_DISABLE_WARNINGS})
     endif()
 
     if (C_COMPILER_CLANG_FAMILY)
         target_compile_options(${name} PRIVATE ${CLANG_GNU_FAMILY_WARNINGS})
     endif()
 
-    # Disable warnings
-    target_compile_options(${name} PRIVATE
-        -Wno-pragma-once-outside-header
-        -Wno-unused-function
-        -Wno-missing-field-initializers
-    )
+    if (C_COMPILER_MSVC_FAMILIY)
+        target_compile_options(${name} PRIVATE ${MSVC_FAMILY_OPTIONS})
+        target_compile_options(${name} PRIVATE ${MSVC_FAMILY_WARNINGS})
+        target_compile_options(${name} PRIVATE ${MSVC_FAMILY_DISABLE_WARNINGS})
+    endif()
 
     if (NOT ${BUSTER_CROSS_COMPILE})
-        target_compile_options(${name} PRIVATE
-            -march=native
-        )
+        if (C_COMPILER_GNU_FAMILY)
+            target_compile_options(${name} PRIVATE ${GNU_FAMILY_NATIVE_TARGET})
+        endif()
     endif()
 
     if (${BUSTER_SANITIZE})
-        set(sanitizers undefined bounds)
-        if (NOT WIN32)
-            set(sanitizers address ${sanitizers})
+        if (C_COMPILER_MSVC)
+            set(sanitizers address)
+        else()
+            set(sanitizers address undefined bounds)
         endif()
 
         string(REPLACE ";" "," sanitizer_flag "${sanitizers}")
@@ -358,8 +408,10 @@ function(executable_add name is_buster_program main_file)
             endif()
         endif()
 
-        target_compile_options(${name} PRIVATE -fsanitize-recover=all)
-        target_link_options(${name} PRIVATE -fsanitize-recover=all)
+        if (NOT C_COMPILER_MSVC)
+            target_compile_options(${name} PRIVATE -fsanitize-recover=all)
+            target_link_options(${name} PRIVATE -fsanitize-recover=all)
+        endif()
     else()
         if (C_COMPILER_ZIG)
             target_compile_options(${name} PRIVATE -fno-sanitize=all)

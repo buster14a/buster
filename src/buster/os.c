@@ -4,7 +4,7 @@
 #include <buster/arena.h>
 #include <buster/string.h>
 
-#if BUSTER_LINK_LIBC && !BUSTER_SINGLE_THREADED && defined(__TINYC__) && defined(__APPLE__) && defined(__aarch64__)
+#if BUSTER_LINK_LIBC && !BUSTER_SINGLE_THREADED && defined(__TINYC__) && defined(__APPLE__) && BUSTER_CPU_ARCH_AARCH64
 #define BUSTER_THREAD_CONTEXT_USE_PTHREAD_TLS 1
 #else
 #define BUSTER_THREAD_CONTEXT_USE_PTHREAD_TLS 0
@@ -183,7 +183,7 @@ BUSTER_COLD bool is_debugger_present(void)
 #endif
     }
 
-    return program_state->_is_debugger_present;
+    return (bool)program_state->_is_debugger_present;
 }
 
 BUSTER_NORETURN BUSTER_COLD void os_fail(void)
@@ -421,8 +421,6 @@ OsFileDescriptor* os_get_stdout(void)
 #endif
     return result;
 }
-
-__attribute__((used)) BUSTER_GLOBAL_LOCAL TimeDataType frequency;
 
 #if defined(_WIN32)
 BUSTER_GLOBAL_LOCAL OsThreadHandle* os_windows_thread_to_generic(HANDLE handle)
@@ -779,7 +777,7 @@ ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, 
     bool any_capture = false;
     for (StandardStream stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
     {
-        if (options.capture & (1 << stream))
+        if (options.capture & ((u64)1 << stream))
         {
             SECURITY_ATTRIBUTES security_attributes = { sizeof(security_attributes), 0, TRUE };
             BUSTER_CT_CHECK(sizeof(HANDLE) == sizeof(OsFileDescriptor*));
@@ -825,7 +823,7 @@ ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, 
 
     for (StandardStream stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
     {
-        if (options.capture & (1 << stream) && pipe_creation_results[stream])
+        if (options.capture & ((u64)1 << stream) && pipe_creation_results[stream])
         {
             CloseHandle(result.pipes[stream][1]);
 

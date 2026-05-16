@@ -2,129 +2,44 @@
 
 #include <buster/float.h>
 
-#if defined(__has_builtin) && __has_builtin(__builtin_floorf)
+#if __has_builtin(__builtin_floorf)
 #define BUILTIN_FLOORF(x) __builtin_floorf(x)
-#else
-#include <math.h>
-#define BUILTIN_FLOORF(x) floorf(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_floor)
 #define BUILTIN_FLOOR(x) __builtin_floor(x)
-#else
-#include <math.h>
-#define BUILTIN_FLOOR(x) floor(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_ceilf)
 #define BUILTIN_CEILF(x) __builtin_ceilf(x)
-#else
-#include <math.h>
-#define BUILTIN_CEILF(x) ceilf(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_ceil)
 #define BUILTIN_CEIL(x) __builtin_ceil(x)
-#else
-#include <math.h>
-#define BUILTIN_CEIL(x) ceil(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_sqrtf)
 #define BUILTIN_SQRTF(x) __builtin_sqrtf(x)
-#else
-#include <math.h>
-#define BUILTIN_SQRTF(x) sqrtf(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_sqrt)
 #define BUILTIN_SQRT(x) __builtin_sqrt(x)
-#else
-#include <math.h>
-#define BUILTIN_SQRT(x) sqrt(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_powf)
 #define BUILTIN_POWF(x, y) __builtin_powf(x, y)
-#else
-#include <math.h>
-#define BUILTIN_POWF(x, y) powf(x, y)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_pow)
 #define BUILTIN_POW(x, y) __builtin_pow(x, y)
-#else
-#include <math.h>
-#define BUILTIN_POW(x, y) pow(x, y)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_fmodf)
 #define BUILTIN_FMODF(x, y) __builtin_fmodf(x, y)
-#else
-#include <math.h>
-#define BUILTIN_FMODF(x, y) fmodf(x, y)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_fmod)
 #define BUILTIN_FMOD(x, y) __builtin_fmod(x, y)
-#else
-#include <math.h>
-#define BUILTIN_FMOD(x, y) fmod(x, y)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_cosf)
 #define BUILTIN_COSF(x) __builtin_cosf(x)
-#else
-#include <math.h>
-#define BUILTIN_COSF(x) cosf(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_cos)
 #define BUILTIN_COS(x) __builtin_cos(x)
-#else
-#include <math.h>
-#define BUILTIN_COS(x) cos(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_acosf)
 #define BUILTIN_ACOSF(x) __builtin_acosf(x)
-#else
-#include <math.h>
-#define BUILTIN_ACOSF(x) acosf(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_acos)
 #define BUILTIN_ACOS(x) __builtin_acos(x)
-#else
-#include <math.h>
-#define BUILTIN_ACOS(x) acos(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_fabsf)
 #define BUILTIN_FABSF(x) __builtin_fabsf(x)
-#else
-#include <math.h>
-#define BUILTIN_FABSF(x) fabsf(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_fabs)
 #define BUILTIN_FABS(x) __builtin_fabs(x)
-#else
-#include <math.h>
-#define BUILTIN_FABS(x) fabs(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_roundf)
 #define BUILTIN_ROUNDF(x) __builtin_roundf(x)
-#else
-#include <math.h>
-#define BUILTIN_ROUNDF(x) roundf(x)
-#endif
-
-#if defined(__has_builtin) && __has_builtin(__builtin_round)
 #define BUILTIN_ROUND(x) __builtin_round(x)
 #else
 #include <math.h>
+#define BUILTIN_FLOORF(x) floorf(x)
+#define BUILTIN_FLOOR(x) floor(x)
+#define BUILTIN_CEILF(x) ceilf(x)
+#define BUILTIN_CEIL(x) ceil(x)
+#define BUILTIN_SQRTF(x) sqrtf(x)
+#define BUILTIN_SQRT(x) sqrt(x)
+#define BUILTIN_POWF(x, y) powf(x, y)
+#define BUILTIN_POW(x, y) pow(x, y)
+#define BUILTIN_FMODF(x, y) fmodf(x, y)
+#define BUILTIN_FMOD(x, y) fmod(x, y)
+#define BUILTIN_COSF(x) cosf(x)
+#define BUILTIN_COS(x) cos(x)
+#define BUILTIN_ACOSF(x) acosf(x)
+#define BUILTIN_ACOS(x) acos(x)
+#define BUILTIN_FABSF(x) fabsf(x)
+#define BUILTIN_FABS(x) fabs(x)
+#define BUILTIN_ROUNDF(x) roundf(x)
 #define BUILTIN_ROUND(x) round(x)
 #endif
 

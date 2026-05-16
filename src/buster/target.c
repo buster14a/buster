@@ -3,21 +3,24 @@
 
 #include <buster/string.h>
 
-#if defined(__x86_64__)
-#include <buster/x86_64.h>
+#if BUSTER_UNITY_BUILD
+#if BUSTER_CPU_ARCH_X86_64
+#include <buster/x86_64.c>
 #endif
-#if defined(__aarch64__)
-#include <buster/aarch64.h>
+#if BUSTER_CPU_ARCH_AARCH64
+#include <buster/aarch64.c>
 #endif
+#endif
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #include <mach/machine.h>
 #endif
 
 Target target_native = {
-#if defined(__x86_64__)
+#if BUSTER_CPU_ARCH_X86_64
     .cpu_arch = CPU_ARCH_X86_64,
-#elif defined(__aarch64__)
+#elif BUSTER_CPU_ARCH_AARCH64
     .cpu_arch = CPU_ARCH_AARCH64,
 #else
 #pragma error
@@ -47,9 +50,9 @@ bool cpu_is_native(CpuModel model)
 CpuModel cpu_detect_model(void)
 {
     CpuModel cpu_model = CPU_MODEL_ERROR;
-#if defined(__x86_64__)
+#if BUSTER_CPU_ARCH_X86_64
     cpu_model = cpu_detect_model_x86_64();
-#elif defined(__aarch64__)
+#elif BUSTER_CPU_ARCH_AARCH64
     cpu_model = cpu_detect_model_aarch64();
 #else
 #pragma error // TODO: implement CPU detection code for this architecture
@@ -99,6 +102,7 @@ String8 operating_system_to_string_os(OperatingSystem os)
     }
 
     BUSTER_UNREACHABLE();
+    return S8("error");
 }
 
 String8 cpu_model_to_string_os(CpuModel model)
@@ -255,4 +259,5 @@ String8 cpu_model_to_string_os(CpuModel model)
     }
 
     BUSTER_UNREACHABLE();
+    return S8("error");
 }

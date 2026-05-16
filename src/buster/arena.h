@@ -54,11 +54,11 @@ BUSTER_F_DECL void arena_end_temporal(TemporalArena temporal);
 BUSTER_F_DECL TemporalArena scratch_begin(Arena** conflicts, u64 count);
 BUSTER_F_DECL void scratch_end(TemporalArena scratch);
 
-#define arena_allocate(arena, T, count) (T*) arena_allocate_bytes(arena, sizeof(T) * (count), alignof(T))
+#define arena_allocate(arena, T, count) (T*) arena_allocate_bytes(arena, sizeof(T) * (count), BUSTER_ALIGN_OF(T))
 #define arena_buffer_is_empty(arena) ((arena)->position == arena_minimum_position)
 #define arena_buffer_size(arena) ((arena)->position - arena_minimum_position)
 #define arena_buffer_start(arena) ((u8*)arena + arena_minimum_position)
 #define arena_get_pointer_at_position(arena, T, position) ((T*)arena_get_byte_pointer((arena), (position)))
 #define arena_get_pointer_at_index(arena, T, index) (((T*)arena_get_byte_pointer((arena), arena_minimum_position)) + (index))
 #define arena_get_slice_at_position(arena, T, start, end) ((Slice<T>){ .pointer = arena_get_pointer_at_position((arena), T, (start)), .length = (u64)(arena_get_pointer_at_position((arena), T, (end)) - arena_get_pointer_at_position((arena), T, (start))) })
-#define arena_current_pointer(arena, T) ((T*)arena_current_byte_pointer((arena), alignof(T)))
+#define arena_current_pointer(arena, T) ((T*)arena_current_byte_pointer((arena), BUSTER_ALIGN_OF(T)))

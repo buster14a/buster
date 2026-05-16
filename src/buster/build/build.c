@@ -1116,7 +1116,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult single_run(const BatchTestConfiguration* con
                 let link_unit_specification = &specifications[link_unit_i];
                 let link_modules = link_unit_specification->modules;
 
-                let source_paths = (StringOs*)align_forward((u64)((u8*)general_arena + general_arena->position), alignof(StringOs));
+                let source_paths = (StringOs*)align_forward((u64)((u8*)general_arena + general_arena->position), BUSTER_ALIGN_OF(StringOs));
                 u64 source_path_count = 0;
 
                 u64 module_bitflag = 0;

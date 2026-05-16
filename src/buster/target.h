@@ -212,3 +212,9 @@ BUSTER_F_DECL String8 target_to_string(Arena* arena, Target target);
 BUSTER_F_DECL String8 cpu_arch_to_string_os(CpuArch arch);
 BUSTER_F_DECL String8 operating_system_to_string_os(OperatingSystem os);
 BUSTER_F_DECL String8 cpu_model_to_string_os(CpuModel model);
+
+#if BUSTER_CPU_ARCH_X86_64
+#include <buster/x86_64.h>
+#elif BUSTER_CPU_ARCH_AARCH64
+#include <buster/aarch64.h>
+#endif

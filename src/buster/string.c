@@ -189,7 +189,7 @@ String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminat
 
     u64 char_size = sizeof(strings.pointer[0].pointer[0]);
 
-    char8* restrict pointer = (char8*)arena_allocate_bytes(arena, (length + zero_terminate) * char_size, alignof(char8));
+    char8* restrict pointer = (char8*)arena_allocate_bytes(arena, (length + zero_terminate) * char_size, BUSTER_ALIGN_OF(char8));
 
     u64 i = 0;
 
@@ -1317,7 +1317,7 @@ u64 string8_length(const char8* pointer)
 
     if (pointer)
     {
-#if defined(__has_builtin) && __has_builtin(__builtin_strlen)
+#if __has_builtin(__builtin_strlen)
         result = __builtin_strlen(pointer);
 #else
         result = strlen(pointer);

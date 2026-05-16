@@ -119,6 +119,10 @@ def main(argv):
         c_compiler = cc
         cxx_compiler = cc.replace("gcc", "g++", 1)
         asm_compiler = cc
+    elif "cl" in cc:
+        c_compiler = cc
+        cxx_compiler = cc
+        asm_compiler = cc
     else:
         c_compiler = cc
         cxx_compiler = ""

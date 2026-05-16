@@ -13,12 +13,6 @@
 #if BUSTER_UNITY_BUILD
 #include <buster/entry_point.c>
 #include <buster/target.c>
-#if defined(__x86_64__)
-#include <buster/x86_64.c>
-#endif
-#if defined(__aarch64__)
-#include <buster/aarch64.c>
-#endif
 #include <buster/assertion.c>
 #include <buster/memory.c>
 #include <buster/string8.c>
