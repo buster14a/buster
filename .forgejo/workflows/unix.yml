@@ -42,6 +42,8 @@ jobs:
             cc: cl
           - runner: aarch64-macos-m1
             cc: cl
+          - runner: x86_64-linux-alpine
+            cc: cl
     steps:
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4

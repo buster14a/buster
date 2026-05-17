@@ -547,7 +547,9 @@ buster_add_executable(ide src/buster/ide/ide.c
 #buster_add_executable(compiler src/buster/compiler/frontend/buster/main.c)
 
 add_custom_target(test_all
-    COMMAND $<TARGET_FILE:ide> ${TEST_ARGUMENTS}
+    COMMAND 
+    ${CMAKE_COMMAND} -E env "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=1"
+    $<TARGET_FILE:ide> ${TEST_ARGUMENTS}
     DEPENDS ide
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Test all"
