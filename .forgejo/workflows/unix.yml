@@ -54,16 +54,92 @@ jobs:
         if: ${{ !contains(matrix.runner, 'windows') }}
         run: |
           set -euox pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            BUSTER_TIMER_PYTHON=python3
+          elif command -v python >/dev/null 2>&1; then
+            BUSTER_TIMER_PYTHON=python
+          else
+            BUSTER_TIMER_PYTHON=
+          fi
+          BUSTER_TIMING_RESULTS=()
+
+          now_nanoseconds() {
+            if [ -n "${BUSTER_TIMER_PYTHON:-}" ]; then
+              "$BUSTER_TIMER_PYTHON" -c 'import time; print(time.perf_counter_ns())'
+            else
+              printf '%s000000000\n' "$SECONDS"
+            fi
+          }
+
+          run_timed() {
+            local label="$1"
+            shift
+            local start_ns
+            local end_ns
+            local elapsed_ns
+            local elapsed_seconds
+            local elapsed_milliseconds
+            local rc=0
+
+            start_ns="$(now_nanoseconds)"
+            "$@" || rc=$?
+            end_ns="$(now_nanoseconds)"
+            elapsed_ns=$((end_ns - start_ns))
+            elapsed_seconds=$((elapsed_ns / 1000000000))
+            elapsed_milliseconds=$(((elapsed_ns / 1000000) % 1000))
+
+            BUSTER_TIMING_RESULTS+=("${label} completed in ${elapsed_seconds}.${elapsed_milliseconds}s")
+            return "$rc"
+          }
+
+          print_timing_summary() {
+            echo '>>> Timing summary'
+            printf '>>> %s\n' "${BUSTER_TIMING_RESULTS[@]}"
+          }
+
           BUSTER_CC='${{ matrix.cc }}'
           BUSTER_CC_DIRECTORY=${BUSTER_CC//[^A-Za-z0-9_.-]/_}
           BUSTER_BUILD_DIRECTORY="build_ci-cc_${BUSTER_CC_DIRECTORY}-optimize_${{ matrix.optimize }}-sanitize_${{ matrix.sanitize }}-fuzz_${{ matrix.fuzz }}"
-          ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc ${{ matrix.cc }} --fuzz ${{ matrix.fuzz }} --optimize ${{ matrix.optimize }} --sanitize ${{ matrix.sanitize }}
-          ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --verbose test_all
+          run_timed "Generate" ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc ${{ matrix.cc }} --fuzz ${{ matrix.fuzz }} --optimize ${{ matrix.optimize }} --sanitize ${{ matrix.sanitize }}
+          run_timed "Build" ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --verbose
+          run_timed "Test" ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --verbose test_all
+          print_timing_summary
       - name: Test
         if: ${{ contains(matrix.runner, 'windows') }}
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          $TimingResults = [System.Collections.Generic.List[string]]::new()
+
+          function Invoke-TimedCommand {
+            param(
+              [string]$Label,
+              [scriptblock]$Command
+            )
+
+            $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $ExitCode = 0
+
+            try {
+              & $Command
+              if ($null -ne $LASTEXITCODE) {
+                $ExitCode = $LASTEXITCODE
+              }
+            }
+            finally {
+              $Stopwatch.Stop()
+              $TimingResults.Add("$Label completed in $($Stopwatch.Elapsed.TotalSeconds.ToString('F3'))s")
+            }
+
+            if ($ExitCode -ne 0) { exit $ExitCode }
+          }
+
+          function Write-TimingSummary {
+            Write-Host '>>> Timing summary'
+            foreach ($TimingResult in $TimingResults) {
+              Write-Host ">>> $TimingResult"
+            }
+          }
 
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $VsPath = & $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
@@ -94,14 +170,21 @@ jobs:
             '--optimize', '${{ matrix.optimize }}',
             '--sanitize', '${{ matrix.sanitize }}'
           )
-          & python @generateArguments
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Invoke-TimedCommand 'Generate' { & python @generateArguments }
 
           $buildArguments = @(
+            '.\build.py',
+            '--build-directory', $BusterBuildDirectory,
+            '--verbose'
+          )
+          Invoke-TimedCommand 'Build' { & python @buildArguments }
+
+          $testArguments = @(
             '.\build.py',
             '--build-directory', $BusterBuildDirectory,
             '--verbose',
             'test_all'
           )
-          & python @buildArguments
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Invoke-TimedCommand 'Test' { & python @testArguments }
+
+          Write-TimingSummary
