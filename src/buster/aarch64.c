@@ -60,7 +60,7 @@ CpuModel cpu_detect_model_aarch64(void)
 #if defined(__linux__)
 #define BUSTER_AARCH64_BUFFER_LENGTH (sizeof(u64) * 2 + 2)
     char8 buffer[BUSTER_AARCH64_BUFFER_LENGTH + 4096];
-    OsFileDescriptor* fd = os_file_open(SOs("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"), (OpenFlags){ .read = 1 }, (OpenPermissions){});
+    OsFileDescriptor* fd = os_file_open(SOs("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"), (OpenFlags){ .read = 1 }, (OpenPermissions){0});
     String8 midr_el1_string = (String8)BUSTER_ARRAY_TO_SLICE(buffer);
     midr_el1_string.length = BUSTER_AARCH64_BUFFER_LENGTH;
     u64 file_size = os_file_read(fd, BUSTER_SLICE_TO_BYTE_SLICE(midr_el1_string), BUSTER_AARCH64_BUFFER_LENGTH);
@@ -71,7 +71,7 @@ CpuModel cpu_detect_model_aarch64(void)
     {
         if (buffer[0] == '0' && buffer[1] == 'x')
         {
-            IntegerParsingU64 value = string_parse_u64_hexadecimal((char*)buffer + 2).value;
+            u64 value = string8_parse_u64_hexadecimal((char*)buffer + 2).value;
 
             if (value <= INT32_MAX)
             {

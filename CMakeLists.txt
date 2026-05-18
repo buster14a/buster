@@ -67,9 +67,14 @@ endif()
 set(BUSTER_ZIG_DARWIN_ASAN_RUNTIME "")
 set(BUSTER_ZIG_DARWIN_UBSAN_RUNTIME "")
 set(BUSTER_ZIG_DARWIN_COMPILER_RT_DIR "")
-if (APPLE AND C_COMPILER_ZIG AND BUSTER_SANITIZE)
+set(BUSTER_ZIG_LINUX_ASAN_RUNTIME "")
+set(BUSTER_ZIG_LINUX_COMPILER_RT_DIR "")
+set(BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_DIR "")
+set(BUSTER_ZIG_SANITIZER_CLANG_RUNTIME_DIR "")
+if ((APPLE OR UNIX) AND NOT WIN32 AND C_COMPILER_ZIG AND BUSTER_SANITIZE)
     string(REGEX MATCH "^[0-9]+" BUSTER_ZIG_CLANG_MAJOR "${CMAKE_C_COMPILER_VERSION}")
-    find_program(BUSTER_DARWIN_CLANG
+    message(STATUS "BUSTER_ZIG_SANITIZER_CLANG_MAJOR: ${BUSTER_ZIG_CLANG_MAJOR}")
+    find_program(BUSTER_ZIG_SANITIZER_CLANG
         NAMES "clang-${BUSTER_ZIG_CLANG_MAJOR}" clang
         PATHS
             "/opt/homebrew/opt/llvm@${BUSTER_ZIG_CLANG_MAJOR}/bin"
@@ -78,32 +83,118 @@ if (APPLE AND C_COMPILER_ZIG AND BUSTER_SANITIZE)
             "/usr/local/opt/llvm/bin"
         NO_DEFAULT_PATH
     )
-    if (NOT BUSTER_DARWIN_CLANG)
-        find_program(BUSTER_DARWIN_CLANG NAMES "clang-${BUSTER_ZIG_CLANG_MAJOR}" clang)
+    if (NOT BUSTER_ZIG_SANITIZER_CLANG)
+        find_program(BUSTER_ZIG_SANITIZER_CLANG NAMES "clang-${BUSTER_ZIG_CLANG_MAJOR}" clang)
     endif()
-    if (NOT BUSTER_DARWIN_CLANG)
+    message(STATUS "BUSTER_ZIG_SANITIZER_CLANG: ${BUSTER_ZIG_SANITIZER_CLANG}")
+    if (APPLE AND NOT BUSTER_ZIG_SANITIZER_CLANG)
         message(FATAL_ERROR "BUSTER_SANITIZE with zig on macOS requires clang to locate compiler-rt sanitizer runtimes")
     endif()
 
-    execute_process(
-        COMMAND "${BUSTER_DARWIN_CLANG}" -print-resource-dir
-        OUTPUT_VARIABLE BUSTER_DARWIN_CLANG_RESOURCE_DIR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE BUSTER_DARWIN_CLANG_RESOURCE_RESULT
-    )
-    if (NOT BUSTER_DARWIN_CLANG_RESOURCE_RESULT EQUAL 0 OR BUSTER_DARWIN_CLANG_RESOURCE_DIR STREQUAL "")
-        message(FATAL_ERROR "Failed to query clang resource directory from ${BUSTER_DARWIN_CLANG}")
+    if (BUSTER_ZIG_SANITIZER_CLANG)
+        execute_process(
+            COMMAND "${BUSTER_ZIG_SANITIZER_CLANG}" -print-resource-dir
+            OUTPUT_VARIABLE BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_DIR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_RESULT
+        )
+        execute_process(
+            COMMAND "${BUSTER_ZIG_SANITIZER_CLANG}" -print-runtime-dir
+            OUTPUT_VARIABLE BUSTER_ZIG_SANITIZER_CLANG_RUNTIME_DIR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE BUSTER_ZIG_SANITIZER_CLANG_RUNTIME_RESULT
+        )
+        message(STATUS "BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_RESULT: ${BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_RESULT}")
+        message(STATUS "BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_DIR: ${BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_DIR}")
+        message(STATUS "BUSTER_ZIG_SANITIZER_CLANG_RUNTIME_RESULT: ${BUSTER_ZIG_SANITIZER_CLANG_RUNTIME_RESULT}")
+        message(STATUS "BUSTER_ZIG_SANITIZER_CLANG_RUNTIME_DIR: ${BUSTER_ZIG_SANITIZER_CLANG_RUNTIME_DIR}")
+        if (APPLE AND (NOT BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_RESULT EQUAL 0 OR BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_DIR STREQUAL ""))
+            message(FATAL_ERROR "Failed to query clang resource directory from ${BUSTER_ZIG_SANITIZER_CLANG}")
+        endif()
+    else()
+        message(STATUS "BUSTER_ZIG_SANITIZER_CLANG: not found; Linux builds will fall back to -lasan")
     endif()
 
-    set(BUSTER_ZIG_DARWIN_COMPILER_RT_DIR "${BUSTER_DARWIN_CLANG_RESOURCE_DIR}/lib/darwin")
-    set(BUSTER_ZIG_DARWIN_ASAN_RUNTIME "${BUSTER_ZIG_DARWIN_COMPILER_RT_DIR}/libclang_rt.asan_osx_dynamic.dylib")
-    set(BUSTER_ZIG_DARWIN_UBSAN_RUNTIME "${BUSTER_ZIG_DARWIN_COMPILER_RT_DIR}/libclang_rt.ubsan_osx_dynamic.dylib")
+    if (APPLE)
+        set(BUSTER_ZIG_DARWIN_COMPILER_RT_DIR "${BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_DIR}/lib/darwin")
+        set(BUSTER_ZIG_DARWIN_ASAN_RUNTIME "${BUSTER_ZIG_DARWIN_COMPILER_RT_DIR}/libclang_rt.asan_osx_dynamic.dylib")
+        set(BUSTER_ZIG_DARWIN_UBSAN_RUNTIME "${BUSTER_ZIG_DARWIN_COMPILER_RT_DIR}/libclang_rt.ubsan_osx_dynamic.dylib")
+        message(STATUS "BUSTER_ZIG_DARWIN_COMPILER_RT_DIR: ${BUSTER_ZIG_DARWIN_COMPILER_RT_DIR}")
+        message(STATUS "BUSTER_ZIG_DARWIN_ASAN_RUNTIME: ${BUSTER_ZIG_DARWIN_ASAN_RUNTIME}")
+        message(STATUS "BUSTER_ZIG_DARWIN_UBSAN_RUNTIME: ${BUSTER_ZIG_DARWIN_UBSAN_RUNTIME}")
 
-    foreach(runtime IN ITEMS BUSTER_ZIG_DARWIN_ASAN_RUNTIME BUSTER_ZIG_DARWIN_UBSAN_RUNTIME)
-        if (NOT EXISTS "${${runtime}}")
-            message(FATAL_ERROR "Could not find macOS sanitizer runtime at ${${runtime}}")
+        foreach(runtime IN ITEMS BUSTER_ZIG_DARWIN_ASAN_RUNTIME BUSTER_ZIG_DARWIN_UBSAN_RUNTIME)
+            if (NOT EXISTS "${${runtime}}")
+                message(FATAL_ERROR "Could not find macOS sanitizer runtime at ${${runtime}}")
+            endif()
+        endforeach()
+    elseif (UNIX AND BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_DIR)
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
+            set(BUSTER_ZIG_LINUX_ASAN_ARCH x86_64)
+        elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
+            set(BUSTER_ZIG_LINUX_ASAN_ARCH aarch64)
         endif()
-    endforeach()
+        message(STATUS "BUSTER_ZIG_LINUX_ASAN_ARCH: ${BUSTER_ZIG_LINUX_ASAN_ARCH}")
+
+        if (BUSTER_ZIG_LINUX_ASAN_ARCH)
+            set(BUSTER_ZIG_LINUX_ASAN_RUNTIME_NAMES
+                "libclang_rt.asan-${BUSTER_ZIG_LINUX_ASAN_ARCH}.so"
+                "libclang_rt.asan.so"
+            )
+
+            foreach(runtime_name IN LISTS BUSTER_ZIG_LINUX_ASAN_RUNTIME_NAMES)
+                execute_process(
+                    COMMAND "${BUSTER_ZIG_SANITIZER_CLANG}" "--print-file-name=${runtime_name}"
+                    OUTPUT_VARIABLE BUSTER_ZIG_LINUX_ASAN_RUNTIME_CANDIDATE
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    RESULT_VARIABLE BUSTER_ZIG_LINUX_ASAN_RUNTIME_CANDIDATE_RESULT
+                )
+                message(STATUS "BUSTER_ZIG_LINUX_ASAN_RUNTIME_LOOKUP '${runtime_name}': ${BUSTER_ZIG_LINUX_ASAN_RUNTIME_CANDIDATE}")
+                if (BUSTER_ZIG_LINUX_ASAN_RUNTIME_CANDIDATE_RESULT EQUAL 0
+                    AND IS_ABSOLUTE "${BUSTER_ZIG_LINUX_ASAN_RUNTIME_CANDIDATE}"
+                    AND EXISTS "${BUSTER_ZIG_LINUX_ASAN_RUNTIME_CANDIDATE}")
+                    set(BUSTER_ZIG_LINUX_ASAN_RUNTIME "${BUSTER_ZIG_LINUX_ASAN_RUNTIME_CANDIDATE}")
+                    break()
+                endif()
+            endforeach()
+
+            if (NOT BUSTER_ZIG_LINUX_ASAN_RUNTIME AND BUSTER_ZIG_SANITIZER_CLANG_RUNTIME_DIR)
+                file(GLOB BUSTER_ZIG_LINUX_ASAN_RUNTIME_GLOB_DIRECT
+                    "${BUSTER_ZIG_SANITIZER_CLANG_RUNTIME_DIR}/libclang_rt.asan*.so"
+                )
+                foreach(runtime_path IN LISTS BUSTER_ZIG_LINUX_ASAN_RUNTIME_GLOB_DIRECT)
+                    message(STATUS "BUSTER_ZIG_LINUX_ASAN_RUNTIME_GLOB_DIRECT: ${runtime_path}")
+                    if (runtime_path MATCHES "/libclang_rt\\.asan(-${BUSTER_ZIG_LINUX_ASAN_ARCH})?\\.so$")
+                        set(BUSTER_ZIG_LINUX_ASAN_RUNTIME "${runtime_path}")
+                        break()
+                    endif()
+                endforeach()
+            endif()
+
+            if (NOT BUSTER_ZIG_LINUX_ASAN_RUNTIME)
+                file(GLOB_RECURSE BUSTER_ZIG_LINUX_ASAN_RUNTIME_GLOB_RECURSIVE
+                    "${BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_DIR}/lib/libclang_rt.asan*.so"
+                )
+                foreach(runtime_path IN LISTS BUSTER_ZIG_LINUX_ASAN_RUNTIME_GLOB_RECURSIVE)
+                    message(STATUS "BUSTER_ZIG_LINUX_ASAN_RUNTIME_GLOB_RECURSIVE: ${runtime_path}")
+                    if (runtime_path MATCHES "/libclang_rt\\.asan(-${BUSTER_ZIG_LINUX_ASAN_ARCH})?\\.so$")
+                        set(BUSTER_ZIG_LINUX_ASAN_RUNTIME "${runtime_path}")
+                        break()
+                    endif()
+                endforeach()
+            endif()
+
+            if (BUSTER_ZIG_LINUX_ASAN_RUNTIME)
+                get_filename_component(BUSTER_ZIG_LINUX_COMPILER_RT_DIR "${BUSTER_ZIG_LINUX_ASAN_RUNTIME}" DIRECTORY)
+                message(STATUS "BUSTER_ZIG_LINUX_COMPILER_RT_DIR: ${BUSTER_ZIG_LINUX_COMPILER_RT_DIR}")
+                message(STATUS "BUSTER_ZIG_LINUX_ASAN_RUNTIME: ${BUSTER_ZIG_LINUX_ASAN_RUNTIME}")
+            else()
+                message(STATUS "BUSTER_ZIG_LINUX_ASAN_RUNTIME: not found; falling back to -lasan")
+            endif()
+        else()
+            message(STATUS "BUSTER_ZIG_LINUX_ASAN_ARCH: unsupported processor '${CMAKE_SYSTEM_PROCESSOR}'; falling back to -lasan")
+        endif()
+    endif()
 endif()
 
 if (APPLE AND C_COMPILER_TCC)
@@ -402,6 +493,9 @@ function(executable_add name is_buster_program main_file)
                         "-Wl,-rpath,@executable_path"
                         "-Wl,-rpath,${BUSTER_ZIG_DARWIN_COMPILER_RT_DIR}"
                     )
+                elseif (UNIX AND BUSTER_ZIG_LINUX_ASAN_RUNTIME)
+                    target_link_libraries(${name} PRIVATE "${BUSTER_ZIG_LINUX_ASAN_RUNTIME}")
+                    target_link_options(${name} PRIVATE "-Wl,-rpath,${BUSTER_ZIG_LINUX_COMPILER_RT_DIR}")
                 elseif (UNIX)
                     target_link_libraries(${name} PRIVATE asan)
                 endif()
