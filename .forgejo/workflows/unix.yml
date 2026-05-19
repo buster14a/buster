@@ -11,94 +11,339 @@ on:
         description: Operating system
         required: true
         type: string
-
 jobs:
   test:
-    name: ${{ matrix.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, sanitize=${{ matrix.sanitize }}
-    runs-on: ${{ matrix.runner }}
+    name: ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
-      matrix:
-        runner: ['${{ inputs.runner }}']
-        fuzz: [OFF, ON]
-        sanitize: [OFF, ON]
-        cc: [clang, gcc, tcc, zig]
-        os: ['${{ inputs.os }}']
-        exclude:
-          - cc: gcc
-            fuzz: ON
-          - cc: tcc
-            fuzz: ON
-          - cc: tcc
-            sanitize: ON
-          - cc: zig
-            fuzz: ON
-          - os: macos
-            fuzz: ON
     steps:
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Test
+      - name: Generations
         shell: bash
         run: |
           set -euox pipefail
-          if command -v python3 >/dev/null 2>&1; then
-            BUSTER_TIMER_PYTHON=python3
-          elif command -v python >/dev/null 2>&1; then
-            BUSTER_TIMER_PYTHON=python
-          else
-            BUSTER_TIMER_PYTHON=
-          fi
-          BUSTER_TIMING_RESULTS=()
+          declare -A generate_configurations
+          generation_configuration_count=0
 
-          now_nanoseconds() {
-            if [ -n "${BUSTER_TIMER_PYTHON:-}" ]; then
-              "$BUSTER_TIMER_PYTHON" -c 'import time; print(time.perf_counter_ns())'
-            else
-              printf '%s000000000\n' "$SECONDS"
-            fi
+          BUILD_PREFIX=${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}
+
+          add_generation() {
+            local i=$generation_configuration_count
+
+            local BUSTER_CC=$1
+            local BUSTER_FUZZ=$2
+            local BUSTER_SANITIZE=$3
+
+            generate_configurations[$i.cc]=$BUSTER_CC
+            generate_configurations[$i.sanitize]=$BUSTER_SANITIZE
+            generate_configurations[$i.fuzz]=$BUSTER_FUZZ
+
+            BUSTER_CC_DIRECTORY=${BUSTER_CC//[^A-Za-z0-9_.-]/_}
+            generate_configurations[$i.directory]="${BUILD_PREFIX}cc_${BUSTER_CC_DIRECTORY}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}"
+
+            generation_configuration_count=$((generation_configuration_count + 1))
           }
 
-          run_timed() {
-            local label="$1"
-            shift
-            local start_ns
-            local end_ns
-            local elapsed_ns
-            local elapsed_seconds
-            local elapsed_milliseconds
-            local rc=0
+          #               COMPILER    FUZZ        SANITIZE
+          add_generation  clang       OFF         OFF
+          add_generation  clang       OFF         ON
 
-            start_ns="$(now_nanoseconds)"
-            "$@" || rc=$?
-            end_ns="$(now_nanoseconds)"
-            elapsed_ns=$((end_ns - start_ns))
-            elapsed_seconds=$((elapsed_ns / 1000000000))
-            elapsed_milliseconds=$(((elapsed_ns / 1000000) % 1000))
-
-            BUSTER_TIMING_RESULTS+=("${label} completed in ${elapsed_seconds}.${elapsed_milliseconds}s")
-            return "$rc"
-          }
-
-          print_timing_summary() {
-            echo '>>> Timing summary'
-            printf '>>> %s\n' "${BUSTER_TIMING_RESULTS[@]}"
-          }
-
-          BUSTER_CC='${{ matrix.cc }}'
-          BUSTER_CC_DIRECTORY=${BUSTER_CC//[^A-Za-z0-9_.-]/_}
-          BUSTER_BUILD_DIRECTORY="build_ci-cc_${BUSTER_CC_DIRECTORY}-sanitize_${{ matrix.sanitize }}-fuzz_${{ matrix.fuzz }}"
-          run_timed "Generate" ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc "$BUSTER_CC" --fuzz ${{ matrix.fuzz }} --sanitize ${{ matrix.sanitize }}
-
-          BUSTER_CONFIGS=(Debug Release)
-          if [ "$BUSTER_CC" = tcc ]; then
-            BUSTER_CONFIGS=(Debug)
+          if [[ "${{ inputs.runner }}" != "macos" ]]; then
+            add_generation  clang       ON          OFF
+            add_generation  clang       ON          ON
           fi
 
-          for BUSTER_CONFIG in "${BUSTER_CONFIGS[@]}"; do
-            run_timed "Build ${BUSTER_CONFIG}" ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --config "$BUSTER_CONFIG" --verbose
-            run_timed "Test ${BUSTER_CONFIG}" ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --config "$BUSTER_CONFIG" --verbose test_all
+          add_generation  tcc         OFF         OFF
+          add_generation  gcc         OFF         OFF
+          add_generation  gcc         OFF         ON
+          add_generation  zig         OFF         OFF
+          add_generation  zig         OFF         ON
+
+          for ((i = 0; i < generation_configuration_count; i++)); do
+            BUSTER_CC=${generate_configurations[$i.cc]}
+            BUSTER_SANITIZE=${generate_configurations[$i.sanitize]}
+            BUSTER_FUZZ=${generate_configurations[$i.fuzz]}
+            BUSTER_BUILD_DIRECTORY=${generate_configurations[$i.directory]}
+            time ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc "$BUSTER_CC" --fuzz $BUSTER_FUZZ --sanitize $BUSTER_SANITIZE
           done
-          print_timing_summary
+# =======================================================================================================================================
+# ================================================================ CLANG ================================================================
+# =======================================================================================================================================
+      - name: Build (compiler=clang fuzz=off sanitize=off optimize=off)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=clang fuzz=off sanitize=off optimize=off)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Build (compiler=clang fuzz=off sanitize=off optimize=on)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=clang fuzz=off sanitize=off optimize=on)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Build (compiler=clang fuzz=off sanitize=on optimize=off)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=clang fuzz=off sanitize=on optimize=off)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Build (compiler=clang fuzz=off sanitize=on optimize=on)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=clang fuzz=off sanitize=on optimize=on)
+        shell: bash
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Build (compiler=clang fuzz=on sanitize=off optimize=off)
+        shell: bash
+        if: ${{ !contains(inputs.os, 'macos') }}
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=clang fuzz=on sanitize=off optimize=off)
+        shell: bash
+        if: ${{ !contains(inputs.os, 'macos') }}
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Build (compiler=clang fuzz=on sanitize=off optimize=on)
+        shell: bash
+        if: ${{ !contains(inputs.os, 'macos') }}
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=clang fuzz=on sanitize=off optimize=on)
+        shell: bash
+        if: ${{ !contains(inputs.os, 'macos') }}
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Build (compiler=clang fuzz=on sanitize=on optimize=off)
+        shell: bash
+        if: ${{ !contains(inputs.os, 'macos') }}
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=clang fuzz=on sanitize=on optimize=off)
+        shell: bash
+        if: ${{ !contains(inputs.os, 'macos') }}
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Build (compiler=clang fuzz=on sanitize=on optimize=on)
+        shell: bash
+        if: ${{ !contains(inputs.os, 'macos') }}
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=clang fuzz=on sanitize=on optimize=on)
+        shell: bash
+        if: ${{ !contains(inputs.os, 'macos') }}
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+# =======================================================================================================================================
+# ================================================================= GCC =================================================================
+# =======================================================================================================================================
+      - name: Build (compiler=gcc fuzz=off sanitize=off optimize=off)
+        shell: bash
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=gcc fuzz=off sanitize=off optimize=off)
+        shell: bash
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Build (compiler=gcc fuzz=off sanitize=off optimize=on)
+        shell: bash
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=gcc fuzz=off sanitize=off optimize=on)
+        shell: bash
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Build (compiler=gcc fuzz=off sanitize=on optimize=off)
+        shell: bash
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=gcc fuzz=off sanitize=on optimize=off)
+        shell: bash
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Build (compiler=gcc fuzz=off sanitize=on optimize=on)
+        shell: bash
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=gcc fuzz=off sanitize=on optimize=on)
+        shell: bash
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+# =======================================================================================================================================
+# ================================================================= TCC =================================================================
+# =======================================================================================================================================
+      - name: Build (compiler=tcc fuzz=off sanitize=off optimize=off)
+        shell: bash
+        env:
+          BUSTER_CC: tcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+      - name: Test (compiler=tcc fuzz=off sanitize=off optimize=off)
+        shell: bash
+        env:
+          BUSTER_CC: tcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          set -euox pipefail
+          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all

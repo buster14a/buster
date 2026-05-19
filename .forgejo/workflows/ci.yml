@@ -5,7 +5,7 @@ jobs:
     strategy:
       matrix:
         runner: [x86_64-linux-znver5, x86_64-linux-sapphirerapids, x86_64-linux-alpine, x86_64-linux-ubuntu, x86_64-linux-debian, aarch64-linux-fedora]
-    name: ${{matrix.runner}}
+    name: ${{matrix.runner}} - wrapper
     uses: ./.forgejo/workflows/unix.yml
     with:
       runner: ${{ matrix.runner }}
@@ -14,7 +14,7 @@ jobs:
     strategy:
       matrix:
         runner: [aarch64-macos-m1]
-    name: ${{matrix.runner}}
+    name: ${{matrix.runner}} - wrapper
     uses: ./.forgejo/workflows/unix.yml
     with:
       runner: ${{ matrix.runner }}
@@ -23,7 +23,7 @@ jobs:
     strategy:
       matrix:
         runner: [x86_64-windows-znver5]
-    name: ${{matrix.runner}}
+    name: ${{matrix.runner}} - wrapper
     uses: ./.forgejo/workflows/windows.yml
     with:
       runner: ${{ matrix.runner }}

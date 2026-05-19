@@ -158,6 +158,35 @@ set(BUSTER_ZIG_LINUX_ASAN_RUNTIME "")
 set(BUSTER_ZIG_LINUX_COMPILER_RT_DIR "")
 set(BUSTER_ZIG_SANITIZER_CLANG_RESOURCE_DIR "")
 set(BUSTER_ZIG_SANITIZER_CLANG_RUNTIME_DIR "")
+set(BUSTER_CLANG_WINDOWS_DYNAMIC_RUNTIMES "")
+if (WIN32 AND C_COMPILER_CLANG AND NOT MINGW AND BUSTER_SANITIZE)
+    execute_process(
+        COMMAND "${CMAKE_C_COMPILER}" -print-resource-dir
+        OUTPUT_VARIABLE BUSTER_CLANG_WINDOWS_RESOURCE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE BUSTER_CLANG_WINDOWS_RESOURCE_RESULT
+    )
+    if (NOT BUSTER_CLANG_WINDOWS_RESOURCE_RESULT EQUAL 0 OR BUSTER_CLANG_WINDOWS_RESOURCE_DIR STREQUAL "")
+        message(FATAL_ERROR "Failed to query clang resource directory from ${CMAKE_C_COMPILER}")
+    endif()
+
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64)$")
+        set(BUSTER_CLANG_WINDOWS_RUNTIME_ARCH x86_64)
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|aarch64)$")
+        set(BUSTER_CLANG_WINDOWS_RUNTIME_ARCH aarch64)
+    else()
+        message(FATAL_ERROR "Unsupported Windows clang sanitizer runtime architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+
+    set(BUSTER_CLANG_WINDOWS_RUNTIME_DIR "${BUSTER_CLANG_WINDOWS_RESOURCE_DIR}/lib/windows")
+    file(GLOB BUSTER_CLANG_WINDOWS_DYNAMIC_RUNTIMES
+        "${BUSTER_CLANG_WINDOWS_RUNTIME_DIR}/clang_rt.*-${BUSTER_CLANG_WINDOWS_RUNTIME_ARCH}.dll"
+    )
+    if (NOT BUSTER_CLANG_WINDOWS_DYNAMIC_RUNTIMES)
+        message(FATAL_ERROR "Could not find Windows clang sanitizer runtime DLLs in ${BUSTER_CLANG_WINDOWS_RUNTIME_DIR}")
+    endif()
+    message(STATUS "BUSTER_CLANG_WINDOWS_RUNTIME_DIR: ${BUSTER_CLANG_WINDOWS_RUNTIME_DIR}")
+endif()
 if ((APPLE OR UNIX) AND NOT WIN32 AND C_COMPILER_ZIG AND BUSTER_SANITIZE)
     string(REGEX MATCH "^[0-9]+" BUSTER_ZIG_CLANG_MAJOR "${CMAKE_C_COMPILER_VERSION}")
     message(STATUS "BUSTER_ZIG_SANITIZER_CLANG_MAJOR: ${BUSTER_ZIG_CLANG_MAJOR}")
@@ -676,6 +705,13 @@ function(executable_add name is_buster_program main_file)
         target_sources(${name} PRIVATE src/buster/sanitizer_coe_win.c)
         target_link_libraries(${name} PRIVATE dbghelp onecore synchronization)
         target_link_options(${name} PRIVATE "LINKER:/ignore:4217")
+    endif()
+
+    if (BUSTER_CLANG_WINDOWS_DYNAMIC_RUNTIMES)
+        add_custom_command(TARGET ${name} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${BUSTER_CLANG_WINDOWS_DYNAMIC_RUNTIMES} "$<TARGET_FILE_DIR:${name}>"
+            VERBATIM
+        )
     endif()
 
     if (${is_buster_program} AND ${BUSTER_FUZZ})

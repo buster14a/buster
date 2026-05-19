@@ -1,10 +1,10 @@
-name: CI UNIX pipeline
+name: CI Windows pipeline
 
 on:
   workflow_call:
     inputs:
       runner:
-        description: Runner label to execute the UNIX pipeline on
+        description: Runner label to execute the Windows pipeline on
         required: true
         type: string
       os:
@@ -14,120 +14,839 @@ on:
 
 jobs:
   test:
-    name: ${{ matrix.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, sanitize=${{ matrix.sanitize }}
-    runs-on: ${{ matrix.runner }}
+    name: ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
-      matrix:
-        runner: ['${{ inputs.runner }}']
-        fuzz: [OFF, ON]
-        sanitize: [OFF, ON]
-        cc: [cl, clang, gcc, tcc, zig]
-        os: ['${{ inputs.os }}']
-        exclude:
-          - cc: gcc
-            fuzz: ON
-          - cc: tcc
-            fuzz: ON
-          - cc: tcc
-            sanitize: ON
-          - cc: zig
-            fuzz: ON
-          - cc: gcc
-            sanitize: ON
     steps:
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Test
+      - name: Cache Visual Studio environment
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $TimingResults = [System.Collections.Generic.List[string]]::new()
-
-          function Invoke-TimedCommand {
-            param(
-              [string]$Label,
-              [scriptblock]$Command
-            )
-
-            $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-            $ExitCode = 0
-
-            try {
-              & $Command
-              if ($null -ne $LASTEXITCODE) {
-                $ExitCode = $LASTEXITCODE
-              }
-            }
-            finally {
-              $Stopwatch.Stop()
-              $TimingResults.Add("$Label completed in $($Stopwatch.Elapsed.TotalSeconds.ToString('F3'))s")
-            }
-
-            if ($ExitCode -ne 0) { exit $ExitCode }
-          }
-
-          function Write-TimingSummary {
-            Write-Host '>>> Timing summary'
-            foreach ($TimingResult in $TimingResults) {
-              Write-Host ">>> $TimingResult"
-            }
-          }
 
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $VsPath = & $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $VsPath) { throw 'Visual Studio with VC tools was not found' }
+
+          $BeforeEnvironment = @{}
+          Get-ChildItem Env: | ForEach-Object { $BeforeEnvironment[$_.Name] = $_.Value }
+
           $VsDevShell = Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1'
           & $VsDevShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          where.exe cl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          if ('${{ matrix.cc }}' -match 'clang' -and '${{ matrix.sanitize }}' -eq 'ON') {
-            $ClangResourceDirectory = & clang -print-resource-dir
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $ClangRuntimeDirectory = Join-Path $ClangResourceDirectory 'lib\windows'
-            if (Test-Path $ClangRuntimeDirectory) {
-              $env:PATH = "$ClangRuntimeDirectory;$env:PATH"
+          where.exe cl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $EnvironmentNames = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+          foreach ($Item in Get-ChildItem Env:) {
+            if (-not $BeforeEnvironment.ContainsKey($Item.Name) -or $BeforeEnvironment[$Item.Name] -ne $Item.Value) {
+              [void]$EnvironmentNames.Add($Item.Name)
             }
           }
 
-          echo $env:PATH
-
-          $BusterCcDirectory = '${{ matrix.cc }}' -replace '[^A-Za-z0-9_.-]', '_'
-          $BusterBuildDirectory = "build_ci-cc_$BusterCcDirectory-sanitize_${{matrix.sanitize}}-fuzz_${{matrix.fuzz}}"
-
-          $generateArguments = @(
-            '.\generate.py',
-            '--build-directory', $BusterBuildDirectory,
-            '--ci', 'ON',
-            '--cc', '${{ matrix.cc }}',
-            '--fuzz', '${{ matrix.fuzz }}',
-            '--sanitize', '${{ matrix.sanitize }}'
-          )
-          Invoke-TimedCommand 'Generate' { & python @generateArguments }
-
-          $BusterConfigs = @('Debug', 'Release')
-          if ('${{ matrix.cc }}' -eq 'tcc') {
-            $BusterConfigs = @('Debug')
+          foreach ($Name in @(
+            'Path',
+            'INCLUDE',
+            'LIB',
+            'LIBPATH',
+            'UCRTVersion',
+            'UniversalCRTSdkDir',
+            'VCINSTALLDIR',
+            'VCToolsInstallDir',
+            'VCToolsRedistDir',
+            'VCToolsVersion',
+            'VSINSTALLDIR',
+            'VisualStudioVersion',
+            'WindowsLibPath',
+            'WindowsSdkBinPath',
+            'WindowsSdkDir',
+            'WindowsSDKLibVersion',
+            'WindowsSDKVersion'
+          )) {
+            if (Test-Path "Env:$Name") {
+              [void]$EnvironmentNames.Add($Name)
+            }
           }
 
-          foreach ($BusterConfig in $BusterConfigs) {
-            $buildArguments = @(
-              '.\build.py',
-              '--build-directory', $BusterBuildDirectory,
-              '--config', $BusterConfig,
-              '--verbose'
-            )
-            Invoke-TimedCommand "Build $BusterConfig" { & python @buildArguments }
-
-            $testArguments = @(
-              '.\build.py',
-              '--build-directory', $BusterBuildDirectory,
-              '--config', $BusterConfig,
-              '--verbose',
-              'test_all'
-            )
-            Invoke-TimedCommand "Test $BusterConfig" { & python @testArguments }
+          foreach ($Name in $EnvironmentNames) {
+            $Value = (Get-Item "Env:$Name").Value
+            "$Name=$Value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            if ($Name -ieq 'Path') {
+              "BUSTER_VISUAL_STUDIO_PATH=$Value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
           }
 
-          Write-TimingSummary
+          Write-Host $env:PATH
+      - name: Generations
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $GenerateConfigurations = [System.Collections.Generic.List[object]]::new()
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $VisualStudioPath = $env:PATH
+          $ClangRuntimeDirectory = $null
+
+          function Use-ClangRuntimePath {
+            if (-not $script:ClangRuntimeDirectory) {
+              $ClangResourceDirectory = & clang -print-resource-dir
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              $script:ClangRuntimeDirectory = Join-Path $ClangResourceDirectory 'lib\windows'
+              if (-not (Test-Path $script:ClangRuntimeDirectory)) {
+                throw "Clang Windows runtime directory was not found: $script:ClangRuntimeDirectory"
+              }
+            }
+
+            $env:PATH = "$script:ClangRuntimeDirectory;$VisualStudioPath"
+          }
+
+          function Add-Generation {
+            param(
+              [string]$BusterCc,
+              [string]$BusterFuzz,
+              [string]$BusterSanitize
+            )
+
+            $BusterCcDirectory = $BusterCc -replace '[^A-Za-z0-9_.-]', '_'
+            [void]$GenerateConfigurations.Add([pscustomobject]@{
+              Cc = $BusterCc
+              Fuzz = $BusterFuzz
+              Sanitize = $BusterSanitize
+              Directory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_${BusterSanitize}-fuzz_${BusterFuzz}"
+            })
+          }
+
+          #               COMPILER    FUZZ        SANITIZE
+          Add-Generation  cl          OFF         OFF
+          Add-Generation  cl          OFF         ON
+          Add-Generation  cl          ON          OFF
+          Add-Generation  cl          ON          ON
+          Add-Generation  clang       OFF         OFF
+          Add-Generation  clang       OFF         ON
+          Add-Generation  clang       ON          OFF
+          Add-Generation  clang       ON          ON
+          Add-Generation  gcc         OFF         OFF
+          Add-Generation  tcc         OFF         OFF
+          Add-Generation  zig         OFF         OFF
+          Add-Generation  zig         OFF         ON
+
+          foreach ($Configuration in $GenerateConfigurations) {
+            if ($Configuration.Cc -match 'clang' -and $Configuration.Sanitize -eq 'ON') {
+              Use-ClangRuntimePath
+            }
+            else {
+              $env:PATH = $VisualStudioPath
+            }
+
+            Write-Host "Generate (compiler=$($Configuration.Cc) fuzz=$($Configuration.Fuzz.ToLowerInvariant()) sanitize=$($Configuration.Sanitize.ToLowerInvariant()))"
+            $GenerateArguments = @(
+              '.\generate.py',
+              '--build-directory', $Configuration.Directory,
+              '--ci', 'ON',
+              '--cc', $Configuration.Cc,
+              '--fuzz', $Configuration.Fuzz,
+              '--sanitize', $Configuration.Sanitize
+            )
+            python @GenerateArguments
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+# =======================================================================================================================================
+# ================================================================== CL =================================================================
+# =======================================================================================================================================
+      - name: Build (compiler=cl fuzz=off sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=cl fuzz=off sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=cl fuzz=off sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=cl fuzz=off sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=cl fuzz=off sanitize=on optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=cl fuzz=off sanitize=on optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=cl fuzz=off sanitize=on optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=cl fuzz=off sanitize=on optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=cl fuzz=on sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=cl fuzz=on sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=cl fuzz=on sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=cl fuzz=on sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=cl fuzz=on sanitize=on optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=cl fuzz=on sanitize=on optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=cl fuzz=on sanitize=on optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=cl fuzz=on sanitize=on optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: cl
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+# =======================================================================================================================================
+# ================================================================ CLANG ================================================================
+# =======================================================================================================================================
+      - name: Cache Clang runtime environment
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ClangResourceDirectory = & clang -print-resource-dir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ClangRuntimeDirectory = Join-Path $ClangResourceDirectory 'lib\windows'
+          if (-not (Test-Path $ClangRuntimeDirectory)) {
+            throw "Clang Windows runtime directory was not found: $ClangRuntimeDirectory"
+          }
+          "Path=$ClangRuntimeDirectory;$env:Path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BUSTER_CLANG_RUNTIME_DIRECTORY=$ClangRuntimeDirectory" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build (compiler=clang fuzz=off sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=clang fuzz=off sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=clang fuzz=off sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=clang fuzz=off sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=clang fuzz=off sanitize=on optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:BUSTER_CLANG_RUNTIME_DIRECTORY) { throw 'Clang runtime directory was not cached' }
+          $env:PATH = "$env:BUSTER_CLANG_RUNTIME_DIRECTORY;$env:PATH"
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=clang fuzz=off sanitize=on optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:BUSTER_CLANG_RUNTIME_DIRECTORY) { throw 'Clang runtime directory was not cached' }
+          $env:PATH = "$env:BUSTER_CLANG_RUNTIME_DIRECTORY;$env:PATH"
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=clang fuzz=off sanitize=on optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:BUSTER_CLANG_RUNTIME_DIRECTORY) { throw 'Clang runtime directory was not cached' }
+          $env:PATH = "$env:BUSTER_CLANG_RUNTIME_DIRECTORY;$env:PATH"
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=clang fuzz=off sanitize=on optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:BUSTER_CLANG_RUNTIME_DIRECTORY) { throw 'Clang runtime directory was not cached' }
+          $env:PATH = "$env:BUSTER_CLANG_RUNTIME_DIRECTORY;$env:PATH"
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=clang fuzz=on sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=clang fuzz=on sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=clang fuzz=on sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=clang fuzz=on sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=clang fuzz=on sanitize=on optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:BUSTER_CLANG_RUNTIME_DIRECTORY) { throw 'Clang runtime directory was not cached' }
+          $env:PATH = "$env:BUSTER_CLANG_RUNTIME_DIRECTORY;$env:PATH"
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=clang fuzz=on sanitize=on optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:BUSTER_CLANG_RUNTIME_DIRECTORY) { throw 'Clang runtime directory was not cached' }
+          $env:PATH = "$env:BUSTER_CLANG_RUNTIME_DIRECTORY;$env:PATH"
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=clang fuzz=on sanitize=on optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:BUSTER_CLANG_RUNTIME_DIRECTORY) { throw 'Clang runtime directory was not cached' }
+          $env:PATH = "$env:BUSTER_CLANG_RUNTIME_DIRECTORY;$env:PATH"
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=clang fuzz=on sanitize=on optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: clang
+          BUSTER_FUZZ: ON
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:BUSTER_CLANG_RUNTIME_DIRECTORY) { throw 'Clang runtime directory was not cached' }
+          $env:PATH = "$env:BUSTER_CLANG_RUNTIME_DIRECTORY;$env:PATH"
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Restore Visual Studio environment
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:BUSTER_VISUAL_STUDIO_PATH) {
+            throw 'Visual Studio PATH was not cached'
+          }
+          "Path=$($env:BUSTER_VISUAL_STUDIO_PATH)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+# =======================================================================================================================================
+# ================================================================= GCC =================================================================
+# =======================================================================================================================================
+      - name: Build (compiler=gcc fuzz=off sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=gcc fuzz=off sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=gcc fuzz=off sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=gcc fuzz=off sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: gcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+# =======================================================================================================================================
+# ================================================================= TCC =================================================================
+# =======================================================================================================================================
+      - name: Build (compiler=tcc fuzz=off sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: tcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=tcc fuzz=off sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: tcc
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+# =======================================================================================================================================
+# ================================================================= ZIG =================================================================
+# =======================================================================================================================================
+      - name: Build (compiler=zig fuzz=off sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: zig
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=zig fuzz=off sanitize=off optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: zig
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=zig fuzz=off sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: zig
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=zig fuzz=off sanitize=off optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: zig
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: OFF
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=zig fuzz=off sanitize=on optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: zig
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=zig fuzz=off sanitize=on optimize=off)
+        shell: powershell
+        env:
+          BUSTER_CC: zig
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Debug
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (compiler=zig fuzz=off sanitize=on optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: zig
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test (compiler=zig fuzz=off sanitize=on optimize=on)
+        shell: powershell
+        env:
+          BUSTER_CC: zig
+          BUSTER_FUZZ: OFF
+          BUSTER_SANITIZE: ON
+          BUSTER_CONFIG: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCcDirectory = $env:BUSTER_CC -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
+          python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
