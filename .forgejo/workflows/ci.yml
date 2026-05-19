@@ -1,11 +1,30 @@
 on: [push]
 
 jobs:
-  test_controller:
+  test_linux:
     strategy:
       matrix:
-        runner: [zen5-linux, x86_64-linux-sapphirerapids, aarch64-macos-m1, x86_64-windows-znver5, x86_64-linux-alpine, x86_64-linux-ubuntu, x86_64-linux-debian, aarch64-linux-fedora]
-    name: All [${{matrix.runner}}]
+        runner: [x86_64-linux-znver5, x86_64-linux-sapphirerapids, x86_64-linux-alpine, x86_64-linux-ubuntu, x86_64-linux-debian, aarch64-linux-fedora]
+    name: ${{matrix.runner}}
     uses: ./.forgejo/workflows/unix.yml
     with:
       runner: ${{ matrix.runner }}
+      os: linux
+  test_macos:
+    strategy:
+      matrix:
+        runner: [aarch64-macos-m1]
+    name: ${{matrix.runner}}
+    uses: ./.forgejo/workflows/unix.yml
+    with:
+      runner: ${{ matrix.runner }}
+      os: macos
+  test_windows:
+    strategy:
+      matrix:
+        runner: [x86_64-windows-znver5]
+    name: ${{matrix.runner}}
+    uses: ./.forgejo/workflows/windows.yml
+    with:
+      runner: ${{ matrix.runner }}
+      os: windows

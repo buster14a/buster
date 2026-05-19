@@ -7,10 +7,14 @@ on:
         description: Runner label to execute the UNIX pipeline on
         required: true
         type: string
+      os:
+        description: Operating system
+        required: true
+        type: string
 
 jobs:
   test:
-    name: Test [${{ matrix.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, sanitize=${{ matrix.sanitize }}]
+    name: ${{ matrix.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, sanitize=${{ matrix.sanitize }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -18,7 +22,8 @@ jobs:
         runner: ['${{ inputs.runner }}']
         fuzz: [OFF, ON]
         sanitize: [OFF, ON]
-        cc: [cl, clang, gcc, tcc, zig]
+        cc: [clang, gcc, tcc, zig]
+        os: ['${{ inputs.os }}']
         exclude:
           - cc: gcc
             fuzz: ON
@@ -28,25 +33,8 @@ jobs:
             sanitize: ON
           - cc: zig
             fuzz: ON
-          - runner: aarch64-macos-m1
+          - os: macos
             fuzz: ON
-          - runner: x86_64-windows-znver5
-            cc: gcc
-            sanitize: ON
-          - runner: zen5-linux
-            cc: cl
-          - runner: x86_64-linux-sapphirerapids
-            cc: cl
-          - runner: aarch64-macos-m1
-            cc: cl
-          - runner: x86_64-linux-alpine
-            cc: cl
-          - runner: aarch64-linux-fedora
-            cc: cl
-          - runner: x86_64-linux-ubuntu
-            cc: cl
-          - runner: x86_64-linux-debian
-            cc: cl
     steps:
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4
@@ -54,7 +42,6 @@ jobs:
           persist-credentials: false
       - name: Test
         shell: bash
-        if: ${{ !contains(matrix.runner, 'windows') }}
         run: |
           set -euox pipefail
           if command -v python3 >/dev/null 2>&1; then
@@ -115,95 +102,3 @@ jobs:
             run_timed "Test ${BUSTER_CONFIG}" ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --config "$BUSTER_CONFIG" --verbose test_all
           done
           print_timing_summary
-      - name: Test
-        if: ${{ contains(matrix.runner, 'windows') }}
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $TimingResults = [System.Collections.Generic.List[string]]::new()
-
-          function Invoke-TimedCommand {
-            param(
-              [string]$Label,
-              [scriptblock]$Command
-            )
-
-            $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-            $ExitCode = 0
-
-            try {
-              & $Command
-              if ($null -ne $LASTEXITCODE) {
-                $ExitCode = $LASTEXITCODE
-              }
-            }
-            finally {
-              $Stopwatch.Stop()
-              $TimingResults.Add("$Label completed in $($Stopwatch.Elapsed.TotalSeconds.ToString('F3'))s")
-            }
-
-            if ($ExitCode -ne 0) { exit $ExitCode }
-          }
-
-          function Write-TimingSummary {
-            Write-Host '>>> Timing summary'
-            foreach ($TimingResult in $TimingResults) {
-              Write-Host ">>> $TimingResult"
-            }
-          }
-
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $VsPath = & $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          $VsDevShell = Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1'
-          & $VsDevShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          where.exe cl
-
-          if ('${{ matrix.cc }}' -match 'clang' -and '${{ matrix.sanitize }}' -eq 'ON') {
-            $ClangResourceDirectory = & clang -print-resource-dir
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $ClangRuntimeDirectory = Join-Path $ClangResourceDirectory 'lib\windows'
-            if (Test-Path $ClangRuntimeDirectory) {
-              $env:PATH = "$ClangRuntimeDirectory;$env:PATH"
-            }
-          }
-
-          echo $env:PATH
-
-          $BusterCcDirectory = '${{ matrix.cc }}' -replace '[^A-Za-z0-9_.-]', '_'
-          $BusterBuildDirectory = "build_ci-cc_$BusterCcDirectory-sanitize_${{matrix.sanitize}}-fuzz_${{matrix.fuzz}}"
-
-          $generateArguments = @(
-            '.\generate.py',
-            '--build-directory', $BusterBuildDirectory,
-            '--ci', 'ON',
-            '--cc', '${{ matrix.cc }}',
-            '--fuzz', '${{ matrix.fuzz }}',
-            '--sanitize', '${{ matrix.sanitize }}'
-          )
-          Invoke-TimedCommand 'Generate' { & python @generateArguments }
-
-          $BusterConfigs = @('Debug', 'Release')
-          if ('${{ matrix.cc }}' -eq 'tcc') {
-            $BusterConfigs = @('Debug')
-          }
-
-          foreach ($BusterConfig in $BusterConfigs) {
-            $buildArguments = @(
-              '.\build.py',
-              '--build-directory', $BusterBuildDirectory,
-              '--config', $BusterConfig,
-              '--verbose'
-            )
-            Invoke-TimedCommand "Build $BusterConfig" { & python @buildArguments }
-
-            $testArguments = @(
-              '.\build.py',
-              '--build-directory', $BusterBuildDirectory,
-              '--config', $BusterConfig,
-              '--verbose',
-              'test_all'
-            )
-            Invoke-TimedCommand "Test $BusterConfig" { & python @testArguments }
-          }
-
-          Write-TimingSummary

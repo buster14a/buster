@@ -1,0 +1,133 @@
+name: CI UNIX pipeline
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label to execute the UNIX pipeline on
+        required: true
+        type: string
+      os:
+        description: Operating system
+        required: true
+        type: string
+
+jobs:
+  test:
+    name: ${{ matrix.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, sanitize=${{ matrix.sanitize }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ['${{ inputs.runner }}']
+        fuzz: [OFF, ON]
+        sanitize: [OFF, ON]
+        cc: [cl, clang, gcc, tcc, zig]
+        os: ['${{ inputs.os }}']
+        exclude:
+          - cc: gcc
+            fuzz: ON
+          - cc: tcc
+            fuzz: ON
+          - cc: tcc
+            sanitize: ON
+          - cc: zig
+            fuzz: ON
+          - cc: gcc
+            sanitize: ON
+    steps:
+      - name: Checkout
+        uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $TimingResults = [System.Collections.Generic.List[string]]::new()
+
+          function Invoke-TimedCommand {
+            param(
+              [string]$Label,
+              [scriptblock]$Command
+            )
+
+            $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $ExitCode = 0
+
+            try {
+              & $Command
+              if ($null -ne $LASTEXITCODE) {
+                $ExitCode = $LASTEXITCODE
+              }
+            }
+            finally {
+              $Stopwatch.Stop()
+              $TimingResults.Add("$Label completed in $($Stopwatch.Elapsed.TotalSeconds.ToString('F3'))s")
+            }
+
+            if ($ExitCode -ne 0) { exit $ExitCode }
+          }
+
+          function Write-TimingSummary {
+            Write-Host '>>> Timing summary'
+            foreach ($TimingResult in $TimingResults) {
+              Write-Host ">>> $TimingResult"
+            }
+          }
+
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPath = & $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $VsDevShell = Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1'
+          & $VsDevShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          where.exe cl
+
+          if ('${{ matrix.cc }}' -match 'clang' -and '${{ matrix.sanitize }}' -eq 'ON') {
+            $ClangResourceDirectory = & clang -print-resource-dir
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $ClangRuntimeDirectory = Join-Path $ClangResourceDirectory 'lib\windows'
+            if (Test-Path $ClangRuntimeDirectory) {
+              $env:PATH = "$ClangRuntimeDirectory;$env:PATH"
+            }
+          }
+
+          echo $env:PATH
+
+          $BusterCcDirectory = '${{ matrix.cc }}' -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterBuildDirectory = "build_ci-cc_$BusterCcDirectory-sanitize_${{matrix.sanitize}}-fuzz_${{matrix.fuzz}}"
+
+          $generateArguments = @(
+            '.\generate.py',
+            '--build-directory', $BusterBuildDirectory,
+            '--ci', 'ON',
+            '--cc', '${{ matrix.cc }}',
+            '--fuzz', '${{ matrix.fuzz }}',
+            '--sanitize', '${{ matrix.sanitize }}'
+          )
+          Invoke-TimedCommand 'Generate' { & python @generateArguments }
+
+          $BusterConfigs = @('Debug', 'Release')
+          if ('${{ matrix.cc }}' -eq 'tcc') {
+            $BusterConfigs = @('Debug')
+          }
+
+          foreach ($BusterConfig in $BusterConfigs) {
+            $buildArguments = @(
+              '.\build.py',
+              '--build-directory', $BusterBuildDirectory,
+              '--config', $BusterConfig,
+              '--verbose'
+            )
+            Invoke-TimedCommand "Build $BusterConfig" { & python @buildArguments }
+
+            $testArguments = @(
+              '.\build.py',
+              '--build-directory', $BusterBuildDirectory,
+              '--config', $BusterConfig,
+              '--verbose',
+              'test_all'
+            )
+            Invoke-TimedCommand "Test $BusterConfig" { & python @testArguments }
+          }
+
+          Write-TimingSummary
