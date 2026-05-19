@@ -2,7 +2,6 @@
 // https://www.youtube.com/watch?v=Z1qyvQsjK5Y
 // https://www.rfleury.com/p/ui-part-1-the-interaction-medium
 
-#pragma once
 #include <buster/ui_core.h>
 #include <buster/string.h>
 #include <buster/float.h>

@@ -1,5 +1,4 @@
 
-#pragma once
 
 #include <buster/aarch64.h>
 #include <buster/system_headers.h>

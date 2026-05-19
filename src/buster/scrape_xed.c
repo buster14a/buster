@@ -1,4 +1,3 @@
-#pragma once
 
 // Scrape Intel x86_64 instruction set data from Intel XED source files.
 //

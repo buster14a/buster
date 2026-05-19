@@ -1,4 +1,3 @@
-#pragma once
 
 #include <buster/ui_builder.h>
 

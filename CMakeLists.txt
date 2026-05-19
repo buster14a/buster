@@ -7,6 +7,8 @@ project(buster C)
 
 set (CMAKE_COLOR_DIAGNOSTICS ON)
 
+include(CheckCCompilerFlag)
+
 option(BUSTER_CI "Enable CI mode" OFF)
 option(BUSTER_LINK_LIBC "Link libc" ON)
 option(BUSTER_OPTIMIZE "Enable optimized build" OFF)
@@ -227,6 +229,38 @@ if (C_COMPILER_MSVC)
     set(C_COMPILER_MSVC_FAMILIY ON)
 endif()
 
+function(buster_filter_supported_c_flags out_var)
+    set(supported_flags "")
+    set(unsupported_flags "")
+
+    foreach(flag IN LISTS ARGN)
+        string(MAKE_C_IDENTIFIER "BUSTER_HAS_C_FLAG_${flag}" flag_var)
+        set(saved_required_flags "")
+        if (DEFINED CMAKE_REQUIRED_FLAGS)
+            set(saved_required_flags "${CMAKE_REQUIRED_FLAGS}")
+        endif()
+
+        if (CMAKE_C_COMPILER_ID MATCHES "^(Clang|AppleClang)$")
+            string(APPEND CMAKE_REQUIRED_FLAGS " -Werror=unknown-warning-option")
+        endif()
+
+        check_c_compiler_flag("${flag}" ${flag_var})
+        set(CMAKE_REQUIRED_FLAGS "${saved_required_flags}")
+
+        if (${flag_var})
+            list(APPEND supported_flags "${flag}")
+        else()
+            list(APPEND unsupported_flags "${flag}")
+        endif()
+    endforeach()
+
+    if (unsupported_flags)
+        message(STATUS "Skipping unsupported optional C compiler flags: ${unsupported_flags}")
+    endif()
+
+    set(${out_var} "${supported_flags}" PARENT_SCOPE)
+endfunction()
+
 option(BUSTER_SINGLE_THREADED "Enable single-threaded mode" ON)
 
 if (C_COMPILER_MSVC)
@@ -357,16 +391,13 @@ set(CLANG_GNU_FAMILY_WARNINGS
     -Wdangling
     -Wenum-compare-conditional
     -Wenum-too-large
-    -Wexperimental-lifetime-safety
     -Wfixed-point-overflow
     -Wflag-enum
     -Wfortify-source
     -Wfour-char-constants
-    -Whigher-precision-for-complex-division
     -Wimplicit-fallthrough-per-function
     -Wimplicit-float-conversion
     -Wimplicit-int-conversion
-    -Wimplicit-void-ptr-cast
     -Wlinker-warnings
     -Wloop-analysis
     -Wnon-power-of-two-alignment
@@ -383,18 +414,49 @@ set(CLANG_GNU_FAMILY_WARNINGS
     -Wself-assign-field
     -Wshadow-all
     -Wshadow-field
-    -Wshift-bool
     -Wshift-sign-overflow
     -Wsigned-enum-bitfield
     -Wtautological-constant-in-range-compare
     -Wthread-safety
     -Wunaligned-access
     -Wvector-conversion
+)
+
+set(CLANG_GNU_FAMILY_OPTIONAL_WARNING_CANDIDATES
+    -Wexperimental-lifetime-safety
+    -Whigher-precision-for-complex-division
+    -Wimplicit-void-ptr-cast
+    -Wshift-bool
     -Wunique-object-duplication
 )
 
+if (C_COMPILER_CLANG_FAMILY)
+    set(BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_KEY
+        "${CMAKE_C_COMPILER_ID}|${CMAKE_C_COMPILER_VERSION}|${CMAKE_C_COMPILER}"
+    )
+
+    if (NOT DEFINED BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_CACHE_KEY
+        OR NOT BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_CACHE_KEY STREQUAL BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_KEY)
+        buster_filter_supported_c_flags(
+            BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_COMPUTED
+            ${CLANG_GNU_FAMILY_OPTIONAL_WARNING_CANDIDATES}
+        )
+        set(
+            BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS
+            "${BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_COMPUTED}"
+            CACHE INTERNAL "Supported optional Clang-family warning flags" FORCE
+        )
+        set(
+            BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_CACHE_KEY
+            "${BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_KEY}"
+            CACHE INTERNAL "Compiler signature for supported optional Clang-family warning flags" FORCE
+        )
+    endif()
+
+    list(APPEND CLANG_GNU_FAMILY_WARNINGS ${BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS})
+endif()
+
 set(GNU_FAMILY_DISABLE_WARNINGS
-    -Wno-pragma-once-outside-header
     -Wno-unused-function
     -Wno-missing-field-initializers
 )

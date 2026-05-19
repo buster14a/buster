@@ -1,4 +1,3 @@
-#pragma once
 #include <buster/os.h>
 #include <buster/system_headers.h>
 #include <buster/arena.h>

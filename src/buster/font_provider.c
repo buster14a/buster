@@ -1,4 +1,3 @@
-#pragma once
 
 #include <buster/font_provider.h>
 #include <buster/file.h>

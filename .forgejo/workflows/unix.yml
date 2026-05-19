@@ -48,6 +48,8 @@ jobs:
             cc: cl
           - runner: x86_64-linux-ubuntu
             cc: cl
+          - runner: x86_64-linux-debian
+            cc: cl
     steps:
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4

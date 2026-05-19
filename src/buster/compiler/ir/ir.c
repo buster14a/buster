@@ -1,4 +1,3 @@
-#pragma once
 
 #include <buster/compiler/ir/ir.h>
 #include <buster/string.h>

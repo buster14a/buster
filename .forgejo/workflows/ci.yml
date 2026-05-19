@@ -4,7 +4,7 @@ jobs:
   test_controller:
     strategy:
       matrix:
-        runner: [zen5-linux, x86_64-linux-sapphirerapids, aarch64-macos-m1, x86_64-windows-znver5, x86_64-linux-alpine, x86_64-linux-ubuntu, aarch64-linux-fedora]
+        runner: [zen5-linux, x86_64-linux-sapphirerapids, aarch64-macos-m1, x86_64-windows-znver5, x86_64-linux-alpine, x86_64-linux-ubuntu, x86_64-linux-debian, aarch64-linux-fedora]
     name: All [${{matrix.runner}}]
     uses: ./.forgejo/workflows/unix.yml
     with:

@@ -1,4 +1,3 @@
-#pragma once
 
 #define BUSTER_USE_PADDING 0
 
@@ -25,15 +24,8 @@
 #include <buster/integer.c>
 #include <buster/file.c>
 #include <buster/build/build_common.c>
-#if defined(__x86_64__)
-#include <buster/x86_64.c>
-#endif
-#if defined(__aarch64__)
-#include <buster/aarch64.c>
-#endif
 #include <buster/entry_point.c>
 #include <buster/path.c>
-#include <buster/file.c>
 #include <buster/test.c>
 #endif
 

@@ -1,4 +1,3 @@
-#pragma once
 #include <buster/integer.h>
 
 u64 align_forward(u64 n, u64 a)

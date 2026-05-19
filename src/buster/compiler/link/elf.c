@@ -1,4 +1,3 @@
-#pragma once
 
 #include <buster/compiler/link/elf.h>
 

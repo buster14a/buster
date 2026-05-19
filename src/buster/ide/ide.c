@@ -1,4 +1,3 @@
-#pragma once
 
 #include <buster/base.h>
 #include <buster/entry_point.h>
@@ -38,7 +37,6 @@
 #include <buster/compiler/frontend/buster/parser.c>
 #include <buster/compiler/ir/ir.c>
 // #include <buster/simd.c>
-#include <buster/integer.c>
 #include <buster/compiler/frontend/buster/analysis.c>
 #endif
 

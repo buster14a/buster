@@ -1,4 +1,3 @@
-#pragma once
 #include <buster/build/build_common.h>
 
 BUSTER_V_IMPL StringOs vulkan_sdk_path;
@@ -105,7 +104,6 @@ BUSTER_GLOBAL_LOCAL StringOs disable_warning_flags[] = {
     SOs("-Wno-unused-function"),
     SOs("-Wno-gnu-flexible-array-initializer"),
     SOs("-Wno-missing-field-initializers"),
-    SOs("-Wno-pragma-once-outside-header"),
     SOs("-Wno-zero-length-array"),
     SOs("-Wno-gnu-zero-variadic-macro-arguments"),
     SOs("-Wno-gnu-statement-expression-from-macro-expansion"),

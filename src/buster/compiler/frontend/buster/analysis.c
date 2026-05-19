@@ -1,4 +1,3 @@
-#pragma once
 
 #include <buster/compiler/frontend/buster/analysis.h>
 #include <buster/file.h>

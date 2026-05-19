@@ -1,4 +1,3 @@
-#pragma once
 #include <buster/time.h>
 #include <buster/os.h>
 #include <buster/system_headers.h>

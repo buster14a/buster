@@ -1,4 +1,3 @@
-#pragma once
 
 // Scrape LLVM X86 TableGen files and generate compact C tables for the selector.
 //

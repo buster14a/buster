@@ -1,4 +1,3 @@
-#pragma once
 #include <buster/compiler/frontend/buster/parser.h>
 #include <buster/integer.h>
 #include <buster/arena.h>

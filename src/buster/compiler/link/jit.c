@@ -1,4 +1,3 @@
-#pragma once
 
 #include <buster/compiler/link/jit.h>
 #include <buster/string8.h>

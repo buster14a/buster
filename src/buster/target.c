@@ -1,4 +1,3 @@
-#pragma once
 #include <buster/target.h>
 
 #include <buster/string.h>

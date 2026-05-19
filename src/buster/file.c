@@ -1,4 +1,3 @@
-#pragma once
 #include <buster/file.h>
 #include <buster/system_headers.h>
 #include <buster/integer.h>

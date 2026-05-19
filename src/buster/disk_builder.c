@@ -1,4 +1,3 @@
-#pragma once
 #include <lib.h>
 
 STRUCT(MBRPartitionRecord)

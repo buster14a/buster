@@ -1,4 +1,3 @@
-#pragma once
 #include <buster/window.h>
 #if defined (__linux__)
 #include <xcb/xcb.h>

@@ -1,4 +1,3 @@
-#pragma once
 #include <buster/memory.h>
 
 bool memory_compare(const void* a, const void* b, u64 count)
