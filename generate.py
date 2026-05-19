@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 
 
+CONFIGS = ("Debug", "Release", "RelWithDebInfo", "MinSizeRel")
+OPTIMIZED_CONFIGS = ("Release", "RelWithDebInfo", "MinSizeRel")
+
+
 def cmake_bool(value):
     normalized = value.upper()
     if normalized in ("ON", "TRUE", "YES", "1"):
@@ -48,6 +52,13 @@ def parse_arguments(argv):
         help="CMake build directory.",
     )
     parser.add_argument(
+        "--config",
+        "--configuration",
+        choices=CONFIGS,
+        default=None,
+        help="Default CMake build configuration.",
+    )
+    parser.add_argument(
         "--cc",
         default="clang",
         help="C compiler command.",
@@ -59,7 +70,7 @@ def parse_arguments(argv):
     )
     add_cmake_bool_argument(parser, "ci", "OFF")
     add_cmake_bool_argument(parser, "fuzz", "OFF")
-    add_cmake_bool_argument(parser, "optimize", "OFF")
+    add_cmake_bool_argument(parser, "optimize", None)
     add_cmake_bool_argument(parser, "sanitize", "OFF")
     add_cmake_bool_argument(parser, "lto", "OFF")
     add_cmake_bool_argument(parser, "time_trace", "OFF")
@@ -79,11 +90,38 @@ def command_string(command):
     return " ".join(shlex.quote(str(argument)) for argument in command)
 
 
+def config_is_optimized(config):
+    return config in OPTIMIZED_CONFIGS
+
+
 def main(argv):
     arguments, cmake_arguments = parse_arguments(argv)
 
     build_directory = arguments.build_directory
     print(f"BUSTER_BUILD_DIRECTORY: {build_directory}", flush=True)
+
+    build_config = arguments.config
+    if build_config is None:
+        build_config = "Release" if arguments.optimize == "ON" else "Debug"
+
+    config_optimize = "ON" if config_is_optimized(build_config) else "OFF"
+    optimize_was_explicit = arguments.optimize is not None
+    if arguments.optimize is None:
+        optimize = config_optimize
+    elif arguments.optimize == config_optimize:
+        optimize = arguments.optimize
+    else:
+        print(
+            f"error: --optimize {arguments.optimize} conflicts with --config {build_config}",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"BUSTER_BUILD_CONFIG: {build_config}", flush=True)
+
+    buster_option_args = []
+    if optimize_was_explicit:
+        buster_option_args.append(f"-DBUSTER_OPTIMIZE={optimize}")
 
     build_path = Path(build_directory)
     remove_path(build_path)
@@ -158,11 +196,13 @@ def main(argv):
         "-B",
         build_directory,
         "-G",
-        "Ninja",
+        "Ninja Multi-Config",
+        f"-DCMAKE_DEFAULT_BUILD_TYPE={build_config}",
+        f"-DCMAKE_CONFIGURATION_TYPES={';'.join(CONFIGS)}",
         *cmake_compiler_args,
         f"-DCMAKE_LINKER_TYPE={linker}",
         f"-DBUSTER_FUZZ={arguments.fuzz}",
-        f"-DBUSTER_OPTIMIZE={arguments.optimize}",
+        *buster_option_args,
         f"-DBUSTER_SANITIZE={arguments.sanitize}",
         f"-DBUSTER_LTO={arguments.lto}",
         f"-DBUSTER_TIME_TRACE={arguments.time_trace}",

@@ -10,16 +10,15 @@ on:
 
 jobs:
   test:
-    name: Test [${{ matrix.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, optimize=${{ matrix.optimize }}, sanitize=${{ matrix.sanitize }}]
+    name: Test [${{ matrix.runner }}, cc=${{ matrix.cc }}, fuzz=${{ matrix.fuzz }}, sanitize=${{ matrix.sanitize }}]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         runner: ['${{ inputs.runner }}']
         fuzz: [OFF, ON]
-        optimize: [OFF, ON]
         sanitize: [OFF, ON]
-        cc: [cl, zig, gcc, clang, tcc]
+        cc: [cl, clang, gcc, tcc, zig]
         exclude:
           - cc: gcc
             fuzz: ON
@@ -27,8 +26,6 @@ jobs:
             fuzz: ON
           - cc: tcc
             sanitize: ON
-          - cc: tcc
-            optimize: ON
           - cc: zig
             fuzz: ON
           - runner: aarch64-macos-m1
@@ -105,10 +102,18 @@ jobs:
 
           BUSTER_CC='${{ matrix.cc }}'
           BUSTER_CC_DIRECTORY=${BUSTER_CC//[^A-Za-z0-9_.-]/_}
-          BUSTER_BUILD_DIRECTORY="build_ci-cc_${BUSTER_CC_DIRECTORY}-optimize_${{ matrix.optimize }}-sanitize_${{ matrix.sanitize }}-fuzz_${{ matrix.fuzz }}"
-          run_timed "Generate" ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc ${{ matrix.cc }} --fuzz ${{ matrix.fuzz }} --optimize ${{ matrix.optimize }} --sanitize ${{ matrix.sanitize }}
-          run_timed "Build" ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --verbose
-          run_timed "Test" ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --verbose test_all
+          BUSTER_BUILD_DIRECTORY="build_ci-cc_${BUSTER_CC_DIRECTORY}-sanitize_${{ matrix.sanitize }}-fuzz_${{ matrix.fuzz }}"
+          run_timed "Generate" ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc "$BUSTER_CC" --fuzz ${{ matrix.fuzz }} --sanitize ${{ matrix.sanitize }}
+
+          BUSTER_CONFIGS=(Debug Release)
+          if [ "$BUSTER_CC" = tcc ]; then
+            BUSTER_CONFIGS=(Debug)
+          fi
+
+          for BUSTER_CONFIG in "${BUSTER_CONFIGS[@]}"; do
+            run_timed "Build ${BUSTER_CONFIG}" ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --config "$BUSTER_CONFIG" --verbose
+            run_timed "Test ${BUSTER_CONFIG}" ./build.py --build-directory "$BUSTER_BUILD_DIRECTORY" --config "$BUSTER_CONFIG" --verbose test_all
+          done
           print_timing_summary
       - name: Test
         if: ${{ contains(matrix.runner, 'windows') }}
@@ -165,7 +170,7 @@ jobs:
           echo $env:PATH
 
           $BusterCcDirectory = '${{ matrix.cc }}' -replace '[^A-Za-z0-9_.-]', '_'
-          $BusterBuildDirectory = "build_ci-cc_$BusterCcDirectory-optimize_${{matrix.optimize}}-sanitize_${{matrix.sanitize}}-fuzz_${{matrix.fuzz}}"
+          $BusterBuildDirectory = "build_ci-cc_$BusterCcDirectory-sanitize_${{matrix.sanitize}}-fuzz_${{matrix.fuzz}}"
 
           $generateArguments = @(
             '.\generate.py',
@@ -173,24 +178,32 @@ jobs:
             '--ci', 'ON',
             '--cc', '${{ matrix.cc }}',
             '--fuzz', '${{ matrix.fuzz }}',
-            '--optimize', '${{ matrix.optimize }}',
             '--sanitize', '${{ matrix.sanitize }}'
           )
           Invoke-TimedCommand 'Generate' { & python @generateArguments }
 
-          $buildArguments = @(
-            '.\build.py',
-            '--build-directory', $BusterBuildDirectory,
-            '--verbose'
-          )
-          Invoke-TimedCommand 'Build' { & python @buildArguments }
+          $BusterConfigs = @('Debug', 'Release')
+          if ('${{ matrix.cc }}' -eq 'tcc') {
+            $BusterConfigs = @('Debug')
+          }
 
-          $testArguments = @(
-            '.\build.py',
-            '--build-directory', $BusterBuildDirectory,
-            '--verbose',
-            'test_all'
-          )
-          Invoke-TimedCommand 'Test' { & python @testArguments }
+          foreach ($BusterConfig in $BusterConfigs) {
+            $buildArguments = @(
+              '.\build.py',
+              '--build-directory', $BusterBuildDirectory,
+              '--config', $BusterConfig,
+              '--verbose'
+            )
+            Invoke-TimedCommand "Build $BusterConfig" { & python @buildArguments }
+
+            $testArguments = @(
+              '.\build.py',
+              '--build-directory', $BusterBuildDirectory,
+              '--config', $BusterConfig,
+              '--verbose',
+              'test_all'
+            )
+            Invoke-TimedCommand "Test $BusterConfig" { & python @testArguments }
+          }
 
           Write-TimingSummary

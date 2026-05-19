@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.17)
 if (POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
@@ -9,15 +9,108 @@ set (CMAKE_COLOR_DIAGNOSTICS ON)
 
 include(CheckCCompilerFlag)
 
+set(BUSTER_OPTIMIZE_EXPLICIT OFF)
+if (DEFINED BUSTER_OPTIMIZE)
+    set(BUSTER_OPTIMIZE_EXPLICIT ON)
+endif()
+
+set(BUSTER_CONFIG_TYPES Debug Release RelWithDebInfo MinSizeRel)
+
+function(buster_config_is_optimized out_var config)
+    if ("${config}" STREQUAL "Release" OR "${config}" STREQUAL "RelWithDebInfo" OR "${config}" STREQUAL "MinSizeRel")
+        set(${out_var} ON PARENT_SCOPE)
+    elseif("${config}" STREQUAL "Debug")
+        set(${out_var} OFF PARENT_SCOPE)
+    else()
+        message(FATAL_ERROR "Invalid build configuration: ${config}")
+    endif()
+endfunction()
+
+get_property(BUSTER_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+
+if (BUSTER_MULTI_CONFIG)
+    if (DEFINED CMAKE_BUILD_TYPE AND NOT CMAKE_BUILD_TYPE STREQUAL "")
+        message(FATAL_ERROR "CMAKE_BUILD_TYPE is not used with multi-config generators; use CMAKE_DEFAULT_BUILD_TYPE or build with --config")
+    endif()
+
+    if (NOT CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_CONFIGURATION_TYPES "${BUSTER_CONFIG_TYPES}" CACHE STRING "Available build configurations" FORCE)
+    endif()
+
+    if (DEFINED CMAKE_DEFAULT_BUILD_TYPE AND NOT CMAKE_DEFAULT_BUILD_TYPE STREQUAL "")
+        set(BUSTER_DEFAULT_CONFIG "${CMAKE_DEFAULT_BUILD_TYPE}")
+    elseif(DEFINED BUSTER_OPTIMIZE AND BUSTER_OPTIMIZE)
+        set(BUSTER_DEFAULT_CONFIG Release)
+    else()
+        set(BUSTER_DEFAULT_CONFIG Debug)
+    endif()
+
+    if (NOT BUSTER_DEFAULT_CONFIG IN_LIST CMAKE_CONFIGURATION_TYPES)
+        message(FATAL_ERROR "CMAKE_DEFAULT_BUILD_TYPE '${BUSTER_DEFAULT_CONFIG}' is not in CMAKE_CONFIGURATION_TYPES: ${CMAKE_CONFIGURATION_TYPES}")
+    endif()
+
+    set(CMAKE_DEFAULT_BUILD_TYPE "${BUSTER_DEFAULT_CONFIG}" CACHE STRING "Default multi-config build configuration" FORCE)
+    set_property(CACHE CMAKE_DEFAULT_BUILD_TYPE PROPERTY STRINGS ${CMAKE_CONFIGURATION_TYPES})
+else()
+    if (DEFINED CMAKE_DEFAULT_BUILD_TYPE AND NOT CMAKE_DEFAULT_BUILD_TYPE STREQUAL "")
+        message(FATAL_ERROR "CMAKE_DEFAULT_BUILD_TYPE is only used with multi-config generators; use CMAKE_BUILD_TYPE")
+    endif()
+
+    if (DEFINED CMAKE_BUILD_TYPE AND NOT CMAKE_BUILD_TYPE STREQUAL "")
+        set(BUSTER_DEFAULT_CONFIG "${CMAKE_BUILD_TYPE}")
+    elseif(DEFINED BUSTER_OPTIMIZE AND BUSTER_OPTIMIZE)
+        set(BUSTER_DEFAULT_CONFIG Release)
+    else()
+        set(BUSTER_DEFAULT_CONFIG Debug)
+    endif()
+
+    set(CMAKE_BUILD_TYPE "${BUSTER_DEFAULT_CONFIG}" CACHE STRING "Build configuration" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS ${BUSTER_CONFIG_TYPES})
+endif()
+
+buster_config_is_optimized(BUSTER_DEFAULT_CONFIG_OPTIMIZED "${BUSTER_DEFAULT_CONFIG}")
+
+if (DEFINED BUSTER_OPTIMIZE)
+    set(BUSTER_OPTIMIZE_DEFAULT "${BUSTER_OPTIMIZE}")
+else()
+    set(BUSTER_OPTIMIZE_DEFAULT "${BUSTER_DEFAULT_CONFIG_OPTIMIZED}")
+endif()
+
+set(BUSTER_STATUS_CMAKE_CONFIGURATION_TYPES "")
+if (DEFINED CMAKE_CONFIGURATION_TYPES)
+    set(BUSTER_STATUS_CMAKE_CONFIGURATION_TYPES "${CMAKE_CONFIGURATION_TYPES}")
+endif()
+
+set(BUSTER_STATUS_CMAKE_DEFAULT_BUILD_TYPE "")
+if (DEFINED CMAKE_DEFAULT_BUILD_TYPE)
+    set(BUSTER_STATUS_CMAKE_DEFAULT_BUILD_TYPE "${CMAKE_DEFAULT_BUILD_TYPE}")
+endif()
+
+set(BUSTER_STATUS_CMAKE_BUILD_TYPE "")
+if (DEFINED CMAKE_BUILD_TYPE)
+    set(BUSTER_STATUS_CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+endif()
+
 option(BUSTER_CI "Enable CI mode" OFF)
 option(BUSTER_LINK_LIBC "Link libc" ON)
-option(BUSTER_OPTIMIZE "Enable optimized build" OFF)
-option(BUSTER_UNITY_BUILD "Enable unity build" ${BUSTER_OPTIMIZE})
+option(BUSTER_OPTIMIZE "Enable optimized build" ${BUSTER_OPTIMIZE_DEFAULT})
+option(BUSTER_UNITY_BUILD "Enable unity builds for optimized configurations" ON)
 option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
 option(BUSTER_SANITIZE "Enable sanitizers" OFF)
 option(BUSTER_TIME_TRACE "Enable time tracing" OFF)
 option(BUSTER_FUZZ "Enable fuzzing" OFF)
 option(BUSTER_LTO "Enable LTO" OFF)
+
+if (BUSTER_MULTI_CONFIG AND NOT BUSTER_OPTIMIZE_EXPLICIT)
+    set(BUSTER_OPTIMIZE_CONDITION "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>")
+else()
+    set(BUSTER_OPTIMIZE_CONDITION "$<BOOL:${BUSTER_OPTIMIZE}>")
+endif()
+
+set(BUSTER_OPTIMIZE_DEFINE "$<IF:${BUSTER_OPTIMIZE_CONDITION},1,0>")
+set(BUSTER_UNITY_BUILD_CONDITION "$<AND:$<BOOL:${BUSTER_UNITY_BUILD}>,${BUSTER_OPTIMIZE_CONDITION}>")
+set(BUSTER_UNITY_BUILD_DEFINE "$<IF:${BUSTER_UNITY_BUILD_CONDITION},1,0>")
+set(BUSTER_NON_UNITY_SOURCE_CONDITION "$<NOT:${BUSTER_UNITY_BUILD_CONDITION}>")
 
 if (NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS OR CMAKE_EXPORT_COMPILE_COMMANDS STREQUAL "")
     set(BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT ON)
@@ -25,25 +118,6 @@ if (NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS OR CMAKE_EXPORT_COMPILE_COMMANDS S
         set(BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT OFF)
     endif()
     set(CMAKE_EXPORT_COMPILE_COMMANDS ${BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT} CACHE BOOL "Enable compile commands" FORCE)
-endif()
-
-if (NOT DEFINED BUSTER_OPTIMIZE AND (DEFINED CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL ""))
-    if (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
-        set(BUSTER_OPTIMIZE ON)
-    elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        set(BUSTER_OPTIMIZE OFF)
-    else()
-        message(FATAL_ERROR "Invalid CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
-    endif()
-elseif(DEFINED BUSTER_OPTIMIZE AND (NOT DEFINED CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL ""))
-    if (BUSTER_OPTIMIZE)
-        set(CMAKE_BUILD_TYPE Release)
-    else()
-        set(CMAKE_BUILD_TYPE Debug)
-    endif()
-else()
-    set(CMAKE_BUILD_TYPE Debug)
-    set(BUSTER_OPTIMIZE ON)
 endif()
 
 set(BUSTER_CROSS_COMPILE OFF)
@@ -310,7 +384,10 @@ message(STATUS "BUSTER_SINGLE_THREADED: ${BUSTER_SINGLE_THREADED}")
 
 message(STATUS "CMAKE_HOST_SYSTEM_PROCESSOR: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
 message(STATUS "CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
-message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
+message(STATUS "CMAKE_GENERATOR: ${CMAKE_GENERATOR}")
+message(STATUS "CMAKE_CONFIGURATION_TYPES: ${BUSTER_STATUS_CMAKE_CONFIGURATION_TYPES}")
+message(STATUS "CMAKE_DEFAULT_BUILD_TYPE: ${BUSTER_STATUS_CMAKE_DEFAULT_BUILD_TYPE}")
+message(STATUS "CMAKE_BUILD_TYPE: ${BUSTER_STATUS_CMAKE_BUILD_TYPE}")
 message(STATUS "CMAKE_C_COMPILER_ID: ${CMAKE_C_COMPILER_ID}")
 message(STATUS "CMAKE_LINKER_TYPE: ${CMAKE_LINKER_TYPE}")
 message(STATUS "C_COMPILER_ZIG: ${C_COMPILER_ZIG}")
@@ -499,11 +576,15 @@ function(executable_add name is_buster_program main_file)
 
     message(STATUS "${name} files: ${main_file} ${target_sources}")
 
-    if(${BUSTER_UNITY_BUILD})
-        add_executable(${name} ${main_file})
-    else()
-        add_executable(${name} ${main_file} ${target_sources})
-    endif()
+    add_executable(${name} ${main_file})
+    foreach(target_source IN LISTS target_sources)
+        if (IS_ABSOLUTE "${target_source}")
+            set(target_source_path "${target_source}")
+        else()
+            set(target_source_path "${CMAKE_CURRENT_SOURCE_DIR}/${target_source}")
+        endif()
+        target_sources(${name} PRIVATE "$<${BUSTER_NON_UNITY_SOURCE_CONDITION}:${target_source_path}>")
+    endforeach()
 
     set_target_properties(${name} PROPERTIES
         VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -516,8 +597,8 @@ function(executable_add name is_buster_program main_file)
 
     target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_compile_definitions(${name} PRIVATE
-        BUSTER_UNITY_BUILD=$<IF:$<BOOL:${BUSTER_UNITY_BUILD}>,1,0>
-        BUSTER_OPTIMIZE=$<IF:$<BOOL:${BUSTER_OPTIMIZE}>,1,0>
+        BUSTER_UNITY_BUILD=${BUSTER_UNITY_BUILD_DEFINE}
+        BUSTER_OPTIMIZE=${BUSTER_OPTIMIZE_DEFINE}
         BUSTER_INCLUDE_TESTS=$<IF:$<BOOL:${BUSTER_INCLUDE_TESTS}>,1,0>
         BUSTER_FUZZ=$<IF:$<BOOL:${BUSTER_FUZZ}>,1,0>
         BUSTER_LINK_LIBC=$<IF:$<BOOL:${BUSTER_LINK_LIBC}>,1,0>
@@ -672,18 +753,12 @@ endfunction()
 
 executable_add(metaprogram OFF src/buster/metaprogram.c)
 
-set(METAPROGRAM_STAMP "${CMAKE_CURRENT_BINARY_DIR}/metaprogram.stamp")
-
-add_custom_command(
-    OUTPUT "${METAPROGRAM_STAMP}"
+add_custom_target(metaprogram_generate
     COMMAND "$<TARGET_FILE:metaprogram>"
-    COMMAND "${CMAKE_COMMAND}" -E touch "${METAPROGRAM_STAMP}"
     DEPENDS metaprogram
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running metaprogram"
     VERBATIM)
-
-add_custom_target(metaprogram_generate DEPENDS "${METAPROGRAM_STAMP}")
 
 function(buster_add_executable name main_file)
     executable_add(${name} ON ${main_file} ${ARGN})

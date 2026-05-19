@@ -245,10 +245,24 @@ struct DeferHelper
 #define BUSTER_CACHE_LINE_GUESS (64)
 #endif
 
+#if BUSTER_COMPILER_MSVC
+#define BUSTER_RAW_UNREACHABLE() __assume(0)
+#elif BUSTER_COMPILER_CLANG || BUSTER_COMPILER_GCC
 #define BUSTER_RAW_UNREACHABLE() __builtin_unreachable()
+#else
+#define BUSTER_RAW_UNREACHABLE() BUSTER_TRAP()
+#endif
 
+#if BUSTER_COMPILER_MSVC
+#define BUSTER_ASSUME(x) __assume(x)
+#elif __has_builtin(__builtin_assume)
 #define BUSTER_ASSUME(x) __builtin_assume(x)
-#ifdef NDEBUG
+#elif BUSTER_COMPILER_CLANG || BUSTER_COMPILER_GCC
+#define BUSTER_ASSUME(x) do { if (!(x)) __builtin_unreachable(); } while (0)
+#else
+#define BUSTER_ASSUME(x) BUSTER_UNUSED(x)
+#endif
+#if BUSTER_OPTIMIZE
 #define BUSTER_UNREACHABLE() BUSTER_RAW_UNREACHABLE()
 #else
 #define BUSTER_UNREACHABLE() BUSTER_TRAP()
@@ -696,7 +710,7 @@ typedef ThreadReturnType ThreadCallback(void*);
 #define BUSTER_FUNCTION ((String8){ .pointer = (char8*)__func__, .length = strlen(__func__) })
 #endif
 
-#ifdef NDEBUG
+#if BUSTER_OPTIMIZE
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
 #else
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (buster_failed_assertion(__LINE__, BUSTER_FUNCTION, S8(__FILE__)), 0) : 0))
