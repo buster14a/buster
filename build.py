@@ -3,6 +3,7 @@ import argparse
 import shlex
 import subprocess
 import sys
+import time
 
 
 CONFIGS = ("Debug", "Release", "RelWithDebInfo", "MinSizeRel")
@@ -39,6 +40,11 @@ def parse_arguments(argv):
         help="Show verbose build output.",
     )
     parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Pass --quiet to the native build tool and suppress wrapper output.",
+    )
+    parser.add_argument(
         "--clean-first",
         action="store_true",
         help="Build target clean first, then build.",
@@ -69,6 +75,20 @@ def command_string(command):
     return " ".join(shlex.quote(str(argument)) for argument in command)
 
 
+def timed_subprocess_call(command, description, quiet=False):
+    start_ns = time.perf_counter_ns()
+    try:
+        return subprocess.call(command)
+    finally:
+        if not quiet:
+            elapsed_ns = time.perf_counter_ns() - start_ns
+            elapsed_seconds = elapsed_ns / 1_000_000_000
+            print(
+                f"{description} took {elapsed_seconds:.3f} seconds ({elapsed_ns} nanoseconds)",
+                flush=True,
+            )
+
+
 def main(argv):
     arguments, native_arguments = parse_arguments(argv)
 
@@ -92,11 +112,16 @@ def main(argv):
     if arguments.verbose:
         command.append("--verbose")
 
+    quiet = arguments.quiet or "--quiet" in native_arguments
+    if arguments.quiet and "--quiet" not in native_arguments:
+        native_arguments.append("--quiet")
+
     if native_arguments:
         command.extend(["--", *native_arguments])
 
-    print(f"+ {command_string(command)}", flush=True)
-    return subprocess.call(command)
+    if not quiet:
+        print(f"+ {command_string(command)}", flush=True)
+    return timed_subprocess_call(command, "CMake build", quiet=quiet)
 
 
 if __name__ == "__main__":

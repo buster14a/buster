@@ -5,11 +5,14 @@ import shutil
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
 CONFIGS = ("Debug", "Release", "RelWithDebInfo", "MinSizeRel")
 OPTIMIZED_CONFIGS = ("Release", "RelWithDebInfo", "MinSizeRel")
+DEFAULT_CMAKE_PROFILE = "cmake-profile.json"
+DEFAULT_CMAKE_PROFILE_SUMMARY_LIMIT = 25
 
 
 def cmake_bool(value):
@@ -40,6 +43,13 @@ def add_cmake_bool_argument(parser, name, default):
     )
 
 
+def positive_integer(value):
+    result = int(value, 10)
+    if result <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return result
+
+
 def parse_arguments(argv):
     parser = argparse.ArgumentParser(
         allow_abbrev=False,
@@ -68,6 +78,32 @@ def parse_arguments(argv):
         default=None,
         help="CMake linker type. Defaults to MOLD on Linux with clang/gcc, otherwise DEFAULT.",
     )
+    parser.add_argument(
+        "--cmake-profile",
+        nargs="?",
+        const=DEFAULT_CMAKE_PROFILE,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write CMake google-trace profiling JSON. Relative paths are "
+            "resolved inside the build directory."
+        ),
+    )
+    parser.add_argument(
+        "--cmake-profile-summary",
+        action="store_true",
+        help=(
+            "Print a ranked text summary after configure. Implies "
+            f"--cmake-profile={DEFAULT_CMAKE_PROFILE} when no profile path is set."
+        ),
+    )
+    parser.add_argument(
+        "--cmake-profile-summary-limit",
+        default=DEFAULT_CMAKE_PROFILE_SUMMARY_LIMIT,
+        type=positive_integer,
+        metavar="N",
+        help="Number of CMake profiling entries to print.",
+    )
     add_cmake_bool_argument(parser, "ci", "OFF")
     add_cmake_bool_argument(parser, "fuzz", "OFF")
     add_cmake_bool_argument(parser, "optimize", None)
@@ -88,6 +124,34 @@ def remove_path(path):
 
 def command_string(command):
     return " ".join(shlex.quote(str(argument)) for argument in command)
+
+
+def configuration_string(configuration):
+    parts = [f"{name}={value}" for name, value in configuration if value is not None]
+    if not parts:
+        return ""
+    return f" ({', '.join(parts)})"
+
+
+def timed_subprocess_call(command, description, configuration=()):
+    start_ns = time.perf_counter_ns()
+    try:
+        return subprocess.call(command)
+    finally:
+        elapsed_ns = time.perf_counter_ns() - start_ns
+        elapsed_seconds = elapsed_ns / 1_000_000_000
+        print(
+            f"{description}{configuration_string(configuration)} "
+            f"took {elapsed_seconds:.3f} seconds ({elapsed_ns} nanoseconds)",
+            flush=True,
+        )
+
+
+def build_relative_path(build_path, value):
+    result = Path(value)
+    if not result.is_absolute():
+        result = build_path / result
+    return result
 
 
 def config_is_optimized(config):
@@ -126,6 +190,15 @@ def main(argv):
     build_path = Path(build_directory)
     remove_path(build_path)
     build_path.mkdir(parents=True, exist_ok=True)
+
+    cmake_profile_path = None
+    if arguments.cmake_profile_summary and arguments.cmake_profile is None:
+        arguments.cmake_profile = DEFAULT_CMAKE_PROFILE
+
+    if arguments.cmake_profile is not None:
+        cmake_profile_path = build_relative_path(build_path, arguments.cmake_profile)
+        cmake_profile_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"BUSTER_CMAKE_PROFILE: {cmake_profile_path}", flush=True)
 
     cc = arguments.cc
     if cc in ("zig cc", "zig;cc"):
@@ -210,11 +283,46 @@ def main(argv):
         f"-DBUSTER_CI={arguments.ci}",
         f"-DBUSTER_LINK_LIBC={arguments.link_libc}",
         *cmake_extra_args,
+        *(
+            [
+                "--profiling-format=google-trace",
+                f"--profiling-output={cmake_profile_path}",
+            ]
+            if cmake_profile_path is not None
+            else []
+        ),
         *cmake_arguments,
     ]
 
     print(f"+ {command_string(command)}", flush=True)
-    return subprocess.call(command)
+    result = timed_subprocess_call(
+        command,
+        "CMake generation",
+        (
+            ("cc", cc),
+            ("fuzz", arguments.fuzz),
+            ("sanitize", arguments.sanitize),
+        ),
+    )
+
+    if arguments.cmake_profile_summary:
+        if cmake_profile_path is None or not cmake_profile_path.exists():
+            print("warning: CMake profiling output was not produced", file=sys.stderr)
+        else:
+            summary_script = Path(__file__).resolve().parent / "tools" / "cmake_profile_summary.py"
+            summary_command = [
+                sys.executable,
+                str(summary_script),
+                str(cmake_profile_path),
+                "--limit",
+                str(arguments.cmake_profile_summary_limit),
+            ]
+            print(f"+ {command_string(summary_command)}", flush=True)
+            summary_result = subprocess.call(summary_command)
+            if result == 0 and summary_result != 0:
+                result = summary_result
+
+    return result
 
 
 if __name__ == "__main__":

@@ -150,7 +150,10 @@ jobs:
               '--ci', 'ON',
               '--cc', $Configuration.Cc,
               '--fuzz', $Configuration.Fuzz,
-              '--sanitize', $Configuration.Sanitize
+              '--sanitize', $Configuration.Sanitize,
+              '--cmake-profile',
+              '--cmake-profile-summary',
+              '--cmake-profile-summary-limit', '15'
             )
             python @GenerateArguments
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

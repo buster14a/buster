@@ -68,7 +68,7 @@ jobs:
             BUSTER_SANITIZE=${generate_configurations[$i.sanitize]}
             BUSTER_FUZZ=${generate_configurations[$i.fuzz]}
             BUSTER_BUILD_DIRECTORY=${generate_configurations[$i.directory]}
-            time ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc "$BUSTER_CC" --fuzz $BUSTER_FUZZ --sanitize $BUSTER_SANITIZE
+            ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc "$BUSTER_CC" --fuzz $BUSTER_FUZZ --sanitize $BUSTER_SANITIZE --cmake-profile --cmake-profile-summary --cmake-profile-summary-limit 15
           done
 # =======================================================================================================================================
 # ================================================================ CLANG ================================================================
@@ -82,7 +82,7 @@ jobs:
           BUSTER_CONFIG: Debug
         run: |
           set -euox pipefail
-          time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
+          ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose
       - name: Test (compiler=clang fuzz=off sanitize=off optimize=off)
         shell: bash
         env:
