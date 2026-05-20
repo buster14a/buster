@@ -1662,7 +1662,10 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
                 UNSIGNED_TEST_CASE_COUNT,
             } UnsignedTestCaseId;
 
-            String8 format_strings[(u64)UNSIGNED_TEST_CASE_COUNT][(u64)UNSIGNED_FORMAT_TEST_CASE_COUNT] = {
+#undef S8
+#define S8(strlit) S8_INITIALIZER(strlit)
+
+            BUSTER_GLOBAL_LOCAL const String8 format_strings[(u64)UNSIGNED_TEST_CASE_COUNT][(u64)UNSIGNED_FORMAT_TEST_CASE_COUNT] = {
                 [(u64)UNSIGNED_TEST_CASE_U8] =
                 {
                     [(u64)UNSIGNED_FORMAT_TEST_CASE_DEFAULT] =                                           S8("{u8}"),
@@ -2036,7 +2039,7 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
                 UNSIGNED_TEST_CASE_NUMBER_COUNT,
             };
 
-            UnsignedTestCase cases[(u64)UNSIGNED_TEST_CASE_COUNT][(u64)UNSIGNED_TEST_CASE_NUMBER_COUNT] =
+            BUSTER_GLOBAL_LOCAL const UnsignedTestCase cases[(u64)UNSIGNED_TEST_CASE_COUNT][(u64)UNSIGNED_TEST_CASE_NUMBER_COUNT] =
             {
                 [(u64)UNSIGNED_TEST_CASE_U8] =
                 {
@@ -6741,11 +6744,14 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
                 },
             };
 
+#undef S8
+#define S8(strlit) ((String8) S8_INITIALIZER(strlit))
+
             for (u64 type_i = 0; type_i < UNSIGNED_TEST_CASE_COUNT; type_i += 1)
             {
                 for (u64 case_value_i = 0; case_value_i < UNSIGNED_TEST_CASE_NUMBER_COUNT; case_value_i += 1)
                 {
-                    UnsignedTestCase* uint_case = &cases[type_i][case_value_i];
+                    const UnsignedTestCase* uint_case = &cases[type_i][case_value_i];
                     u64 value = uint_case->value;
 
                     for (u64 case_i = 0; case_i < UNSIGNED_FORMAT_TEST_CASE_COUNT; case_i += 1)
