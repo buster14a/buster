@@ -1,4 +1,3 @@
-
 #include <buster/entry_point.h>
 #include <buster/system_headers.h>
 #include <buster/target.h>
@@ -69,8 +68,13 @@ BUSTER_GLOBAL_LOCAL void install_signal_handlers(void)
 BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOsList envp)
 {
     os_state.arena = arena_create((ArenaCreation){0});
-    SliceString8 arguments = os_string_list_to_slice_string(os_state.arena, argv);
-    SliceString8 environment = os_string_list_to_slice_string(os_state.arena, envp);
+#if defined(_WIN32)
+    SliceString8 arguments = slice_string_from_windows_string_list(os_state.arena, argv);
+    SliceString8 environment = string16_environment_block_to_slice_string(os_state.arena, envp);
+#else
+    SliceString8 arguments = slice_string_from_posix_string_list(os_state.arena, argv);
+    SliceString8 environment = slice_string_from_posix_string_list(os_state.arena, envp);
+#endif
     
 #ifdef _WIN32
     {
@@ -129,7 +133,12 @@ int main(int argc, char* argv[], char* envp[])
 #if defined(_WIN32)
     BUSTER_UNUSED(argv);
     BUSTER_UNUSED(envp);
-    result = (int)buster_entry_point(GetCommandLineW(), GetEnvironmentStringsW());
+    CharOs* environment = GetEnvironmentStringsW();
+    result = (int)buster_entry_point(GetCommandLineW(), environment);
+    if (environment)
+    {
+        FreeEnvironmentStringsW(environment);
+    }
 #else
     result = (int)buster_entry_point((StringOsList)argv, (StringOsList)envp);
 #endif
@@ -140,7 +149,12 @@ int main(int argc, char* argv[], char* envp[])
 #if defined(_WIN32)
 [[gnu::noreturn]] BUSTER_EXPORT void mainCRTStartup()
 {
-    let result = buster_entry_point(GetCommandLineW(), GetEnvironmentStringsW());
+    CharOs* environment = GetEnvironmentStringsW();
+    let result = buster_entry_point(GetCommandLineW(), environment);
+    if (environment)
+    {
+        FreeEnvironmentStringsW(environment);
+    }
     ExitProcess((UINT)result);
 }
 #endif

@@ -7,6 +7,12 @@ u64 align_forward(u64 n, u64 a)
     return result;
 }
 
+bool is_aligned(u64 n, u64 alignment)
+{
+    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment));
+    return (n & (alignment - 1)) == 0;
+}
+
 u64 next_power_of_two(u64 n)
 {
     n--;

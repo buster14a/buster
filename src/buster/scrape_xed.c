@@ -19,7 +19,6 @@
 #include <buster/system_headers.h>
 #include <buster/arena.h>
 #include <buster/file.h>
-#include <buster/path.h>
 #include <buster/entry_point.h>
 #include <buster/string.h>
 
@@ -36,7 +35,6 @@
 #include <buster/arena.c>
 #include <buster/integer.c>
 #include <buster/file.c>
-#include <buster/path.c>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.c>
 #endif
@@ -1873,9 +1871,9 @@ BUSTER_V_IMPL ProcessResult process_arguments()
         return ProcessResult::Failed;
     }
 
-    if (string8_equal(first_argument, SOs("test")))
+    if (string8_equal(first_argument, S8("test")))
     {
-        scrape_xed_program_state.xed_root = SOs("/home/david/dev/xed");
+        scrape_xed_program_state.xed_root = S8("/home/david/dev/xed");
         scrape_xed_program_state.generate = true;
     }
     else
@@ -1886,33 +1884,33 @@ BUSTER_V_IMPL ProcessResult process_arguments()
         u64 i = 2;
         for (StringOs arg = string_os_list_iterator_next(&arg_it); arg.pointer; arg = string_os_list_iterator_next(&arg_it), i += 1)
         {
-            if (string8_equal(arg, SOs("--stats")))
+            if (string8_equal(arg, S8("--stats")))
             {
                 scrape_xed_program_state.show_stats = true;
             }
-            else if (string8_equal(arg, SOs("--dump")))
+            else if (string8_equal(arg, S8("--dump")))
             {
                 scrape_xed_program_state.dump_iclass = string_os_list_iterator_next(&arg_it);
                 i += 1;
             }
-            else if (string8_equal(arg, SOs("--filter-extension")))
+            else if (string8_equal(arg, S8("--filter-extension")))
             {
                 scrape_xed_program_state.filter_extension = string_os_list_iterator_next(&arg_it);
                 i += 1;
             }
-            else if (string8_equal(arg, SOs("--list-extensions")))
+            else if (string8_equal(arg, S8("--list-extensions")))
             {
                 scrape_xed_program_state.list_extensions = true;
             }
-            else if (string8_equal(arg, SOs("--list-categories")))
+            else if (string8_equal(arg, S8("--list-categories")))
             {
                 scrape_xed_program_state.list_categories = true;
             }
-            else if (string8_equal(arg, SOs("--list-iclasses")))
+            else if (string8_equal(arg, S8("--list-iclasses")))
             {
                 scrape_xed_program_state.list_iclasses = true;
             }
-            else if (string8_equal(arg, SOs("--generate")))
+            else if (string8_equal(arg, S8("--generate")))
             {
                 scrape_xed_program_state.generate = true;
                 // Optional next arg as output path
@@ -1928,7 +1926,7 @@ BUSTER_V_IMPL ProcessResult process_arguments()
                 let r = buster_argument_process(argv, envp, i, arg);
                 if (r != ProcessResult::Success)
                 {
-                    string8_print(S8("Unknown argument: {SOs}\n"), arg);
+                    string8_print(S8("Unknown argument: {S8}\n"), arg);
                     result = r;
                     break;
                 }
@@ -2026,8 +2024,8 @@ BUSTER_F_IMPL ProcessResult entry_point()
     {
         StringOs output_path = scrape_xed_program_state.generate_output.pointer
             ? scrape_xed_program_state.generate_output
-            : SOs("build/x86_64_instructions.c");
-        string8_print(S8("Generating C source: {SOs}\n"), output_path);
+            : S8("build/x86_64_instructions.c");
+        string8_print(S8("Generating C source: {S8}\n"), output_path);
         scrape_generate_c_source(arena, &database, output_path);
         string8_print(S8("Done.\n"));
         return ProcessResult::Success;

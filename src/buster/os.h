@@ -127,12 +127,12 @@ struct OsError
 #define BUSTER_OS_ERROR_BUFFER_MAX_LENGTH (BUSTER_KB(64))
 
 BUSTER_F_DECL OsError os_get_last_error(void);
-BUSTER_F_DECL StringOs os_error_write_message(StringOs string, OsError error);
-BUSTER_F_DECL ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, StringOsList envp, ProcessSpawnOptions options);
+BUSTER_F_DECL String8 os_error_write_message(String8 string, OsError error);
+BUSTER_F_DECL ProcessSpawnResult os_process_spawn(SliceString8 argv, SliceString8 envp, ProcessSpawnOptions options);
 BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
-BUSTER_F_DECL StringOs get_environment_variable(String8 variable);
+BUSTER_F_DECL String8 get_environment_variable(String8 variable);
 
-BUSTER_F_DECL void os_make_directory(StringOs path);
+BUSTER_F_DECL void os_make_directory(String8 path);
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_F_DECL u64 os_file_get_size(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options);
@@ -140,7 +140,7 @@ BUSTER_F_DECL void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice bu
 BUSTER_F_DECL u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count);
 BUSTER_F_DECL bool os_file_close(OsFileDescriptor* file_descriptor);
 
-BUSTER_F_DECL StringOs os_path_absolute(StringOs buffer, StringOs relative_file_path);
+BUSTER_F_DECL String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_terminate);
 BUSTER_F_DECL OsFileDescriptor* os_get_stdout(void);
 BUSTER_F_DECL OsThreadHandle* os_thread_create(ThreadCreateOptions options);
 BUSTER_F_DECL bool os_thread_join(OsThreadHandle* handle);
@@ -198,7 +198,7 @@ BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);
 
 BUSTER_F_DECL bool os_is_tty(OsFileDescriptor* file);
-BUSTER_F_DECL OsModuleHandle* os_dynamic_library_load(StringOs library);
+BUSTER_F_DECL OsModuleHandle* os_dynamic_library_load(String8 library);
 BUSTER_F_DECL void os_dynamic_library_unload(OsModuleHandle* module);
 BUSTER_F_DECL OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbol);
 BUSTER_F_DECL u32 os_get_logical_thread_count(void);
@@ -221,8 +221,6 @@ BUSTER_F_DECL bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index
 
 #define flag_get(arr, Count, e) flag_get_ex((arr), (Count), (u64)(e))
 #define flag_set(arr, Count, e, v) flag_set_ex((arr), (Count), (e), (v))
-
-BUSTER_F_DECL SliceString8 os_string_list_to_slice_string(Arena* arena, StringOsList string_os_list);
 
 typedef struct BooleanArgumentProcessResult BooleanArgumentProcessResult;
 struct BooleanArgumentProcessResult

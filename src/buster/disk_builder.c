@@ -362,7 +362,11 @@ int main()
     bool name = true;
     if (name)
     {
-        let partition_name = S16("buster");
+        char16 partition_name_raw[] = { 'b', 'u', 's', 't', 'e', 'r', 0 };
+        let partition_name = (String16) {
+            .pointer = partition_name_raw,
+            .length = BUSTER_ARRAY_LENGTH(partition_name_raw) - 1,
+        };
         memcpy(gpt_partition_entry->partition_name, partition_name.pointer, str_size(partition_name));
     }
 

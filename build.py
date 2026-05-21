@@ -121,7 +121,7 @@ def main(argv):
 
     if not quiet:
         print(f"+ {command_string(command)}", flush=True)
-    return timed_subprocess_call(command, "CMake build", quiet=quiet)
+    return timed_subprocess_call(command, "ninja", quiet=quiet)
 
 
 if __name__ == "__main__":

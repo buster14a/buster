@@ -330,50 +330,71 @@ String16 string16_from_pointer_length(const char16* pointer, u64 length)
     return (String16){ .pointer = (char16*)pointer, .length = length };
 }
 
-String8 string16_to_string8_arena(Arena* arena, String16 s, bool null_terminate)
+typedef struct Utf8Result Utf8Result;
+struct Utf8Result
 {
-    char8* restrict pointer = arena_allocate(arena, char8, s.length + null_terminate);
-    for (u64 i = 0; i < s.length; i += 1)
+    char8 buffer[4];
+    u32 count;
+};
+
+typedef struct Utf8DecodeResult Utf8DecodeResult;
+struct Utf8DecodeResult
+{
+    u32 code_point;
+    u64 advance;
+};
+
+BUSTER_GLOBAL_LOCAL Utf8DecodeResult utf8_decode(String8 string, u64 index);
+BUSTER_GLOBAL_LOCAL u64 utf16_write_code_point(char16* destination, u32 code_point);
+BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_code_point(u32 code_point);
+
+String8 string8_from_string16(Arena* arena, String16 s, bool null_terminate)
+{
+    u64 position = arena->position;
+
+    for (u64 i = 0; i < s.length;)
     {
-        // TODO
-        pointer[i] = (u8)s.pointer[i];
+        u32 code_point = s.pointer[i];
+        u64 advance = 1;
+
+        if (code_point >= 0xD800u && code_point <= 0xDBFFu && i + 1 < s.length)
+        {
+            u32 second = s.pointer[i + 1];
+            if (second >= 0xDC00u && second <= 0xDFFFu)
+            {
+                code_point = (((code_point - 0xD800u) << 10) | (second - 0xDC00u)) + 0x10000u;
+                advance = 2;
+            }
+            else
+            {
+                code_point = 0xFFFDu;
+            }
+        }
+        else if (code_point >= 0xDC00u && code_point <= 0xDFFFu)
+        {
+            code_point = 0xFFFDu;
+        }
+
+        Utf8Result encoding_result = utf8_from_code_point(code_point);
+        char8* allocation = arena_allocate(arena, char8, encoding_result.count);
+
+        for (u32 encoding_i = 0; encoding_i < encoding_result.count; encoding_i += 1)
+        {
+            allocation[encoding_i] = encoding_result.buffer[encoding_i];
+        }
+
+        i += advance;
     }
 
+    u64 result_length = arena->position - position;
     if (null_terminate)
     {
-        pointer[s.length] = 0;
+        *arena_allocate(arena, char8, 1) = 0;
     }
 
-    String8 result = string_from_pointer_length(pointer, s.length);
+    String8 result = string_from_pointer_length((char8*)arena_get_byte_pointer_at_position(arena, position), result_length);
     return result;
 }
-
-String16 string8_to_string16_arena(Arena* arena, String8 s, bool null_terminate)
-{
-    char16* pointer = arena_allocate(arena, char16, s.length + null_terminate);
-    for (u64 i = 0; i < s.length; i += 1)
-    {
-        pointer[i] = s.pointer[i];
-    }
-
-    if (null_terminate)
-    {
-        pointer[s.length] = 0;
-    }
-
-    String16 result = string16_from_pointer_length(pointer, s.length);
-    return result;
-}
-
-// String8 string_os_to_string8_arena(Arena* arena, StringOs string)
-// {
-// #if defined(_WIN32)
-//     return string16_to_string8_arena(arena, s, true);
-// #else
-//     BUSTER_UNUSED(arena);
-//     return string;
-// #endif
-// }
 
 BUSTER_GLOBAL_LOCAL void string_reverse(String8 s)
 {
@@ -529,25 +550,6 @@ BUSTER_GLOBAL_LOCAL void arena_append_string(Arena* arena, String8 string)
     memcpy(destination, string.pointer, sizeof(char8) * string.length);
 }
 
-// template<typename DestinationChar, typename SourceChar>
-// BUSTER_GLOBAL_LOCAL void string_append_slice_different(Arena* arena, String<SourceChar> string)
-// {
-//
-//     if constexpr (BUSTER_TYPE_EQUAL(DestinationChar, SourceChar))
-//     {
-//     let destination = arena_allocate(arena, DestinationChar, string.length);
-//         memcpy(destination, string.pointer, sizeof(SourceChar) * string.length);
-//     }
-//     else
-//     {
-//     let destination = arena_allocate(arena, DestinationChar, string.length);
-//         for (u64 i = 0; i < string.length; i += 1)
-//         {
-//             destination[i] = (DestinationChar)string.pointer[i];
-//         }
-//     }
-// }
-
 BUSTER_GLOBAL_LOCAL void string_append_repeated_code_unit(Arena* arena, char8 code_unit, u64 code_unit_count)
 {
     if (code_unit_count != 0)
@@ -560,46 +562,119 @@ BUSTER_GLOBAL_LOCAL void string_append_repeated_code_unit(Arena* arena, char8 co
     }
 }
 
-String8 string8_slice(String8 slice, u64 start, u64 end)
+BUSTER_GLOBAL_LOCAL bool utf8_code_unit_is_continuation(u8 code_unit)
 {
-    return string_slice(slice, start, end);
+    return (code_unit & 0xC0u) == 0x80u;
 }
 
-typedef struct Utf8Result Utf8Result;
-struct Utf8Result
+BUSTER_GLOBAL_LOCAL Utf8DecodeResult utf8_decode(String8 string, u64 index)
 {
-    char8 buffer[4];
-    u32 count;
-};
+    Utf8DecodeResult result = {
+        .code_point = (u8)string.pointer[index],
+        .advance = 1,
+    };
 
-BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_other(u32 ch)
-{
-    Utf8Result result = {0};
-    result.buffer[0] = (char8)ch;
-    result.count = 1;
-    return result;
-}
+    u8 first = (u8)string.pointer[index];
 
-String8 string8_duplicate_from_string_os(Arena* arena, StringOs string, bool null_terminate)
-{
-    u64 position = arena->position;
-
-    for (u64 i = 0; i < string.length; i += 1)
+    if ((first & 0x80u) == 0)
     {
-        char16 ch16 = string.pointer[i];
-        Utf8Result encoding_result = utf8_from_other(ch16);
-        char8* allocation = arena_allocate(arena, char8, encoding_result.count);
-
-        for (u32 encoding_i = 0; encoding_i < encoding_result.count; encoding_i += 1)
+    }
+    else if ((first & 0xE0u) == 0xC0u && index + 1 < string.length)
+    {
+        u8 second = (u8)string.pointer[index + 1];
+        if (utf8_code_unit_is_continuation(second))
         {
-            allocation[encoding_i] = encoding_result.buffer[encoding_i];
+            u32 code_point = ((u32)(first & 0x1Fu) << 6) | (u32)(second & 0x3Fu);
+            if (code_point >= 0x80u)
+            {
+                result.code_point = code_point;
+                result.advance = 2;
+            }
+        }
+    }
+    else if ((first & 0xF0u) == 0xE0u && index + 2 < string.length)
+    {
+        u8 second = (u8)string.pointer[index + 1];
+        u8 third = (u8)string.pointer[index + 2];
+        if (utf8_code_unit_is_continuation(second) && utf8_code_unit_is_continuation(third))
+        {
+            u32 code_point = ((u32)(first & 0x0Fu) << 12) | ((u32)(second & 0x3Fu) << 6) | (u32)(third & 0x3Fu);
+            if (code_point >= 0x800u && !(code_point >= 0xD800u && code_point <= 0xDFFFu))
+            {
+                result.code_point = code_point;
+                result.advance = 3;
+            }
+        }
+    }
+    else if ((first & 0xF8u) == 0xF0u && index + 3 < string.length)
+    {
+        u8 second = (u8)string.pointer[index + 1];
+        u8 third = (u8)string.pointer[index + 2];
+        u8 fourth = (u8)string.pointer[index + 3];
+        if (utf8_code_unit_is_continuation(second) && utf8_code_unit_is_continuation(third) && utf8_code_unit_is_continuation(fourth))
+        {
+            u32 code_point = ((u32)(first & 0x07u) << 18) | ((u32)(second & 0x3Fu) << 12) | ((u32)(third & 0x3Fu) << 6) | (u32)(fourth & 0x3Fu);
+            if (code_point >= 0x10000u && code_point <= 0x10FFFFu)
+            {
+                result.code_point = code_point;
+                result.advance = 4;
+            }
         }
     }
 
-    u64 result_length = arena->position - position;
-    if (null_terminate) *arena_allocate(arena, char8, 1) = 0;
+    return result;
+}
 
-    String8 result = string_from_pointer_length((char8*)arena_get_byte_pointer(arena, position), result_length);
+BUSTER_GLOBAL_LOCAL u64 utf16_write_code_point(char16* destination, u32 code_point)
+{
+    if (code_point <= 0xFFFFu)
+    {
+        destination[0] = (char16)code_point;
+        return 1;
+    }
+
+    code_point -= 0x10000u;
+    destination[0] = (char16)(0xD800u + (code_point >> 10));
+    destination[1] = (char16)(0xDC00u + (code_point & 0x3FFu));
+    return 2;
+}
+
+BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_code_point(u32 code_point)
+{
+    Utf8Result result = {0};
+
+    if (code_point > 0x10FFFFu || (code_point >= 0xD800u && code_point <= 0xDFFFu))
+    {
+        code_point = 0xFFFDu;
+    }
+
+    if (code_point <= 0x7Fu)
+    {
+        result.buffer[0] = (char8)code_point;
+        result.count = 1;
+    }
+    else if (code_point <= 0x7FFu)
+    {
+        result.buffer[0] = (char8)(0xC0u | (code_point >> 6));
+        result.buffer[1] = (char8)(0x80u | (code_point & 0x3Fu));
+        result.count = 2;
+    }
+    else if (code_point <= 0xFFFFu)
+    {
+        result.buffer[0] = (char8)(0xE0u | (code_point >> 12));
+        result.buffer[1] = (char8)(0x80u | ((code_point >> 6) & 0x3Fu));
+        result.buffer[2] = (char8)(0x80u | (code_point & 0x3Fu));
+        result.count = 3;
+    }
+    else
+    {
+        result.buffer[0] = (char8)(0xF0u | (code_point >> 18));
+        result.buffer[1] = (char8)(0x80u | ((code_point >> 12) & 0x3Fu));
+        result.buffer[2] = (char8)(0x80u | ((code_point >> 6) & 0x3Fu));
+        result.buffer[3] = (char8)(0x80u | (code_point & 0x3Fu));
+        result.count = 4;
+    }
+
     return result;
 }
 
@@ -642,7 +717,6 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 
                 typedef enum FormatTypeId
                 {
-                    FORMAT_TYPE_STRING_OS,
                     FORMAT_TYPE_STRING_OS_LIST,
                     FORMAT_TYPE_STRING8,
                     FORMAT_TYPE_STRING16,
@@ -662,7 +736,6 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     FORMAT_TYPE_COUNT,
                 } FormatTypeId;
                 String8 possible_format_strings[] = {
-                    [FORMAT_TYPE_STRING_OS] = S8("SOs"),
                     [FORMAT_TYPE_STRING_OS_LIST] = S8("SOsL"),
                     [FORMAT_TYPE_STRING8] = S8("S8"),
                     [FORMAT_TYPE_STRING16] = S8("S16"),
@@ -915,26 +988,28 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                 {
                     break; case FORMAT_TYPE_STRING_OS_LIST:
                     {
-                        StringOsList string_os_list = va_arg(variable_arguments, StringOsList);
-                        StringOsListIterator it = string_os_list_iterator_initialize(string_os_list);
-
-                        StringOs string_os;
-
-                        it = string_os_list_iterator_initialize(string_os_list);
-                        while ((string_os = string_os_list_iterator_next(&it)).pointer)
-                        {
-                            string8_duplicate_from_string_os(arena, string_os, false);
-                            *arena_allocate(arena, char8, 1) = ' ';
-                        }
-
-                        // Remove trailing space
-                        arena->position -= 1;
+                        BUSTER_TRAP();
+                        // StringOsList string_os_list = va_arg(variable_arguments, StringOsList);
+                        // StringOsListIterator it = string_os_list_iterator_initialize(string_os_list);
+                        //
+                        // StringOs string_os;
+                        //
+                        // it = string_os_list_iterator_initialize(string_os_list);
+                        // while ((string_os = string_os_list_iterator_next(&it)).pointer)
+                        // {
+                        //     string8_duplicate_from_string_os(arena, string_os, false);
+                        //     *arena_allocate(arena, char8, 1) = ' ';
+                        // }
+                        //
+                        // // Remove trailing space
+                        // arena->position -= 1;
                     }
-                    break; case FORMAT_TYPE_STRING_OS:
-                    {
-                        StringOs string = va_arg(variable_arguments, StringOs);
-                        string8_duplicate_from_string_os(arena, string, false);
-                    }
+                    // break; case FORMAT_TYPE_STRING_OS:
+                    // {
+                    //     BUSTER_TRAP();
+                    //     // StringOs string = va_arg(variable_arguments, StringOs);
+                    //     // string8_duplicate_from_string_os(arena, string, false);
+                    // }
                     break; case FORMAT_TYPE_STRING8:
                     {
                         String8 string = va_arg(variable_arguments, String8);
@@ -1161,11 +1236,12 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     }
                     break; case FORMAT_TYPE_OS_ERROR:
                     {
-                        OsError os_error = va_arg(variable_arguments, OsError);
-                        CharOs error_buffer[BUSTER_OS_ERROR_BUFFER_MAX_LENGTH];
-                        StringOs error_string = os_error_write_message((StringOs)BUSTER_ARRAY_TO_SLICE(error_buffer), os_error);
-
-                        string8_duplicate_from_string_os(arena, error_string, false);
+                        BUSTER_TRAP();
+                        // OsError os_error = va_arg(variable_arguments, OsError);
+                        // CharOs error_buffer[BUSTER_OS_ERROR_BUFFER_MAX_LENGTH];
+                        // StringOs error_string = os_error_write_message((StringOs)BUSTER_ARRAY_TO_SLICE(error_buffer), os_error);
+                        //
+                        // string8_duplicate_from_string_os(arena, error_string, false);
                     }
                     break; case FORMAT_TYPE_COUNT:
                     {
@@ -1205,40 +1281,32 @@ String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate
     return result;
 }
 
-StringOs string_os_duplicate_arena(Arena* arena, StringOs string, bool zero_terminate)
+SliceString8 string16_environment_block_to_slice_string(Arena* arena, const char16* environment_block)
 {
-    StringOs result = { .pointer = arena_allocate(arena, CharOs, string.length + zero_terminate), .length = string.length };
-    memcpy(result.pointer, string.pointer, sizeof(CharOs) * string.length);
-
-    if (zero_terminate)
-    {
-        result.pointer[string.length] = 0;
-    }
-
-    return result;
-}
-
-SliceString8 os_string_list_to_slice_string(Arena* arena, StringOsList string_os_list)
-{
-    StringOsListIterator iterator = string_os_list_iterator_initialize(string_os_list);
-    StringOs s;
+    SliceString8 result = {0};
     u64 string_count = 0;
 
-    while ((s = string_os_list_iterator_next(&iterator)).pointer)
+    if (!environment_block)
+    {
+        return result;
+    }
+
+    // Windows environment blocks are NUL-separated strings terminated by an extra NUL.
+    for (const char16* it = environment_block; *it; it += string16_length(it) + 1)
     {
         string_count += 1;
     }
 
     String8* slices = arena_allocate(arena, String8, string_count);
-    iterator = string_os_list_iterator_initialize(string_os_list);
-
+    const char16* it = environment_block;
     for (u64 i = 0; i < string_count; i += 1)
     {
-        s = string_os_list_iterator_next(&iterator);
-        slices[i] = string8_duplicate_from_string_os(arena, s, true);
+        u64 length = string16_length(it);
+        slices[i] = string8_from_string16(arena, string16_from_pointer_length(it, length), true);
+        it += length + 1;
     }
 
-    SliceString8 result = (SliceString8){ .pointer = slices, .length = string_count };
+    result = (SliceString8){ .pointer = slices, .length = string_count };
     return result;
 }
 
@@ -1346,15 +1414,6 @@ String16 string16_from_pointer(const char16* pointer)
     return (String16){ .pointer = (char16*)pointer, .length = string16_length(pointer) };
 }
 
-StringOs string_os_from_pointer(const CharOs* pointer)
-{
-#if defined(_WIN32)
-    return string16_from_pointer(pointer);
-#else
-    return string_from_pointer(pointer);
-#endif
-}
-
 BUSTER_GLOBAL_LOCAL u64 raw_string16_first_code_unit(const char16* pointer, char16 code_unit)
 {
     u64 result = BUSTER_STRING_NO_MATCH;
@@ -1374,178 +1433,320 @@ BUSTER_GLOBAL_LOCAL u64 raw_string16_first_code_unit(const char16* pointer, char
     return result;
 }
 
-StringOs string_os_list_iterator_next(StringOsListIterator* iterator)
+PosixStringList posix_string_list_from_slice_string(Arena* arena, SliceString8 parts)
 {
-    StringOs result = {0};
-    StringOsList list = iterator->list;
-    u64 original_position = iterator->position;
-    u64 position = original_position;
+    PosixChar** list = arena_allocate(arena, PosixChar*, parts.length + 1);
 
-    CharOs* current;
-#if defined(_WIN32)
-    current = &list[position];
-    if (*current)
-#else
-    current = list[position];
-    if (current)
-#endif
+    for (u64 i = 0; i < parts.length; i += 1)
     {
-#if defined(_WIN32)
-        CharOs* original_pointer = &list[position];
-        CharOs* pointer = original_pointer;
-        if (*pointer == '"')
-        {
-            // TODO: handle escape
-            u64 double_quote = raw_string16_first_code_unit(pointer + 1, '"');
-            if (double_quote == BUSTER_STRING_NO_MATCH)
-            {
-                return result;
-            }
-
-            position += double_quote + 1 + 1;
-            pointer = &list[position];
-        }
-
-        u64 space = raw_string16_first_code_unit(pointer, ' ');
-        bool is_space = space != BUSTER_STRING_NO_MATCH;
-        space = is_space ? space : 0;
-        position += space;
-        position += is_space ? 0 : string16_length(pointer);
-        u64 length = position - original_position;
-
-        if (is_space)
-        {
-            while (list[position] == ' ')
-            {
-                position += 1;
-            }
-        }
-
-        result = string_os_from_pointer_length(original_pointer, length);
-#else
-        position += 1;
-        result = string_os_from_pointer(current);
-#endif
-        iterator->position = position;
+        list[i] = parts.pointer[i].pointer;
     }
 
-    return result;
-}
-
-
-StringOs string_os_from_pointer_length(CharOs* pointer, u64 length)
-{
-#if defined(_WIN32)
-    return string16_from_pointer_length(pointer, length);
-#else
-    return string_from_pointer_length(pointer, length);
-#endif
-}
-
-StringOsList string_os_list_builder_append(OsArgumentBuilder* builder, StringOs arg)
-{
-#if defined(_WIN32)
-    StringOs result = string_os_duplicate_arena(builder->arena, arg, true);
-    if (result.pointer)
-    {
-        result.pointer[arg.length] = ' ';
-    }
-    return result.pointer;
-#else
-    CharOs** result = arena_allocate(builder->arena, CharOs*, 1);
-    if (result)
-    {
-        *result = (CharOs*)arg.pointer;
-    }
-    return result;
-#endif
-}
-
-OsArgumentBuilder* string_os_list_builder_create(Arena* arena, StringOs s)
-{
-    u64 position = arena->position;
-    OsArgumentBuilder* argument_builder = arena_allocate(arena, OsArgumentBuilder, 1);
-    if (argument_builder)
-    {
-        *argument_builder = (OsArgumentBuilder) {
-            .argv = 0,
-                .arena = arena,
-                .arena_offset = position,
-        };
-        argument_builder->argv = string_os_list_builder_append(argument_builder, s);
-    }
-    return argument_builder;
-}
-
-StringOsList string_os_list_builder_end(OsArgumentBuilder* restrict builder)
-{
-#if defined(_WIN32)
-    *(CharOs*)((u8*)builder->arena + builder->arena->position - sizeof(CharOs)) = 0;
-#else
-    string_os_list_builder_append(builder, (StringOs){0});
-#endif
-    return builder->argv;
-}
-
-StringOsList string_os_list_create_from(Arena* arena, SliceStringOs arguments)
-{
-#if defined(_WIN32)
-    u64 allocation_length = 0;
-
-    for (u64 i = 0; i < arguments.length; i += 1)
-    {
-        allocation_length += arguments.pointer[i].length + 1;
-    }
-
-    CharOs* allocation = arena_allocate(arena, CharOs, allocation_length);
-
-    for (u64 source_i = 0, destination_i = 0; source_i < arguments.length; source_i += 1)
-    {
-        StringOs source_argument = arguments.pointer[source_i];
-        memcpy(&allocation[destination_i], source_argument.pointer, BUSTER_SLICE_SIZE(source_argument));
-        destination_i += source_argument.length;
-        allocation[destination_i] = ' ';
-        destination_i += 1;
-    }
-
-    allocation[allocation_length - 1] = 0;
-
-    return allocation;
-#else
-    CharOs** list = arena_allocate(arena, CharOs*, arguments.length + 1);
-
-    for (u64 i = 0; i < arguments.length; i += 1)
-    {
-        list[i] = arguments.pointer[i].pointer;
-    }
-
-    list[arguments.length] = 0;
+    list[parts.length] = 0;
 
     return list;
-#endif
 }
 
-// TODO: make this better
+SliceString8 slice_string_from_posix_string_list(Arena* arena, PosixStringList string_list)
+{
+    SliceString8 result = {0};
+    u64 string_count = 0;
+
+    if (string_list)
+    {
+        while (string_list[string_count])
+        {
+            string_count += 1;
+        }
+    }
+
+    if (string_count)
+    {
+        String8* strings = arena_allocate(arena, String8, string_count);
+        for (u64 i = 0; i < string_count; i += 1)
+        {
+            strings[i] = string_from_pointer(string_list[i]);
+        }
+
+        result = (SliceString8){ .pointer = strings, .length = string_count };
+    }
+
+    return result;
+}
+
+SliceString8 slice_string_from_windows_string_list(Arena* arena, WindowsStringList command_line)
+{
+    SliceString8 result = {0};
+    if (!command_line)
+    {
+        return result;
+    }
+
+    u64 command_line_length = string16_length(command_line);
+    String8* strings = arena_allocate(arena, String8, command_line_length + 1);
+    u64 string_count = 0;
+
+    for (u64 i = 0; i < command_line_length;)
+    {
+        while (i < command_line_length && (command_line[i] == ' ' || command_line[i] == '\t'))
+        {
+            i += 1;
+        }
+
+        if (i >= command_line_length)
+        {
+            break;
+        }
+
+        char16* argument = arena_allocate(arena, char16, command_line_length - i + 1);
+        u64 argument_length = 0;
+        bool in_quotes = false;
+
+        while (i < command_line_length)
+        {
+            char16 c = command_line[i];
+            if (!in_quotes && (c == ' ' || c == '\t'))
+            {
+                break;
+            }
+
+            if (c == '\\')
+            {
+                u64 backslash_count = 0;
+                while (i < command_line_length && command_line[i] == '\\')
+                {
+                    backslash_count += 1;
+                    i += 1;
+                }
+
+                if (i < command_line_length && command_line[i] == '"')
+                {
+                    for (u64 backslash_i = 0; backslash_i < backslash_count / 2; backslash_i += 1)
+                    {
+                        argument[argument_length] = '\\';
+                        argument_length += 1;
+                    }
+
+                    if (backslash_count & 1)
+                    {
+                        argument[argument_length] = '"';
+                        argument_length += 1;
+                    }
+                    else
+                    {
+                        in_quotes = !in_quotes;
+                    }
+                    i += 1;
+                }
+                else
+                {
+                    for (u64 backslash_i = 0; backslash_i < backslash_count; backslash_i += 1)
+                    {
+                        argument[argument_length] = '\\';
+                        argument_length += 1;
+                    }
+                }
+            }
+            else if (c == '"')
+            {
+                in_quotes = !in_quotes;
+                i += 1;
+            }
+            else
+            {
+                argument[argument_length] = c;
+                argument_length += 1;
+                i += 1;
+            }
+        }
+
+        argument[argument_length] = 0;
+        strings[string_count] = string8_from_string16(arena, (String16){ .pointer = argument, .length = argument_length }, true);
+        string_count += 1;
+    }
+
+    result = (SliceString8){ .pointer = strings, .length = string_count };
+    return result;
+}
+
 String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate)
 {
     char16* pointer = arena_allocate(arena, char16, string.length + null_terminate);
+    u64 result_length = 0;
 
-    for (u64 i = 0; i < string.length; i += 1)
+    for (u64 i = 0; i < string.length;)
     {
-        pointer[i] = string.pointer[i];
+        Utf8DecodeResult decoded = utf8_decode(string, i);
+        result_length += utf16_write_code_point(pointer + result_length, decoded.code_point);
+        i += decoded.advance;
     }
 
     if (null_terminate)
     {
-        pointer[string.length] = 0;
+        pointer[result_length] = 0;
     }
 
-    String16 result = (String16) { .pointer = pointer, .length = string.length };
+    String16 result = (String16) { .pointer = pointer, .length = result_length };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool windows_command_line_argument_needs_quotes(String8 string)
+{
+    bool result = string.length == 0;
+    for (u64 i = 0; i < string.length; i += 1)
+    {
+        char8 c = string.pointer[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '"')
+        {
+            result = true;
+            break;
+        }
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void append_byte_repeated(Arena* arena, char8 byte, u64 count)
+{
+    if (count)
+    {
+        char8* destination = arena_allocate(arena, char8, count);
+        for (u64 i = 0; i < count; i += 1)
+        {
+            destination[i] = byte;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL String8 windows_command_line_quote_argument(Arena* arena, String8 string)
+{
+    u64 position = arena->position;
+    *arena_allocate(arena, char8, 1) = '"';
+
+    u64 backslash_count = 0;
+    for (u64 i = 0; i < string.length; i += 1)
+    {
+        char8 c = string.pointer[i];
+        if (c == '\\')
+        {
+            backslash_count += 1;
+        }
+        else if (c == '"')
+        {
+            append_byte_repeated(arena, '\\', backslash_count * 2 + 1);
+            *arena_allocate(arena, char8, 1) = '"';
+            backslash_count = 0;
+        }
+        else
+        {
+            append_byte_repeated(arena, '\\', backslash_count);
+            *arena_allocate(arena, char8, 1) = c;
+            backslash_count = 0;
+        }
+    }
+
+    append_byte_repeated(arena, '\\', backslash_count * 2);
+    *arena_allocate(arena, char8, 1) = '"';
+
+    String8 result = string_from_pointer_length((char8*)arena_get_byte_pointer_at_position(arena, position), arena->position - position);
+    return result;
+}
+
+WindowsStringList windows_string_list_from_slice_string(Arena* arena, SliceString8 strings)
+{
+    char16* result = arena_get_current_pointer(arena, char16);
+    for (u64 string_i = 0; string_i < strings.length; string_i += 1)
+    {
+        if (string_i > 0)
+        {
+            *arena_allocate(arena, char16, 1) = ' ';
+        }
+
+        String8 string8 = strings.pointer[string_i];
+        if (windows_command_line_argument_needs_quotes(string8))
+        {
+            TemporalArena temp = scratch_begin(0, 0);
+            string8 = windows_command_line_quote_argument(temp.arena, string8);
+            string16_from_string8(arena, string8, false);
+            scratch_end(temp);
+        }
+        else
+        {
+            string16_from_string8(arena, string8, false);
+        }
+    }
+
+    *arena_allocate(arena, char16, 1) = 0;
+    return result;
+}
+
+WindowsStringList windows_environment_block_from_slice_string(Arena* arena, SliceString8 environment)
+{
+    char16* result = arena_get_current_pointer(arena, char16);
+    for (u64 environment_i = 0; environment_i < environment.length; environment_i += 1)
+    {
+        string16_from_string8(arena, environment.pointer[environment_i], false);
+        *arena_allocate(arena, char16, 1) = 0;
+    }
+
+    *arena_allocate(arena, char16, 1) = 0;
+    return result;
+}
+
+char* const* slice_string8_to_null_terminated_array_char(Arena* arena, SliceString8 strings)
+{
+    TemporalArena temp = scratch_begin(0, 0);
+    char** result = arena_allocate(arena, char*, strings.length + 1);
+    for (u64 i = 0; i < strings.length; i += 1)
+    {
+        result[i] = string_duplicate_arena(arena, strings.pointer[i], true).pointer;
+    }
+    scratch_end(temp);
+    result[strings.length] = 0;
     return result;
 }
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
+
+#if defined(_WIN32)
+#define BUSTER_UNICODE_OS_TO_UTF8_TEST(args, arena_value, utf8_value, utf16_value) do \
+{ \
+    String8 unicode_utf8_from_os = string8_from_string16((arena_value), (utf16_value), true); \
+    BUSTER_STRING_TEST((args), unicode_utf8_from_os, (utf8_value)); \
+    BUSTER_TEST_RAW((args), unicode_utf8_from_os.pointer[unicode_utf8_from_os.length] == 0, S8("string8_duplicate_from_string_os did not write a terminator")); \
+} while (0)
+#else
+#define BUSTER_UNICODE_OS_TO_UTF8_TEST(args, arena_value, utf8_value, utf16_value) do \
+{ \
+    BUSTER_UNUSED(utf16_value); \
+    String8 unicode_utf8_from_os = (utf8_value); \
+    BUSTER_STRING_TEST((args), unicode_utf8_from_os, (utf8_value)); \
+    BUSTER_TEST_RAW((args), unicode_utf8_from_os.pointer[unicode_utf8_from_os.length] == 0, S8("string8_duplicate_from_string_os did not write a terminator")); \
+} while (0)
+#endif
+
+#define BUSTER_UNICODE_ROUND_TRIP_TEST(args, arena_value, utf8_value, utf16_value) do \
+{ \
+    String8 unicode_utf8 = (utf8_value); \
+    String16 unicode_expected_utf16 = (utf16_value); \
+    String16 unicode_utf16 = string16_from_string8((arena_value), unicode_utf8, true); \
+    BUSTER_TEST_RAW((args), string16_equal(unicode_utf16, unicode_expected_utf16), S8("string16_from_string8 Unicode decode mismatch")); \
+    BUSTER_TEST_RAW((args), unicode_utf16.pointer[unicode_utf16.length] == 0, S8("string16_from_string8 did not write a terminator")); \
+    String8 unicode_utf8_round_trip = string8_from_string16((arena_value), unicode_utf16, true); \
+    BUSTER_STRING_TEST((args), unicode_utf8_round_trip, unicode_utf8); \
+    BUSTER_TEST_RAW((args), unicode_utf8_round_trip.pointer[unicode_utf8_round_trip.length] == 0, S8("string16_to_string8_arena did not write a terminator")); \
+    BUSTER_UNICODE_OS_TO_UTF8_TEST((args), (arena_value), unicode_utf8, unicode_expected_utf16); \
+} while (0)
+
+#define BUSTER_UTF16_TO_UTF8_TEST(args, arena_value, utf16_value, expected_utf8_value) do \
+{ \
+    String16 unicode_utf16 = (utf16_value); \
+    String8 unicode_expected_utf8 = (expected_utf8_value); \
+    String8 unicode_utf8 = string8_from_string16((arena_value), unicode_utf16, true); \
+    BUSTER_STRING_TEST((args), unicode_utf8, unicode_expected_utf8); \
+    BUSTER_TEST_RAW((args), unicode_utf8.pointer[unicode_utf8.length] == 0, S8("string16_to_string8_arena did not write a terminator")); \
+} while (0)
 
 UnitTestResult string_tests(UnitTestArguments* arguments)
 {
@@ -1560,6 +1761,45 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         {
             String8 formatted = string_format(arena, S8("async_thread_{u64}"), (u64)7);
             BUSTER_STRING_TEST(arguments, formatted, S8("async_thread_7"));
+        }
+        {
+            char8 utf8_bytes[] = {
+                'J', 'o', 's', (char8)0xC3, (char8)0xA9, '/',
+                (char8)0xF0, (char8)0x9F, (char8)0x98, (char8)0x80, 0
+            };
+            char16 utf16_bytes[] = { 'J', 'o', 's', 0x00E9, '/', 0xD83D, 0xDE00, 0 };
+            BUSTER_UNICODE_ROUND_TRIP_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 10), string16_from_pointer_length(utf16_bytes, 7));
+        }
+        {
+            char8 utf8_bytes[] = {
+                'A',
+                (char8)0xC3, (char8)0xA9,
+                (char8)0xE2, (char8)0x82, (char8)0xAC,
+                (char8)0xF0, (char8)0x9F, (char8)0x98, (char8)0x80,
+                0
+            };
+            char16 utf16_bytes[] = { 'A', 0x00E9, 0x20AC, 0xD83D, 0xDE00, 0 };
+            BUSTER_UNICODE_ROUND_TRIP_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 10), string16_from_pointer_length(utf16_bytes, 5));
+        }
+        {
+            char8 utf8_bytes[] = {
+                '[',
+                (char8)0xF4, (char8)0x8F, (char8)0xBF, (char8)0xBF,
+                ']',
+                0
+            };
+            char16 utf16_bytes[] = { '[', 0xDBFF, 0xDFFF, ']', 0 };
+            BUSTER_UNICODE_ROUND_TRIP_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 6), string16_from_pointer_length(utf16_bytes, 4));
+        }
+        {
+            char16 utf16_bytes[] = { 'A', 0xD83D, 'B', 0 };
+            char8 utf8_bytes[] = { 'A', (char8)0xEF, (char8)0xBF, (char8)0xBD, 'B', 0 };
+            BUSTER_UTF16_TO_UTF8_TEST(arguments, arena, string16_from_pointer_length(utf16_bytes, 3), string_from_pointer_length(utf8_bytes, 5));
+        }
+        {
+            char16 utf16_bytes[] = { 'A', 0xDE00, 'B', 0 };
+            char8 utf8_bytes[] = { 'A', (char8)0xEF, (char8)0xBF, (char8)0xBD, 'B', 0 };
+            BUSTER_UTF16_TO_UTF8_TEST(arguments, arena, string16_from_pointer_length(utf16_bytes, 3), string_from_pointer_length(utf8_bytes, 5));
         }
 
         enum UnsignedFormatTestCase
@@ -6779,140 +7019,223 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
 
     // string_first_sequence
     {
-        {
-            // Basic match at start
-            bool success = string_first_sequence(S8("hello world"), S8("hello")) == 0;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // Match in middle
-            bool success = string_first_sequence(S8("hello world"), S8("world")) == 6;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // Match at end
-            bool success = string_first_sequence(S8("hello.txt"), S8(".txt")) == 5;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // No match
-            bool success = string_first_sequence(S8("hello world"), S8("foo")) == BUSTER_STRING_NO_MATCH;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // Empty substring matches at 0
-            bool success = string_first_sequence(S8("hello"), S8("")) == 0;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // Empty string with empty substring
-            bool success = string_first_sequence(S8(""), S8("")) == 0;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // Empty string with non-empty substring
-            bool success = string_first_sequence(S8(""), S8("a")) == BUSTER_STRING_NO_MATCH;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // Substring longer than string
-            bool success = string_first_sequence(S8("hi"), S8("hello")) == BUSTER_STRING_NO_MATCH;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // Exact match
-            bool success = string_first_sequence(S8("abc"), S8("abc")) == 0;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // Multiple occurrences - should return first
-            bool success = string_first_sequence(S8("abcabc"), S8("abc")) == 0;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // Single character match
-            bool success = string_first_sequence(S8("hello"), S8("l")) == 2;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            // Partial match should not count
-            bool success = string_first_sequence(S8("abcd"), S8("abd")) == BUSTER_STRING_NO_MATCH;
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
+        // Basic match at start
+        BUSTER_TEST(arguments, string_first_sequence(S8("hello world"), S8("hello")) == 0);
+        // Match in middle
+        BUSTER_TEST(arguments, string_first_sequence(S8("hello world"), S8("world")) == 6);
+        // Match at end
+        BUSTER_TEST(arguments, string_first_sequence(S8("hello.txt"), S8(".txt")) == 5);
+        // No match
+        BUSTER_TEST(arguments, string_first_sequence(S8("hello world"), S8("foo")) == BUSTER_STRING_NO_MATCH);
+        // Empty substring matches at 0
+        BUSTER_TEST(arguments, string_first_sequence(S8("hello"), S8("")) == 0);
+        // Empty string with empty substring
+        BUSTER_TEST(arguments, string_first_sequence(S8(""), S8("")) == 0);
+        // Empty string with non-empty substring
+        BUSTER_TEST(arguments, string_first_sequence(S8(""), S8("a")) == BUSTER_STRING_NO_MATCH);
+        // Substring longer than string
+        BUSTER_TEST(arguments, string_first_sequence(S8("hi"), S8("hello")) == BUSTER_STRING_NO_MATCH);
+        // Exact match
+        BUSTER_TEST(arguments, string_first_sequence(S8("abc"), S8("abc")) == 0);
+        // Multiple occurrences - should return first
+        BUSTER_TEST(arguments, string_first_sequence(S8("abcabc"), S8("abc")) == 0);
+        // Single character match
+        BUSTER_TEST(arguments, string_first_sequence(S8("hello"), S8("l")) == 2);
+        // Partial match should not count
+        BUSTER_TEST(arguments, string_first_sequence(S8("abcd"), S8("abd")) == BUSTER_STRING_NO_MATCH);
     }
 
     // string_ends_with_sequence
     {
+            BUSTER_TEST(arguments, string_ends_with_sequence(S8("hello.txt"), S8(".txt")));
+            BUSTER_TEST(arguments, string_ends_with_sequence(S8("test.vert.spv"), S8(".vert.spv")));
+            BUSTER_TEST(arguments, string_ends_with_sequence(S8("abc"), S8("abc")));
+            BUSTER_TEST(arguments, string_ends_with_sequence(S8("hello"), S8("")));
+            BUSTER_TEST(arguments, !string_ends_with_sequence(S8("hello.txt"), S8(".c")));
+            BUSTER_TEST(arguments, !string_ends_with_sequence(S8("ab"), S8("abc")));
+            BUSTER_TEST(arguments, !string_ends_with_sequence(S8("hi"), S8("hello")));
+            BUSTER_TEST(arguments, string_ends_with_sequence(S8(""), S8("")));
+            BUSTER_TEST(arguments, !string_ends_with_sequence(S8(""), S8("a")));
+            BUSTER_TEST(arguments, !string_ends_with_sequence(S8("abcde"), S8("cdf")));
+            BUSTER_TEST(arguments, !string_ends_with_sequence(S8("txtfile"), S8("txt")));
+    }
+
+    {
+        PosixChar first[] = "faa";
+        PosixChar second[] = "fee";
+        PosixChar empty[] = "";
+        PosixChar* const posix_string_list[] = { first, second, empty, 0 };
+
+        SliceString8 strings = slice_string_from_posix_string_list(arena, posix_string_list);
+        BUSTER_TEST(arguments, strings.length == 3);
+        BUSTER_TEST(arguments, string_equal(strings.pointer[0], S8("faa")));
+        BUSTER_TEST(arguments, string_equal(strings.pointer[1], S8("fee")));
+        BUSTER_TEST(arguments, string_equal(strings.pointer[2], S8("")));
+    }
+
+    {
         {
-            bool success = string_ends_with_sequence(S8("hello.txt"), S8(".txt"));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
+            String8 parts[] = {
+                S8("faa"),
+                S8("fee"),
+                S8("fii"),
+                S8("foo"),
+                S8("fuu"),
+            };
+            const char16* win32_string_raw = windows_string_list_from_slice_string(arena, (SliceString8) BUSTER_ARRAY_TO_SLICE(parts));
+            String16 win32_string = string16_from_pointer(win32_string_raw);
+            char16 expected_win32_string_raw[] = {
+                'f', 'a', 'a', ' ',
+                'f', 'e', 'e', ' ',
+                'f', 'i', 'i', ' ',
+                'f', 'o', 'o', ' ',
+                'f', 'u', 'u', 0
+            };
+            String16 expected_win32_string = (String16) {
+                .pointer = expected_win32_string_raw,
+                .length = BUSTER_ARRAY_LENGTH(expected_win32_string_raw) - 1,
+            };
+            BUSTER_TEST(arguments, string16_equal(win32_string, expected_win32_string));
         }
         {
-            bool success = string_ends_with_sequence(S8("test.vert.spv"), S8(".vert.spv"));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
+            String8 parts[] = {
+                S8("program"),
+                S8("two words"),
+                S8("quote\"arg"),
+                S8("slash\\"),
+                S8("trail\\"),
+                S8(""),
+                S8("C:\\Program Files\\"),
+                S8("a\\\"b"),
+            };
+            const char16* win32_string_raw = windows_string_list_from_slice_string(arena, (SliceString8) BUSTER_ARRAY_TO_SLICE(parts));
+            String16 win32_string = string16_from_pointer(win32_string_raw);
+            String16 expected_win32_string = string16_from_string8(
+                arena,
+                S8("program \"two words\" \"quote\\\"arg\" slash\\ trail\\ \"\" \"C:\\Program Files\\\\\" \"a\\\\\\\"b\""),
+                false
+            );
+            BUSTER_TEST(arguments, string16_equal(win32_string, expected_win32_string));
         }
         {
-            bool success = string_ends_with_sequence(S8("abc"), S8("abc"));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
+            String16 command_line = string16_from_string8(
+                arena,
+                S8("program \"two words\" \"quote\\\"arg\" slash\\ trail\\ \"\" \"C:\\Program Files\\\\\" \"a\\\\\\\"b\""),
+                true
+            );
+            SliceString8 parts = slice_string_from_windows_string_list(arena, command_line.pointer);
+            BUSTER_TEST(arguments, parts.length == 8);
+            BUSTER_TEST(arguments, string_equal(parts.pointer[0], S8("program")));
+            BUSTER_TEST(arguments, string_equal(parts.pointer[1], S8("two words")));
+            BUSTER_TEST(arguments, string_equal(parts.pointer[2], S8("quote\"arg")));
+            BUSTER_TEST(arguments, string_equal(parts.pointer[3], S8("slash\\")));
+            BUSTER_TEST(arguments, string_equal(parts.pointer[4], S8("trail\\")));
+            BUSTER_TEST(arguments, string_equal(parts.pointer[5], S8("")));
+            BUSTER_TEST(arguments, string_equal(parts.pointer[6], S8("C:\\Program Files\\")));
+            BUSTER_TEST(arguments, string_equal(parts.pointer[7], S8("a\\\"b")));
         }
         {
-            bool success = string_ends_with_sequence(S8("hello"), S8(""));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
+            String16 command_line = string16_from_string8(arena, S8(" \t program\targ  \"\"  final"), true);
+            SliceString8 parts = slice_string_from_windows_string_list(arena, command_line.pointer);
+            BUSTER_TEST(arguments, parts.length == 4);
+            BUSTER_TEST(arguments, string_equal(parts.pointer[0], S8("program")));
+            BUSTER_TEST(arguments, string_equal(parts.pointer[1], S8("arg")));
+            BUSTER_TEST(arguments, string_equal(parts.pointer[2], S8("")));
+            BUSTER_TEST(arguments, string_equal(parts.pointer[3], S8("final")));
+        }
+    }
+
+    {
+        const char16 environment_block[] = {
+            'U', 'S', 'E', 'R', '=', 'd', 'a', 'v', 'i', 'd', 0,
+            'P', 'R', 'O', 'G', 'R', 'A', 'M', '_', 'F', 'I', 'L', 'E', 'S', '=',
+            'C', ':', '\\', 'P', 'r', 'o', 'g', 'r', 'a', 'm', ' ', 'F', 'i', 'l', 'e', 's', 0,
+            'E', 'M', 'P', 'T', 'Y', '=', 0,
+            0,
+        };
+        SliceString8 environment = string16_environment_block_to_slice_string(arena, environment_block);
+        BUSTER_TEST(arguments, environment.length == 3);
+        BUSTER_TEST(arguments, string_equal(environment.pointer[0], S8("USER=david")));
+        BUSTER_TEST(arguments, string_equal(environment.pointer[1], S8("PROGRAM_FILES=C:\\Program Files")));
+        BUSTER_TEST(arguments, string_equal(environment.pointer[2], S8("EMPTY=")));
+    }
+    {
+        String8 environment[] = {
+            S8("USER=david"),
+            S8("PROGRAM_FILES=C:\\Program Files"),
+            S8("EMPTY="),
+        };
+        const char16* environment_block = windows_environment_block_from_slice_string(arena, (SliceString8) BUSTER_ARRAY_TO_SLICE(environment));
+        const char16 expected_environment_block[] = {
+            'U', 'S', 'E', 'R', '=', 'd', 'a', 'v', 'i', 'd', 0,
+            'P', 'R', 'O', 'G', 'R', 'A', 'M', '_', 'F', 'I', 'L', 'E', 'S', '=',
+            'C', ':', '\\', 'P', 'r', 'o', 'g', 'r', 'a', 'm', ' ', 'F', 'i', 'l', 'e', 's', 0,
+            'E', 'M', 'P', 'T', 'Y', '=', 0,
+            0,
+        };
+        String16 environment_block_string = string16_from_pointer_length(environment_block, BUSTER_ARRAY_LENGTH(expected_environment_block) - 1);
+        String16 expected_environment_block_string = string16_from_pointer_length(expected_environment_block, BUSTER_ARRAY_LENGTH(expected_environment_block) - 1);
+        BUSTER_TEST(arguments, string16_equal(environment_block_string, expected_environment_block_string));
+
+        SliceString8 round_trip = string16_environment_block_to_slice_string(arena, environment_block);
+        BUSTER_TEST(arguments, round_trip.length == 3);
+        BUSTER_TEST(arguments, string_equal(round_trip.pointer[0], S8("USER=david")));
+        BUSTER_TEST(arguments, string_equal(round_trip.pointer[1], S8("PROGRAM_FILES=C:\\Program Files")));
+        BUSTER_TEST(arguments, string_equal(round_trip.pointer[2], S8("EMPTY=")));
+    }
+    {
+        SliceString8 environment = {0};
+        const char16* environment_block = windows_environment_block_from_slice_string(arena, environment);
+        BUSTER_TEST(arguments, environment_block[0] == 0);
+    }
+
+    {
+        {
+            String8 s = S8("hello");
+            BUSTER_TEST(arguments, s.length == 5);
         }
         {
-            bool success = !string_ends_with_sequence(S8("hello.txt"), S8(".c"));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
+            String8 s = S8("ñ");
+            BUSTER_TEST(arguments, s.length == 2);
         }
         {
-            bool success = !string_ends_with_sequence(S8("ab"), S8("abc"));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
+            String8 s = S8("€");
+            BUSTER_TEST(arguments, s.length == 3);
         }
         {
-            bool success = !string_ends_with_sequence(S8("hi"), S8("hello"));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
+            String8 s = S8("😀");
+            BUSTER_TEST(arguments, s.length == 4);
+        }
+    }
+
+    {
+        {
+            char16 hello_raw[] = { 'h', 'e', 'l', 'l', 'o', 0 };
+            String16 s = (String16) { .pointer = hello_raw, .length = BUSTER_ARRAY_LENGTH(hello_raw) - 1 };
+            BUSTER_TEST(arguments, s.length == 5);
         }
         {
-            bool success = string_ends_with_sequence(S8(""), S8(""));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
+            char16 enye_raw[] = { 0x00F1, 0 };
+            String16 s = (String16) { .pointer = enye_raw, .length = BUSTER_ARRAY_LENGTH(enye_raw) - 1 };
+            BUSTER_TEST(arguments, s.length == 1);
         }
         {
-            bool success = !string_ends_with_sequence(S8(""), S8("a"));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
+            char16 euro_raw[] = { 0x20AC, 0 };
+            String16 s = (String16) { .pointer = euro_raw, .length = BUSTER_ARRAY_LENGTH(euro_raw) - 1 };
+            BUSTER_TEST(arguments, s.length == 1);
         }
         {
-            bool success = !string_ends_with_sequence(S8("abcde"), S8("cdf"));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
-        }
-        {
-            bool success = !string_ends_with_sequence(S8("txtfile"), S8("txt"));
-            result.succeeded_test_count += success;
-            result.test_count += 1;
+            char16 grinning_face_raw[] = { 0xD83D, 0xDE00, 0 };
+            String16 s = (String16) { .pointer = grinning_face_raw, .length = BUSTER_ARRAY_LENGTH(grinning_face_raw) - 1 };
+            BUSTER_TEST(arguments, s.length == 2);
         }
     }
 
     return result;
 }
+
+#undef BUSTER_UTF16_TO_UTF8_TEST
+#undef BUSTER_UNICODE_ROUND_TRIP_TEST
+#undef BUSTER_UNICODE_OS_TO_UTF8_TEST
 
 #endif

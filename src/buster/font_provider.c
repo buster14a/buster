@@ -59,13 +59,13 @@ StringOs font_file_get_path(Arena* arena, FontIndex index)
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(table) == (u64)FONT_INDEX_COUNT);
 //     StringOs mono_path =
 // #if defined(_WIN32)
-//     SOs("C:/Users/David/Downloads/Fira_Sans/FiraSans-Regular.ttf");
+//     S8("C:/Users/David/Downloads/Fira_Sans/FiraSans-Regular.ttf");
 // #elif defined(__linux__)
-//     SOs("/usr/share/fonts/TTF/FiraSans-Regular.ttf");
+//     S8("/usr/share/fonts/TTF/FiraSans-Regular.ttf");
 // #elif defined(__APPLE__)
-//     SOs("/Users/david/Library/Fonts/FiraSans-Regular.ttf");
+//     S8("/Users/david/Library/Fonts/FiraSans-Regular.ttf");
 // #else
-//     SOs("WRONG_PATH");
+//     S8("WRONG_PATH");
 // #endif
 
 

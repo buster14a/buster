@@ -74,7 +74,7 @@ bool file_copy(CopyFileArguments arguments)
         }
         else
         {
-            string_print(S8("Error message: {EOs}. Original: {SOs}. New: {SOs}\n"), os_get_last_error(), arguments.original_path, arguments.new_path);
+            string_print(S8("Error message: {EOs}. Original: {S8}. New: {S8}\n"), os_get_last_error(), arguments.original_path, arguments.new_path);
             os_fail();
         }
     }

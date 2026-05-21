@@ -1806,9 +1806,9 @@ void parser_experiments(void)
     parse_experiment(arena, S8("tests/basic_hexadecimal.bbb"));
     parse_experiment(arena, S8("tests/basic_octal.bbb"));
     parse_experiment(arena, S8("tests/basic_binary.bbb"));
-    // parse_experiment(arena, SOs("tests/basic_sum.bbb"));
-    // parse_experiment(arena, SOs("tests/if_else.bbb"));
-    // parse_experiment(arena, SOs("tests/array_slices.bbb"));
+    // parse_experiment(arena, S8("tests/basic_sum.bbb"));
+    // parse_experiment(arena, S8("tests/if_else.bbb"));
+    // parse_experiment(arena, S8("tests/array_slices.bbb"));
 }
 
 #if BUSTER_INCLUDE_TESTS

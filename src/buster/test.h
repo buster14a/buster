@@ -16,17 +16,25 @@ struct BatchTestResult
 };
 
 #define BUSTER_TEST_ERROR(format, ...) buster_test_error(__LINE__, BUSTER_FUNCTION, S8(__FILE__), (format), __VA_ARGS__);
+#define BUSTER_TEST_RAW(args, boolean, log) \
+do \
+{\
+    bool success_ = (boolean);\
+    if (BUSTER_UNLIKELY(!(success_)))\
+    {\
+        buster_test_error(__LINE__, BUSTER_FUNCTION, S8(__FILE__), log);\
+    }\
+    result.succeeded_test_count += (success_);\
+    result.test_count += 1;\
+} while (0)
+
+#define BUSTER_TEST(args, boolean) BUSTER_TEST_RAW((args), (boolean), S8(#boolean))
+
 #define BUSTER_STRING_TEST(args, a, b) do\
 {\
     String8 string_a = (a);\
     String8 string_b = (b);\
-    bool success_ = string_equal(string_a, string_b);\
-    if (BUSTER_UNLIKELY(!(success_)))\
-    {\
-        buster_test_error(__LINE__, BUSTER_FUNCTION, S8(__FILE__), S8(#a "!=" #b));\
-    }\
-    result.succeeded_test_count += (success_);\
-    result.test_count += 1;\
+    BUSTER_TEST_RAW((args), string_equal(string_a, string_b), S8(#a "!=" #b));\
 } while (0)
 
 #if defined(_WIN32)

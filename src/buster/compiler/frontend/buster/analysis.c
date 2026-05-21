@@ -812,7 +812,7 @@
 // BUSTER_F_IMPL void analysis_experiments()
 // {
 //     Arena* arena = arena_create({});
-//     let source = BYTE_SLICE_TO_STRING(8, file_read(arena, SOs("tests/basic.bbb"), {}));
+//     let source = BYTE_SLICE_TO_STRING(8, file_read(arena, S8("tests/basic.bbb"), {}));
 //     let parser = parse(source.pointer, tokenize(arena, source.pointer, source.length));
 //     analyze(&parser, 1);
 // }

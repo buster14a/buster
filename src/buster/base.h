@@ -420,7 +420,6 @@ typedef enum IntegerFormat
 #else
 typedef char char8_t;
 typedef u16 char16_t;
-typedef u32 char32_t;
 #endif
 
 #if defined(_WIN32)
@@ -441,16 +440,6 @@ typedef wchar_t char16;
 typedef char16_t char16;
 #endif
 BUSTER_CT_CHECK(sizeof(char16) == 2);
-#if defined(_WIN32)
-#if defined(__TINYC__)
-typedef uint32_t char32;
-#else
-typedef char32_t char32;
-#endif
-#else
-typedef wchar_t char32;
-#endif
-BUSTER_CT_CHECK(sizeof(char32) == 4);
 
 typedef struct String8 String8;
 struct String8
@@ -481,9 +470,7 @@ struct SliceString16
 };
 
 #define S8_INITIALIZER(strlit) { .pointer = (char8*)(strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) }
-#define S16_INITIALIZER(strlit) { .pointer = (char16*)(u ## strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) }
 #define S8(strlit) ((String8) S8_INITIALIZER(strlit))
-#define S16(strlit) ((String16) S16_INITIALIZER(strlit))
 
 // Math types and enums for UI
 typedef enum Axis2
@@ -539,24 +526,30 @@ typedef struct Thread Thread;
 typedef struct Arena Arena;
 typedef ProcessResult ThreadEntryPoint(void);
 
+#if defined(_WIN32)
+typedef wchar_t WindowsChar;
+#else
+typedef char16 WindowsChar;
+#endif
+BUSTER_CT_CHECK(sizeof(WindowsChar) == 2);
+
+typedef char8 PosixChar;
+BUSTER_CT_CHECK(sizeof(PosixChar) == 1);
 
 #if defined(_WIN32)
-typedef String16 StringOs;
-typedef wchar_t CharOs;
-BUSTER_CT_CHECK(sizeof(CharOs) == 2);
-typedef CharOs* StringOsList;
-typedef SliceString16 SliceStringOs;
-#define SOs(x) S16(x)
+typedef WindowsChar CharOs;
 #else
-typedef String8 StringOs;
-typedef char CharOs;
-BUSTER_CT_CHECK(sizeof(CharOs) == 1);
-typedef CharOs** StringOsList;
-typedef SliceString8 SliceStringOs;
-#define SOs(x) S8(x)
+typedef PosixChar CharOs;
 #endif
 
-#define BUSTER_SLICE(p, l) (Slice<decltype(*(p))>){ .pointer = (typeof(*(p))*) (p), .length = (l) }
+typedef PosixChar* const* PosixStringList;
+typedef WindowsChar* WindowsStringList;
+
+#if defined(_WIN32)
+typedef WindowsStringList StringOsList;
+#else
+typedef PosixStringList StringOsList;
+#endif
 
 typedef struct TextureIndex TextureIndex;
 struct TextureIndex
@@ -594,7 +587,7 @@ struct FontTextureAtlasDescription
 typedef struct FontTextureAtlasCreate FontTextureAtlasCreate;
 struct FontTextureAtlasCreate
 {
-    StringOs font_path;
+    String8 font_path;
     u32 text_height;
     u8 reserved[4];
 };

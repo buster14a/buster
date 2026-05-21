@@ -735,9 +735,9 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
     RenderingHandle* rendering = 0;
     VkAllocationCallbacks* allocator = 0;
 #if defined(__linux__)
-    rendering_handle.vulkan_library = os_dynamic_library_load(SOs("libvulkan.so.1"));
+    rendering_handle.vulkan_library = os_dynamic_library_load(S8("libvulkan.so.1"));
 #elif defined(_WIN32)
-    rendering_handle.vulkan_library = os_dynamic_library_load(SOs("vulkan-1.dll"));
+    rendering_handle.vulkan_library = os_dynamic_library_load(S8("vulkan-1.dll"));
 #elif defined(__APPLE__)
     rendering_handle.vulkan_library = os_dynamic_library_load("libvulkan.dylib");
 

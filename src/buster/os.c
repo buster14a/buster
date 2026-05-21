@@ -500,35 +500,51 @@ bool os_thread_join(OsThreadHandle* handle)
     return result;
 }
 
-StringOs os_path_absolute(StringOs buffer, StringOs relative_file_path)
+String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_terminate)
 {
-    StringOs result = {0};
+    String8 result = {0};
 #if defined(__linux__) || defined(__APPLE__)
-    char* syscall_result = realpath((char*)relative_file_path.pointer, (char*)buffer.pointer);
+    u64 position = arena->position;
+    u64 length = PATH_MAX;
+    char8* buffer = arena_allocate(arena, char8, length + null_terminate);
+    char* syscall_result = realpath((char*)relative_file_path.pointer, buffer);
 
     if (syscall_result)
     {
         result = string_from_pointer(syscall_result);
-        BUSTER_CHECK(result.length < buffer.length);
+        BUSTER_CHECK(result.length <= length);
     }
 
+    arena->position = position + result.length + null_terminate;
 #elif defined(_WIN32)
-    DWORD length = GetFullPathNameW(relative_file_path.pointer, (DWORD)buffer.length, buffer.pointer, 0);
-    if (length <= buffer.length)
+    TemporalArena temp = scratch_begin(0, 0);
+    String16 relative_file_path_w = string16_from_string8(temp.arena, relative_file_path, true);
+    DWORD length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, 0, 0, 0);
+
+    if (length_plus_null_termination != 0)
     {
-        result.pointer = buffer.pointer;
-        result.length = length;
+        WindowsChar* os_result = arena_allocate(temp.arena, WindowsChar, length_plus_null_termination);
+        DWORD new_length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, length_plus_null_termination, os_result, 0);
+        BUSTER_CHECK(new_length_plus_null_termination == length_plus_null_termination);
+
+        String16 string16 = { .pointer = os_result, .length = new_length_plus_null_termination - 1 };
+        result = string8_from_string16(arena, string16, null_terminate);
     }
+
+    scratch_end(temp);
 #endif
     return result;
 }
 
-void os_make_directory(StringOs path)
+void os_make_directory(String8 path)
 {
 #if defined(__linux__) || defined(__APPLE__)
     mkdir((const char*)path.pointer, 0755);
 #elif defined(_WIN32)
-    CreateDirectoryW(path.pointer, 0);
+    TemporalArena temp = scratch_begin(0, 0);
+    String16 path_w = string16_from_string8(temp.arena, path, true);
+    CreateDirectoryW(path_w.pointer, 0);
+    scratch_end(temp);
 #endif
 }
 
@@ -767,8 +783,9 @@ u64 string8_code_point_count(String8 s, u8 code_point)
     return count;
 }
 
-ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, StringOsList envp, ProcessSpawnOptions options)
+ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environment, ProcessSpawnOptions options)
 {
+    TemporalArena temp = scratch_begin(0, 0);
     ProcessSpawnResult result = {0};
     bool pipe_creation_results[(u64)STANDARD_STREAM_COUNT];
     bool pipe_result = true;
@@ -798,7 +815,6 @@ ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, 
 
     if (pipe_result)
     {
-        BUSTER_UNUSED(envp);
         PROCESS_INFORMATION process_information = {0};
         STARTUPINFOW startup_info = {sizeof(startup_info)};
 
@@ -810,7 +826,17 @@ ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, 
             startup_info.hStdError = options.capture & (1 << STANDARD_STREAM_ERROR) ? result.pipes[STANDARD_STREAM_ERROR][1] : GetStdHandle(STD_ERROR_HANDLE);
         }
 
-        if (CreateProcessW(first_argument.pointer, argv, 0, 0, 1, 0, 0, 0, &startup_info, &process_information))
+        String16 first_argument = {0};
+        if (arguments.length > 0)
+        {
+            first_argument = string16_from_string8(temp.arena, arguments.pointer[0], true);
+        }
+
+        WindowsStringList argv = windows_string_list_from_slice_string(temp.arena, arguments);
+        WindowsStringList envp = windows_environment_block_from_slice_string(temp.arena, environment);
+        DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT;
+
+        if (CreateProcessW(first_argument.pointer, argv, 0, 0, 1, creation_flags, envp, 0, &startup_info, &process_information))
         {
             result.handle = (OsProcessHandle*)process_information.hProcess;
         }
@@ -881,7 +907,9 @@ ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, 
 
     if (file_actions_init == 0 && attribute_init == 0 && pipe_result)
     {
-        int spawn_result = posix_spawnp(&pid, first_argument.pointer, &file_actions, &attributes, (char**)argv, (char**)envp);
+        PosixStringList argv = slice_string8_to_null_terminated_array_char(temp.arena, arguments);
+        PosixStringList envp = posix_string_list_from_slice_string(temp.arena, environment);
+        int spawn_result = posix_spawnp(&pid, argv[0], &file_actions, &attributes, argv, envp);
 
         if (spawn_result != 0)
         {
@@ -915,8 +943,10 @@ ProcessSpawnResult os_process_spawn(StringOs first_argument, StringOsList argv, 
 
     if (program_flag_get(PROGRAM_FLAG_VERBOSE))
     {
-        string_print(S8("{S8} [{u64}]: \"{SOsL}\" \n"), result.handle ? S8("Launched") : S8("Failed to launch"), result.handle, argv);
+        string_print(S8("{S8} [{u64}]: \"{[]S8}\" \n"), result.handle ? S8("Launched") : S8("Failed to launch"), result.handle, arguments);
     }
+
+    scratch_end(temp);
 
     return result;
 }
@@ -1054,15 +1084,16 @@ OsError os_get_last_error(void)
     return result;
 }
 
-StringOs os_error_write_message(StringOs string, OsError error)
+String8 os_error_write_message(String8 string, OsError error)
 {
     BUSTER_CHECK(string.length == BUSTER_OS_ERROR_BUFFER_MAX_LENGTH);
-    StringOs result = {0};
+    String8 result = {0};
 #if defined(_WIN32)
-    DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)error.v, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), string.pointer, string.length > ~(DWORD)0 ? ~(DWORD)0 : (DWORD)string.length, 0);
+    DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)error.v, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), 0, 0, 0);
     if (length != 0)
     {
-        result = string_os_from_pointer_length(string.pointer, length - 1);
+        BUSTER_TRAP();
+        //result = string_os_from_pointer_length(string.pointer, length - 1);
     }
 #else
     const char* error_raw_string = strerror((int)error.v);
@@ -1074,29 +1105,13 @@ StringOs os_error_write_message(StringOs string, OsError error)
     return result;
 }
 
-StringOs os_get_environment_variable(StringOs variable)
+String8 os_get_environment_variable(String8 variable)
 {
-    StringOs result = {0};
-#if defined(_WIN32)
-    CharOs* envp = GetEnvironmentStringsW();
-    CharOs* it = envp;
-    while (*it)
+    String8 result = {0};
+    if (variable.pointer)
     {
-        u64 length = string16_length(it);
-        StringOs full_env = string_os_from_pointer_length(it, length);
-        it += length + 1;
-        u64 key_index = string16_first_code_unit(full_env, '=');
-        StringOs key = string_os_from_pointer_length(full_env.pointer, key_index);
-        if (string16_equal(key, variable))
-        {
-            result = string_os_from_pointer_length(full_env.pointer + (key_index + 1), full_env.length - (key_index + 1));
-            break;
-        }
+        BUSTER_TRAP(); // TODO
     }
-#else
-    const char8* pointer = getenv(variable.pointer);
-    result = string_from_pointer(pointer);
-#endif
     return result;
 }
 
@@ -1150,13 +1165,16 @@ bool os_unreserve(void* address, u64 size)
     return result;
 }
 
-OsModuleHandle* os_dynamic_library_load(StringOs library)
+OsModuleHandle* os_dynamic_library_load(String8 library)
 {
     OsModuleHandle* result = {0};
     BUSTER_CHECK(BUSTER_SLICE_IS_ZERO_TERMINATED(library));
 
 #if defined(_WIN32)
-    result = (OsModuleHandle*)LoadLibraryW(library.pointer);
+    TemporalArena temp = scratch_begin(0, 0);
+    String16 library_w = string16_from_string8(temp.arena, library, true);
+    result = (OsModuleHandle*)LoadLibraryW(library_w.pointer);
+    scratch_end(temp);
 #else
     result = (OsModuleHandle*) dlopen(library.pointer, RTLD_NOW | RTLD_LOCAL);
 #endif

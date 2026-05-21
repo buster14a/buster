@@ -11,7 +11,6 @@
 #include <buster/arena.h>
 #include <buster/string8.h>
 #include <buster/file.h>
-#include <buster/path.h>
 #include <buster/entry_point.h>
 
 #include <dirent.h>
@@ -35,7 +34,6 @@
 #endif
 #include <buster/integer.c>
 #include <buster/file.c>
-#include <buster/path.c>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.c>
 #endif
@@ -295,7 +293,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_add_instruction_schedule(ScrapeLlvmDatabase
 
 BUSTER_GLOBAL_LOCAL StringOs scrape_llvm_default_tblgen_path()
 {
-    StringOs result = SOs("/home/david/dev/toolchain/install/llvm_22.1.0_x86_64-linux-Release/bin/llvm-tblgen");
+    StringOs result = S8("/home/david/dev/toolchain/install/llvm_22.1.0_x86_64-linux-Release/bin/llvm-tblgen");
     return result;
 }
 
@@ -697,19 +695,19 @@ BUSTER_GLOBAL_LOCAL ByteSlice scrape_llvm_run_tblgen_dump_json(Arena* arena, Str
 
     StringOs x86_td_parts[] = {
         llvm_root,
-        SOs("/llvm/lib/Target/X86/X86.td"),
+        S8("/llvm/lib/Target/X86/X86.td"),
     };
     StringOs include_x86_parts[] = {
         llvm_root,
-        SOs("/llvm/lib/Target/X86"),
+        S8("/llvm/lib/Target/X86"),
     };
     StringOs include_llvm_parts[] = {
         llvm_root,
-        SOs("/llvm/include"),
+        S8("/llvm/include"),
     };
     StringOs include_target_parts[] = {
         llvm_root,
-        SOs("/llvm/lib/Target"),
+        S8("/llvm/lib/Target"),
     };
 
     StringOs x86_td_path = string_os_join_arena(arena, (StringOsSlice)BUSTER_ARRAY_TO_SLICE(x86_td_parts), true);
@@ -719,12 +717,12 @@ BUSTER_GLOBAL_LOCAL ByteSlice scrape_llvm_run_tblgen_dump_json(Arena* arena, Str
 
     StringOs arguments[] = {
         llvm_tblgen_path,
-        SOs("--dump-json"),
-        SOs("-I"),
+        S8("--dump-json"),
+        S8("-I"),
         include_x86_path,
-        SOs("-I"),
+        S8("-I"),
         include_llvm_path,
-        SOs("-I"),
+        S8("-I"),
         include_target_path,
         x86_td_path,
     };
@@ -1151,7 +1149,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_find_files_recursive(Arena* arena, StringOs
         }
 
         String8 entry_name = string8_from_pointer((char8*)entry->d_name);
-        StringOs parts[] = { directory, SOs("/"), entry_name };
+        StringOs parts[] = { directory, S8("/"), entry_name };
         StringOs full_path = string_os_join_arena(arena, (StringOsSlice)BUSTER_ARRAY_TO_SLICE(parts), true);
 
         struct stat stat_buffer = { 0 };
@@ -3267,7 +3265,7 @@ BUSTER_IMPL ProcessResult process_arguments()
         return PROCESS_RESULT_FAILED;
     }
 
-    if (string_equal(first, SOs("test")))
+    if (string_equal(first, S8("test")))
     {
         scrape_llvm_program_state.skip_generation = true;
         return PROCESS_RESULT_SUCCESS;
@@ -3277,16 +3275,16 @@ BUSTER_IMPL ProcessResult process_arguments()
     u64 i = 2;
     for (StringOs arg = string_os_list_iterator_next(&arg_it); arg.pointer; arg = string_os_list_iterator_next(&arg_it), i += 1)
     {
-        if (string_equal(arg, SOs("--generate")))
+        if (string_equal(arg, S8("--generate")))
         {
             scrape_llvm_program_state.generate = true;
         }
-        else if (string_equal(arg, SOs("--tblgen")))
+        else if (string_equal(arg, S8("--tblgen")))
         {
             scrape_llvm_program_state.llvm_tblgen_path = string_os_list_iterator_next(&arg_it);
             i += 1;
         }
-        else if (string_equal(arg, SOs("--generate-output")))
+        else if (string_equal(arg, S8("--generate-output")))
         {
             scrape_llvm_program_state.generate_output = string_os_list_iterator_next(&arg_it);
             i += 1;
@@ -3296,7 +3294,7 @@ BUSTER_IMPL ProcessResult process_arguments()
             let r = buster_argument_process(argv, envp, i, arg);
             if (r != PROCESS_RESULT_SUCCESS)
             {
-                string8_print(S8("Unknown argument: {SOs}\n"), arg);
+                string8_print(S8("Unknown argument: {S8}\n"), arg);
                 result = r;
                 break;
             }
@@ -3328,22 +3326,22 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     bool parsed = scrape_llvm_build_database_from_tblgen_json(arena, database, scrape_llvm_program_state.llvm_root, llvm_tblgen_path);
     if (!parsed)
     {
-        string8_print(S8("Failed to import LLVM TableGen data from {SOs} using {SOs}\n"), scrape_llvm_program_state.llvm_root, llvm_tblgen_path);
+        string8_print(S8("Failed to import LLVM TableGen data from {S8} using {S8}\n"), scrape_llvm_program_state.llvm_root, llvm_tblgen_path);
         return PROCESS_RESULT_FAILED;
     }
 
     StringOs output_path = scrape_llvm_program_state.generate_output.pointer ?
         scrape_llvm_program_state.generate_output :
-        SOs("src/buster/x86_64_llvm.c");
+        S8("src/buster/x86_64_llvm.c");
 
     bool wrote = scrape_llvm_write_generated_source(output_path, database);
     if (!wrote)
     {
-        string8_print(S8("Failed to write output: {SOs}\n"), output_path);
+        string8_print(S8("Failed to write output: {S8}\n"), output_path);
         return PROCESS_RESULT_FAILED;
     }
 
-    string8_print(S8("Generated {SOs} with {u32} instructions, {u32} schedule writes, {u32} instruction schedules\n"),
+    string8_print(S8("Generated {S8} with {u32} instructions, {u32} schedule writes, {u32} instruction schedules\n"),
                   output_path,
                   database->instruction_count,
                   database->schedule_write_count,

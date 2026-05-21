@@ -34,9 +34,23 @@ void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
     return result;
 }
 
-u8* arena_get_byte_pointer(Arena* arena, u64 position)
+u8* arena_get_byte_pointer_at_position(Arena* arena, u64 position)
 {
     return (u8*)arena + position;
+}
+
+u8* arena_get_byte_pointer_at_position_check_aligned(Arena* arena, u64 position, u64 alignment)
+{
+    u8* result = arena_get_byte_pointer_at_position(arena, position);
+    BUSTER_CHECK(is_aligned((u64)result, alignment));
+    return result;
+}
+
+u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment)
+{
+    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment));
+    u8* result = arena_get_byte_pointer_at_position(arena, align_forward(position, alignment));
+    return result;
 }
 
 void arena_reset_to_start(Arena* arena)
@@ -100,11 +114,6 @@ bool arena_destroy(Arena* arena, u64 count)
     u64 reserved_size = arena->reserved_size;
     u64 size = reserved_size * count;
     return os_unreserve(arena, size);
-}
-
-void* arena_current_byte_pointer(Arena* arena, u64 alignment)
-{
-    return (u8*)arena + align_forward(arena->position, alignment);
 }
 
 TemporalArena arena_begin_temporal(Arena* arena)

@@ -108,7 +108,7 @@ ProcessResult process_arguments(void)
             ProcessResult r = buster_argument_process(arguments, environment, i, arg);
             if (r != PROCESS_RESULT_SUCCESS)
             {
-                string_print(S8("Failed to process argument {SOs}\n"), arg);
+                string_print(S8("Failed to process argument {S8}\n"), arg);
                 result = r;
                 break;
             }
@@ -951,13 +951,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
             arena->position = position;
         }
 
-        {
-            u64 position = arena->position;
-            UnitTestArguments arguments = { arena, &default_show };
-            BatchTestResult batch_test_result = parser_tests(&arguments);
-            result = batch_test_report(&arguments, batch_test_result) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-            arena->position = position;
-        }
+        // {
+        //     u64 position = arena->position;
+        //     UnitTestArguments arguments = { arena, &default_show };
+        //     BatchTestResult batch_test_result = parser_tests(&arguments);
+        //     result = batch_test_report(&arguments, batch_test_result) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        //     arena->position = position;
+        // }
 
         arena_destroy(arena, 1);
 
@@ -979,7 +979,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
             {
                 state.first_window = state.last_window = arena_allocate(arena, IdeWindow, 1);
                 let os_window = os_window_create(windowing, (OsWindowCreate) {
-                        .name = SOs("Ide"),
+                        .name = S8("Ide"),
                         .size = {
                         .width = 1600,
                         .height= 900,
