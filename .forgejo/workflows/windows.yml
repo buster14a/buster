@@ -155,6 +155,9 @@ jobs:
               '--cmake-profile-summary',
               '--cmake-profile-summary-limit', '15'
             )
+            if ($Configuration.Cc -eq 'clang') {
+              $GenerateArguments += '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'
+            }
             python @GenerateArguments
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -640,6 +643,23 @@ jobs:
           $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_$($env:BUSTER_SANITIZE)-fuzz_$($env:BUSTER_FUZZ)"
           python .\build.py --build-directory $BusterBuildDirectory --config $env:BUSTER_CONFIG --verbose test_all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Analyze (compiler=clang sanitize=off fuzz={off,on} optimize={off,on})
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildPrefix = if ($env:BUSTER_BUILD_DIRECTORY_PREFIX) { $env:BUSTER_BUILD_DIRECTORY_PREFIX } else { 'build_ci-' }
+          $BusterCc = 'clang'
+          $BusterCcDirectory = $BusterCc -replace '[^A-Za-z0-9_.-]', '_'
+          $BusterSanitize = 'OFF'
+          foreach ($BusterFuzz in @('OFF', 'ON')) {
+            foreach ($BusterConfig in @('Debug', 'Release')) {
+              $Optimize = if ($BusterConfig -eq 'Release') { 'on' } else { 'off' }
+              Write-Host "Analyze (compiler=clang fuzz=$($BusterFuzz.ToLowerInvariant()) sanitize=off optimize=$Optimize)"
+              $BusterBuildDirectory = "${BuildPrefix}cc_${BusterCcDirectory}-sanitize_${BusterSanitize}-fuzz_${BusterFuzz}"
+              python .\build.py --build-directory $BusterBuildDirectory --config $BusterConfig --verbose clang_analyze
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
       - name: Restore Visual Studio environment
         shell: powershell
         run: |

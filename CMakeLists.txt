@@ -425,6 +425,9 @@ message(STATUS "CMAKE_EXPORT_COMPILE_COMMANDS: ${CMAKE_EXPORT_COMPILE_COMMANDS}"
 
 find_program(gdb_executable gdb)
 find_program(lldb_executable lldb)
+if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+endif()
 
 message(STATUS "GDB: ${gdb_executable}")
 message(STATUS "LLDB: ${lldb_executable}")
@@ -833,3 +836,23 @@ add_custom_target(test_all
     COMMENT "Test all"
     VERBATIM
 )
+
+if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
+    if (Python3_Interpreter_FOUND)
+        add_custom_target(clang_analyze
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tools/clang_analyze.py"
+                "${CMAKE_BINARY_DIR}/compile_commands.json"
+                --config "$<CONFIG>"
+                --quiet
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            USES_TERMINAL
+            COMMENT "Running clang --analyze"
+            VERBATIM
+        )
+    else()
+        message(STATUS "clang_analyze target disabled: Python3 interpreter not found")
+    endif()
+elseif (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG)
+    message(STATUS "clang_analyze target disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF")
+endif()

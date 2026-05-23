@@ -1775,7 +1775,8 @@ BUSTER_GLOBAL_LOCAL void print_tokenizer_result(TokenizerResult tokenizer, const
             break; default: BUSTER_TRAP();
         }
 
-        string_print(S8("[{u64}] {u32}:{u32} at {u32} {S8} \"{S8}\"\n"), i, token.line, token.column, token.offset, token_id, string.pointer[0] >= ' ' ? string : S8(""));
+        String8 display_string = string.pointer && string.length > 0 && string.pointer[0] >= ' ' ? string : S8("");
+        string_print(S8("[{u64}] {u32}:{u32} at {u32} {S8} \"{S8}\"\n"), i, token.line, token.column, token.offset, token_id, display_string);
 
         consume(&iterator);
     }

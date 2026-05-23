@@ -787,7 +787,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 {
     TemporalArena temp = scratch_begin(0, 0);
     ProcessSpawnResult result = {0};
-    bool pipe_creation_results[(u64)STANDARD_STREAM_COUNT];
+    bool pipe_creation_results[(u64)STANDARD_STREAM_COUNT] = {0};
     bool pipe_result = true;
 #if defined(_WIN32)
     bool any_capture = false;
@@ -919,7 +919,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 
     for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
     {
-        if (options.capture & (1 << stream) && pipe_creation_results[stream])
+        if (options.capture & ((u64)1 << stream) && pipe_creation_results[stream])
         {
             close(pipes[stream][1]);
 
@@ -1063,7 +1063,7 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
         else
         {
             // TODO
-            wait_result = (int)PROCESS_RESULT_FAILED;
+            result.result = PROCESS_RESULT_FAILED;
         }
 #endif
     }

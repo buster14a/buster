@@ -68,7 +68,11 @@ jobs:
             BUSTER_SANITIZE=${generate_configurations[$i.sanitize]}
             BUSTER_FUZZ=${generate_configurations[$i.fuzz]}
             BUSTER_BUILD_DIRECTORY=${generate_configurations[$i.directory]}
-            ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc "$BUSTER_CC" --fuzz $BUSTER_FUZZ --sanitize $BUSTER_SANITIZE --cmake-profile --cmake-profile-summary --cmake-profile-summary-limit 15
+            generate_extra_arguments=()
+            if [[ "$BUSTER_CC" == clang ]]; then
+              generate_extra_arguments+=(-DCMAKE_EXPORT_COMPILE_COMMANDS=ON)
+            fi
+            ./generate.py --build-directory "$BUSTER_BUILD_DIRECTORY" --ci ON --cc "$BUSTER_CC" --fuzz $BUSTER_FUZZ --sanitize $BUSTER_SANITIZE --cmake-profile --cmake-profile-summary --cmake-profile-summary-limit 15 "${generate_extra_arguments[@]}"
           done
 # =======================================================================================================================================
 # ================================================================ CLANG ================================================================
@@ -241,6 +245,21 @@ jobs:
         run: |
           set -euox pipefail
           time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
+      - name: Analyze (compiler=clang sanitize=off fuzz={off,on} optimize={off,on})
+        shell: bash
+        run: |
+          set -euox pipefail
+          BUILD_PREFIX=${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}
+          BUSTER_CC=clang
+          BUSTER_SANITIZE=OFF
+          for BUSTER_FUZZ in OFF ON; do
+            if [[ "$BUSTER_FUZZ" == ON && "${{ inputs.os }}" == macos ]]; then
+              continue
+            fi
+            for BUSTER_CONFIG in Debug Release; do
+              time ./build.py --build-directory "${BUILD_PREFIX}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose clang_analyze
+            done
+          done
 # =======================================================================================================================================
 # ================================================================= GCC =================================================================
 # =======================================================================================================================================

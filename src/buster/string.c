@@ -1046,7 +1046,6 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                             break; case INTEGER_FORMAT_KIND_HEXADECIMAL_LOWER: case INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER: prefix_second_character = 'x';
                             break; case INTEGER_FORMAT_KIND_COUNT: BUSTER_UNREACHABLE();
                         }
-                        BUSTER_UNUSED(prefix_second_character);
 
                         char8 prefix_buffer[] =
                         {
@@ -1111,7 +1110,6 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                         {
                             break; case INTEGER_FORMAT_KIND_DECIMAL:
                             {
-                                prefix_second_character = 'd';
                                 switch (format_type_id)
                                 {
                                     break; case FORMAT_TYPE_UNSIGNED_INTEGER_8: integer_max_width = 3;
@@ -1124,13 +1122,11 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                             }
                             break; case INTEGER_FORMAT_KIND_BINARY:
                             {
-                                prefix_second_character = 'b';
                                 integer_max_width = value_size * 8;
                                 digit_group_character_count = 8;
                             }
                             break; case INTEGER_FORMAT_KIND_OCTAL:
                             {
-                                prefix_second_character = 'o';
                                 switch (format_type_id)
                                 {
                                     break; case FORMAT_TYPE_UNSIGNED_INTEGER_8: integer_max_width = 3;
@@ -1143,7 +1139,6 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                             }
                             break; case INTEGER_FORMAT_KIND_HEXADECIMAL_LOWER: case INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER:
                             {
-                                prefix_second_character = 'x';
                                 integer_max_width = value_size * 2;
                                 digit_group_character_count = 2;
                             }
