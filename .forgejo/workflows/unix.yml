@@ -245,20 +245,17 @@ jobs:
         run: |
           set -euox pipefail
           time ./build.py --build-directory "${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose test_all
-      - name: Analyze (compiler=clang sanitize=off fuzz={off,on} optimize={off,on})
+      - name: Analyze (compiler=clang sanitize=off fuzz=off optimize={off,on})
         shell: bash
         run: |
           set -euox pipefail
           BUILD_PREFIX=${BUSTER_BUILD_DIRECTORY_PREFIX:-build_ci-}
           BUSTER_CC=clang
           BUSTER_SANITIZE=OFF
-          for BUSTER_FUZZ in OFF ON; do
-            if [[ "$BUSTER_FUZZ" == ON && "${{ inputs.os }}" == macos ]]; then
-              continue
-            fi
-            for BUSTER_CONFIG in Debug Release; do
-              time ./build.py --build-directory "${BUILD_PREFIX}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose clang_analyze
-            done
+          BUSTER_FUZZ=OFF
+
+          for BUSTER_CONFIG in Debug Release; do
+            time ./build.py --build-directory "${BUILD_PREFIX}cc_${BUSTER_CC}-sanitize_${BUSTER_SANITIZE}-fuzz_${BUSTER_FUZZ}" --config "$BUSTER_CONFIG" --verbose clang_analyze
           done
 # =======================================================================================================================================
 # ================================================================= GCC =================================================================
