@@ -112,6 +112,8 @@ def parse_arguments(argv):
     add_cmake_bool_argument(parser, "time_trace", "OFF")
     add_cmake_bool_argument(parser, "include_tests", "ON")
     add_cmake_bool_argument(parser, "link_libc", "ON")
+    add_cmake_bool_argument(parser, "check_optional_warnings", "ON")
+    add_cmake_bool_argument(parser, "developer_targets", "ON")
     return parser.parse_known_args(argv)
 
 
@@ -215,41 +217,22 @@ def main(argv):
             "-DCMAKE_C_LINK_DEPENDS_USE_LINKER=FALSE",
         ]
         c_compiler = cc
-        cxx_compiler = cc
-        asm_compiler = cc
         cmake_compiler_args = [
             f"-DCMAKE_C_COMPILER={c_compiler};cc",
-            f"-DCMAKE_CXX_COMPILER={cxx_compiler};c++",
-            f"-DCMAKE_ASM_COMPILER={asm_compiler};cc",
         ]
     elif "clang" in cc:
         c_compiler = cc
-        cxx_compiler = cc.replace("clang", "clang++", 1)
-        asm_compiler = cc
     elif "gcc" in cc:
         c_compiler = cc
-        cxx_compiler = cc.replace("gcc", "g++", 1)
-        asm_compiler = cc
     elif "cl" in cc:
         c_compiler = cc
-        cxx_compiler = cc
-        asm_compiler = cc
     else:
         c_compiler = cc
-        cxx_compiler = ""
-        asm_compiler = ""
 
     if not cmake_compiler_args:
-        if cxx_compiler == "" or asm_compiler == "":
-            cmake_compiler_args = [
-                f"-DCMAKE_C_COMPILER={c_compiler}",
-            ]
-        else:
-            cmake_compiler_args = [
-                f"-DCMAKE_C_COMPILER={c_compiler}",
-                f"-DCMAKE_CXX_COMPILER={cxx_compiler}",
-                f"-DCMAKE_ASM_COMPILER={asm_compiler}",
-            ]
+        cmake_compiler_args = [
+            f"-DCMAKE_C_COMPILER={c_compiler}",
+        ]
 
     linker = arguments.linker
     if not linker:
@@ -282,6 +265,9 @@ def main(argv):
         f"-DBUSTER_INCLUDE_TESTS={arguments.include_tests}",
         f"-DBUSTER_CI={arguments.ci}",
         f"-DBUSTER_LINK_LIBC={arguments.link_libc}",
+        f"-DBUSTER_CHECK_OPTIONAL_WARNINGS={arguments.check_optional_warnings}",
+        f"-DBUSTER_DEVELOPER_TARGETS={arguments.developer_targets}",
+        f"-DBUSTER_PYTHON_EXECUTABLE={Path(sys.executable).resolve()}",
         *cmake_extra_args,
         *(
             [

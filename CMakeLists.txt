@@ -100,6 +100,9 @@ option(BUSTER_SANITIZE "Enable sanitizers" OFF)
 option(BUSTER_TIME_TRACE "Enable time tracing" OFF)
 option(BUSTER_FUZZ "Enable fuzzing" OFF)
 option(BUSTER_LTO "Enable LTO" OFF)
+option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warning flags" ON)
+option(BUSTER_DEVELOPER_TARGETS "Enable convenience run/test/debug targets" ON)
+set(BUSTER_PYTHON_EXECUTABLE "" CACHE FILEPATH "Python interpreter for clang_analyze")
 
 if (BUSTER_MULTI_CONFIG AND NOT BUSTER_OPTIMIZE_EXPLICIT)
     set(BUSTER_OPTIMIZE_CONDITION "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>")
@@ -409,6 +412,8 @@ message(STATUS "BUSTER_SANITIZE: ${BUSTER_SANITIZE}")
 message(STATUS "BUSTER_TIME_TRACE: ${BUSTER_TIME_TRACE}")
 message(STATUS "BUSTER_FUZZ: ${BUSTER_FUZZ}")
 message(STATUS "BUSTER_LTO: ${BUSTER_LTO}")
+message(STATUS "BUSTER_CHECK_OPTIONAL_WARNINGS: ${BUSTER_CHECK_OPTIONAL_WARNINGS}")
+message(STATUS "BUSTER_DEVELOPER_TARGETS: ${BUSTER_DEVELOPER_TARGETS}")
 message(STATUS "BUSTER_SINGLE_THREADED: ${BUSTER_SINGLE_THREADED}")
 
 message(STATUS "CMAKE_HOST_SYSTEM_PROCESSOR: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
@@ -423,14 +428,28 @@ message(STATUS "C_COMPILER_ZIG: ${C_COMPILER_ZIG}")
 message(STATUS "CMAKE_COLOR_DIAGNOSTICS: ${CMAKE_COLOR_DIAGNOSTICS}")
 message(STATUS "CMAKE_EXPORT_COMPILE_COMMANDS: ${CMAKE_EXPORT_COMPILE_COMMANDS}")
 
-find_program(gdb_executable gdb)
-find_program(lldb_executable lldb)
+if (BUSTER_DEVELOPER_TARGETS)
+    find_program(gdb_executable gdb)
+    find_program(lldb_executable lldb)
+endif()
+set(BUSTER_CLANG_ANALYZE_PYTHON "")
 if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
-    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if (DEFINED BUSTER_PYTHON_EXECUTABLE
+        AND NOT BUSTER_PYTHON_EXECUTABLE STREQUAL ""
+        AND EXISTS "${BUSTER_PYTHON_EXECUTABLE}")
+        set(BUSTER_CLANG_ANALYZE_PYTHON "${BUSTER_PYTHON_EXECUTABLE}")
+    else()
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if (Python3_Interpreter_FOUND)
+            set(BUSTER_CLANG_ANALYZE_PYTHON "${Python3_EXECUTABLE}")
+        endif()
+    endif()
 endif()
 
-message(STATUS "GDB: ${gdb_executable}")
-message(STATUS "LLDB: ${lldb_executable}")
+if (BUSTER_DEVELOPER_TARGETS)
+    message(STATUS "GDB: ${gdb_executable}")
+    message(STATUS "LLDB: ${lldb_executable}")
+endif()
 
 set(COMMON_EXTENSION ".c")
 
@@ -550,7 +569,7 @@ set(CLANG_GNU_FAMILY_OPTIONAL_WARNING_CANDIDATES
     -Wunique-object-duplication
 )
 
-if (C_COMPILER_CLANG_FAMILY)
+if (C_COMPILER_CLANG_FAMILY AND BUSTER_CHECK_OPTIONAL_WARNINGS)
     set(BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_KEY
         "${CMAKE_C_COMPILER_ID}|${CMAKE_C_COMPILER_VERSION}|${CMAKE_C_COMPILER}"
     )
@@ -753,40 +772,42 @@ function(executable_add name is_buster_program main_file)
         add_dependencies(${name} metaprogram_generate)
     endif()
 
-    add_custom_target(run_${name}
-        COMMAND "$<TARGET_FILE:${name}>"
-        DEPENDS ${name}
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        USES_TERMINAL
-        COMMENT "Running ${name}"
-        VERBATIM)
-
-    add_custom_target(test_${name}
-        COMMAND "$<TARGET_FILE:${name}>" ${TEST_ARGUMENTS}
-        DEPENDS ${name}
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        USES_TERMINAL
-        COMMENT "Running ${name}"
-        VERBATIM)
-
-    if(gdb_executable)
-        add_custom_target(debug_${name}
-            COMMAND "${gdb_executable}" --args "$<TARGET_FILE:${name}>"
+    if (BUSTER_DEVELOPER_TARGETS)
+        add_custom_target(run_${name}
+            COMMAND "$<TARGET_FILE:${name}>"
             DEPENDS ${name}
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             USES_TERMINAL
-            COMMENT "Debugging ${name} with gdb"
+            COMMENT "Running ${name}"
             VERBATIM)
-    elseif(lldb_executable)
-        add_custom_target(debug_${name}
-            COMMAND "${lldb_executable}" -- "$<TARGET_FILE:${name}>"
+
+        add_custom_target(test_${name}
+            COMMAND "$<TARGET_FILE:${name}>" ${TEST_ARGUMENTS}
             DEPENDS ${name}
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             USES_TERMINAL
-            COMMENT "Debugging ${name} with lldb"
+            COMMENT "Running ${name}"
             VERBATIM)
-    else()
-        message(STATUS "No supported debugger found for ${name}_debug")
+
+        if(gdb_executable)
+            add_custom_target(debug_${name}
+                COMMAND "${gdb_executable}" --args "$<TARGET_FILE:${name}>"
+                DEPENDS ${name}
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                USES_TERMINAL
+                COMMENT "Debugging ${name} with gdb"
+                VERBATIM)
+        elseif(lldb_executable)
+            add_custom_target(debug_${name}
+                COMMAND "${lldb_executable}" -- "$<TARGET_FILE:${name}>"
+                DEPENDS ${name}
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                USES_TERMINAL
+                COMMENT "Debugging ${name} with lldb"
+                VERBATIM)
+        else()
+            message(STATUS "No supported debugger found for ${name}_debug")
+        endif()
     endif()
 endfunction()
 
@@ -838,9 +859,9 @@ add_custom_target(test_all
 )
 
 if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
-    if (Python3_Interpreter_FOUND)
+    if (BUSTER_CLANG_ANALYZE_PYTHON)
         add_custom_target(clang_analyze
-            COMMAND "${Python3_EXECUTABLE}"
+            COMMAND "${BUSTER_CLANG_ANALYZE_PYTHON}"
                 "${CMAKE_SOURCE_DIR}/tools/clang_analyze.py"
                 "${CMAKE_BINARY_DIR}/compile_commands.json"
                 --config "$<CONFIG>"

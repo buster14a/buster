@@ -144,6 +144,15 @@ jobs:
             }
 
             Write-Host "Generate (compiler=$($Configuration.Cc) fuzz=$($Configuration.Fuzz.ToLowerInvariant()) sanitize=$($Configuration.Sanitize.ToLowerInvariant()))"
+            $GenerateProfileArguments = @()
+            if ($env:BUSTER_CMAKE_PROFILE -eq 'ON') {
+              $ProfileSummaryLimit = if ($env:BUSTER_CMAKE_PROFILE_SUMMARY_LIMIT) { $env:BUSTER_CMAKE_PROFILE_SUMMARY_LIMIT } else { '15' }
+              $GenerateProfileArguments = @(
+                '--cmake-profile',
+                '--cmake-profile-summary',
+                '--cmake-profile-summary-limit', $ProfileSummaryLimit
+              )
+            }
             $GenerateArguments = @(
               '.\generate.py',
               '--build-directory', $Configuration.Directory,
@@ -151,11 +160,12 @@ jobs:
               '--cc', $Configuration.Cc,
               '--fuzz', $Configuration.Fuzz,
               '--sanitize', $Configuration.Sanitize,
-              '--cmake-profile',
-              '--cmake-profile-summary',
-              '--cmake-profile-summary-limit', '15'
+              '--check-optional-warnings', 'OFF',
+              '--developer-targets', 'OFF',
+              '-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY'
             )
-            if ($Configuration.Cc -eq 'clang') {
+            $GenerateArguments += $GenerateProfileArguments
+            if ($Configuration.Cc -eq 'clang' -and $Configuration.Sanitize -eq 'OFF' -and $Configuration.Fuzz -eq 'OFF') {
               $GenerateArguments += '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'
             }
             python @GenerateArguments
