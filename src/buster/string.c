@@ -1,6 +1,7 @@
 #include <buster/string.h>
 #include <buster/arena.h>
 #include <buster/os.h>
+#include <buster/integer.h>
 
 BUSTER_GLOBAL_LOCAL bool code_unit_is_binary(char8 code_unit)
 {
@@ -286,7 +287,7 @@ bool string_starts_with_sequence(String8 string, String8 sequence)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u64 string_first_code_unit(String8 string, char8 code_unit)
+u64 string_first_code_unit(String8 string, char8 code_unit)
 {
     u64 result = BUSTER_STRING_NO_MATCH;
 
@@ -681,7 +682,6 @@ BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_code_point(u32 code_point)
 String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments)
 {
     u64 original_position = arena->position;
-
     u64 format_index = 0;
 
     while (format_index < format.length)
@@ -717,6 +717,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 
                 typedef enum FormatTypeId
                 {
+                    FORMAT_TYPE_STRING_SLICE,
                     FORMAT_TYPE_STRING_OS_LIST,
                     FORMAT_TYPE_STRING8,
                     FORMAT_TYPE_STRING16,
@@ -735,7 +736,9 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     FORMAT_TYPE_OS_ERROR,
                     FORMAT_TYPE_COUNT,
                 } FormatTypeId;
+
                 String8 possible_format_strings[] = {
+                    [FORMAT_TYPE_STRING_SLICE] = S8("[]S8"),
                     [FORMAT_TYPE_STRING_OS_LIST] = S8("SOsL"),
                     [FORMAT_TYPE_STRING8] = S8("S8"),
                     [FORMAT_TYPE_STRING16] = S8("S16"),
@@ -763,10 +766,10 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                         1, // Avoid starting left brace
                         this_format_string_length);
 
-                u64 i;
-                for (i = 0; i < BUSTER_ARRAY_LENGTH(possible_format_strings); i += 1)
+                u64 format_string_i;
+                for (format_string_i = 0; format_string_i < BUSTER_ARRAY_LENGTH(possible_format_strings); format_string_i += 1)
                 {
-                    String8 possible_format_string = possible_format_strings[i];
+                    String8 possible_format_string = possible_format_strings[format_string_i];
                     if (string_equal(this_format_string, possible_format_string))
                     {
                         break;
@@ -796,7 +799,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     INTEGER_FORMAT_SPECIFIER_COUNT,
                 } IntegerFormatSpecifier;
 
-                FormatTypeId format_type_id = (FormatTypeId)i;
+                FormatTypeId format_type_id = (FormatTypeId)format_string_i;
                 bool prefix = false;
                 bool prefix_set = false;
                 bool digit_group = false;
@@ -986,6 +989,21 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 
                 switch (format_type_id)
                 {
+                    break; case FORMAT_TYPE_STRING_SLICE:
+                    {
+                        SliceString8 strings = va_arg(variable_arguments, SliceString8);
+                        if (strings.length)
+                        {
+                            for (u64 i = 0; i < strings.length; i += 1)
+                            {
+                                String8 string = strings.pointer[i];
+                                arena_append_string(arena, string);
+                                *arena_allocate(arena, char8, 1) = ' ';
+                            }
+
+                            arena->position -= 1;
+                        }
+                    }
                     break; case FORMAT_TYPE_STRING_OS_LIST:
                     {
                         BUSTER_TRAP();
@@ -1013,8 +1031,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     break; case FORMAT_TYPE_STRING8:
                     {
                         String8 string = va_arg(variable_arguments, String8);
-                        char8* destination = arena_allocate(arena, char8, string.length);
-                        memcpy(destination, string.pointer, sizeof(char8) * string.length);
+                        arena_append_string(arena, string);
                     }
                     break; case FORMAT_TYPE_STRING16:
                     {
@@ -1231,12 +1248,8 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     }
                     break; case FORMAT_TYPE_OS_ERROR:
                     {
-                        BUSTER_TRAP();
-                        // OsError os_error = va_arg(variable_arguments, OsError);
-                        // CharOs error_buffer[BUSTER_OS_ERROR_BUFFER_MAX_LENGTH];
-                        // StringOs error_string = os_error_write_message((StringOs)BUSTER_ARRAY_TO_SLICE(error_buffer), os_error);
-                        //
-                        // string8_duplicate_from_string_os(arena, error_string, false);
+                        OsError os_error = va_arg(variable_arguments, OsError);
+                        string8_from_os_error(arena, os_error, false);
                     }
                     break; case FORMAT_TYPE_COUNT:
                     {
@@ -1339,6 +1352,8 @@ void string_print(String8 format, ...)
         *arena_allocate(scratch.arena, char8, 1) = 0;
         os_file_write(os_get_stdout(), BUSTER_SLICE_TO_BYTE_SLICE(string));
     }
+
+    scratch_end(scratch);
 }
 
 u64 string_first_sequence(String8 s, String8 sub)
@@ -1440,6 +1455,60 @@ PosixStringList posix_string_list_from_slice_string(Arena* arena, SliceString8 p
     list[parts.length] = 0;
 
     return list;
+}
+
+PosixStringList posix_environment_from_keys_and_values(Arena* arena, SliceString8 keys, SliceString8 values)
+{
+    PosixStringList result = {0};
+    BUSTER_CHECK(keys.length == values.length);
+
+    if (keys.length)
+    {
+        result = arena_allocate(arena, char8*, keys.length + 1);
+
+        for (u64 i = 0; i < keys.length; i += 1)
+        {
+            String8 key = keys.pointer[i];
+            String8 value = values.pointer[i];
+
+            String8 parts[] = {
+                key,
+                S8("="),
+                value,
+            };
+
+            result[i] = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true).pointer;
+        }
+
+        result[keys.length] = 0;
+    }
+
+    return result;
+}
+
+WindowsStringList windows_environment_from_keys_and_values(Arena* arena, SliceString8 keys, SliceString8 values)
+{
+    WindowsStringList result = {0};
+
+    if (keys.length)
+    {
+        result = arena_get_pointer_at_position_align(arena, char16, arena->position);
+
+        for (u64 i = 0; i < keys.length; i += 1)
+        {
+            String8 key = keys.pointer[i];
+            String8 value = values.pointer[i];
+
+            string16_from_string8(arena, key, false);
+            *arena_allocate(arena, char16, 1) = '=';
+            string16_from_string8(arena, value, false);
+            *arena_allocate(arena, char16, 1) = 0;
+        }
+
+        *arena_allocate(arena, char16, 1) = 0;
+    }
+
+    return result;
 }
 
 SliceString8 slice_string_from_posix_string_list(Arena* arena, PosixStringList string_list)
@@ -1649,7 +1718,9 @@ BUSTER_GLOBAL_LOCAL String8 windows_command_line_quote_argument(Arena* arena, St
 
 WindowsStringList windows_string_list_from_slice_string(Arena* arena, SliceString8 strings)
 {
+    TemporalArena temp = scratch_begin(&arena, 1);
     char16* result = arena_get_current_pointer(arena, char16);
+
     for (u64 string_i = 0; string_i < strings.length; string_i += 1)
     {
         if (string_i > 0)
@@ -1660,10 +1731,8 @@ WindowsStringList windows_string_list_from_slice_string(Arena* arena, SliceStrin
         String8 string8 = strings.pointer[string_i];
         if (windows_command_line_argument_needs_quotes(string8))
         {
-            TemporalArena temp = scratch_begin(0, 0);
             string8 = windows_command_line_quote_argument(temp.arena, string8);
             string16_from_string8(arena, string8, false);
-            scratch_end(temp);
         }
         else
         {
@@ -1672,6 +1741,7 @@ WindowsStringList windows_string_list_from_slice_string(Arena* arena, SliceStrin
     }
 
     *arena_allocate(arena, char16, 1) = 0;
+    scratch_end(temp);
     return result;
 }
 
@@ -1688,16 +1758,40 @@ WindowsStringList windows_environment_block_from_slice_string(Arena* arena, Slic
     return result;
 }
 
-char* const* slice_string8_to_null_terminated_array_char(Arena* arena, SliceString8 strings)
+char** slice_string8_to_null_terminated_array_char(Arena* arena, SliceString8 strings)
 {
-    TemporalArena temp = scratch_begin(0, 0);
     char** result = arena_allocate(arena, char*, strings.length + 1);
     for (u64 i = 0; i < strings.length; i += 1)
     {
         result[i] = string_duplicate_arena(arena, strings.pointer[i], true).pointer;
     }
-    scratch_end(temp);
     result[strings.length] = 0;
+    return result;
+}
+
+OsArgumentBuilder os_argument_builder_start(Arena* arena)
+{
+    OsArgumentBuilder result = {
+        .arena = arena,
+        .position = align_forward(arena->position, BUSTER_ALIGN_OF(String8)),
+    };
+    return result;
+}
+
+void os_argument_builder_append(OsArgumentBuilder* builder, String8 string)
+{
+    *arena_allocate(builder->arena, String8, 1) = string;
+}
+
+SliceString8 os_argument_builder_flush(OsArgumentBuilder* const builder)
+{
+    u64 original_position = builder->position;
+    u64 current_position = builder->arena->position;
+    u64 byte_count = current_position - original_position;
+    BUSTER_CHECK(byte_count % sizeof(String8) == 0);
+    u64 argument_count = byte_count / sizeof(String8);
+    String8* pointer = arena_get_pointer_at_position_align(builder->arena, String8, builder->position);
+    SliceString8 result = { .pointer = pointer, .length = argument_count };
     return result;
 }
 
@@ -7059,7 +7153,7 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         PosixChar first[] = "faa";
         PosixChar second[] = "fee";
         PosixChar empty[] = "";
-        PosixChar* const posix_string_list[] = { first, second, empty, 0 };
+        PosixChar* posix_string_list[] = { first, second, empty, 0 };
 
         SliceString8 strings = slice_string_from_posix_string_list(arena, posix_string_list);
         BUSTER_TEST(arguments, strings.length == 3);

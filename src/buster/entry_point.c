@@ -4,7 +4,7 @@
 #include <buster/arena.h>
 #include <buster/string.h>
 
-OsState os_state;
+BUSTER_V_IMPL OsState os_state;
 
 #if BUSTER_LINK_LIBC
 #if BUSTER_FUZZ
@@ -13,11 +13,9 @@ BUSTER_EXPORT s32 LLVMFuzzerTestOneInput(const u8* pointer, size_t size)
     return buster_fuzz(pointer, size);
 }
 #else
-ProcessResult buster_argument_process(SliceString8 argument_pointer, SliceString8 environment_pointer, u64 argument_index, String8 argument)
+ProcessResult buster_argument_process(u64 argument_index)
 {
-    BUSTER_UNUSED(argument_pointer);
-    BUSTER_UNUSED(environment_pointer);
-    BUSTER_UNUSED(argument_index);
+    String8 argument = program_state->input.arguments.pointer[argument_index];
 
     String8 flag_string_starts[] = {
         [PROGRAM_FLAG_VERBOSE] = S8("--verbose="),
@@ -68,15 +66,37 @@ BUSTER_GLOBAL_LOCAL void install_signal_handlers(void)
 BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOsList envp)
 {
     os_state.arena = arena_create((ArenaCreation){0});
+    SliceString8 environments_raw;
 #if defined(_WIN32)
     SliceString8 arguments = slice_string_from_windows_string_list(os_state.arena, argv);
-    SliceString8 environment = string16_environment_block_to_slice_string(os_state.arena, envp);
+    environments_raw = string16_environment_block_to_slice_string(os_state.arena, envp);
 #else
     SliceString8 arguments = slice_string_from_posix_string_list(os_state.arena, argv);
-    SliceString8 environment = slice_string_from_posix_string_list(os_state.arena, envp);
+    environments_raw = slice_string_from_posix_string_list(os_state.arena, envp);
 #endif
+
+    SliceString8 environment_keys = { .pointer = arena_allocate(os_state.arena, String8, environments_raw.length), .length = environments_raw.length };
+    SliceString8 environment_values = { .pointer = arena_allocate(os_state.arena, String8, environments_raw.length), .length = environments_raw.length };
+
+    for (u64 i = 0; i < environments_raw.length; i += 1)
+    {
+        String8 environment_raw = environments_raw.pointer[i];
+        u64 equal_index = string_first_code_unit(environment_raw, '=');
+        if (equal_index != BUSTER_STRING_NO_MATCH)
+        {
+            String8 key = string_slice(environment_raw, 0, equal_index);
+            String8 value = string_slice(environment_raw, equal_index + 1, environment_raw.length);
+            environment_keys.pointer[i] = key;
+            environment_values.pointer[i] = value;
+        }
+        else
+        {
+            environment_keys.pointer[i] = (String8){0};
+            environment_values.pointer[i] = (String8){0};
+        }
+    }
     
-#ifdef _WIN32
+#if defined(_WIN32)
     {
         LARGE_INTEGER i;
         if (QueryPerformanceFrequency(&i))
@@ -114,7 +134,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
 
     program_state->arena = arena_create((ArenaCreation){0});
     program_state->input.arguments = arguments;
-    program_state->input.environment = environment;
+    program_state->input.environment_keys = environment_keys;
+    program_state->input.environment_values = environment_values;
+    program_state->input.raw_arguments = argv;
+    program_state->input.raw_environment = envp;
 
     ProcessResult result = process_arguments();
 

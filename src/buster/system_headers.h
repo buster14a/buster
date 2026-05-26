@@ -29,9 +29,6 @@ BUSTER_V_DECL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions;
 #include <sys/ptrace.h>
 #include <sys/sysinfo.h>
 #include <linux/limits.h>
-#if BUSTER_USE_IO_RING
-#include <liburing.h>
-#endif
 #endif
 
 #if defined(__APPLE__)

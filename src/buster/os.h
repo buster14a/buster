@@ -107,6 +107,7 @@ typedef struct ProcessSpawnOptions ProcessSpawnOptions;
 struct ProcessSpawnOptions
 {
     u64 capture:(size_t)STANDARD_STREAM_COUNT;
+    u64 use_process_environment:1;
     u64 reserved:sizeof(u64)*8-(size_t)STANDARD_STREAM_COUNT;
 };
 
@@ -127,8 +128,8 @@ struct OsError
 #define BUSTER_OS_ERROR_BUFFER_MAX_LENGTH (BUSTER_KB(64))
 
 BUSTER_F_DECL OsError os_get_last_error(void);
-BUSTER_F_DECL String8 os_error_write_message(String8 string, OsError error);
-BUSTER_F_DECL ProcessSpawnResult os_process_spawn(SliceString8 argv, SliceString8 envp, ProcessSpawnOptions options);
+BUSTER_F_DECL String8 string8_from_os_error(Arena* arena, OsError error, bool null_terminate);
+BUSTER_F_DECL ProcessSpawnResult os_process_spawn(SliceString8 argv, SliceString8 environment_keys, SliceString8 environment_values, ProcessSpawnOptions options);
 BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
 BUSTER_F_DECL String8 get_environment_variable(String8 variable);
 
@@ -157,7 +158,10 @@ typedef struct ProgramInput ProgramInput;
 struct ProgramInput
 {
     SliceString8 arguments;
-    SliceString8 environment;
+    SliceString8 environment_keys;
+    SliceString8 environment_values;
+    StringOsList raw_arguments;
+    StringOsList raw_environment;
     FLAG_ARRAY_U64(flags, ProgramFlag, PROGRAM_FLAG_COUNT);
     u8 reserved[4];
 };
@@ -232,8 +236,4 @@ struct BooleanArgumentProcessResult
 BUSTER_F_DECL BooleanArgumentProcessResult boolean_argument_process(String8* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer, u64 flag_count, String8 argument);
 
 BUSTER_F_DECL bool program_flag_get(ProgramFlag flag);
-
-#if BUSTER_USE_IO_RING
-BUSTER_DECL IoRingSubmission io_ring_prepare_open(char* path, u64 user_data);
-BUSTER_DECL u32 io_ring_submit_and_wait_all();
-#endif
+BUSTER_F_DECL String8 executable_resolve_in_path(Arena* arena, String8 file);

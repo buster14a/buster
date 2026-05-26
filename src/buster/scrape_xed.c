@@ -29,7 +29,6 @@
 #include <buster/entry_point.c>
 #include <buster/target.c>
 #include <buster/assertion.c>
-#include <buster/memory.c>
 #include <buster/os.c>
 #include <buster/string.c>
 #include <buster/arena.c>

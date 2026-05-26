@@ -13,7 +13,6 @@
 #if defined(_WIN32)
 #include <buster/string16.c>
 #endif
-#include <buster/memory.c>
 #include <buster/assertion.c>
 #include <buster/os.c>
 #include <buster/arena.c>

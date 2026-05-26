@@ -35,7 +35,7 @@ BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
 #endif
 
 #if defined(_MSC_VER)
-RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {0};
+BUSTER_V_IMPL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {0};
 #endif
 
 //- rjf: doubly-linked-lists
@@ -783,7 +783,7 @@ u64 string8_code_point_count(String8 s, u8 code_point)
     return count;
 }
 
-ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environment, ProcessSpawnOptions options)
+ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environment_keys, SliceString8 environment_values, ProcessSpawnOptions options)
 {
     TemporalArena temp = scratch_begin(0, 0);
     ProcessSpawnResult result = {0};
@@ -833,7 +833,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         }
 
         WindowsStringList argv = windows_string_list_from_slice_string(temp.arena, arguments);
-        WindowsStringList envp = windows_environment_block_from_slice_string(temp.arena, environment);
+        WindowsStringList envp = options.use_process_environment ? program_state->input.raw_environment : windows_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
         DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT;
 
         if (CreateProcessW(first_argument.pointer, argv, 0, 0, 1, creation_flags, envp, 0, &startup_info, &process_information))
@@ -842,7 +842,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         }
         else
         {
-            string_print(S8("Error creating a process: {EOs}\n{SOsL}\n"), os_get_last_error(), argv);
+            string_print(S8("Error creating a process: \"{EOs}\" => {[]S8}\n"), os_get_last_error(), arguments);
         }
     }
 
@@ -908,7 +908,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     if (file_actions_init == 0 && attribute_init == 0 && pipe_result)
     {
         PosixStringList argv = slice_string8_to_null_terminated_array_char(temp.arena, arguments);
-        PosixStringList envp = posix_string_list_from_slice_string(temp.arena, environment);
+        PosixStringList envp = options.use_process_environment ? program_state->input.raw_environment : posix_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
         int spawn_result = posix_spawnp(&pid, argv[0], &file_actions, &attributes, argv, envp);
 
         if (spawn_result != 0)
@@ -1084,33 +1084,49 @@ OsError os_get_last_error(void)
     return result;
 }
 
-String8 os_error_write_message(String8 string, OsError error)
+String8 string8_from_os_error(Arena* arena, OsError error, bool null_terminate)
 {
-    BUSTER_CHECK(string.length == BUSTER_OS_ERROR_BUFFER_MAX_LENGTH);
     String8 result = {0};
+
 #if defined(_WIN32)
-    DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)error.v, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), 0, 0, 0);
+    TemporalArena temp = scratch_begin(&arena, 1);
+    DWORD buffer_size = 64 * 1024 / 2;
+    char16* buffer = arena_allocate(temp.arena, char16, buffer_size);
+    DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)error.v, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer, buffer_size, 0);
     if (length != 0)
     {
-        BUSTER_TRAP();
-        //result = string_os_from_pointer_length(string.pointer, length - 1);
+        String16 string16 = (String16){ .pointer = buffer, .length = length - 2 };
+        u64 position = arena->position;
+        result = string8_from_string16(arena, string16, null_terminate);
+        BUSTER_CHECK(position + string16.length == arena->position);
     }
+
+    scratch_end(temp);
 #else
     const char* error_raw_string = strerror((int)error.v);
     String8 error_string = string_from_pointer(error_raw_string);
-    result = string;
-    memcpy(result.pointer, error_string.pointer, BUSTER_SLICE_SIZE(error_string));
-    result.length = error_string.length;
+    result = string_duplicate_arena(arena, error_string, null_terminate);
 #endif
+
     return result;
 }
 
 String8 os_get_environment_variable(String8 variable)
 {
     String8 result = {0};
-    if (variable.pointer)
+    if (variable.pointer && variable.length)
     {
-        BUSTER_TRAP(); // TODO
+        String8* env_pointer = program_state->input.environment_keys.pointer;
+        u64 env_count = program_state->input.environment_keys.length;
+        for (u64 i = 0; i < env_count; i += 1)
+        {
+            String8 env = env_pointer[i];
+            if (string_equal(variable, env))
+            {
+                result = program_state->input.environment_values.pointer[i];
+                break;
+            }
+        }
     }
     return result;
 }
@@ -1436,4 +1452,86 @@ BooleanArgumentProcessResult boolean_argument_process(String8* flag_string_start
 bool program_flag_get(ProgramFlag flag)
 {
     return flag_get(program_state->input.flags, PROGRAM_FLAG_COUNT, flag);
+}
+
+String8 executable_resolve_in_path(Arena* arena, String8 file)
+{
+    TemporalArena temp = scratch_begin(0, 0);
+
+    String8 result = {0};
+    String8 path_value = {0};
+    String8* key_pointer = program_state->input.environment_keys.pointer;
+    u64 key_length = program_state->input.environment_keys.length;
+#if defined(_WIN32)
+    String8 path_key = S8("Path");
+#else
+    String8 path_key = S8("PATH");
+#endif
+
+    for (u64 i = 0; i < key_length; i += 1)
+    {
+        String8 candidate_key = key_pointer[i];
+        if (string_equal(path_key, candidate_key))
+        {
+            path_value = program_state->input.environment_values.pointer[i];
+            break;
+        }
+    }
+
+    if (path_value.pointer && path_value.length)
+    {
+        String8 path_it = path_value;
+
+#if defined(_WIN32)
+        char8 path_separator = ';';
+#else
+        char8 path_separator = ':';
+#endif
+
+#if defined(_WIN32)
+        String8 exe_part = string_ends_with_sequence(file, S8(".exe")) ? S8("") : S8(".exe");
+#endif
+
+        while (true)
+        {
+            u64 colon_index = string_first_code_unit(path_it, path_separator);
+            bool is_end = colon_index == BUSTER_STRING_NO_MATCH;
+            u64 it_end = is_end ? path_it.length : colon_index;
+            String8 it = string_slice(path_it, 0, it_end);
+            String8 parts[] = {
+                it,
+                S8("/"),
+                file,
+#if defined(_WIN32)
+                exe_part,
+#endif
+            };
+
+            String8 full_path = string_join_arena(temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
+
+            bool found;
+#if defined(_WIN32)
+            DWORD file_attributes = GetFileAttributesW(string16_from_string8(temp.arena, full_path, true).pointer);
+            found = file_attributes != INVALID_FILE_ATTRIBUTES && (file_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+#else
+            found = access(full_path.pointer, X_OK) == 0;
+#endif
+            if (found)
+            {
+                result = string_duplicate_arena(arena, full_path, true);
+                break;
+            }
+
+            if (is_end)
+            {
+                break;
+            }
+
+            path_it = string_slice(path_it, it_end + 1, path_it.length);
+        }
+    }
+
+    scratch_end(temp);
+
+    return result;
 }

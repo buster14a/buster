@@ -6,7 +6,7 @@
 #include <buster/string.h>
 #include <buster/float.h>
 
-UI_State* ui_state;
+BUSTER_V_IMPL UI_State* ui_state;
 
 void ui_autopop(UI_State* state)
 {

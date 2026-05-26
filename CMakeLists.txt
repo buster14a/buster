@@ -458,7 +458,6 @@ set(BUSTER_SOURCE_DIR "src/buster")
 set(BUSTER_MODULE_OS "${BUSTER_SOURCE_DIR}/os${COMMON_EXTENSION}")
 set(BUSTER_MODULE_ENTRY_POINT "${BUSTER_SOURCE_DIR}/entry_point${COMMON_EXTENSION}")
 set(BUSTER_MODULE_ARENA "${BUSTER_SOURCE_DIR}/arena${COMMON_EXTENSION}")
-set(BUSTER_MODULE_MEMORY "${BUSTER_SOURCE_DIR}/memory${COMMON_EXTENSION}")
 set(BUSTER_MODULE_STRING "${BUSTER_SOURCE_DIR}/string${COMMON_EXTENSION}")
 set(BUSTER_MODULE_INTEGER "${BUSTER_SOURCE_DIR}/integer${COMMON_EXTENSION}")
 set(BUSTER_MODULE_FLOAT "${BUSTER_SOURCE_DIR}/float${COMMON_EXTENSION}")
@@ -767,11 +766,6 @@ function(executable_add name is_buster_program main_file)
     #     )
     # endif()
 
-    if(NOT ${name} STREQUAL "metaprogram")
-        message(STATUS "Adding metaprogram dependency to ${name}")
-        add_dependencies(${name} metaprogram_generate)
-    endif()
-
     if (BUSTER_DEVELOPER_TARGETS)
         add_custom_target(run_${name}
             COMMAND "$<TARGET_FILE:${name}>"
@@ -811,15 +805,6 @@ function(executable_add name is_buster_program main_file)
     endif()
 endfunction()
 
-executable_add(metaprogram OFF src/buster/metaprogram.c)
-
-add_custom_target(metaprogram_generate
-    COMMAND "$<TARGET_FILE:metaprogram>"
-    DEPENDS metaprogram
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Running metaprogram"
-    VERBATIM)
-
 function(buster_add_executable name main_file)
     executable_add(${name} ON ${main_file} ${ARGN})
 endfunction()
@@ -830,7 +815,6 @@ buster_add_executable(ide src/buster/ide/ide.c
     ${BUSTER_MODULE_ARENA}
     ${BUSTER_MODULE_INTEGER}
     ${BUSTER_MODULE_ASSERTION}
-    ${BUSTER_MODULE_MEMORY}
     ${BUSTER_MODULE_STRING}
     ${BUSTER_MODULE_FLOAT}
     ${BUSTER_MODULE_COMPILER_PARSER}

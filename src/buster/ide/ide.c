@@ -23,7 +23,6 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.c>
 #endif
-#include <buster/memory.c>
 #include <buster/entry_point.c>
 #include <buster/target.c>
 // #include <buster/ui_core.c>
@@ -79,7 +78,7 @@ struct IdeProgram
 
 BUSTER_GLOBAL_LOCAL IdeProgram ide_state = {0};
 
-ProgramState* program_state = &ide_state.state;
+BUSTER_V_IMPL ProgramState* program_state = &ide_state.state;
 
 #if BUSTER_FUZZ
 BUSTER_EXPORT s32 buster_fuzz(const u8* pointer, size_t size)
@@ -94,7 +93,7 @@ ProcessResult process_arguments(void)
     ProcessResult result = PROCESS_RESULT_SUCCESS;
 
     SliceString8 arguments = program_state->input.arguments;
-    SliceString8 environment = program_state->input.environment;
+    // SliceString8 environment = program_state->input.environment;
 
     // StringOsListIterator arg_it = string_os_list_iterator_initialize(argv);
     //
@@ -105,7 +104,7 @@ ProcessResult process_arguments(void)
         String8 arg = arguments.pointer[i];
         if (!string_equal(arg, S8("test")))
         {
-            ProcessResult r = buster_argument_process(arguments, environment, i, arg);
+            ProcessResult r = buster_argument_process(i);
             if (r != PROCESS_RESULT_SUCCESS)
             {
                 string_print(S8("Failed to process argument {S8}\n"), arg);

@@ -16,7 +16,7 @@
 #include <mach/machine.h>
 #endif
 
-Target target_native = {
+BUSTER_V_IMPL Target target_native = {
 #if BUSTER_CPU_ARCH_X86_64
     .cpu_arch = CPU_ARCH_X86_64,
 #elif BUSTER_CPU_ARCH_AARCH64

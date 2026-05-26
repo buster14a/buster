@@ -37,6 +37,24 @@
 #define BUSTER_FUZZ 0
 #endif
 
+#if defined(__linux__)
+#define BUSTER_LINUX 1
+#else
+#define BUSTER_LINUX 0
+#endif
+
+#if defined(_WIN32)
+#define BUSTER_WINDOWS 1
+#else
+#define BUSTER_WINDOWS 0
+#endif
+
+#if defined(__APPLE__)
+#define BUSTER_APPLE 1
+#else
+#define BUSTER_APPLE 0
+#endif
+
 #if defined(__TINYC__)
 #define BUSTER_COMPILER_TCC 1
 #elif defined(__clang__)
@@ -158,15 +176,13 @@ struct DeferHelper
 #if defined __cplusplus
 #define BUSTER_V_DECL "This is an error to be fixed" + 123 - 0.012312;
 #else
-#define BUSTER_V_DECL
+#define BUSTER_V_DECL static
+#define BUSTER_V_IMPL static
 #endif
 #else
 #define BUSTER_F_DECL
 #define BUSTER_V_DECL extern
-#endif
-
-#ifndef BUSTER_USE_IO_RING
-#define BUSTER_USE_IO_RING 0
+#define BUSTER_V_IMPL
 #endif
 
 #define BUSTER_PACKED __attribute__((packed))
@@ -276,6 +292,8 @@ struct DeferHelper
 #include <string.h>
 #include <stdlib.h>
 #endif
+
+#define memory_compare(a, b, count) (memcmp((a), (b), (count)) == 0)
 
 #if defined __clang__
 #define DECLARE_VECTOR(name, T, count) typedef T name __attribute__((ext_vector_type(count)))
@@ -542,7 +560,7 @@ typedef WindowsChar CharOs;
 typedef PosixChar CharOs;
 #endif
 
-typedef PosixChar* const* PosixStringList;
+typedef PosixChar** PosixStringList;
 typedef WindowsChar* WindowsStringList;
 
 #if defined(_WIN32)
