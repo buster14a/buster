@@ -112,7 +112,6 @@ struct Generate
 };
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
-BUSTER_GLOBAL_LOCAL String8 python_path = {0};
 
 BUSTER_GLOBAL_LOCAL String8 cl_path = {0};
 BUSTER_GLOBAL_LOCAL String8 clang_path = {0};
@@ -566,8 +565,6 @@ ProcessResult process_arguments(void)
 
     Arena* arena = program_state->arena;
 
-    String8 cmd_path = executable_resolve_in_path(arena, S8("cmd"));
-
     BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
@@ -612,7 +609,15 @@ ProcessResult process_arguments(void)
         command = BUILD_COMMAND_BUILD;
     }
 
-    Generate generate = {0};
+    String8 build_directory = S8("build");
+    Generate generate = {
+        .build_directory = build_directory,
+        .compiler = BUILD_COMPILER_CLANG,
+        .link_libc = true,
+        .include_tests = true,
+        .developer_targets = true,
+    };
+    CmakeBuildOptions options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -688,12 +693,15 @@ ProcessResult process_arguments(void)
         switch (command)
         {
             break; case BUILD_COMMAND_COUNT: BUSTER_UNREACHABLE();
-            break; case BUILD_COMMAND_NONE:{}
+            break; case BUILD_COMMAND_NONE: {}
             break; case BUILD_COMMAND_GENERATE:
             {
+                BuildStep* generate_step = step_add(arena);
+                generate_add(arena, generate_step, generate);
             }
             break; case BUILD_COMMAND_BUILD:
             {
+                build_add(arena, build_directory, (SliceString8){0}, options);
             }
             break;
             case BUILD_COMMAND_TEST_ALL_COMBINATIONS:
