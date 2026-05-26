@@ -724,12 +724,6 @@ ProcessResult entry_point(void)
 
     for (BuildStep* step = build_graph->first_step; step; step = step->next)
     {
-        u32 step_run_count = 0;
-        for (ProcessRun* run = step->first_process; run; run = run->next)
-        {
-            step_run_count += 1;
-        }
-
         u32 i = 0;
 
         for (ProcessRun* run = step->first_process, *first_pending = step->first_process; run; run = run->next, i += 1)
