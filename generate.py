@@ -294,14 +294,25 @@ def main(argv):
         if cmake_profile_path is None or not cmake_profile_path.exists():
             print("warning: CMake profiling output was not produced", file=sys.stderr)
         else:
-            summary_script = Path(__file__).resolve().parent / "tools" / "cmake_profile_summary.py"
-            summary_command = [
-                sys.executable,
-                str(summary_script),
-                str(cmake_profile_path),
-                "--limit",
-                str(arguments.cmake_profile_summary_limit),
-            ]
+            build_driver_name = "build.exe" if platform.system() == "Windows" else "build"
+            build_driver = Path(__file__).resolve().parent / "build" / build_driver_name
+            if build_driver.exists():
+                summary_command = [
+                    str(build_driver),
+                    "cmake_profile_summary",
+                    str(cmake_profile_path),
+                    "--limit",
+                    str(arguments.cmake_profile_summary_limit),
+                ]
+            else:
+                summary_script = Path(__file__).resolve().parent / "tools" / "cmake_profile_summary.py"
+                summary_command = [
+                    sys.executable,
+                    str(summary_script),
+                    str(cmake_profile_path),
+                    "--limit",
+                    str(arguments.cmake_profile_summary_limit),
+                ]
             print(f"+ {command_string(summary_command)}", flush=True)
             summary_result = subprocess.call(summary_command)
             if result == 0 and summary_result != 0:

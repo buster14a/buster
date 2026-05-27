@@ -7,6 +7,7 @@
 #include <buster/integer.h>
 #include <buster/string.h>
 #include <buster/target.h>
+#include <stdio.h>
 
 #include <buster/assertion.c>
 #include <buster/string.c>
@@ -23,6 +24,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_GENERATE,
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_CLANG_ANALYZE,
+    BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -70,6 +72,7 @@ typedef enum BuildArgument
     BUILD_ARGUMENT_CC,
     BUILD_ARGUMENT_CLANG,
     BUILD_ARGUMENT_CONFIG,
+    BUILD_ARGUMENT_LIMIT,
     BUILD_ARGUMENT_QUIET,
     BUILD_ARGUMENT_COUNT,
 } BuildArgument;
@@ -78,6 +81,7 @@ BUSTER_GLOBAL_LOCAL String8 build_arguments[] = {
     [BUILD_ARGUMENT_CC] = S8_INITIALIZER("--cc"),
     [BUILD_ARGUMENT_CLANG] = S8_INITIALIZER("--clang"),
     [BUILD_ARGUMENT_CONFIG] = S8_INITIALIZER("--config"),
+    [BUILD_ARGUMENT_LIMIT] = S8_INITIALIZER("--limit"),
     [BUILD_ARGUMENT_QUIET] = S8_INITIALIZER("--quiet"),
 };
 
@@ -412,6 +416,62 @@ struct ClangAnalyzeOptions
     u32 compile_commands_set:1;
 };
 
+typedef struct CmakeProfileSummaryOptions CmakeProfileSummaryOptions;
+struct CmakeProfileSummaryOptions
+{
+    String8 profile;
+    u64 limit;
+    u32 profile_set:1;
+};
+
+typedef struct CmakeProfileEvent CmakeProfileEvent;
+struct CmakeProfileEvent
+{
+    CmakeProfileEvent* next;
+    s64 pid;
+    s64 tid;
+    s64 ts;
+    char8 phase;
+    String8 category;
+    String8 name;
+    String8 location;
+    String8 function_arguments;
+};
+
+typedef struct CmakeProfileStack CmakeProfileStack;
+struct CmakeProfileStack
+{
+    CmakeProfileStack* next;
+    CmakeProfileEvent* top;
+    s64 pid;
+    s64 tid;
+};
+
+typedef struct CmakeProfileRow CmakeProfileRow;
+struct CmakeProfileRow
+{
+    s64 duration_us;
+    String8 category;
+    String8 name;
+    String8 location;
+    String8 function_arguments;
+};
+
+typedef struct CmakeProfileRowNode CmakeProfileRowNode;
+struct CmakeProfileRowNode
+{
+    CmakeProfileRow row;
+    CmakeProfileRowNode* next;
+};
+
+typedef struct CmakeProfileRowList CmakeProfileRowList;
+struct CmakeProfileRowList
+{
+    CmakeProfileRowNode* first;
+    CmakeProfileRowNode* last;
+    u64 count;
+};
+
 BUSTER_GLOBAL_LOCAL bool character_is_space(char8 c)
 {
     bool result = (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v');
@@ -552,6 +612,66 @@ BUSTER_GLOBAL_LOCAL bool json_consume(JsonParser* parser, char8 c)
     {
         parser->index += 1;
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL s64 json_parse_s64(JsonParser* parser, bool* valid)
+{
+    s64 result = 0;
+    json_skip_whitespace(parser);
+
+    bool negative = false;
+    if (parser->index < parser->text.length && parser->text.pointer[parser->index] == '-')
+    {
+        negative = true;
+        parser->index += 1;
+    }
+
+    bool found_digit = false;
+    while (parser->index < parser->text.length)
+    {
+        char8 c = parser->text.pointer[parser->index];
+        if (!code_unit_is_decimal(c))
+        {
+            break;
+        }
+        found_digit = true;
+        result = result * 10 + (s64)(c - '0');
+        parser->index += 1;
+    }
+
+    if (!found_digit)
+    {
+        *valid = false;
+    }
+
+    if (parser->index < parser->text.length && parser->text.pointer[parser->index] == '.')
+    {
+        parser->index += 1;
+        while (parser->index < parser->text.length && code_unit_is_decimal(parser->text.pointer[parser->index]))
+        {
+            parser->index += 1;
+        }
+    }
+
+    if (parser->index < parser->text.length && (parser->text.pointer[parser->index] == 'e' || parser->text.pointer[parser->index] == 'E'))
+    {
+        parser->index += 1;
+        if (parser->index < parser->text.length && (parser->text.pointer[parser->index] == '+' || parser->text.pointer[parser->index] == '-'))
+        {
+            parser->index += 1;
+        }
+        while (parser->index < parser->text.length && code_unit_is_decimal(parser->text.pointer[parser->index]))
+        {
+            parser->index += 1;
+        }
+    }
+
+    if (negative)
+    {
+        result = -result;
+    }
+
     return result;
 }
 
@@ -1367,6 +1487,321 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_add(Arena* arena, String8 build_directory
     };
 }
 
+BUSTER_GLOBAL_LOCAL void cmake_profile_row_list_push(Arena* arena, CmakeProfileRowList* list, CmakeProfileRow row)
+{
+    CmakeProfileRowNode* node = arena_allocate(arena, CmakeProfileRowNode, 1);
+    *node = (CmakeProfileRowNode){ .row = row };
+
+    if (list->last)
+    {
+        list->last->next = node;
+    }
+    else
+    {
+        list->first = node;
+    }
+
+    list->last = node;
+    list->count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL CmakeProfileStack* cmake_profile_stack_get(Arena* arena, CmakeProfileStack** first, s64 pid, s64 tid)
+{
+    CmakeProfileStack* result = 0;
+    for (CmakeProfileStack* stack = *first; stack; stack = stack->next)
+    {
+        if (stack->pid == pid && stack->tid == tid)
+        {
+            result = stack;
+            break;
+        }
+    }
+
+    if (!result)
+    {
+        result = arena_allocate(arena, CmakeProfileStack, 1);
+        *result = (CmakeProfileStack){
+            .next = *first,
+            .pid = pid,
+            .tid = tid,
+        };
+        *first = result;
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void cmake_profile_parse_args(Arena* arena, JsonParser* parser, CmakeProfileEvent* event, bool* valid)
+{
+    if (!json_consume(parser, '{'))
+    {
+        json_skip_value(arena, parser, valid);
+        return;
+    }
+
+    for (;;)
+    {
+        json_skip_whitespace(parser);
+        if (json_consume(parser, '}'))
+        {
+            break;
+        }
+
+        String8 key = json_parse_string(arena, parser, valid);
+        if (!*valid || !json_consume(parser, ':'))
+        {
+            *valid = false;
+            break;
+        }
+
+        if (string_equal(key, S8("location")))
+        {
+            event->location = json_parse_string(arena, parser, valid);
+        }
+        else if (string_equal(key, S8("functionArgs")))
+        {
+            event->function_arguments = json_parse_string(arena, parser, valid);
+        }
+        else
+        {
+            json_skip_value(arena, parser, valid);
+        }
+
+        if (!*valid)
+        {
+            break;
+        }
+        if (json_consume(parser, ','))
+        {
+            continue;
+        }
+        if (json_consume(parser, '}'))
+        {
+            break;
+        }
+
+        *valid = false;
+        break;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL CmakeProfileEvent cmake_profile_parse_event(Arena* arena, JsonParser* parser, bool* valid)
+{
+    CmakeProfileEvent result = {0};
+
+    if (!json_consume(parser, '{'))
+    {
+        *valid = false;
+        return result;
+    }
+
+    for (;;)
+    {
+        json_skip_whitespace(parser);
+        if (json_consume(parser, '}'))
+        {
+            break;
+        }
+
+        String8 key = json_parse_string(arena, parser, valid);
+        if (!*valid || !json_consume(parser, ':'))
+        {
+            *valid = false;
+            break;
+        }
+
+        if (string_equal(key, S8("pid")))
+        {
+            result.pid = json_parse_s64(parser, valid);
+        }
+        else if (string_equal(key, S8("tid")))
+        {
+            result.tid = json_parse_s64(parser, valid);
+        }
+        else if (string_equal(key, S8("ts")))
+        {
+            result.ts = json_parse_s64(parser, valid);
+        }
+        else if (string_equal(key, S8("ph")))
+        {
+            String8 phase = json_parse_string(arena, parser, valid);
+            result.phase = phase.length ? phase.pointer[0] : 0;
+        }
+        else if (string_equal(key, S8("cat")))
+        {
+            result.category = json_parse_string(arena, parser, valid);
+        }
+        else if (string_equal(key, S8("name")))
+        {
+            result.name = json_parse_string(arena, parser, valid);
+        }
+        else if (string_equal(key, S8("args")))
+        {
+            cmake_profile_parse_args(arena, parser, &result, valid);
+        }
+        else
+        {
+            json_skip_value(arena, parser, valid);
+        }
+
+        if (!*valid)
+        {
+            break;
+        }
+        if (json_consume(parser, ','))
+        {
+            continue;
+        }
+        if (json_consume(parser, '}'))
+        {
+            break;
+        }
+
+        *valid = false;
+        break;
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int cmake_profile_row_compare(const void* a, const void* b)
+{
+    const CmakeProfileRow* row_a = (const CmakeProfileRow*)a;
+    const CmakeProfileRow* row_b = (const CmakeProfileRow*)b;
+
+    int result = 0;
+    if (row_a->duration_us < row_b->duration_us)
+    {
+        result = 1;
+    }
+    else if (row_a->duration_us > row_b->duration_us)
+    {
+        result = -1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int string8_printf_length(String8 string, u64 max_length)
+{
+    u64 length = BUSTER_MIN(string.length, max_length);
+    int result = length > (u64)INT32_MAX ? INT32_MAX : (int)length;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult cmake_profile_summary_run(Arena* arena, CmakeProfileSummaryOptions options)
+{
+    if (!options.limit)
+    {
+        options.limit = 25;
+    }
+
+    if (!options.profile.pointer || !options.profile.length)
+    {
+        string_print(S8("error: cmake_profile_summary requires a profile path\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    ByteSlice bytes = file_read(arena, options.profile, (FileReadOptions){ .end_padding = 1 });
+    if (!bytes.pointer)
+    {
+        string_print(S8("error: failed to read {S8}\n"), options.profile);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    JsonParser parser = { .text = { .pointer = (char8*)bytes.pointer, .length = bytes.length } };
+    bool valid = true;
+    if (!json_consume(&parser, '['))
+    {
+        string_print(S8("error: failed to parse {S8}: expected JSON array\n"), options.profile);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    CmakeProfileStack* stacks = 0;
+    CmakeProfileRowList row_list = {0};
+
+    for (;;)
+    {
+        json_skip_whitespace(&parser);
+        if (json_consume(&parser, ']'))
+        {
+            break;
+        }
+
+        CmakeProfileEvent event = cmake_profile_parse_event(arena, &parser, &valid);
+        if (!valid)
+        {
+            string_print(S8("error: failed to parse {S8}: invalid profiling event\n"), options.profile);
+            return PROCESS_RESULT_FAILED;
+        }
+
+        CmakeProfileStack* stack = cmake_profile_stack_get(arena, &stacks, event.pid, event.tid);
+        if (event.phase == 'B')
+        {
+            CmakeProfileEvent* stored = arena_allocate(arena, CmakeProfileEvent, 1);
+            *stored = event;
+            stored->next = stack->top;
+            stack->top = stored;
+        }
+        else if (event.phase == 'E' && stack->top)
+        {
+            CmakeProfileEvent* start = stack->top;
+            stack->top = start->next;
+            cmake_profile_row_list_push(arena, &row_list, (CmakeProfileRow){
+                .duration_us = event.ts - start->ts,
+                .category = start->category,
+                .name = start->name,
+                .location = start->location,
+                .function_arguments = start->function_arguments,
+            });
+        }
+
+        if (json_consume(&parser, ','))
+        {
+            continue;
+        }
+        if (json_consume(&parser, ']'))
+        {
+            break;
+        }
+
+        string_print(S8("error: failed to parse {S8}: expected ',' or ']'\n"), options.profile);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    if (!row_list.count)
+    {
+        string_print(S8("No complete CMake profiling events found.\n"));
+        return PROCESS_RESULT_SUCCESS;
+    }
+
+    CmakeProfileRow* rows = arena_allocate(arena, CmakeProfileRow, row_list.count);
+    u64 row_i = 0;
+    for (CmakeProfileRowNode* node = row_list.first; node; node = node->next)
+    {
+        rows[row_i++] = node->row;
+    }
+    qsort(rows, row_list.count, sizeof(rows[0]), cmake_profile_row_compare);
+
+    string_print(S8("Slowest CMake configure/generate entries:\n"));
+    u64 limit = BUSTER_MIN(options.limit, row_list.count);
+    for (u64 i = 0; i < limit; i += 1)
+    {
+        CmakeProfileRow row = rows[i];
+        s64 duration_us = row.duration_us < 0 ? 0 : row.duration_us;
+        unsigned long long duration_ms_whole = (unsigned long long)((u64)duration_us / 1000);
+        unsigned long long duration_ms_fraction = (unsigned long long)((u64)duration_us % 1000);
+        printf("%4llu.%03llu ms  %-10.*s %-30.*s %.*s %.*s\n",
+               duration_ms_whole,
+               duration_ms_fraction,
+               string8_printf_length(row.category, 10), row.category.pointer ? row.category.pointer : "",
+               string8_printf_length(row.name, 30), row.name.pointer ? row.name.pointer : "",
+               string8_printf_length(row.location, UINT64_MAX), row.location.pointer ? row.location.pointer : "",
+               string8_printf_length(row.function_arguments, 100), row.function_arguments.pointer ? row.function_arguments.pointer : "");
+    }
+
+    return PROCESS_RESULT_SUCCESS;
+}
+
 BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     BuildStep* generate_step = step_add(arena);
@@ -1455,6 +1890,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
+        [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -1505,6 +1941,7 @@ ProcessResult process_arguments(void)
     };
     CmakeBuildOptions options = {0};
     ClangAnalyzeOptions clang_analyze_options = { .compile_commands = build_directory };
+    CmakeProfileSummaryOptions cmake_profile_summary_options = { .limit = 25 };
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -1531,6 +1968,12 @@ ProcessResult process_arguments(void)
                 {
                     clang_analyze_options.compile_commands = argument;
                     clang_analyze_options.compile_commands_set = 1;
+                    argument_i += 1;
+                }
+                else if (command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY && !cmake_profile_summary_options.profile_set && !string_starts_with_sequence(argument, S8("--")))
+                {
+                    cmake_profile_summary_options.profile = argument;
+                    cmake_profile_summary_options.profile_set = 1;
                     argument_i += 1;
                 }
                 else
@@ -1607,6 +2050,28 @@ ProcessResult process_arguments(void)
                     result = PROCESS_RESULT_FAILED;
                 }
             }
+            break; case BUILD_ARGUMENT_LIMIT:
+            {
+                if (command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY && argument_i + 1 < arguments.length)
+                {
+                    argument_i += 1;
+                    String8 candidate_limit = arguments.pointer[argument_i];
+                    IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit.pointer);
+                    if (parsed_limit.length == candidate_limit.length && parsed_limit.value > 0)
+                    {
+                        cmake_profile_summary_options.limit = parsed_limit.value;
+                        argument_i += 1;
+                    }
+                    else
+                    {
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                }
+                else
+                {
+                    result = PROCESS_RESULT_FAILED;
+                }
+            }
             break; case BUILD_ARGUMENT_QUIET:
             {
                 options.quiet = 1;
@@ -1634,6 +2099,10 @@ ProcessResult process_arguments(void)
             break; case BUILD_COMMAND_CLANG_ANALYZE:
             {
                 result = clang_analyze_run(arena, clang_analyze_options);
+            }
+            break; case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY:
+            {
+                result = cmake_profile_summary_run(arena, cmake_profile_summary_options);
             }
             break;
             case BUILD_COMMAND_TEST_ALL_COMBINATIONS:
