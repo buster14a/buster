@@ -102,7 +102,6 @@ option(BUSTER_FUZZ "Enable fuzzing" OFF)
 option(BUSTER_LTO "Enable LTO" OFF)
 option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warning flags" ON)
 option(BUSTER_DEVELOPER_TARGETS "Enable convenience run/test/debug targets" ON)
-set(BUSTER_PYTHON_EXECUTABLE "" CACHE FILEPATH "Python interpreter for clang_analyze")
 
 if (BUSTER_MULTI_CONFIG AND NOT BUSTER_OPTIMIZE_EXPLICIT)
     set(BUSTER_OPTIMIZE_CONDITION "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>")
@@ -432,19 +431,7 @@ if (BUSTER_DEVELOPER_TARGETS)
     find_program(gdb_executable gdb)
     find_program(lldb_executable lldb)
 endif()
-set(BUSTER_CLANG_ANALYZE_PYTHON "")
-if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
-    if (DEFINED BUSTER_PYTHON_EXECUTABLE
-        AND NOT BUSTER_PYTHON_EXECUTABLE STREQUAL ""
-        AND EXISTS "${BUSTER_PYTHON_EXECUTABLE}")
-        set(BUSTER_CLANG_ANALYZE_PYTHON "${BUSTER_PYTHON_EXECUTABLE}")
-    else()
-        find_package(Python3 COMPONENTS Interpreter QUIET)
-        if (Python3_Interpreter_FOUND)
-            set(BUSTER_CLANG_ANALYZE_PYTHON "${Python3_EXECUTABLE}")
-        endif()
-    endif()
-endif()
+set(BUSTER_CLANG_ANALYZE_DRIVER "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}")
 
 if (BUSTER_DEVELOPER_TARGETS)
     message(STATUS "GDB: ${gdb_executable}")
@@ -843,10 +830,10 @@ add_custom_target(test_all
 )
 
 if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
-    if (BUSTER_CLANG_ANALYZE_PYTHON)
+    if (EXISTS "${BUSTER_CLANG_ANALYZE_DRIVER}")
         add_custom_target(clang_analyze
-            COMMAND "${BUSTER_CLANG_ANALYZE_PYTHON}"
-                "${CMAKE_SOURCE_DIR}/tools/clang_analyze.py"
+            COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}"
+                clang_analyze
                 "${CMAKE_BINARY_DIR}/compile_commands.json"
                 --config "$<CONFIG>"
                 --quiet
@@ -856,7 +843,7 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
             VERBATIM
         )
     else()
-        message(STATUS "clang_analyze target disabled: Python3 interpreter not found")
+        message(STATUS "clang_analyze target disabled: ${BUSTER_CLANG_ANALYZE_DRIVER} not found")
     endif()
 elseif (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG)
     message(STATUS "clang_analyze target disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF")

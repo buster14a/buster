@@ -3,6 +3,7 @@
 #include <buster/base.h>
 #include <buster/os.h>
 #include <buster/entry_point.h>
+#include <buster/file.h>
 #include <buster/integer.h>
 #include <buster/string.h>
 #include <buster/target.h>
@@ -11,6 +12,7 @@
 #include <buster/string.c>
 #include <buster/os.c>
 #include <buster/arena.c>
+#include <buster/file.c>
 #include <buster/integer.c>
 #include <buster/entry_point.c>
 #include <buster/target.c>
@@ -20,6 +22,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_NONE,
     BUILD_COMMAND_GENERATE,
     BUILD_COMMAND_BUILD,
+    BUILD_COMMAND_CLANG_ANALYZE,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -65,12 +68,16 @@ BUSTER_V_IMPL ProgramState* program_state = &program.state;
 typedef enum BuildArgument
 {
     BUILD_ARGUMENT_CC,
+    BUILD_ARGUMENT_CLANG,
+    BUILD_ARGUMENT_CONFIG,
     BUILD_ARGUMENT_QUIET,
     BUILD_ARGUMENT_COUNT,
 } BuildArgument;
 
 BUSTER_GLOBAL_LOCAL String8 build_arguments[] = {
     [BUILD_ARGUMENT_CC] = S8_INITIALIZER("--cc"),
+    [BUILD_ARGUMENT_CLANG] = S8_INITIALIZER("--clang"),
+    [BUILD_ARGUMENT_CONFIG] = S8_INITIALIZER("--config"),
     [BUILD_ARGUMENT_QUIET] = S8_INITIALIZER("--quiet"),
 };
 
@@ -363,6 +370,1003 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
     generic_tool_run_add_end(r);
 }
 
+typedef struct String8Node String8Node;
+struct String8Node
+{
+    String8 string;
+    String8Node* next;
+};
+
+typedef struct String8List String8List;
+struct String8List
+{
+    String8Node* first;
+    String8Node* last;
+    u64 count;
+};
+
+typedef struct JsonParser JsonParser;
+struct JsonParser
+{
+    String8 text;
+    u64 index;
+};
+
+typedef struct CompileCommandEntry CompileCommandEntry;
+struct CompileCommandEntry
+{
+    String8 directory;
+    String8 command;
+    String8 file;
+    String8 output;
+    SliceString8 arguments;
+};
+
+typedef struct ClangAnalyzeOptions ClangAnalyzeOptions;
+struct ClangAnalyzeOptions
+{
+    String8 compile_commands;
+    String8 config;
+    String8 clang;
+    u32 quiet:1;
+    u32 compile_commands_set:1;
+};
+
+BUSTER_GLOBAL_LOCAL bool character_is_space(char8 c)
+{
+    bool result = (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v');
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL char8 character_to_lower(char8 c)
+{
+    if (c >= 'A' && c <= 'Z')
+    {
+        c = (char8)(c - 'A' + 'a');
+    }
+    return c;
+}
+
+BUSTER_GLOBAL_LOCAL bool string_contains(String8 s, String8 sub)
+{
+    bool result = string_first_sequence(s, sub) != BUSTER_STRING_NO_MATCH;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool string_ends_with_sequence_insensitive(String8 s, String8 suffix)
+{
+    bool result = false;
+    if (s.length >= suffix.length)
+    {
+        result = true;
+        u64 offset = s.length - suffix.length;
+        for (u64 i = 0; i < suffix.length; i += 1)
+        {
+            if (character_to_lower(s.pointer[offset + i]) != character_to_lower(suffix.pointer[i]))
+            {
+                result = false;
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void string8_list_push(Arena* arena, String8List* list, String8 string)
+{
+    String8Node* node = arena_allocate(arena, String8Node, 1);
+    *node = (String8Node){ .string = string };
+
+    if (list->last)
+    {
+        list->last->next = node;
+    }
+    else
+    {
+        list->first = node;
+    }
+
+    list->last = node;
+    list->count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL SliceString8 string8_list_to_slice(Arena* arena, String8List list)
+{
+    SliceString8 result = { .pointer = arena_allocate(arena, String8, list.count), .length = list.count };
+
+    u64 i = 0;
+    for (String8Node* node = list.first; node; node = node->next, i += 1)
+    {
+        result.pointer[i] = node->string;
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void arena_append_char8(Arena* arena, char8 c)
+{
+    *arena_allocate(arena, char8, 1) = c;
+}
+
+BUSTER_GLOBAL_LOCAL void arena_append_utf8(Arena* arena, u32 codepoint)
+{
+    if (codepoint <= 0x7f)
+    {
+        arena_append_char8(arena, (char8)codepoint);
+    }
+    else if (codepoint <= 0x7ff)
+    {
+        arena_append_char8(arena, (char8)(0xc0 | (codepoint >> 6)));
+        arena_append_char8(arena, (char8)(0x80 | (codepoint & 0x3f)));
+    }
+    else if (codepoint <= 0xffff)
+    {
+        arena_append_char8(arena, (char8)(0xe0 | (codepoint >> 12)));
+        arena_append_char8(arena, (char8)(0x80 | ((codepoint >> 6) & 0x3f)));
+        arena_append_char8(arena, (char8)(0x80 | (codepoint & 0x3f)));
+    }
+    else
+    {
+        arena_append_char8(arena, (char8)(0xf0 | (codepoint >> 18)));
+        arena_append_char8(arena, (char8)(0x80 | ((codepoint >> 12) & 0x3f)));
+        arena_append_char8(arena, (char8)(0x80 | ((codepoint >> 6) & 0x3f)));
+        arena_append_char8(arena, (char8)(0x80 | (codepoint & 0x3f)));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 hexadecimal_digit_value(char8 c, bool* valid)
+{
+    u32 result = 0;
+    if (c >= '0' && c <= '9')
+    {
+        result = (u32)(c - '0');
+    }
+    else if (c >= 'a' && c <= 'f')
+    {
+        result = (u32)(10 + c - 'a');
+    }
+    else if (c >= 'A' && c <= 'F')
+    {
+        result = (u32)(10 + c - 'A');
+    }
+    else
+    {
+        *valid = false;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void json_skip_whitespace(JsonParser* parser)
+{
+    while (parser->index < parser->text.length && character_is_space(parser->text.pointer[parser->index]))
+    {
+        parser->index += 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool json_consume(JsonParser* parser, char8 c)
+{
+    json_skip_whitespace(parser);
+    bool result = parser->index < parser->text.length && parser->text.pointer[parser->index] == c;
+    if (result)
+    {
+        parser->index += 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 json_parse_string(Arena* arena, JsonParser* parser, bool* valid)
+{
+    String8 result = {0};
+    json_skip_whitespace(parser);
+
+    if (parser->index >= parser->text.length || parser->text.pointer[parser->index] != '"')
+    {
+        *valid = false;
+        return result;
+    }
+
+    parser->index += 1;
+    u64 start = arena->position;
+
+    while (*valid && parser->index < parser->text.length)
+    {
+        char8 c = parser->text.pointer[parser->index++];
+        if (c == '"')
+        {
+            result = (String8){ .pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start };
+            arena_append_char8(arena, 0);
+            return result;
+        }
+        else if (c == '\\')
+        {
+            if (parser->index >= parser->text.length)
+            {
+                *valid = false;
+                break;
+            }
+
+            char8 escape = parser->text.pointer[parser->index++];
+            switch (escape)
+            {
+                break; case '"': arena_append_char8(arena, '"');
+                break; case '\\': arena_append_char8(arena, '\\');
+                break; case '/': arena_append_char8(arena, '/');
+                break; case 'b': arena_append_char8(arena, '\b');
+                break; case 'f': arena_append_char8(arena, '\f');
+                break; case 'n': arena_append_char8(arena, '\n');
+                break; case 'r': arena_append_char8(arena, '\r');
+                break; case 't': arena_append_char8(arena, '\t');
+                break; case 'u':
+                {
+                    if (parser->index + 4 > parser->text.length)
+                    {
+                        *valid = false;
+                        break;
+                    }
+
+                    bool hex_valid = true;
+                    u32 codepoint = 0;
+                    for (u64 digit_i = 0; digit_i < 4; digit_i += 1)
+                    {
+                        codepoint = (codepoint << 4) | hexadecimal_digit_value(parser->text.pointer[parser->index++], &hex_valid);
+                    }
+
+                    if (hex_valid)
+                    {
+                        arena_append_utf8(arena, codepoint);
+                    }
+                    else
+                    {
+                        *valid = false;
+                    }
+                }
+                break; default:
+                {
+                    *valid = false;
+                }
+            }
+        }
+        else
+        {
+            arena_append_char8(arena, c);
+        }
+    }
+
+    *valid = false;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void json_skip_value(Arena* arena, JsonParser* parser, bool* valid);
+
+BUSTER_GLOBAL_LOCAL SliceString8 json_parse_string_array(Arena* arena, JsonParser* parser, bool* valid)
+{
+    SliceString8 result = {0};
+    String8List list = {0};
+
+    if (!json_consume(parser, '['))
+    {
+        *valid = false;
+        return result;
+    }
+
+    for (;;)
+    {
+        json_skip_whitespace(parser);
+        if (json_consume(parser, ']'))
+        {
+            break;
+        }
+
+        String8 string = json_parse_string(arena, parser, valid);
+        if (!*valid)
+        {
+            break;
+        }
+        string8_list_push(arena, &list, string);
+
+        json_skip_whitespace(parser);
+        if (json_consume(parser, ','))
+        {
+            continue;
+        }
+        if (json_consume(parser, ']'))
+        {
+            break;
+        }
+
+        *valid = false;
+        break;
+    }
+
+    if (*valid)
+    {
+        result = string8_list_to_slice(arena, list);
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void json_skip_value(Arena* arena, JsonParser* parser, bool* valid)
+{
+    json_skip_whitespace(parser);
+    if (parser->index >= parser->text.length)
+    {
+        *valid = false;
+        return;
+    }
+
+    char8 c = parser->text.pointer[parser->index];
+    if (c == '"')
+    {
+        json_parse_string(arena, parser, valid);
+    }
+    else if (c == '{')
+    {
+        parser->index += 1;
+        for (;;)
+        {
+            json_skip_whitespace(parser);
+            if (json_consume(parser, '}'))
+            {
+                break;
+            }
+            json_parse_string(arena, parser, valid);
+            if (!*valid || !json_consume(parser, ':'))
+            {
+                *valid = false;
+                break;
+            }
+            json_skip_value(arena, parser, valid);
+            if (!*valid)
+            {
+                break;
+            }
+            if (json_consume(parser, ','))
+            {
+                continue;
+            }
+            if (json_consume(parser, '}'))
+            {
+                break;
+            }
+            *valid = false;
+            break;
+        }
+    }
+    else if (c == '[')
+    {
+        parser->index += 1;
+        for (;;)
+        {
+            json_skip_whitespace(parser);
+            if (json_consume(parser, ']'))
+            {
+                break;
+            }
+            json_skip_value(arena, parser, valid);
+            if (!*valid)
+            {
+                break;
+            }
+            if (json_consume(parser, ','))
+            {
+                continue;
+            }
+            if (json_consume(parser, ']'))
+            {
+                break;
+            }
+            *valid = false;
+            break;
+        }
+    }
+    else
+    {
+        while (parser->index < parser->text.length)
+        {
+            c = parser->text.pointer[parser->index];
+            if (c == ',' || c == ']' || c == '}' || character_is_space(c))
+            {
+                break;
+            }
+            parser->index += 1;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL CompileCommandEntry json_parse_compile_command_entry(Arena* arena, JsonParser* parser, bool* valid)
+{
+    CompileCommandEntry result = {0};
+
+    if (!json_consume(parser, '{'))
+    {
+        *valid = false;
+        return result;
+    }
+
+    for (;;)
+    {
+        json_skip_whitespace(parser);
+        if (json_consume(parser, '}'))
+        {
+            break;
+        }
+
+        String8 key = json_parse_string(arena, parser, valid);
+        if (!*valid || !json_consume(parser, ':'))
+        {
+            *valid = false;
+            break;
+        }
+
+        if (string_equal(key, S8("directory")))
+        {
+            result.directory = json_parse_string(arena, parser, valid);
+        }
+        else if (string_equal(key, S8("command")))
+        {
+            result.command = json_parse_string(arena, parser, valid);
+        }
+        else if (string_equal(key, S8("file")))
+        {
+            result.file = json_parse_string(arena, parser, valid);
+        }
+        else if (string_equal(key, S8("output")))
+        {
+            result.output = json_parse_string(arena, parser, valid);
+        }
+        else if (string_equal(key, S8("arguments")))
+        {
+            result.arguments = json_parse_string_array(arena, parser, valid);
+        }
+        else
+        {
+            json_skip_value(arena, parser, valid);
+        }
+
+        if (!*valid)
+        {
+            break;
+        }
+
+        if (json_consume(parser, ','))
+        {
+            continue;
+        }
+        if (json_consume(parser, '}'))
+        {
+            break;
+        }
+
+        *valid = false;
+        break;
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL SliceString8 shell_split(Arena* arena, String8 command, bool* valid)
+{
+    String8List list = {0};
+    u64 index = 0;
+
+#if BUSTER_WINDOWS
+    while (*valid)
+    {
+        while (index < command.length && character_is_space(command.pointer[index]))
+        {
+            index += 1;
+        }
+
+        if (index >= command.length)
+        {
+            break;
+        }
+
+        u64 start = arena->position;
+        bool in_quotes = false;
+        while (index < command.length)
+        {
+            char8 c = command.pointer[index++];
+            if (c == '"')
+            {
+                in_quotes = !in_quotes;
+            }
+            else if (!in_quotes && character_is_space(c))
+            {
+                break;
+            }
+            else
+            {
+                arena_append_char8(arena, c);
+            }
+        }
+
+        String8 argument = { .pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start };
+        arena_append_char8(arena, 0);
+        string8_list_push(arena, &list, argument);
+    }
+#else
+    while (*valid)
+    {
+        while (index < command.length && character_is_space(command.pointer[index]))
+        {
+            index += 1;
+        }
+
+        if (index >= command.length)
+        {
+            break;
+        }
+
+        u64 start = arena->position;
+        while (*valid && index < command.length && !character_is_space(command.pointer[index]))
+        {
+            char8 c = command.pointer[index++];
+            if (c == '\'')
+            {
+                while (index < command.length && command.pointer[index] != '\'')
+                {
+                    arena_append_char8(arena, command.pointer[index++]);
+                }
+
+                if (index < command.length && command.pointer[index] == '\'')
+                {
+                    index += 1;
+                }
+                else
+                {
+                    *valid = false;
+                }
+            }
+            else if (c == '"')
+            {
+                while (index < command.length && command.pointer[index] != '"')
+                {
+                    char8 quoted = command.pointer[index++];
+                    if (quoted == '\\' && index < command.length)
+                    {
+                        quoted = command.pointer[index++];
+                    }
+                    arena_append_char8(arena, quoted);
+                }
+
+                if (index < command.length && command.pointer[index] == '"')
+                {
+                    index += 1;
+                }
+                else
+                {
+                    *valid = false;
+                }
+            }
+            else if (c == '\\')
+            {
+                if (index < command.length)
+                {
+                    arena_append_char8(arena, command.pointer[index++]);
+                }
+                else
+                {
+                    *valid = false;
+                }
+            }
+            else
+            {
+                arena_append_char8(arena, c);
+            }
+        }
+
+        if (*valid)
+        {
+            String8 argument = { .pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start };
+            arena_append_char8(arena, 0);
+            string8_list_push(arena, &list, argument);
+        }
+    }
+#endif
+
+    SliceString8 result = {0};
+    if (*valid)
+    {
+        result = string8_list_to_slice(arena, list);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(String8 argument, String8 next_argument, u64* skip_count)
+{
+    String8 drop_options[] = {
+        S8("-c"),
+        S8("-fcolor-diagnostics"),
+        S8("-MD"),
+        S8("-MMD"),
+        S8("-MP"),
+    };
+    String8 separate_options[] = {
+        S8("-MF"),
+        S8("-MJ"),
+        S8("-MQ"),
+        S8("-MT"),
+        S8("-o"),
+        S8("--output"),
+        S8("-dependency-file"),
+    };
+    String8 joined_options[] = {
+        S8("-MF"),
+        S8("-MJ"),
+        S8("-MQ"),
+        S8("-MT"),
+        S8("-o"),
+        S8("--output="),
+        S8("-dependency-file="),
+    };
+
+    bool result = false;
+    *skip_count = 0;
+
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(drop_options); i += 1)
+    {
+        if (string_equal(argument, drop_options[i]))
+        {
+            *skip_count = 1;
+            result = true;
+            break;
+        }
+    }
+
+    for (u64 i = 0; !result && i < BUSTER_ARRAY_LENGTH(separate_options); i += 1)
+    {
+        if (string_equal(argument, separate_options[i]))
+        {
+            *skip_count = next_argument.pointer ? 2 : 1;
+            result = true;
+            break;
+        }
+    }
+
+    for (u64 i = 0; !result && i < BUSTER_ARRAY_LENGTH(joined_options); i += 1)
+    {
+        String8 prefix = joined_options[i];
+        if (argument.length > prefix.length && string_starts_with_sequence(argument, prefix))
+        {
+            *skip_count = 1;
+            result = true;
+            break;
+        }
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL SliceString8 clang_analyzer_command(Arena* arena, SliceString8 compile_arguments, String8 clang)
+{
+    SliceString8 result = {0};
+    if (compile_arguments.length)
+    {
+        u64 count = 6;
+        for (u64 i = 1; i < compile_arguments.length;)
+        {
+            String8 next = i + 1 < compile_arguments.length ? compile_arguments.pointer[i + 1] : (String8){0};
+            u64 skip_count = 0;
+            if (clang_analyze_skip_option(compile_arguments.pointer[i], next, &skip_count))
+            {
+                i += skip_count;
+            }
+            else
+            {
+                count += 1;
+                i += 1;
+            }
+        }
+
+        result = (SliceString8){ .pointer = arena_allocate(arena, String8, count), .length = count };
+        u64 out = 0;
+        result.pointer[out++] = clang.pointer ? clang : compile_arguments.pointer[0];
+        result.pointer[out++] = S8("--analyze");
+        result.pointer[out++] = S8("-Xanalyzer");
+        result.pointer[out++] = S8("-analyzer-output=text");
+        result.pointer[out++] = S8("-fno-color-diagnostics");
+        result.pointer[out++] = S8("-Wno-error=unused-command-line-argument");
+
+        for (u64 i = 1; i < compile_arguments.length;)
+        {
+            String8 next = i + 1 < compile_arguments.length ? compile_arguments.pointer[i + 1] : (String8){0};
+            u64 skip_count = 0;
+            if (clang_analyze_skip_option(compile_arguments.pointer[i], next, &skip_count))
+            {
+                i += skip_count;
+            }
+            else
+            {
+                result.pointer[out++] = compile_arguments.pointer[i++];
+            }
+        }
+        BUSTER_CHECK(out == count);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_is_c_source(String8 file)
+{
+    bool result = string_ends_with_sequence_insensitive(file, S8(".c"));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool string_has_path_part(String8 s, String8 part)
+{
+    bool result = false;
+    u64 start = 0;
+
+    for (u64 i = 0; i <= s.length; i += 1)
+    {
+        bool at_end = i == s.length;
+        bool at_separator = !at_end && (s.pointer[i] == '/' || s.pointer[i] == '\\');
+        if (at_end || at_separator)
+        {
+            String8 candidate = string_slice(s, start, i);
+            if (string_equal(candidate, part))
+            {
+                result = true;
+                break;
+            }
+            start = i + 1;
+        }
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_entry_matches_config(Arena* arena, CompileCommandEntry entry, SliceString8 arguments, String8 config)
+{
+    bool result = true;
+    if (config.pointer && config.length)
+    {
+        result = false;
+        String8 cmake_intdir_plain = string_format(arena, S8("CMAKE_INTDIR={S8}"), config);
+        String8 cmake_intdir_quoted = string_format(arena, S8("CMAKE_INTDIR=\"{S8}\""), config);
+        String8 cmake_intdir_escaped = string_format(arena, S8("CMAKE_INTDIR=\\\"{S8}\\\""), config);
+
+        if (entry.output.pointer)
+        {
+            result = string_has_path_part(entry.output, config) || string_contains(entry.output, cmake_intdir_plain) || string_contains(entry.output, cmake_intdir_quoted) || string_contains(entry.output, cmake_intdir_escaped);
+        }
+
+        for (u64 i = 0; !result && i < arguments.length; i += 1)
+        {
+            String8 candidate = arguments.pointer[i];
+            result = string_has_path_part(candidate, config) || string_contains(candidate, cmake_intdir_plain) || string_contains(candidate, cmake_intdir_quoted) || string_contains(candidate, cmake_intdir_escaped);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_output_has_warning(String8 output)
+{
+    bool result = string_contains(output, S8(": warning:"));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void command_print(SliceString8 command)
+{
+    string_print(S8("+ {[]S8}\n"), command);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessWaitResult clang_analyze_run_command(Arena* arena, SliceString8 command, String8 directory, bool quiet, bool* has_warning)
+{
+    if (!quiet)
+    {
+        command_print(command);
+    }
+
+    bool restore_directory = false;
+#if BUSTER_WINDOWS
+    char16 old_directory_buffer[BUSTER_KB(32) / sizeof(char16)];
+    DWORD old_directory_length = 0;
+    if (directory.pointer && directory.length)
+    {
+        old_directory_length = GetCurrentDirectoryW(BUSTER_ARRAY_LENGTH(old_directory_buffer), old_directory_buffer);
+        if (old_directory_length > 0 && old_directory_length < BUSTER_ARRAY_LENGTH(old_directory_buffer))
+        {
+            TemporalArena temp = scratch_begin(&arena, 1);
+            String16 directory16 = string16_from_string8(temp.arena, directory, true);
+            restore_directory = SetCurrentDirectoryW(directory16.pointer) != 0;
+            scratch_end(temp);
+        }
+    }
+#else
+    char old_directory_buffer[BUSTER_KB(32)];
+    if (directory.pointer && directory.length && getcwd(old_directory_buffer, sizeof(old_directory_buffer)))
+    {
+        restore_directory = chdir(directory.pointer) == 0;
+    }
+#endif
+
+    ProcessSpawnResult spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){
+        .capture = ((u64)1 << STANDARD_STREAM_ERROR),
+        .use_process_environment = 1,
+    });
+
+    if (restore_directory)
+    {
+#if BUSTER_WINDOWS
+        SetCurrentDirectoryW(old_directory_buffer);
+#else
+        chdir(old_directory_buffer);
+#endif
+    }
+
+    ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
+    String8 error_output = { .pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length };
+    *has_warning = clang_analyze_output_has_warning(error_output);
+
+    if (quiet && (wait.result != PROCESS_RESULT_SUCCESS || *has_warning))
+    {
+        command_print(command);
+    }
+
+    if (error_output.length)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(error_output));
+    }
+
+    return wait;
+}
+
+BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, String8 path)
+{
+    if (!path.pointer || !path.length)
+    {
+        path = S8("build");
+    }
+
+    String8 result = path;
+    if (!string_ends_with_sequence_insensitive(path, S8(".json")))
+    {
+        String8 separator = S8("/");
+        if (path.length && (path.pointer[path.length - 1] == '/' || path.pointer[path.length - 1] == '\\'))
+        {
+            separator = S8("");
+        }
+
+        String8 parts[] = {
+            path,
+            separator,
+            S8("compile_commands.json"),
+        };
+        result = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_run(Arena* arena, ClangAnalyzeOptions options)
+{
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
+    String8 path = clang_analyze_compile_commands_path(arena, options.compile_commands);
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){ .end_padding = 1 });
+
+    if (!bytes.pointer)
+    {
+        string_print(S8("error: compile commands not found: {S8}\n"), path);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    JsonParser parser = { .text = { .pointer = (char8*)bytes.pointer, .length = bytes.length } };
+    bool valid = true;
+    if (!json_consume(&parser, '['))
+    {
+        string_print(S8("error: failed to read {S8}: expected JSON array\n"), path);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    u64 analyzed = 0;
+    u64 warnings = 0;
+    u64 failures = 0;
+
+    for (;;)
+    {
+        json_skip_whitespace(&parser);
+        if (json_consume(&parser, ']'))
+        {
+            break;
+        }
+
+        CompileCommandEntry entry = json_parse_compile_command_entry(arena, &parser, &valid);
+        if (!valid)
+        {
+            string_print(S8("error: failed to read {S8}: invalid compile command entry\n"), path);
+            return PROCESS_RESULT_FAILED;
+        }
+
+        if (entry.file.pointer && clang_analyze_is_c_source(entry.file))
+        {
+            SliceString8 compile_arguments = entry.arguments;
+            bool split_valid = true;
+            if (!compile_arguments.length && entry.command.pointer)
+            {
+                compile_arguments = shell_split(arena, entry.command, &split_valid);
+            }
+
+            if (!split_valid || !compile_arguments.length)
+            {
+                string_print(S8("error: {S8}: compile command entry has no usable command\n"), entry.file);
+                failures += 1;
+            }
+            else if (clang_analyze_entry_matches_config(arena, entry, compile_arguments, options.config))
+            {
+                SliceString8 command = clang_analyzer_command(arena, compile_arguments, options.clang);
+                bool has_warning = false;
+                ProcessWaitResult wait = clang_analyze_run_command(arena, command, entry.directory, options.quiet, &has_warning);
+                analyzed += 1;
+                failures += wait.result != PROCESS_RESULT_SUCCESS;
+                warnings += has_warning;
+            }
+        }
+
+        if (json_consume(&parser, ','))
+        {
+            continue;
+        }
+        if (json_consume(&parser, ']'))
+        {
+            break;
+        }
+
+        string_print(S8("error: failed to read {S8}: expected ',' or ']'\n"), path);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    if (analyzed == 0)
+    {
+        if (options.config.pointer && options.config.length)
+        {
+            string_print(S8("error: no C compile commands found for configuration {S8} in {S8}\n"), options.config, path);
+        }
+        else
+        {
+            string_print(S8("error: no C compile commands found in {S8}\n"), path);
+        }
+        result = PROCESS_RESULT_FAILED;
+    }
+    else
+    {
+        string_print(S8("clang --analyze checked {u64} translation unit(s), {u64} with analyzer warning(s), {u64} failed.\n"), analyzed, warnings, failures);
+
+        if (warnings || failures)
+        {
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void clang_analyze_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    String8 self = program_state->input.arguments.length ? program_state->input.arguments.pointer[0] : S8("build/build");
+    os_argument_builder_append(&builder, self);
+    os_argument_builder_append(&builder, S8("clang_analyze"));
+    os_argument_builder_append(&builder, build_directory);
+    os_argument_builder_append(&builder, S8("--config"));
+    os_argument_builder_append(&builder, options.optimize ? S8("Release") : S8("Debug"));
+    if (options.quiet)
+    {
+        os_argument_builder_append(&builder, S8("--quiet"));
+    }
+
+    *run = (ProcessRun) {
+        .arguments = os_argument_builder_flush(&builder),
+        .spawn_options = (ProcessSpawnOptions){
+            .use_process_environment = 1,
+        },
+    };
+}
+
 BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     BuildStep* generate_step = step_add(arena);
@@ -427,11 +1431,7 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
 
                     if (compiler == BUILD_COMPILER_CLANG && !sanitize && !fuzz)
                     {
-                        String8 analyze_parts[] = {
-                            S8("--target"),
-                            S8("clang_analyze"),
-                        };
-                        build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(analyze_parts), options);
+                        clang_analyze_add(arena, build_directory, options);
                     }
                 }
             }
@@ -454,6 +1454,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
+        [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -503,6 +1504,7 @@ ProcessResult process_arguments(void)
         .developer_targets = true,
     };
     CmakeBuildOptions options = {0};
+    ClangAnalyzeOptions clang_analyze_options = { .compile_commands = build_directory };
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -525,15 +1527,24 @@ ProcessResult process_arguments(void)
         {
             break; case BUILD_ARGUMENT_COUNT:
             {
-                ProcessResult generic_argument_result = buster_argument_process(argument_i);
-                if (generic_argument_result == PROCESS_RESULT_SUCCESS)
+                if (command == BUILD_COMMAND_CLANG_ANALYZE && !clang_analyze_options.compile_commands_set && !string_starts_with_sequence(argument, S8("--")))
                 {
+                    clang_analyze_options.compile_commands = argument;
+                    clang_analyze_options.compile_commands_set = 1;
                     argument_i += 1;
                 }
                 else
                 {
-                    result = generic_argument_result;
-                    string_print(S8("error: unknown argument => \"{S8}\"\n"), argument);
+                    ProcessResult generic_argument_result = buster_argument_process(argument_i);
+                    if (generic_argument_result == PROCESS_RESULT_SUCCESS)
+                    {
+                        argument_i += 1;
+                    }
+                    else
+                    {
+                        result = generic_argument_result;
+                        string_print(S8("error: unknown argument => \"{S8}\"\n"), argument);
+                    }
                 }
             }
             break; case BUILD_ARGUMENT_CC:
@@ -570,9 +1581,36 @@ ProcessResult process_arguments(void)
                     result = PROCESS_RESULT_FAILED;
                 }
             }
+            break; case BUILD_ARGUMENT_CLANG:
+            {
+                if (command == BUILD_COMMAND_CLANG_ANALYZE && argument_i + 1 < arguments.length)
+                {
+                    argument_i += 1;
+                    clang_analyze_options.clang = arguments.pointer[argument_i];
+                    argument_i += 1;
+                }
+                else
+                {
+                    result = PROCESS_RESULT_FAILED;
+                }
+            }
+            break; case BUILD_ARGUMENT_CONFIG:
+            {
+                if (command == BUILD_COMMAND_CLANG_ANALYZE && argument_i + 1 < arguments.length)
+                {
+                    argument_i += 1;
+                    clang_analyze_options.config = arguments.pointer[argument_i];
+                    argument_i += 1;
+                }
+                else
+                {
+                    result = PROCESS_RESULT_FAILED;
+                }
+            }
             break; case BUILD_ARGUMENT_QUIET:
             {
                 options.quiet = 1;
+                clang_analyze_options.quiet = 1;
                 argument_i += 1;
             }
         }
@@ -592,6 +1630,10 @@ ProcessResult process_arguments(void)
             break; case BUILD_COMMAND_BUILD:
             {
                 build_add(arena, build_directory, (SliceString8){0}, options);
+            }
+            break; case BUILD_COMMAND_CLANG_ANALYZE:
+            {
+                result = clang_analyze_run(arena, clang_analyze_options);
             }
             break;
             case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

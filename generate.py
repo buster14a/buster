@@ -267,7 +267,6 @@ def main(argv):
         f"-DBUSTER_LINK_LIBC={arguments.link_libc}",
         f"-DBUSTER_CHECK_OPTIONAL_WARNINGS={arguments.check_optional_warnings}",
         f"-DBUSTER_DEVELOPER_TARGETS={arguments.developer_targets}",
-        f"-DBUSTER_PYTHON_EXECUTABLE={Path(sys.executable).resolve()}",
         *cmake_extra_args,
         *(
             [
