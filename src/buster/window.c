@@ -1,7 +1,9 @@
 #include <buster/window.h>
+
 #if defined (__linux__)
 #include <xcb/xcb.h>
 #endif
+
 #include <buster/string.h>
 #include <buster/os.h>
 #include <buster/arena.h>
@@ -20,6 +22,7 @@ struct OsWindowingHandle
 #endif
 BUSTER_GLOBAL_LOCAL OsWindowingHandle windowing_handle = {0};
 
+#if defined(__linux__)
 typedef enum X11Atom
 {
     X11_ATOM_WM_PROTOCOLS,
@@ -34,6 +37,8 @@ BUSTER_GLOBAL_LOCAL String8 atom_names[X11_ATOM_COUNT] = {
 
 BUSTER_GLOBAL_LOCAL xcb_intern_atom_reply_t* atom_replies[BUSTER_ARRAY_LENGTH(atom_names)];
 BUSTER_GLOBAL_LOCAL xcb_intern_atom_cookie_t atom_cookies[BUSTER_ARRAY_LENGTH(atom_names)];
+#else
+#endif
 
 OsWindowingHandle* os_windowing_initialize(void)
 {
@@ -89,6 +94,7 @@ void os_windowing_deinitialize(OsWindowingHandle* windowing)
             free(atom_replies[i]);
         }
     }
+#else
 #endif
 }
 
@@ -165,6 +171,7 @@ OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate cr
 OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWindowHandle* os_window)
 {
     OsWindowSize result = {0};
+#if defined(__linux__)
     xcb_connection_t* connection = windowing->connection;
     xcb_window_t window = (xcb_window_t)(u64)os_window;
     xcb_get_geometry_cookie_t cookie = xcb_get_geometry(connection, window);
@@ -172,17 +179,25 @@ OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWind
     result.width = reply->width;
     result.height = reply->height;
     free(reply);
+#else
+#endif
     return result;
 }
 
 void* native_windowing_handle_from_os_windowing_handle(OsWindowingHandle* windowing)
 {
+#if defined(__linux__)
     return windowing->connection;
+#else
+#endif
 }
 
 void* native_window_handle_from_os_window_handle(OsWindowHandle* window)
 {
+#if defined(__linux__)
     return window;
+#else
+#endif
 }
 
 OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* windowing)
