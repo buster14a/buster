@@ -65,11 +65,13 @@ BUSTER_V_IMPL ProgramState* program_state = &program.state;
 typedef enum BuildArgument
 {
     BUILD_ARGUMENT_CC,
+    BUILD_ARGUMENT_QUIET,
     BUILD_ARGUMENT_COUNT,
 } BuildArgument;
 
 BUSTER_GLOBAL_LOCAL String8 build_arguments[] = {
     [BUILD_ARGUMENT_CC] = S8_INITIALIZER("--cc"),
+    [BUILD_ARGUMENT_QUIET] = S8_INITIALIZER("--quiet"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(build_arguments) == BUILD_ARGUMENT_COUNT);
@@ -333,6 +335,7 @@ typedef struct CmakeBuildOptions CmakeBuildOptions;
 struct CmakeBuildOptions
 {
     u32 optimize:1;
+    u32 quiet:1;
 };
 
 BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceString8 extra_arguments, CmakeBuildOptions options)
@@ -349,6 +352,12 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
     {
         String8 extra_argument = extra_arguments.pointer[i];
         os_argument_builder_append(b, extra_argument);
+    }
+
+    if (options.quiet)
+    {
+        os_argument_builder_append(b, S8("--"));
+        os_argument_builder_append(b, S8("--quiet"));
     }
 
     generic_tool_run_add_end(r);
@@ -479,7 +488,7 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
 
 // }
 
-BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci)
+BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     BuildStep* generate_step = step_add(arena);
 
@@ -528,6 +537,7 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci)
 
                     CmakeBuildOptions options = {
                         .optimize = optimize,
+                        .quiet = base_options.quiet,
                     };
 
                     generate_add(arena, generate_step, generate);
@@ -685,6 +695,11 @@ ProcessResult process_arguments(void)
                     result = PROCESS_RESULT_FAILED;
                 }
             }
+            break; case BUILD_ARGUMENT_QUIET:
+            {
+                options.quiet = 1;
+                argument_i += 1;
+            }
         }
     }
 
@@ -708,7 +723,7 @@ ProcessResult process_arguments(void)
             case BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI:
             {
                 bool ci = command == BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI;
-                test_all(arena, ci);
+                test_all(arena, ci, options);
             }
         }
     }
