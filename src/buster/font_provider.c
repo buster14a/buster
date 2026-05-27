@@ -12,9 +12,9 @@
 
 BUSTER_GLOBAL_LOCAL bool font_config_initialized = false;
 
-StringOs font_file_get_path(Arena* arena, FontIndex index)
+String8 font_file_get_path(Arena* arena, FontIndex index)
 {
-    BUSTER_GLOBAL_LOCAL StringOs table[(u64)FONT_INDEX_COUNT] = {0};
+    BUSTER_GLOBAL_LOCAL String8 table[(u64)FONT_INDEX_COUNT] = {0};
 
     if (!font_config_initialized)
     {

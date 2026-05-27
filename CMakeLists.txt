@@ -442,28 +442,82 @@ set(COMMON_EXTENSION ".c")
 
 set(BUSTER_SOURCE_DIR "src/buster")
 
-set(BUSTER_MODULE_OS "${BUSTER_SOURCE_DIR}/os${COMMON_EXTENSION}")
-set(BUSTER_MODULE_ENTRY_POINT "${BUSTER_SOURCE_DIR}/entry_point${COMMON_EXTENSION}")
-set(BUSTER_MODULE_ARENA "${BUSTER_SOURCE_DIR}/arena${COMMON_EXTENSION}")
-set(BUSTER_MODULE_STRING "${BUSTER_SOURCE_DIR}/string${COMMON_EXTENSION}")
-set(BUSTER_MODULE_INTEGER "${BUSTER_SOURCE_DIR}/integer${COMMON_EXTENSION}")
-set(BUSTER_MODULE_FLOAT "${BUSTER_SOURCE_DIR}/float${COMMON_EXTENSION}")
-set(BUSTER_MODULE_FILE "${BUSTER_SOURCE_DIR}/file${COMMON_EXTENSION}")
-set(BUSTER_MODULE_ASSERTION "${BUSTER_SOURCE_DIR}/assertion${COMMON_EXTENSION}")
-set(BUSTER_MODULE_COMPILER_PARSER "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/parser${COMMON_EXTENSION}")
-set(BUSTER_MODULE_COMPILER_ANALYSIS "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/analysis${COMMON_EXTENSION}")
-set(BUSTER_MODULE_COMPILER_IR "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
-set(BUSTER_MODULE_SIMD "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
-set(BUSTER_MODULE_TARGET "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
-set(BUSTER_MODULE_X86_64 "${BUSTER_SOURCE_DIR}/x86_64${COMMON_EXTENSION}")
-set(BUSTER_MODULE_AARCH64 "${BUSTER_SOURCE_DIR}/aarch64${COMMON_EXTENSION}")
-set(BUSTER_MODULE_TEST "${BUSTER_SOURCE_DIR}/test${COMMON_EXTENSION}")
-set(BUSTER_MODULE_TIME "${BUSTER_SOURCE_DIR}/time${COMMON_EXTENSION}")
-set(BUSTER_MODULE_UI_CORE "${BUSTER_SOURCE_DIR}/ui_core${COMMON_EXTENSION}")
-set(BUSTER_MODULE_UI_BUILDER "${BUSTER_SOURCE_DIR}/ui_builder${COMMON_EXTENSION}")
-set(BUSTER_MODULE_WINDOW "${BUSTER_SOURCE_DIR}/window${COMMON_EXTENSION}")
-set(BUSTER_MODULE_RENDERING "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSION}")
-set(BUSTER_MODULE_FONT_PROVIDER "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
+function(buster_normalize_module_name out_var module)
+    string(TOUPPER "${module}" module_key)
+    string(REPLACE "-" "_" module_key "${module_key}")
+
+    if ("${module_key}" STREQUAL "WINDOWING")
+        set(module_key "WINDOW")
+    endif()
+
+    set(${out_var} "${module_key}" PARENT_SCOPE)
+endfunction()
+
+macro(buster_register_module module source)
+    buster_normalize_module_name(module_key "${module}")
+    set(BUSTER_MODULE_${module_key}_SOURCE "${source}")
+    set(BUSTER_MODULE_${module_key} "${source}")
+    list(APPEND BUSTER_KNOWN_MODULES "${module_key}")
+    list(REMOVE_DUPLICATES BUSTER_KNOWN_MODULES)
+endmacro()
+
+function(buster_resolve_modules out_sources out_modules)
+    set(module_sources "")
+    set(module_keys "")
+
+    foreach(module IN LISTS ARGN)
+        buster_normalize_module_name(module_key "${module}")
+        set(module_source_variable "BUSTER_MODULE_${module_key}_SOURCE")
+        if (NOT DEFINED ${module_source_variable})
+            message(FATAL_ERROR "Unknown buster module '${module}'. Known modules: ${BUSTER_KNOWN_MODULES}")
+        endif()
+        list(APPEND module_keys "${module_key}")
+    endforeach()
+
+    list(REMOVE_DUPLICATES module_keys)
+    foreach(module_key IN LISTS module_keys)
+        set(module_source_variable "BUSTER_MODULE_${module_key}_SOURCE")
+        list(APPEND module_sources "${${module_source_variable}}")
+    endforeach()
+
+    set(${out_sources} "${module_sources}" PARENT_SCOPE)
+    set(${out_modules} "${module_keys}" PARENT_SCOPE)
+endfunction()
+
+function(buster_apply_module_options name)
+    set(modules ${ARGN})
+
+    if ("WINDOW" IN_LIST modules AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_libraries(${name} PRIVATE xcb)
+    endif()
+
+    if ("FONT_PROVIDER" IN_LIST modules AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_libraries(${name} PRIVATE fontconfig)
+    endif()
+endfunction()
+
+buster_register_module(os "${BUSTER_SOURCE_DIR}/os${COMMON_EXTENSION}")
+buster_register_module(entry_point "${BUSTER_SOURCE_DIR}/entry_point${COMMON_EXTENSION}")
+buster_register_module(arena "${BUSTER_SOURCE_DIR}/arena${COMMON_EXTENSION}")
+buster_register_module(string "${BUSTER_SOURCE_DIR}/string${COMMON_EXTENSION}")
+buster_register_module(integer "${BUSTER_SOURCE_DIR}/integer${COMMON_EXTENSION}")
+buster_register_module(float "${BUSTER_SOURCE_DIR}/float${COMMON_EXTENSION}")
+buster_register_module(file "${BUSTER_SOURCE_DIR}/file${COMMON_EXTENSION}")
+buster_register_module(assertion "${BUSTER_SOURCE_DIR}/assertion${COMMON_EXTENSION}")
+buster_register_module(compiler_parser "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/parser${COMMON_EXTENSION}")
+buster_register_module(compiler_analysis "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/analysis${COMMON_EXTENSION}")
+buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
+buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
+buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
+buster_register_module(x86_64 "${BUSTER_SOURCE_DIR}/x86_64${COMMON_EXTENSION}")
+buster_register_module(aarch64 "${BUSTER_SOURCE_DIR}/aarch64${COMMON_EXTENSION}")
+buster_register_module(test "${BUSTER_SOURCE_DIR}/test${COMMON_EXTENSION}")
+buster_register_module(time "${BUSTER_SOURCE_DIR}/time${COMMON_EXTENSION}")
+buster_register_module(ui_core "${BUSTER_SOURCE_DIR}/ui_core${COMMON_EXTENSION}")
+buster_register_module(ui_builder "${BUSTER_SOURCE_DIR}/ui_builder${COMMON_EXTENSION}")
+buster_register_module(window "${BUSTER_SOURCE_DIR}/window${COMMON_EXTENSION}")
+buster_register_module(rendering "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSION}")
+buster_register_module(font_provider "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
 
 
 set(GNU_FAMILY_OPTIONS
@@ -599,7 +653,17 @@ else()
 endif()
 
 function(executable_add name is_buster_program main_file)
-    set(target_sources ${ARGN})
+    set(options)
+    set(one_value_args)
+    set(multi_value_args MODULES SOURCES)
+    cmake_parse_arguments(EXECUTABLE_ADD "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
+
+    if (EXECUTABLE_ADD_UNPARSED_ARGUMENTS)
+        list(APPEND EXECUTABLE_ADD_SOURCES ${EXECUTABLE_ADD_UNPARSED_ARGUMENTS})
+    endif()
+
+    buster_resolve_modules(module_sources module_names ${EXECUTABLE_ADD_MODULES})
+    set(target_sources ${module_sources} ${EXECUTABLE_ADD_SOURCES})
 
     if (${is_buster_program} AND ${BUSTER_INCLUDE_TESTS})
         list(APPEND target_sources ${BUSTER_MODULE_TEST})
@@ -611,6 +675,11 @@ function(executable_add name is_buster_program main_file)
         list(APPEND target_sources ${BUSTER_MODULE_AARCH64})
     endif()
 
+    list(REMOVE_DUPLICATES target_sources)
+
+    if (module_names)
+        message(STATUS "${name} modules: ${module_names}")
+    endif()
     message(STATUS "${name} files: ${main_file} ${target_sources}")
 
     add_executable(${name} ${main_file})
@@ -743,9 +812,9 @@ function(executable_add name is_buster_program main_file)
         if (WIN32)
             target_link_libraries(${name} PRIVATE ws2_32)
         endif()
-        # target_link_libraries(${name} PRIVATE xcb)
-        # target_link_libraries(${name} PRIVATE fontconfig)
     endif()
+
+    buster_apply_module_options(${name} ${module_names})
 
     # if (NOT ${BUSTER_CI})
     #     target_compile_options(${name} PRIVATE
@@ -796,26 +865,28 @@ function(buster_add_executable name main_file)
     executable_add(${name} ON ${main_file} ${ARGN})
 endfunction()
 
+# buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
 buster_add_executable(ide src/buster/ide/ide.c
-    ${BUSTER_MODULE_OS}
-    ${BUSTER_MODULE_ENTRY_POINT}
-    ${BUSTER_MODULE_ARENA}
-    ${BUSTER_MODULE_INTEGER}
-    ${BUSTER_MODULE_ASSERTION}
-    ${BUSTER_MODULE_STRING}
-    ${BUSTER_MODULE_FLOAT}
-    ${BUSTER_MODULE_COMPILER_PARSER}
-    ${BUSTER_MODULE_COMPILER_ANALYSIS}
-    ${BUSTER_MODULE_COMPILER_IR}
-    # ${BUSTER_MODULE_SIMD}
-    ${BUSTER_MODULE_FILE}
-    ${BUSTER_MODULE_TARGET}
-    ${BUSTER_MODULE_TIME}
-    # ${BUSTER_MODULE_UI_CORE}
-    # ${BUSTER_MODULE_UI_BUILDER}
-    # ${BUSTER_MODULE_WINDOW}
-    # ${BUSTER_MODULE_RENDERING}
-    # ${BUSTER_MODULE_FONT_PROVIDER}
+    MODULES
+        os
+        entry_point
+        arena
+        integer
+        assertion
+        string
+        float
+        compiler_parser
+        compiler_analysis
+        compiler_ir
+        # simd
+        file
+        target
+        time
+        # ui_core
+        # ui_builder
+        # window
+        # rendering
+        # font_provider
 )
 #buster_add_executable(compiler src/buster/compiler/frontend/buster/main.c)
 

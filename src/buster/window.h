@@ -17,7 +17,7 @@ typedef void OsWindowRefresh(OsWindowHandle* window, void* context);
 typedef struct OsWindowCreate OsWindowCreate;
 struct OsWindowCreate
 {
-    StringOs name;
+    String8 name;
     void* context;
     OsWindowRefresh* refresh_callback;
     OsWindowSize size;
