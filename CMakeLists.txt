@@ -8,6 +8,7 @@ project(buster C)
 set (CMAKE_COLOR_DIAGNOSTICS ON)
 
 include(CheckCCompilerFlag)
+include(CheckCSourceCompiles)
 
 set(BUSTER_OPTIMIZE_EXPLICIT OFF)
 if (DEFINED BUSTER_OPTIMIZE)
@@ -91,37 +92,6 @@ if (DEFINED CMAKE_BUILD_TYPE)
     set(BUSTER_STATUS_CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
 endif()
 
-option(BUSTER_CI "Enable CI mode" OFF)
-option(BUSTER_LINK_LIBC "Link libc" ON)
-option(BUSTER_OPTIMIZE "Enable optimized build" ${BUSTER_OPTIMIZE_DEFAULT})
-option(BUSTER_UNITY_BUILD "Enable unity builds for optimized configurations" ON)
-option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
-option(BUSTER_SANITIZE "Enable sanitizers" OFF)
-option(BUSTER_TIME_TRACE "Enable time tracing" OFF)
-option(BUSTER_FUZZ "Enable fuzzing" OFF)
-option(BUSTER_LTO "Enable LTO" OFF)
-option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warning flags" ON)
-option(BUSTER_DEVELOPER_TARGETS "Enable convenience run/test/debug targets" ON)
-
-if (BUSTER_MULTI_CONFIG AND NOT BUSTER_OPTIMIZE_EXPLICIT)
-    set(BUSTER_OPTIMIZE_CONDITION "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>")
-else()
-    set(BUSTER_OPTIMIZE_CONDITION "$<BOOL:${BUSTER_OPTIMIZE}>")
-endif()
-
-set(BUSTER_OPTIMIZE_DEFINE "$<IF:${BUSTER_OPTIMIZE_CONDITION},1,0>")
-set(BUSTER_UNITY_BUILD_CONDITION "$<AND:$<BOOL:${BUSTER_UNITY_BUILD}>,${BUSTER_OPTIMIZE_CONDITION}>")
-set(BUSTER_UNITY_BUILD_DEFINE "$<IF:${BUSTER_UNITY_BUILD_CONDITION},1,0>")
-set(BUSTER_NON_UNITY_SOURCE_CONDITION "$<NOT:${BUSTER_UNITY_BUILD_CONDITION}>")
-
-if (NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS OR CMAKE_EXPORT_COMPILE_COMMANDS STREQUAL "")
-    set(BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT ON)
-    if (BUSTER_CI)
-        set(BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT OFF)
-    endif()
-    set(CMAKE_EXPORT_COMPILE_COMMANDS ${BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT} CACHE BOOL "Enable compile commands" FORCE)
-endif()
-
 set(BUSTER_CROSS_COMPILE OFF)
 
 set(C_COMPILER_GNU OFF)
@@ -149,8 +119,80 @@ if (WIN32 AND C_COMPILER_TCC)
 endif()
 
 get_filename_component(C_COMPILER_NAME "${CMAKE_C_COMPILER}" NAME)
-if (C_COMPILER_NAME STREQUAL "zig" AND "${CMAKE_C_COMPILER_ARG1}" STREQUAL "cc")
+if ((C_COMPILER_NAME STREQUAL "zig" OR C_COMPILER_NAME STREQUAL "zig.exe") AND "${CMAKE_C_COMPILER_ARG1}" STREQUAL "cc")
     set(C_COMPILER_ZIG ON)
+endif()
+
+option(BUSTER_CI "Enable CI mode" OFF)
+option(BUSTER_LINK_LIBC "Link libc" ON)
+option(BUSTER_OPTIMIZE "Enable optimized build" ${BUSTER_OPTIMIZE_DEFAULT})
+option(BUSTER_UNITY_BUILD "Enable unity builds for optimized configurations" ON)
+option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
+option(BUSTER_SANITIZE "Enable sanitizers" OFF)
+option(BUSTER_TIME_TRACE "Enable time tracing" OFF)
+option(BUSTER_FUZZ "Enable fuzzing" OFF)
+option(BUSTER_LTO "Enable LTO" OFF)
+option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warning flags" ON)
+option(BUSTER_DEVELOPER_TARGETS "Enable convenience run/test/debug targets" ON)
+
+set(BUSTER_USE_VULKAN_DEFAULT OFF)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR C_COMPILER_TCC)
+    set(BUSTER_USE_VULKAN_DEFAULT ON)
+endif()
+option(BUSTER_USE_VULKAN "Use the Vulkan renderer instead of the platform fallback" ${BUSTER_USE_VULKAN_DEFAULT})
+
+set(BUSTER_VULKAN_SDK_BIN_DIRS)
+set(BUSTER_VULKAN_SDK_INCLUDE_DIRS)
+if (DEFINED ENV{VULKAN_SDK})
+    list(APPEND BUSTER_VULKAN_SDK_BIN_DIRS
+        "$ENV{VULKAN_SDK}/bin"
+        "$ENV{VULKAN_SDK}/Bin"
+    )
+    list(APPEND BUSTER_VULKAN_SDK_INCLUDE_DIRS "$ENV{VULKAN_SDK}/include")
+endif()
+
+find_path(BUSTER_VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h HINTS ${BUSTER_VULKAN_SDK_INCLUDE_DIRS})
+find_program(BUSTER_GLSLC_EXECUTABLE NAMES glslc HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS})
+option(BUSTER_REQUIRE_VULKAN_SDK "Require Vulkan headers and shader compiler" ${BUSTER_USE_VULKAN})
+set(BUSTER_COMPILE_SHADERS_DEFAULT ${BUSTER_USE_VULKAN})
+option(BUSTER_COMPILE_SHADERS "Compile Vulkan GLSL shaders" ${BUSTER_COMPILE_SHADERS_DEFAULT})
+
+if (BUSTER_USE_VULKAN AND BUSTER_REQUIRE_VULKAN_SDK)
+    if (NOT BUSTER_VULKAN_INCLUDE_DIR)
+        message(FATAL_ERROR "Could not find Vulkan headers. Install Vulkan SDK/vulkan-headers or set BUSTER_VULKAN_INCLUDE_DIR.")
+    endif()
+    if (BUSTER_COMPILE_SHADERS AND NOT BUSTER_GLSLC_EXECUTABLE)
+        message(FATAL_ERROR "BUSTER_COMPILE_SHADERS requires glslc. Install the Vulkan SDK/shaderc or set BUSTER_GLSLC_EXECUTABLE.")
+    endif()
+endif()
+
+if (BUSTER_MULTI_CONFIG AND NOT BUSTER_OPTIMIZE_EXPLICIT)
+    set(BUSTER_OPTIMIZE_CONDITION "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>")
+else()
+    set(BUSTER_OPTIMIZE_CONDITION "$<BOOL:${BUSTER_OPTIMIZE}>")
+endif()
+
+set(BUSTER_OPTIMIZE_DEFINE "$<IF:${BUSTER_OPTIMIZE_CONDITION},1,0>")
+set(BUSTER_UNITY_BUILD_CONDITION "$<AND:$<BOOL:${BUSTER_UNITY_BUILD}>,${BUSTER_OPTIMIZE_CONDITION}>")
+set(BUSTER_UNITY_BUILD_DEFINE "$<IF:${BUSTER_UNITY_BUILD_CONDITION},1,0>")
+set(BUSTER_NON_UNITY_SOURCE_CONDITION "$<NOT:${BUSTER_UNITY_BUILD_CONDITION}>")
+
+if (NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS OR CMAKE_EXPORT_COMPILE_COMMANDS STREQUAL "")
+    set(BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT ON)
+    if (BUSTER_CI)
+        set(BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT OFF)
+    endif()
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ${BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT} CACHE BOOL "Enable compile commands" FORCE)
+endif()
+
+set(BUSTER_USE_D3D12 OFF)
+if (WIN32 AND NOT BUSTER_USE_VULKAN)
+    set(BUSTER_USE_D3D12 ON)
+endif()
+
+set(BUSTER_USE_METAL OFF)
+if (APPLE AND NOT BUSTER_USE_VULKAN)
+    set(BUSTER_USE_METAL ON)
 endif()
 
 set(BUSTER_ZIG_DARWIN_ASAN_RUNTIME "")
@@ -340,6 +382,56 @@ if (C_COMPILER_CLANG_FAMILY OR C_COMPILER_GNU)
     set(C_COMPILER_GNU_FAMILY ON)
 endif()
 
+set(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "")
+set(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR "")
+if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
+    if (C_COMPILER_ZIG AND BUSTER_ZIG_LINUX_ASAN_RUNTIME)
+        set(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "${BUSTER_ZIG_LINUX_ASAN_RUNTIME}")
+    elseif (C_COMPILER_GNU_FAMILY)
+        set(BUSTER_LINUX_ASAN_RUNTIME_NAMES)
+        if (C_COMPILER_CLANG_FAMILY)
+            if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
+                set(BUSTER_LINUX_ASAN_ARCH x86_64)
+            elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
+                set(BUSTER_LINUX_ASAN_ARCH aarch64)
+            endif()
+
+            if (BUSTER_LINUX_ASAN_ARCH)
+                list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES
+                    "libclang_rt.asan-${BUSTER_LINUX_ASAN_ARCH}.so"
+                    "libclang_rt.asan.so"
+                )
+            endif()
+        endif()
+        list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libasan.so")
+
+        foreach(runtime_name IN LISTS BUSTER_LINUX_ASAN_RUNTIME_NAMES)
+            execute_process(
+                COMMAND "${CMAKE_C_COMPILER}" "-print-file-name=${runtime_name}"
+                OUTPUT_VARIABLE BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                RESULT_VARIABLE BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_RESULT
+            )
+            if (BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_RESULT EQUAL 0
+                AND IS_ABSOLUTE "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}"
+                AND EXISTS "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}")
+                get_filename_component(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}" REALPATH)
+                get_filename_component(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR "${BUSTER_LINUX_ASAN_PRELOAD_RUNTIME}" DIRECTORY)
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    if (BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
+        if (NOT BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR)
+            get_filename_component(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR "${BUSTER_LINUX_ASAN_PRELOAD_RUNTIME}" DIRECTORY)
+        endif()
+        message(STATUS "BUSTER_LINUX_ASAN_PRELOAD_RUNTIME: ${BUSTER_LINUX_ASAN_PRELOAD_RUNTIME}")
+    else()
+        message(STATUS "BUSTER_LINUX_ASAN_PRELOAD_RUNTIME: not found")
+    endif()
+endif()
+
 set(C_COMPILER_MSVC_FAMILIY OFF)
 if (C_COMPILER_MSVC)
     set(C_COMPILER_MSVC_FAMILIY ON)
@@ -413,6 +505,8 @@ message(STATUS "BUSTER_FUZZ: ${BUSTER_FUZZ}")
 message(STATUS "BUSTER_LTO: ${BUSTER_LTO}")
 message(STATUS "BUSTER_CHECK_OPTIONAL_WARNINGS: ${BUSTER_CHECK_OPTIONAL_WARNINGS}")
 message(STATUS "BUSTER_DEVELOPER_TARGETS: ${BUSTER_DEVELOPER_TARGETS}")
+message(STATUS "BUSTER_REQUIRE_VULKAN_SDK: ${BUSTER_REQUIRE_VULKAN_SDK}")
+message(STATUS "BUSTER_COMPILE_SHADERS: ${BUSTER_COMPILE_SHADERS}")
 message(STATUS "BUSTER_SINGLE_THREADED: ${BUSTER_SINGLE_THREADED}")
 
 message(STATUS "CMAKE_HOST_SYSTEM_PROCESSOR: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
@@ -424,6 +518,9 @@ message(STATUS "CMAKE_BUILD_TYPE: ${BUSTER_STATUS_CMAKE_BUILD_TYPE}")
 message(STATUS "CMAKE_C_COMPILER_ID: ${CMAKE_C_COMPILER_ID}")
 message(STATUS "CMAKE_LINKER_TYPE: ${CMAKE_LINKER_TYPE}")
 message(STATUS "C_COMPILER_ZIG: ${C_COMPILER_ZIG}")
+message(STATUS "BUSTER_USE_VULKAN: ${BUSTER_USE_VULKAN}")
+message(STATUS "BUSTER_USE_D3D12: ${BUSTER_USE_D3D12}")
+message(STATUS "BUSTER_USE_METAL: ${BUSTER_USE_METAL}")
 message(STATUS "CMAKE_COLOR_DIAGNOSTICS: ${CMAKE_COLOR_DIAGNOSTICS}")
 message(STATUS "CMAKE_EXPORT_COMPILE_COMMANDS: ${CMAKE_EXPORT_COMPILE_COMMANDS}")
 
@@ -491,6 +588,18 @@ function(buster_apply_module_options name)
         target_link_libraries(${name} PRIVATE xcb)
     endif()
 
+    if ("WINDOW" IN_LIST modules AND APPLE)
+        target_link_libraries(${name} PRIVATE "-framework AppKit")
+    endif()
+
+    if ("WINDOW" IN_LIST modules AND WIN32 AND C_COMPILER_TCC)
+        target_link_libraries(${name} PRIVATE user32)
+    endif()
+
+    if ("RENDERING" IN_LIST modules AND BUSTER_USE_METAL)
+        target_link_libraries(${name} PRIVATE "-framework Metal" "-framework QuartzCore" "-framework Foundation")
+    endif()
+
     if ("FONT_PROVIDER" IN_LIST modules AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(${name} PRIVATE fontconfig)
     endif()
@@ -517,6 +626,7 @@ buster_register_module(ui_core "${BUSTER_SOURCE_DIR}/ui_core${COMMON_EXTENSION}"
 buster_register_module(ui_builder "${BUSTER_SOURCE_DIR}/ui_builder${COMMON_EXTENSION}")
 buster_register_module(window "${BUSTER_SOURCE_DIR}/window${COMMON_EXTENSION}")
 buster_register_module(rendering "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSION}")
+buster_register_module(truetype "${BUSTER_SOURCE_DIR}/truetype${COMMON_EXTENSION}")
 buster_register_module(font_provider "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
 
 
@@ -649,8 +759,152 @@ set(MSVC_FAMILY_DISABLE_WARNINGS )
 if (BUSTER_FUZZ)
     set(TEST_ARGUMENTS -max_len=4096;-max_total_time=2)
 else()
-    set(TEST_ARGUMENTS test)
+    set(TEST_ARGUMENTS test --verbose=1)
+    if (BUSTER_CI)
+        list(APPEND TEST_ARGUMENTS --ci=1)
+    endif()
 endif()
+
+set(BUSTER_TEST_ENV)
+
+if (NOT WIN32)
+    set(BUSTER_LSAN_OPTIONS "suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=1")
+    if (DEFINED ENV{LSAN_OPTIONS})
+        if (NOT "$ENV{LSAN_OPTIONS}" STREQUAL "")
+            set(BUSTER_LSAN_OPTIONS "$ENV{LSAN_OPTIONS}:${BUSTER_LSAN_OPTIONS}")
+        endif()
+    endif()
+    list(APPEND BUSTER_TEST_ENV "LSAN_OPTIONS=${BUSTER_LSAN_OPTIONS}")
+
+    if (UNIX AND NOT APPLE)
+        list(APPEND BUSTER_TEST_ENV "VK_LOADER_DISABLE_DYNAMIC_LIBRARY_UNLOADING=1")
+    endif()
+
+    if (BUSTER_SANITIZE)
+        string(REGEX MATCH "^[0-9]+" BUSTER_SANITIZER_COMPILER_MAJOR "${CMAKE_C_COMPILER_VERSION}")
+        set(BUSTER_LLVM_SYMBOLIZER_NAMES llvm-symbolizer)
+        if (BUSTER_SANITIZER_COMPILER_MAJOR)
+            set(BUSTER_LLVM_SYMBOLIZER_NAMES "llvm-symbolizer-${BUSTER_SANITIZER_COMPILER_MAJOR}" ${BUSTER_LLVM_SYMBOLIZER_NAMES})
+        endif()
+        find_program(BUSTER_LLVM_SYMBOLIZER NAMES ${BUSTER_LLVM_SYMBOLIZER_NAMES})
+
+        set(BUSTER_ASAN_OPTIONS "symbolize=1")
+        set(BUSTER_UBSAN_OPTIONS "print_stacktrace=1")
+        if (BUSTER_LLVM_SYMBOLIZER)
+            list(APPEND BUSTER_TEST_ENV "ASAN_SYMBOLIZER_PATH=${BUSTER_LLVM_SYMBOLIZER}")
+            set(BUSTER_ASAN_OPTIONS "${BUSTER_ASAN_OPTIONS}:external_symbolizer_path=${BUSTER_LLVM_SYMBOLIZER}")
+            set(BUSTER_UBSAN_OPTIONS "${BUSTER_UBSAN_OPTIONS}:external_symbolizer_path=${BUSTER_LLVM_SYMBOLIZER}")
+            message(STATUS "BUSTER_LLVM_SYMBOLIZER: ${BUSTER_LLVM_SYMBOLIZER}")
+        else()
+            message(STATUS "BUSTER_LLVM_SYMBOLIZER: not found")
+        endif()
+
+        if (DEFINED ENV{ASAN_OPTIONS})
+            if (NOT "$ENV{ASAN_OPTIONS}" STREQUAL "")
+                set(BUSTER_ASAN_OPTIONS "$ENV{ASAN_OPTIONS}:${BUSTER_ASAN_OPTIONS}")
+            endif()
+        endif()
+        if (DEFINED ENV{UBSAN_OPTIONS})
+            if (NOT "$ENV{UBSAN_OPTIONS}" STREQUAL "")
+                set(BUSTER_UBSAN_OPTIONS "$ENV{UBSAN_OPTIONS}:${BUSTER_UBSAN_OPTIONS}")
+            endif()
+        endif()
+
+        list(APPEND BUSTER_TEST_ENV "ASAN_OPTIONS=${BUSTER_ASAN_OPTIONS}")
+        list(APPEND BUSTER_TEST_ENV "UBSAN_OPTIONS=${BUSTER_UBSAN_OPTIONS}")
+
+        if (UNIX AND NOT APPLE AND BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
+            set(BUSTER_LD_PRELOAD "${BUSTER_LINUX_ASAN_PRELOAD_RUNTIME}")
+            if (DEFINED ENV{LD_PRELOAD})
+                if (NOT "$ENV{LD_PRELOAD}" STREQUAL "")
+                    set(BUSTER_LD_PRELOAD "${BUSTER_LD_PRELOAD}:$ENV{LD_PRELOAD}")
+                endif()
+            endif()
+            list(APPEND BUSTER_TEST_ENV "LD_PRELOAD=${BUSTER_LD_PRELOAD}")
+        endif()
+    endif()
+endif()
+
+set(BUSTER_SHADER_SOURCE_DIR "${CMAKE_SOURCE_DIR}/src/buster/shaders")
+set(BUSTER_SHADER_BINARY_DIR "${CMAKE_BINARY_DIR}/shaders")
+set(BUSTER_SHADER_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated")
+set(BUSTER_SHADER_GENERATED_HEADER_DIR "${BUSTER_SHADER_GENERATED_INCLUDE_DIR}/buster/shaders")
+set(BUSTER_SHADER_GENERATED_PATH_HEADER "${BUSTER_SHADER_GENERATED_HEADER_DIR}/paths.h")
+
+function(buster_c_string out_var value)
+    string(REPLACE "\\" "\\\\" escaped "${value}")
+    string(REPLACE "\"" "\\\"" escaped "${escaped}")
+    set(${out_var} "${escaped}" PARENT_SCOPE)
+endfunction()
+
+function(buster_compile_shader out_var shader_source)
+    if (IS_ABSOLUTE "${shader_source}")
+        set(shader_source_path "${shader_source}")
+    else()
+        set(shader_source_path "${CMAKE_CURRENT_SOURCE_DIR}/${shader_source}")
+    endif()
+
+    get_filename_component(shader_source_name "${shader_source_path}" NAME)
+    set(shader_output "${BUSTER_SHADER_BINARY_DIR}/${shader_source_name}.spv")
+
+    add_custom_command(
+        OUTPUT "${shader_output}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUSTER_SHADER_BINARY_DIR}"
+        COMMAND "${BUSTER_GLSLC_EXECUTABLE}"
+            --target-env=vulkan1.3
+            -I "${BUSTER_SHADER_SOURCE_DIR}"
+            "${shader_source_path}"
+            -o "${shader_output}"
+        MAIN_DEPENDENCY "${shader_source_path}"
+        DEPENDS "${BUSTER_SHADER_SOURCE_DIR}/rect.inc"
+        COMMENT "Compiling shader ${shader_source_name}"
+        VERBATIM
+    )
+
+    set_source_files_properties("${shader_output}" PROPERTIES GENERATED TRUE)
+    set(${out_var} "${shader_output}" PARENT_SCOPE)
+endfunction()
+
+set(BUSTER_SHADER_SOURCES
+    src/buster/shaders/rect.vert
+    src/buster/shaders/rect.frag
+)
+
+set(BUSTER_RECT_VERTEX_SHADER_BINARY "${BUSTER_SHADER_BINARY_DIR}/rect.vert.spv")
+set(BUSTER_RECT_FRAGMENT_SHADER_BINARY "${BUSTER_SHADER_BINARY_DIR}/rect.frag.spv")
+
+if (BUSTER_USE_VULKAN AND BUSTER_COMPILE_SHADERS)
+    if (NOT BUSTER_GLSLC_EXECUTABLE)
+        message(FATAL_ERROR "BUSTER_COMPILE_SHADERS requires glslc. Install the Vulkan SDK/shaderc or set BUSTER_GLSLC_EXECUTABLE.")
+    endif()
+
+    message(STATUS "BUSTER_VULKAN_INCLUDE_DIR: ${BUSTER_VULKAN_INCLUDE_DIR}")
+    message(STATUS "BUSTER_GLSLC_EXECUTABLE: ${BUSTER_GLSLC_EXECUTABLE}")
+
+    buster_compile_shader(BUSTER_RECT_VERTEX_SHADER_BINARY src/buster/shaders/rect.vert)
+    buster_compile_shader(BUSTER_RECT_FRAGMENT_SHADER_BINARY src/buster/shaders/rect.frag)
+    add_custom_target(buster_shaders
+        DEPENDS
+            "${BUSTER_RECT_VERTEX_SHADER_BINARY}"
+            "${BUSTER_RECT_FRAGMENT_SHADER_BINARY}"
+    )
+elseif(BUSTER_USE_VULKAN AND NOT BUSTER_GLSLC_EXECUTABLE)
+    message(STATUS "glslc not found; shader compilation is disabled")
+endif()
+
+buster_c_string(BUSTER_RECT_VERTEX_SHADER_BINARY_C "${BUSTER_RECT_VERTEX_SHADER_BINARY}")
+buster_c_string(BUSTER_RECT_FRAGMENT_SHADER_BINARY_C "${BUSTER_RECT_FRAGMENT_SHADER_BINARY}")
+file(MAKE_DIRECTORY "${BUSTER_SHADER_GENERATED_HEADER_DIR}")
+file(WRITE "${BUSTER_SHADER_GENERATED_PATH_HEADER}"
+"/* Generated by CMake. Do not edit. */\n"
+"#ifndef BUSTER_SHADERS_PATHS_H\n"
+"#define BUSTER_SHADERS_PATHS_H\n"
+"\n"
+"#define BUSTER_SHADER_RECT_VERT_SPV \"${BUSTER_RECT_VERTEX_SHADER_BINARY_C}\"\n"
+"#define BUSTER_SHADER_RECT_FRAG_SPV \"${BUSTER_RECT_FRAGMENT_SHADER_BINARY_C}\"\n"
+"\n"
+"#endif /* BUSTER_SHADERS_PATHS_H */\n"
+)
 
 function(executable_add name is_buster_program main_file)
     set(options)
@@ -701,7 +955,11 @@ function(executable_add name is_buster_program main_file)
         target_link_options(${name} PRIVATE /INCREMENTAL:NO)
     endif()
 
-    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_include_directories(${name} PRIVATE ${BUSTER_SHADER_GENERATED_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/src)
+    if (BUSTER_USE_VULKAN AND BUSTER_VULKAN_INCLUDE_DIR)
+        target_include_directories(${name} PRIVATE ${BUSTER_VULKAN_INCLUDE_DIR})
+    endif()
+
     target_compile_definitions(${name} PRIVATE
         BUSTER_UNITY_BUILD=${BUSTER_UNITY_BUILD_DEFINE}
         BUSTER_OPTIMIZE=${BUSTER_OPTIMIZE_DEFINE}
@@ -709,6 +967,10 @@ function(executable_add name is_buster_program main_file)
         BUSTER_FUZZ=$<IF:$<BOOL:${BUSTER_FUZZ}>,1,0>
         BUSTER_LINK_LIBC=$<IF:$<BOOL:${BUSTER_LINK_LIBC}>,1,0>
         BUSTER_SINGLE_THREADED=$<IF:$<BOOL:${BUSTER_SINGLE_THREADED}>,1,0>
+        BUSTER_USE_VULKAN=$<IF:$<BOOL:${BUSTER_USE_VULKAN}>,1,0>
+        BUSTER_USE_D3D12=$<IF:$<BOOL:${BUSTER_USE_D3D12}>,1,0>
+        BUSTER_USE_METAL=$<IF:$<BOOL:${BUSTER_USE_METAL}>,1,0>
+        BUSTER_COMPILER_ZIG=$<IF:$<BOOL:${C_COMPILER_ZIG}>,1,0>
     )
 
     if (C_COMPILER_GNU_FAMILY)
@@ -719,6 +981,10 @@ function(executable_add name is_buster_program main_file)
 
     if (C_COMPILER_CLANG_FAMILY)
         target_compile_options(${name} PRIVATE ${CLANG_GNU_FAMILY_WARNINGS})
+
+        if (BUSTER_DEVELOPER_TARGETS)
+            target_compile_options(${name} PRIVATE -ferror-limit=1)
+        endif()
     endif()
 
     if (C_COMPILER_MSVC_FAMILIY)
@@ -744,6 +1010,18 @@ function(executable_add name is_buster_program main_file)
         target_compile_options(${name} PRIVATE "-fsanitize=${sanitizer_flag}")
         target_link_options(${name} PRIVATE "-fsanitize=${sanitizer_flag}")
 
+        if (UNIX AND NOT APPLE AND C_COMPILER_CLANG AND NOT C_COMPILER_ZIG AND BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
+            target_link_options(${name} PRIVATE -shared-libasan)
+            target_link_options(${name} PRIVATE "-Wl,-rpath,${BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR}")
+        endif()
+
+        if (NOT WIN32)
+            target_compile_options(${name} PRIVATE -g)
+        elseif (C_COMPILER_MSVC)
+            target_compile_options(${name} PRIVATE /Zi)
+            target_link_options(${name} PRIVATE /DEBUG)
+        endif()
+
         if (NOT WIN32)
             if (C_COMPILER_ZIG)
                 if (APPLE)
@@ -767,7 +1045,7 @@ function(executable_add name is_buster_program main_file)
             target_link_options(${name} PRIVATE -fsanitize-recover=all)
         endif()
     else()
-        if (C_COMPILER_ZIG)
+        if (C_COMPILER_ZIG AND NOT WIN32)
             target_compile_options(${name} PRIVATE -fno-sanitize=all)
             target_link_options(${name} PRIVATE -fno-sanitize=all)
         endif()
@@ -832,7 +1110,7 @@ function(executable_add name is_buster_program main_file)
             VERBATIM)
 
         add_custom_target(test_${name}
-            COMMAND "$<TARGET_FILE:${name}>" ${TEST_ARGUMENTS}
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:${name}>" ${TEST_ARGUMENTS}
             DEPENDS ${name}
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             USES_TERMINAL
@@ -868,32 +1146,37 @@ endfunction()
 # buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
 buster_add_executable(ide src/buster/ide/ide.c
     MODULES
-        os
-        entry_point
-        arena
-        integer
-        assertion
-        string
-        float
-        compiler_parser
-        compiler_analysis
-        compiler_ir
-        # simd
-        file
-        target
-        time
-        # ui_core
-        # ui_builder
-        # window
-        # rendering
-        # font_provider
+    os
+    entry_point
+    arena
+    integer
+    assertion
+    string
+    float
+    compiler_parser
+    compiler_analysis
+    compiler_ir
+    simd
+    file
+    target
+    time
+    ui_core
+    ui_builder
+    window
+    rendering
+    truetype
+    font_provider
 )
-#buster_add_executable(compiler src/buster/compiler/frontend/buster/main.c)
+
+if (TARGET buster_shaders)
+    add_dependencies(ide buster_shaders)
+    target_sources(ide PRIVATE ${BUSTER_SHADER_SOURCES})
+endif()
 
 add_custom_target(test_all
     COMMAND 
-    ${CMAKE_COMMAND} -E env "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=1"
-    $<TARGET_FILE:ide> ${TEST_ARGUMENTS}
+    ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+    "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
     DEPENDS ide
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Test all"

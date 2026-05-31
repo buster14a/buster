@@ -34,6 +34,17 @@ typedef enum BuildCommand
 } BuildCommand;
 
 typedef struct ProcessRun ProcessRun;
+typedef ProcessResult BuildActionCallback(Arena* arena, void* data);
+
+typedef enum ProcessRunFlag
+{
+    PROCESS_RUN_FLAG_PRINT_COMMAND = (1u << 0),
+    PROCESS_RUN_FLAG_PRINT_COMMAND_ON_FAILURE_OR_WARNING = (1u << 1),
+    PROCESS_RUN_FLAG_PRINT_CAPTURED_ERROR = (1u << 2),
+    PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE = (1u << 3),
+    PROCESS_RUN_FLAG_CLANG_ANALYZE = (1u << 4),
+} ProcessRunFlag;
+
 struct ProcessRun
 {
     SliceString8 arguments;
@@ -41,9 +52,13 @@ struct ProcessRun
     SliceString8 environment_values;
     ProcessSpawnOptions spawn_options;
     ProcessSpawnResult spawn;
+    String8 working_directory;
     String8 timing_description;
     String8 timing_configuration;
     u64 start_us;
+    u32 flags;
+    BuildActionCallback* callback;
+    void* callback_data;
     ProcessRun* next;
 };
 
@@ -357,14 +372,6 @@ BUSTER_GLOBAL_LOCAL BuildStep* step_create(Arena* arena)
     BuildStep* step = arena_allocate(arena, BuildStep, 1);
     *step = (BuildStep){0};
     return step;
-}
-
-BUSTER_GLOBAL_LOCAL void step_link(BuildStep* step, BuildStep* previous)
-{
-    if (previous)
-    {
-        previous->next = step;
-    }
 }
 
 BUSTER_GLOBAL_LOCAL void build_graph_step_add(BuildStep* step)
@@ -819,6 +826,7 @@ struct CmakeBuildOptions
 {
     String8 config;
     u32 optimize:1;
+    u32 optimize_set:1;
     u32 quiet:1;
     u32 verbose:1;
 };
@@ -917,6 +925,16 @@ struct ClangAnalyzeOptions
     u32 quiet:1;
     u32 compile_commands_set:1;
 };
+
+typedef struct ClangAnalyzeSummary ClangAnalyzeSummary;
+struct ClangAnalyzeSummary
+{
+    u64 analyzed;
+    u64 warnings;
+    u64 failures;
+};
+
+BUSTER_GLOBAL_LOCAL ClangAnalyzeSummary clang_analyze_summary = {0};
 
 typedef struct CmakeProfileSummaryOptions CmakeProfileSummaryOptions;
 struct CmakeProfileSummaryOptions
@@ -1778,67 +1796,6 @@ BUSTER_GLOBAL_LOCAL void command_print(SliceString8 command)
     string_print(S8("+ {[]S8}\n"), command);
 }
 
-BUSTER_GLOBAL_LOCAL ProcessWaitResult clang_analyze_run_command(Arena* arena, SliceString8 command, String8 directory, bool quiet, bool* has_warning)
-{
-    if (!quiet)
-    {
-        command_print(command);
-    }
-
-    bool restore_directory = false;
-#if BUSTER_WINDOWS
-    char16 old_directory_buffer[BUSTER_KB(32) / sizeof(char16)];
-    DWORD old_directory_length = 0;
-    if (directory.pointer && directory.length)
-    {
-        old_directory_length = GetCurrentDirectoryW(BUSTER_ARRAY_LENGTH(old_directory_buffer), old_directory_buffer);
-        if (old_directory_length > 0 && old_directory_length < BUSTER_ARRAY_LENGTH(old_directory_buffer))
-        {
-            TemporalArena temp = scratch_begin(&arena, 1);
-            String16 directory16 = string16_from_string8(temp.arena, directory, true);
-            restore_directory = SetCurrentDirectoryW(directory16.pointer) != 0;
-            scratch_end(temp);
-        }
-    }
-#else
-    char old_directory_buffer[BUSTER_KB(32)];
-    if (directory.pointer && directory.length && getcwd(old_directory_buffer, sizeof(old_directory_buffer)))
-    {
-        restore_directory = chdir(directory.pointer) == 0;
-    }
-#endif
-
-    ProcessSpawnResult spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){
-        .capture = ((u64)1 << STANDARD_STREAM_ERROR),
-        .use_process_environment = 1,
-    });
-
-    if (restore_directory)
-    {
-#if BUSTER_WINDOWS
-        SetCurrentDirectoryW(old_directory_buffer);
-#else
-        chdir(old_directory_buffer);
-#endif
-    }
-
-    ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
-    String8 error_output = { .pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length };
-    *has_warning = clang_analyze_output_has_warning(error_output);
-
-    if (quiet && (wait.result != PROCESS_RESULT_SUCCESS || *has_warning))
-    {
-        command_print(command);
-    }
-
-    if (error_output.length)
-    {
-        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(error_output));
-    }
-
-    return wait;
-}
-
 BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, String8 path)
 {
     if (!path.pointer || !path.length)
@@ -1866,7 +1823,7 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, St
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_run(Arena* arena, ClangAnalyzeOptions options)
+BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_add(Arena* arena, ClangAnalyzeOptions options)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     String8 path = clang_analyze_compile_commands_path(arena, options.compile_commands);
@@ -1886,9 +1843,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_run(Arena* arena, ClangAnalyzeOp
         return PROCESS_RESULT_FAILED;
     }
 
-    u64 analyzed = 0;
-    u64 warnings = 0;
-    u64 failures = 0;
+    BuildStep* step = 0;
+    u64 scheduled = 0;
+    u64 setup_failures = 0;
+    clang_analyze_summary = (ClangAnalyzeSummary){0};
 
     for (;;)
     {
@@ -1917,16 +1875,37 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_run(Arena* arena, ClangAnalyzeOp
             if (!split_valid || !compile_arguments.length)
             {
                 string_print(S8("error: {S8}: compile command entry has no usable command\n"), entry.file);
-                failures += 1;
+                setup_failures += 1;
             }
             else if (clang_analyze_entry_matches_config(arena, entry, compile_arguments, options.config))
             {
                 SliceString8 command = clang_analyzer_command(arena, compile_arguments, options.clang);
-                bool has_warning = false;
-                ProcessWaitResult wait = clang_analyze_run_command(arena, command, entry.directory, options.quiet, &has_warning);
-                analyzed += 1;
-                failures += wait.result != PROCESS_RESULT_SUCCESS;
-                warnings += has_warning;
+                if (!step)
+                {
+                    step = step_add(arena);
+                }
+
+                ProcessRun* run = run_add(arena, step);
+                u32 flags = PROCESS_RUN_FLAG_PRINT_CAPTURED_ERROR | PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE | PROCESS_RUN_FLAG_CLANG_ANALYZE;
+                if (options.quiet)
+                {
+                    flags |= PROCESS_RUN_FLAG_PRINT_COMMAND_ON_FAILURE_OR_WARNING;
+                }
+                else
+                {
+                    flags |= PROCESS_RUN_FLAG_PRINT_COMMAND;
+                }
+
+                *run = (ProcessRun){
+                    .arguments = command,
+                    .working_directory = entry.directory,
+                    .flags = flags,
+                    .spawn_options = (ProcessSpawnOptions){
+                        .capture = ((u64)1 << STANDARD_STREAM_ERROR),
+                        .use_process_environment = 1,
+                    },
+                };
+                scheduled += 1;
             }
         }
 
@@ -1943,7 +1922,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_run(Arena* arena, ClangAnalyzeOp
         return PROCESS_RESULT_FAILED;
     }
 
-    if (analyzed == 0)
+    clang_analyze_summary.failures += setup_failures;
+    if (scheduled == 0)
     {
         if (options.config.pointer && options.config.length)
         {
@@ -1955,20 +1935,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_run(Arena* arena, ClangAnalyzeOp
         }
         result = PROCESS_RESULT_FAILED;
     }
-    else
-    {
-        string_print(S8("clang --analyze checked {u64} translation unit(s), {u64} with analyzer warning(s), {u64} failed.\n"), analyzed, warnings, failures);
-
-        if (warnings || failures)
-        {
-            result = PROCESS_RESULT_FAILED;
-        }
-    }
 
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void clang_analyze_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
+BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
 {
     BuildStep* step = step_add(arena);
     ProcessRun* run = run_add(arena, step);
@@ -2329,6 +2300,26 @@ BUSTER_GLOBAL_LOCAL ProcessResult cmake_profile_summary_run(Arena* arena, CmakeP
     return PROCESS_RESULT_SUCCESS;
 }
 
+BUSTER_GLOBAL_LOCAL ProcessResult cmake_profile_summary_action(Arena* arena, void* data)
+{
+    CmakeProfileSummaryOptions* options = (CmakeProfileSummaryOptions*)data;
+    ProcessResult result = cmake_profile_summary_run(arena, *options);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void cmake_profile_summary_action_add(Arena* arena, CmakeProfileSummaryOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    CmakeProfileSummaryOptions* options_copy = arena_allocate(arena, CmakeProfileSummaryOptions, 1);
+    *options_copy = options;
+
+    *run = (ProcessRun){
+        .callback = cmake_profile_summary_action,
+        .callback_data = options_copy,
+    };
+}
+
 BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     BuildStep* generate_step = step_add(arena);
@@ -2347,6 +2338,11 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
 
     for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)
     {
+        if (ci && compiler == BUILD_COMPILER_TCC && (BUSTER_WINDOWS || BUSTER_APPLE))
+        {
+            continue;
+        }
+
         bool support_fuzz = (compiler == BUILD_COMPILER_CLANG || compiler == BUILD_COMPILER_CL) && !BUSTER_APPLE;
         bool support_sanitize = compiler != BUILD_COMPILER_TCC && (!BUSTER_WINDOWS || compiler != BUILD_COMPILER_GCC);
         bool support_optimize = compiler != BUILD_COMPILER_TCC;
@@ -2416,7 +2412,7 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
 
                     if (compiler == BUILD_COMPILER_CLANG && !sanitize && !fuzz)
                     {
-                        clang_analyze_add(arena, build_directory, options);
+                        clang_analyze_command_add(arena, build_directory, options);
                     }
                 }
             }
@@ -2807,6 +2803,11 @@ ProcessResult process_arguments(void)
                         break; default: BUSTER_UNREACHABLE();
                     }
                 }
+                else if (command == BUILD_COMMAND_BUILD && build_argument == BUILD_ARGUMENT_OPTIMIZE && build_argument_read_optional_bool(arguments, &argument_i, argument_has_value, argument_value, &value))
+                {
+                    options.optimize = value;
+                    options.optimize_set = true;
+                }
                 else
                 {
                     result = PROCESS_RESULT_FAILED;
@@ -2839,6 +2840,12 @@ ProcessResult process_arguments(void)
                         break; case BUILD_ARGUMENT_NO_DEVELOPER_TARGETS: generate.developer_targets = false;
                         break; default: BUSTER_UNREACHABLE();
                     }
+                    argument_i += 1;
+                }
+                else if (command == BUILD_COMMAND_BUILD && build_argument == BUILD_ARGUMENT_NO_OPTIMIZE && !argument_has_value)
+                {
+                    options.optimize = false;
+                    options.optimize_set = true;
                     argument_i += 1;
                 }
                 else
@@ -2925,6 +2932,20 @@ ProcessResult process_arguments(void)
         }
     }
 
+    if (result == PROCESS_RESULT_SUCCESS && command == BUILD_COMMAND_BUILD && options.config.pointer && options.optimize_set)
+    {
+        bool config_optimize = build_config_is_optimized(options.config);
+        if (options.optimize != config_optimize)
+        {
+            fprintf(stderr,
+                    "error: --optimize %s conflicts with --config %.*s\n",
+                    options.optimize ? "ON" : "OFF",
+                    string8_printf_length(options.config, UINT64_MAX),
+                    options.config.pointer ? options.config.pointer : "");
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
+
     if (result == PROCESS_RESULT_SUCCESS)
     {
         switch (command)
@@ -2943,11 +2964,11 @@ ProcessResult process_arguments(void)
             }
             break; case BUILD_COMMAND_CLANG_ANALYZE:
             {
-                result = clang_analyze_run(arena, clang_analyze_options);
+                result = clang_analyze_add(arena, clang_analyze_options);
             }
             break; case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY:
             {
-                result = cmake_profile_summary_run(arena, cmake_profile_summary_options);
+                cmake_profile_summary_action_add(arena, cmake_profile_summary_options);
             }
             break;
             case BUILD_COMMAND_TEST_ALL_COMBINATIONS:
@@ -2957,6 +2978,87 @@ ProcessResult process_arguments(void)
                 test_all(arena, ci, options);
             }
         }
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessSpawnResult process_run_spawn(Arena* arena, ProcessRun* run)
+{
+    if (run->flags & PROCESS_RUN_FLAG_PRINT_COMMAND)
+    {
+        command_print(run->arguments);
+    }
+
+    bool restore_directory = false;
+#if BUSTER_WINDOWS
+    char16 old_directory_buffer[BUSTER_KB(32) / sizeof(char16)];
+    DWORD old_directory_length = 0;
+    if (run->working_directory.pointer && run->working_directory.length)
+    {
+        old_directory_length = GetCurrentDirectoryW(BUSTER_ARRAY_LENGTH(old_directory_buffer), old_directory_buffer);
+        if (old_directory_length > 0 && old_directory_length < BUSTER_ARRAY_LENGTH(old_directory_buffer))
+        {
+            TemporalArena temp = scratch_begin(&arena, 1);
+            String16 directory16 = string16_from_string8(temp.arena, run->working_directory, true);
+            restore_directory = SetCurrentDirectoryW(directory16.pointer) != 0;
+            scratch_end(temp);
+        }
+    }
+#else
+    char old_directory_buffer[BUSTER_KB(32)];
+    if (run->working_directory.pointer && run->working_directory.length && getcwd(old_directory_buffer, sizeof(old_directory_buffer)))
+    {
+        restore_directory = chdir(run->working_directory.pointer) == 0;
+    }
+#endif
+
+    ProcessSpawnResult spawn = os_process_spawn(run->arguments, run->environment_keys, run->environment_values, run->spawn_options);
+
+    if (restore_directory)
+    {
+#if BUSTER_WINDOWS
+        SetCurrentDirectoryW(old_directory_buffer);
+#else
+        chdir(old_directory_buffer);
+#endif
+    }
+
+    return spawn;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run)
+{
+    ProcessWaitResult wait_result = os_process_wait_sync(arena, run->spawn);
+    ProcessResult result = wait_result.result;
+    bool has_warning = false;
+
+    if (run->flags & (PROCESS_RUN_FLAG_PRINT_CAPTURED_ERROR | PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE | PROCESS_RUN_FLAG_CLANG_ANALYZE))
+    {
+        String8 error_output = { .pointer = (char8*)wait_result.streams[STANDARD_STREAM_ERROR].pointer, .length = wait_result.streams[STANDARD_STREAM_ERROR].length };
+        has_warning = clang_analyze_output_has_warning(error_output);
+
+        if (run->flags & PROCESS_RUN_FLAG_CLANG_ANALYZE)
+        {
+            clang_analyze_summary.analyzed += 1;
+            clang_analyze_summary.failures += wait_result.result != PROCESS_RESULT_SUCCESS;
+            clang_analyze_summary.warnings += has_warning;
+        }
+
+        if ((run->flags & PROCESS_RUN_FLAG_PRINT_COMMAND_ON_FAILURE_OR_WARNING) && (wait_result.result != PROCESS_RESULT_SUCCESS || has_warning))
+        {
+            command_print(run->arguments);
+        }
+
+        if ((run->flags & PROCESS_RUN_FLAG_PRINT_CAPTURED_ERROR) && error_output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(error_output));
+        }
+    }
+
+    if ((run->flags & PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE) && has_warning && result == PROCESS_RESULT_SUCCESS)
+    {
+        result = PROCESS_RESULT_FAILED;
     }
 
     return result;
@@ -2978,18 +3080,16 @@ ProcessResult entry_point(void)
 
     for (BuildStep* step = build_graph->first_step; step; step = step->next)
     {
-        u32 i = 0;
+        u32 pending_count = 0;
+        ProcessRun* first_pending = step->first_process;
 
-        for (ProcessRun* run = step->first_process, *first_pending = step->first_process; run; run = run->next, i += 1)
+        for (ProcessRun* run = step->first_process; run; run = run->next)
         {
-            run->start_us = os_now_microseconds();
-            run->spawn = os_process_spawn(run->arguments, run->environment_keys, run->environment_values, run->spawn_options);
-
-            if (i == thread_count || !run->next)
+            if (run->callback)
             {
-                for (ProcessRun* wait = first_pending; wait != run->next; wait = wait->next)
+                for (ProcessRun* wait = first_pending; wait != run; wait = wait->next)
                 {
-                    ProcessWaitResult wait_result = os_process_wait_sync(arena, wait->spawn);
+                    ProcessResult wait_result = process_run_wait(arena, wait);
                     if (wait->timing_description.pointer)
                     {
                         u64 elapsed_us = os_now_microseconds() - wait->start_us;
@@ -3004,15 +3104,73 @@ ProcessResult entry_point(void)
                                (unsigned long long)elapsed_ns);
                     }
 
-                    if (result == PROCESS_RESULT_SUCCESS && wait_result.result != PROCESS_RESULT_SUCCESS)
+                    if (result == PROCESS_RESULT_SUCCESS && wait_result != PROCESS_RESULT_SUCCESS)
                     {
-                        result = wait_result.result;
+                        result = wait_result;
                     }
                 }
 
                 first_pending = run->next;
-                i = 0;
+                pending_count = 0;
+
+                if (result == PROCESS_RESULT_SUCCESS)
+                {
+                    ProcessResult callback_result = run->callback(arena, run->callback_data);
+                    if (callback_result != PROCESS_RESULT_SUCCESS)
+                    {
+                        result = callback_result;
+                    }
+                }
             }
+            else
+            {
+                run->start_us = os_now_microseconds();
+                run->spawn = process_run_spawn(arena, run);
+                pending_count += 1;
+
+                if (pending_count == thread_count || !run->next)
+                {
+                    for (ProcessRun* wait = first_pending; wait != run->next; wait = wait->next)
+                    {
+                        ProcessResult wait_result = process_run_wait(arena, wait);
+                        if (wait->timing_description.pointer)
+                        {
+                            u64 elapsed_us = os_now_microseconds() - wait->start_us;
+                            u64 elapsed_ns = elapsed_us * 1000;
+                            u64 seconds_whole = elapsed_us / 1000000;
+                            u64 seconds_fraction = elapsed_us % 1000000;
+                            printf("%.*s%.*s took %llu.%06llu seconds (%llu nanoseconds)\n",
+                                   string8_printf_length(wait->timing_description, UINT64_MAX), wait->timing_description.pointer ? wait->timing_description.pointer : "",
+                                   string8_printf_length(wait->timing_configuration, UINT64_MAX), wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "",
+                                   (unsigned long long)seconds_whole,
+                                   (unsigned long long)seconds_fraction,
+                                   (unsigned long long)elapsed_ns);
+                        }
+
+                        if (result == PROCESS_RESULT_SUCCESS && wait_result != PROCESS_RESULT_SUCCESS)
+                        {
+                            result = wait_result;
+                        }
+                    }
+
+                    first_pending = run->next;
+                    pending_count = 0;
+                }
+            }
+        }
+
+        if (result != PROCESS_RESULT_SUCCESS && step == build_graph->first_step)
+        {
+            break;
+        }
+    }
+
+    if (clang_analyze_summary.analyzed || clang_analyze_summary.failures || clang_analyze_summary.warnings)
+    {
+        string_print(S8("clang --analyze checked {u64} translation unit(s), {u64} with analyzer warning(s), {u64} failed.\n"), clang_analyze_summary.analyzed, clang_analyze_summary.warnings, clang_analyze_summary.failures);
+        if (result == PROCESS_RESULT_SUCCESS && (clang_analyze_summary.failures || clang_analyze_summary.warnings))
+        {
+            result = PROCESS_RESULT_FAILED;
         }
     }
 

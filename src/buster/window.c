@@ -2,6 +2,10 @@
 
 #if defined (__linux__)
 #include <xcb/xcb.h>
+#elif defined(__APPLE__)
+#include <objc/objc.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
 #endif
 
 #include <buster/string.h>
@@ -10,17 +14,125 @@
 #include <buster/file.h>
 #include <buster/font_provider.h>
 #include <buster/ui_core.h>
+#if defined(_WIN32)
+#include <buster/system_headers.h>
+#ifndef WS_EX_NOREDIRECTIONBITMAP
+#define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
+#endif
+#endif
 
-#ifdef __linux__
+#if defined(__linux__)
 typedef struct OsWindowingHandle OsWindowingHandle;
 struct OsWindowingHandle
 {
     xcb_connection_t* connection;
     const xcb_setup_t* setup;
 };
-#else
+#elif defined(__APPLE__)
+typedef struct OsWindowingHandle OsWindowingHandle;
+struct OsWindowingHandle
+{
+    id application;
+};
+#elif defined(_WIN32)
+typedef struct OsWindowingHandle OsWindowingHandle;
+struct OsWindowingHandle
+{
+    HINSTANCE instance;
+};
 #endif
 BUSTER_GLOBAL_LOCAL OsWindowingHandle windowing_handle = {0};
+
+#if defined(__APPLE__)
+#ifndef BUSTER_APPLE_RUNTIME_TYPES
+#define BUSTER_APPLE_RUNTIME_TYPES
+typedef unsigned long BusterNSUInteger;
+typedef signed long BusterNSInteger;
+typedef double BusterCGFloat;
+typedef struct BusterCGPoint BusterCGPoint;
+struct BusterCGPoint { BusterCGFloat x; BusterCGFloat y; };
+typedef struct BusterCGSize BusterCGSize;
+struct BusterCGSize { BusterCGFloat width; BusterCGFloat height; };
+typedef struct BusterCGRect BusterCGRect;
+struct BusterCGRect { BusterCGPoint origin; BusterCGSize size; };
+#endif
+
+#define BUSTER_APPLE_MAX_WINDOW_COUNT (64)
+BUSTER_GLOBAL_LOCAL id buster_apple_windows[BUSTER_APPLE_MAX_WINDOW_COUNT];
+BUSTER_GLOBAL_LOCAL u32 buster_apple_window_count;
+BUSTER_GLOBAL_LOCAL id buster_apple_run_loop_mode;
+
+#if defined(__x86_64__)
+#define buster_msg_send_stret objc_msgSend_stret
+#else
+#define buster_msg_send_stret objc_msgSend
+#endif
+
+BUSTER_GLOBAL_LOCAL SEL buster_sel(const char* name)
+{
+    return sel_registerName(name);
+}
+
+BUSTER_GLOBAL_LOCAL id buster_msg_id(id receiver, const char* selector)
+{
+    return ((id (*)(id, SEL))objc_msgSend)(receiver, buster_sel(selector));
+}
+
+BUSTER_GLOBAL_LOCAL void buster_msg_void(id receiver, const char* selector)
+{
+    ((void (*)(id, SEL))objc_msgSend)(receiver, buster_sel(selector));
+}
+
+BUSTER_GLOBAL_LOCAL void buster_msg_void_id(id receiver, const char* selector, id argument)
+{
+    ((void (*)(id, SEL, id))objc_msgSend)(receiver, buster_sel(selector), argument);
+}
+
+BUSTER_GLOBAL_LOCAL void buster_msg_void_bool(id receiver, const char* selector, bool argument)
+{
+    ((void (*)(id, SEL, bool))objc_msgSend)(receiver, buster_sel(selector), argument);
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_msg_bool(id receiver, const char* selector)
+{
+    return ((bool (*)(id, SEL))objc_msgSend)(receiver, buster_sel(selector));
+}
+
+BUSTER_GLOBAL_LOCAL id buster_nsstring_from_cstring(const char* string)
+{
+    id ns_string_class = (id)objc_getClass("NSString");
+    id allocated = buster_msg_id(ns_string_class, "alloc");
+    return ((id (*)(id, SEL, const char*))objc_msgSend)(allocated, buster_sel("initWithUTF8String:"), string);
+}
+
+BUSTER_GLOBAL_LOCAL void buster_release(id object)
+{
+    if (object)
+    {
+        buster_msg_void(object, "release");
+    }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL OsWindowingEvent* os_windowing_event_push(Arena* arena, OsWindowingEventList* event_list, OsWindowingEvent event)
+{
+    OsWindowingEvent* result = arena_allocate(arena, OsWindowingEvent, 1);
+    *result = event;
+
+    if (event_list->last)
+    {
+        result->previous = event_list->last;
+        event_list->last->next = result;
+    }
+    else
+    {
+        event_list->first = result;
+    }
+
+    event_list->last = result;
+    event_list->count += 1;
+    return result;
+}
 
 #if defined(__linux__)
 typedef enum X11Atom
@@ -37,12 +149,40 @@ BUSTER_GLOBAL_LOCAL String8 atom_names[X11_ATOM_COUNT] = {
 
 BUSTER_GLOBAL_LOCAL xcb_intern_atom_reply_t* atom_replies[BUSTER_ARRAY_LENGTH(atom_names)];
 BUSTER_GLOBAL_LOCAL xcb_intern_atom_cookie_t atom_cookies[BUSTER_ARRAY_LENGTH(atom_names)];
-#else
+#elif defined(_WIN32)
+BUSTER_GLOBAL_LOCAL const wchar_t* graphical_window_class_name = L"graphical_window";
+#define WIN32_CLOSE_EVENT_CAPACITY (64)
+BUSTER_GLOBAL_LOCAL HWND win32_close_events[WIN32_CLOSE_EVENT_CAPACITY];
+BUSTER_GLOBAL_LOCAL u32 win32_close_event_count;
+
+BUSTER_GLOBAL_LOCAL LRESULT window_callback(HWND window_handle, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    LRESULT result = 0;
+
+    switch (message)
+    {
+        case WM_CLOSE:
+        {
+            BUSTER_CHECK(win32_close_event_count < WIN32_CLOSE_EVENT_CAPACITY);
+            win32_close_events[win32_close_event_count] = window_handle;
+            win32_close_event_count += 1;
+            DestroyWindow(window_handle);
+        } break;
+
+        default:
+        {
+            result = DefWindowProcW(window_handle, message, wparam, lparam);
+        } break;
+    }
+
+    return result;
+}
 #endif
 
 OsWindowingHandle* os_windowing_initialize(void)
 {
     OsWindowingHandle* result = {0};
+    bool success = false;
 #if defined(__linux__)
     // XCB allocates global state via pthread_once on first connection that it
     // never frees. Disable LSAN for this call so those library-internal
@@ -73,10 +213,42 @@ OsWindowingHandle* os_windowing_initialize(void)
                 atom_replies[i] = xcb_intern_atom_reply(connection, atom_cookies[i], 0);
             }
 
-            result = &windowing_handle;
+            success = true;
         }
     }
+#elif defined(__APPLE__)
+    id application_class = (id)objc_getClass("NSApplication");
+    id application = buster_msg_id(application_class, "sharedApplication");
+    if (application)
+    {
+        BusterNSInteger regular_activation_policy = 0;
+        ((void (*)(id, SEL, BusterNSInteger))objc_msgSend)(application, buster_sel("setActivationPolicy:"), regular_activation_policy);
+        buster_msg_void(application, "finishLaunching");
+        windowing_handle.application = application;
+        buster_apple_run_loop_mode = buster_nsstring_from_cstring("kCFRunLoopDefaultMode");
+        success = true;
+    }
+#elif defined(_WIN32)
+    windowing_handle.instance = GetModuleHandleW(0);
+    {
+        WNDCLASSEXW wndclass = {sizeof(wndclass)};
+        wndclass.lpfnWndProc = &window_callback;
+        wndclass.hInstance = windowing_handle.instance;
+        wndclass.lpszClassName = graphical_window_class_name;
+        wndclass.hCursor = LoadCursorW(0, IDC_ARROW);
+        wndclass.hIcon = LoadIcon(windowing_handle.instance, MAKEINTRESOURCE(1));
+        wndclass.style = CS_VREDRAW|CS_HREDRAW;
+        ATOM wndatom = RegisterClassExW(&wndclass);
+        (void)wndatom;
+    }
+
+    success = true;
 #endif
+
+    if (success)
+    {
+        result = &windowing_handle;
+    }
 
     return result;
 }
@@ -94,7 +266,18 @@ void os_windowing_deinitialize(OsWindowingHandle* windowing)
             free(atom_replies[i]);
         }
     }
-#else
+#elif defined(__APPLE__)
+    BUSTER_UNUSED(windowing);
+    for (u32 i = 0; i < buster_apple_window_count; i += 1)
+    {
+        buster_release(buster_apple_windows[i]);
+        buster_apple_windows[i] = 0;
+    }
+    buster_apple_window_count = 0;
+    buster_release(buster_apple_run_loop_mode);
+    buster_apple_run_loop_mode = 0;
+#elif defined(_WIN32)
+    BUSTER_UNUSED(windowing);
 #endif
 }
 
@@ -163,6 +346,61 @@ OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate cr
     {
         string_print(S8("No screen found\n"));
     }
+#elif defined(__APPLE__)
+    BUSTER_UNUSED(windowing);
+    BUSTER_CHECK(buster_apple_window_count < BUSTER_APPLE_MAX_WINDOW_COUNT);
+
+    id window_class = (id)objc_getClass("NSWindow");
+    id window = buster_msg_id(window_class, "alloc");
+    BusterCGRect content_rect = {
+        .origin = { .x = 0, .y = 0 },
+        .size = { .width = create.size.width, .height = create.size.height },
+    };
+    BusterNSUInteger style_mask = (1ul << 0) | (1ul << 1) | (1ul << 2) | (1ul << 3);
+    BusterNSUInteger backing_store_buffered = 2;
+    bool defer_creation = false;
+    window = ((id (*)(id, SEL, BusterCGRect, BusterNSUInteger, BusterNSUInteger, bool))objc_msgSend)(window, buster_sel("initWithContentRect:styleMask:backing:defer:"), content_rect, style_mask, backing_store_buffered, defer_creation);
+
+    if (window)
+    {
+        id title = buster_nsstring_from_cstring((const char*)create.name.pointer);
+        buster_msg_void_id(window, "setTitle:", title);
+        buster_release(title);
+        buster_msg_void_bool(window, "setReleasedWhenClosed:", false);
+        buster_msg_void(window, "center");
+        buster_msg_void_id(window, "makeKeyAndOrderFront:", 0);
+        ((void (*)(id, SEL, bool))objc_msgSend)(windowing_handle.application, buster_sel("activateIgnoringOtherApps:"), true);
+        buster_apple_windows[buster_apple_window_count] = window;
+        buster_apple_window_count += 1;
+        result = (OsWindowHandle*)window;
+    }
+#elif defined(_WIN32)
+    TemporalArena temp = scratch_begin(0, 0);
+    // u32 custom_border = false;
+    u32 use_default_position = true;
+
+    DWORD style_flags = WS_EX_APPWINDOW;
+    HWND window_handle = CreateWindowExW(
+            style_flags,
+            graphical_window_class_name,
+            string16_from_string8(temp.arena, create.name, true).pointer,
+            WS_OVERLAPPEDWINDOW | WS_SIZEBOX,
+            use_default_position ? CW_USEDEFAULT : 0, // TODO
+            use_default_position ? CW_USEDEFAULT : 0, // TODO
+            create.size.width,
+            create.size.height,
+            0,
+            0,
+            windowing->instance,
+            0);
+
+    if (window_handle)
+    {
+        ShowWindow(window_handle, SW_SHOW);
+        result = (OsWindowHandle*)window_handle;
+    }
+
+    scratch_end(temp);
 #else
 #endif
     return result;
@@ -171,16 +409,33 @@ OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate cr
 OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWindowHandle* os_window)
 {
     OsWindowSize result = {0};
+    if (os_window)
+    {
 #if defined(__linux__)
-    xcb_connection_t* connection = windowing->connection;
-    xcb_window_t window = (xcb_window_t)(u64)os_window;
-    xcb_get_geometry_cookie_t cookie = xcb_get_geometry(connection, window);
-    xcb_get_geometry_reply_t* reply = xcb_get_geometry_reply(connection, cookie, 0);
-    result.width = reply->width;
-    result.height = reply->height;
-    free(reply);
+        xcb_connection_t* connection = windowing->connection;
+        xcb_window_t window = (xcb_window_t)(u64)os_window;
+        xcb_get_geometry_cookie_t cookie = xcb_get_geometry(connection, window);
+        xcb_get_geometry_reply_t* reply = xcb_get_geometry_reply(connection, cookie, 0);
+        result.width = reply->width;
+        result.height = reply->height;
+        free(reply);
+#elif defined(__APPLE__)
+        BUSTER_UNUSED(windowing);
+        id window = (id)os_window;
+        id content_view = buster_msg_id(window, "contentView");
+        BusterCGRect bounds = ((BusterCGRect (*)(id, SEL))buster_msg_send_stret)(content_view, buster_sel("bounds"));
+        BusterCGSize backing_size = ((BusterCGSize (*)(id, SEL, BusterCGSize))objc_msgSend)(content_view, buster_sel("convertSizeToBacking:"), bounds.size);
+        result.width = (u16)backing_size.width;
+        result.height = (u16)backing_size.height;
+#elif defined(_WIN32)
+        BUSTER_UNUSED(windowing);
+        RECT rect;
+        GetClientRect((HWND)os_window, &rect);
+        result.width = (u16)(rect.right - rect.left);
+        result.height = (u16)(rect.bottom - rect.top);
 #else
 #endif
+    }
     return result;
 }
 
@@ -188,6 +443,10 @@ void* native_windowing_handle_from_os_windowing_handle(OsWindowingHandle* window
 {
 #if defined(__linux__)
     return windowing->connection;
+#elif defined(__APPLE__)
+    return windowing->application;
+#elif defined(_WIN32)
+    return windowing->instance;
 #else
 #endif
 }
@@ -195,6 +454,10 @@ void* native_windowing_handle_from_os_windowing_handle(OsWindowingHandle* window
 void* native_window_handle_from_os_window_handle(OsWindowHandle* window)
 {
 #if defined(__linux__)
+    return window;
+#elif defined(__APPLE__)
+    return window;
+#elif defined(_WIN32)
     return window;
 #else
 #endif
@@ -1734,24 +1997,10 @@ OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* w
                 if (client_message_event->data.data32[0] == atom_replies[X11_ATOM_WM_DELETE_WINDOW]->atom)
                 {
                     string_print(S8("WM_DELETE_WINDOW"));
-                    OsWindowingEvent* os_event = arena_allocate(arena, OsWindowingEvent, 1);
-                    *os_event = (OsWindowingEvent) {
+                    BUSTER_UNUSED(os_windowing_event_push(arena, &event_list, (OsWindowingEvent) {
                         .kind = OS_WINDOWING_EVENT_WINDOW_CLOSE,
                         .window = (OsWindowHandle*)(u64)client_message_event->window,
-                    };
-
-                    if (event_list.last)
-                    {
-                        os_event->previous = event_list.last;
-                        event_list.last->next = os_event;
-                    }
-                    else
-                    {
-                        event_list.first = os_event;
-                    }
-
-                    event_list.last = os_event;
-                    event_list.count += 1;
+                    }));
 
                     unimplemented = false;
                 }
@@ -1825,6 +2074,66 @@ OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* w
             os_fail();
         }
     }
+#elif defined(__APPLE__)
+    id distant_past = buster_msg_id((id)objc_getClass("NSDate"), "distantPast");
+    while (true)
+    {
+        BusterNSUInteger any_event_mask = ~0ul;
+        id event = ((id (*)(id, SEL, BusterNSUInteger, id, id, bool))objc_msgSend)(windowing->application, buster_sel("nextEventMatchingMask:untilDate:inMode:dequeue:"), any_event_mask, distant_past, buster_apple_run_loop_mode, true);
+        if (!event)
+        {
+            break;
+        }
+
+        buster_msg_void_id(windowing->application, "sendEvent:", event);
+    }
+    buster_msg_void(windowing->application, "updateWindows");
+
+    for (u32 i = 0; i < buster_apple_window_count;)
+    {
+        id window = buster_apple_windows[i];
+        if (!buster_msg_bool(window, "isVisible"))
+        {
+            BUSTER_UNUSED(os_windowing_event_push(arena, &event_list, (OsWindowingEvent) {
+                .kind = OS_WINDOWING_EVENT_WINDOW_CLOSE,
+                .window = (OsWindowHandle*)window,
+            }));
+            for (u32 j = i + 1; j < buster_apple_window_count; j += 1)
+            {
+                buster_apple_windows[j - 1] = buster_apple_windows[j];
+            }
+            buster_apple_window_count -= 1;
+        }
+        else
+        {
+            i += 1;
+        }
+    }
+#elif defined(_WIN32)
+    while (true)
+    {
+        MSG msg;
+        BOOL peek = PeekMessageW(&msg, 0, 0, 0, PM_REMOVE);
+        if (!peek)
+        {
+            break;
+        }
+
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    for (u32 i = 0; i < win32_close_event_count; i += 1)
+    {
+        BUSTER_UNUSED(os_windowing_event_push(arena, &event_list, (OsWindowingEvent) {
+            .kind = OS_WINDOWING_EVENT_WINDOW_CLOSE,
+            .window = (OsWindowHandle*)win32_close_events[i],
+        }));
+    }
+    win32_close_event_count = 0;
+
+    BUSTER_UNUSED(windowing);
+#else
 #endif
 
     return event_list;

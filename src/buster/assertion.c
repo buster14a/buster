@@ -20,6 +20,7 @@ BUSTER_NORETURN BUSTER_COLD void buster_failed_assertion(u32 line, String8 funct
     // string8_print(line_format);
     // string8_print(S8("\n"));
         
-    os_fail();
+    os_fail_ex(line, function_name, file_path);
+    scratch_end(scratch);
 }
 

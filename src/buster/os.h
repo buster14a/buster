@@ -194,7 +194,8 @@ struct ThreadContext
 
 BUSTER_V_DECL ProgramState* program_state;
 
-BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail(void);
+#define os_fail() buster_failed_assertion((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__))
+BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_ex(u32 line, String8 function, String8 file);
 BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);
 
 BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);

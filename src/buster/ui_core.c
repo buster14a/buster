@@ -575,7 +575,7 @@ void ui_resolve_conflicts(UI_Widget* widget)
             {
                 if (!(child_widget->flags.v & ((u64)UI_WIDGET_FLAG_FLOATING_X << axis)))
                 {
-                    if (axis == (u64)widget->child_layout_axis)
+                    if (axis == widget->child_layout_axis)
                     {
                         taken_space += float2_element(child_widget->computed_size, axis);
                     }
@@ -599,7 +599,7 @@ void ui_resolve_conflicts(UI_Widget* widget)
                         f32 fixup_budget_this_child = float2_element(child_widget->computed_size, axis) * (1 - child_widget->pref_size[axis].strictness);
                         f32 fixup_size_this_child = 0;
 
-                        if (axis == (u64)widget->child_layout_axis)
+                        if (axis == widget->child_layout_axis)
                         {
                             fixup_size_this_child = fixup_budget_this_child * (conflict / total_fixup_budget);
                         }
@@ -615,7 +615,7 @@ void ui_resolve_conflicts(UI_Widget* widget)
             }
         }
 
-        if (axis == (u64)widget->child_layout_axis)
+        if (axis == widget->child_layout_axis)
         {
             f32 p = 0;
 

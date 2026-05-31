@@ -45,6 +45,11 @@ BUSTER_GLOBAL_LOCAL IrBlock* ir_block_get(IrModule* module, IrBlockRef reference
     return pointer_from_ref(module->block_arena, IrBlock, reference);
 }
 
+IrBasicBlock* ir_basic_block_get(IrModule* module, IrBasicBlockRef reference)
+{
+    return pointer_from_ref(module->basic_block_arena, IrBasicBlock, reference);
+}
+
 BUSTER_GLOBAL_LOCAL u64 get_hash_table_allocation_size(InternTable* table)
 {
     u64 byte_size = table->hash_table_arena->position - arena_minimum_position;
@@ -221,11 +226,6 @@ BUSTER_GLOBAL_LOCAL u32 arena_get_index(Arena* arena, void* pointer, u64 element
     return result;
 }
 
-// BUSTER_GLOBAL_LOCAL TypedIrRef<T> ref_from_pointer(Arena* arena, T* pointer)
-// {
-//     return ref<TypedIrRef<T>>(arena_get_index(arena, pointer, sizeof(*pointer)));
-// }
-
 #define ref_from_pointer(arena, T, pointer) ir_ref_new(T, arena_get_index(arena, pointer, sizeof(*pointer)))
 
 BUSTER_GLOBAL_LOCAL IrTypeRef ir_type_get_ref(IrModule* module, IrType* pointer)
@@ -246,6 +246,11 @@ BUSTER_GLOBAL_LOCAL IrValueRef ir_value_get_ref(IrModule* module, IrValue* point
 BUSTER_GLOBAL_LOCAL IrBlockRef ir_block_get_ref(IrModule* module, IrBlock* pointer)
 {
     return ref_from_pointer(module->block_arena, IrBlockRef, pointer);
+}
+
+BUSTER_GLOBAL_LOCAL IrBasicBlockRef ir_basic_block_ref(IrModule* module, IrBasicBlock* pointer)
+{
+    return ref_from_pointer(module->basic_block_arena, IrBasicBlockRef, pointer);
 }
 
 BUSTER_GLOBAL_LOCAL InternTable intern_table_create(void)
@@ -297,6 +302,7 @@ IrModule* ir_module_create(Arena* arena, Target* target, String8 name)
         .value_arena = arena_create((ArenaCreation){0}),
         .global_variable_arena = arena_create((ArenaCreation){0}),
         .block_arena = arena_create((ArenaCreation){0}),
+        .basic_block_arena = arena_create((ArenaCreation){0}),
         .statement_arena = arena_create((ArenaCreation){0}),
         .intern_table = intern_table_create(),
         .types = {
@@ -1048,6 +1054,14 @@ IrBlockRef ir_create_block(IrModule* module)
     return result;
 }
 
+IrBasicBlockRef ir_create_basic_block(IrModule* module)
+{
+    IrBasicBlock* basic_block = arena_allocate(module->basic_block_arena, IrBasicBlock, 1);
+    *basic_block = (IrBasicBlock){0};
+    IrBasicBlockRef result = ir_basic_block_ref(module, basic_block);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL IrFunction* ir_function_allocate(IrModule* module, IrGlobalSymbol symbol)
 {
     IrFunction* function = 0;
@@ -1056,12 +1070,14 @@ BUSTER_GLOBAL_LOCAL IrFunction* ir_function_allocate(IrModule* module, IrGlobalS
     function = arena_allocate(module->function_arena, IrFunction, 1);
     *function = (IrFunction){0};
     function->declaration.symbol = symbol;
-    // let entry_basic_block = arena_allocate(module->untyped_arena, IrBasicBlock, 1);
-    // *function = (IrFunction) {
-    //     .symbol = symbol,
-    //         .entry_block = entry_basic_block,
-    //         .current_basic_block = entry_basic_block,
-    // };
+    IrBasicBlockRef entry_block = ir_create_basic_block(module);
+    *function = (IrFunction) {
+        .declaration = {
+            .symbol = symbol,
+        },
+        .entry_block = entry_block,
+        .current_basic_block = entry_block,
+    };
 
     return function;
 }

@@ -6,7 +6,46 @@
 #include <buster/float.h>
 #include <buster/string.h>
 
+#ifndef BUSTER_USE_FONTCONFIG
 #if defined(__linux__)
+#define BUSTER_USE_FONTCONFIG 1
+#else
+#define BUSTER_USE_FONTCONFIG 0
+#endif
+#endif
+
+#if BUSTER_USE_FONTCONFIG && defined(__TINYC__) && defined(__linux__) && !defined(__GLIBC__)
+typedef unsigned char FcChar8;
+typedef int FcBool;
+typedef struct _FcConfig FcConfig;
+typedef struct _FcPattern FcPattern;
+typedef enum FcMatchKind
+{
+    FcMatchPattern,
+    FcMatchFont,
+    FcMatchScan,
+} FcMatchKind;
+typedef enum FcResult
+{
+    FcResultMatch,
+    FcResultNoMatch,
+    FcResultTypeMismatch,
+    FcResultNoId,
+    FcResultOutOfMemory,
+} FcResult;
+#define FC_FAMILY "family"
+#define FC_STYLE "style"
+#define FC_FILE "file"
+extern FcBool FcInit(void);
+extern void FcFini(void);
+extern FcPattern* FcPatternCreate(void);
+extern void FcPatternDestroy(FcPattern* p);
+extern FcBool FcPatternAddString(FcPattern* p, const char* object, const FcChar8* s);
+extern FcBool FcConfigSubstitute(FcConfig* config, FcPattern* p, FcMatchKind kind);
+extern void FcDefaultSubstitute(FcPattern* pattern);
+extern FcPattern* FcFontMatch(FcConfig* config, FcPattern* p, FcResult* result);
+extern FcResult FcPatternGetString(const FcPattern* p, const char* object, int n, FcChar8** s);
+#elif BUSTER_USE_FONTCONFIG
 #include <fontconfig/fontconfig.h>
 #endif
 
@@ -19,7 +58,7 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
     if (!font_config_initialized)
     {
         font_config_initialized = true;
-#if defined(__linux__)
+#if BUSTER_USE_FONTCONFIG
         if (FcInit())
         {
             FcPattern *pat = FcPatternCreate();
@@ -52,27 +91,30 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
             }
             FcFini();
         }
-#else
+#elif defined(_WIN32)
+        String8 mono_candidates[] = {
+            S8("C:/Windows/Fonts/FiraCode-Regular.ttf"),
+            S8("C:/Users/david/AppData/Local/Microsoft/Windows/Fonts/FiraCode-Regular.ttf"),
+        };
+
+        // TODO
+        BUSTER_UNUSED(arena);
+        table[(uint64_t)FONT_INDEX_MONO] = mono_candidates[0];
+        font_config_initialized = true;
+#elif defined(__APPLE__)
+        BUSTER_UNUSED(arena);
+        table[(uint64_t)FONT_INDEX_MONO] = S8("/Library/Fonts/FiraCode-Regular.ttf");
+        font_config_initialized = true;
 #endif
     }
 
+    BUSTER_CHECK(font_config_initialized);
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(table) == (u64)FONT_INDEX_COUNT);
-//     StringOs mono_path =
-// #if defined(_WIN32)
-//     S8("C:/Users/David/Downloads/Fira_Sans/FiraSans-Regular.ttf");
-// #elif defined(__linux__)
-//     S8("/usr/share/fonts/TTF/FiraSans-Regular.ttf");
-// #elif defined(__APPLE__)
-//     S8("/Users/david/Library/Fonts/FiraSans-Regular.ttf");
-// #else
-//     S8("WRONG_PATH");
-// #endif
-
 
     return table[(u64)index];
 }
 
-#define USE_STB_TRUETYPE 1
+#define USE_STB_TRUETYPE 0
 
 #if USE_STB_TRUETYPE
 
@@ -123,6 +165,12 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
 FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureAtlasCreate create)
 {
     FontTextureAtlasDescription result = {0};
+
+    if (!create.font_path.pointer)
+    {
+        os_fail();
+    }
+
     ByteSlice font_file = file_read(arena, create.font_path, (FileReadOptions){0});
     stbtt_fontinfo font_info;
     if (!stbtt_InitFont(&font_info, font_file.pointer, stbtt_GetFontOffsetForIndex(font_file.pointer, 0)))
@@ -217,93 +265,105 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
 
 FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureAtlasCreate create)
 {
-    FontTextureAtlasDescription result = {};
+    FontTextureAtlasDescription result = {0};
 
-    let font_file = file_read(arena, create.font_path, (FileReadOptions){});
-    let font_initialization = truetype_font_initialize(font_file, 0);
-    let font_information = font_initialization.information;
-
-    if (font_initialization.result == TTF_FONT_INITIALIZATION_SUCCESS)
+    if (!create.font_path.pointer)
     {
-        u32 character_count = UINT8_MAX + 1;
-        result.characters = arena_allocate(arena, FontCharacter, character_count);
-        result.kerning_tables = arena_allocate(arena, s32, character_count * character_count);
-        result.height = (u32)sqrtf((f32)(create.text_height * create.text_height * character_count));
-        result.width = result.height;
-        result.pointer = arena_allocate(arena, u32, result.width * result.height);
-        let scale_factor = truetype_scale_for_pixel_height(&font_information, (f32)create.text_height);
+        os_fail();
+    }
 
-        let vertical_metrics = truetype_get_font_vertical_metrics(&font_information);
+    string_print(S8("Font path: {S8}\n"), create.font_path);
+    ByteSlice font_file = file_read(arena, create.font_path, (FileReadOptions){0});
+    string_print(S8("Font. Pointer: {u64:x}. Length: {u64}\n"), font_file.pointer, font_file.length);
+    if (font_file.pointer)
+    {
+        TTF_FontInitialization font_initialization = truetype_font_initialize(font_file, 0);
+        TTF_FontInformation font_information = font_initialization.information;
 
-        result.ascent = (s32)roundf(vertical_metrics.ascent * scale_factor);
-        result.descent = (s32)roundf(vertical_metrics.descent * scale_factor);
-        result.line_gap = (s32)roundf(vertical_metrics.line_gap * scale_factor);
-
-        u32 x = 0;
-        u32 y = 0;
-        u32 max_row_height = 0;
-        u32 first_character = ' ';
-        u32 last_character = '~';
-
-        let loop_start_position = arena->position;
-
-        for (let i = first_character; i <= last_character; i += 1)
+        if (font_initialization.result == TTF_FONT_INITIALIZATION_SUCCESS)
         {
-            let ch = (u8)i;
-            let character = &result.characters[i];
-            let horizontal_metrics = truetype_get_codepoint_horizontal_metrics(&font_information, ch);
+            u32 character_count = UINT8_MAX + 1u;
+            result.characters = arena_allocate(arena, FontCharacter, character_count);
+            result.kerning_tables = arena_allocate(arena, s32, (u64)character_count * (u64)character_count);
+            result.height = (u32)sqrt_f32((f32)(create.text_height * create.text_height * character_count));
+            result.width = result.height;
+            result.pointer = arena_allocate(arena, u32, (u64)result.width * (u64)result.height);
+            f32 scale_factor = truetype_scale_for_pixel_height(&font_information, (f32)create.text_height);
 
-            character->advance = (u32)roundf((f32)horizontal_metrics.advance_width * scale_factor);
-            character->left_bearing = (u32)roundf((f32)horizontal_metrics.left_side_bearing * scale_factor);
+            TTF_VerticalMetrics vertical_metrics = truetype_get_font_vertical_metrics(&font_information);
 
-            let bitmap = truetype_get_codepoint_bitmap(arena, &font_information, scale_factor, scale_factor, ch);
+            result.ascent = (s32)round_f32((f32)vertical_metrics.ascent * scale_factor);
+            result.descent = (s32)round_f32((f32)vertical_metrics.descent * scale_factor);
+            result.line_gap = (s32)round_f32((f32)vertical_metrics.line_gap * scale_factor);
 
+            u32 x = 0;
+            u32 y = 0;
+            u32 max_row_height = 0;
+            u32 first_character = ' ';
+            u32 last_character = '~';
+
+            u64 loop_start_position = arena->position;
+
+            for (u32 i = first_character; i <= last_character; i += 1)
             {
-                let kerning_table = result.kerning_tables + i * character_count;
+                u32 ch = i;
+                FontCharacter* character = &result.characters[i];
+                TTF_HorizontalMetrics horizontal_metrics = truetype_get_codepoint_horizontal_metrics(&font_information, ch);
 
+                character->advance = (u32)round_f32((f32)horizontal_metrics.advance_width * scale_factor);
+                character->left_bearing = (u32)round_f32((f32)horizontal_metrics.left_side_bearing * scale_factor);
+
+                TTF_Bitmap bitmap = truetype_get_codepoint_bitmap(arena, &font_information, scale_factor, scale_factor, ch);
+
+                s32* kerning_table = result.kerning_tables + (u64)i * character_count;
                 for (u32 j = first_character; j <= last_character; j += 1)
                 {
-                    let kerning_advance = truetype_get_codepoint_kern_advance(&font_information, i, j);
-                    kerning_table[j] = (s32)roundf((f32)kerning_advance * scale_factor);
+                    s32 kerning_advance = truetype_get_codepoint_kern_advance(&font_information, i, j);
+                    kerning_table[j] = (s32)round_f32((f32)kerning_advance * scale_factor);
                 }
-            }
 
-            if ((x + (u32)bitmap.width) > result.width)
-            {
-                y += max_row_height;
-                max_row_height = (u32)bitmap.height;
-                x = 0;
-            }
-            else
-            {
-                max_row_height = BUSTER_MAX((u32)bitmap.height, (u32)max_row_height);
-            }
-
-            character->x = x;
-            character->y = y;
-            character->width = (u32)bitmap.width;
-            character->height = (u32)bitmap.height;
-            character->x_offset = bitmap.x_offset;
-            character->y_offset = bitmap.y_offset;
-
-            let source = bitmap;
-            let destination = result.pointer;
-
-            for (u32 bitmap_y = 0; bitmap_y < (u32)bitmap.height; bitmap_y += 1)
-            {
-                for (u32 bitmap_x = 0; bitmap_x < (u32)bitmap.width; bitmap_x += 1)
+                if ((x + (u32)bitmap.width) > result.width)
                 {
-                    let source_index = bitmap_y * (u32)bitmap.width + bitmap_x;
-                    let destination_index = (bitmap_y + y) * result.width + (bitmap_x + x);
-                    let value = source.pixels[source_index];
-                    destination[destination_index] = ((u32)value << 24) | 0xffffff;
+                    y += max_row_height;
+                    max_row_height = (u32)bitmap.height;
+                    x = 0;
                 }
+                else
+                {
+                    max_row_height = BUSTER_MAX((u32)bitmap.height, max_row_height);
+                }
+
+                character->x = x;
+                character->y = y;
+                character->width = (u32)bitmap.width;
+                character->height = (u32)bitmap.height;
+                character->x_offset = bitmap.x_offset;
+                character->y_offset = bitmap.y_offset;
+
+                for (u32 bitmap_y = 0; bitmap_y < (u32)bitmap.height; bitmap_y += 1)
+                {
+                    for (u32 bitmap_x = 0; bitmap_x < (u32)bitmap.width; bitmap_x += 1)
+                    {
+                        u64 source_index = (u64)bitmap_y * (u64)(u32)bitmap.width + bitmap_x;
+                        u64 destination_index = (u64)(bitmap_y + y) * (u64)result.width + (bitmap_x + x);
+                        u32 value = bitmap.pixels[source_index];
+                        result.pointer[destination_index] = (value << 24u) | 0x00ffffffu;
+                    }
+                }
+
+                x += (u32)bitmap.width;
+
+                arena->position = loop_start_position;
             }
-
-            x += (u32)bitmap.width;
-
-            arena->position = loop_start_position;
         }
+        else
+        {
+            os_fail();
+        }
+    }
+    else
+    {
+        os_fail();
     }
 
     return result;

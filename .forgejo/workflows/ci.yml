@@ -13,9 +13,15 @@ jobs:
         uses: https://data.forgejo.org/actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Test (UNIX)
+      - name: Test (Linux)
         shell: bash
-        if: ${{ !contains(matrix.runner, 'windows') }}
+        if: ${{ contains(matrix.runner, 'linux') }}
+        run: |
+          env
+          ./build.sh test_all_combinations_ci --verbose=1
+      - name: Test (macOS)
+        shell: bash
+        if: ${{ contains(matrix.runner, 'macos') }}
         run: |
           ./build.sh test_all_combinations_ci --verbose=1
       - name: Test (Windows)

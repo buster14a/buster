@@ -25,8 +25,13 @@
 #define WIN32_LEAN_AND_MEAN 1
 #endif
 
+#if defined(_WIN32)
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
+#endif
+#ifndef UNICODE
+#define UNICODE
+#endif
 #endif
 
 #ifndef BUSTER_LINK_LIBC
@@ -73,6 +78,10 @@
 
 #ifndef BUSTER_COMPILER_CLANG
 #define BUSTER_COMPILER_CLANG 0
+#endif
+
+#ifndef BUSTER_COMPILER_ZIG
+#define BUSTER_COMPILER_ZIG 0
 #endif
 
 #ifndef BUSTER_COMPILER_MSVC
@@ -191,8 +200,13 @@ struct DeferHelper
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
 
+#if BUSTER_COMPILER_MSVC
+#include <stddef.h>
+#define BUSTER_OFFSET_OF(T, field) offsetof(T, field)
+#else
 #define BUSTER_OFFSET_OF(T, field) __builtin_offsetof(T, field)
-#define BUSTER_FIELD_PARENT_POINTER(type, field, pointer) ((type*)((char8*)(pointer) - BUSTER_OFFSET_OF(T, field)))
+#endif
+#define BUSTER_FIELD_PARENT_POINTER(type, field, pointer) ((type*)((char8*)(pointer) - BUSTER_OFFSET_OF(type, field)))
 
 #if __has_builtin(__builtin_unpredictable)
 #define BUSTER_UNPREDICTABLE(cond) __builtin_unpredictable(cond)
@@ -366,36 +380,33 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE float4 float4_make(f32 x, f32 y, f32 z, f32 w)
 }
 
 #define EACH_SLICE_INT(i, s) u64 i = 0; i < (s).length; i += 1
-#define EACH_SLICE_REF(e, s) let & e : (s)
-#define EACH_SLICE_VALUE(e, s) let e : (s)
 #define EACH_ARRAY_INDEX(i, a) u64 i = 0; i < BUSTER_ARRAY_LENGTH(a); i += 1
 
-typedef struct SliceU8 SliceU8;
-struct SliceU8
+typedef struct Sliceu8 Sliceu8;
+struct Sliceu8
 {
     u8* pointer;
     u64 length;
 };
 
-typedef SliceU8 ByteSlice;
+typedef Sliceu8 ByteSlice;
 
-typedef struct SliceU16 SliceU16;
-struct SliceU16
+typedef struct Sliceu16 Sliceu16;
+struct Sliceu16
 {
     u16* pointer;
     u64 length;
-
 };
 
-typedef struct SliceU32 SliceU32;
-struct SliceU32
+typedef struct Sliceu32 Sliceu32;
+struct Sliceu32
 {
     u32* pointer;
     u64 length;
 };
 
-typedef struct SliceU64 SliceU64;
-struct SliceU64
+typedef struct Sliceu64 Sliceu64;
+struct Sliceu64
 {
     u64* pointer;
     u64 length;

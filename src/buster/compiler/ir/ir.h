@@ -474,6 +474,7 @@ struct IrModule
     Arena* global_variable_arena;
     Arena* block_arena;
     Arena* statement_arena;
+    Arena* basic_block_arena;
     Arena* constant_arenas[(u64)IR_CONSTANT_DATA_COUNT];
     Target* default_target;
     InternTable intern_table;
@@ -621,6 +622,8 @@ BUSTER_F_DECL SliceIrTypeRef ir_module_allocate_type_array(IrModule* module, u64
 BUSTER_F_DECL IrValueRef ir_get_constant_integer(IrModule* module, IrTypeRef type_ref, u64 value);
 
 BUSTER_F_DECL IrBlockRef ir_create_block(IrModule* module);
+BUSTER_F_DECL IrBasicBlockRef ir_create_basic_block(IrModule* module);
+IrBasicBlock* ir_basic_block_get(IrModule* module, IrBasicBlockRef reference);
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
 BUSTER_F_DECL bool ir_tests(UnitTestArguments* arguments);

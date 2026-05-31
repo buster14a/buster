@@ -185,8 +185,10 @@ BUSTER_COLD bool is_debugger_present(void)
     return (bool)program_state->_is_debugger_present;
 }
 
-BUSTER_NORETURN BUSTER_COLD void os_fail(void)
+BUSTER_NORETURN BUSTER_COLD void os_fail_ex(u32 line, String8 function, String8 file)
 {
+    string_print(S8("os_fail called from {S8}:{u32} in {S8}\n"), file, line, function);
+
     if (is_debugger_present())
     {
         BUSTER_TRAP();
@@ -550,97 +552,101 @@ void os_make_directory(String8 path)
 
 OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions)
 {
-    BUSTER_CHECK(!path.pointer[path.length]);
     OsFileDescriptor* result = 0;
+    if (path.pointer)
+    {
+        BUSTER_CHECK(!path.pointer[path.length]);
+
 #if defined (__linux__) || defined(__APPLE__)
-    int o = 0;
-    if (flags.read & flags.write)
-    {
-        o = O_RDWR;
-    }
-    else if (flags.read)
-    {
-        o = O_RDONLY;
-    }
-    else if (flags.write)
-    {
-        o = O_WRONLY;
-    }
-    else
-    {
-        BUSTER_UNREACHABLE();
-    }
-
-    o |= (flags.truncate) * O_TRUNC;
-    o |= (flags.create) * O_CREAT;
-    o |= (flags.directory) * O_DIRECTORY;
-
-    mode_t mode = permissions.execute ? 0755 : 0644;
-    int fd = open((char*)path.pointer, o, mode);
-
-    if (fd >= 0)
-    {
-        result = (OsFileDescriptor*)(u64)fd;
-    }
-#elif defined(_WIN32)
-    TemporalArena scratch = scratch_begin(0, 0);
-
-    DWORD desired_access = 0;
-    DWORD shared_mode = 0;
-    SECURITY_ATTRIBUTES security_attributes = { sizeof(security_attributes), 0, 0 };
-    DWORD creation_disposition = 0;
-    DWORD flags_and_attributes = 0;
-    HANDLE template_file = 0;
-
-    if (flags.read)
-    {
-        desired_access |= GENERIC_READ;
-    }
-
-    if (flags.write)
-    {
-        desired_access |= GENERIC_WRITE;
-    }
-
-    if (flags.execute)
-    {
-        desired_access |= GENERIC_EXECUTE;
-    }
-
-    if (permissions.read)
-    {
-        shared_mode |= FILE_SHARE_READ;
-    }
-    
-    if (permissions.write)
-    {
-        shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-    }
-
-    if (permissions.write)
-    {
-        creation_disposition |= CREATE_ALWAYS;
-    }
-    else
-    {
-        creation_disposition |= OPEN_EXISTING;
-    }
-
-    String16 path_w = string16_from_string8(scratch.arena, path, true);
-    HANDLE fd = CreateFileW(path_w.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
-    if (fd != INVALID_HANDLE_VALUE)
-    {
-        result = (OsFileDescriptor*)fd;
-    }
-    else
-    {
-        if (program_flag_get(PROGRAM_FLAG_VERBOSE))
+        int o = 0;
+        if (flags.read & flags.write)
         {
-            string_print(S8("Error: {EOs}\n"), os_get_last_error());
+            o = O_RDWR;
         }
-    }
-    scratch_end(scratch);
+        else if (flags.read)
+        {
+            o = O_RDONLY;
+        }
+        else if (flags.write)
+        {
+            o = O_WRONLY;
+        }
+        else
+        {
+            BUSTER_UNREACHABLE();
+        }
+
+        o |= (flags.truncate) * O_TRUNC;
+        o |= (flags.create) * O_CREAT;
+        o |= (flags.directory) * O_DIRECTORY;
+
+        mode_t mode = permissions.execute ? 0755 : 0644;
+        int fd = open((char*)path.pointer, o, mode);
+
+        if (fd >= 0)
+        {
+            result = (OsFileDescriptor*)(u64)fd;
+        }
+#elif defined(_WIN32)
+        TemporalArena scratch = scratch_begin(0, 0);
+
+        DWORD desired_access = 0;
+        DWORD shared_mode = 0;
+        SECURITY_ATTRIBUTES security_attributes = { sizeof(security_attributes), 0, 0 };
+        DWORD creation_disposition = 0;
+        DWORD flags_and_attributes = 0;
+        HANDLE template_file = 0;
+
+        if (flags.read)
+        {
+            desired_access |= GENERIC_READ;
+        }
+
+        if (flags.write)
+        {
+            desired_access |= GENERIC_WRITE;
+        }
+
+        if (flags.execute)
+        {
+            desired_access |= GENERIC_EXECUTE;
+        }
+
+        if (permissions.read)
+        {
+            shared_mode |= FILE_SHARE_READ;
+        }
+
+        if (permissions.write)
+        {
+            shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        }
+
+        if (permissions.write)
+        {
+            creation_disposition |= CREATE_ALWAYS;
+        }
+        else
+        {
+            creation_disposition |= OPEN_EXISTING;
+        }
+
+        String16 path_w = string16_from_string8(scratch.arena, path, true);
+        HANDLE fd = CreateFileW(path_w.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
+        if (fd != INVALID_HANDLE_VALUE)
+        {
+            result = (OsFileDescriptor*)fd;
+        }
+        else
+        {
+            if (program_flag_get(PROGRAM_FLAG_VERBOSE))
+            {
+                string_print(S8("Error: {EOs}\n"), os_get_last_error());
+            }
+        }
+        scratch_end(scratch);
 #endif
+    }
     return result;
 }
 
