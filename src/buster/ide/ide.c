@@ -130,7 +130,7 @@ BUSTER_GLOBAL_LOCAL void ui_top_bar(void)
         UI_Widget* top_bar = ui_widget_make((UI_WidgetFlags) {0}, S8("top_bar"));
         ui_push(parent, top_bar);
         {
-            if (ui_button(S8("Button s")).clicked_left)
+            if (ui_button(S8("Button 123")).clicked_left)
             {
                 string_print(S8("Button pressed\n"));
             }

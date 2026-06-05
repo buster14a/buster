@@ -34,6 +34,18 @@ typedef struct RectVertex RectVertex;
 #endif
 #endif
 
+#ifndef BUSTER_USE_SLANG_SHADERS
+#define BUSTER_USE_SLANG_SHADERS 0
+#endif
+
+#if BUSTER_USE_METAL && BUSTER_USE_SLANG_SHADERS
+#include <buster/shaders/metal.h>
+#endif
+
+#if BUSTER_USE_D3D12 && BUSTER_USE_SLANG_SHADERS
+#include <buster/shaders/d3d12.h>
+#endif
+
 #if BUSTER_USE_VULKAN
 #define BUSTER_VULKAN_FUNCTION_POINTER(n) PFN_ ## n n
 #define BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(n) BUSTER_GLOBAL_LOCAL __attribute__((used)) BUSTER_VULKAN_FUNCTION_POINTER(n)
@@ -3569,7 +3581,7 @@ BUSTER_GLOBAL_LOCAL u32 d3d12_format_channel_count(TextureFormat format)
     return 0;
 }
 
-BUSTER_GLOBAL_LOCAL const char* d3d12_rect_shader_source(void)
+BUSTER_GLOBAL_LOCAL const char* d3d12_rect_inline_shader_source(void)
 {
     return
         "struct RectVertex { float2 p0; float2 uv0; float2 extent; float corner_radius; float softness; float4 colors[4]; uint texture_index; uint3 reserved; };\n"
@@ -3586,6 +3598,24 @@ BUSTER_GLOBAL_LOCAL const char* d3d12_rect_shader_source(void)
         "    output.texture_index = v.texture_index; output.color = v.colors[quad_vertex_id]; output.pixel_position = position; output.center = center; output.half_size = half_size; output.corner_radius = v.corner_radius; output.softness = v.softness; return output; }\n"
         "float rounded_rect_sdf(float2 position, float2 center, float2 half_size, float radius) { float2 r2 = float2(radius, radius); float2 d2_no_r2 = abs(center - position) - half_size; float2 d2 = d2_no_r2 + r2; float negative_distance = min(max(d2.x, d2.y), 0.0); float positive_distance = length(max(d2, 0.0)); return negative_distance + positive_distance - radius; }\n"
         "float4 ps_main(VertexOut input) : SV_Target { uint texture_index = NonUniformResourceIndex(input.texture_index); uint width_tex; uint height_tex; textures[texture_index].GetDimensions(width_tex, height_tex); float2 uv = float2(input.uv.x / (float)width_tex, input.uv.y / (float)height_tex); float4 sampled = textures[texture_index].Sample(texture_sampler, uv); float softness = input.softness; float softness_padding_scalar = max(0.0, softness * 2.0 - 1.0); float distance = rounded_rect_sdf(input.pixel_position, input.center, input.half_size - float2(softness_padding_scalar, softness_padding_scalar), input.corner_radius); float sdf_factor = 1.0 - smoothstep(0.0, 2.0 * softness, distance); return input.color * sampled * sdf_factor; }\n";
+}
+
+BUSTER_GLOBAL_LOCAL const char* d3d12_rect_vertex_shader_source(void)
+{
+#if BUSTER_USE_SLANG_SHADERS
+    return BUSTER_SHADER_RECT_D3D12_VERTEX_SOURCE;
+#else
+    return d3d12_rect_inline_shader_source();
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL const char* d3d12_rect_pixel_shader_source(void)
+{
+#if BUSTER_USE_SLANG_SHADERS
+    return BUSTER_SHADER_RECT_D3D12_PIXEL_SOURCE;
+#else
+    return d3d12_rect_inline_shader_source();
+#endif
 }
 
 BUSTER_GLOBAL_LOCAL ID3DBlob* d3d12_compile_shader(const char* source, const char* entry_point, const char* target)
@@ -3668,9 +3698,8 @@ BUSTER_GLOBAL_LOCAL bool d3d12_create_rect_pipeline(RenderingHandle* rendering)
     {
         if (d3d12_ok(ID3D12Device_CreateRootSignature(rendering->device, 0, ID3D10Blob_GetBufferPointer(signature), ID3D10Blob_GetBufferSize(signature), &IID_ID3D12RootSignature, (void**)&rendering->root_signature)))
         {
-            const char* source = d3d12_rect_shader_source();
-            ID3DBlob* vertex_shader = d3d12_compile_shader(source, "vs_main", "vs_5_1");
-            ID3DBlob* pixel_shader = d3d12_compile_shader(source, "ps_main", "ps_5_1");
+            ID3DBlob* vertex_shader = d3d12_compile_shader(d3d12_rect_vertex_shader_source(), "vs_main", "vs_5_1");
+            ID3DBlob* pixel_shader = d3d12_compile_shader(d3d12_rect_pixel_shader_source(), "ps_main", "ps_5_1");
             if (vertex_shader && pixel_shader)
             {
                 D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {0};
@@ -4766,7 +4795,7 @@ BUSTER_GLOBAL_LOCAL void metal_release(id object)
     }
 }
 
-BUSTER_GLOBAL_LOCAL const char* metal_rect_shader_source(void)
+BUSTER_GLOBAL_LOCAL const char* metal_rect_inline_shader_source(void)
 {
     return
         "#include <metal_stdlib>\n"
@@ -4784,6 +4813,24 @@ BUSTER_GLOBAL_LOCAL const char* metal_rect_shader_source(void)
         "fragment float4 rect_fs(VertexOut input [[stage_in]], array<texture2d<float>, " BUSTER_METAL_STRINGIFY(BUSTER_METAL_RECT_TEXTURE_SLOT_COUNT) "> textures [[texture(0)]], sampler texture_sampler [[sampler(0)]]) { uint texture_index = input.texture_index; float2 texture_size = float2(textures[texture_index].get_width(), textures[texture_index].get_height()); float2 uv = float2(input.uv.x / texture_size.x, input.uv.y / texture_size.y); float4 sampled = textures[texture_index].sample(texture_sampler, uv); float softness = input.softness; float softness_padding_scalar = max(0.0, softness * 2.0 - 1.0); float distance = rounded_rect_sdf(input.pixel_position, input.center, input.half_size - float2(softness_padding_scalar, softness_padding_scalar), input.corner_radius); float sdf_factor = 1.0 - smoothstep(0.0, 2.0 * softness, distance); return input.color * sampled * sdf_factor; }\n";
 }
 
+BUSTER_GLOBAL_LOCAL const char* metal_rect_vertex_shader_source(void)
+{
+#if BUSTER_USE_SLANG_SHADERS
+    return BUSTER_SHADER_RECT_METAL_VERTEX_SOURCE;
+#else
+    return metal_rect_inline_shader_source();
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL const char* metal_rect_fragment_shader_source(void)
+{
+#if BUSTER_USE_SLANG_SHADERS
+    return BUSTER_SHADER_RECT_METAL_FRAGMENT_SOURCE;
+#else
+    return metal_rect_inline_shader_source();
+#endif
+}
+
 BUSTER_GLOBAL_LOCAL void metal_log_error(String8 prefix, id error)
 {
     if (error)
@@ -4797,18 +4844,37 @@ BUSTER_GLOBAL_LOCAL void metal_log_error(String8 prefix, id error)
 BUSTER_GLOBAL_LOCAL bool metal_create_rect_pipeline(RenderingHandle* rendering)
 {
     bool result = false;
-    id source = metal_nsstring_from_cstring(metal_rect_shader_source());
+    id vertex_source = metal_nsstring_from_cstring(metal_rect_vertex_shader_source());
     id error = 0;
-    rendering->library = ((id (*)(id, SEL, id, id, id*))objc_msgSend)(rendering->device, metal_sel("newLibraryWithSource:options:error:"), source, 0, &error);
-    metal_release(source);
-    string_print(S8("Metal shader library creation: library={u64:x}\n"), (u64)rendering->library);
+    rendering->library = ((id (*)(id, SEL, id, id, id*))objc_msgSend)(rendering->device, metal_sel("newLibraryWithSource:options:error:"), vertex_source, 0, &error);
+    metal_release(vertex_source);
+    string_print(S8("Metal vertex shader library creation: library={u64:x}\n"), (u64)rendering->library);
+    if (!rendering->library)
+    {
+        metal_log_error(S8("Metal vertex shader compilation failed"), error);
+    }
 
-    if (rendering->library)
+#if BUSTER_USE_SLANG_SHADERS
+    id fragment_library = 0;
+    id fragment_source = metal_nsstring_from_cstring(metal_rect_fragment_shader_source());
+    error = 0;
+    fragment_library = ((id (*)(id, SEL, id, id, id*))objc_msgSend)(rendering->device, metal_sel("newLibraryWithSource:options:error:"), fragment_source, 0, &error);
+    metal_release(fragment_source);
+    string_print(S8("Metal fragment shader library creation: library={u64:x}\n"), (u64)fragment_library);
+    if (!fragment_library)
+    {
+        metal_log_error(S8("Metal fragment shader compilation failed"), error);
+    }
+#else
+    id fragment_library = rendering->library;
+#endif
+
+    if (rendering->library && fragment_library)
     {
         id vertex_name = metal_nsstring_from_cstring("rect_vs");
         id fragment_name = metal_nsstring_from_cstring("rect_fs");
         id vertex_function = ((id (*)(id, SEL, id))objc_msgSend)(rendering->library, metal_sel("newFunctionWithName:"), vertex_name);
-        id fragment_function = ((id (*)(id, SEL, id))objc_msgSend)(rendering->library, metal_sel("newFunctionWithName:"), fragment_name);
+        id fragment_function = ((id (*)(id, SEL, id))objc_msgSend)(fragment_library, metal_sel("newFunctionWithName:"), fragment_name);
         metal_release(vertex_name);
         metal_release(fragment_name);
         string_print(S8("Metal shader functions: vertex={u64:x}, fragment={u64:x}\n"), (u64)vertex_function, (u64)fragment_function);
@@ -4854,10 +4920,10 @@ BUSTER_GLOBAL_LOCAL bool metal_create_rect_pipeline(RenderingHandle* rendering)
         metal_release(vertex_function);
         metal_release(fragment_function);
     }
-    else
-    {
-        metal_log_error(S8("Metal shader compilation failed"), error);
-    }
+
+#if BUSTER_USE_SLANG_SHADERS
+    metal_release(fragment_library);
+#endif
 
     return result;
 }

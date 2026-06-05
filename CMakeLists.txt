@@ -141,28 +141,136 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR C_COMPILER_TCC)
 endif()
 option(BUSTER_USE_VULKAN "Use the Vulkan renderer instead of the platform fallback" ${BUSTER_USE_VULKAN_DEFAULT})
 
-set(BUSTER_VULKAN_SDK_BIN_DIRS)
-set(BUSTER_VULKAN_SDK_INCLUDE_DIRS)
-if (DEFINED ENV{VULKAN_SDK})
-    list(APPEND BUSTER_VULKAN_SDK_BIN_DIRS
-        "$ENV{VULKAN_SDK}/bin"
-        "$ENV{VULKAN_SDK}/Bin"
-    )
-    list(APPEND BUSTER_VULKAN_SDK_INCLUDE_DIRS "$ENV{VULKAN_SDK}/include")
+set(BUSTER_USE_D3D12 OFF)
+if (WIN32 AND NOT BUSTER_USE_VULKAN)
+    set(BUSTER_USE_D3D12 ON)
 endif()
 
-find_path(BUSTER_VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h HINTS ${BUSTER_VULKAN_SDK_INCLUDE_DIRS})
-find_program(BUSTER_GLSLC_EXECUTABLE NAMES glslc HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS})
-option(BUSTER_REQUIRE_VULKAN_SDK "Require Vulkan headers and shader compiler" ${BUSTER_USE_VULKAN})
-set(BUSTER_COMPILE_SHADERS_DEFAULT ${BUSTER_USE_VULKAN})
-option(BUSTER_COMPILE_SHADERS "Compile Vulkan GLSL shaders" ${BUSTER_COMPILE_SHADERS_DEFAULT})
+set(BUSTER_USE_METAL OFF)
+if (APPLE AND NOT BUSTER_USE_VULKAN)
+    set(BUSTER_USE_METAL ON)
+endif()
+
+set(BUSTER_VULKAN_SDK_DEFAULT "")
+if (DEFINED ENV{VULKAN_SDK})
+    set(BUSTER_VULKAN_SDK_DEFAULT "$ENV{VULKAN_SDK}")
+endif()
+set(BUSTER_VULKAN_SDK "${BUSTER_VULKAN_SDK_DEFAULT}" CACHE PATH "Vulkan SDK root directory")
+if (NOT BUSTER_VULKAN_SDK AND BUSTER_VULKAN_SDK_DEFAULT)
+    set(BUSTER_VULKAN_SDK "${BUSTER_VULKAN_SDK_DEFAULT}" CACHE PATH "Vulkan SDK root directory" FORCE)
+endif()
+
+set(BUSTER_VULKAN_SDK_ROOT_DIRS)
+set(BUSTER_VULKAN_SDK_BIN_DIRS)
+set(BUSTER_VULKAN_SDK_INCLUDE_DIRS)
+if (BUSTER_VULKAN_SDK)
+    set(BUSTER_VULKAN_SDK_ARCH_DIR_NAMES)
+    if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        list(APPEND BUSTER_VULKAN_SDK_ARCH_DIR_NAMES aarch64 arm64)
+    elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+        list(APPEND BUSTER_VULKAN_SDK_ARCH_DIR_NAMES x86_64)
+    endif()
+
+    list(APPEND BUSTER_VULKAN_SDK_ROOT_DIRS "${BUSTER_VULKAN_SDK}")
+
+    get_filename_component(BUSTER_VULKAN_SDK_NAME "${BUSTER_VULKAN_SDK}" NAME)
+    if (BUSTER_VULKAN_SDK_NAME IN_LIST BUSTER_VULKAN_SDK_ARCH_DIR_NAMES)
+        get_filename_component(BUSTER_VULKAN_SDK_PARENT "${BUSTER_VULKAN_SDK}" DIRECTORY)
+        list(APPEND BUSTER_VULKAN_SDK_ROOT_DIRS "${BUSTER_VULKAN_SDK_PARENT}")
+    endif()
+
+    foreach(BUSTER_VULKAN_SDK_ROOT IN LISTS BUSTER_VULKAN_SDK_ROOT_DIRS)
+        list(APPEND BUSTER_VULKAN_SDK_BIN_DIRS
+            "${BUSTER_VULKAN_SDK_ROOT}/bin"
+            "${BUSTER_VULKAN_SDK_ROOT}/Bin"
+        )
+        list(APPEND BUSTER_VULKAN_SDK_INCLUDE_DIRS
+            "${BUSTER_VULKAN_SDK_ROOT}/include"
+        )
+        foreach(BUSTER_VULKAN_SDK_ARCH_DIR_NAME IN LISTS BUSTER_VULKAN_SDK_ARCH_DIR_NAMES)
+            list(APPEND BUSTER_VULKAN_SDK_BIN_DIRS
+                "${BUSTER_VULKAN_SDK_ROOT}/${BUSTER_VULKAN_SDK_ARCH_DIR_NAME}/bin"
+                "${BUSTER_VULKAN_SDK_ROOT}/${BUSTER_VULKAN_SDK_ARCH_DIR_NAME}/Bin"
+            )
+            list(APPEND BUSTER_VULKAN_SDK_INCLUDE_DIRS
+                "${BUSTER_VULKAN_SDK_ROOT}/${BUSTER_VULKAN_SDK_ARCH_DIR_NAME}/include"
+            )
+        endforeach()
+    endforeach()
+endif()
+
+unset(BUSTER_VULKAN_INCLUDE_DIR CACHE)
+unset(BUSTER_GLSLC_EXECUTABLE CACHE)
+unset(BUSTER_SLANGC_EXECUTABLE CACHE)
+find_path(BUSTER_VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h HINTS ${BUSTER_VULKAN_SDK_INCLUDE_DIRS} NO_DEFAULT_PATH)
+find_program(BUSTER_GLSLC_EXECUTABLE NAMES glslc HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS} NO_DEFAULT_PATH)
+find_program(BUSTER_SLANGC_EXECUTABLE NAMES slangc HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS} NO_DEFAULT_PATH)
+option(BUSTER_REQUIRE_VULKAN_SDK "Require Vulkan SDK headers and shader tools" ON)
+set(BUSTER_COMPILE_SHADERS_DEFAULT OFF)
+if (BUSTER_USE_VULKAN OR BUSTER_USE_D3D12 OR BUSTER_USE_METAL)
+    set(BUSTER_COMPILE_SHADERS_DEFAULT ON)
+endif()
+option(BUSTER_COMPILE_SHADERS "Compile renderer shaders" ${BUSTER_COMPILE_SHADERS_DEFAULT})
+option(BUSTER_USE_SLANG_SHADERS "Compile supported backend shaders from Slang" ON)
+
+set(BUSTER_USE_SLANG_SHADERS_DEFINE OFF)
+if (BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS)
+    set(BUSTER_USE_SLANG_SHADERS_DEFINE ON)
+endif()
+
+set(BUSTER_NEEDS_VULKAN_SDK OFF)
+if (BUSTER_USE_VULKAN OR (BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS))
+    set(BUSTER_NEEDS_VULKAN_SDK ON)
+endif()
+
+if (BUSTER_REQUIRE_VULKAN_SDK AND BUSTER_NEEDS_VULKAN_SDK AND NOT BUSTER_VULKAN_SDK)
+    message(FATAL_ERROR "BUSTER_REQUIRE_VULKAN_SDK requires the Vulkan SDK. Set the VULKAN_SDK environment variable or configure with -DBUSTER_VULKAN_SDK=/path/to/vulkan-sdk.")
+endif()
+
+if (BUSTER_REQUIRE_VULKAN_SDK AND BUSTER_USE_VULKAN AND NOT BUSTER_VULKAN_INCLUDE_DIR)
+    message(FATAL_ERROR "Could not find vulkan/vulkan.h in BUSTER_VULKAN_SDK='${BUSTER_VULKAN_SDK}'.")
+endif()
+
+if (BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_SLANGC_EXECUTABLE)
+    message(FATAL_ERROR "BUSTER_USE_SLANG_SHADERS requires slangc from the Vulkan SDK. Set VULKAN_SDK or -DBUSTER_VULKAN_SDK to a Vulkan SDK that contains slangc.")
+endif()
+
+set(BUSTER_SLANGC_COMMAND "${BUSTER_SLANGC_EXECUTABLE}")
+if (BUSTER_SLANGC_EXECUTABLE)
+    get_filename_component(BUSTER_SLANGC_BIN_DIR "${BUSTER_SLANGC_EXECUTABLE}" DIRECTORY)
+    get_filename_component(BUSTER_SLANGC_ROOT_DIR "${BUSTER_SLANGC_BIN_DIR}" DIRECTORY)
+    set(BUSTER_SLANGC_LIB_DIR "${BUSTER_SLANGC_ROOT_DIR}/lib")
+    if (EXISTS "${BUSTER_SLANGC_LIB_DIR}")
+        if (WIN32)
+            if (DEFINED ENV{PATH})
+                set(BUSTER_SLANGC_PATH "${BUSTER_SLANGC_LIB_DIR};$ENV{PATH}")
+            else()
+                set(BUSTER_SLANGC_PATH "${BUSTER_SLANGC_LIB_DIR}")
+            endif()
+            # Keep the Windows PATH as one cmake -E env argument when stored in a CMake list.
+            string(REPLACE ";" "\\;" BUSTER_SLANGC_PATH "${BUSTER_SLANGC_PATH}")
+            set(BUSTER_SLANGC_COMMAND "${CMAKE_COMMAND}" -E env "PATH=${BUSTER_SLANGC_PATH}" "${BUSTER_SLANGC_EXECUTABLE}")
+        elseif(APPLE)
+            if (DEFINED ENV{DYLD_LIBRARY_PATH})
+                set(BUSTER_SLANGC_LIBRARY_PATH "${BUSTER_SLANGC_LIB_DIR}:$ENV{DYLD_LIBRARY_PATH}")
+            else()
+                set(BUSTER_SLANGC_LIBRARY_PATH "${BUSTER_SLANGC_LIB_DIR}")
+            endif()
+            set(BUSTER_SLANGC_COMMAND "${CMAKE_COMMAND}" -E env "DYLD_LIBRARY_PATH=${BUSTER_SLANGC_LIBRARY_PATH}" "${BUSTER_SLANGC_EXECUTABLE}")
+        else()
+            if (DEFINED ENV{LD_LIBRARY_PATH})
+                set(BUSTER_SLANGC_LIBRARY_PATH "${BUSTER_SLANGC_LIB_DIR}:$ENV{LD_LIBRARY_PATH}")
+            else()
+                set(BUSTER_SLANGC_LIBRARY_PATH "${BUSTER_SLANGC_LIB_DIR}")
+            endif()
+            set(BUSTER_SLANGC_COMMAND "${CMAKE_COMMAND}" -E env "LD_LIBRARY_PATH=${BUSTER_SLANGC_LIBRARY_PATH}" "${BUSTER_SLANGC_EXECUTABLE}")
+        endif()
+    endif()
+endif()
 
 if (BUSTER_USE_VULKAN AND BUSTER_REQUIRE_VULKAN_SDK)
-    if (NOT BUSTER_VULKAN_INCLUDE_DIR)
-        message(FATAL_ERROR "Could not find Vulkan headers. Install Vulkan SDK/vulkan-headers or set BUSTER_VULKAN_INCLUDE_DIR.")
-    endif()
-    if (BUSTER_COMPILE_SHADERS AND NOT BUSTER_GLSLC_EXECUTABLE)
-        message(FATAL_ERROR "BUSTER_COMPILE_SHADERS requires glslc. Install the Vulkan SDK/shaderc or set BUSTER_GLSLC_EXECUTABLE.")
+    if (BUSTER_COMPILE_SHADERS AND NOT BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_GLSLC_EXECUTABLE)
+        message(FATAL_ERROR "BUSTER_COMPILE_SHADERS requires glslc from the Vulkan SDK. Set VULKAN_SDK or -DBUSTER_VULKAN_SDK to a Vulkan SDK that contains glslc.")
     endif()
 endif()
 
@@ -183,16 +291,6 @@ if (NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS OR CMAKE_EXPORT_COMPILE_COMMANDS S
         set(BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT OFF)
     endif()
     set(CMAKE_EXPORT_COMPILE_COMMANDS ${BUSTER_EXPORT_COMPILE_COMMANDS_DEFAULT} CACHE BOOL "Enable compile commands" FORCE)
-endif()
-
-set(BUSTER_USE_D3D12 OFF)
-if (WIN32 AND NOT BUSTER_USE_VULKAN)
-    set(BUSTER_USE_D3D12 ON)
-endif()
-
-set(BUSTER_USE_METAL OFF)
-if (APPLE AND NOT BUSTER_USE_VULKAN)
-    set(BUSTER_USE_METAL ON)
 endif()
 
 set(BUSTER_ZIG_DARWIN_ASAN_RUNTIME "")
@@ -494,6 +592,8 @@ if (C_COMPILER_MSVC)
     endforeach()
 endif()
 
+message(STATUS "BUSTER_VULKAN_SDK: ${BUSTER_VULKAN_SDK}")
+message(STATUS "BUSTER_SLANGC_EXECUTABLE: ${BUSTER_SLANGC_EXECUTABLE}")
 message(STATUS "BUSTER_CI: ${BUSTER_CI}")
 message(STATUS "BUSTER_LINK_LIBC: ${BUSTER_LINK_LIBC}")
 message(STATUS "BUSTER_OPTIMIZE: ${BUSTER_OPTIMIZE}")
@@ -507,6 +607,7 @@ message(STATUS "BUSTER_CHECK_OPTIONAL_WARNINGS: ${BUSTER_CHECK_OPTIONAL_WARNINGS
 message(STATUS "BUSTER_DEVELOPER_TARGETS: ${BUSTER_DEVELOPER_TARGETS}")
 message(STATUS "BUSTER_REQUIRE_VULKAN_SDK: ${BUSTER_REQUIRE_VULKAN_SDK}")
 message(STATUS "BUSTER_COMPILE_SHADERS: ${BUSTER_COMPILE_SHADERS}")
+message(STATUS "BUSTER_USE_SLANG_SHADERS: ${BUSTER_USE_SLANG_SHADERS}")
 message(STATUS "BUSTER_SINGLE_THREADED: ${BUSTER_SINGLE_THREADED}")
 
 message(STATUS "CMAKE_HOST_SYSTEM_PROCESSOR: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
@@ -830,6 +931,7 @@ set(BUSTER_SHADER_BINARY_DIR "${CMAKE_BINARY_DIR}/shaders")
 set(BUSTER_SHADER_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated")
 set(BUSTER_SHADER_GENERATED_HEADER_DIR "${BUSTER_SHADER_GENERATED_INCLUDE_DIR}/buster/shaders")
 set(BUSTER_SHADER_GENERATED_PATH_HEADER "${BUSTER_SHADER_GENERATED_HEADER_DIR}/paths.h")
+set(BUSTER_RECT_TEXTURE_SLOT_COUNT 2)
 
 function(buster_c_string out_var value)
     string(REPLACE "\\" "\\\\" escaped "${value}")
@@ -865,31 +967,208 @@ function(buster_compile_shader out_var shader_source)
     set(${out_var} "${shader_output}" PARENT_SCOPE)
 endfunction()
 
+function(buster_compile_slang_spirv out_var shader_source entry_point stage output_name)
+    if (IS_ABSOLUTE "${shader_source}")
+        set(shader_source_path "${shader_source}")
+    else()
+        set(shader_source_path "${CMAKE_CURRENT_SOURCE_DIR}/${shader_source}")
+    endif()
+
+    set(emit_spirv_flag -emit-spirv-directly)
+    if ("${stage}" STREQUAL "fragment")
+        # Slang's direct SPIR-V path currently emits Sampler2D as a depth-unknown image.
+        # Route fragments through glslang so sampler2D matches the working GLSL shader.
+        set(emit_spirv_flag -emit-spirv-via-glsl)
+    endif()
+
+    set(shader_output "${BUSTER_SHADER_BINARY_DIR}/${output_name}")
+    add_custom_command(
+        OUTPUT "${shader_output}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUSTER_SHADER_BINARY_DIR}"
+        COMMAND ${BUSTER_SLANGC_COMMAND}
+            "${shader_source_path}"
+            -entry "${entry_point}"
+            -stage "${stage}"
+            -target spirv
+            ${emit_spirv_flag}
+            -DBUSTER_VULKAN=1
+            -DBUSTER_RECT_TEXTURE_SLOT_COUNT=${BUSTER_RECT_TEXTURE_SLOT_COUNT}
+            -o "${shader_output}"
+        MAIN_DEPENDENCY "${shader_source_path}"
+        COMMENT "Compiling Slang shader ${entry_point} to ${output_name}"
+        VERBATIM
+    )
+
+    set_source_files_properties("${shader_output}" PROPERTIES GENERATED TRUE)
+    set(${out_var} "${shader_output}" PARENT_SCOPE)
+endfunction()
+
+function(buster_compile_slang_metal out_var shader_source entry_point stage output_name)
+    if (IS_ABSOLUTE "${shader_source}")
+        set(shader_source_path "${shader_source}")
+    else()
+        set(shader_source_path "${CMAKE_CURRENT_SOURCE_DIR}/${shader_source}")
+    endif()
+
+    set(shader_output "${BUSTER_SHADER_BINARY_DIR}/${output_name}")
+    add_custom_command(
+        OUTPUT "${shader_output}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUSTER_SHADER_BINARY_DIR}"
+        COMMAND ${BUSTER_SLANGC_COMMAND}
+            "${shader_source_path}"
+            -entry "${entry_point}"
+            -stage "${stage}"
+            -target metal
+            -DBUSTER_METAL=1
+            -DBUSTER_RECT_TEXTURE_SLOT_COUNT=${BUSTER_RECT_TEXTURE_SLOT_COUNT}
+            -warnings-disable 39001,39029
+            -o "${shader_output}"
+        MAIN_DEPENDENCY "${shader_source_path}"
+        COMMENT "Compiling Slang shader ${entry_point} to ${output_name}"
+        VERBATIM
+    )
+
+    set_source_files_properties("${shader_output}" PROPERTIES GENERATED TRUE)
+    set(${out_var} "${shader_output}" PARENT_SCOPE)
+endfunction()
+
+function(buster_compile_slang_hlsl out_var shader_source entry_point stage output_name)
+    if (IS_ABSOLUTE "${shader_source}")
+        set(shader_source_path "${shader_source}")
+    else()
+        set(shader_source_path "${CMAKE_CURRENT_SOURCE_DIR}/${shader_source}")
+    endif()
+
+    if ("${stage}" STREQUAL "vertex")
+        set(profile vs_5_1)
+    elseif("${stage}" STREQUAL "fragment")
+        set(profile ps_5_1)
+    else()
+        message(FATAL_ERROR "Unsupported HLSL shader stage: ${stage}")
+    endif()
+
+    set(shader_output "${BUSTER_SHADER_BINARY_DIR}/${output_name}")
+    add_custom_command(
+        OUTPUT "${shader_output}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUSTER_SHADER_BINARY_DIR}"
+        COMMAND ${BUSTER_SLANGC_COMMAND}
+            "${shader_source_path}"
+            -entry "${entry_point}"
+            -target hlsl
+            -profile "${profile}"
+            -DBUSTER_D3D12=1
+            -DBUSTER_RECT_TEXTURE_SLOT_COUNT=${BUSTER_RECT_TEXTURE_SLOT_COUNT}
+            -o "${shader_output}"
+        MAIN_DEPENDENCY "${shader_source_path}"
+        COMMENT "Compiling Slang shader ${entry_point} to ${output_name}"
+        VERBATIM
+    )
+
+    set_source_files_properties("${shader_output}" PROPERTIES GENERATED TRUE)
+    set(${out_var} "${shader_output}" PARENT_SCOPE)
+endfunction()
+
+function(buster_embed_metal_shaders out_var vertex_source fragment_source output_name)
+    set(header_output "${BUSTER_SHADER_GENERATED_HEADER_DIR}/${output_name}")
+    add_custom_command(
+        OUTPUT "${header_output}"
+        COMMAND "${CMAKE_COMMAND}"
+            -D "BUSTER_METAL_VERTEX_INPUT=${vertex_source}"
+            -D "BUSTER_METAL_FRAGMENT_INPUT=${fragment_source}"
+            -D "BUSTER_METAL_HEADER_OUTPUT=${header_output}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_metal_shaders.cmake"
+        MAIN_DEPENDENCY "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_metal_shaders.cmake"
+        DEPENDS "${vertex_source}" "${fragment_source}"
+        COMMENT "Embedding Slang-generated Metal shaders"
+        VERBATIM
+    )
+
+    set_source_files_properties("${header_output}" PROPERTIES GENERATED TRUE)
+    set(${out_var} "${header_output}" PARENT_SCOPE)
+endfunction()
+
+function(buster_embed_d3d12_shaders out_var vertex_source pixel_source output_name)
+    set(header_output "${BUSTER_SHADER_GENERATED_HEADER_DIR}/${output_name}")
+    add_custom_command(
+        OUTPUT "${header_output}"
+        COMMAND "${CMAKE_COMMAND}"
+            -D "BUSTER_D3D12_VERTEX_INPUT=${vertex_source}"
+            -D "BUSTER_D3D12_PIXEL_INPUT=${pixel_source}"
+            -D "BUSTER_D3D12_HEADER_OUTPUT=${header_output}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_d3d12_shaders.cmake"
+        MAIN_DEPENDENCY "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_d3d12_shaders.cmake"
+        DEPENDS "${vertex_source}" "${pixel_source}"
+        COMMENT "Embedding Slang-generated D3D12 shaders"
+        VERBATIM
+    )
+
+    set_source_files_properties("${header_output}" PROPERTIES GENERATED TRUE)
+    set(${out_var} "${header_output}" PARENT_SCOPE)
+endfunction()
+
 set(BUSTER_SHADER_SOURCES
+    src/buster/shaders/rect.slang
     src/buster/shaders/rect.vert
     src/buster/shaders/rect.frag
 )
 
 set(BUSTER_RECT_VERTEX_SHADER_BINARY "${BUSTER_SHADER_BINARY_DIR}/rect.vert.spv")
 set(BUSTER_RECT_FRAGMENT_SHADER_BINARY "${BUSTER_SHADER_BINARY_DIR}/rect.frag.spv")
+set(BUSTER_RECT_METAL_VERTEX_SHADER_SOURCE "${BUSTER_SHADER_BINARY_DIR}/rect.vert.metal")
+set(BUSTER_RECT_METAL_FRAGMENT_SHADER_SOURCE "${BUSTER_SHADER_BINARY_DIR}/rect.frag.metal")
+set(BUSTER_RECT_D3D12_VERTEX_SHADER_SOURCE "${BUSTER_SHADER_BINARY_DIR}/rect.vert.hlsl")
+set(BUSTER_RECT_D3D12_PIXEL_SHADER_SOURCE "${BUSTER_SHADER_BINARY_DIR}/rect.frag.hlsl")
+
+set(BUSTER_SHADER_TARGET_DEPENDS)
 
 if (BUSTER_USE_VULKAN AND BUSTER_COMPILE_SHADERS)
-    if (NOT BUSTER_GLSLC_EXECUTABLE)
+    if (BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_SLANGC_EXECUTABLE)
+        message(FATAL_ERROR "BUSTER_USE_SLANG_SHADERS requires slangc. Install Slang or set BUSTER_SLANGC_EXECUTABLE.")
+    endif()
+    if (NOT BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_GLSLC_EXECUTABLE)
         message(FATAL_ERROR "BUSTER_COMPILE_SHADERS requires glslc. Install the Vulkan SDK/shaderc or set BUSTER_GLSLC_EXECUTABLE.")
     endif()
 
     message(STATUS "BUSTER_VULKAN_INCLUDE_DIR: ${BUSTER_VULKAN_INCLUDE_DIR}")
-    message(STATUS "BUSTER_GLSLC_EXECUTABLE: ${BUSTER_GLSLC_EXECUTABLE}")
 
-    buster_compile_shader(BUSTER_RECT_VERTEX_SHADER_BINARY src/buster/shaders/rect.vert)
-    buster_compile_shader(BUSTER_RECT_FRAGMENT_SHADER_BINARY src/buster/shaders/rect.frag)
-    add_custom_target(buster_shaders
-        DEPENDS
-            "${BUSTER_RECT_VERTEX_SHADER_BINARY}"
-            "${BUSTER_RECT_FRAGMENT_SHADER_BINARY}"
+    if (BUSTER_USE_SLANG_SHADERS)
+        message(STATUS "BUSTER_SLANGC_EXECUTABLE: ${BUSTER_SLANGC_EXECUTABLE}")
+        buster_compile_slang_spirv(BUSTER_RECT_VERTEX_SHADER_BINARY src/buster/shaders/rect.slang vs_main vertex rect.vert.spv)
+        buster_compile_slang_spirv(BUSTER_RECT_FRAGMENT_SHADER_BINARY src/buster/shaders/rect.slang ps_main fragment rect.frag.spv)
+    else()
+        message(STATUS "BUSTER_GLSLC_EXECUTABLE: ${BUSTER_GLSLC_EXECUTABLE}")
+        buster_compile_shader(BUSTER_RECT_VERTEX_SHADER_BINARY src/buster/shaders/rect.vert)
+        buster_compile_shader(BUSTER_RECT_FRAGMENT_SHADER_BINARY src/buster/shaders/rect.frag)
+    endif()
+
+    list(APPEND BUSTER_SHADER_TARGET_DEPENDS
+        "${BUSTER_RECT_VERTEX_SHADER_BINARY}"
+        "${BUSTER_RECT_FRAGMENT_SHADER_BINARY}"
     )
-elseif(BUSTER_USE_VULKAN AND NOT BUSTER_GLSLC_EXECUTABLE)
+elseif(BUSTER_USE_VULKAN AND NOT BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_GLSLC_EXECUTABLE)
     message(STATUS "glslc not found; shader compilation is disabled")
+endif()
+
+if (BUSTER_USE_METAL AND BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS)
+    buster_compile_slang_metal(BUSTER_RECT_METAL_VERTEX_SHADER_SOURCE src/buster/shaders/rect.slang rect_vs vertex rect.vert.metal)
+    buster_compile_slang_metal(BUSTER_RECT_METAL_FRAGMENT_SHADER_SOURCE src/buster/shaders/rect.slang rect_fs fragment rect.frag.metal)
+    buster_embed_metal_shaders(BUSTER_RECT_METAL_SHADER_HEADER "${BUSTER_RECT_METAL_VERTEX_SHADER_SOURCE}" "${BUSTER_RECT_METAL_FRAGMENT_SHADER_SOURCE}" metal.h)
+    list(APPEND BUSTER_SHADER_TARGET_DEPENDS
+        "${BUSTER_RECT_METAL_SHADER_HEADER}"
+    )
+endif()
+
+if (BUSTER_USE_D3D12 AND BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS)
+    buster_compile_slang_hlsl(BUSTER_RECT_D3D12_VERTEX_SHADER_SOURCE src/buster/shaders/rect.slang vs_main vertex rect.vert.hlsl)
+    buster_compile_slang_hlsl(BUSTER_RECT_D3D12_PIXEL_SHADER_SOURCE src/buster/shaders/rect.slang ps_main fragment rect.frag.hlsl)
+    buster_embed_d3d12_shaders(BUSTER_RECT_D3D12_SHADER_HEADER "${BUSTER_RECT_D3D12_VERTEX_SHADER_SOURCE}" "${BUSTER_RECT_D3D12_PIXEL_SHADER_SOURCE}" d3d12.h)
+    list(APPEND BUSTER_SHADER_TARGET_DEPENDS
+        "${BUSTER_RECT_D3D12_SHADER_HEADER}"
+    )
+endif()
+
+if (BUSTER_SHADER_TARGET_DEPENDS)
+    add_custom_target(buster_shaders DEPENDS ${BUSTER_SHADER_TARGET_DEPENDS})
 endif()
 
 buster_c_string(BUSTER_RECT_VERTEX_SHADER_BINARY_C "${BUSTER_RECT_VERTEX_SHADER_BINARY}")
@@ -970,6 +1249,7 @@ function(executable_add name is_buster_program main_file)
         BUSTER_USE_VULKAN=$<IF:$<BOOL:${BUSTER_USE_VULKAN}>,1,0>
         BUSTER_USE_D3D12=$<IF:$<BOOL:${BUSTER_USE_D3D12}>,1,0>
         BUSTER_USE_METAL=$<IF:$<BOOL:${BUSTER_USE_METAL}>,1,0>
+        BUSTER_USE_SLANG_SHADERS=$<IF:$<BOOL:${BUSTER_USE_SLANG_SHADERS_DEFINE}>,1,0>
         BUSTER_COMPILER_ZIG=$<IF:$<BOOL:${C_COMPILER_ZIG}>,1,0>
     )
 
