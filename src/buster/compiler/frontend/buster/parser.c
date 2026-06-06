@@ -1651,14 +1651,14 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                         BUSTER_CHECK(number_string.length >= 3);
                                         BUSTER_CHECK(number_string.pointer[0] == '0');
                                         BUSTER_CHECK(number_string.pointer[1] == 'o');
-                                        number_parsing = string8_parse_u64_hexadecimal(number_string.pointer + 2);
+                                        number_parsing = string8_parse_u64_octal(number_string.pointer + 2);
                                     }
                                     break; case TOKEN_BINARY_INTEGER_LITERAL:
                                     {
                                         BUSTER_CHECK(number_string.length >= 3);
                                         BUSTER_CHECK(number_string.pointer[0] == '0');
                                         BUSTER_CHECK(number_string.pointer[1] == 'b');
-                                        number_parsing = string8_parse_u64_hexadecimal(number_string.pointer + 2);
+                                        number_parsing = string8_parse_u64_binary(number_string.pointer + 2);
                                     }
                                     break; default: BUSTER_UNREACHABLE();
                                 }

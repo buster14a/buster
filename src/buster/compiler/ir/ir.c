@@ -34,7 +34,7 @@
 //     return result;
 // }
 
-#define pointer_from_ref(arena, T, reference) (ir_ref_is_valid(reference) ? arena_get_pointer_at_index(arena, T, ir_ref_get_raw(reference)) : (T*)0)
+#define pointer_from_ref(arena, T, reference) (ir_ref_is_valid(reference) ? arena_get_pointer_at_index(arena, T, ir_ref_get(reference)) : (T*)0)
 IrDebugType* ir_debug_type_get(IrModule* module, IrDebugTypeRef reference)
 {
     return pointer_from_ref(module->types.arenas.debug, IrDebugType, reference);
@@ -683,7 +683,7 @@ IrType* ir_type_get(IrModule* module, IrTypeRef reference)
 
     if (ir_ref_is_valid(reference))
     {
-        result = arena_get_pointer_at_index(module->types.arenas.ir, IrType, ir_ref_get_raw(reference));
+        result = arena_get_pointer_at_index(module->types.arenas.ir, IrType, ir_ref_get(reference));
     }
 
     return result;
@@ -917,7 +917,7 @@ IrFunction* ir_function_get(IrModule* module, IrFunctionRef function_ref)
 
     if (ir_ref_is_valid(function_ref))
     {
-        result = arena_get_pointer_at_index(module->function_arena, IrFunction, ir_ref_get_raw(function_ref));
+        result = arena_get_pointer_at_index(module->function_arena, IrFunction, ir_ref_get(function_ref));
     }
 
     return result;

@@ -389,7 +389,7 @@ u8 ui_build_begin(OsWindowingHandle* windowing, OsWindowHandle* window, f64 fram
     u32 event_index = 0;
     u64 event_count = event_queue->count;
 
-    for (OsWindowingEvent* event = event_queue->first; open & (event_index < event_count); event_count += 1, event = event->next)
+    for (OsWindowingEvent* event = event_queue->first; open & (event_index < event_count); event_index += 1, event = event->next)
     {
         // switch (event->type)
         // {

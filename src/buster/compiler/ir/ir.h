@@ -28,7 +28,8 @@ typedef struct IrRef { u32 v; } IrRef;
 BUSTER_CT_CHECK(sizeof(IrRef) == sizeof(u32));
 #define ir_ref_get_raw(x) (((x).v).v)
 #define ir_ref_is_valid(x) (ir_ref_get_raw(x) != 0)
-#define ir_ref_unwrap(x) (BUSTER_CHECK(ir_ref_is_valid(x)), ir_ref_get_raw(x))
+#define ir_ref_get(x) (ir_ref_get_raw(x) - 1)
+#define ir_ref_unwrap(x) (BUSTER_CHECK(ir_ref_is_valid(x)), ir_ref_get(x))
 
 #define IR_REF_DECL(T) typedef struct T ## Ref { IrRef v; } T ## Ref
 
