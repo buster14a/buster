@@ -312,7 +312,6 @@ OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate cr
             XCB_EVENT_MASK_ENTER_WINDOW |
             XCB_EVENT_MASK_LEAVE_WINDOW |
             XCB_EVENT_MASK_POINTER_MOTION |
-            XCB_EVENT_MASK_POINTER_MOTION_HINT |
             XCB_EVENT_MASK_BUTTON_1_MOTION |
             XCB_EVENT_MASK_BUTTON_2_MOTION |
             XCB_EVENT_MASK_BUTTON_3_MOTION |
@@ -642,9 +641,8 @@ OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* w
             }
             break; case XCB_MOTION_NOTIFY: // 6
             {
-                string_print(S8("MOTION_NOTIFY"));
                 xcb_motion_notify_event_t* motion_notify_event = (xcb_motion_notify_event_t*)event;
-                u8 k = motion_notify_event->detail;
+                string_print(S8("MOTION_NOTIFY. Root ({s16}, {s16}). Event: ({s16}, {s16}). Same screen: {u8}"), motion_notify_event->root_x, motion_notify_event->root_y, motion_notify_event->event_x, motion_notify_event->event_y, motion_notify_event->same_screen);
 
                 // xcb_motion_notify_event_t(3)                                                               XCB Events                                                              xcb_motion_notify_event_t(3)
                 //
@@ -711,7 +709,6 @@ OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* w
                 // X Version 11                                                                             libxcb 1.17.0                                                             xcb_motion_notify_event_t(3)
 
                 unimplemented = false;
-                BUSTER_UNUSED(k);
             }
             break;
             case XCB_ENTER_NOTIFY: // 7
