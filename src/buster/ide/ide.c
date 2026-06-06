@@ -55,7 +55,7 @@ struct IdePanel
 typedef struct IdeWindow IdeWindow;
 struct IdeWindow
 {
-    OsWindowHandle* os;
+    WmWindowHandle* wm;
     RenderingWindowHandle* render;
     IdeWindow* previous;
     IdeWindow* next;
@@ -69,9 +69,9 @@ struct IdeProgram
     ProgramState state;
     IdeWindow* first_window;
     IdeWindow* last_window;
-    OsWindowingHandle* windowing;
+    WmHandle* windowing;
     RenderingHandle* rendering;
-    OsWindowingEventList event_list;
+    WmEventList event_list;
     bool test;
     u8 reserved[7];
     TimeDataType last_frame_timestamp;
@@ -165,19 +165,19 @@ BUSTER_GLOBAL_LOCAL void ui_node(UI_Node node)
 BUSTER_GLOBAL_LOCAL void app_update(void)
 {
     TimeDataType frame_end = timestamp_take();
-    ide_state.event_list = os_windowing_poll_events(ide_state.state.arena, ide_state.windowing);
+    ide_state.event_list = wm_poll_events(ide_state.state.arena, ide_state.windowing);
     f64 frame_ms = (f64)timestamp_ns_between(ide_state.last_frame_timestamp, frame_end) / (1000 * 1000);
     ide_state.last_frame_timestamp = frame_end;
 
-    for (OsWindowingEvent* os_event = ide_state.event_list.first; os_event; os_event = os_event->next)
+    for (WmEvent* event = ide_state.event_list.first; event; event = event->next)
     {
-        switch (os_event->kind)
+        switch (event->kind)
         {
-            case OS_WINDOWING_EVENT_WINDOW_CLOSE:
+            case WM_EVENT_WINDOW_CLOSE:
             {
                 for (IdeWindow* window = ide_state.first_window; window; window = window->next)
                 {
-                    if (window->os == os_event->window)
+                    if (window->wm == event->window)
                     {
                         if (window->previous)
                         {
@@ -208,7 +208,7 @@ BUSTER_GLOBAL_LOCAL void app_update(void)
                     }
                 }
             } break;
-            break; case OS_WINDOWING_EVENT_COUNT: BUSTER_UNREACHABLE();
+            break; case WM_EVENT_COUNT: BUSTER_UNREACHABLE();
         }
     }
 
@@ -222,20 +222,20 @@ BUSTER_GLOBAL_LOCAL void app_update(void)
 
         ui_state_select(window->ui);
 
-        ui_build_begin(ide_state.windowing, window->os, frame_ms, &ide_state.event_list);
+        ui_build_begin(ide_state.windowing, window->wm, frame_ms, &ide_state.event_list);
 
         ui_push(font_size, 24);
 
         ui_top_bar();
         ui_push(child_layout_axis, AXIS2_X);
-        UI_Widget* workspace_widget = ui_widget_make_format((UI_WidgetFlags) {0}, S8("workspace{u64}"), window->os);
+        UI_Widget* workspace_widget = ui_widget_make_format((UI_WidgetFlags) {0}, S8("workspace{u64}"), window->wm);
         ui_push(parent, workspace_widget);
         {
             // Node visualizer
             ui_push(child_layout_axis, AXIS2_Y);
             UI_Widget* node_visualizer_widget = ui_widget_make_format((UI_WidgetFlags) {
                 .draw_background = 1,
-            }, S8("node_visualizer{u64}"), window->os);
+            }, S8("node_visualizer{u64}"), window->wm);
 
             ui_push(parent, node_visualizer_widget);
             {
@@ -275,7 +275,7 @@ BUSTER_GLOBAL_LOCAL void app_update(void)
     }
 }
 
-BUSTER_GLOBAL_LOCAL void window_refresh_callback(OsWindowHandle* window, void* context)
+BUSTER_GLOBAL_LOCAL void window_refresh_callback(WmWindowHandle* window, void* context)
 {
     BUSTER_UNUSED(window);
     BUSTER_UNUSED(context);
@@ -1025,7 +1025,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
 
     if (result == PROCESS_RESULT_SUCCESS)
     {
-        OsWindowingHandle* windowing = ide_state.windowing = os_windowing_initialize();
+        WmHandle* windowing = ide_state.windowing = wm_initialize();
         if (windowing)
         {
             Arena* arena = program_state->arena;
@@ -1033,7 +1033,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
             if (r)
             {
                 ide_state.first_window = ide_state.last_window = arena_allocate(arena, IdeWindow, 1);
-                OsWindowHandle* os_window = os_window_create(windowing, (OsWindowCreate) {
+                WmWindowHandle* wm_window = wm_window_create(windowing, (WmWindowCreate) {
                         .name = S8("Ide"),
                         .size = {
                         .width = 1600,
@@ -1041,11 +1041,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
                         },
                         .refresh_callback = &window_refresh_callback,
                         });
-                ide_state.first_window->os = os_window;
+                ide_state.first_window->wm = wm_window;
 
-                if (os_window)
+                if (wm_window)
                 {
-                    RenderingWindowHandle* render_window = ide_state.first_window->render = rendering_window_initialize(arena, windowing, r, os_window);
+                    RenderingWindowHandle* render_window = ide_state.first_window->render = rendering_window_initialize(arena, windowing, r, wm_window);
 
                     if (render_window)
                     {
@@ -1112,7 +1112,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
                 result = PROCESS_RESULT_FAILED;
             }
 
-            os_windowing_deinitialize(windowing);
+            wm_deinitialize(windowing);
         }
         else
         {

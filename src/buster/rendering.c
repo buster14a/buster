@@ -1885,22 +1885,24 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
     }
 }
 
-RenderingWindowHandle* rendering_window_initialize(Arena* arena, OsWindowingHandle* windowing, RenderingHandle* rendering, OsWindowHandle* window)
+RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windowing, RenderingHandle* rendering, WmWindowHandle* window)
 {
     BUSTER_UNUSED(rendering);
     BUSTER_UNUSED(window);
 
     RenderingWindowHandle* result = arena_allocate(arena, RenderingWindowHandle, 1);
 #if defined(VK_USE_PLATFORM_XCB_KHR)
+    xcb_connection_t* native_connection = (xcb_connection_t*)wm_handle_native_from_wm(windowing);
+    xcb_window_t native_window = (xcb_window_t)(u64)wm_window_handle_native_from_wm(window);
     string_print(S8("Vulkan render window initialization: platform=xcb, native_window={u64:x}, connection={u64:x}\n"),
-                 (u64)native_window_handle_from_os_window_handle(window),
-                 (u64)native_windowing_handle_from_os_windowing_handle(windowing));
+                 (u64)native_window,
+                 (u64)native_connection);
     VkXcbSurfaceCreateInfoKHR surface_create_info = {
         .sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
         .pNext = 0,
         .flags = 0,
-        .connection = (xcb_connection_t*)native_windowing_handle_from_os_windowing_handle(windowing),
-        .window = (xcb_window_t)(u64)native_window_handle_from_os_window_handle(window),
+        .connection = native_connection,
+        .window = native_window,
     };
 
     VkResult create_surface_result = vkCreateXcbSurfaceKHR(rendering->instance, &surface_create_info, rendering->allocator, &result->surface);
@@ -1910,15 +1912,17 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, OsWindowingHand
         os_fail();
     }
 #elif defined(VK_USE_PLATFORM_WIN32_KHR)
+    HINSTANCE native_instance = (HINSTANCE)wm_handle_native_from_wm(windowing);
+    HWND native_window = (HWND)wm_window_handle_native_from_wm(window);
     string_print(S8("Vulkan render window initialization: platform=win32, hwnd={u64:x}, hinstance={u64:x}\n"),
-                 (u64)native_window_handle_from_os_window_handle(window),
-                 (u64)native_windowing_handle_from_os_windowing_handle(windowing));
+                 (u64)native_window,
+                 (u64)native_instance);
     VkWin32SurfaceCreateInfoKHR surface_create_info = {
         .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
         .pNext = 0,
         .flags = 0,
-        .hinstance = (HINSTANCE)native_windowing_handle_from_os_windowing_handle(windowing),
-        .hwnd = (HWND)native_window_handle_from_os_window_handle(window),
+        .hinstance = native_instance,
+        .hwnd = native_window,
     };
 
     VkResult create_surface_result = vkCreateWin32SurfaceKHR(rendering->instance, &surface_create_info, rendering->allocator, &result->surface);
@@ -4028,11 +4032,11 @@ BUSTER_GLOBAL_LOCAL void d3d12_swapchain_recreate(RenderingHandle* rendering, Re
     }
 }
 
-RenderingWindowHandle* rendering_window_initialize(Arena* arena, OsWindowingHandle* windowing, RenderingHandle* rendering, OsWindowHandle* window)
+RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windowing, RenderingHandle* rendering, WmWindowHandle* window)
 {
     BUSTER_UNUSED(windowing);
     RenderingWindowHandle* result = arena_allocate(arena, RenderingWindowHandle, 1);
-    result->hwnd = (HWND)native_window_handle_from_os_window_handle(window);
+    result->hwnd = (HWND)wm_window_handle_native_from_wm(window);
     result->frame_count = BUSTER_D3D12_FRAME_COUNT;
 
     RECT client_rect;
@@ -5007,11 +5011,11 @@ BUSTER_GLOBAL_LOCAL void metal_window_update_drawable_size(RenderingWindowHandle
     }
 }
 
-RenderingWindowHandle* rendering_window_initialize(Arena* arena, OsWindowingHandle* windowing, RenderingHandle* rendering, OsWindowHandle* window)
+RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windowing, RenderingHandle* rendering, WmWindowHandle* window)
 {
     BUSTER_UNUSED(windowing);
     RenderingWindowHandle* result = arena_allocate(arena, RenderingWindowHandle, 1);
-    result->ns_window = (id)native_window_handle_from_os_window_handle(window);
+    result->ns_window = (id)wm_window_handle_native_from_wm(window);
     result->content_view = metal_msg_id(result->ns_window, "contentView");
     result->frame_index = 0;
     result->frame_count = BUSTER_METAL_FRAME_COUNT;

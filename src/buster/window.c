@@ -22,26 +22,26 @@
 #endif
 
 #if defined(__linux__)
-typedef struct OsWindowingHandle OsWindowingHandle;
-struct OsWindowingHandle
+typedef struct WmHandle WmHandle;
+struct WmHandle
 {
     xcb_connection_t* connection;
     const xcb_setup_t* setup;
 };
 #elif defined(__APPLE__)
-typedef struct OsWindowingHandle OsWindowingHandle;
-struct OsWindowingHandle
+typedef struct WmHandle WmHandle;
+struct WmHandle
 {
     id application;
 };
 #elif defined(_WIN32)
-typedef struct OsWindowingHandle OsWindowingHandle;
-struct OsWindowingHandle
+typedef struct WmHandle WmHandle;
+struct WmHandle
 {
     HINSTANCE instance;
 };
 #endif
-BUSTER_GLOBAL_LOCAL OsWindowingHandle windowing_handle = {0};
+BUSTER_GLOBAL_LOCAL WmHandle windowing_handle = {0};
 
 #if defined(__APPLE__)
 #ifndef BUSTER_APPLE_RUNTIME_TYPES
@@ -114,9 +114,9 @@ BUSTER_GLOBAL_LOCAL void buster_release(id object)
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL OsWindowingEvent* os_windowing_event_push(Arena* arena, OsWindowingEventList* event_list, OsWindowingEvent event)
+BUSTER_GLOBAL_LOCAL WmEvent* wm_event_push(Arena* arena, WmEventList* event_list, WmEvent event)
 {
-    OsWindowingEvent* result = arena_allocate(arena, OsWindowingEvent, 1);
+    WmEvent* result = arena_allocate(arena, WmEvent, 1);
     *result = event;
 
     if (event_list->last)
@@ -179,9 +179,9 @@ BUSTER_GLOBAL_LOCAL LRESULT window_callback(HWND window_handle, UINT message, WP
 }
 #endif
 
-OsWindowingHandle* os_windowing_initialize(void)
+WmHandle* wm_initialize(void)
 {
-    OsWindowingHandle* result = {0};
+    WmHandle* result = {0};
     bool success = false;
 #if defined(__linux__)
     // XCB allocates global state via pthread_once on first connection that it
@@ -195,7 +195,7 @@ OsWindowingHandle* os_windowing_initialize(void)
         const xcb_setup_t* setup = xcb_get_setup(connection);
         if (setup)
         {
-            windowing_handle = (OsWindowingHandle){
+            windowing_handle = (WmHandle){
                 .connection = connection,
                 .setup = setup,
             };
@@ -253,7 +253,7 @@ OsWindowingHandle* os_windowing_initialize(void)
     return result;
 }
 
-void os_windowing_deinitialize(OsWindowingHandle* windowing)
+void wm_deinitialize(WmHandle* windowing)
 {
 #if defined(__linux__)
     if (windowing->connection)
@@ -281,9 +281,9 @@ void os_windowing_deinitialize(OsWindowingHandle* windowing)
 #endif
 }
 
-OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate create)
+WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
 {
-    OsWindowHandle* result = {0};
+    WmWindowHandle* result = {0};
 #if defined(__linux__)
     xcb_connection_t* connection = windowing->connection;
     const xcb_setup_t* setup = windowing->setup;
@@ -339,7 +339,7 @@ OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate cr
         xcb_flush(connection);
 
         BUSTER_CHECK(window_id != 0);
-        result = (OsWindowHandle*)(u64)window_id;
+        result = (WmWindowHandle*)(u64)window_id;
     }
     else
     {
@@ -371,7 +371,7 @@ OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate cr
         ((void (*)(id, SEL, bool))objc_msgSend)(windowing_handle.application, buster_sel("activateIgnoringOtherApps:"), true);
         buster_apple_windows[buster_apple_window_count] = window;
         buster_apple_window_count += 1;
-        result = (OsWindowHandle*)window;
+        result = (WmWindowHandle*)window;
     }
 #elif defined(_WIN32)
     TemporalArena temp = scratch_begin(0, 0);
@@ -396,7 +396,7 @@ OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate cr
     if (window_handle)
     {
         ShowWindow(window_handle, SW_SHOW);
-        result = (OsWindowHandle*)window_handle;
+        result = (WmWindowHandle*)window_handle;
     }
 
     scratch_end(temp);
@@ -405,14 +405,14 @@ OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate cr
     return result;
 }
 
-OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWindowHandle* os_window)
+WmWindowSize wm_window_get_framebuffer_size(WmHandle* windowing, WmWindowHandle* wm_window)
 {
-    OsWindowSize result = {0};
-    if (os_window)
+    WmWindowSize result = {0};
+    if (wm_window)
     {
 #if defined(__linux__)
         xcb_connection_t* connection = windowing->connection;
-        xcb_window_t window = (xcb_window_t)(u64)os_window;
+        xcb_window_t window = (xcb_window_t)(u64)wm_window;
         xcb_get_geometry_cookie_t cookie = xcb_get_geometry(connection, window);
         xcb_get_geometry_reply_t* reply = xcb_get_geometry_reply(connection, cookie, 0);
         result.width = reply->width;
@@ -420,7 +420,7 @@ OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWind
         free(reply);
 #elif defined(__APPLE__)
         BUSTER_UNUSED(windowing);
-        id window = (id)os_window;
+        id window = (id)wm_window;
         id content_view = buster_msg_id(window, "contentView");
         BusterCGRect bounds = ((BusterCGRect (*)(id, SEL))buster_msg_send_stret)(content_view, buster_sel("bounds"));
         BusterCGSize backing_size = ((BusterCGSize (*)(id, SEL, BusterCGSize))objc_msgSend)(content_view, buster_sel("convertSizeToBacking:"), bounds.size);
@@ -429,7 +429,7 @@ OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWind
 #elif defined(_WIN32)
         BUSTER_UNUSED(windowing);
         RECT rect;
-        GetClientRect((HWND)os_window, &rect);
+        GetClientRect((HWND)wm_window, &rect);
         result.width = (u16)(rect.right - rect.left);
         result.height = (u16)(rect.bottom - rect.top);
 #else
@@ -438,7 +438,7 @@ OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWind
     return result;
 }
 
-void* native_windowing_handle_from_os_windowing_handle(OsWindowingHandle* windowing)
+void* wm_handle_native_from_wm(WmHandle* windowing)
 {
 #if defined(__linux__)
     return windowing->connection;
@@ -450,7 +450,7 @@ void* native_windowing_handle_from_os_windowing_handle(OsWindowingHandle* window
 #endif
 }
 
-void* native_window_handle_from_os_window_handle(OsWindowHandle* window)
+void* wm_window_handle_native_from_wm(WmWindowHandle* window)
 {
 #if defined(__linux__)
     return window;
@@ -462,9 +462,9 @@ void* native_window_handle_from_os_window_handle(OsWindowHandle* window)
 #endif
 }
 
-OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* windowing)
+WmEventList wm_poll_events(Arena* arena, WmHandle* windowing)
 {
-    OsWindowingEventList event_list = {0};
+    WmEventList event_list = {0};
 
 #if defined(__linux__)
     xcb_generic_event_t *event;
@@ -1994,9 +1994,9 @@ OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* w
                 if (client_message_event->data.data32[0] == atom_replies[X11_ATOM_WM_DELETE_WINDOW]->atom)
                 {
                     string_print(S8("WM_DELETE_WINDOW"));
-                    BUSTER_UNUSED(os_windowing_event_push(arena, &event_list, (OsWindowingEvent) {
-                        .kind = OS_WINDOWING_EVENT_WINDOW_CLOSE,
-                        .window = (OsWindowHandle*)(u64)client_message_event->window,
+                    BUSTER_UNUSED(wm_event_push(arena, &event_list, (WmEvent) {
+                        .kind = WM_EVENT_WINDOW_CLOSE,
+                        .window = (WmWindowHandle*)(u64)client_message_event->window,
                     }));
 
                     unimplemented = false;
@@ -2091,9 +2091,9 @@ OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* w
         id window = buster_apple_windows[i];
         if (!buster_msg_bool(window, "isVisible"))
         {
-            BUSTER_UNUSED(os_windowing_event_push(arena, &event_list, (OsWindowingEvent) {
-                .kind = OS_WINDOWING_EVENT_WINDOW_CLOSE,
-                .window = (OsWindowHandle*)window,
+            BUSTER_UNUSED(wm_event_push(arena, &event_list, (WmEvent) {
+                .kind = WM_EVENT_WINDOW_CLOSE,
+                .window = (WmWindowHandle*)window,
             }));
             for (u32 j = i + 1; j < buster_apple_window_count; j += 1)
             {
@@ -2122,9 +2122,9 @@ OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* w
 
     for (u32 i = 0; i < win32_close_event_count; i += 1)
     {
-        BUSTER_UNUSED(os_windowing_event_push(arena, &event_list, (OsWindowingEvent) {
-            .kind = OS_WINDOWING_EVENT_WINDOW_CLOSE,
-            .window = (OsWindowHandle*)win32_close_events[i],
+        BUSTER_UNUSED(wm_event_push(arena, &event_list, (WmEvent) {
+            .kind = WM_EVENT_WINDOW_CLOSE,
+            .window = (WmWindowHandle*)win32_close_events[i],
         }));
     }
     win32_close_event_count = 0;

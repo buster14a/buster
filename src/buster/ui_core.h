@@ -268,7 +268,7 @@ struct UI_State
     Arena* build_arenas[2];
     RenderingHandle* rendering;
     RenderingWindowHandle* rendering_window;
-    OsWindowHandle* window;
+    WmWindowHandle* window;
     u64 build_count;
     f64 frame_time;
     UI_Widget* root;
@@ -344,7 +344,7 @@ BUSTER_V_DECL UI_State* ui_state;
 BUSTER_F_DECL UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* window);
 BUSTER_F_DECL void ui_state_deinitialize(UI_State* state);
 BUSTER_F_DECL void ui_state_select(UI_State* state);
-BUSTER_F_DECL u8 ui_build_begin(OsWindowingHandle* windowing, OsWindowHandle* window, f64 frame_time, OsWindowingEventList* event_queue);
+BUSTER_F_DECL u8 ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, WmEventList* event_queue);
 BUSTER_F_DECL void ui_build_end(void);
 BUSTER_F_DECL void ui_draw(void);
 BUSTER_F_DECL UI_Signal ui_signal_from_widget(UI_Widget* widget);

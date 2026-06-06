@@ -49,7 +49,7 @@ struct RectDraw
 };
 
 BUSTER_F_DECL RenderingHandle* rendering_initialize(Arena* arena);
-BUSTER_F_DECL RenderingWindowHandle* rendering_window_initialize(Arena* arena, OsWindowingHandle* windowing, RenderingHandle* rendering, OsWindowHandle* window);
+BUSTER_F_DECL RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windowing, RenderingHandle* rendering, WmWindowHandle* window);
 BUSTER_F_DECL void rendering_window_rect_texture_update_begin(RenderingWindowHandle* window);
 BUSTER_F_DECL TextureIndex white_texture_create(Arena* arena, RenderingHandle* rendering);
 BUSTER_F_DECL void rendering_window_queue_rect_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, RectTextureSlot slot, TextureIndex texture_index);

@@ -672,32 +672,6 @@ struct FontTextureAtlas
 //   String8List strings;
 // };
 
-typedef struct OsWindowHandle OsWindowHandle;
-
-typedef enum OsWindowingEventKind
-{
-    OS_WINDOWING_EVENT_WINDOW_CLOSE,
-    OS_WINDOWING_EVENT_COUNT,
-} OsWindowingEventKind;
-
-typedef struct OsWindowingEvent OsWindowingEvent;
-struct OsWindowingEvent
-{
-    OsWindowingEvent* previous;
-    OsWindowingEvent* next;
-    OsWindowHandle* window;
-    OsWindowingEventKind kind;
-    u8 reserved[4];
-};
-
-typedef struct OsWindowingEventList OsWindowingEventList;
-struct OsWindowingEventList
-{
-    OsWindowingEvent* first;
-    OsWindowingEvent* last;
-    u64 count;
-};
-
 #define FLAG_ARRAY_LENGTH(T, count) ((count) / sizeof(T) + ((count) % sizeof(T) != 0))
 #define FLAG_ARRAY_GENERIC(T, N, count) T N[FLAG_ARRAY_LENGTH(T, count)]
 #define FLAG_ARRAY_U64(N, E, Count) FLAG_ARRAY_GENERIC(u64, N, (u64)(Count))

@@ -375,7 +375,7 @@ UI_Size ui_em(f32 value, f32 strictness)
     };
 }
 
-u8 ui_build_begin(OsWindowingHandle* windowing, OsWindowHandle* window, f64 frame_time, OsWindowingEventList* event_queue)
+u8 ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, WmEventList* event_queue)
 {
     ui_state->build_count += 1;
     Arena* build_arena = ui_build_arena();
@@ -389,7 +389,7 @@ u8 ui_build_begin(OsWindowingHandle* windowing, OsWindowHandle* window, f64 fram
     u32 event_index = 0;
     u64 event_count = event_queue->count;
 
-    for (OsWindowingEvent* event = event_queue->first; open & (event_index < event_count); event_index += 1, event = event->next)
+    for (WmEvent* event = event_queue->first; open & (event_index < event_count); event_index += 1, event = event->next)
     {
         // switch (event->type)
         // {
@@ -471,7 +471,7 @@ u8 ui_build_begin(OsWindowingHandle* windowing, OsWindowHandle* window, f64 fram
             }
         }
 
-        OsWindowSize framebuffer_size = os_window_get_framebuffer_size(windowing, window);
+        WmWindowSize framebuffer_size = wm_window_get_framebuffer_size(windowing, window);
         ui_push_next_only(pref_width, ui_pixels(framebuffer_size.width, 1.0f));
         ui_push_next_only(pref_height, ui_pixels(framebuffer_size.height, 1.0f));
         ui_push_next_only(child_layout_axis, AXIS2_Y);

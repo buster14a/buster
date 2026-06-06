@@ -2,33 +2,58 @@
 
 #include <buster/base.h>
 
-typedef struct OsWindowingHandle OsWindowingHandle;
-typedef struct OsWindowHandle OsWindowHandle;
+typedef struct WmHandle WmHandle;
+typedef struct WmWindowHandle WmWindowHandle;
 
-typedef struct OsWindowSize OsWindowSize;
-struct OsWindowSize
+typedef enum WmEventKind
+{
+    WM_EVENT_WINDOW_CLOSE,
+    WM_EVENT_COUNT,
+} WmEventKind;
+
+typedef struct WmEvent WmEvent;
+struct WmEvent
+{
+    WmEvent* previous;
+    WmEvent* next;
+    WmWindowHandle* window;
+    WmEventKind kind;
+    u8 reserved[4];
+};
+
+typedef struct WmEventList WmEventList;
+struct WmEventList
+{
+    WmEvent* first;
+    WmEvent* last;
+    u64 count;
+};
+
+
+typedef struct WmWindowSize WmWindowSize;
+struct WmWindowSize
 {
     u16 width;
     u16 height;
 };
 
-typedef void OsWindowRefresh(OsWindowHandle* window, void* context);
+typedef void WmWindowRefresh(WmWindowHandle* window, void* context);
 
-typedef struct OsWindowCreate OsWindowCreate;
-struct OsWindowCreate
+typedef struct WmWindowCreate WmWindowCreate;
+struct WmWindowCreate
 {
     String8 name;
     void* context;
-    OsWindowRefresh* refresh_callback;
-    OsWindowSize size;
+    WmWindowRefresh* refresh_callback;
+    WmWindowSize size;
     u8 reserved[4];
 };
 
-BUSTER_F_DECL OsWindowingHandle* os_windowing_initialize(void);
-BUSTER_F_DECL void os_windowing_deinitialize(OsWindowingHandle* windowing);
-BUSTER_F_DECL OsWindowHandle* os_window_create(OsWindowingHandle* windowing, OsWindowCreate create);
-BUSTER_F_DECL OsWindowSize os_window_get_framebuffer_size(OsWindowingHandle* windowing, OsWindowHandle* os_window);
-BUSTER_F_DECL OsWindowingEventList os_windowing_poll_events(Arena* arena, OsWindowingHandle* windowing);
+BUSTER_F_DECL WmHandle* wm_initialize(void);
+BUSTER_F_DECL void wm_deinitialize(WmHandle* windowing);
+BUSTER_F_DECL WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create);
+BUSTER_F_DECL WmWindowSize wm_window_get_framebuffer_size(WmHandle* windowing, WmWindowHandle* wm_window);
+BUSTER_F_DECL WmEventList wm_poll_events(Arena* arena, WmHandle* windowing);
 
-BUSTER_F_DECL void* native_windowing_handle_from_os_windowing_handle(OsWindowingHandle* windowing);
-BUSTER_F_DECL void* native_window_handle_from_os_window_handle(OsWindowHandle* window);
+BUSTER_F_DECL void* wm_handle_native_from_wm(WmHandle* windowing);
+BUSTER_F_DECL void* wm_window_handle_native_from_wm(WmWindowHandle* window);
