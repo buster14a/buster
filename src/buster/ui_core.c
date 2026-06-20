@@ -159,7 +159,6 @@ UI_EventNode* ui_event_list_push(Arena* arena, UI_EventList* list, UI_Event* eve
     UI_EventNode* node = arena_allocate(arena, UI_EventNode, 1);
     memset(node, 0, sizeof(*node));
     node->v = *event;
-    node->v.node = node;
     if (node->v.string.length != 0)
     {
         node->v.string = string_duplicate_arena(arena, node->v.string, false);
@@ -191,26 +190,33 @@ void ui_eat_event_node(UI_EventList* list, UI_EventNode* node)
     }
 }
 
-bool ui_next_event(UI_Event** event)
+UI_EventIterator ui_event_iterator_initialize(UI_State* state)
 {
-    UI_EventNode* node = ui_state->events.first;
-    if (*event)
+    UI_EventIterator iterator = {
+        .list = state->events,
+        .current = state->events.first,
+    };
+    return iterator;
+}
+
+UI_Event* ui_next_event(UI_EventIterator* iterator)
+{
+    UI_Event* result = 0;
+    UI_EventNode* current = iterator->current;
+    if (current)
     {
-        node = (*event)->node ? (*event)->node->next : 0;
-        *event = 0;
+        result = &current->v;
+        iterator->current = current->next;
     }
-    if (node)
-    {
-        *event = &node->v;
-    }
-    return *event != 0;
+    return result;
 }
 
 void ui_eat_event(UI_Event* event)
 {
-    if (event && event->node)
+    if (event)
     {
-        ui_eat_event_node(&ui_state->events, event->node);
+        UI_EventNode* event_node = BUSTER_FIELD_PARENT_POINTER(UI_EventNode, v, event);
+        ui_eat_event_node(&ui_state->events, event_node);
     }
 }
 
@@ -1001,7 +1007,9 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         sig.hovering = 1;
     }
 
-    for (UI_Event* event = 0; ui_next_event(&event);)
+    UI_EventIterator iterator = ui_event_iterator_initialize(ui_state);
+    UI_Event* event;
+    while ((event = ui_next_event(&iterator)))
     {
         bool is_mouse = false;
         UI_MouseButtonKind button = ui_mouse_button_kind_from_key(event->key, &is_mouse);

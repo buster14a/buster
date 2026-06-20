@@ -30,7 +30,6 @@ typedef struct UI_EventNode UI_EventNode;
 typedef struct UI_Event UI_Event;
 struct UI_Event
 {
-    UI_EventNode* node;
     UI_EventKind kind;
     WmKey key;
     u8 modifiers;
@@ -52,6 +51,13 @@ struct UI_EventList
     UI_EventNode* first;
     UI_EventNode* last;
     u64 count;
+};
+
+typedef struct UI_EventIterator UI_EventIterator;
+struct UI_EventIterator
+{
+    UI_EventList list;
+    UI_EventNode* current;
 };
 
 typedef struct UI_Key UI_Key;
@@ -410,7 +416,7 @@ BUSTER_F_DECL void ui_draw(void);
 // UI event queue. ui_build_begin converts WmEventList input into this list.
 BUSTER_F_DECL UI_EventNode* ui_event_list_push(Arena* arena, UI_EventList* list, UI_Event* event);
 BUSTER_F_DECL void ui_eat_event_node(UI_EventList* list, UI_EventNode* node);
-BUSTER_F_DECL bool ui_next_event(UI_Event** event);
+BUSTER_F_DECL UI_Event* ui_next_event(UI_EventIterator* iterator);
 BUSTER_F_DECL void ui_eat_event(UI_Event* event);
 
 // Keys, sizes, boxes, interaction
