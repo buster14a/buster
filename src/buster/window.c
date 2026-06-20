@@ -1888,2041 +1888,1906 @@ WmEventList wm_poll_events(Arena* arena, WmHandle* windowing)
             continue;
         }
 
-        string_print(S8("Event type: {u8}. ("), event_type);
-        bool unimplemented = true;
-
         bool filtered = windowing->xim && xcb_xim_filter_event(windowing->xim, event);
-        if (filtered)
+        if (!filtered)
         {
-            unimplemented = false;
-        }
-        else if (windowing->xkb_base_event && event_type == windowing->xkb_base_event)
-        {
-            unimplemented = !wm_x11_handle_xkb_event(windowing, event);
-        }
-        else
-        {
-            switch (event_type)
+            if (windowing->xkb_base_event && event_type == windowing->xkb_base_event)
             {
-                break;
-                case XCB_KEY_PRESS: // 2
-                case XCB_KEY_RELEASE: // 3
+                wm_x11_handle_xkb_event(windowing, event);
+            }
+            else
+            {
+                switch (event_type)
                 {
-                    switch (event_type)
+                    break;
+                    case XCB_KEY_PRESS: // 2
+                    case XCB_KEY_RELEASE: // 3
                     {
-                        break; case XCB_KEY_PRESS: string_print(S8("KEY_PRESS"));
-                        break; case XCB_KEY_RELEASE: string_print(S8("KEY_RELEASE"));
-                        break; default: BUSTER_UNREACHABLE();
-                    }
-
-                    xcb_key_press_event_t* key_event = (xcb_key_press_event_t*)event;
-                    WmWindowHandle* window = wm_x11_window_from_xcb(windowing, key_event->event);
-                    if (window)
-                    {
-                        windowing->focused_window = window;
-                    }
-
-                    u8 modifiers = wm_x11_modifiers_from_state(key_event->state);
-                    bool text_handled_by_xim = false;
-
-                    if (event_type == XCB_KEY_PRESS && windowing->xim && window && window->ic)
-                    {
-                        text_handled_by_xim = xcb_xim_forward_event(windowing->xim, window->ic, key_event);
-                    }
-
-                    xkb_keysym_t key_symbol = XKB_KEY_NoSymbol;
-                    xkb_keysym_t key_symbol_without_modifiers = XKB_KEY_NoSymbol;
-                    if (windowing->xkb_state)
-                    {
-                        key_symbol = xkb_state_key_get_one_sym(windowing->xkb_state, key_event->detail);
-                        key_symbol_without_modifiers = key_symbol;
-                    }
-                    else if (windowing->key_symbols)
-                    {
-                        int column = (key_event->state & XCB_KEY_BUT_MASK_SHIFT) ? 1 : 0;
-                        key_symbol = xcb_key_symbols_get_keysym(windowing->key_symbols, key_event->detail, column);
-                        key_symbol_without_modifiers = xcb_key_symbols_get_keysym(windowing->key_symbols, key_event->detail, 0);
-                    }
-
-                    if (event_type == XCB_KEY_PRESS)
-                    {
-                        struct xkb_compose_state* compose_state = window ? window->xkb_compose_state : 0;
-                        bool mod_control = (key_event->state & XCB_KEY_BUT_MASK_CONTROL) != 0;
-                        bool mod_alt = (key_event->state & XCB_KEY_BUT_MASK_MOD_1) != 0;
-
-                        int composed_text_length = 0;
-
-                        if (event_type == XCB_KEY_PRESS && !text_handled_by_xim && (windowing->xkb_state || windowing->key_symbols) && !mod_control && !mod_alt)
+                        xcb_key_press_event_t* key_event = (xcb_key_press_event_t*)event;
+                        WmWindowHandle* window = wm_x11_window_from_xcb(windowing, key_event->event);
+                        if (window)
                         {
-                            char text_buffer[64] = {0};
-                            bool consumed = false;
+                            windowing->focused_window = window;
+                        }
 
-                            if (windowing->xkb_state)
+                        u8 modifiers = wm_x11_modifiers_from_state(key_event->state);
+                        bool text_handled_by_xim = false;
+
+                        if (event_type == XCB_KEY_PRESS && windowing->xim && window && window->ic)
+                        {
+                            text_handled_by_xim = xcb_xim_forward_event(windowing->xim, window->ic, key_event);
+                        }
+
+                        xkb_keysym_t key_symbol = XKB_KEY_NoSymbol;
+                        xkb_keysym_t key_symbol_without_modifiers = XKB_KEY_NoSymbol;
+                        if (windowing->xkb_state)
+                        {
+                            key_symbol = xkb_state_key_get_one_sym(windowing->xkb_state, key_event->detail);
+                            key_symbol_without_modifiers = key_symbol;
+                        }
+                        else if (windowing->key_symbols)
+                        {
+                            int column = (key_event->state & XCB_KEY_BUT_MASK_SHIFT) ? 1 : 0;
+                            key_symbol = xcb_key_symbols_get_keysym(windowing->key_symbols, key_event->detail, column);
+                            key_symbol_without_modifiers = xcb_key_symbols_get_keysym(windowing->key_symbols, key_event->detail, 0);
+                        }
+
+                        if (event_type == XCB_KEY_PRESS)
+                        {
+                            struct xkb_compose_state* compose_state = window ? window->xkb_compose_state : 0;
+                            bool mod_control = (key_event->state & XCB_KEY_BUT_MASK_CONTROL) != 0;
+                            bool mod_alt = (key_event->state & XCB_KEY_BUT_MASK_MOD_1) != 0;
+
+                            int composed_text_length = 0;
+
+                            if (event_type == XCB_KEY_PRESS && !text_handled_by_xim && (windowing->xkb_state || windowing->key_symbols) && !mod_control && !mod_alt)
                             {
-                                if (compose_state)
-                                {
-                                    enum xkb_compose_feed_result feed_result = xkb_compose_state_feed(compose_state, key_symbol);
-                                    if (feed_result == XKB_COMPOSE_FEED_ACCEPTED)
-                                    {
-                                        enum xkb_compose_status compose_status = xkb_compose_state_get_status(compose_state);
-                                        switch (compose_status)
-                                        {
-                                            break; case XKB_COMPOSE_COMPOSED:
-                                            {
-                                                composed_text_length = xkb_compose_state_get_utf8(compose_state, text_buffer, sizeof(text_buffer));
-                                                if (composed_text_length == 0)
-                                                {
-                                                    xkb_keysym_t composed_key_symbol = xkb_compose_state_get_one_sym(compose_state);
-                                                    int text_length_with_null = xkb_keysym_to_utf8(composed_key_symbol, text_buffer, sizeof(text_buffer));
-                                                    if (text_length_with_null > 0)
-                                                    {
-                                                        composed_text_length = text_length_with_null - 1;
-                                                    }
-                                                }
+                                char text_buffer[64] = {0};
+                                bool consumed = false;
 
-                                                consumed = true;
-                                                xkb_compose_state_reset(compose_state);
-                                            }
-                                            break; case XKB_COMPOSE_COMPOSING:
+                                if (windowing->xkb_state)
+                                {
+                                    if (compose_state)
+                                    {
+                                        enum xkb_compose_feed_result feed_result = xkb_compose_state_feed(compose_state, key_symbol);
+                                        if (feed_result == XKB_COMPOSE_FEED_ACCEPTED)
+                                        {
+                                            enum xkb_compose_status compose_status = xkb_compose_state_get_status(compose_state);
+                                            switch (compose_status)
                                             {
-                                                consumed = true;
-                                            }
-                                            break; case XKB_COMPOSE_CANCELLED:
-                                            {
-                                                xkb_compose_state_reset(compose_state);
-                                            }
-                                            break; case XKB_COMPOSE_NOTHING:
-                                            {
+                                                break; case XKB_COMPOSE_COMPOSED:
+                                                {
+                                                    composed_text_length = xkb_compose_state_get_utf8(compose_state, text_buffer, sizeof(text_buffer));
+                                                    if (composed_text_length == 0)
+                                                    {
+                                                        xkb_keysym_t composed_key_symbol = xkb_compose_state_get_one_sym(compose_state);
+                                                        int text_length_with_null = xkb_keysym_to_utf8(composed_key_symbol, text_buffer, sizeof(text_buffer));
+                                                        if (text_length_with_null > 0)
+                                                        {
+                                                            composed_text_length = text_length_with_null - 1;
+                                                        }
+                                                    }
+
+                                                    consumed = true;
+                                                    xkb_compose_state_reset(compose_state);
+                                                }
+                                                break; case XKB_COMPOSE_COMPOSING:
+                                                {
+                                                    consumed = true;
+                                                }
+                                                break; case XKB_COMPOSE_CANCELLED:
+                                                {
+                                                    xkb_compose_state_reset(compose_state);
+                                                }
+                                                break; case XKB_COMPOSE_NOTHING:
+                                                {
+                                                }
                                             }
                                         }
                                     }
+
+                                    if (!consumed && composed_text_length == 0)
+                                    {
+                                        composed_text_length = xkb_state_key_get_utf8(windowing->xkb_state, key_event->detail, text_buffer, sizeof(text_buffer));
+                                    }
+                                }
+                                else
+                                {
+                                    int text_length_with_nul = xkb_keysym_to_utf8(key_symbol, text_buffer, sizeof(text_buffer));
+                                    if (text_length_with_nul > 0)
+                                    {
+                                        composed_text_length = text_length_with_nul - 1;
+                                    }
                                 }
 
-                                if (!consumed && composed_text_length == 0)
+                                if (composed_text_length < 0)
                                 {
-                                    composed_text_length = xkb_state_key_get_utf8(windowing->xkb_state, key_event->detail, text_buffer, sizeof(text_buffer));
+                                    BUSTER_TODO();
                                 }
+
+                                u64 text_length = (u64)composed_text_length;
+
+                                if (text_length > 0 && (u64)text_length < sizeof(text_buffer))
+                                {
+                                    String8 text = string_duplicate_arena(arena, string_from_pointer_length(text_buffer, text_length), false);
+                                    wm_event_push((WmEvent) {
+                                            .kind = WM_EVENT_TEXT_INPUT,
+                                            .window = window,
+                                            .text = text,
+                                            });
+                                }
+                            }
+                        }
+
+                        if (windowing->xkb_state)
+                        {
+                            enum xkb_key_direction direction = event_type == XCB_KEY_PRESS ? XKB_KEY_DOWN : XKB_KEY_UP;
+                            xkb_state_update_key(windowing->xkb_state, key_event->detail, direction);
+                        }
+
+                        WmKey key = WM_KEY_NULL;
+                        if (windowing->xkb_keymap)
+                        {
+                            key = wm_x11_key_from_xkb_name(xkb_keymap_key_get_name(windowing->xkb_keymap, key_event->detail));
+                        }
+
+                        if (key == WM_KEY_NULL)
+                        {
+                            xkb_keysym_t key_map_symbol = key_symbol;
+                            if (!windowing->xkb_keymap && key_symbol_without_modifiers != XKB_KEY_NoSymbol)
+                            {
+                                key_map_symbol = key_symbol_without_modifiers;
+                            }
+
+                            switch (key_map_symbol)
+                            {
+                                break; case XKB_KEY_Escape: key = WM_KEY_ESC;
+
+                                break; case XKB_KEY_F1: key = WM_KEY_F1;
+                                break; case XKB_KEY_F2: key = WM_KEY_F2;
+                                break; case XKB_KEY_F3: key = WM_KEY_F3;
+                                break; case XKB_KEY_F4: key = WM_KEY_F4;
+                                break; case XKB_KEY_F5: key = WM_KEY_F5;
+                                break; case XKB_KEY_F6: key = WM_KEY_F6;
+                                break; case XKB_KEY_F7: key = WM_KEY_F7;
+                                break; case XKB_KEY_F8: key = WM_KEY_F8;
+                                break; case XKB_KEY_F9: key = WM_KEY_F9;
+                                break; case XKB_KEY_F10: key = WM_KEY_F10;
+                                break; case XKB_KEY_F11: key = WM_KEY_F11;
+                                break; case XKB_KEY_F12: key = WM_KEY_F12;
+                                break; case XKB_KEY_F13: key = WM_KEY_F13;
+                                break; case XKB_KEY_F14: key = WM_KEY_F14;
+                                break; case XKB_KEY_F15: key = WM_KEY_F15;
+                                break; case XKB_KEY_F16: key = WM_KEY_F16;
+                                break; case XKB_KEY_F17: key = WM_KEY_F17;
+                                break; case XKB_KEY_F18: key = WM_KEY_F18;
+                                break; case XKB_KEY_F19: key = WM_KEY_F19;
+                                break; case XKB_KEY_F20: key = WM_KEY_F20;
+                                break; case XKB_KEY_F21: key = WM_KEY_F21;
+                                break; case XKB_KEY_F22: key = WM_KEY_F22;
+                                break; case XKB_KEY_F23: key = WM_KEY_F23;
+                                break; case XKB_KEY_F24: key = WM_KEY_F24;
+                                break; case XKB_KEY_F25: key = WM_KEY_F25;
+                                break; case XKB_KEY_F26: key = WM_KEY_F26;
+                                break; case XKB_KEY_F27: key = WM_KEY_F27;
+                                break; case XKB_KEY_F28: key = WM_KEY_F28;
+                                break; case XKB_KEY_F29: key = WM_KEY_F29;
+                                break; case XKB_KEY_F30: key = WM_KEY_F30;
+                                break; case XKB_KEY_F31: key = WM_KEY_F31;
+                                break; case XKB_KEY_F32: key = WM_KEY_F32;
+                                break; case XKB_KEY_F33: key = WM_KEY_F33;
+                                break; case XKB_KEY_F34: key = WM_KEY_F34;
+                                break; case XKB_KEY_F35: key = WM_KEY_F35;
+
+                                break; case XKB_KEY_minus: key = WM_KEY_MINUS;
+                                break; case XKB_KEY_equal: key = WM_KEY_EQUAL;
+                                break; case XKB_KEY_BackSpace: key = WM_KEY_BACKSPACE;
+                                break; case XKB_KEY_Tab: key = WM_KEY_TAB;
+                                // break; case XKB_KEY_tick: key = WM_KEY_TICK;
+                                break; case XKB_KEY_asciitilde: key = WM_KEY_TILDE;
+                                break; case XKB_KEY_grave: key = WM_KEY_BACKTICK;
+                                break; case XKB_KEY_bracketleft: key = WM_KEY_LEFT_BRACKET;
+                                break; case XKB_KEY_bracketright: key = WM_KEY_RIGHT_BRACKET;
+                                break; case XKB_KEY_braceleft: key = WM_KEY_LEFT_BRACE;
+                                break; case XKB_KEY_braceright: key = WM_KEY_RIGHT_BRACE;
+                                break; case XKB_KEY_parenleft: key = WM_KEY_LEFT_PARENTHESIS;
+                                break; case XKB_KEY_parenright: key = WM_KEY_RIGHT_PARENTHESIS;
+                                break; case XKB_KEY_slash: key = WM_KEY_FORWARD_SLASH;
+                                break; case XKB_KEY_backslash: key = WM_KEY_BACKWARD_SLASH;
+                                break; case XKB_KEY_colon: key = WM_KEY_COLON;
+                                break; case XKB_KEY_semicolon: key = WM_KEY_SEMICOLON;
+                                break; case XKB_KEY_apostrophe: key = WM_KEY_SINGLE_QUOTE;
+                                break; case XKB_KEY_quotedbl: key = WM_KEY_DOUBLE_QUOTE;
+                                break; case XKB_KEY_Return: key = WM_KEY_RETURN;
+                                break; case XKB_KEY_comma: key = WM_KEY_COMMA;
+                                break; case XKB_KEY_period: key = WM_KEY_DOT;
+                                break; case XKB_KEY_space: key = WM_KEY_SPACE;
+                                break; case XKB_KEY_bar: key = WM_KEY_BAR;
+                                break; case XKB_KEY_underscore: key = WM_KEY_UNDERSCORE;
+                                break; case XKB_KEY_exclam: key = WM_KEY_EXCLAMATION;
+                                break; case XKB_KEY_at: key = WM_KEY_AT;
+                                break; case XKB_KEY_numbersign: key = WM_KEY_HASH;
+                                break; case XKB_KEY_dollar: key = WM_KEY_DOLLAR;
+                                break; case XKB_KEY_percent: key = WM_KEY_PERCENTAGE;
+                                break; case XKB_KEY_asciicircum: key = WM_KEY_CIRCUMFLEX;
+                                break; case XKB_KEY_ampersand: key = WM_KEY_AMPERSAND;
+                                break; case XKB_KEY_asterisk: key = WM_KEY_ASTERISK;
+                                break; case XKB_KEY_plus: key = WM_KEY_PLUS;
+
+                                break; case XKB_KEY_Menu: key = WM_KEY_MENU;
+                                break; case XKB_KEY_Caps_Lock: key = WM_KEY_CAPS_LOCK;
+                                break; case XKB_KEY_Scroll_Lock: key = WM_KEY_SCROLL_LOCK;
+                                break; case XKB_KEY_Insert: key = WM_KEY_INSERT;
+                                break; case XKB_KEY_Pause: key = WM_KEY_PAUSE;
+                                break; case XKB_KEY_Home: key = WM_KEY_HOME;
+                                break; case XKB_KEY_End: key = WM_KEY_END;
+                                break; case XKB_KEY_Page_Up: key = WM_KEY_PAGE_UP;
+                                break; case XKB_KEY_Page_Down: key = WM_KEY_PAGE_DOWN;
+                                break; case XKB_KEY_Delete: key = WM_KEY_DELETE;
+
+                                break; case XKB_KEY_Up: key = WM_KEY_UP;
+                                break; case XKB_KEY_Down: key = WM_KEY_DOWN;
+                                break; case XKB_KEY_Left: key = WM_KEY_LEFT;
+                                break; case XKB_KEY_Right: key = WM_KEY_RIGHT;
+
+                                break; case XKB_KEY_Control_L: key = WM_KEY_CONTROL;
+                                break; case XKB_KEY_Control_R: key = WM_KEY_CONTROL;
+                                break; case XKB_KEY_Shift_L: key = WM_KEY_SHIFT;
+                                break; case XKB_KEY_Shift_R: key = WM_KEY_SHIFT;
+                                break; case XKB_KEY_Alt_L: key = WM_KEY_ALT;
+                                break; case XKB_KEY_Alt_R: key = WM_KEY_ALT;
+
+                                break; case XKB_KEY_Num_Lock: key = WM_KEY_NUM_LOCK;
+                                break; case XKB_KEY_KP_Divide: key = WM_KEY_NUM_SLASH;
+                                break; case XKB_KEY_KP_Multiply: key = WM_KEY_NUM_STAR;
+                                break; case XKB_KEY_KP_Subtract: key = WM_KEY_NUM_MINUS;
+                                break; case XKB_KEY_KP_Add: key = WM_KEY_NUM_PLUS;
+                                break; case XKB_KEY_KP_Decimal: key = WM_KEY_NUM_DOT;
+
+                                break; case XKB_KEY_KP_0: key = WM_KEY_NUM_0;
+                                break; case XKB_KEY_KP_1: key = WM_KEY_NUM_1;
+                                break; case XKB_KEY_KP_2: key = WM_KEY_NUM_2;
+                                break; case XKB_KEY_KP_3: key = WM_KEY_NUM_3;
+                                break; case XKB_KEY_KP_4: key = WM_KEY_NUM_4;
+                                break; case XKB_KEY_KP_5: key = WM_KEY_NUM_5;
+                                break; case XKB_KEY_KP_6: key = WM_KEY_NUM_6;
+                                break; case XKB_KEY_KP_7: key = WM_KEY_NUM_7;
+                                break; case XKB_KEY_KP_8: key = WM_KEY_NUM_8;
+                                break; case XKB_KEY_KP_9: key = WM_KEY_NUM_9;
+
+                                break; case XKB_KEY_0: key = WM_KEY_0;
+                                break; case XKB_KEY_1: key = WM_KEY_1;
+                                break; case XKB_KEY_2: key = WM_KEY_2;
+                                break; case XKB_KEY_3: key = WM_KEY_3;
+                                break; case XKB_KEY_4: key = WM_KEY_4;
+                                break; case XKB_KEY_5: key = WM_KEY_5;
+                                break; case XKB_KEY_6: key = WM_KEY_6;
+                                break; case XKB_KEY_7: key = WM_KEY_7;
+                                break; case XKB_KEY_8: key = WM_KEY_8;
+                                break; case XKB_KEY_9: key = WM_KEY_9;
+
+                                break; case XKB_KEY_A: case XKB_KEY_a: key = WM_KEY_A;
+                                break; case XKB_KEY_B: case XKB_KEY_b: key = WM_KEY_B;
+                                break; case XKB_KEY_C: case XKB_KEY_c: key = WM_KEY_C;
+                                break; case XKB_KEY_D: case XKB_KEY_d: key = WM_KEY_D;
+                                break; case XKB_KEY_E: case XKB_KEY_e: key = WM_KEY_E;
+                                break; case XKB_KEY_F: case XKB_KEY_f: key = WM_KEY_F;
+                                break; case XKB_KEY_G: case XKB_KEY_g: key = WM_KEY_G;
+                                break; case XKB_KEY_H: case XKB_KEY_h: key = WM_KEY_H;
+                                break; case XKB_KEY_I: case XKB_KEY_i: key = WM_KEY_I;
+                                break; case XKB_KEY_J: case XKB_KEY_j: key = WM_KEY_J;
+                                break; case XKB_KEY_K: case XKB_KEY_k: key = WM_KEY_K;
+                                break; case XKB_KEY_L: case XKB_KEY_l: key = WM_KEY_L;
+                                break; case XKB_KEY_M: case XKB_KEY_m: key = WM_KEY_M;
+                                break; case XKB_KEY_N: case XKB_KEY_n: key = WM_KEY_N;
+                                break; case XKB_KEY_O: case XKB_KEY_o: key = WM_KEY_O;
+                                break; case XKB_KEY_P: case XKB_KEY_p: key = WM_KEY_P;
+                                break; case XKB_KEY_Q: case XKB_KEY_q: key = WM_KEY_Q;
+                                break; case XKB_KEY_R: case XKB_KEY_r: key = WM_KEY_R;
+                                break; case XKB_KEY_S: case XKB_KEY_s: key = WM_KEY_S;
+                                break; case XKB_KEY_T: case XKB_KEY_t: key = WM_KEY_T;
+                                break; case XKB_KEY_U: case XKB_KEY_u: key = WM_KEY_U;
+                                break; case XKB_KEY_V: case XKB_KEY_v: key = WM_KEY_V;
+                                break; case XKB_KEY_W: case XKB_KEY_w: key = WM_KEY_W;
+                                break; case XKB_KEY_X: case XKB_KEY_x: key = WM_KEY_X;
+                                break; case XKB_KEY_Y: case XKB_KEY_y: key = WM_KEY_Y;
+                                break; case XKB_KEY_Z: case XKB_KEY_z: key = WM_KEY_Z;
+
+                                break; default: {}
+                            }
+                        }
+
+                        wm_event_push((WmEvent) {
+                                .kind = event_type == XCB_KEY_PRESS ? WM_EVENT_KEY_PRESS : WM_EVENT_KEY_RELEASE,
+                                .window = window,
+                                .modifiers = modifiers,
+                                .key = key,
+                                });
+
+                        // xcb_key_press_event_t(3)                                                                   XCB Events                                                                  xcb_key_press_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_key_press_event_t - a key was pressed/released
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_key_press_event_t {
+                        //            uint8_t         response_type;
+                        //            xcb_keycode_t   detail;
+                        //            uint16_t        sequence;
+                        //            xcb_timestamp_t time;
+                        //            xcb_window_t    root;
+                        //            xcb_window_t    event;
+                        //            xcb_window_t    child;
+                        //            int16_t         root_x;
+                        //            int16_t         root_y;
+                        //            int16_t         event_x;
+                        //            int16_t         event_y;
+                        //            uint16_t        state;
+                        //            uint8_t         same_screen;
+                        //            uint8_t         pad0;
+                        //        } xcb_key_press_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_KEY_RELEASE. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        detail    The keycode (a number representing a physical key on the keyboard) of the key which was pressed.
+                        //
+                        //        time      Time when the event was generated (in milliseconds).
+                        //
+                        //        root      The root window of child.
+                        //
+                        //        event     NOT YET DOCUMENTED.
+                        //
+                        //        child     NOT YET DOCUMENTED.
+                        //
+                        //        root_x    The X coordinate of the pointer relative to the root window at the time of the event.
+                        //
+                        //        root_y    The Y coordinate of the pointer relative to the root window at the time of the event.
+                        //
+                        //        event_x   If same_screen is true, this is the X coordinate relative to the event window's origin. Otherwise, event_x will be set to zero.
+                        //
+                        //        event_y   If same_screen is true, this is the Y coordinate relative to the event window's origin. Otherwise, event_y will be set to zero.
+                        //
+                        //        state     The logical state of the pointer buttons and modifier keys just prior to the event.
+                        //
+                        //        same_screen
+                        //                  Whether the event window is on the same screen as the root window.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_grab_key(3), xcb_grab_keyboard(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                                 xcb_key_press_event_t(3)
+                    }
+                    break;
+                    case XCB_BUTTON_PRESS: // 4
+                    case XCB_BUTTON_RELEASE: // 5
+                    {
+                        xcb_button_press_event_t* button_event = (xcb_button_press_event_t*)event;
+                        u8 modifiers = wm_x11_modifiers_from_state(button_event->state);
+
+                        u8 button = button_event->detail;
+
+                        WmKey key = 0;
+
+                        switch (button)
+                        {
+                            break; case 1:
+                            {
+                                key = WM_KEY_MOUSE_LEFT;
+                            }
+                            break; case 2:
+                            {
+                                key = WM_KEY_MOUSE_MIDDLE;
+                            }
+                            break; case 3:
+                            {
+                                key = WM_KEY_MOUSE_RIGHT;
+                            }
+                            break; case 4:
+                            {
+                                key = WM_KEY_MOUSE_WHEEL_UP;
+                            }
+                            break; case 5:
+                            {
+                                key = WM_KEY_MOUSE_WHEEL_DOWN;
+                            }
+                            break; case 6:
+                            {
+                                key = WM_KEY_MOUSE_WHEEL_LEFT;
+                            }
+                            break; case 7:
+                            {
+                                key = WM_KEY_MOUSE_WHEEL_RIGHT;
+                            }
+                            break; case 8:
+                            {
+                                key = WM_KEY_MOUSE_BACK;
+                            }
+                            break; case 9:
+                            {
+                                key = WM_KEY_MOUSE_FORWARD;
+                            }
+                            break; case 10: case 11:
+                            {
+                            }
+                            break; default:
+                            {
+                            }
+                        }
+
+                        if (key != WM_KEY_NULL)
+                        {
+                            WmWindowHandle* window = wm_x11_window_from_xcb(windowing, button_event->event);
+                            wm_event_push((WmEvent) {
+                                    .kind = event_type == XCB_BUTTON_PRESS ? WM_EVENT_BUTTON_PRESS : WM_EVENT_BUTTON_RELEASE,
+                                    .window = window,
+                                    .key = key,
+                                    .modifiers = modifiers,
+                                    .position = (WmOffset) { .x = (WmUnit)button_event->event_x, .y = (WmUnit)button_event->event_y },
+                                    });
+                        }
+
+                        // xcb_button_press_event_t(3)                                                                XCB Events                                                               xcb_button_press_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_button_press_event_t - a mouse button was pressed/released
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_button_press_event_t {
+                        //            uint8_t         response_type;
+                        //            xcb_button_t    detail;
+                        //            uint16_t        sequence;
+                        //            xcb_timestamp_t time;
+                        //            xcb_window_t    root;
+                        //            xcb_window_t    event;
+                        //            xcb_window_t    child;
+                        //            int16_t         root_x;
+                        //            int16_t         root_y;
+                        //            int16_t         event_x;
+                        //            int16_t         event_y;
+                        //            uint16_t        state;
+                        //            uint8_t         same_screen;
+                        //            uint8_t         pad0;
+                        //        } xcb_button_press_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_BUTTON_RELEASE. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        detail    The keycode (a number representing a physical key on the keyboard) of the key which was pressed.
+                        //
+                        //        time      Time when the event was generated (in milliseconds).
+                        //
+                        //        root      The root window of child.
+                        //
+                        //        event     NOT YET DOCUMENTED.
+                        //
+                        //        child     NOT YET DOCUMENTED.
+                        //
+                        //        root_x    The X coordinate of the pointer relative to the root window at the time of the event.
+                        //
+                        //        root_y    The Y coordinate of the pointer relative to the root window at the time of the event.
+                        //
+                        //        event_x   If same_screen is true, this is the X coordinate relative to the event window's origin. Otherwise, event_x will be set to zero.
+                        //
+                        //        event_y   If same_screen is true, this is the Y coordinate relative to the event window's origin. Otherwise, event_y will be set to zero.
+                        //
+                        //        state     The logical state of the pointer buttons and modifier keys just prior to the event.
+                        //
+                        //        same_screen
+                        //                  Whether the event window is on the same screen as the root window.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_grab_button(3), xcb_grab_pointer(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                              xcb_button_press_event_t(3)
+
+                        xcb_button_t k = button_event->detail;
+                        BUSTER_UNUSED(k);
+                    }
+                    break; case XCB_MOTION_NOTIFY: // 6
+                    {
+                        xcb_motion_notify_event_t* motion_notify_event = (xcb_motion_notify_event_t*)event;
+                        wm_event_push((WmEvent) {
+                                .kind = WM_EVENT_MOUSE_MOVE,
+                                .window = wm_x11_window_from_xcb(windowing, motion_notify_event->event),
+                                .position = (WmOffset) { .x = (WmUnit)motion_notify_event->event_x, .y = (WmUnit)motion_notify_event->event_y },
+                                });
+                        // xcb_motion_notify_event_t(3)                                                               XCB Events                                                              xcb_motion_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_motion_notify_event_t - a key was pressed
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_motion_notify_event_t {
+                        //            uint8_t         response_type;
+                        //            uint8_t         detail;
+                        //            uint16_t        sequence;
+                        //            xcb_timestamp_t time;
+                        //            xcb_window_t    root;
+                        //            xcb_window_t    event;
+                        //            xcb_window_t    child;
+                        //            int16_t         root_x;
+                        //            int16_t         root_y;
+                        //            int16_t         event_x;
+                        //            int16_t         event_y;
+                        //            uint16_t        state;
+                        //            uint8_t         same_screen;
+                        //            uint8_t         pad0;
+                        //        } xcb_motion_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_MOTION_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        detail    The keycode (a number representing a physical key on the keyboard) of the key which was pressed.
+                        //
+                        //        time      Time when the event was generated (in milliseconds).
+                        //
+                        //        root      The root window of child.
+                        //
+                        //        event     NOT YET DOCUMENTED.
+                        //
+                        //        child     NOT YET DOCUMENTED.
+                        //
+                        //        root_x    The X coordinate of the pointer relative to the root window at the time of the event.
+                        //
+                        //        root_y    The Y coordinate of the pointer relative to the root window at the time of the event.
+                        //
+                        //        event_x   If same_screen is true, this is the X coordinate relative to the event window's origin. Otherwise, event_x will be set to zero.
+                        //
+                        //        event_y   If same_screen is true, this is the Y coordinate relative to the event window's origin. Otherwise, event_y will be set to zero.
+                        //
+                        //        state     The logical state of the pointer buttons and modifier keys just prior to the event.
+                        //
+                        //        same_screen
+                        //                  Whether the event window is on the same screen as the root window.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_grab_key(3), xcb_grab_keyboard(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                             xcb_motion_notify_event_t(3)
+                    }
+                    break;
+                    case XCB_ENTER_NOTIFY: // 7
+                    case XCB_LEAVE_NOTIFY: // 8
+                    {
+                        xcb_enter_notify_event_t* enter_leave_event = (xcb_enter_notify_event_t*)event;
+                        BUSTER_UNUSED(enter_leave_event);
+
+                        //                 xcb_enter_notify_event_t(3)                                                                XCB Events                                                               xcb_enter_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_enter_notify_event_t - the pointer is in a different window
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_enter_notify_event_t {
+                        //            uint8_t         response_type;
+                        //            uint8_t         detail;
+                        //            uint16_t        sequence;
+                        //            xcb_timestamp_t time;
+                        //            xcb_window_t    root;
+                        //            xcb_window_t    event;
+                        //            xcb_window_t    child;
+                        //            int16_t         root_x;
+                        //            int16_t         root_y;
+                        //            int16_t         event_x;
+                        //            int16_t         event_y;
+                        //            uint16_t        state;
+                        //            uint8_t         mode;
+                        //            uint8_t         same_screen_focus;
+                        //        } xcb_enter_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_LEAVE_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        detail    NOT YET DOCUMENTED.
+                        //
+                        //        time      NOT YET DOCUMENTED.
+                        //
+                        //        root      The root window for the final cursor position.
+                        //
+                        //        event     The window on which the event was generated.
+                        //
+                        //        child     If the event window has subwindows and the final pointer position is in one of them, then child is set to that subwindow, XCB_WINDOW_NONE otherwise.
+                        //
+                        //        root_x    The pointer X coordinate relative to root's origin at the time of the event.
+                        //
+                        //        root_y    The pointer Y coordinate relative to root's origin at the time of the event.
+                        //
+                        //        event_x   If event is on the same screen as root, this is the pointer X coordinate relative to the event window's origin.
+                        //
+                        //        event_y   If event is on the same screen as root, this is the pointer Y coordinate relative to the event window's origin.
+                        //
+                        //        state     NOT YET DOCUMENTED.
+                        //
+                        //        mode
+                        //
+                        //        same_screen_focus
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                              xcb_enter_notify_event_t(3)
+                    }
+                    break;
+                    case XCB_FOCUS_IN: // 9
+                    case XCB_FOCUS_OUT: // 10
+                    {
+                        //                 xcb_focus_in_event_t(3)                                                                    XCB Events                                                                   xcb_focus_in_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_focus_in_event_t - NOT YET DOCUMENTED
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_focus_in_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      detail;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t event;
+                        //            uint8_t      mode;
+                        //            uint8_t      pad0[3];
+                        //        } xcb_focus_in_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_FOCUS_OUT. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        detail
+                        //
+                        //        event     The window on which the focus event was generated. This is the window used by the X server to report the event.
+                        //
+                        //        mode
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                                  xcb_focus_in_event_t(3)
+
+                        xcb_focus_in_event_t* focus_event = (xcb_focus_in_event_t*)event;
+                        WmWindowHandle* focus_window = wm_x11_window_from_xcb(windowing, focus_event->event);
+                        if (focus_window)
+                        {
+                            if (event_type == XCB_FOCUS_IN)
+                            {
+                                if (windowing->focused_window && windowing->focused_window != focus_window)
+                                {
+                                    windowing->focused_window->focused = false;
+                                    if (windowing->xim && windowing->focused_window->ic)
+                                    {
+                                        xcb_xim_unset_ic_focus(windowing->xim, windowing->focused_window->ic);
+                                    }
+                                }
+
+                                windowing->focused_window = focus_window;
+                                focus_window->focused = true;
+                                wm_xim_create_ic_for_window(focus_window);
+                                if (windowing->xim && focus_window->ic)
+                                {
+                                    xcb_xim_set_ic_focus(windowing->xim, focus_window->ic);
+                                }
+                                wm_event_push((WmEvent) {
+                                        .kind = WM_EVENT_WINDOW_FOCUS,
+                                        .window = focus_window,
+                                        });
                             }
                             else
                             {
-                                int text_length_with_nul = xkb_keysym_to_utf8(key_symbol, text_buffer, sizeof(text_buffer));
-                                if (text_length_with_nul > 0)
+                                focus_window->focused = false;
+                                if (windowing->focused_window == focus_window)
                                 {
-                                    composed_text_length = text_length_with_nul - 1;
+                                    windowing->focused_window = 0;
                                 }
-                            }
-
-                            if (composed_text_length < 0)
-                            {
-                                BUSTER_TODO();
-                            }
-
-                            u64 text_length = (u64)composed_text_length;
-
-                            if (text_length > 0 && (u64)text_length < sizeof(text_buffer))
-                            {
-                                String8 text = string_duplicate_arena(arena, string_from_pointer_length(text_buffer, text_length), false);
+                                if (windowing->xim && focus_window->ic)
+                                {
+                                    xcb_xim_unset_ic_focus(windowing->xim, focus_window->ic);
+                                }
                                 wm_event_push((WmEvent) {
-                                        .kind = WM_EVENT_TEXT_INPUT,
-                                        .window = window,
-                                        .text = text,
+                                        .kind = WM_EVENT_WINDOW_UNFOCUS,
+                                        .window = focus_window,
                                         });
                             }
                         }
+
+                        u8 k = focus_event->detail;
+                        BUSTER_UNUSED(k);
                     }
-
-                    if (windowing->xkb_state)
+                    break; case XCB_KEYMAP_NOTIFY: // 11
                     {
-                        enum xkb_key_direction direction = event_type == XCB_KEY_PRESS ? XKB_KEY_DOWN : XKB_KEY_UP;
-                        xkb_state_update_key(windowing->xkb_state, key_event->detail, direction);
+                        // xcb_keymap_notify_event_t(3)                                                               XCB Events                                                              xcb_keymap_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_keymap_notify_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_keymap_notify_event_t {
+                        //            uint8_t response_type;
+                        //            uint8_t keys[31];
+                        //        } xcb_keymap_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_KEYMAP_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        keys      NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                             xcb_keymap_notify_event_t(3)
                     }
-
-                    WmKey key = WM_KEY_NULL;
-                    if (windowing->xkb_keymap)
+                    break; case XCB_EXPOSE: // 12
                     {
-                        key = wm_x11_key_from_xkb_name(xkb_keymap_key_get_name(windowing->xkb_keymap, key_event->detail));
+                        // This is the classical repaint event
+                        xcb_expose_event_t* expose_event = (xcb_expose_event_t*)event;
+                        BUSTER_UNUSED(expose_event);
+
+                        //                 xcb_expose_event_t(3)                                                                      XCB Events                                                                     xcb_expose_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_expose_event_t - NOT YET DOCUMENTED
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_expose_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t window;
+                        //            uint16_t     x;
+                        //            uint16_t     y;
+                        //            uint16_t     width;
+                        //            uint16_t     height;
+                        //            uint16_t     count;
+                        //            uint8_t      pad1[2];
+                        //        } xcb_expose_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_EXPOSE. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        window    The exposed (damaged) window.
+                        //
+                        //        x         The X coordinate of the left-upper corner of the exposed rectangle, relative to the window's origin.
+                        //
+                        //        y         The Y coordinate of the left-upper corner of the exposed rectangle, relative to the window's origin.
+                        //
+                        //        width     The width of the exposed rectangle.
+                        //
+                        //        height    The height of the exposed rectangle.
+                        //
+                        //        count     The  amount  of  Expose events following this one. Simple applications that do not want to optimize redisplay by distinguishing between subareas of its window can just ignore
+                        //                  all Expose events with nonzero counts and perform full redisplays on events with zero counts.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                                    xcb_expose_event_t(3)
                     }
-
-                    if (key == WM_KEY_NULL)
+                    break; case XCB_GRAPHICS_EXPOSURE: // 13
                     {
-                        xkb_keysym_t key_map_symbol = key_symbol;
-                        if (!windowing->xkb_keymap && key_symbol_without_modifiers != XKB_KEY_NoSymbol)
-                        {
-                            key_map_symbol = key_symbol_without_modifiers;
-                        }
+                        xcb_graphics_exposure_event_t* graphics_exposure_event = (xcb_graphics_exposure_event_t*)event;
+                        u8 k = graphics_exposure_event->response_type;
+                        BUSTER_UNUSED(k);
 
-                        switch (key_map_symbol)
-                        {
-                        break; case XKB_KEY_Escape: key = WM_KEY_ESC;
+                        //                 xcb_graphics_exposure_event_t(3)                                                           XCB Events                                                          xcb_graphics_exposure_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_graphics_exposure_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_graphics_exposure_event_t {
+                        //            uint8_t        response_type;
+                        //            uint8_t        pad0;
+                        //            uint16_t       sequence;
+                        //            xcb_drawable_t drawable;
+                        //            uint16_t       x;
+                        //            uint16_t       y;
+                        //            uint16_t       width;
+                        //            uint16_t       height;
+                        //            uint16_t       minor_opcode;
+                        //            uint16_t       count;
+                        //            uint8_t        major_opcode;
+                        //            uint8_t        pad1[3];
+                        //        } xcb_graphics_exposure_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_GRAPHICS_EXPOSURE. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        drawable  NOT YET DOCUMENTED.
+                        //
+                        //        x         NOT YET DOCUMENTED.
+                        //
+                        //        y         NOT YET DOCUMENTED.
+                        //
+                        //        width     NOT YET DOCUMENTED.
+                        //
+                        //        height    NOT YET DOCUMENTED.
+                        //
+                        //        minor_opcode
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        //        count     NOT YET DOCUMENTED.
+                        //
+                        //        major_opcode
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                         xcb_graphics_exposure_event_t(3)
 
-                        break; case XKB_KEY_F1: key = WM_KEY_F1;
-                        break; case XKB_KEY_F2: key = WM_KEY_F2;
-                        break; case XKB_KEY_F3: key = WM_KEY_F3;
-                        break; case XKB_KEY_F4: key = WM_KEY_F4;
-                        break; case XKB_KEY_F5: key = WM_KEY_F5;
-                        break; case XKB_KEY_F6: key = WM_KEY_F6;
-                        break; case XKB_KEY_F7: key = WM_KEY_F7;
-                        break; case XKB_KEY_F8: key = WM_KEY_F8;
-                        break; case XKB_KEY_F9: key = WM_KEY_F9;
-                        break; case XKB_KEY_F10: key = WM_KEY_F10;
-                        break; case XKB_KEY_F11: key = WM_KEY_F11;
-                        break; case XKB_KEY_F12: key = WM_KEY_F12;
-                        break; case XKB_KEY_F13: key = WM_KEY_F13;
-                        break; case XKB_KEY_F14: key = WM_KEY_F14;
-                        break; case XKB_KEY_F15: key = WM_KEY_F15;
-                        break; case XKB_KEY_F16: key = WM_KEY_F16;
-                        break; case XKB_KEY_F17: key = WM_KEY_F17;
-                        break; case XKB_KEY_F18: key = WM_KEY_F18;
-                        break; case XKB_KEY_F19: key = WM_KEY_F19;
-                        break; case XKB_KEY_F20: key = WM_KEY_F20;
-                        break; case XKB_KEY_F21: key = WM_KEY_F21;
-                        break; case XKB_KEY_F22: key = WM_KEY_F22;
-                        break; case XKB_KEY_F23: key = WM_KEY_F23;
-                        break; case XKB_KEY_F24: key = WM_KEY_F24;
-                        break; case XKB_KEY_F25: key = WM_KEY_F25;
-                        break; case XKB_KEY_F26: key = WM_KEY_F26;
-                        break; case XKB_KEY_F27: key = WM_KEY_F27;
-                        break; case XKB_KEY_F28: key = WM_KEY_F28;
-                        break; case XKB_KEY_F29: key = WM_KEY_F29;
-                        break; case XKB_KEY_F30: key = WM_KEY_F30;
-                        break; case XKB_KEY_F31: key = WM_KEY_F31;
-                        break; case XKB_KEY_F32: key = WM_KEY_F32;
-                        break; case XKB_KEY_F33: key = WM_KEY_F33;
-                        break; case XKB_KEY_F34: key = WM_KEY_F34;
-                        break; case XKB_KEY_F35: key = WM_KEY_F35;
-
-                        break; case XKB_KEY_minus: key = WM_KEY_MINUS;
-                        break; case XKB_KEY_equal: key = WM_KEY_EQUAL;
-                        break; case XKB_KEY_BackSpace: key = WM_KEY_BACKSPACE;
-                        break; case XKB_KEY_Tab: key = WM_KEY_TAB;
-                        // break; case XKB_KEY_tick: key = WM_KEY_TICK;
-                        break; case XKB_KEY_asciitilde: key = WM_KEY_TILDE;
-                        break; case XKB_KEY_grave: key = WM_KEY_BACKTICK;
-                        break; case XKB_KEY_bracketleft: key = WM_KEY_LEFT_BRACKET;
-                        break; case XKB_KEY_bracketright: key = WM_KEY_RIGHT_BRACKET;
-                        break; case XKB_KEY_braceleft: key = WM_KEY_LEFT_BRACE;
-                        break; case XKB_KEY_braceright: key = WM_KEY_RIGHT_BRACE;
-                        break; case XKB_KEY_parenleft: key = WM_KEY_LEFT_PARENTHESIS;
-                        break; case XKB_KEY_parenright: key = WM_KEY_RIGHT_PARENTHESIS;
-                        break; case XKB_KEY_slash: key = WM_KEY_FORWARD_SLASH;
-                        break; case XKB_KEY_backslash: key = WM_KEY_BACKWARD_SLASH;
-                        break; case XKB_KEY_colon: key = WM_KEY_COLON;
-                        break; case XKB_KEY_semicolon: key = WM_KEY_SEMICOLON;
-                        break; case XKB_KEY_apostrophe: key = WM_KEY_SINGLE_QUOTE;
-                        break; case XKB_KEY_quotedbl: key = WM_KEY_DOUBLE_QUOTE;
-                        break; case XKB_KEY_Return: key = WM_KEY_RETURN;
-                        break; case XKB_KEY_comma: key = WM_KEY_COMMA;
-                        break; case XKB_KEY_period: key = WM_KEY_DOT;
-                        break; case XKB_KEY_space: key = WM_KEY_SPACE;
-                        break; case XKB_KEY_bar: key = WM_KEY_BAR;
-                        break; case XKB_KEY_underscore: key = WM_KEY_UNDERSCORE;
-                        break; case XKB_KEY_exclam: key = WM_KEY_EXCLAMATION;
-                        break; case XKB_KEY_at: key = WM_KEY_AT;
-                        break; case XKB_KEY_numbersign: key = WM_KEY_HASH;
-                        break; case XKB_KEY_dollar: key = WM_KEY_DOLLAR;
-                        break; case XKB_KEY_percent: key = WM_KEY_PERCENTAGE;
-                        break; case XKB_KEY_asciicircum: key = WM_KEY_CIRCUMFLEX;
-                        break; case XKB_KEY_ampersand: key = WM_KEY_AMPERSAND;
-                        break; case XKB_KEY_asterisk: key = WM_KEY_ASTERISK;
-                        break; case XKB_KEY_plus: key = WM_KEY_PLUS;
-
-                        break; case XKB_KEY_Menu: key = WM_KEY_MENU;
-                        break; case XKB_KEY_Caps_Lock: key = WM_KEY_CAPS_LOCK;
-                        break; case XKB_KEY_Scroll_Lock: key = WM_KEY_SCROLL_LOCK;
-                        break; case XKB_KEY_Insert: key = WM_KEY_INSERT;
-                        break; case XKB_KEY_Pause: key = WM_KEY_PAUSE;
-                        break; case XKB_KEY_Home: key = WM_KEY_HOME;
-                        break; case XKB_KEY_End: key = WM_KEY_END;
-                        break; case XKB_KEY_Page_Up: key = WM_KEY_PAGE_UP;
-                        break; case XKB_KEY_Page_Down: key = WM_KEY_PAGE_DOWN;
-                        break; case XKB_KEY_Delete: key = WM_KEY_DELETE;
-
-                        break; case XKB_KEY_Up: key = WM_KEY_UP;
-                        break; case XKB_KEY_Down: key = WM_KEY_DOWN;
-                        break; case XKB_KEY_Left: key = WM_KEY_LEFT;
-                        break; case XKB_KEY_Right: key = WM_KEY_RIGHT;
-
-                        break; case XKB_KEY_Control_L: key = WM_KEY_CONTROL;
-                        break; case XKB_KEY_Control_R: key = WM_KEY_CONTROL;
-                        break; case XKB_KEY_Shift_L: key = WM_KEY_SHIFT;
-                        break; case XKB_KEY_Shift_R: key = WM_KEY_SHIFT;
-                        break; case XKB_KEY_Alt_L: key = WM_KEY_ALT;
-                        break; case XKB_KEY_Alt_R: key = WM_KEY_ALT;
-
-                        break; case XKB_KEY_Num_Lock: key = WM_KEY_NUM_LOCK;
-                        break; case XKB_KEY_KP_Divide: key = WM_KEY_NUM_SLASH;
-                        break; case XKB_KEY_KP_Multiply: key = WM_KEY_NUM_STAR;
-                        break; case XKB_KEY_KP_Subtract: key = WM_KEY_NUM_MINUS;
-                        break; case XKB_KEY_KP_Add: key = WM_KEY_NUM_PLUS;
-                        break; case XKB_KEY_KP_Decimal: key = WM_KEY_NUM_DOT;
-
-                        break; case XKB_KEY_KP_0: key = WM_KEY_NUM_0;
-                        break; case XKB_KEY_KP_1: key = WM_KEY_NUM_1;
-                        break; case XKB_KEY_KP_2: key = WM_KEY_NUM_2;
-                        break; case XKB_KEY_KP_3: key = WM_KEY_NUM_3;
-                        break; case XKB_KEY_KP_4: key = WM_KEY_NUM_4;
-                        break; case XKB_KEY_KP_5: key = WM_KEY_NUM_5;
-                        break; case XKB_KEY_KP_6: key = WM_KEY_NUM_6;
-                        break; case XKB_KEY_KP_7: key = WM_KEY_NUM_7;
-                        break; case XKB_KEY_KP_8: key = WM_KEY_NUM_8;
-                        break; case XKB_KEY_KP_9: key = WM_KEY_NUM_9;
-
-                        break; case XKB_KEY_0: key = WM_KEY_0;
-                        break; case XKB_KEY_1: key = WM_KEY_1;
-                        break; case XKB_KEY_2: key = WM_KEY_2;
-                        break; case XKB_KEY_3: key = WM_KEY_3;
-                        break; case XKB_KEY_4: key = WM_KEY_4;
-                        break; case XKB_KEY_5: key = WM_KEY_5;
-                        break; case XKB_KEY_6: key = WM_KEY_6;
-                        break; case XKB_KEY_7: key = WM_KEY_7;
-                        break; case XKB_KEY_8: key = WM_KEY_8;
-                        break; case XKB_KEY_9: key = WM_KEY_9;
-
-                        break; case XKB_KEY_A: case XKB_KEY_a: key = WM_KEY_A;
-                        break; case XKB_KEY_B: case XKB_KEY_b: key = WM_KEY_B;
-                        break; case XKB_KEY_C: case XKB_KEY_c: key = WM_KEY_C;
-                        break; case XKB_KEY_D: case XKB_KEY_d: key = WM_KEY_D;
-                        break; case XKB_KEY_E: case XKB_KEY_e: key = WM_KEY_E;
-                        break; case XKB_KEY_F: case XKB_KEY_f: key = WM_KEY_F;
-                        break; case XKB_KEY_G: case XKB_KEY_g: key = WM_KEY_G;
-                        break; case XKB_KEY_H: case XKB_KEY_h: key = WM_KEY_H;
-                        break; case XKB_KEY_I: case XKB_KEY_i: key = WM_KEY_I;
-                        break; case XKB_KEY_J: case XKB_KEY_j: key = WM_KEY_J;
-                        break; case XKB_KEY_K: case XKB_KEY_k: key = WM_KEY_K;
-                        break; case XKB_KEY_L: case XKB_KEY_l: key = WM_KEY_L;
-                        break; case XKB_KEY_M: case XKB_KEY_m: key = WM_KEY_M;
-                        break; case XKB_KEY_N: case XKB_KEY_n: key = WM_KEY_N;
-                        break; case XKB_KEY_O: case XKB_KEY_o: key = WM_KEY_O;
-                        break; case XKB_KEY_P: case XKB_KEY_p: key = WM_KEY_P;
-                        break; case XKB_KEY_Q: case XKB_KEY_q: key = WM_KEY_Q;
-                        break; case XKB_KEY_R: case XKB_KEY_r: key = WM_KEY_R;
-                        break; case XKB_KEY_S: case XKB_KEY_s: key = WM_KEY_S;
-                        break; case XKB_KEY_T: case XKB_KEY_t: key = WM_KEY_T;
-                        break; case XKB_KEY_U: case XKB_KEY_u: key = WM_KEY_U;
-                        break; case XKB_KEY_V: case XKB_KEY_v: key = WM_KEY_V;
-                        break; case XKB_KEY_W: case XKB_KEY_w: key = WM_KEY_W;
-                        break; case XKB_KEY_X: case XKB_KEY_x: key = WM_KEY_X;
-                        break; case XKB_KEY_Y: case XKB_KEY_y: key = WM_KEY_Y;
-                        break; case XKB_KEY_Z: case XKB_KEY_z: key = WM_KEY_Z;
-
-                        break; default: {}
-                        }
                     }
-
-                    wm_event_push((WmEvent) {
-                        .kind = event_type == XCB_KEY_PRESS ? WM_EVENT_KEY_PRESS : WM_EVENT_KEY_RELEASE,
-                        .window = window,
-                        .modifiers = modifiers,
-                        .key = key,
-                    });
-
-                    // xcb_key_press_event_t(3)                                                                   XCB Events                                                                  xcb_key_press_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_key_press_event_t - a key was pressed/released
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_key_press_event_t {
-                    //            uint8_t         response_type;
-                    //            xcb_keycode_t   detail;
-                    //            uint16_t        sequence;
-                    //            xcb_timestamp_t time;
-                    //            xcb_window_t    root;
-                    //            xcb_window_t    event;
-                    //            xcb_window_t    child;
-                    //            int16_t         root_x;
-                    //            int16_t         root_y;
-                    //            int16_t         event_x;
-                    //            int16_t         event_y;
-                    //            uint16_t        state;
-                    //            uint8_t         same_screen;
-                    //            uint8_t         pad0;
-                    //        } xcb_key_press_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_KEY_RELEASE. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        detail    The keycode (a number representing a physical key on the keyboard) of the key which was pressed.
-                    //
-                    //        time      Time when the event was generated (in milliseconds).
-                    //
-                    //        root      The root window of child.
-                    //
-                    //        event     NOT YET DOCUMENTED.
-                    //
-                    //        child     NOT YET DOCUMENTED.
-                    //
-                    //        root_x    The X coordinate of the pointer relative to the root window at the time of the event.
-                    //
-                    //        root_y    The Y coordinate of the pointer relative to the root window at the time of the event.
-                    //
-                    //        event_x   If same_screen is true, this is the X coordinate relative to the event window's origin. Otherwise, event_x will be set to zero.
-                    //
-                    //        event_y   If same_screen is true, this is the Y coordinate relative to the event window's origin. Otherwise, event_y will be set to zero.
-                    //
-                    //        state     The logical state of the pointer buttons and modifier keys just prior to the event.
-                    //
-                    //        same_screen
-                    //                  Whether the event window is on the same screen as the root window.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_grab_key(3), xcb_grab_keyboard(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                                 xcb_key_press_event_t(3)
-
-                    unimplemented = false;
-                }
-                break;
-                case XCB_BUTTON_PRESS: // 4
-                case XCB_BUTTON_RELEASE: // 5
-                {
-                    switch (event_type)
+                    break; case XCB_NO_EXPOSURE: // 14
                     {
-                        break; case XCB_BUTTON_PRESS: string_print(S8("BUTTON_PRESS"));
-                        break; case XCB_BUTTON_RELEASE: string_print(S8("BUTTON_RELEASE"));
-                        break; default: BUSTER_UNREACHABLE();
+                        xcb_no_exposure_event_t* no_exposure_event = (xcb_no_exposure_event_t*)event;
+                        u8 k = no_exposure_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_no_exposure_event_t(3)                                                                 XCB Events                                                                xcb_no_exposure_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_no_exposure_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_no_exposure_event_t {
+                        //            uint8_t        response_type;
+                        //            uint8_t        pad0;
+                        //            uint16_t       sequence;
+                        //            xcb_drawable_t drawable;
+                        //            uint16_t       minor_opcode;
+                        //            uint8_t        major_opcode;
+                        //            uint8_t        pad1;
+                        //        } xcb_no_exposure_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_NO_EXPOSURE. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        drawable  NOT YET DOCUMENTED.
+                        //
+                        //        minor_opcode
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        //        major_opcode
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                               xcb_no_exposure_event_t(3)
+
                     }
-
-                    xcb_button_press_event_t* button_event = (xcb_button_press_event_t*)event;
-                    u8 modifiers = wm_x11_modifiers_from_state(button_event->state);
-
-                    u8 button = button_event->detail;
-
-                    WmKey key = 0;
-
-                    switch (button)
+                    break; case XCB_VISIBILITY_NOTIFY: // 15
                     {
-                        break; case 1:
-                        {
-                            key = WM_KEY_MOUSE_LEFT;
-                        }
-                        break; case 2:
-                        {
-                            key = WM_KEY_MOUSE_MIDDLE;
-                        }
-                        break; case 3:
-                        {
-                            key = WM_KEY_MOUSE_RIGHT;
-                        }
-                        break; case 4:
-                        {
-                            key = WM_KEY_MOUSE_WHEEL_UP;
-                        }
-                        break; case 5:
-                        {
-                            key = WM_KEY_MOUSE_WHEEL_DOWN;
-                        }
-                        break; case 6:
-                        {
-                            key = WM_KEY_MOUSE_WHEEL_LEFT;
-                        }
-                        break; case 7:
-                        {
-                            key = WM_KEY_MOUSE_WHEEL_RIGHT;
-                        }
-                        break; case 8:
-                        {
-                            key = WM_KEY_MOUSE_BACK;
-                        }
-                        break; case 9:
-                        {
-                            key = WM_KEY_MOUSE_FORWARD;
-                        }
-                        break; case 10: case 11:
-                        {
-                        }
-                        break; default:
-                        {
-                        }
+                        xcb_visibility_notify_event_t* visibility_notify_event = (xcb_visibility_notify_event_t*)event;
+                        BUSTER_UNUSED(visibility_notify_event);
+                        //                 xcb_visibility_notify_event_t(3)                                                           XCB Events                                                          xcb_visibility_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_visibility_notify_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_visibility_notify_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t window;
+                        //            uint8_t      state;
+                        //            uint8_t      pad1[3];
+                        //        } xcb_visibility_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_VISIBILITY_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        window    NOT YET DOCUMENTED.
+                        //
+                        //        state     NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                         xcb_visibility_notify_event_t(3)
                     }
-
-                    string_print(S8("Button {S8}. Root: ({s16}, {s16}). Event: ({s16}, {s16}). Button: {u8}\n"), event_type == XCB_BUTTON_PRESS ? S8("press") : S8("release"),
-                            button_event->root_x, button_event->root_y,
-                            button_event->event_x, button_event->event_y, 
-                            button
-                            );
-
-                    if (key != WM_KEY_NULL)
+                    break; case XCB_CREATE_NOTIFY: // 16
                     {
-                        WmWindowHandle* window = wm_x11_window_from_xcb(windowing, button_event->event);
-                        wm_event_push((WmEvent) {
-                                .kind = event_type == XCB_BUTTON_PRESS ? WM_EVENT_BUTTON_PRESS : WM_EVENT_BUTTON_RELEASE,
-                                .window = window,
-                                .key = key,
-                                .modifiers = modifiers,
-                                .position = (WmOffset) { .x = (WmUnit)button_event->event_x, .y = (WmUnit)button_event->event_y },
-                                });
+                        xcb_create_notify_event_t* create_notify_event = (xcb_create_notify_event_t*)event;
+                        //                 xcb_create_notify_event_t(3)                                                               XCB Events                                                              xcb_create_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_create_notify_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_create_notify_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t parent;
+                        //            xcb_window_t window;
+                        //            int16_t      x;
+                        //            int16_t      y;
+                        //            uint16_t     width;
+                        //            uint16_t     height;
+                        //            uint16_t     border_width;
+                        //            uint8_t      override_redirect;
+                        //            uint8_t      pad1;
+                        //        } xcb_create_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_CREATE_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        parent    NOT YET DOCUMENTED.
+                        //
+                        //        window    NOT YET DOCUMENTED.
+                        //
+                        //        x         NOT YET DOCUMENTED.
+                        //
+                        //        y         NOT YET DOCUMENTED.
+                        //
+                        //        width     NOT YET DOCUMENTED.
+                        //
+                        //        height    NOT YET DOCUMENTED.
+                        //
+                        //        border_width
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        //        override_redirect
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                             xcb_create_notify_event_t(3)
+
+                        u8 k = create_notify_event->response_type;
+                        BUSTER_UNUSED(k);
                     }
-
-                    unimplemented = false;
-
-                    // xcb_button_press_event_t(3)                                                                XCB Events                                                               xcb_button_press_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_button_press_event_t - a mouse button was pressed/released
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_button_press_event_t {
-                    //            uint8_t         response_type;
-                    //            xcb_button_t    detail;
-                    //            uint16_t        sequence;
-                    //            xcb_timestamp_t time;
-                    //            xcb_window_t    root;
-                    //            xcb_window_t    event;
-                    //            xcb_window_t    child;
-                    //            int16_t         root_x;
-                    //            int16_t         root_y;
-                    //            int16_t         event_x;
-                    //            int16_t         event_y;
-                    //            uint16_t        state;
-                    //            uint8_t         same_screen;
-                    //            uint8_t         pad0;
-                    //        } xcb_button_press_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_BUTTON_RELEASE. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        detail    The keycode (a number representing a physical key on the keyboard) of the key which was pressed.
-                    //
-                    //        time      Time when the event was generated (in milliseconds).
-                    //
-                    //        root      The root window of child.
-                    //
-                    //        event     NOT YET DOCUMENTED.
-                    //
-                    //        child     NOT YET DOCUMENTED.
-                    //
-                    //        root_x    The X coordinate of the pointer relative to the root window at the time of the event.
-                    //
-                    //        root_y    The Y coordinate of the pointer relative to the root window at the time of the event.
-                    //
-                    //        event_x   If same_screen is true, this is the X coordinate relative to the event window's origin. Otherwise, event_x will be set to zero.
-                    //
-                    //        event_y   If same_screen is true, this is the Y coordinate relative to the event window's origin. Otherwise, event_y will be set to zero.
-                    //
-                    //        state     The logical state of the pointer buttons and modifier keys just prior to the event.
-                    //
-                    //        same_screen
-                    //                  Whether the event window is on the same screen as the root window.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_grab_button(3), xcb_grab_pointer(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                              xcb_button_press_event_t(3)
-
-                    xcb_button_t k = button_event->detail;
-                    BUSTER_UNUSED(k);
-                }
-                break; case XCB_MOTION_NOTIFY: // 6
-                {
-                    xcb_motion_notify_event_t* motion_notify_event = (xcb_motion_notify_event_t*)event;
-                    wm_event_push((WmEvent) {
-                            .kind = WM_EVENT_MOUSE_MOVE,
-                            .window = wm_x11_window_from_xcb(windowing, motion_notify_event->event),
-                            .position = (WmOffset) { .x = (WmUnit)motion_notify_event->event_x, .y = (WmUnit)motion_notify_event->event_y },
-                            });
-                    string_print(S8("MOTION_NOTIFY. Root ({s16}, {s16}). Event: ({s16}, {s16}). Same screen: {u8}"), motion_notify_event->root_x, motion_notify_event->root_y, motion_notify_event->event_x, motion_notify_event->event_y, motion_notify_event->same_screen);
-                    unimplemented = false;
-
-                    // xcb_motion_notify_event_t(3)                                                               XCB Events                                                              xcb_motion_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_motion_notify_event_t - a key was pressed
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_motion_notify_event_t {
-                    //            uint8_t         response_type;
-                    //            uint8_t         detail;
-                    //            uint16_t        sequence;
-                    //            xcb_timestamp_t time;
-                    //            xcb_window_t    root;
-                    //            xcb_window_t    event;
-                    //            xcb_window_t    child;
-                    //            int16_t         root_x;
-                    //            int16_t         root_y;
-                    //            int16_t         event_x;
-                    //            int16_t         event_y;
-                    //            uint16_t        state;
-                    //            uint8_t         same_screen;
-                    //            uint8_t         pad0;
-                    //        } xcb_motion_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_MOTION_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        detail    The keycode (a number representing a physical key on the keyboard) of the key which was pressed.
-                    //
-                    //        time      Time when the event was generated (in milliseconds).
-                    //
-                    //        root      The root window of child.
-                    //
-                    //        event     NOT YET DOCUMENTED.
-                    //
-                    //        child     NOT YET DOCUMENTED.
-                    //
-                    //        root_x    The X coordinate of the pointer relative to the root window at the time of the event.
-                    //
-                    //        root_y    The Y coordinate of the pointer relative to the root window at the time of the event.
-                    //
-                    //        event_x   If same_screen is true, this is the X coordinate relative to the event window's origin. Otherwise, event_x will be set to zero.
-                    //
-                    //        event_y   If same_screen is true, this is the Y coordinate relative to the event window's origin. Otherwise, event_y will be set to zero.
-                    //
-                    //        state     The logical state of the pointer buttons and modifier keys just prior to the event.
-                    //
-                    //        same_screen
-                    //                  Whether the event window is on the same screen as the root window.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_grab_key(3), xcb_grab_keyboard(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                             xcb_motion_notify_event_t(3)
-                }
-                break;
-                case XCB_ENTER_NOTIFY: // 7
-                case XCB_LEAVE_NOTIFY: // 8
-                {
-                    switch (event_type)
+                    break; case XCB_DESTROY_NOTIFY: // 17
                     {
-                        break; case XCB_ENTER_NOTIFY: string_print(S8("ENTER_NOTIFY"));
-                        break; case XCB_LEAVE_NOTIFY: string_print(S8("LEAVE_NOTIFY"));
-                        break; default: BUSTER_UNREACHABLE();
+                        xcb_destroy_notify_event_t* destroy_notify_event = (xcb_destroy_notify_event_t*)event;
+
+                        //                 xcb_destroy_notify_event_t(3)                                                              XCB Events                                                             xcb_destroy_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_destroy_notify_event_t - a window is destroyed
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_destroy_notify_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t event;
+                        //            xcb_window_t window;
+                        //        } xcb_destroy_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_DESTROY_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        event     The reconfigured window or its parent, depending on whether StructureNotify or SubstructureNotify was selected.
+                        //
+                        //        window    The window that is destroyed.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_destroy_window(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                            xcb_destroy_notify_event_t(3)
+                        u8 k = destroy_notify_event->response_type;
+
+                        BUSTER_UNUSED(k);
+
                     }
-
-                    xcb_enter_notify_event_t* enter_leave_event = (xcb_enter_notify_event_t*)event;
-
-                    string_print(S8("\n\tat time ({u32}) Root x: {s16}. Root y: {s16}. Event x: {s16}. Event y: {s16}. State: {u16:x}. Mode: {u8:x}. Same screen focus: {u8:x}\n"),
-                            enter_leave_event->time,
-                            enter_leave_event->root_x,
-                            enter_leave_event->root_y,
-                            enter_leave_event->event_x,
-                            enter_leave_event->event_y,
-                            enter_leave_event->state,
-                            enter_leave_event->mode,
-                            enter_leave_event->same_screen_focus);
-
-                    unimplemented = false;
-
-                    //                 xcb_enter_notify_event_t(3)                                                                XCB Events                                                               xcb_enter_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_enter_notify_event_t - the pointer is in a different window
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_enter_notify_event_t {
-                    //            uint8_t         response_type;
-                    //            uint8_t         detail;
-                    //            uint16_t        sequence;
-                    //            xcb_timestamp_t time;
-                    //            xcb_window_t    root;
-                    //            xcb_window_t    event;
-                    //            xcb_window_t    child;
-                    //            int16_t         root_x;
-                    //            int16_t         root_y;
-                    //            int16_t         event_x;
-                    //            int16_t         event_y;
-                    //            uint16_t        state;
-                    //            uint8_t         mode;
-                    //            uint8_t         same_screen_focus;
-                    //        } xcb_enter_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_LEAVE_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        detail    NOT YET DOCUMENTED.
-                    //
-                    //        time      NOT YET DOCUMENTED.
-                    //
-                    //        root      The root window for the final cursor position.
-                    //
-                    //        event     The window on which the event was generated.
-                    //
-                    //        child     If the event window has subwindows and the final pointer position is in one of them, then child is set to that subwindow, XCB_WINDOW_NONE otherwise.
-                    //
-                    //        root_x    The pointer X coordinate relative to root's origin at the time of the event.
-                    //
-                    //        root_y    The pointer Y coordinate relative to root's origin at the time of the event.
-                    //
-                    //        event_x   If event is on the same screen as root, this is the pointer X coordinate relative to the event window's origin.
-                    //
-                    //        event_y   If event is on the same screen as root, this is the pointer Y coordinate relative to the event window's origin.
-                    //
-                    //        state     NOT YET DOCUMENTED.
-                    //
-                    //        mode
-                    //
-                    //        same_screen_focus
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                              xcb_enter_notify_event_t(3)
-                }
-                break;
-                case XCB_FOCUS_IN: // 9
-                case XCB_FOCUS_OUT: // 10
-                {
-                    switch (event_type)
+                    break; case XCB_UNMAP_NOTIFY: // 18
                     {
-                        break; case XCB_FOCUS_IN: string_print(S8("FOCUS_IN"));
-                        break; case XCB_FOCUS_OUT: string_print(S8("FOCUS_OUT"));
-                        break; default: BUSTER_UNREACHABLE();
+                        xcb_unmap_notify_event_t* unmap_notify_event = (xcb_unmap_notify_event_t*)event;
+                        u8 k = unmap_notify_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_unmap_notify_event_t(3)                                                                XCB Events                                                               xcb_unmap_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_unmap_notify_event_t - a window is unmapped
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_unmap_notify_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t event;
+                        //            xcb_window_t window;
+                        //            uint8_t      from_configure;
+                        //            uint8_t      pad1[3];
+                        //        } xcb_unmap_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_UNMAP_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        event     The reconfigured window or its parent, depending on whether StructureNotify or SubstructureNotify was selected.
+                        //
+                        //        window    The window that was unmapped.
+                        //
+                        //        from_configure
+                        //                  Set to 1 if the event was generated as a result of a resizing of the window's parent when window had a win_gravity of UnmapGravity.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_unmap_window(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                              xcb_unmap_notify_event_t(3)
+
                     }
-
-                    unimplemented = false;
-
-                    //                 xcb_focus_in_event_t(3)                                                                    XCB Events                                                                   xcb_focus_in_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_focus_in_event_t - NOT YET DOCUMENTED
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_focus_in_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      detail;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t event;
-                    //            uint8_t      mode;
-                    //            uint8_t      pad0[3];
-                    //        } xcb_focus_in_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_FOCUS_OUT. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        detail
-                    //
-                    //        event     The window on which the focus event was generated. This is the window used by the X server to report the event.
-                    //
-                    //        mode
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                                  xcb_focus_in_event_t(3)
-
-                    xcb_focus_in_event_t* focus_event = (xcb_focus_in_event_t*)event;
-                    WmWindowHandle* focus_window = wm_x11_window_from_xcb(windowing, focus_event->event);
-                    if (focus_window)
+                    break; case XCB_MAP_NOTIFY: // 19
                     {
-                        if (event_type == XCB_FOCUS_IN)
+                        xcb_map_notify_event_t* map_notify_event = (xcb_map_notify_event_t*)event;
+                        u8 k = map_notify_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_map_notify_event_t(3)                                                                  XCB Events                                                                 xcb_map_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_map_notify_event_t - a window was mapped
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_map_notify_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t event;
+                        //            xcb_window_t window;
+                        //            uint8_t      override_redirect;
+                        //            uint8_t      pad1[3];
+                        //        } xcb_map_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_MAP_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        event     The window which was mapped or its parent, depending on whether StructureNotify or SubstructureNotify was selected.
+                        //
+                        //        window    The window that was mapped.
+                        //
+                        //        override_redirect
+                        //                  Window managers should ignore this window if override_redirect is 1.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_map_window(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                                xcb_map_notify_event_t(3)
+
+                    }
+                    break; case XCB_MAP_REQUEST: // 20
+                    {
+                        xcb_map_request_event_t* map_request_event = (xcb_map_request_event_t*)event;
+                        u8 k = map_request_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_map_request_event_t(3)                                                                 XCB Events                                                                xcb_map_request_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_map_request_event_t - window wants to be mapped
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_map_request_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t parent;
+                        //            xcb_window_t window;
+                        //        } xcb_map_request_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_MAP_REQUEST. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        parent    The parent of window.
+                        //
+                        //        window    The window to be mapped.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_map_window(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                               xcb_map_request_event_t(3)
+
+                    }
+                    break; case XCB_REPARENT_NOTIFY: // 21
+                    {
+                        xcb_reparent_notify_event_t* reparent_notify_event = (xcb_reparent_notify_event_t*)event;
+                        u8 k = reparent_notify_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_reparent_notify_event_t(3)                                                             XCB Events                                                            xcb_reparent_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_reparent_notify_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_reparent_notify_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t event;
+                        //            xcb_window_t window;
+                        //            xcb_window_t parent;
+                        //            int16_t      x;
+                        //            int16_t      y;
+                        //            uint8_t      override_redirect;
+                        //            uint8_t      pad1[3];
+                        //        } xcb_reparent_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_REPARENT_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        event     NOT YET DOCUMENTED.
+                        //
+                        //        window    NOT YET DOCUMENTED.
+                        //
+                        //        parent    NOT YET DOCUMENTED.
+                        //
+                        //        x         NOT YET DOCUMENTED.
+                        //
+                        //        y         NOT YET DOCUMENTED.
+                        //
+                        //        override_redirect
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                           xcb_reparent_notify_event_t(3)
+
+                    }
+                    break; case XCB_CONFIGURE_NOTIFY: // 22
+                    {
+                        xcb_configure_notify_event_t* configure_notify_event = (xcb_configure_notify_event_t*)event;
+                        u16 width = configure_notify_event->width;
+                        u16 height = configure_notify_event->height;
+
+                        WmWindowHandle* window = wm_x11_window_from_xcb(windowing, configure_notify_event->window);
+                        if (window)
                         {
-                            if (windowing->focused_window && windowing->focused_window != focus_window)
-                            {
-                                windowing->focused_window->focused = false;
-                                if (windowing->xim && windowing->focused_window->ic)
-                                {
-                                    xcb_xim_unset_ic_focus(windowing->xim, windowing->focused_window->ic);
-                                }
-                            }
-
-                            windowing->focused_window = focus_window;
-                            focus_window->focused = true;
-                            wm_xim_create_ic_for_window(focus_window);
-                            if (windowing->xim && focus_window->ic)
-                            {
-                                xcb_xim_set_ic_focus(windowing->xim, focus_window->ic);
-                            }
                             wm_event_push((WmEvent) {
-                                    .kind = WM_EVENT_WINDOW_FOCUS,
-                                    .window = focus_window,
+                                    .kind = WM_EVENT_WINDOW_RESIZE,
+                                    .window = window,
+                                    .position = (WmOffset) { .width = width, .height = height },
                                     });
                         }
-                        else
+
+                        //                 xcb_configure_notify_event_t(3)                                                            XCB Events                                                           xcb_configure_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_configure_notify_event_t - NOT YET DOCUMENTED
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_configure_notify_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t event;
+                        //            xcb_window_t window;
+                        //            xcb_window_t above_sibling;
+                        //            int16_t      x;
+                        //            int16_t      y;
+                        //            uint16_t     width;
+                        //            uint16_t     height;
+                        //            uint16_t     border_width;
+                        //            uint8_t      override_redirect;
+                        //            uint8_t      pad1;
+                        //        } xcb_configure_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_CONFIGURE_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        event     The reconfigured window or its parent, depending on whether StructureNotify or SubstructureNotify was selected.
+                        //
+                        //        window    The window whose size, position, border, and/or stacking order was changed.
+                        //
+                        //        above_sibling
+                        //                  If  XCB_NONE,  the window is on the bottom of the stack with respect to sibling windows. However, if set to a sibling window, the window is placed on top of this sibling win‐
+                        //                  dow.
+                        //
+                        //        x         The X coordinate of the upper-left outside corner of window, relative to the parent window's origin.
+                        //
+                        //        y         The Y coordinate of the upper-left outside corner of window, relative to the parent window's origin.
+                        //
+                        //        width     The inside width of window, not including the border.
+                        //
+                        //        height    The inside height of window, not including the border.
+                        //
+                        //        border_width
+                        //                  The border width of window.
+                        //
+                        //        override_redirect
+                        //                  Window managers should ignore this window if override_redirect is 1.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_free_colormap(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                          xcb_configure_notify_event_t(3)
+
+                    }
+                    break; case XCB_CONFIGURE_REQUEST: // 23
+                    {
+                        xcb_configure_request_event_t* configure_request_event = (xcb_configure_request_event_t*)event;
+
+                        //                 xcb_configure_request_event_t(3)                                                           XCB Events                                                          xcb_configure_request_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_configure_request_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_configure_request_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      stack_mode;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t parent;
+                        //            xcb_window_t window;
+                        //            xcb_window_t sibling;
+                        //            int16_t      x;
+                        //            int16_t      y;
+                        //            uint16_t     width;
+                        //            uint16_t     height;
+                        //            uint16_t     border_width;
+                        //            uint16_t     value_mask;
+                        //        } xcb_configure_request_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_CONFIGURE_REQUEST. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        stack_mode
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        //        parent    NOT YET DOCUMENTED.
+                        //
+                        //        window    NOT YET DOCUMENTED.
+                        //
+                        //        sibling   NOT YET DOCUMENTED.
+                        //
+                        //        x         NOT YET DOCUMENTED.
+                        //
+                        //        y         NOT YET DOCUMENTED.
+                        //
+                        //        width     NOT YET DOCUMENTED.
+                        //
+                        //        height    NOT YET DOCUMENTED.
+                        //
+                        //        border_width
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        //        value_mask
+                        //                  NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                         xcb_configure_request_event_t(3)
+
+                        u8 k = configure_request_event->response_type;
+                        BUSTER_UNUSED(k);
+                    }
+                    break; case XCB_GRAVITY_NOTIFY: // 24
+                    {
+                        xcb_gravity_notify_event_t* gravity_notify_event = (xcb_gravity_notify_event_t*)event;
+                        u8 k = gravity_notify_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        // xcb_gravity_notify_event_t(3)                                                              XCB Events                                                             xcb_gravity_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_gravity_notify_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_gravity_notify_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t event;
+                        //            xcb_window_t window;
+                        //            int16_t      x;
+                        //            int16_t      y;
+                        //        } xcb_gravity_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_GRAVITY_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        event     NOT YET DOCUMENTED.
+                        //
+                        //        window    NOT YET DOCUMENTED.
+                        //
+                        //        x         NOT YET DOCUMENTED.
+                        //
+                        //        y         NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                            xcb_gravity_notify_event_t(3)
+
+
+                    }
+                    break; case XCB_RESIZE_REQUEST: // 25
+                    {
+                        xcb_resize_request_event_t* resize_request_event = (xcb_resize_request_event_t*)event;
+                        u8 k = resize_request_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_resize_request_event_t(3)                                                              XCB Events                                                             xcb_resize_request_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_resize_request_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_resize_request_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t window;
+                        //            uint16_t     width;
+                        //            uint16_t     height;
+                        //        } xcb_resize_request_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_RESIZE_REQUEST. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        window    NOT YET DOCUMENTED.
+                        //
+                        //        width     NOT YET DOCUMENTED.
+                        //
+                        //        height    NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                            xcb_resize_request_event_t(3)
+
+                    }
+                    break;
+                    case XCB_CIRCULATE_NOTIFY: // 26
+                    case XCB_CIRCULATE_REQUEST: // 27
+                    {
+                        xcb_circulate_notify_event_t* circulate_event = (xcb_circulate_notify_event_t*)event;
+                        u8 k = circulate_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_circulate_notify_event_t(3)                                                            XCB Events                                                           xcb_circulate_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_circulate_notify_event_t - NOT YET DOCUMENTED
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_circulate_notify_event_t {
+                        //            uint8_t      response_type;
+                        //            uint8_t      pad0;
+                        //            uint16_t     sequence;
+                        //            xcb_window_t event;
+                        //            xcb_window_t window;
+                        //            uint8_t      pad1[4];
+                        //            uint8_t      place;
+                        //            uint8_t      pad2[3];
+                        //        } xcb_circulate_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_CIRCULATE_REQUEST. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        event     Either the restacked window or its parent, depending on whether StructureNotify or SubstructureNotify was selected.
+                        //
+                        //        window    The restacked window.
+                        //
+                        //        place
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_circulate_window(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                          xcb_circulate_notify_event_t(3)
+
+                    }
+                    break; case XCB_PROPERTY_NOTIFY: // 28
+                    {
+                        xcb_property_notify_event_t* property_notify_event = (xcb_property_notify_event_t*)event;
+                        xcb_atom_t property_atom = property_notify_event->atom;
+                        xcb_get_atom_name_cookie_t name_cookie = xcb_get_atom_name(connection, property_atom);
+                        xcb_generic_error_t* error;
+                        xcb_get_atom_name_reply_t* reply = xcb_get_atom_name_reply(connection, name_cookie, &error);
+                        if (reply)
                         {
-                            focus_window->focused = false;
-                            if (windowing->focused_window == focus_window)
-                            {
-                                windowing->focused_window = 0;
-                            }
-                            if (windowing->xim && focus_window->ic)
-                            {
-                                xcb_xim_unset_ic_focus(windowing->xim, focus_window->ic);
-                            }
+                            char* name_pointer = xcb_get_atom_name_name(reply);
+                            int name_length = xcb_get_atom_name_name_length(reply);
+                            String8 name = { .pointer = name_pointer, .length = (u64)name_length };
+                            string_print(S8("\nProperty changed: {S8}\n"), name);
+                            free(reply);
+                        }
+
+                        //                 xcb_property_notify_event_t(3)                                                             XCB Events                                                            xcb_property_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_property_notify_event_t - a window property changed
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_property_notify_event_t {
+                        //            uint8_t         response_type;
+                        //            uint8_t         pad0;
+                        //            uint16_t        sequence;
+                        //            xcb_window_t    window;
+                        //            xcb_atom_t      atom;
+                        //            xcb_timestamp_t time;
+                        //            uint8_t         state;
+                        //            uint8_t         pad1[3];
+                        //        } xcb_property_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_PROPERTY_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        window    The window whose associated property was changed.
+                        //
+                        //        atom      The property's atom, to indicate which property was changed.
+                        //
+                        //        time      A timestamp of the server time when the property was changed.
+                        //
+                        //        state
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_change_property(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                           xcb_property_notify_event_t(3)
+
+                    }
+                    break; case XCB_SELECTION_CLEAR: // 29
+                    {
+                        xcb_selection_clear_event_t* selection_clear_event = (xcb_selection_clear_event_t*)event;
+                        u8 k = selection_clear_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_selection_clear_event_t(3)                                                             XCB Events                                                            xcb_selection_clear_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_selection_clear_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_selection_clear_event_t {
+                        //            uint8_t         response_type;
+                        //            uint8_t         pad0;
+                        //            uint16_t        sequence;
+                        //            xcb_timestamp_t time;
+                        //            xcb_window_t    owner;
+                        //            xcb_atom_t      selection;
+                        //        } xcb_selection_clear_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_SELECTION_CLEAR. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        time      NOT YET DOCUMENTED.
+                        //
+                        //        owner     NOT YET DOCUMENTED.
+                        //
+                        //        selection NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                           xcb_selection_clear_event_t(3)
+
+                    }
+                    break; case XCB_SELECTION_REQUEST: // 30
+                    {
+                        xcb_selection_request_event_t* selection_request_event = (xcb_selection_request_event_t*)event;
+                        u8 k = selection_request_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_selection_request_event_t(3)                                                           XCB Events                                                          xcb_selection_request_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_selection_request_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_selection_request_event_t {
+                        //            uint8_t         response_type;
+                        //            uint8_t         pad0;
+                        //            uint16_t        sequence;
+                        //            xcb_timestamp_t time;
+                        //            xcb_window_t    owner;
+                        //            xcb_window_t    requestor;
+                        //            xcb_atom_t      selection;
+                        //            xcb_atom_t      target;
+                        //            xcb_atom_t      property;
+                        //        } xcb_selection_request_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_SELECTION_REQUEST. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        time      NOT YET DOCUMENTED.
+                        //
+                        //        owner     NOT YET DOCUMENTED.
+                        //
+                        //        requestor NOT YET DOCUMENTED.
+                        //
+                        //        selection NOT YET DOCUMENTED.
+                        //
+                        //        target    NOT YET DOCUMENTED.
+                        //
+                        //        property  NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                         xcb_selection_request_event_t(3)
+
+                    }
+                    break; case XCB_SELECTION_NOTIFY: // 31
+                    {
+                        xcb_selection_notify_event_t* selection_notify_event = (xcb_selection_notify_event_t*)event;
+                        u8 k = selection_notify_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_selection_notify_event_t(3)                                                            XCB Events                                                           xcb_selection_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_selection_notify_event_t -
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_selection_notify_event_t {
+                        //            uint8_t         response_type;
+                        //            uint8_t         pad0;
+                        //            uint16_t        sequence;
+                        //            xcb_timestamp_t time;
+                        //            xcb_window_t    requestor;
+                        //            xcb_atom_t      selection;
+                        //            xcb_atom_t      target;
+                        //            xcb_atom_t      property;
+                        //        } xcb_selection_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_SELECTION_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        time      NOT YET DOCUMENTED.
+                        //
+                        //        requestor NOT YET DOCUMENTED.
+                        //
+                        //        selection NOT YET DOCUMENTED.
+                        //
+                        //        target    NOT YET DOCUMENTED.
+                        //
+                        //        property  NOT YET DOCUMENTED.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                          xcb_selection_notify_event_t(3)
+                    }
+                    break; case XCB_COLORMAP_NOTIFY: // 32
+                    {
+                        xcb_colormap_notify_event_t* colormap_notify_event = (xcb_colormap_notify_event_t*)event;
+                        u8 k = colormap_notify_event->response_type;
+                        BUSTER_UNUSED(k);
+
+                        //                 xcb_colormap_notify_event_t(3)                                                             XCB Events                                                            xcb_colormap_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_colormap_notify_event_t - the colormap for some window changed
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_colormap_notify_event_t {
+                        //            uint8_t        response_type;
+                        //            uint8_t        pad0;
+                        //            uint16_t       sequence;
+                        //            xcb_window_t   window;
+                        //            xcb_colormap_t colormap;
+                        //            uint8_t        _new;
+                        //            uint8_t        state;
+                        //            uint8_t        pad1[2];
+                        //        } xcb_colormap_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_COLORMAP_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        window    The window whose associated colormap is changed, installed or uninstalled.
+                        //
+                        //        colormap  The colormap which is changed, installed or uninstalled. This is XCB_NONE when the colormap is changed by a call to FreeColormap.
+                        //
+                        //        _new      NOT YET DOCUMENTED.
+                        //
+                        //        state
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3), xcb_free_colormap(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                           xcb_colormap_notify_event_t(3)
+
+                    }
+                    break; case XCB_CLIENT_MESSAGE: // 33
+                    {
+                        xcb_client_message_event_t* client_message_event = (xcb_client_message_event_t*)event;
+                        if (client_message_event->data.data32[0] == atom_replies[X11_ATOM_WM_DELETE_WINDOW]->atom)
+                        {
                             wm_event_push((WmEvent) {
-                                    .kind = WM_EVENT_WINDOW_UNFOCUS,
-                                    .window = focus_window,
-                                    });
+                                        .kind = WM_EVENT_WINDOW_CLOSE,
+                                        .window = wm_x11_window_from_xcb(windowing, client_message_event->window),
+                                        });
                         }
                     }
-
-                    u8 k = focus_event->detail;
-                    BUSTER_UNUSED(k);
-                }
-                break; case XCB_KEYMAP_NOTIFY: // 11
-                {
-                    string_print(S8("KEYMAP_NOTIFY"));
-
-                    // xcb_keymap_notify_event_t(3)                                                               XCB Events                                                              xcb_keymap_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_keymap_notify_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_keymap_notify_event_t {
-                    //            uint8_t response_type;
-                    //            uint8_t keys[31];
-                    //        } xcb_keymap_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_KEYMAP_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        keys      NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                             xcb_keymap_notify_event_t(3)
-
-
-                    xcb_keymap_notify_event_t* keymap_notify_event = (xcb_keymap_notify_event_t*)event;
-                    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(keymap_notify_event->keys); i += 1)
+                    break; case XCB_MAPPING_NOTIFY: // 32
                     {
-                        string_print(S8("\nKey [{u64}]: {u8:x}"), i, keymap_notify_event->keys[i]);
+                        xcb_mapping_notify_event_t* mapping_notify_event = (xcb_mapping_notify_event_t*)event;
+                        u8 k = mapping_notify_event->response_type;
+                        BUSTER_UNUSED(k);
+                        wm_x11_xkb_refresh_keymap(windowing);
+
+                        //                 xcb_mapping_notify_event_t(3)                                                              XCB Events                                                             xcb_mapping_notify_event_t(3)
+                        //
+                        // NAME
+                        //        xcb_mapping_notify_event_t - keyboard mapping changed
+                        //
+                        // SYNOPSIS
+                        //        #include <xcb/xproto.h>
+                        //
+                        //    Event datastructure
+                        //        typedef struct xcb_mapping_notify_event_t {
+                        //            uint8_t       response_type;
+                        //            uint8_t       pad0;
+                        //            uint16_t      sequence;
+                        //            uint8_t       request;
+                        //            xcb_keycode_t first_keycode;
+                        //            uint8_t       count;
+                        //            uint8_t       pad1;
+                        //        } xcb_mapping_notify_event_t;
+                        //
+                        // EVENT FIELDS
+                        //        response_type
+                        //                  The type of this event, in this case XCB_MAPPING_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
+                        //
+                        //        sequence  The sequence number of the last request processed by the X11 server.
+                        //
+                        //        request
+                        //
+                        //        first_keycode
+                        //                  The first number in the range of the altered mapping.
+                        //
+                        //        count     The number of keycodes altered.
+                        //
+                        // DESCRIPTION
+                        // SEE ALSO
+                        //        xcb_generic_event_t(3)
+                        //
+                        // AUTHOR
+                        //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
+                        //
+                        // X Version 11                                                                             libxcb 1.17.0                                                            xcb_mapping_notify_event_t(3)
+
                     }
-                    string_print(S8("\n"));
-
-                    unimplemented = false;
-                }
-                break; case XCB_EXPOSE: // 12
-                {
-                    // This is the classical repaint event
-                    string_print(S8("EXPOSE"));
-                    xcb_expose_event_t* expose_event = (xcb_expose_event_t*)event;
-                    string_print(S8("\nRepaint ({u16}). X: {u16}. Y: {u16}. Width: {u16}. Height: {u16}\n"), expose_event->count, expose_event->x, expose_event->y, expose_event->width, expose_event->height);
-                    unimplemented = false;
-
-                    //                 xcb_expose_event_t(3)                                                                      XCB Events                                                                     xcb_expose_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_expose_event_t - NOT YET DOCUMENTED
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_expose_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t window;
-                    //            uint16_t     x;
-                    //            uint16_t     y;
-                    //            uint16_t     width;
-                    //            uint16_t     height;
-                    //            uint16_t     count;
-                    //            uint8_t      pad1[2];
-                    //        } xcb_expose_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_EXPOSE. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        window    The exposed (damaged) window.
-                    //
-                    //        x         The X coordinate of the left-upper corner of the exposed rectangle, relative to the window's origin.
-                    //
-                    //        y         The Y coordinate of the left-upper corner of the exposed rectangle, relative to the window's origin.
-                    //
-                    //        width     The width of the exposed rectangle.
-                    //
-                    //        height    The height of the exposed rectangle.
-                    //
-                    //        count     The  amount  of  Expose events following this one. Simple applications that do not want to optimize redisplay by distinguishing between subareas of its window can just ignore
-                    //                  all Expose events with nonzero counts and perform full redisplays on events with zero counts.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                                    xcb_expose_event_t(3)
-                }
-                break; case XCB_GRAPHICS_EXPOSURE: // 13
-                {
-                    string_print(S8("GRAPHICS_EXPOSURE"));
-                    xcb_graphics_exposure_event_t* graphics_exposure_event = (xcb_graphics_exposure_event_t*)event;
-                    u8 k = graphics_exposure_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_graphics_exposure_event_t(3)                                                           XCB Events                                                          xcb_graphics_exposure_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_graphics_exposure_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_graphics_exposure_event_t {
-                    //            uint8_t        response_type;
-                    //            uint8_t        pad0;
-                    //            uint16_t       sequence;
-                    //            xcb_drawable_t drawable;
-                    //            uint16_t       x;
-                    //            uint16_t       y;
-                    //            uint16_t       width;
-                    //            uint16_t       height;
-                    //            uint16_t       minor_opcode;
-                    //            uint16_t       count;
-                    //            uint8_t        major_opcode;
-                    //            uint8_t        pad1[3];
-                    //        } xcb_graphics_exposure_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_GRAPHICS_EXPOSURE. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        drawable  NOT YET DOCUMENTED.
-                    //
-                    //        x         NOT YET DOCUMENTED.
-                    //
-                    //        y         NOT YET DOCUMENTED.
-                    //
-                    //        width     NOT YET DOCUMENTED.
-                    //
-                    //        height    NOT YET DOCUMENTED.
-                    //
-                    //        minor_opcode
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    //        count     NOT YET DOCUMENTED.
-                    //
-                    //        major_opcode
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                         xcb_graphics_exposure_event_t(3)
-
-                }
-                break; case XCB_NO_EXPOSURE: // 14
-                {
-                    string_print(S8("NO_EXPOSURE"));
-
-                    xcb_no_exposure_event_t* no_exposure_event = (xcb_no_exposure_event_t*)event;
-                    u8 k = no_exposure_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_no_exposure_event_t(3)                                                                 XCB Events                                                                xcb_no_exposure_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_no_exposure_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_no_exposure_event_t {
-                    //            uint8_t        response_type;
-                    //            uint8_t        pad0;
-                    //            uint16_t       sequence;
-                    //            xcb_drawable_t drawable;
-                    //            uint16_t       minor_opcode;
-                    //            uint8_t        major_opcode;
-                    //            uint8_t        pad1;
-                    //        } xcb_no_exposure_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_NO_EXPOSURE. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        drawable  NOT YET DOCUMENTED.
-                    //
-                    //        minor_opcode
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    //        major_opcode
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                               xcb_no_exposure_event_t(3)
-
-                }
-                break; case XCB_VISIBILITY_NOTIFY: // 15
-                {
-                    string_print(S8("VISIBILITY_NOTIFY"));
-
-                    xcb_visibility_notify_event_t* visibility_notify_event = (xcb_visibility_notify_event_t*)event;
-
-                    string_print(S8("\nVisibility changed: {u8:x}\n"), visibility_notify_event->state);
-                    unimplemented = false;
-                    //                 xcb_visibility_notify_event_t(3)                                                           XCB Events                                                          xcb_visibility_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_visibility_notify_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_visibility_notify_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t window;
-                    //            uint8_t      state;
-                    //            uint8_t      pad1[3];
-                    //        } xcb_visibility_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_VISIBILITY_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        window    NOT YET DOCUMENTED.
-                    //
-                    //        state     NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                         xcb_visibility_notify_event_t(3)
-                }
-                break; case XCB_CREATE_NOTIFY: // 16
-                {
-                    string_print(S8("CREATE_NOTIFY"));
-
-                    xcb_create_notify_event_t* create_notify_event = (xcb_create_notify_event_t*)event;
-                    //                 xcb_create_notify_event_t(3)                                                               XCB Events                                                              xcb_create_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_create_notify_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_create_notify_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t parent;
-                    //            xcb_window_t window;
-                    //            int16_t      x;
-                    //            int16_t      y;
-                    //            uint16_t     width;
-                    //            uint16_t     height;
-                    //            uint16_t     border_width;
-                    //            uint8_t      override_redirect;
-                    //            uint8_t      pad1;
-                    //        } xcb_create_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_CREATE_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        parent    NOT YET DOCUMENTED.
-                    //
-                    //        window    NOT YET DOCUMENTED.
-                    //
-                    //        x         NOT YET DOCUMENTED.
-                    //
-                    //        y         NOT YET DOCUMENTED.
-                    //
-                    //        width     NOT YET DOCUMENTED.
-                    //
-                    //        height    NOT YET DOCUMENTED.
-                    //
-                    //        border_width
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    //        override_redirect
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                             xcb_create_notify_event_t(3)
-
-                    u8 k = create_notify_event->response_type;
-                    BUSTER_UNUSED(k);
-                }
-                break; case XCB_DESTROY_NOTIFY: // 17
-                {
-                    string_print(S8("DESTROY_NOTIFY"));
-
-                    xcb_destroy_notify_event_t* destroy_notify_event = (xcb_destroy_notify_event_t*)event;
-
-                    //                 xcb_destroy_notify_event_t(3)                                                              XCB Events                                                             xcb_destroy_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_destroy_notify_event_t - a window is destroyed
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_destroy_notify_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t event;
-                    //            xcb_window_t window;
-                    //        } xcb_destroy_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_DESTROY_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        event     The reconfigured window or its parent, depending on whether StructureNotify or SubstructureNotify was selected.
-                    //
-                    //        window    The window that is destroyed.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_destroy_window(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                            xcb_destroy_notify_event_t(3)
-                    u8 k = destroy_notify_event->response_type;
-
-                    BUSTER_UNUSED(k);
-
-                }
-                break; case XCB_UNMAP_NOTIFY: // 18
-                {
-                    string_print(S8("UNMAP_NOTIFY"));
-
-                    xcb_unmap_notify_event_t* unmap_notify_event = (xcb_unmap_notify_event_t*)event;
-                    u8 k = unmap_notify_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_unmap_notify_event_t(3)                                                                XCB Events                                                               xcb_unmap_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_unmap_notify_event_t - a window is unmapped
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_unmap_notify_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t event;
-                    //            xcb_window_t window;
-                    //            uint8_t      from_configure;
-                    //            uint8_t      pad1[3];
-                    //        } xcb_unmap_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_UNMAP_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        event     The reconfigured window or its parent, depending on whether StructureNotify or SubstructureNotify was selected.
-                    //
-                    //        window    The window that was unmapped.
-                    //
-                    //        from_configure
-                    //                  Set to 1 if the event was generated as a result of a resizing of the window's parent when window had a win_gravity of UnmapGravity.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_unmap_window(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                              xcb_unmap_notify_event_t(3)
-
-                }
-                break; case XCB_MAP_NOTIFY: // 19
-                {
-                    string_print(S8("MAP_NOTIFY"));
-
-                    xcb_map_notify_event_t* map_notify_event = (xcb_map_notify_event_t*)event;
-                    u8 k = map_notify_event->response_type;
-                    BUSTER_UNUSED(k);
-                    string_print(S8("\nWindow is showing!\n"));
-                    unimplemented = false;
-
-                    //                 xcb_map_notify_event_t(3)                                                                  XCB Events                                                                 xcb_map_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_map_notify_event_t - a window was mapped
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_map_notify_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t event;
-                    //            xcb_window_t window;
-                    //            uint8_t      override_redirect;
-                    //            uint8_t      pad1[3];
-                    //        } xcb_map_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_MAP_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        event     The window which was mapped or its parent, depending on whether StructureNotify or SubstructureNotify was selected.
-                    //
-                    //        window    The window that was mapped.
-                    //
-                    //        override_redirect
-                    //                  Window managers should ignore this window if override_redirect is 1.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_map_window(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                                xcb_map_notify_event_t(3)
-
-                }
-                break; case XCB_MAP_REQUEST: // 20
-                {
-                    string_print(S8("MAP_REQUEST"));
-
-                    xcb_map_request_event_t* map_request_event = (xcb_map_request_event_t*)event;
-                    u8 k = map_request_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_map_request_event_t(3)                                                                 XCB Events                                                                xcb_map_request_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_map_request_event_t - window wants to be mapped
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_map_request_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t parent;
-                    //            xcb_window_t window;
-                    //        } xcb_map_request_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_MAP_REQUEST. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        parent    The parent of window.
-                    //
-                    //        window    The window to be mapped.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_map_window(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                               xcb_map_request_event_t(3)
-
-                }
-                break; case XCB_REPARENT_NOTIFY: // 21
-                {
-                    string_print(S8("REPARENT_NOTIFY"));
-
-                    xcb_reparent_notify_event_t* reparent_notify_event = (xcb_reparent_notify_event_t*)event;
-                    u8 k = reparent_notify_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_reparent_notify_event_t(3)                                                             XCB Events                                                            xcb_reparent_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_reparent_notify_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_reparent_notify_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t event;
-                    //            xcb_window_t window;
-                    //            xcb_window_t parent;
-                    //            int16_t      x;
-                    //            int16_t      y;
-                    //            uint8_t      override_redirect;
-                    //            uint8_t      pad1[3];
-                    //        } xcb_reparent_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_REPARENT_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        event     NOT YET DOCUMENTED.
-                    //
-                    //        window    NOT YET DOCUMENTED.
-                    //
-                    //        parent    NOT YET DOCUMENTED.
-                    //
-                    //        x         NOT YET DOCUMENTED.
-                    //
-                    //        y         NOT YET DOCUMENTED.
-                    //
-                    //        override_redirect
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                           xcb_reparent_notify_event_t(3)
-
-                }
-                break; case XCB_CONFIGURE_NOTIFY: // 22
-                {
-                    string_print(S8("CONFIGURE_NOTIFY"));
-
-                    xcb_configure_notify_event_t* configure_notify_event = (xcb_configure_notify_event_t*)event;
-                    u16 width = configure_notify_event->width;
-                    u16 height = configure_notify_event->height;
-
-                    string_print(S8("\nConfiguration changed! Width: {s16}. Height: {s16}\n"), width, height);
-                    WmWindowHandle* window = wm_x11_window_from_xcb(windowing, configure_notify_event->window);
-                    if (window)
+                    break; default:
                     {
-                        wm_event_push((WmEvent) {
-                                .kind = WM_EVENT_WINDOW_RESIZE,
-                                .window = window,
-                                .position = (WmOffset) { .width = width, .height = height },
-                                });
+                        string_print(S8("Unknown event type: {u8:x}\n"), event_type);
                     }
-
-                    unimplemented = false;
-
-                    //                 xcb_configure_notify_event_t(3)                                                            XCB Events                                                           xcb_configure_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_configure_notify_event_t - NOT YET DOCUMENTED
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_configure_notify_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t event;
-                    //            xcb_window_t window;
-                    //            xcb_window_t above_sibling;
-                    //            int16_t      x;
-                    //            int16_t      y;
-                    //            uint16_t     width;
-                    //            uint16_t     height;
-                    //            uint16_t     border_width;
-                    //            uint8_t      override_redirect;
-                    //            uint8_t      pad1;
-                    //        } xcb_configure_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_CONFIGURE_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        event     The reconfigured window or its parent, depending on whether StructureNotify or SubstructureNotify was selected.
-                    //
-                    //        window    The window whose size, position, border, and/or stacking order was changed.
-                    //
-                    //        above_sibling
-                    //                  If  XCB_NONE,  the window is on the bottom of the stack with respect to sibling windows. However, if set to a sibling window, the window is placed on top of this sibling win‐
-                    //                  dow.
-                    //
-                    //        x         The X coordinate of the upper-left outside corner of window, relative to the parent window's origin.
-                    //
-                    //        y         The Y coordinate of the upper-left outside corner of window, relative to the parent window's origin.
-                    //
-                    //        width     The inside width of window, not including the border.
-                    //
-                    //        height    The inside height of window, not including the border.
-                    //
-                    //        border_width
-                    //                  The border width of window.
-                    //
-                    //        override_redirect
-                    //                  Window managers should ignore this window if override_redirect is 1.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_free_colormap(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                          xcb_configure_notify_event_t(3)
-
-                }
-                break; case XCB_CONFIGURE_REQUEST: // 23
-                {
-                    string_print(S8("CONFIGURE_REQUEST"));
-                    xcb_configure_request_event_t* configure_request_event = (xcb_configure_request_event_t*)event;
-
-                    //                 xcb_configure_request_event_t(3)                                                           XCB Events                                                          xcb_configure_request_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_configure_request_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_configure_request_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      stack_mode;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t parent;
-                    //            xcb_window_t window;
-                    //            xcb_window_t sibling;
-                    //            int16_t      x;
-                    //            int16_t      y;
-                    //            uint16_t     width;
-                    //            uint16_t     height;
-                    //            uint16_t     border_width;
-                    //            uint16_t     value_mask;
-                    //        } xcb_configure_request_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_CONFIGURE_REQUEST. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        stack_mode
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    //        parent    NOT YET DOCUMENTED.
-                    //
-                    //        window    NOT YET DOCUMENTED.
-                    //
-                    //        sibling   NOT YET DOCUMENTED.
-                    //
-                    //        x         NOT YET DOCUMENTED.
-                    //
-                    //        y         NOT YET DOCUMENTED.
-                    //
-                    //        width     NOT YET DOCUMENTED.
-                    //
-                    //        height    NOT YET DOCUMENTED.
-                    //
-                    //        border_width
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    //        value_mask
-                    //                  NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                         xcb_configure_request_event_t(3)
-
-                    u8 k = configure_request_event->response_type;
-                    BUSTER_UNUSED(k);
-                }
-                break; case XCB_GRAVITY_NOTIFY: // 24
-                {
-                    string_print(S8("GRAVITY_NOTIFY"));
-                    xcb_gravity_notify_event_t* gravity_notify_event = (xcb_gravity_notify_event_t*)event;
-                    u8 k = gravity_notify_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    // xcb_gravity_notify_event_t(3)                                                              XCB Events                                                             xcb_gravity_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_gravity_notify_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_gravity_notify_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t event;
-                    //            xcb_window_t window;
-                    //            int16_t      x;
-                    //            int16_t      y;
-                    //        } xcb_gravity_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_GRAVITY_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        event     NOT YET DOCUMENTED.
-                    //
-                    //        window    NOT YET DOCUMENTED.
-                    //
-                    //        x         NOT YET DOCUMENTED.
-                    //
-                    //        y         NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                            xcb_gravity_notify_event_t(3)
-
-
-                }
-                break; case XCB_RESIZE_REQUEST: // 25
-                {
-                    string_print(S8("RESIZE_REQUEST"));
-                    xcb_resize_request_event_t* resize_request_event = (xcb_resize_request_event_t*)event;
-                    u8 k = resize_request_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_resize_request_event_t(3)                                                              XCB Events                                                             xcb_resize_request_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_resize_request_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_resize_request_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t window;
-                    //            uint16_t     width;
-                    //            uint16_t     height;
-                    //        } xcb_resize_request_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_RESIZE_REQUEST. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        window    NOT YET DOCUMENTED.
-                    //
-                    //        width     NOT YET DOCUMENTED.
-                    //
-                    //        height    NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                            xcb_resize_request_event_t(3)
-
-                }
-                break;
-                case XCB_CIRCULATE_NOTIFY: // 26
-                case XCB_CIRCULATE_REQUEST: // 27
-                {
-                    switch (event_type)
-                    {
-                        break; case XCB_CIRCULATE_NOTIFY: string_print(S8("CIRCULATE_NOTIFY"));
-                        break; case XCB_CIRCULATE_REQUEST: string_print(S8("CIRCULATE_REQUEST"));
-                        break; default: BUSTER_UNREACHABLE();
-                    }
-
-                    xcb_circulate_notify_event_t* circulate_event = (xcb_circulate_notify_event_t*)event;
-                    u8 k = circulate_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_circulate_notify_event_t(3)                                                            XCB Events                                                           xcb_circulate_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_circulate_notify_event_t - NOT YET DOCUMENTED
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_circulate_notify_event_t {
-                    //            uint8_t      response_type;
-                    //            uint8_t      pad0;
-                    //            uint16_t     sequence;
-                    //            xcb_window_t event;
-                    //            xcb_window_t window;
-                    //            uint8_t      pad1[4];
-                    //            uint8_t      place;
-                    //            uint8_t      pad2[3];
-                    //        } xcb_circulate_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_CIRCULATE_REQUEST. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        event     Either the restacked window or its parent, depending on whether StructureNotify or SubstructureNotify was selected.
-                    //
-                    //        window    The restacked window.
-                    //
-                    //        place
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_circulate_window(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                          xcb_circulate_notify_event_t(3)
-
-                }
-                break; case XCB_PROPERTY_NOTIFY: // 28
-                {
-                    string_print(S8("PROPERTY_NOTIFY"));
-                    xcb_property_notify_event_t* property_notify_event = (xcb_property_notify_event_t*)event;
-                    xcb_atom_t property_atom = property_notify_event->atom;
-                    xcb_get_atom_name_cookie_t name_cookie = xcb_get_atom_name(connection, property_atom);
-                    xcb_generic_error_t* error;
-                    xcb_get_atom_name_reply_t* reply = xcb_get_atom_name_reply(connection, name_cookie, &error);
-                    if (reply)
-                    {
-                        char* name_pointer = xcb_get_atom_name_name(reply);
-                        int name_length = xcb_get_atom_name_name_length(reply);
-                        String8 name = { .pointer = name_pointer, .length = (u64)name_length };
-                        string_print(S8("\nProperty changed: {S8}\n"), name);
-                        unimplemented = false;
-                        free(reply);
-                    }
-
-                    //                 xcb_property_notify_event_t(3)                                                             XCB Events                                                            xcb_property_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_property_notify_event_t - a window property changed
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_property_notify_event_t {
-                    //            uint8_t         response_type;
-                    //            uint8_t         pad0;
-                    //            uint16_t        sequence;
-                    //            xcb_window_t    window;
-                    //            xcb_atom_t      atom;
-                    //            xcb_timestamp_t time;
-                    //            uint8_t         state;
-                    //            uint8_t         pad1[3];
-                    //        } xcb_property_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_PROPERTY_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        window    The window whose associated property was changed.
-                    //
-                    //        atom      The property's atom, to indicate which property was changed.
-                    //
-                    //        time      A timestamp of the server time when the property was changed.
-                    //
-                    //        state
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_change_property(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                           xcb_property_notify_event_t(3)
-
-                }
-                break; case XCB_SELECTION_CLEAR: // 29
-                {
-                    string_print(S8("SELECTION_CLEAR"));
-
-                    xcb_selection_clear_event_t* selection_clear_event = (xcb_selection_clear_event_t*)event;
-                    u8 k = selection_clear_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_selection_clear_event_t(3)                                                             XCB Events                                                            xcb_selection_clear_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_selection_clear_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_selection_clear_event_t {
-                    //            uint8_t         response_type;
-                    //            uint8_t         pad0;
-                    //            uint16_t        sequence;
-                    //            xcb_timestamp_t time;
-                    //            xcb_window_t    owner;
-                    //            xcb_atom_t      selection;
-                    //        } xcb_selection_clear_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_SELECTION_CLEAR. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        time      NOT YET DOCUMENTED.
-                    //
-                    //        owner     NOT YET DOCUMENTED.
-                    //
-                    //        selection NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                           xcb_selection_clear_event_t(3)
-
-                }
-                break; case XCB_SELECTION_REQUEST: // 30
-                {
-                    string_print(S8("SELECTION_REQUEST"));
-
-                    xcb_selection_request_event_t* selection_request_event = (xcb_selection_request_event_t*)event;
-                    u8 k = selection_request_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_selection_request_event_t(3)                                                           XCB Events                                                          xcb_selection_request_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_selection_request_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_selection_request_event_t {
-                    //            uint8_t         response_type;
-                    //            uint8_t         pad0;
-                    //            uint16_t        sequence;
-                    //            xcb_timestamp_t time;
-                    //            xcb_window_t    owner;
-                    //            xcb_window_t    requestor;
-                    //            xcb_atom_t      selection;
-                    //            xcb_atom_t      target;
-                    //            xcb_atom_t      property;
-                    //        } xcb_selection_request_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_SELECTION_REQUEST. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        time      NOT YET DOCUMENTED.
-                    //
-                    //        owner     NOT YET DOCUMENTED.
-                    //
-                    //        requestor NOT YET DOCUMENTED.
-                    //
-                    //        selection NOT YET DOCUMENTED.
-                    //
-                    //        target    NOT YET DOCUMENTED.
-                    //
-                    //        property  NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                         xcb_selection_request_event_t(3)
-
-                }
-                break; case XCB_SELECTION_NOTIFY: // 31
-                {
-                    string_print(S8("SELECTION_NOTIFY"));
-
-                    xcb_selection_notify_event_t* selection_notify_event = (xcb_selection_notify_event_t*)event;
-                    u8 k = selection_notify_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_selection_notify_event_t(3)                                                            XCB Events                                                           xcb_selection_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_selection_notify_event_t -
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_selection_notify_event_t {
-                    //            uint8_t         response_type;
-                    //            uint8_t         pad0;
-                    //            uint16_t        sequence;
-                    //            xcb_timestamp_t time;
-                    //            xcb_window_t    requestor;
-                    //            xcb_atom_t      selection;
-                    //            xcb_atom_t      target;
-                    //            xcb_atom_t      property;
-                    //        } xcb_selection_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_SELECTION_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        time      NOT YET DOCUMENTED.
-                    //
-                    //        requestor NOT YET DOCUMENTED.
-                    //
-                    //        selection NOT YET DOCUMENTED.
-                    //
-                    //        target    NOT YET DOCUMENTED.
-                    //
-                    //        property  NOT YET DOCUMENTED.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                          xcb_selection_notify_event_t(3)
-                }
-                break; case XCB_COLORMAP_NOTIFY: // 32
-                {
-                    string_print(S8("COLORMAP_NOTIFY"));
-
-                    xcb_colormap_notify_event_t* colormap_notify_event = (xcb_colormap_notify_event_t*)event;
-                    u8 k = colormap_notify_event->response_type;
-                    BUSTER_UNUSED(k);
-
-                    //                 xcb_colormap_notify_event_t(3)                                                             XCB Events                                                            xcb_colormap_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_colormap_notify_event_t - the colormap for some window changed
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_colormap_notify_event_t {
-                    //            uint8_t        response_type;
-                    //            uint8_t        pad0;
-                    //            uint16_t       sequence;
-                    //            xcb_window_t   window;
-                    //            xcb_colormap_t colormap;
-                    //            uint8_t        _new;
-                    //            uint8_t        state;
-                    //            uint8_t        pad1[2];
-                    //        } xcb_colormap_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_COLORMAP_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        window    The window whose associated colormap is changed, installed or uninstalled.
-                    //
-                    //        colormap  The colormap which is changed, installed or uninstalled. This is XCB_NONE when the colormap is changed by a call to FreeColormap.
-                    //
-                    //        _new      NOT YET DOCUMENTED.
-                    //
-                    //        state
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3), xcb_free_colormap(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                           xcb_colormap_notify_event_t(3)
-
-                }
-                break; case XCB_CLIENT_MESSAGE: // 33
-                {
-                    string_print(S8("CLIENT_MESSAGE"));
-                    xcb_client_message_event_t* client_message_event = (xcb_client_message_event_t*)event;
-                    if (client_message_event->data.data32[0] == atom_replies[X11_ATOM_WM_DELETE_WINDOW]->atom)
-                    {
-                        string_print(S8("WM_DELETE_WINDOW"));
-                        BUSTER_UNUSED(wm_event_push((WmEvent) {
-                                    .kind = WM_EVENT_WINDOW_CLOSE,
-                                    .window = wm_x11_window_from_xcb(windowing, client_message_event->window),
-                                    }));
-
-                        unimplemented = false;
-                    }
-                    else
-                    {
-                        unimplemented = true;
-                    }
-                }
-                break; case XCB_MAPPING_NOTIFY: // 32
-                {
-                    string_print(S8("MAPPING_NOTIFY"));
-
-                    xcb_mapping_notify_event_t* mapping_notify_event = (xcb_mapping_notify_event_t*)event;
-                    u8 k = mapping_notify_event->response_type;
-                    BUSTER_UNUSED(k);
-                    wm_x11_xkb_refresh_keymap(windowing);
-                    unimplemented = false;
-
-                    //                 xcb_mapping_notify_event_t(3)                                                              XCB Events                                                             xcb_mapping_notify_event_t(3)
-                    //
-                    // NAME
-                    //        xcb_mapping_notify_event_t - keyboard mapping changed
-                    //
-                    // SYNOPSIS
-                    //        #include <xcb/xproto.h>
-                    //
-                    //    Event datastructure
-                    //        typedef struct xcb_mapping_notify_event_t {
-                    //            uint8_t       response_type;
-                    //            uint8_t       pad0;
-                    //            uint16_t      sequence;
-                    //            uint8_t       request;
-                    //            xcb_keycode_t first_keycode;
-                    //            uint8_t       count;
-                    //            uint8_t       pad1;
-                    //        } xcb_mapping_notify_event_t;
-                    //
-                    // EVENT FIELDS
-                    //        response_type
-                    //                  The type of this event, in this case XCB_MAPPING_NOTIFY. This field is also present in the xcb_generic_event_t and can be used to tell events apart from each other.
-                    //
-                    //        sequence  The sequence number of the last request processed by the X11 server.
-                    //
-                    //        request
-                    //
-                    //        first_keycode
-                    //                  The first number in the range of the altered mapping.
-                    //
-                    //        count     The number of keycodes altered.
-                    //
-                    // DESCRIPTION
-                    // SEE ALSO
-                    //        xcb_generic_event_t(3)
-                    //
-                    // AUTHOR
-                    //        Generated from xproto.xml. Contact xcb@lists.freedesktop.org for corrections and improvements.
-                    //
-                    // X Version 11                                                                             libxcb 1.17.0                                                            xcb_mapping_notify_event_t(3)
-
-                }
-                break; default:
-                {
-                    string_print(S8("UNKNOWN"));
                 }
             }
         }
 
-        string_print(S8(")\n"));
         free(event);
         wm_xim_create_ic(windowing);
-
-        if (unimplemented)
-        {
-            string_print(S8("Ignored unimplemented X event\n"));
-        }
     }
     windowing->poll_arena = 0;
     windowing->poll_event_list = 0;
