@@ -80,6 +80,22 @@
 #define BUSTER_COMPILER_CLANG 0
 #endif
 
+#ifndef BUSTER_USE_VULKAN
+#define BUSTER_USE_VULKAN 0
+#endif
+
+#ifndef BUSTER_USE_D3D12
+#define BUSTER_USE_D3D12 0
+#endif
+
+#ifndef BUSTER_USE_METAL
+#define BUSTER_USE_METAL 0
+#endif
+
+#ifndef BUSTER_USE_GRAPHICS
+#define BUSTER_USE_GRAPHICS (BUSTER_USE_VULKAN || BUSTER_USE_D3D12 || BUSTER_USE_METAL)
+#endif
+
 #ifndef BUSTER_COMPILER_ZIG
 #define BUSTER_COMPILER_ZIG 0
 #endif
@@ -706,12 +722,6 @@ typedef ThreadReturnType ThreadCallback(void*);
 #define BUSTER_FUNCTION ((String8){ .pointer = (char8*)__func__, .length = strlen(__func__) })
 #endif
 
-#if BUSTER_OPTIMIZE
-#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
-#else
-#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (buster_failed_assertion(__LINE__, BUSTER_FUNCTION, S8(__FILE__)), 0) : 0))
-#endif
-
 #if BUSTER_COMPILER_MSVC
 #define BUSTER_NORETURN __declspec(noreturn)
 #else
@@ -738,4 +748,88 @@ typedef ThreadReturnType ThreadCallback(void*);
 #define BUSTER_ALIGN_OF(T) alignof(T)
 #endif
 
-BUSTER_F_DECL BUSTER_NORETURN BUSTER_COLD void buster_failed_assertion(u32 line, String8 function_name, String8 file_path);
+#define BUSTER_SWITCH_ALPHA_UPPER \
+                case 'A':\
+                case 'B':\
+                case 'C':\
+                case 'D':\
+                case 'E':\
+                case 'F':\
+                case 'G':\
+                case 'H':\
+                case 'I':\
+                case 'J':\
+                case 'K':\
+                case 'L':\
+                case 'M':\
+                case 'N':\
+                case 'O':\
+                case 'P':\
+                case 'Q':\
+                case 'R':\
+                case 'S':\
+                case 'T':\
+                case 'U':\
+                case 'V':\
+                case 'W':\
+                case 'X':\
+                case 'Y':\
+                case 'Z'
+
+#define BUSTER_SWITCH_ALPHA_LOWER \
+                case 'a':\
+                case 'b':\
+                case 'c':\
+                case 'd':\
+                case 'e':\
+                case 'f':\
+                case 'g':\
+                case 'h':\
+                case 'i':\
+                case 'j':\
+                case 'k':\
+                case 'l':\
+                case 'm':\
+                case 'n':\
+                case 'o':\
+                case 'p':\
+                case 'q':\
+                case 'r':\
+                case 's':\
+                case 't':\
+                case 'u':\
+                case 'v':\
+                case 'w':\
+                case 'x':\
+                case 'y':\
+                case 'z'
+
+#define BUSTER_SWITCH_DECIMAL_DIGIT \
+    case '0':\
+    case '1':\
+    case '2':\
+    case '3':\
+    case '4':\
+    case '5':\
+    case '6':\
+    case '7':\
+    case '8':\
+    case '9'
+
+#define BUSTER_SWITCH_HEX_ALPHA_LOWER \
+                case 'a':\
+                case 'b':\
+                case 'c':\
+                case 'd':\
+                case 'e':\
+                case 'f'
+
+#define BUSTER_SWITCH_HEX_ALPHA_UPPER \
+                case 'A':\
+                case 'B':\
+                case 'C':\
+                case 'D':\
+                case 'E':\
+                case 'F'
+
+#define BUSTER_SWITCH_HEX_ALPHA BUSTER_SWITCH_HEX_ALPHA_UPPER: BUSTER_SWITCH_HEX_ALPHA_LOWER

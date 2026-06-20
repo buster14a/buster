@@ -734,6 +734,14 @@ struct RenderingWindowHandle
     VkDescriptorPool descriptor_pool;
 };
 
+RenderingWindowSize rendering_window_get_size(RenderingWindowHandle* window)
+{
+    return (RenderingWindowSize){
+        .width = window->width,
+        .height = window->height,
+    };
+}
+
 BUSTER_GLOBAL_LOCAL RenderingHandle rendering_handle = {0};
 BUSTER_GLOBAL_LOCAL u32 vulkan_frame_begin_log_count = 0;
 BUSTER_GLOBAL_LOCAL u32 vulkan_frame_end_log_count = 0;
@@ -1016,7 +1024,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                                 }
                                 else
                                 {
-                                    BUSTER_TRAP();
+                                    BUSTER_TODO();
                                 }
                             }
                         }
@@ -2491,6 +2499,24 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         vulkan_frame_begin_log_count += 1;
     }
 
+    VkSurfaceCapabilitiesKHR surface_capabilities = {0};
+    VkResult capabilities_result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(rendering->physical_device, window->surface, &surface_capabilities);
+    if (capabilities_result == VK_SUCCESS)
+    {
+        u32 surface_width = surface_capabilities.currentExtent.width;
+        u32 surface_height = surface_capabilities.currentExtent.height;
+        if (surface_width && surface_height && (surface_width != window->width || surface_height != window->height))
+        {
+            string_print(S8("Vulkan frame begin detected surface resize: stored={u32}x{u32}, current={u32}x{u32}\n"),
+                         window->width,
+                         window->height,
+                         surface_width,
+                         surface_height);
+            swapchain_recreate(rendering, window);
+            frame = window_frame(window);
+        }
+    }
+
     u32 fence_count = 1;
     VkBool32 wait_all = 1;
     VkResult wait_result = vkWaitForFences(rendering->device, fence_count, &frame->render_fence, wait_all, timeout);
@@ -2505,8 +2531,12 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         {
             string_print(S8("Vulkan frame begin acquire out of date: vkAcquireNextImageKHR={u64:x}\n"), (u64)(u32)next_image_result);
             swapchain_recreate(rendering, window);
+            frame = window_frame(window);
+            next_image_result = vkAcquireNextImageKHR(rendering->device, window->swapchain, timeout, frame->swapchain_semaphore, image_fence, &window->swapchain_image_index);
+            acquired_image_index = window->swapchain_image_index;
         }
-        else if (next_image_result != VK_SUCCESS && next_image_result != VK_SUBOPTIMAL_KHR)
+
+        if (next_image_result != VK_SUCCESS && next_image_result != VK_SUBOPTIMAL_KHR)
         {
             string_print(S8("Vulkan frame begin acquire failed: vkAcquireNextImageKHR={u64:x}\n"), (u64)(u32)next_image_result);
             os_fail();
@@ -3355,7 +3385,12 @@ void rendering_deinitialize(RenderingHandle* rendering)
 #define BUSTER_D3D12_STRINGIFY_HELPER(x) #x
 #define BUSTER_D3D12_STRINGIFY(x) BUSTER_D3D12_STRINGIFY_HELPER(x)
 
-#define BUSTER_D3D12_RELEASE(object) do { if (object) { IUnknown_Release((IUnknown*)(object)); (object) = 0; } } while (0)
+BUSTER_GLOBAL_LOCAL void d3d12_release_unknown(IUnknown* object)
+{
+    object->lpVtbl->Release(object);
+}
+
+#define BUSTER_D3D12_RELEASE(object) do { if (object) { d3d12_release_unknown((IUnknown*)(object)); (object) = 0; } } while (0)
 
 BUSTER_CT_CHECK(BUSTER_D3D12_RECT_TEXTURE_SLOT_COUNT == RECT_TEXTURE_SLOT_COUNT);
 
@@ -3474,6 +3509,14 @@ struct RenderingWindowHandle
     u32 rect_descriptor_base;
     WindowFrame frames[BUSTER_D3D12_FRAME_COUNT];
 };
+
+RenderingWindowSize rendering_window_get_size(RenderingWindowHandle* window)
+{
+    return (RenderingWindowSize){
+        .width = window->width,
+        .height = window->height,
+    };
+}
 
 BUSTER_GLOBAL_LOCAL RenderingHandle rendering_handle = {0};
 BUSTER_GLOBAL_LOCAL u32 d3d12_frame_begin_log_count = 0;
@@ -4737,6 +4780,14 @@ struct RenderingWindowHandle
     TextureIndex rect_textures[RECT_TEXTURE_SLOT_COUNT];
     WindowFrame frames[BUSTER_METAL_FRAME_COUNT];
 };
+
+RenderingWindowSize rendering_window_get_size(RenderingWindowHandle* window)
+{
+    return (RenderingWindowSize){
+        .width = window->width,
+        .height = window->height,
+    };
+}
 
 BUSTER_GLOBAL_LOCAL RenderingHandle rendering_handle = {0};
 BUSTER_GLOBAL_LOCAL u32 metal_drawable_size_log_count = 0;

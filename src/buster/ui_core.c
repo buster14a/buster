@@ -1,50 +1,136 @@
-// This UI is heavily inspired by the ideas of Casey Muratori and Ryan Fleury on GUI programming.
-// https://www.youtube.com/watch?v=Z1qyvQsjK5Y
-// https://www.rfleury.com/p/ui-part-1-the-interaction-medium
+// Raddebugger-inspired immediate-mode UI core, adapted to Buster's renderer/window layer.
 
 #include <buster/ui_core.h>
 #include <buster/string.h>
 #include <buster/float.h>
+#include <buster/os.h>
 
 BUSTER_V_IMPL UI_State* ui_state;
 
-void ui_autopop(UI_State* state)
+BUSTER_GLOBAL_LOCAL F32Interval2 ui_rect_make(f32 x0, f32 y0, f32 x1, f32 y1)
 {
-    if (state->stack_autopops.parent && state->stacks.parent_length > 0)
-    {
-        state->stacks.parent_length -= 1;
-        state->stack_autopops.parent = 0;
+    return (F32Interval2){ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 };
+}
+
+BUSTER_GLOBAL_LOCAL float2 ui_rect_dim(F32Interval2 rect)
+{
+    return float2_make(rect.x1 - rect.x0, rect.y1 - rect.y0);
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_rect_contains(F32Interval2 rect, float2 p)
+{
+    f32 px = float2_element(p, AXIS2_X);
+    f32 py = float2_element(p, AXIS2_Y);
+    bool result = (px >= rect.x0 && px <= rect.x1 && py >= rect.y0 && py <= rect.y1);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL float4 ui_color_mul_alpha(float4 color, f32 alpha)
+{
+    float4_element(color, 3) *= alpha;
+    return color;
+}
+
+BUSTER_GLOBAL_LOCAL UI_Box* ui_nil_box(void)
+{
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_box_is_nil(UI_Box* box)
+{
+    return box == 0;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_stack_reset(UI_State* state)
+{
+    memset(&state->stacks, 0, sizeof(state->stacks));
+}
+
+#define UI_STACK_TOP_IMPL(name, type) \
+    type ui_top_##name(void) \
+    { \
+        type result = ui_state->stack_nulls.name; \
+        if (ui_state->stacks.name##_length != 0) \
+        { \
+            result = ui_state->stacks.name[ui_state->stacks.name##_length - 1]; \
+        } \
+        return result; \
     }
-    if (state->stack_autopops.pref_width && state->stacks.pref_width_length > 0)
-    {
-        state->stacks.pref_width_length -= 1;
-        state->stack_autopops.pref_width = 0;
+
+#define UI_STACK_PUSH_IMPL(name, type) \
+    type ui_push_##name(type v) \
+    { \
+        type old = ui_top_##name(); \
+        BUSTER_CHECK(ui_state->stacks.name##_length < UI_STACK_CAPACITY); \
+        ui_state->stacks.name[ui_state->stacks.name##_length++] = v; \
+        ui_state->stacks.name##_auto_pop = 0; \
+        return old; \
     }
-    if (state->stack_autopops.pref_height && state->stacks.pref_height_length > 0)
-    {
-        state->stacks.pref_height_length -= 1;
-        state->stack_autopops.pref_height = 0;
+
+#define UI_STACK_POP_IMPL(name, type) \
+    type ui_pop_##name(void) \
+    { \
+        BUSTER_CHECK(ui_state->stacks.name##_length != 0); \
+        type result = ui_state->stacks.name[--ui_state->stacks.name##_length]; \
+        ui_state->stacks.name##_auto_pop = 0; \
+        return result; \
     }
-    if (state->stack_autopops.child_layout_axis && state->stacks.child_layout_axis_length > 0)
-    {
-        state->stacks.child_layout_axis_length -= 1;
-        state->stack_autopops.child_layout_axis = 0;
+
+#define UI_STACK_SET_NEXT_IMPL(name, type) \
+    type ui_set_next_##name(type v) \
+    { \
+        type old = ui_top_##name(); \
+        BUSTER_CHECK(ui_state->stacks.name##_length < UI_STACK_CAPACITY); \
+        ui_state->stacks.name[ui_state->stacks.name##_length++] = v; \
+        ui_state->stacks.name##_auto_pop = 1; \
+        return old; \
     }
-    if (state->stack_autopops.text_color && state->stacks.text_color_length > 0)
-    {
-        state->stacks.text_color_length -= 1;
-        state->stack_autopops.text_color = 0;
-    }
-    if (state->stack_autopops.background_color && state->stacks.background_color_length > 0)
-    {
-        state->stacks.background_color_length -= 1;
-        state->stack_autopops.background_color = 0;
-    }
-    if (state->stack_autopops.font_size && state->stacks.font_size_length > 0)
-    {
-        state->stacks.font_size_length -= 1;
-        state->stack_autopops.font_size = 0;
-    }
+
+#define UI_STACK_IMPL(name, type) \
+    UI_STACK_TOP_IMPL(name, type) \
+    UI_STACK_PUSH_IMPL(name, type) \
+    UI_STACK_POP_IMPL(name, type) \
+    UI_STACK_SET_NEXT_IMPL(name, type)
+
+UI_STACK_IMPL(parent, UI_Box*)
+UI_STACK_IMPL(child_layout_axis, Axis2)
+UI_STACK_IMPL(fixed_x, f32)
+UI_STACK_IMPL(fixed_y, f32)
+UI_STACK_IMPL(fixed_width, f32)
+UI_STACK_IMPL(fixed_height, f32)
+UI_STACK_IMPL(pref_width, UI_Size)
+UI_STACK_IMPL(pref_height, UI_Size)
+UI_STACK_IMPL(min_width, f32)
+UI_STACK_IMPL(min_height, f32)
+UI_STACK_IMPL(flags, UI_BoxFlags)
+UI_STACK_IMPL(background_color, float4)
+UI_STACK_IMPL(text_color, float4)
+UI_STACK_IMPL(border_color, float4)
+UI_STACK_IMPL(font_size, f32)
+UI_STACK_IMPL(text_padding, f32)
+UI_STACK_IMPL(text_alignment, UI_TextAlign)
+
+BUSTER_GLOBAL_LOCAL void ui_stack_auto_pop_all(UI_State* state)
+{
+#define UI_STACK_AUTO_POP(name) do { if (state->stacks.name##_auto_pop && state->stacks.name##_length != 0) { state->stacks.name##_length -= 1; state->stacks.name##_auto_pop = 0; } } while (0)
+    UI_STACK_AUTO_POP(parent);
+    UI_STACK_AUTO_POP(child_layout_axis);
+    UI_STACK_AUTO_POP(fixed_x);
+    UI_STACK_AUTO_POP(fixed_y);
+    UI_STACK_AUTO_POP(fixed_width);
+    UI_STACK_AUTO_POP(fixed_height);
+    UI_STACK_AUTO_POP(pref_width);
+    UI_STACK_AUTO_POP(pref_height);
+    UI_STACK_AUTO_POP(min_width);
+    UI_STACK_AUTO_POP(min_height);
+    UI_STACK_AUTO_POP(flags);
+    UI_STACK_AUTO_POP(background_color);
+    UI_STACK_AUTO_POP(text_color);
+    UI_STACK_AUTO_POP(border_color);
+    UI_STACK_AUTO_POP(font_size);
+    UI_STACK_AUTO_POP(text_padding);
+    UI_STACK_AUTO_POP(text_alignment);
+#undef UI_STACK_AUTO_POP
 }
 
 void ui_state_select(UI_State* state)
@@ -59,14 +145,161 @@ UI_State* ui_state_get(void)
 
 Arena* ui_build_arena(void)
 {
-    Arena* arena = ui_state->build_arenas[ui_state->build_count % BUSTER_ARRAY_LENGTH(ui_state->build_arenas)];
-    return arena;
+    Arena* result = ui_state->build_arenas[ui_state->build_index % BUSTER_ARRAY_LENGTH(ui_state->build_arenas)];
+    return result;
 }
 
-UI_Key ui_key_null(void)
+UI_Box* ui_root_from_state(UI_State* state)
 {
-    UI_Key key = {0};
-    return key;
+    return state ? state->root : 0;
+}
+
+UI_EventNode* ui_event_list_push(Arena* arena, UI_EventList* list, UI_Event* event)
+{
+    UI_EventNode* node = arena_allocate(arena, UI_EventNode, 1);
+    memset(node, 0, sizeof(*node));
+    node->v = *event;
+    node->v.node = node;
+    if (node->v.string.length != 0)
+    {
+        node->v.string = string_duplicate_arena(arena, node->v.string, false);
+    }
+
+    if (!list->last)
+    {
+        list->first = list->last = node;
+    }
+    else
+    {
+        node->prev = list->last;
+        list->last->next = node;
+        list->last = node;
+    }
+    list->count += 1;
+    return node;
+}
+
+void ui_eat_event_node(UI_EventList* list, UI_EventNode* node)
+{
+    if (node)
+    {
+        if (node->prev) { node->prev->next = node->next; }
+        if (node->next) { node->next->prev = node->prev; }
+        if (list->first == node) { list->first = node->next; }
+        if (list->last == node) { list->last = node->prev; }
+        if (list->count != 0) { list->count -= 1; }
+    }
+}
+
+bool ui_next_event(UI_Event** event)
+{
+    UI_EventNode* node = ui_state->events.first;
+    if (*event)
+    {
+        node = (*event)->node ? (*event)->node->next : 0;
+        *event = 0;
+    }
+    if (node)
+    {
+        *event = &node->v;
+    }
+    return *event != 0;
+}
+
+void ui_eat_event(UI_Event* event)
+{
+    if (event && event->node)
+    {
+        ui_eat_event_node(&ui_state->events, event->node);
+    }
+}
+
+UI_Key ui_key_zero(void)
+{
+    UI_Key result = {0};
+    return result;
+}
+
+UI_Key ui_key_make(u64 value)
+{
+    UI_Key result = { value };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 ui_hash_part_from_key_string(String8 string)
+{
+    String8 result = string;
+    u64 index = string_first_sequence(string, S8("###"));
+    if (index < string.length)
+    {
+        result = string_slice(string, index, string.length);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 ui_display_part_from_key_string(String8 string)
+{
+    String8 result = string;
+    u64 index = string_first_sequence(string, S8("##"));
+    if (index < string.length)
+    {
+        result.length = index;
+    }
+    return result;
+}
+
+UI_Key ui_key_from_string(UI_Key seed, String8 string)
+{
+    UI_Key result = ui_key_zero();
+    String8 hash_part = ui_hash_part_from_key_string(string);
+    if (hash_part.length != 0)
+    {
+        u64 hash = seed.value ? seed.value : 5381;
+        for (u64 i = 0; i < hash_part.length; i += 1)
+        {
+            hash = ((hash << 5) + hash) + (u8)hash_part.pointer[i];
+        }
+        result.value = hash;
+    }
+    return result;
+}
+
+bool ui_key_match(UI_Key a, UI_Key b)
+{
+    return a.value == b.value;
+}
+
+UI_Size ui_size(UI_SizeKind kind, f32 value, f32 strictness)
+{
+    UI_Size result = { .kind = kind, .value = value, .strictness = strictness };
+    return result;
+}
+
+UI_Size ui_pixels(u32 width, f32 strictness)
+{
+    return ui_size(UI_SizeKind_Pixels, (f32)width, strictness);
+}
+
+UI_Size ui_percentage(f32 percentage, f32 strictness)
+{
+    return ui_size(UI_SizeKind_ParentPct, percentage, strictness);
+}
+
+UI_Size ui_em(f32 value, f32 strictness)
+{
+    f32 font_size = ui_top_font_size();
+    BUSTER_CHECK(font_size != 0);
+    return ui_size(UI_SizeKind_Pixels, value * font_size, strictness);
+}
+
+UI_Size ui_text_dim(f32 padding, f32 strictness)
+{
+    return ui_size(UI_SizeKind_TextContent, padding, strictness);
+}
+
+UI_Size ui_children_sum(f32 strictness)
+{
+    return ui_size(UI_SizeKind_ChildrenSum, 0.0f, strictness);
 }
 
 UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* window)
@@ -77,13 +310,11 @@ UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* w
         .initial_size = BUSTER_MB(2),
     });
     UI_State* state = arena_allocate(arena, UI_State, 1);
+    state->arena = arena;
     state->rendering = rendering;
     state->rendering_window = window;
-    state->arena = arena;
-
-    u64 widget_table_length = 4096;
-    state->widget_table.length = widget_table_length;
-    state->widget_table.pointer = arena_allocate(arena, UI_WidgetSlot, widget_table_length);
+    state->box_table_size = 4096;
+    state->box_table = arena_allocate(arena, UI_BoxHashSlot, state->box_table_size);
 
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(state->build_arenas); i += 1)
     {
@@ -96,9 +327,22 @@ UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* w
 
     state->stack_nulls = (UI_StateStackNulls){
         .parent = 0,
-        .child_layout_axis = AXIS2_COUNT,
-        .pref_width = {0},
-        .pref_height = {0},
+        .child_layout_axis = AXIS2_Y,
+        .fixed_x = 0,
+        .fixed_y = 0,
+        .fixed_width = 0,
+        .fixed_height = 0,
+        .pref_width = { .kind = UI_SizeKind_Null, .value = 0, .strictness = 1 },
+        .pref_height = { .kind = UI_SizeKind_Null, .value = 0, .strictness = 1 },
+        .min_width = 0,
+        .min_height = 0,
+        .flags = 0,
+        .background_color = float4_make(0.12f, 0.12f, 0.14f, 1.0f),
+        .text_color = float4_make(0.85f, 0.86f, 0.88f, 1.0f),
+        .border_color = float4_make(0.22f, 0.23f, 0.26f, 1.0f),
+        .font_size = 12.0f,
+        .text_padding = 4.0f,
+        .text_alignment = UI_TextAlign_Left,
     };
 
     return state;
@@ -116,12 +360,10 @@ void ui_state_deinitialize(UI_State* state)
                 state->build_arenas[i] = 0;
             }
         }
-
         if (ui_state == state)
         {
             ui_state = 0;
         }
-
         Arena* arena = state->arena;
         if (arena)
         {
@@ -130,184 +372,222 @@ void ui_state_deinitialize(UI_State* state)
     }
 }
 
-u64 ui_widget_index_from_key(UI_Key key)
+BUSTER_GLOBAL_LOCAL u64 ui_box_slot_from_key(UI_Key key)
 {
-    u64 length = ui_state->widget_table.length;
-    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(length));
-    return key.value & (length - 1);
+    BUSTER_CHECK(ui_state->box_table_size != 0);
+    return key.value & (ui_state->box_table_size - 1);
 }
 
-String8 ui_text_from_key_string(String8 string)
+UI_Box* ui_box_from_key(UI_Key key)
 {
-    String8 result = string;
-    String8 text_end_delimiter = S8("##");
-    u64 index = string_first_sequence(string, text_end_delimiter);
-    if (index < string.length)
+    UI_Box* result = 0;
+    if (!ui_key_match(key, ui_key_zero()))
     {
-        result.length = index;
-    }
-    return result;
-}
-
-String8 ui_hash_from_key_string(String8 string)
-{
-    String8 result = string;
-    String8 hash_start_delimiter = S8("###");
-    u64 index = string_first_sequence(string, hash_start_delimiter);
-    if (index < string.length)
-    {
-        result = string_slice(string, index, string.length);
-    }
-    return result;
-}
-
-UI_Key ui_key_from_string(UI_Key seed, String8 string)
-{
-    UI_Key key = ui_key_null();
-
-    if (string.length)
-    {
-        key = seed;
-
-        for (u64 i = 0; i < string.length; i += 1)
+        u64 slot_index = ui_box_slot_from_key(key);
+        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
         {
-            key.value = ((key.value << 5) + key.value) + string.pointer[i];
-        }
-    }
-
-    return key;
-}
-
-BUSTER_GLOBAL_LOCAL UI_Key ui_key_from_string_format(UI_Key seed, String8 format, ...)
-{
-    TemporalArena scratch = scratch_begin(0, 0);
-    va_list args;
-    va_start(args, format);
-    String8 string = string_format_va(scratch.arena, format, args);
-    va_end(args);
-    UI_Key result = ui_key_from_string(seed, string);
-    return result;
-}
-
-u8 ui_key_equal(UI_Key a, UI_Key b)
-{
-    return a.value == b.value;
-}
-
-UI_Widget* ui_widget_from_key(UI_Key key)
-{
-    UI_Widget* result = 0;
-
-    if (!ui_key_equal(key, ui_key_null()))
-    {
-        u64 index = ui_widget_index_from_key(key);
-        for (UI_Widget* widget = ui_state->widget_table.pointer[index].first; widget; widget = widget->hash_next)
-        {
-            if (ui_key_equal(widget->key, key))
+            if (ui_key_match(box->key, key))
             {
-                result = widget;
+                result = box;
                 break;
             }
         }
     }
-
     return result;
 }
 
-UI_Widget* ui_widget_make_from_key(UI_WidgetFlags flags, UI_Key key)
+BUSTER_GLOBAL_LOCAL void ui_box_hash_push(UI_Box* box)
 {
-    UI_Widget* widget = ui_widget_from_key(key);
-
-    if (widget)
+    u64 slot_index = ui_box_slot_from_key(box->key);
+    UI_BoxHashSlot* slot = &ui_state->box_table[slot_index];
+    if (!slot->last)
     {
-        if (widget->last_build_touched == ui_state->build_count)
-        {
-            key = ui_key_null();
-            widget = 0;
-        }
+        slot->first = slot->last = box;
     }
-
-    u8 first_frame = 0;
-    if (!widget)
+    else
     {
-        u64 index = ui_widget_index_from_key(key);
-        first_frame = 1;
-        BUSTER_UNUSED(first_frame);
-
-        widget = arena_allocate(ui_state->arena, UI_Widget, 1);
-
-        UI_WidgetSlot* table_widget_slot = &ui_state->widget_table.pointer[index];
-        if (!table_widget_slot->last)
-        {
-            table_widget_slot->first = widget;
-            table_widget_slot->last = widget;
-        }
-        else
-        {
-            table_widget_slot->last->hash_next = widget;
-            widget->hash_previous = table_widget_slot->last;
-            table_widget_slot->last = widget;
-        }
+        slot->last->hash_next = box;
+        box->hash_prev = slot->last;
+        slot->last = box;
     }
+}
 
-    UI_Widget* parent = ui_top(parent);
+BUSTER_GLOBAL_LOCAL void ui_box_hash_remove(UI_Box* box, u64 slot_index)
+{
+    UI_BoxHashSlot* slot = &ui_state->box_table[slot_index];
+    if (box->hash_prev) { box->hash_prev->hash_next = box->hash_next; }
+    if (box->hash_next) { box->hash_next->hash_prev = box->hash_prev; }
+    if (slot->first == box) { slot->first = box->hash_next; }
+    if (slot->last == box) { slot->last = box->hash_prev; }
+    box->hash_next = 0;
+    box->hash_prev = 0;
+}
 
+BUSTER_GLOBAL_LOCAL void ui_box_equip_tree_links(UI_Box* box, UI_Box* parent)
+{
+    box->parent = parent;
     if (parent)
     {
         if (!parent->last)
         {
-            parent->last = widget;
-            parent->first = widget;
+            parent->first = parent->last = box;
         }
         else
         {
-            UI_Widget* previous_last = parent->last;
-            previous_last->next = widget;
-            widget->previous = previous_last;
-            parent->last = widget;
+            parent->last->next = box;
+            box->prev = parent->last;
+            parent->last = box;
         }
-
         parent->child_count += 1;
-        widget->parent = parent;
     }
     else
     {
-        ui_state->root = widget;
+        ui_state->root = box;
     }
+}
 
-    widget->key = key;
-
-    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(widget->background_colors); i += 1)
+UI_Box* ui_build_box_from_key(UI_BoxFlags flags, UI_Key key)
+{
+    UI_Box* box = 0;
+    bool box_is_new = false;
+    bool key_is_zero = ui_key_match(key, ui_key_zero());
+    if (!key_is_zero)
     {
-        widget->background_colors[i] = ui_top(background_color);
+        box = ui_box_from_key(key);
+        if (box && box->last_touched_build_index == ui_state->build_index)
+        {
+            key = ui_key_zero();
+            key_is_zero = true;
+            box = 0;
+        }
     }
-    widget->text_color = ui_top(text_color);
-    widget->flags = flags;
-    widget->first = 0;
-    widget->last = 0;
-    widget->last_build_touched = ui_state->build_count;
-    widget->pref_size[AXIS2_X] = ui_top(pref_width);
-    widget->pref_size[AXIS2_Y] = ui_top(pref_height);
-    widget->child_layout_axis = ui_top(child_layout_axis);
 
-    ui_autopop(ui_state);
+    if (!box)
+    {
+        if (key_is_zero)
+        {
+            box = arena_allocate(ui_build_arena(), UI_Box, 1);
+            box_is_new = true;
+        }
+        else if (ui_state->first_free_box)
+        {
+            box = ui_state->first_free_box;
+            ui_state->first_free_box = ui_state->first_free_box->next;
+            memset(box, 0, sizeof(*box));
+            box_is_new = true;
+            box->first_touched_build_index = ui_state->build_index;
+            box->key = key;
+            ui_box_hash_push(box);
+        }
+        else
+        {
+            box = arena_allocate(ui_state->arena, UI_Box, 1);
+            box_is_new = true;
+            memset(box, 0, sizeof(*box));
+            box->first_touched_build_index = ui_state->build_index;
+            box->key = key;
+            ui_box_hash_push(box);
+        }
+    }
 
-    return widget;
+    UI_Box* hash_next = (box_is_new && key_is_zero) ? 0 : box->hash_next;
+    UI_Box* hash_prev = (box_is_new && key_is_zero) ? 0 : box->hash_prev;
+    UI_Key old_key = box_is_new ? key : box->key;
+    u64 first_touched = box_is_new ? ui_state->build_index : (box->first_touched_build_index ? box->first_touched_build_index : ui_state->build_index);
+    f32 hot_t = box_is_new ? 0.0f : box->hot_t;
+    f32 active_t = box_is_new ? 0.0f : box->active_t;
+    float2 view_off = box_is_new ? float2_make(0, 0) : box->view_off;
+    float2 view_bounds = box_is_new ? float2_make(0, 0) : box->view_bounds;
+    F32Interval2 previous_rect = box_is_new ? (F32Interval2){0} : box->rect;
+
+    memset(box, 0, sizeof(*box));
+
+    box->hash_next = hash_next;
+    box->hash_prev = hash_prev;
+    box->key = key_is_zero ? ui_key_zero() : old_key;
+    box->first_touched_build_index = first_touched;
+    box->last_touched_build_index = ui_state->build_index;
+    box->hot_t = hot_t;
+    box->active_t = active_t;
+    box->view_off = view_off;
+    box->view_bounds = view_bounds;
+    box->rect = previous_rect;
+
+    UI_Box* parent = ui_top_parent();
+    ui_box_equip_tree_links(box, parent);
+
+    UI_BoxFlags stack_flags = ui_top_flags();
+    box->flags = flags | stack_flags;
+    box->fixed_position = float2_make(ui_top_fixed_x(), ui_top_fixed_y());
+    box->fixed_size = float2_make(ui_top_fixed_width(), ui_top_fixed_height());
+    box->min_size = float2_make(ui_top_min_width(), ui_top_min_height());
+    box->pref_size[AXIS2_X] = ui_top_pref_width();
+    box->pref_size[AXIS2_Y] = ui_top_pref_height();
+    box->child_layout_axis = ui_top_child_layout_axis();
+    box->background_color = ui_top_background_color();
+    box->text_color = ui_top_text_color();
+    box->border_color = ui_top_border_color();
+    box->font_size = ui_top_font_size();
+    box->text_padding = ui_top_text_padding();
+    box->text_align = ui_top_text_alignment();
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(box->corner_radii); i += 1)
+    {
+        box->corner_radii[i] = 3.0f;
+    }
+
+    if (ui_state->stacks.fixed_width_length != 0)
+    {
+        box->flags |= UI_BoxFlag_FixedWidth;
+    }
+    if (ui_state->stacks.fixed_height_length != 0)
+    {
+        box->flags |= UI_BoxFlag_FixedHeight;
+    }
+
+    ui_stack_auto_pop_all(ui_state);
+    return box;
+}
+
+UI_Box* ui_build_box_from_string(UI_BoxFlags flags, String8 string)
+{
+    UI_Key key = ui_key_from_string(ui_key_zero(), string);
+    UI_Box* box = ui_build_box_from_key(flags, key);
+    box->string = ui_display_part_from_key_string(string);
+    return box;
+}
+
+UI_Box* ui_build_box_from_stringf(UI_BoxFlags flags, String8 format, ...)
+{
+    Arena* arena = ui_build_arena();
+    va_list args;
+    va_start(args, format);
+    String8 string = string_format_va(arena, format, args);
+    va_end(args);
+    UI_Box* result = ui_build_box_from_string(flags, string);
+    return result;
+}
+
+UI_BoxFlags ui_box_flags_from_widget_flags(UI_WidgetFlags flags)
+{
+    UI_BoxFlags result = 0;
+    if (flags.disabled) { result |= UI_BoxFlag_Disabled; }
+    if (flags.mouse_clickable) { result |= UI_BoxFlag_MouseClickable; }
+    if (flags.keyboard_pressable) { result |= UI_BoxFlag_KeyboardClickable; }
+    if (flags.draw_text) { result |= UI_BoxFlag_DrawText; }
+    if (flags.draw_background) { result |= UI_BoxFlag_DrawBackground; }
+    if (flags.overflow_x) { result |= UI_BoxFlag_AllowOverflowX; }
+    if (flags.overflow_y) { result |= UI_BoxFlag_AllowOverflowY; }
+    if (flags.floating_x) { result |= UI_BoxFlag_FloatingX; }
+    if (flags.floating_y) { result |= UI_BoxFlag_FloatingY; }
+    if (flags.draw_border) { result |= UI_BoxFlag_DrawBorder; }
+    if (flags.draw_hot_effects) { result |= UI_BoxFlag_DrawHotEffects; }
+    if (flags.draw_active_effects) { result |= UI_BoxFlag_DrawActiveEffects; }
+    return result;
 }
 
 UI_Widget* ui_widget_make(UI_WidgetFlags flags, String8 string)
 {
-    UI_Key seed = ui_key_null();
-    String8 hash_string = ui_hash_from_key_string(string);
-    UI_Key key = ui_key_from_string(seed, hash_string);
-    UI_Widget* widget = ui_widget_make_from_key(flags, key);
-
-    if (flags.draw_text)
-    {
-        widget->text = ui_text_from_key_string(string);
-    }
-
-    return widget;
+    return ui_build_box_from_string(ui_box_flags_from_widget_flags(flags), string);
 }
 
 UI_Widget* ui_widget_make_format(UI_WidgetFlags flags, String8 format, ...)
@@ -317,442 +597,582 @@ UI_Widget* ui_widget_make_format(UI_WidgetFlags flags, String8 format, ...)
     va_start(args, format);
     String8 string = string_format_va(arena, format, args);
     va_end(args);
+    return ui_widget_make(flags, string);
+}
 
-    UI_Widget* result = ui_widget_make(flags, string);
+UI_BoxRec ui_box_rec_df(UI_Box* box, UI_Box* root, u64 sibling_offset, u64 child_offset)
+{
+    UI_BoxRec result = {0};
+    if (!box)
+    {
+        return result;
+    }
+    UI_Box* child = *(UI_Box**)((u8*)box + child_offset);
+    if (child)
+    {
+        result.next = child;
+        result.push_count = 1;
+    }
+    else
+    {
+        for (UI_Box* p = box; p && p != root; p = p->parent)
+        {
+            UI_Box* sibling = *(UI_Box**)((u8*)p + sibling_offset);
+            if (sibling)
+            {
+                result.next = sibling;
+                break;
+            }
+            result.pop_count += 1;
+        }
+    }
     return result;
 }
 
-UI_Signal ui_signal_from_widget(UI_Widget* widget)
+BUSTER_GLOBAL_LOCAL void ui_prune_boxes(void)
 {
-    F32Interval2 rect = widget->rect;
-    UI_MousePosition mouse_position = ui_state->mouse_position;
-    UI_Signal signal = {
-        .clicked_left =
-            (u32)((widget->flags.mouse_clickable & (ui_state->mouse_button_events[(u64)WINDOWING_EVENT_MOUSE_LEFT].action == WINDOWING_EVENT_MOUSE_RELEASE)) != 0) &
-            (u32)(((mouse_position.x >= (f64)rect.x0) & (mouse_position.x <= (f64)rect.x1)) != 0) &
-            (u32)(((mouse_position.y >= (f64)rect.y0) & (mouse_position.y <= (f64)rect.y1)) != 0),
-    };
-    return signal;
+    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+    {
+        UI_BoxHashSlot* slot = &ui_state->box_table[slot_index];
+        for (UI_Box* box = slot->first, *next = 0; box; box = next)
+        {
+            next = box->hash_next;
+            if (box->last_touched_build_index + 1 < ui_state->build_index)
+            {
+                ui_box_hash_remove(box, slot_index);
+                box->next = ui_state->first_free_box;
+                ui_state->first_free_box = box;
+            }
+        }
+    }
 }
 
-void ui_stack_reset(UI_State* state)
+u8 ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, WmEventList event_queue)
 {
-    state->stacks.parent_length = 0;
-    state->stacks.pref_width_length = 0;
-    state->stacks.pref_height_length = 0;
-    state->stacks.child_layout_axis_length = 0;
-    state->stacks.text_color_length = 0;
-    state->stacks.background_color_length = 0;
-    state->stacks.font_size_length = 0;
-}
-
-UI_Size ui_pixels(u32 width, f32 strictness)
-{
-    return (UI_Size) {
-        .kind = UI_SIZE_PIXEL_COUNT,
-        .strictness = strictness,
-        .value = (f32)width,
-    };
-}
-
-UI_Size ui_percentage(f32 percentage, f32 strictness)
-{
-    return (UI_Size) {
-        .kind = UI_SIZE_PERCENTAGE,
-        .strictness = strictness,
-        .value = percentage,
-    };
-}
-
-UI_Size ui_em(f32 value, f32 strictness)
-{
-    f32 font_size = ui_top(font_size);
-    BUSTER_CHECK(font_size != 0);
-    return (UI_Size) {
-        .kind = UI_SIZE_PIXEL_COUNT,
-        .strictness = strictness,
-        .value = value * font_size,
-    };
-}
-
-u8 ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, WmEventList* event_queue)
-{
-    ui_state->build_count += 1;
-    Arena* build_arena = ui_build_arena();
-    arena_reset_to_start(build_arena);
-    ui_state->frame_time = frame_time;
-    ui_state->window = window;
-
+    ui_state->build_index += 1;
+    arena_reset_to_start(ui_build_arena());
     ui_stack_reset(ui_state);
+    ui_state->root = 0;
+    ui_state->windowing = windowing;
+    ui_state->window = window;
+    ui_state->events = (UI_EventList){0};
+    ui_state->frame_time = frame_time;
+    ui_state->is_animating = 0;
 
     u8 open = 1;
-    u32 event_index = 0;
-    u64 event_count = event_queue->count;
-
-    for (WmEvent* event = event_queue->first; open & (event_index < event_count); event_index += 1, event = event->next)
+    for (WmEvent* event = event_queue.first; event; event = event->next)
     {
-        // switch (event->type)
-        // {
-        // case WINDOWING_EVENT_TYPE_MOUSE_BUTTON:
-        //     {
-        //         let button = event_queue->mouse_buttons[event_index];
-        //         let previous_button_event = ui_state->mouse_button_events[button.button];
-        //         switch (button.event.action)
-        //         {
-        //             case WINDOWING_EVENT_MOUSE_RELAX:
-        //                 BUSTER_UNREACHABLE();
-        //                 break;
-        //             case WINDOWING_EVENT_MOUSE_RELEASE:
-        //                 BUSTER_CHECK(previous_button_event.action == WINDOWING_EVENT_MOUSE_PRESS);
-        //                 break;
-        //             case WINDOWING_EVENT_MOUSE_PRESS:
-        //                 BUSTER_CHECK(previous_button_event.action == WINDOWING_EVENT_MOUSE_RELAX || mouse_button_count);
-        //                 break;
-        //             case WINDOWING_EVENT_MOUSE_REPEAT:
-        //                 BUSTER_UNREACHABLE();
-        //                 break;
-        //         }
-        //
-        //         ui_state->mouse_button_events[button.button] = button.event;
-        //         mouse_button_count += 1;
-        //     } break;
-        // case WINDOWING_EVENT_TYPE_WINDOW_FOCUS:
-        //     break;
-        // case WINDOWING_EVENT_TYPE_CURSOR_POSITION:
-        //     {
-        //         let mouse_position = event_queue->cursor_positions[event_index];
-        //         ui_state->mouse_position = (UI_MousePosition) {
-        //             .x = mouse_position.x,
-        //             .y = mouse_position.y,
-        //         };
-        //     } break;
-        // case WINDOWING_EVENT_TYPE_CURSOR_ENTER:
-        //     // TODO
-        //     break;
-        // case WINDOWING_EVENT_TYPE_WINDOW_POSITION:
-        //     break;
-        // case WINDOWING_EVENT_TYPE_WINDOW_CLOSE:
-        //     open = 0;
-        //     break;
-        // }
+        if (event->window && event->window != window)
+        {
+            continue;
+        }
+        switch (event->kind)
+        {
+            case WM_EVENT_WINDOW_CLOSE:
+            {
+                open = 0;
+            } break;
+            case WM_EVENT_MOUSE_MOVE:
+            case WM_EVENT_BUTTON_PRESS:
+            case WM_EVENT_BUTTON_RELEASE:
+            {
+                ui_state->mouse = float2_make((f32)event->position.x, (f32)event->position.y);
+            } break;
+            default: break;
+        }
+
+        UI_Event ui_event = {0};
+        ui_event.key = event->key;
+        ui_event.modifiers = event->modifiers;
+        ui_event.pos = float2_make((f32)event->position.x, (f32)event->position.y);
+
+        switch (event->kind)
+        {
+            case WM_EVENT_KEY_PRESS:
+            case WM_EVENT_BUTTON_PRESS:
+            {
+                ui_event.kind = UI_EventKind_Press;
+            } break;
+            case WM_EVENT_KEY_RELEASE:
+            case WM_EVENT_BUTTON_RELEASE:
+            {
+                ui_event.kind = UI_EventKind_Release;
+            } break;
+            case WM_EVENT_TEXT_INPUT:
+            {
+                ui_event.kind = UI_EventKind_Text;
+                ui_event.string = event->text;
+            } break;
+            case WM_EVENT_MOUSE_MOVE:
+            {
+                ui_event.kind = UI_EventKind_MouseMove;
+            } break;
+            default: break;
+        }
+
+        if (ui_event.kind != UI_EventKind_Null)
+        {
+            ui_event_list_push(ui_build_arena(), &ui_state->events, &ui_event);
+        }
     }
+
+    bool has_active = false;
+    for (u64 i = 0; i < (u64)UI_MouseButtonKind_COUNT; i += 1)
+    {
+        has_active = has_active || !ui_key_match(ui_state->active_box_key[i], ui_key_zero());
+    }
+    if (!has_active)
+    {
+        ui_state->hot_box_key = ui_key_zero();
+    }
+
+    ui_prune_boxes();
 
     if (open)
     {
-        for (u64 i = 0; i < ui_state->widget_table.length; i += 1)
-        {
-            UI_WidgetSlot* widget_table_element = &ui_state->widget_table.pointer[i];
-            for (UI_Widget* widget = widget_table_element->first, *next = 0; widget; widget = next)
-            {
-                next = widget->hash_next;
+        RenderingWindowSize framebuffer_dimensions = rendering_window_get_size(ui_state->rendering_window);
+        ui_set_next_pref_width(ui_pixels(framebuffer_dimensions.width, 1.0f));
+        ui_set_next_pref_height(ui_pixels(framebuffer_dimensions.height, 1.0f));
+        ui_set_next_child_layout_axis(AXIS2_Y);
+        UI_Box* root = ui_build_box_from_stringf(0, S8("###window_root_{u64:x}"), (u64)window);
+        root->fixed_size = float2_make((f32)framebuffer_dimensions.width, (f32)framebuffer_dimensions.height);
+        root->rect = ui_rect_make(0.0f, 0.0f, (f32)framebuffer_dimensions.width, (f32)framebuffer_dimensions.height);
+        root->flags |= UI_BoxFlag_FixedSize | UI_BoxFlag_AllowOverflow;
 
-                if (ui_key_equal(widget->key, ui_key_null()) || widget->last_build_touched + 1 < ui_state->build_count)
-                {
-                    if (widget->hash_previous)
-                    {
-                        widget->hash_previous->hash_next = widget->hash_next;
-                    }
-
-                    if (widget->hash_next)
-                    {
-                        widget->hash_next->hash_previous = widget->hash_previous;
-                    }
-
-                    if (widget_table_element->first == widget)
-                    {
-                        widget_table_element->first = widget->hash_next;
-                    }
-
-                    if (widget_table_element->last == widget)
-                    {
-                        widget_table_element->last = widget->hash_previous;
-                    }
-                }
-            }
-        }
-
-        WmWindowSize framebuffer_size = wm_window_get_framebuffer_size(windowing, window);
-        ui_push_next_only(pref_width, ui_pixels(framebuffer_size.width, 1.0f));
-        ui_push_next_only(pref_height, ui_pixels(framebuffer_size.height, 1.0f));
-        ui_push_next_only(child_layout_axis, AXIS2_Y);
-
-        UI_Widget* root = ui_widget_make_format((UI_WidgetFlags) {0}, S8("window_root_{u64:x}"), (u64)window);
-        BUSTER_CHECK(!ui_state->stack_autopops.child_layout_axis);
-
-        ui_push(parent, root);
-        ui_push(font_size, 12);
-        ui_push(text_color, float4_make(1.0f, 1.0f, 1.0f, 1.0f));
-        ui_push(background_color, float4_make(0.1f, 0.1f, 0.1f, 1.0f));
-        ui_push(pref_width, ui_percentage(1.0f, 0.0f));
-        ui_push(pref_height, ui_percentage(1.0f, 0.0f));
+        ui_push_parent(root);
+        ui_push_font_size(12.0f);
+        ui_push_text_padding(4.0f);
+        ui_push_text_color(float4_make(0.86f, 0.87f, 0.90f, 1.0f));
+        ui_push_background_color(float4_make(0.13f, 0.13f, 0.15f, 1.0f));
+        ui_push_border_color(float4_make(0.25f, 0.25f, 0.30f, 1.0f));
+        ui_push_pref_width(ui_percentage(1.0f, 0.0f));
+        ui_push_pref_height(ui_percentage(1.0f, 0.0f));
+        ui_push_child_layout_axis(AXIS2_Y);
     }
 
     return open;
 }
 
-void ui_compute_independent_sizes(UI_Widget* widget)
+BUSTER_GLOBAL_LOCAL f32 ui_text_size_for_axis(UI_Box* box, Axis2 axis)
 {
-    for (Axis2 axis = 0; axis < AXIS2_COUNT; axis += 1) 
+    f32 result = 0.0f;
+    f32 padding = box->pref_size[axis].value + box->text_padding * 2.0f;
+    if (axis == AXIS2_X)
     {
-        UI_Size pref_size = widget->pref_size[axis];
-        switch (pref_size.kind)
-        {
-            default: break;
-            case UI_SIZE_KIND_COUNT: BUSTER_UNREACHABLE(); break;
-            case UI_SIZE_PIXEL_COUNT: float2_element(widget->computed_size, axis) = floor_f32(widget->pref_size[axis].value); break;
-        }
+        result = (f32)box->string.length * box->font_size * 0.60f + padding;
     }
-
-    for (UI_Widget* child_widget = widget->first; child_widget; child_widget = child_widget->next)
+    else
     {
-        ui_compute_independent_sizes(child_widget);
+        result = box->font_size * 1.35f + padding;
     }
+    return result;
 }
 
-void ui_compute_upward_dependent_sizes(UI_Widget* widget)
+BUSTER_GLOBAL_LOCAL void ui_calc_sizes_standalone(UI_Box* box, Axis2 axis)
 {
-    for (Axis2 axis = 0; axis < AXIS2_COUNT; axis += 1)
+    for (UI_Box* b = box; b; b = ui_box_rec_df_pre(b, box).next)
     {
-        UI_Size pref_size = widget->pref_size[axis];
-        switch (pref_size.kind)
+        switch (b->pref_size[axis].kind)
         {
             default: break;
-            case UI_SIZE_KIND_COUNT: BUSTER_UNREACHABLE(); break;
-            case UI_SIZE_PERCENTAGE:
+            case UI_SizeKind_Pixels:
             {
-                for (UI_Widget* ancestor = widget->parent; ancestor; ancestor = ancestor->parent)
-                {
-                    if (ancestor->pref_size[axis].kind != UI_SIZE_BY_CHILDREN)
-                    {
-                        float2_element(widget->computed_size, axis) = floor_f32(float2_element(ancestor->computed_size, axis) * widget->pref_size[axis].value);
-                        break;
-                    }
-                }
+                float2_element(b->fixed_size, axis) = floor_f32(b->pref_size[axis].value);
             } break;
-        }
-    }
-
-    for (UI_Widget* child_widget = widget->first; child_widget; child_widget = child_widget->next)
-    {
-        ui_compute_upward_dependent_sizes(child_widget);
-    }
-}
-
-void ui_compute_downward_dependent_sizes(UI_Widget* widget)
-{
-    for (UI_Widget* child_widget = widget->first; child_widget; child_widget = child_widget->next)
-    {
-        ui_compute_downward_dependent_sizes(child_widget);
-    }
-
-    for (Axis2 axis = 0; axis < AXIS2_COUNT; axis += 1)
-    {
-        UI_Size pref_size = widget->pref_size[axis];
-        switch (pref_size.kind)
-        {
-            default: break;
-            case UI_SIZE_KIND_COUNT: BUSTER_UNREACHABLE(); break;
-            case UI_SIZE_BY_CHILDREN:
+            case UI_SizeKind_TextContent:
             {
-                // TODO: implement
-                BUSTER_TRAP();
+                float2_element(b->fixed_size, axis) = floor_f32(ui_text_size_for_axis(b, axis));
             } break;
         }
     }
 }
 
-void ui_resolve_conflicts(UI_Widget* widget)
+BUSTER_GLOBAL_LOCAL void ui_calc_sizes_upwards_dependent(UI_Box* box, Axis2 axis)
 {
-    for (Axis2 axis = 0; axis < AXIS2_COUNT; axis += 1)
+    for (UI_Box* b = box; b; b = ui_box_rec_df_pre(b, box).next)
     {
-        f32 available_space = float2_element(widget->computed_size, axis);
-        f32 taken_space = 0;
-        f32 total_fixup_budget = 0;
-
-        if (!(widget->flags.v & ((u64)UI_WIDGET_FLAG_OVERFLOW_X << axis)))
+        if (b->pref_size[axis].kind == UI_SizeKind_ParentPct)
         {
-            for (UI_Widget* child_widget = widget->first; child_widget; child_widget = child_widget->next)
+            UI_Box* fixed_parent = 0;
+            for (UI_Box* p = b->parent; p; p = p->parent)
             {
-                if (!(child_widget->flags.v & ((u64)UI_WIDGET_FLAG_FLOATING_X << axis)))
+                if (float2_element(p->fixed_size, axis) > 0 || p->pref_size[axis].kind == UI_SizeKind_Pixels || p->pref_size[axis].kind == UI_SizeKind_TextContent || p->pref_size[axis].kind == UI_SizeKind_ParentPct)
                 {
-                    if (axis == widget->child_layout_axis)
-                    {
-                        taken_space += float2_element(child_widget->computed_size, axis);
-                    }
-                    else
-                    {
-                        taken_space = BUSTER_MAX(taken_space, float2_element(child_widget->computed_size, axis));
-                    }
-                    f32 fixup_budget_this_child = float2_element(child_widget->computed_size, axis) * (1 - child_widget->pref_size[axis].strictness);
-                    total_fixup_budget += fixup_budget_this_child;
+                    fixed_parent = p;
+                    break;
                 }
             }
-
-            f32 conflict = taken_space - available_space;
-
-            if (conflict > 0 && total_fixup_budget > 0)
+            if (fixed_parent)
             {
-                for (UI_Widget* child_widget = widget->first; child_widget; child_widget = child_widget->next)
-                {
-                    if (!(child_widget->flags.v & ((u64)UI_WIDGET_FLAG_FLOATING_X << axis)))
-                    {
-                        f32 fixup_budget_this_child = float2_element(child_widget->computed_size, axis) * (1 - child_widget->pref_size[axis].strictness);
-                        f32 fixup_size_this_child = 0;
+                float2_element(b->fixed_size, axis) = floor_f32(float2_element(fixed_parent->fixed_size, axis) * b->pref_size[axis].value);
+            }
+        }
+    }
+}
 
-                        if (axis == widget->child_layout_axis)
+BUSTER_GLOBAL_LOCAL void ui_calc_sizes_downwards_dependent(UI_Box* root, Axis2 axis)
+{
+    UI_BoxRec rec = {0};
+    for (UI_Box* box = root; box; box = rec.next)
+    {
+        rec = ui_box_rec_df_pre(box, root);
+        s32 pop_idx = 0;
+        for (UI_Box* b = box; b && pop_idx <= rec.pop_count; b = b->parent, pop_idx += 1)
+        {
+            if (b->pref_size[axis].kind == UI_SizeKind_ChildrenSum)
+            {
+                f32 sum = 0.0f;
+                for (UI_Box* child = b->first; child; child = child->next)
+                {
+                    if (!(child->flags & (UI_BoxFlag_FloatingX << axis)))
+                    {
+                        if (axis == b->child_layout_axis)
                         {
-                            fixup_size_this_child = fixup_budget_this_child * (conflict / total_fixup_budget);
+                            sum += float2_element(child->fixed_size, axis);
                         }
                         else
                         {
-                            fixup_size_this_child = float2_element(child_widget->computed_size, axis) - available_space;
+                            sum = BUSTER_MAX(sum, float2_element(child->fixed_size, axis));
                         }
+                    }
+                }
+                float2_element(b->fixed_size, axis) = floor_f32(sum);
+            }
+        }
+    }
+}
 
-                        fixup_size_this_child = BUSTER_CLAMP(0, fixup_size_this_child, fixup_budget_this_child);
-                        float2_element(child_widget->computed_size, axis) = floor_f32(float2_element(child_widget->computed_size, axis) - fixup_size_this_child);
+BUSTER_GLOBAL_LOCAL void ui_layout_enforce_constraints(UI_Box* root, Axis2 axis)
+{
+    for (UI_Box* box = root; box; box = ui_box_rec_df_pre(box, root).next)
+    {
+        if (!(box->flags & (UI_BoxFlag_AllowOverflowX << axis)))
+        {
+            f32 allowed_size = float2_element(box->fixed_size, axis);
+            f32 total_size = 0.0f;
+            f32 total_weighted_size = 0.0f;
+            for (UI_Box* child = box->first; child; child = child->next)
+            {
+                if (!(child->flags & (UI_BoxFlag_FloatingX << axis)))
+                {
+                    if (axis == box->child_layout_axis)
+                    {
+                        total_size += float2_element(child->fixed_size, axis);
+                    }
+                    else
+                    {
+                        total_size = BUSTER_MAX(total_size, float2_element(child->fixed_size, axis));
+                    }
+                    total_weighted_size += float2_element(child->fixed_size, axis) * (1.0f - child->pref_size[axis].strictness);
+                }
+            }
+
+            f32 violation = total_size - allowed_size;
+            if (violation > 0 && total_weighted_size > 0)
+            {
+                for (UI_Box* child = box->first; child; child = child->next)
+                {
+                    if (!(child->flags & (UI_BoxFlag_FloatingX << axis)))
+                    {
+                        f32 fixup_budget = float2_element(child->fixed_size, axis) * (1.0f - child->pref_size[axis].strictness);
+                        f32 fixup_pct = BUSTER_CLAMP(0.0f, violation / total_weighted_size, 1.0f);
+                        float2_element(child->fixed_size, axis) -= fixup_budget * fixup_pct;
                     }
                 }
             }
         }
 
-        if (axis == widget->child_layout_axis)
+        for (UI_Box* child = box->first; child; child = child->next)
         {
-            f32 p = 0;
-
-            for (UI_Widget* child_widget = widget->first; child_widget; child_widget = child_widget->next)
-            {
-                if (!(child_widget->flags.v & ((u64)UI_WIDGET_FLAG_FLOATING_X << axis)))
-                {
-                    float2_element(child_widget->computed_relative_position, axis) = p;
-                    p += float2_element(child_widget->computed_size, axis);
-                }
-            }
-        }
-        else
-        {
-            for (UI_Widget* child_widget = widget->first; child_widget; child_widget = child_widget->next)
-            {
-                if (!(child_widget->flags.v & ((u64)UI_WIDGET_FLAG_FLOATING_X << axis)))
-                {
-                    float2_element(child_widget->computed_relative_position, axis) = 0;
-                }
-            }
-        }
-
-        for (UI_Widget* child_widget = widget->first; child_widget; child_widget = child_widget->next)
-        {
-            F32Interval2 last_relative_rect = child_widget->relative_rect;
-            float2_element(child_widget->relative_rect.p0, axis) = float2_element(child_widget->computed_relative_position, axis);
-            float2_element(child_widget->relative_rect.p1, axis) = float2_element(child_widget->relative_rect.p0, axis) + float2_element(child_widget->computed_size, axis);
-
-            float2 last_corner_01 = float2_make(last_relative_rect.x0, last_relative_rect.y1);
-            float2 last_corner_10 = float2_make(last_relative_rect.x1, last_relative_rect.y0);
-            float2 this_corner_01 = float2_make(child_widget->relative_rect.x0, child_widget->relative_rect.y1);
-            float2 this_corner_10 = float2_make(child_widget->relative_rect.x1, child_widget->relative_rect.y0);
-
-            float2_element(child_widget->relative_corner_delta[CORNER_00], axis) = float2_element(child_widget->relative_rect.p0, axis) - float2_element(last_relative_rect.p0, axis);
-            float2_element(child_widget->relative_corner_delta[CORNER_01], axis) = float2_element(this_corner_01, axis) - float2_element(last_corner_01, axis);
-            float2_element(child_widget->relative_corner_delta[CORNER_10], axis) = float2_element(this_corner_10, axis) - float2_element(last_corner_10, axis);
-            float2_element(child_widget->relative_corner_delta[CORNER_11], axis) = float2_element(child_widget->relative_rect.p1, axis) - float2_element(last_relative_rect.p1, axis);
-
-            float2_element(child_widget->rect.p0, axis) = float2_element(widget->rect.p0, axis) + float2_element(child_widget->relative_rect.p0, axis) - float2_element(widget->view_offset, axis);
-            float2_element(child_widget->rect.p1, axis) = float2_element(child_widget->rect.p0, axis) + float2_element(child_widget->computed_size, axis);
-
-            if (!(child_widget->flags.v & ((u64)UI_WIDGET_FLAG_FLOATING_X << axis)))
-            {
-                float2_element(child_widget->rect.p0, axis) = floor_f32(float2_element(child_widget->rect.p0, axis));
-                float2_element(child_widget->rect.p1, axis) = floor_f32(float2_element(child_widget->rect.p1, axis));
-            }
-        }
-
-        for (UI_Widget* child_widget = widget->first; child_widget; child_widget = child_widget->next)
-        {
-            ui_resolve_conflicts(child_widget);
+            float2_element(child->fixed_size, axis) = BUSTER_MAX(float2_element(child->fixed_size, axis), float2_element(child->min_size, axis));
         }
     }
+}
+
+BUSTER_GLOBAL_LOCAL void ui_layout_position(UI_Box* root, Axis2 axis)
+{
+    for (UI_Box* box = root; box; box = ui_box_rec_df_pre(box, root).next)
+    {
+        if (!box->parent)
+        {
+            float2_element(box->rect.p0, axis) = float2_element(box->fixed_position, axis);
+            float2_element(box->rect.p1, axis) = float2_element(box->rect.p0, axis) + float2_element(box->fixed_size, axis);
+        }
+
+        f32 layout_position = 0.0f;
+        f32 bounds = 0.0f;
+        for (UI_Box* child = box->first; child; child = child->next)
+        {
+            f32 child_pos = 0.0f;
+            if (child->flags & (UI_BoxFlag_FloatingX << axis))
+            {
+                child_pos = float2_element(child->fixed_position, axis);
+            }
+            else if (axis == box->child_layout_axis)
+            {
+                child_pos = layout_position;
+                layout_position += float2_element(child->fixed_size, axis);
+            }
+            else
+            {
+                child_pos = 0.0f;
+            }
+
+            f32 old_p0 = float2_element(child->rect.p0, axis);
+            float2_element(child->rect.p0, axis) = floor_f32(float2_element(box->rect.p0, axis) + child_pos - float2_element(box->view_off, axis));
+            float2_element(child->rect.p1, axis) = floor_f32(float2_element(child->rect.p0, axis) + float2_element(child->fixed_size, axis));
+            float2_element(child->position_delta, axis) = float2_element(child->rect.p0, axis) - old_p0;
+            bounds = BUSTER_MAX(bounds, child_pos + float2_element(child->fixed_size, axis));
+        }
+        float2_element(box->view_bounds, axis) = bounds;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ui_layout_root(UI_Box* root, Axis2 axis)
+{
+    ui_calc_sizes_standalone(root, axis);
+    ui_calc_sizes_upwards_dependent(root, axis);
+    ui_calc_sizes_downwards_dependent(root, axis);
+    ui_layout_enforce_constraints(root, axis);
+    ui_layout_position(root, axis);
 }
 
 void ui_build_end(void)
 {
-    // Clear release button presses
-    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(ui_state->mouse_button_events); i += 1)
+    if (ui_state->stacks.parent_length != 0)
     {
-        WindowingEventMouseButtonEvent* event = &ui_state->mouse_button_events[i];
-        if (event->action == WINDOWING_EVENT_MOUSE_RELEASE)
+        BUSTER_UNUSED(ui_pop_parent());
+    }
+
+    if (ui_state->root)
+    {
+        for (Axis2 axis = 0; axis < AXIS2_COUNT; axis += 1)
         {
-            event->action = WINDOWING_EVENT_MOUSE_RELAX;
+            ui_layout_root(ui_state->root, axis);
         }
     }
 
-    BUSTER_UNUSED(ui_pop(parent));
-
-    ui_compute_independent_sizes(ui_state->root);
-    ui_compute_upward_dependent_sizes(ui_state->root);
-    ui_compute_downward_dependent_sizes(ui_state->root);
-    ui_resolve_conflicts(ui_state->root);
+    f32 hot_rate = 0.35f;
+    f32 active_rate = 0.45f;
+    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+    {
+        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+        {
+            bool hot = ui_key_match(box->key, ui_state->hot_box_key);
+            bool active = ui_key_match(box->key, ui_state->active_box_key[UI_MouseButtonKind_Left]);
+            box->hot_t += ((f32)hot - box->hot_t) * hot_rate;
+            box->active_t += ((f32)active - box->active_t) * active_rate;
+            ui_state->is_animating = ui_state->is_animating || (box->hot_t > 0.01f && box->hot_t < 0.99f) || (box->active_t > 0.01f && box->active_t < 0.99f);
+        }
+    }
 }
 
-typedef struct WidgetIterator WidgetIterator;
-struct WidgetIterator
+BUSTER_GLOBAL_LOCAL UI_MouseButtonKind ui_mouse_button_kind_from_key(WmKey key, bool* is_mouse)
 {
-    UI_Widget* next;
-    u32 push_count;
-    u32 pop_count;
-};
+    UI_MouseButtonKind result = UI_MouseButtonKind_Left;
+    *is_mouse = true;
+    if (key == WM_KEY_MOUSE_LEFT) { result = UI_MouseButtonKind_Left; }
+    else if (key == WM_KEY_MOUSE_MIDDLE) { result = UI_MouseButtonKind_Middle; }
+    else if (key == WM_KEY_MOUSE_RIGHT) { result = UI_MouseButtonKind_Right; }
+    else { *is_mouse = false; }
+    return result;
+}
 
-#define ui_widget_recurse_depth_first_preorder(widget) ui_widget_recurse_depth_first((widget), BUSTER_OFFSET_OF(UI_Widget, next), BUSTER_OFFSET_OF(UI_Widget, first))
-#define ui_widget_recurse_depth_first_postorder(widget) ui_widget_recurse_depth_first((widget), BUSTER_OFFSET_OF(UI_Widget, previous), BUSTER_OFFSET_OF(UI_Widget, last))
-
-WidgetIterator ui_widget_recurse_depth_first(UI_Widget* widget, u64 sibling_offset, u64 child_offset)
+UI_Signal ui_signal_from_box(UI_Box* box)
 {
-    WidgetIterator it = {0};
-    UI_Widget* child = *(UI_Widget**)((u8*)widget + child_offset);
-    if (child)
+    UI_Signal sig = { .box = box };
+    if (!box || (box->flags & UI_BoxFlag_Disabled))
     {
-        it.next = child;
-        it.push_count += 1;
+        return sig;
     }
-    else
-    {
-        for (UI_Widget* w = widget; w; w = w->parent)
-        {
-            UI_Widget* sibling = *(UI_Widget**)((u8*)w + sibling_offset);
-            if (sibling)
-            {
-                it.next = sibling;
-                break;
-            }
 
-            it.pop_count += 1;
+    F32Interval2 rect = box->rect;
+    bool mouse_over = ui_rect_contains(rect, ui_state->mouse);
+    if (mouse_over)
+    {
+        sig.f |= UI_SignalFlag_MouseOver;
+        sig.mouse_over = 1;
+    }
+
+    if ((box->flags & UI_BoxFlag_MouseClickable) && mouse_over && (ui_key_match(ui_state->hot_box_key, ui_key_zero()) || ui_key_match(ui_state->hot_box_key, box->key)))
+    {
+        ui_state->hot_box_key = box->key;
+        sig.f |= UI_SignalFlag_Hovering;
+        sig.hovering = 1;
+    }
+
+    for (UI_Event* event = 0; ui_next_event(&event);)
+    {
+        bool is_mouse = false;
+        UI_MouseButtonKind button = ui_mouse_button_kind_from_key(event->key, &is_mouse);
+        bool event_in_bounds = ui_rect_contains(rect, event->pos);
+        if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Press && event_in_bounds)
+        {
+            ui_state->hot_box_key = box->key;
+            ui_state->active_box_key[button] = box->key;
+            if (button == UI_MouseButtonKind_Left)
+            {
+                sig.f |= UI_SignalFlag_LeftPressed;
+                sig.pressed_left = 1;
+            }
+            ui_eat_event(event);
+        }
+        else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Release && ui_key_match(ui_state->active_box_key[button], box->key))
+        {
+            ui_state->active_box_key[button] = ui_key_zero();
+            if (button == UI_MouseButtonKind_Left)
+            {
+                sig.f |= UI_SignalFlag_LeftReleased;
+                sig.released_left = 1;
+                if (event_in_bounds)
+                {
+                    sig.f |= UI_SignalFlag_LeftClicked;
+                    sig.clicked_left = 1;
+                }
+            }
+            ui_eat_event(event);
+        }
+        else if ((box->flags & UI_BoxFlag_KeyboardClickable) && event->kind == UI_EventKind_Press && event->key == WM_KEY_RETURN && ui_key_match(ui_state->hot_box_key, box->key))
+        {
+            sig.f |= UI_SignalFlag_KeyboardPressed;
+            sig.clicked_left = 1;
+            ui_eat_event(event);
         }
     }
 
-    return it;
+    return sig;
+}
+
+UI_Signal ui_signal_from_widget(UI_Widget* widget)
+{
+    return ui_signal_from_box(widget);
+}
+
+BUSTER_GLOBAL_LOCAL float2 ui_box_text_position(UI_Box* box)
+{
+    float2 rect_dim = ui_rect_dim(box->rect);
+    float2 result = float2_make(box->rect.x0 + box->text_padding, box->rect.y0 + BUSTER_MAX(0.0f, (float2_element(rect_dim, AXIS2_Y) - box->font_size) * 0.5f));
+    f32 estimated_width = (f32)box->string.length * box->font_size * 0.60f;
+    if (box->text_align == UI_TextAlign_Center)
+    {
+        float2_element(result, AXIS2_X) = floor_f32((box->rect.x0 + box->rect.x1) * 0.5f - estimated_width * 0.5f);
+        float2_element(result, AXIS2_X) = BUSTER_CLAMP_BOT(float2_element(result, AXIS2_X), box->rect.x0 + box->text_padding);
+    }
+    else if (box->text_align == UI_TextAlign_Right)
+    {
+        float2_element(result, AXIS2_X) = floor_f32(box->rect.x1 - estimated_width - box->text_padding);
+        float2_element(result, AXIS2_X) = BUSTER_CLAMP_BOT(float2_element(result, AXIS2_X), box->rect.x0 + box->text_padding);
+    }
+    float2_element(result, AXIS2_Y) = floor_f32(float2_element(result, AXIS2_Y));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_draw_rect(F32Interval2 rect, float4 color)
+{
+    rendering_window_render_rect(ui_state->rendering_window, (RectDraw){
+        .vertex = rect,
+        .colors = { color, color, color, color },
+    });
+}
+
+BUSTER_GLOBAL_LOCAL void ui_draw_border(F32Interval2 rect, float4 color, f32 thickness)
+{
+    ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x1, rect.y0 + thickness), color);
+    ui_draw_rect(ui_rect_make(rect.x0, rect.y1 - thickness, rect.x1, rect.y1), color);
+    ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x0 + thickness, rect.y1), color);
+    ui_draw_rect(ui_rect_make(rect.x1 - thickness, rect.y0, rect.x1, rect.y1), color);
 }
 
 void ui_draw(void)
 {
-    UI_Widget* root = ui_state->root;
-
-    UI_Widget* widget = root;
-    RenderingWindowHandle* window = ui_state->rendering_window;
-    RenderingHandle* rendering = ui_state->rendering;
-
-    while (widget)
+    UI_Box* root = ui_state->root;
+    if (!root)
     {
-        if (widget->flags.draw_background)
+        return;
+    }
+
+    //- rjf: draw UI background & simple window border
+    ui_draw_rect(root->rect, float4_make(0.08f, 0.08f, 0.095f, 1.0f));
+    ui_draw_border(root->rect, float4_make(0.18f, 0.18f, 0.22f, 1.0f), 1.0f);
+
+    //- rjf: recurse & draw boxes.  This mirrors the structure of raddebugger's
+    // draw block: shadow/background/hot+active effects/text, then border/sides.
+    for (UI_Box* box = root; box; box = ui_box_rec_df_pre(box, root).next)
+    {
+        if (box == root)
         {
-            rendering_window_render_rect(window, (RectDraw) {
-                .colors = { widget->background_colors[0], widget->background_colors[1], widget->background_colors[2], widget->background_colors[3] },
-                .vertex = widget->rect,
-            });
+            continue;
         }
 
-        if (widget->flags.draw_text)
+        F32Interval2 rect = box->rect;
+        if (rect.x1 <= rect.x0 || rect.y1 <= rect.y0)
         {
-            rendering_window_render_text(rendering, window, widget->text, widget->text_color, RENDER_FONT_TYPE_MONOSPACE, widget->rect.x0, widget->rect.y0);
+            continue;
         }
 
-        widget = ui_widget_recurse_depth_first_postorder(widget).next;
+        if (box->flags & UI_BoxFlag_DrawDropShadow)
+        {
+            F32Interval2 shadow = ui_rect_make(rect.x0 + 4, rect.y0 + 4, rect.x1 + 4, rect.y1 + 4);
+            ui_draw_rect(shadow, float4_make(0.0f, 0.0f, 0.0f, 0.22f));
+        }
+
+        if (box->flags & UI_BoxFlag_DrawBackground)
+        {
+            float4 color = box->background_color;
+            ui_draw_rect(rect, color);
+
+            if (box->flags & UI_BoxFlag_DrawHotEffects)
+            {
+                f32 t = box->hot_t * (1.0f - box->active_t);
+                if (t > 0.01f)
+                {
+                    ui_draw_rect(rect, float4_make(1.0f, 1.0f, 1.0f, 0.08f * t));
+                }
+            }
+
+            if (box->flags & UI_BoxFlag_DrawActiveEffects)
+            {
+                f32 t = box->active_t;
+                if (t > 0.01f)
+                {
+                    f32 h = BUSTER_CLAMP(1.0f, (rect.y1 - rect.y0) * 0.25f, box->font_size * 1.2f);
+                    ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x1, rect.y0 + h), float4_make(0.0f, 0.0f, 0.0f, 0.12f * t));
+                    ui_draw_rect(ui_rect_make(rect.x0, rect.y1 - h, rect.x1, rect.y1), float4_make(1.0f, 1.0f, 1.0f, 0.06f * t));
+                }
+            }
+        }
+
+        if (box->flags & UI_BoxFlag_DrawText)
+        {
+            float2 p = ui_box_text_position(box);
+            rendering_window_render_text(ui_state->rendering, ui_state->rendering_window, box->string, box->text_color, RENDER_FONT_TYPE_MONOSPACE, float2_element(p, AXIS2_X), float2_element(p, AXIS2_Y));
+        }
+
+        if (box->flags & UI_BoxFlag_DrawBorder)
+        {
+            ui_draw_border(rect, box->border_color, 1.0f);
+        }
+
+        if (box->flags & UI_BoxFlag_DrawSideTop)
+        {
+            ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x1, rect.y0 + 1), box->border_color);
+        }
+        if (box->flags & UI_BoxFlag_DrawSideBottom)
+        {
+            ui_draw_rect(ui_rect_make(rect.x0, rect.y1 - 1, rect.x1, rect.y1), box->border_color);
+        }
+        if (box->flags & UI_BoxFlag_DrawSideLeft)
+        {
+            ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x0 + 1, rect.y1), box->border_color);
+        }
+        if (box->flags & UI_BoxFlag_DrawSideRight)
+        {
+            ui_draw_rect(ui_rect_make(rect.x1 - 1, rect.y0, rect.x1, rect.y1), box->border_color);
+        }
+
+        if (box->flags & UI_BoxFlag_Debug)
+        {
+            ui_draw_border(rect, float4_make(1.0f, 0.0f, 1.0f, 0.65f), 1.0f);
+        }
     }
 }

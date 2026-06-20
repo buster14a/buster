@@ -12,7 +12,6 @@
 #include <dirent.h>
 #endif
 
-#include <buster/assertion.c>
 #include <buster/string.c>
 #include <buster/os.c>
 #include <buster/arena.c>

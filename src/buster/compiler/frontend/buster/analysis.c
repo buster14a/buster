@@ -103,21 +103,21 @@
 // //                                 next_parser_token_i.v += 1;
 // //                                 if (next_parser_token_i.v >= right_bracket_parser_index.v)
 // //                                 {
-// //                                     BUSTER_TRAP();
+// //                                     BUSTER_TODO();
 // //                                 }
 // //
 // //                                 lexer_token_i = parser.parser_to_lexer_indices[next_parser_token_i.v];
 // //                                 token = &parser.lexer_tokens[lexer_token_i.v];
 // //                                 if (token->id != TokenId::Identifier)
 // //                                 {
-// //                                     BUSTER_TRAP();
+// //                                     BUSTER_TODO();
 // //                                 }
 // //
 // //                                 let calling_convention_name = get_token_content(parser.source, parser.lexer_tokens, lexer_token_i);
 // //                                 let calling_convention_i = string8_array_match(calling_convention_name_array, calling_convention_name);
 // //                                 if (calling_convention_i == BUSTER_STRING_NO_MATCH)
 // //                                 {
-// //                                     BUSTER_TRAP();
+// //                                     BUSTER_TODO();
 // //                                 }
 // //
 // //                                 attributes.calling_convention = (IrCallingConvention)calling_convention_i;
@@ -125,14 +125,14 @@
 // //                                 next_parser_token_i.v += 1;
 // //                                 if (next_parser_token_i.v >= right_bracket_parser_index.v)
 // //                                 {
-// //                                     BUSTER_TRAP();
+// //                                     BUSTER_TODO();
 // //                                 }
 // //
 // //                                 lexer_token_i = parser.parser_to_lexer_indices[next_parser_token_i.v];
 // //                                 token = &parser.lexer_tokens[lexer_token_i.v];
 // //                                 if (token->id != TokenId::RightParenthesis)
 // //                                 {
-// //                                     BUSTER_TRAP();
+// //                                     BUSTER_TODO();
 // //                                 }
 // //
 // //                                 parser_token_i = next_parser_token_i;
@@ -148,7 +148,7 @@
 // //                                 }
 // //                                 else
 // //                                 {
-// //                                     BUSTER_TRAP();
+// //                                     BUSTER_TODO();
 // //                                 }
 // //
 // //                             }
@@ -162,12 +162,12 @@
 // //             }
 // //             else
 // //             {
-// //                 BUSTER_TRAP();
+// //                 BUSTER_TODO();
 // //             }
 // //         }
 // //         else
 // //         {
-// //             BUSTER_TRAP();
+// //             BUSTER_TODO();
 // //         }
 // //     }
 // //
@@ -207,12 +207,12 @@
 //             }
 //             else
 //             {
-//                 BUSTER_TRAP();
+//                 BUSTER_TODO();
 //             }
 //         }
 //         else
 //         {
-//             BUSTER_TRAP();
+//             BUSTER_TODO();
 //         }
 //     }
 //
@@ -283,19 +283,19 @@
 //                         }
 //                         else
 //                         {
-//                             BUSTER_TRAP();
+//                             BUSTER_TODO();
 //                         }
 //                     }
 //                     else if (identifier.pointer[0] == 'f')
 //                     {
-//                         BUSTER_TRAP();
+//                         BUSTER_TODO();
 //                     }
 //                 }
 //             }
 //
 //             if (!is_builtin)
 //             {
-//                 BUSTER_TRAP();
+//                 BUSTER_TODO();
 //             }
 //         }
 //         break; default: BUSTER_UNREACHABLE();
@@ -355,7 +355,7 @@
 //                 let right_bracket = next(parser, TokenId::RightBracket, parser_token_i, parser_end_index);
 //                 if (right_bracket.v == token_not_found.v)
 //                 {
-//                     BUSTER_TRAP();
+//                     BUSTER_TODO();
 //                 }
 //
 //                 BUSTER_CHECK(right_bracket.v - parser_token_i.v > 1);
@@ -364,7 +364,7 @@
 //                 {
 //                     if (function_attributes_already_parsed)
 //                     {
-//                         BUSTER_TRAP();
+//                         BUSTER_TODO();
 //                     }
 //
 //                     function_attributes_already_parsed = true;
@@ -375,12 +375,12 @@
 //                 {
 //                     if (!name_already_parsed)
 //                     {
-//                         BUSTER_TRAP();
+//                         BUSTER_TODO();
 //                     }
 //
 //                     if (symbol_attributes_already_parsed)
 //                     {
-//                         BUSTER_TRAP();
+//                         BUSTER_TODO();
 //                     }
 //
 //                     symbol_attributes_already_parsed = true;
@@ -389,7 +389,7 @@
 //                 }
 //                 else
 //                 {
-//                     BUSTER_TRAP();
+//                     BUSTER_TODO();
 //                 }
 //
 //                 parser_token_i = right_bracket;
@@ -398,7 +398,7 @@
 //             {
 //                 if (name_already_parsed)
 //                 {
-//                     BUSTER_TRAP();
+//                     BUSTER_TODO();
 //                 }
 //
 //                 name_already_parsed = true;
@@ -412,7 +412,7 @@
 //                 let right_parenthesis = next(parser, TokenId::RightParenthesis, parser_token_i, parser_end_index);
 //                 if (right_parenthesis.v == token_not_found.v)
 //                 {
-//                     BUSTER_TRAP();
+//                     BUSTER_TODO();
 //                 }
 //
 //                 let left_parenthesis = parser_token_i;
@@ -608,7 +608,7 @@
 //
 //                         if (value > max_value)
 //                         {
-//                             BUSTER_TRAP();
+//                             BUSTER_TODO();
 //                         }
 //
 //                         let value_ref = ir_get_constant_integer(analyzer->module, expected.ir, value);
@@ -639,7 +639,7 @@
 //             }
 //             else
 //             {
-//                 BUSTER_TRAP();
+//                 BUSTER_TODO();
 //             }
 //
 //             cursor.index.v += 1;

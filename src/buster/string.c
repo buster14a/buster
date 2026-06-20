@@ -479,6 +479,16 @@ BUSTER_GLOBAL_LOCAL String8 string_format_i64_decimal(String8 buffer, u64 value,
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u64 string_format_s64_decimal_magnitude(s64 value)
+{
+    u64 result = (u64)value;
+    if (value < 0)
+    {
+        result = 0 - result;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 string_format_u64_octal(String8 buffer, u64 value)
 {
     String8 result = {0};
@@ -1006,7 +1016,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     }
                     break; case FORMAT_TYPE_STRING_OS_LIST:
                     {
-                        BUSTER_TRAP();
+                        BUSTER_TODO();
                         // StringOsList string_os_list = va_arg(variable_arguments, StringOsList);
                         // StringOsListIterator it = string_os_list_iterator_initialize(string_os_list);
                         //
@@ -1024,7 +1034,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     }
                     // break; case FORMAT_TYPE_STRING_OS:
                     // {
-                    //     BUSTER_TRAP();
+                    //     BUSTER_TODO();
                     //     // StringOs string = va_arg(variable_arguments, StringOs);
                     //     // string8_duplicate_from_string_os(arena, string, false);
                     // }
@@ -1037,7 +1047,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     {
                         String16 string16 = va_arg(variable_arguments, String16);
                         BUSTER_UNUSED(string16);
-                        BUSTER_TRAP();
+                        BUSTER_TODO();
                         // string_append_slice_different<Char, char16>(arena, string16);
                     }
                     break; case FORMAT_TYPE_CHAR_OS:
@@ -1229,7 +1239,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 
                         switch (integer_format_kind)
                         {
-                            break; case INTEGER_FORMAT_KIND_DECIMAL: format_result = string_format_i64_decimal(string_buffer, (u64)((value < 0) ? (-value) : value), value < 0);
+                            break; case INTEGER_FORMAT_KIND_DECIMAL: format_result = string_format_i64_decimal(string_buffer, string_format_s64_decimal_magnitude(value), value < 0);
                             break; case INTEGER_FORMAT_KIND_BINARY: format_result = string_format_u64_binary(string_buffer, (u64)value);
                             break; case INTEGER_FORMAT_KIND_OCTAL: format_result = string_format_u64_octal(string_buffer, (u64)value);
                             break; case INTEGER_FORMAT_KIND_HEXADECIMAL_LOWER: case INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER: format_result = string_format_u64_hexadecimal(string_buffer, (u64)value, integer_format_kind == INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER);
@@ -1268,7 +1278,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             }
             else
             {
-                BUSTER_TRAP();
+                BUSTER_TODO();
             }
         }
     }
@@ -1850,6 +1860,10 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         {
             String8 formatted = string_format(arena, S8("async_thread_{u64}"), (u64)7);
             BUSTER_STRING_TEST(arguments, formatted, S8("async_thread_7"));
+        }
+        {
+            String8 formatted = string_format(arena, S8("{s64}"), (s64)INT64_MIN);
+            BUSTER_STRING_TEST(arguments, formatted, S8("-9223372036854775808"));
         }
         {
             char8 utf8_bytes[] = {

@@ -18,7 +18,7 @@ BUSTER_GLOBAL_LOCAL void thread_context_tls_key_initialize(void)
     int result = pthread_key_create(&thread_context_tls_key, 0);
     if (result != 0)
     {
-        BUSTER_TRAP();
+        os_fail();
     }
 }
 
@@ -27,7 +27,7 @@ BUSTER_GLOBAL_LOCAL void thread_context_tls_key_ensure_initialized(void)
     int result = pthread_once(&thread_context_tls_key_once, thread_context_tls_key_initialize);
     if (result != 0)
     {
-        BUSTER_TRAP();
+        os_fail();
     }
 }
 #else
@@ -178,22 +178,16 @@ BUSTER_COLD bool is_debugger_present(void)
         BOOL os_result = IsDebuggerPresent();
         program_state->_is_debugger_present = os_result != 0;
 #else
-    BUSTER_TRAP();
+    BUSTER_TODO();
 #endif
     }
 
     return (bool)program_state->_is_debugger_present;
 }
 
-BUSTER_NORETURN BUSTER_COLD void os_fail_ex(u32 line, String8 function, String8 file)
+BUSTER_NORETURN BUSTER_COLD void os_fail_ex(String8 context, u32 line, String8 function, String8 file)
 {
-    string_print(S8("os_fail called from {S8}:{u32} in {S8}\n"), file, line, function);
-
-    if (is_debugger_present())
-    {
-        BUSTER_TRAP();
-    }
-
+    string_print(S8("{S8} at {S8}:{u32} in {S8}\n"), context, file, line, function);
     os_exit(1);
 }
 
@@ -1348,7 +1342,7 @@ void thread_context_select(ThreadContext* context)
     int result = pthread_setspecific(thread_context_tls_key, context);
     if (result != 0)
     {
-        BUSTER_TRAP();
+        os_fail();
     }
 #else
     thread_context_thread_local = context;

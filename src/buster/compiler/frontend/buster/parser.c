@@ -15,90 +15,6 @@ BUSTER_GLOBAL_LOCAL TokenId block_end_of_statement_token = TOKEN_SEMICOLON;
 
 #define KEYWORD_COUNT ((u64)last_keyword - (u64)first_keyword + 1)
 
-#define SWITCH_ALPHA_UPPER \
-                case 'A':\
-                case 'B':\
-                case 'C':\
-                case 'D':\
-                case 'E':\
-                case 'F':\
-                case 'G':\
-                case 'H':\
-                case 'I':\
-                case 'J':\
-                case 'K':\
-                case 'L':\
-                case 'M':\
-                case 'N':\
-                case 'O':\
-                case 'P':\
-                case 'Q':\
-                case 'R':\
-                case 'S':\
-                case 'T':\
-                case 'U':\
-                case 'V':\
-                case 'X':\
-                case 'Y':\
-                case 'Z'
-
-#define SWITCH_ALPHA_LOWER \
-                case 'a':\
-                case 'b':\
-                case 'c':\
-                case 'd':\
-                case 'e':\
-                case 'f':\
-                case 'g':\
-                case 'h':\
-                case 'i':\
-                case 'j':\
-                case 'k':\
-                case 'l':\
-                case 'm':\
-                case 'n':\
-                case 'o':\
-                case 'p':\
-                case 'q':\
-                case 'r':\
-                case 's':\
-                case 't':\
-                case 'u':\
-                case 'v':\
-                case 'x':\
-                case 'y':\
-                case 'z'
-
-#define DECIMAL_DIGIT \
-    case '0':\
-    case '1':\
-    case '2':\
-    case '3':\
-    case '4':\
-    case '5':\
-    case '6':\
-    case '7':\
-    case '8':\
-    case '9'
-
-#define HEX_ALPHA_LOWER \
-                case 'a':\
-                case 'b':\
-                case 'c':\
-                case 'd':\
-                case 'e':\
-                case 'f'
-
-#define HEX_ALPHA_UPPER \
-                case 'A':\
-                case 'B':\
-                case 'C':\
-                case 'D':\
-                case 'E':\
-                case 'F'
-
-#define HEX_ALPHA HEX_ALPHA_UPPER: HEX_ALPHA_LOWER
-
 // STRUCT(LexInteger)
 // {
 //     IntegerParsingU64 parsing;
@@ -119,7 +35,7 @@ BUSTER_GLOBAL_LOCAL bool is_valid_character_after_digit(char8 ch)
         {
             return true;
         }
-        break; default: BUSTER_TRAP();
+        break; default: BUSTER_TODO();
     }
 
     return false;
@@ -153,7 +69,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
 
                 switch (start_ch)
                 {
-                    break; SWITCH_ALPHA_UPPER: SWITCH_ALPHA_LOWER:
+                    break; BUSTER_SWITCH_ALPHA_UPPER: BUSTER_SWITCH_ALPHA_LOWER:
                     case '_':
                     {
                         while (true)
@@ -161,7 +77,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                             const char8* restrict it_start = it;
                             switch (*it_start)
                             {
-                                break; SWITCH_ALPHA_UPPER: SWITCH_ALPHA_LOWER: DECIMAL_DIGIT:
+                                break; BUSTER_SWITCH_ALPHA_UPPER: BUSTER_SWITCH_ALPHA_LOWER: BUSTER_SWITCH_DECIMAL_DIGIT:
                                 case '_':
                                 {
                                     it += 1;
@@ -220,7 +136,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                             it += 1;
                         }
                     }
-                    break; DECIMAL_DIGIT:
+                    break; BUSTER_SWITCH_DECIMAL_DIGIT:
                     {
                         bool is_valid = true;
 
@@ -253,8 +169,8 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                                     switch (ch)
                                     {
                                         break; 
-                                        DECIMAL_DIGIT:
-                                        HEX_ALPHA:
+                                        BUSTER_SWITCH_DECIMAL_DIGIT:
+                                        BUSTER_SWITCH_HEX_ALPHA:
                                         case '_':
                                         {
                                             increment = true;
@@ -267,7 +183,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                                     switch (ch)
                                     {
                                         break; 
-                                        DECIMAL_DIGIT:
+                                        BUSTER_SWITCH_DECIMAL_DIGIT:
                                         case '_':
                                         {
                                             increment = true;
@@ -335,7 +251,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                                     {
                                         switch (ch)
                                         {
-                                            break; DECIMAL_DIGIT: HEX_ALPHA: case '_': increment = true;
+                                            break; BUSTER_SWITCH_DECIMAL_DIGIT: BUSTER_SWITCH_HEX_ALPHA: case '_': increment = true;
                                             break; default: increment = false;
                                         }
                                     }
@@ -343,7 +259,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                                     {
                                         switch (ch)
                                         {
-                                            break; DECIMAL_DIGIT: HEX_ALPHA: case '_': increment = true;
+                                            break; BUSTER_SWITCH_DECIMAL_DIGIT: BUSTER_SWITCH_HEX_ALPHA: case '_': increment = true;
                                             break; default: increment = false;
                                         }
                                     }
@@ -390,7 +306,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
 
                                         switch (*it_start)
                                         {
-                                            break; DECIMAL_DIGIT: increment = true;
+                                            break; BUSTER_SWITCH_DECIMAL_DIGIT: increment = true;
                                             break; default: increment = false;
                                         }
 
@@ -425,7 +341,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
 
                         if (!is_valid)
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
                     }
                     break; case '\n': { id = TOKEN_LINE_FEED; it += 1; }
@@ -483,7 +399,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                 u64 length = (u64)(end - start);
                 if (length > (((u64)1 << 24) - 1))
                 {
-                    BUSTER_TRAP(); // TODO: error
+                    BUSTER_TODO(); // TODO: error
                 }
 
                 u64 token_index = token_count;
@@ -502,7 +418,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
 
         if (result.token_count > UINT32_MAX)
         {
-            BUSTER_TRAP();
+            BUSTER_TODO();
         }
 
         result.token_count = (u32)token_count;
@@ -841,7 +757,7 @@ BUSTER_GLOBAL_LOCAL ExtendedToken expect(Parser* parser, TokenId id)
     {
         String8 string = get_string(parser->iterator.source, token);
         BUSTER_UNUSED(string);
-        BUSTER_TRAP();
+        BUSTER_TODO();
     }
 
     return token;
@@ -915,7 +831,7 @@ BUSTER_GLOBAL_LOCAL void finish_type_reference(Parser* parser)
         {
             if (resume_state->code.current_state != CODE_STATE_TYPE)
             {
-                BUSTER_TRAP();
+                BUSTER_TODO();
             }
 
             resume_state->code.current_state = CODE_STATE_AFTER_TYPE;
@@ -932,7 +848,7 @@ BUSTER_GLOBAL_LOCAL void finish_type_reference(Parser* parser)
                 {
                     resume_state->type.current_state = TYPE_STATE_AFTER_FUNCTION_RETURN_TYPE;
                 }
-                break; default: BUSTER_TRAP();
+                break; default: BUSTER_TODO();
             }
         }
         break; default:
@@ -1067,7 +983,7 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
     switch (resume_state->id)
     {
         break; case PARSER_DECLARATION_RETURN_STATEMENT: {}
-        break; default: BUSTER_TRAP();
+        break; default: BUSTER_TODO();
     }
 }
 
@@ -1106,7 +1022,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     {
                         is_running = false;
                     }
-                    break; default: BUSTER_TRAP();
+                    break; default: BUSTER_TODO();
                 }
             }
             break; case PARSER_DECLARATION_CODE:
@@ -1135,7 +1051,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 code_state->code.node->code.name = get_string(parser.iterator.source, token);
                                 code_state->code.current_state = CODE_STATE_AFTER_NAME;
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case CODE_STATE_AFTER_NAME:
@@ -1154,7 +1070,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             }
                             break; case TOKEN_EQUAL:
                             {
-                                BUSTER_TRAP();
+                                BUSTER_TODO();
                             }
                             break; case TOKEN_LEFT_BRACKET:
                             {
@@ -1164,7 +1080,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 attribute_list_state->attribute_list.current_state = ATTRIBUTE_LIST_STATE_ITEM_OR_CLOSE;
                                 attribute_list_state->attribute_list.symbol = &code_state->code.node->code.symbol_attributes;
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case CODE_STATE_TYPE:
@@ -1193,14 +1109,14 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 consume(&parser.iterator);
                                 code_state->code.current_state = CODE_STATE_AFTER_EQUAL;
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case CODE_STATE_AFTER_EQUAL:
                     {
                         if (token.id != TOKEN_LEFT_BRACE)
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         consume(&parser.iterator);
@@ -1246,7 +1162,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 consume(&parser.iterator);
                                 type_state->type.current_state = TYPE_STATE_AFTER_FUNCTION_KEYWORD;
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case TYPE_STATE_AFTER_ARRAY_SLICE_START:
@@ -1267,14 +1183,14 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 consume(&parser.iterator);
                                 type_state->type.current_state = TYPE_STATE_AFTER_ARRAY_INFER_MARKER;
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case TYPE_STATE_AFTER_ARRAY_COUNT:
                     {
                         if (token.id != TOKEN_RIGHT_BRACKET)
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         consume(&parser.iterator);
@@ -1284,7 +1200,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     {
                         if (token.id != TOKEN_RIGHT_BRACKET)
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         consume(&parser.iterator);
@@ -1308,7 +1224,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 consume(&parser.iterator);
                                 type_state->type.current_state = TYPE_STATE_FUNCTION_ARGUMENT_NAME_OR_CLOSE;
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case TYPE_STATE_FUNCTION_ARGUMENT_NAME_OR_CLOSE:
@@ -1325,14 +1241,14 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 consume(&parser.iterator);
                                 type_state->type.current_state = TYPE_STATE_FUNCTION_ARGUMENT_AFTER_NAME_SEGMENT;
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case TYPE_STATE_FUNCTION_ARGUMENT_AFTER_NAME_SEGMENT:
                     {
                         if (token.id != TOKEN_COLON)
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         consume(&parser.iterator);
@@ -1353,7 +1269,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
 
                         if (!token_begins_type(token.id))
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         type_state->type.current_state = TYPE_STATE_FUNCTION_ARGUMENT_TYPE;
@@ -1364,7 +1280,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     }
                     break; case TYPE_STATE_FUNCTION_ARGUMENT_TYPE:
                     {
-                        BUSTER_TRAP();
+                        BUSTER_TODO();
                     }
                     break; case TYPE_STATE_FUNCTION_ARGUMENT_DELIMITER_OR_CLOSE:
                     {
@@ -1380,14 +1296,14 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 consume(&parser.iterator);
                                 type_state->type.current_state = TYPE_STATE_FUNCTION_RETURN_TYPE;
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case TYPE_STATE_FUNCTION_RETURN_TYPE:
                     {
                         if (!token_begins_type(token.id))
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         ParserState* child_type_state = state_push(&parser.state);
@@ -1424,11 +1340,11 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 {
                                     break; case ATTRIBUTE_LIST_CODE:
                                     {
-                                        BUSTER_TRAP();
+                                        BUSTER_TODO();
                                     }
                                     break; case ATTRIBUTE_LIST_DATA:
                                     {
-                                        BUSTER_TRAP();
+                                        BUSTER_TODO();
                                     }
                                     break; case ATTRIBUTE_LIST_SYMBOL:
                                     {
@@ -1450,7 +1366,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                                 attribute_list_state->attribute_list.symbol->exported = true;
                                                 attribute_list_state->attribute_list.symbol->linkage = IR_LINKAGE_EXTERNAL;
                                             }
-                                            break; case IR_SYMBOL_ATTRIBUTE_COUNT: BUSTER_TRAP();
+                                            break; case IR_SYMBOL_ATTRIBUTE_COUNT: BUSTER_TODO();
                                           break;
                                         }
                                     }
@@ -1458,7 +1374,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                     {
                                         if (!string_equal(attribute_name, function_attribute_names[IR_FUNCTION_ATTRIBUTE_CALLING_CONVENTION]))
                                         {
-                                            BUSTER_TRAP();
+                                            BUSTER_TODO();
                                         }
 
                                         attribute_list_state->attribute_list.current_state = ATTRIBUTE_LIST_STATE_CALLING_CONVENTION_OPEN;
@@ -1466,14 +1382,14 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                     break; case ATTRIBUTE_LIST_COUNT: BUSTER_UNREACHABLE();
                                 }
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case ATTRIBUTE_LIST_STATE_CALLING_CONVENTION_OPEN:
                     {
                         if (token.id != TOKEN_LEFT_PARENTHESIS)
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         attribute_list_state->attribute_list.current_state = ATTRIBUTE_LIST_STATE_CALLING_CONVENTION_NAME;
@@ -1482,7 +1398,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     {
                         if (!token_matches_any(&parser, token, calling_convention_names, BUSTER_ARRAY_LENGTH(calling_convention_names)))
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         attribute_list_state->attribute_list.current_state = ATTRIBUTE_LIST_STATE_CALLING_CONVENTION_CLOSE;
@@ -1491,7 +1407,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     {
                         if (token.id != TOKEN_RIGHT_PARENTHESIS)
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         attribute_list_state->attribute_list.current_state = ATTRIBUTE_LIST_STATE_ITEM_OR_CLOSE;
@@ -1512,7 +1428,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
 
                         if (block_state->block.brace_depth == 0)
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         block_state->block.brace_depth -= 1;
@@ -1553,7 +1469,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                 state->id = PARSER_DECLARATION_RETURN_STATEMENT;
                                 state->return_statement.state = RETURN_STATEMENT_STATE_VALUE_OR_END;
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case STATEMENT_STATE_END:
@@ -1564,7 +1480,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                         {
                             if (token.id != statement_state->statement.end_token)
                             {
-                                BUSTER_TRAP();
+                                BUSTER_TODO();
                             }
 
                             consume(&parser.iterator);
@@ -1601,7 +1517,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     {
                         if (token.id != end_of_statement_token)
                         {
-                            BUSTER_TRAP();
+                            BUSTER_TODO();
                         }
 
                         state_pop(&parser.state);
@@ -1670,7 +1586,7 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
 
                                 st->expression.state = EXPRESSION_STATE_TAIL;
                             }
-                            break; default: BUSTER_TRAP();
+                            break; default: BUSTER_TODO();
                         }
                     }
                     break; case EXPRESSION_STATE_TAIL:
@@ -1685,9 +1601,9 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             {
                                 break; case TOKEN_PLUS:
                                 {
-                                    BUSTER_TRAP();
+                                    BUSTER_TODO();
                                 }
-                                break; default: BUSTER_TRAP();
+                                break; default: BUSTER_TODO();
                             }
                         }
                     }
@@ -1696,11 +1612,11 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
             }
             break; case PARSER_DECLARATION_TYPE_DECLARATION:
             {
-                BUSTER_TRAP();
+                BUSTER_TODO();
             }
             break; case PARSER_DECLARATION_DATA_DECLARATION:
             {
-                BUSTER_TRAP();
+                BUSTER_TODO();
             }
         }
     }
@@ -1772,7 +1688,7 @@ BUSTER_GLOBAL_LOCAL void print_tokenizer_result(TokenizerResult tokenizer, const
             break; case TOKEN_KEYWORD_STRUCT: token_id = S8("Keyword_Struct");
             break; case TOKEN_KEYWORD_UNION: token_id = S8("Keyword_Union");
             break; case TOKEN_COUNT: token_id = S8("Token_Count(Error)");
-            break; default: BUSTER_TRAP();
+            break; default: BUSTER_TODO();
         }
 
         String8 display_string = string.pointer && string.length > 0 && string.pointer[0] >= ' ' ? string : S8("");

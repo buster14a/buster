@@ -194,8 +194,13 @@ struct ThreadContext
 
 BUSTER_V_DECL ProgramState* program_state;
 
-#define os_fail() buster_failed_assertion((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__))
-BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_ex(u32 line, String8 function, String8 file);
+BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_ex(String8 context, u32 line, String8 function, String8 file);
+
+#define os_fail_message(message) (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_ex(S8(message), (u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__)))
+#define os_fail() os_fail_message("internal error")
+#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message("assertion failed"), 0) : 0))
+#define BUSTER_TODO() do { os_fail_message("TODO"); } while (1)
+
 BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);
 
 BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);

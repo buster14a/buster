@@ -110,7 +110,7 @@ BUSTER_GLOBAL_LOCAL void table_grow(InternTable* table)
         table_allocate(table, target_capacity);
     }
     // TODO, this is wrong
-    BUSTER_TRAP();
+    BUSTER_TODO();
 }
 
 BUSTER_GLOBAL_LOCAL u64 hash_string(String8 string)
@@ -167,18 +167,18 @@ BUSTER_GLOBAL_LOCAL IrInternSlotRef table_intern(InternTable* restrict table, St
         InternSlot candidate_slot = slot_pointer[*get_slot_index(table, index)];
         if (string_equal(string, candidate_slot.name))
         {
-            BUSTER_TRAP();
+            BUSTER_TODO();
         }
         else
         {
-            BUSTER_TRAP();
+            BUSTER_TODO();
             // for (u32 collision_index = index;; collision_index = (collision_index + 1) & mask)
             // {
             //     let hash = hash_pointer[index];
             //
             //     if ((hash == 0) | (hash == candidate_hash))
             //     {
-            //         if (a) BUSTER_TRAP();
+            //         if (a) BUSTER_TODO();
             //     }
             // }
         }
@@ -198,7 +198,7 @@ IrInternSlotRef ir_module_intern(IrModule* module, String8 string)
 
 IrInternSlotRef table_prepend(InternTable* table, IrInternSlotRef after, String8 before)
 {
-    if (table && after.v.v == UINT32_MAX && before.pointer) BUSTER_TRAP();
+    if (table && after.v.v == UINT32_MAX && before.pointer) BUSTER_TODO();
     return (IrInternSlotRef){0};
 }
 
@@ -636,7 +636,7 @@ BUSTER_GLOBAL_LOCAL bool calling_convention_is_resolved(IrCallingConvention call
 //         let classification = classify_type(module, argument_type_ref);
 //         if (classification.classes[0] == ClassSystemV::Memory)
 //         {
-//             BUSTER_TRAP();
+//             BUSTER_TODO();
 //         }
 //         else if (classification.classes[0] == ClassSystemV::Integer)
 //         {
@@ -648,16 +648,16 @@ BUSTER_GLOBAL_LOCAL bool calling_convention_is_resolved(IrCallingConvention call
 //             }
 //             else
 //             {
-//                 BUSTER_TRAP();
+//                 BUSTER_TODO();
 //             }
 //         }
 //         else
 //         {
-//             BUSTER_TRAP();
+//             BUSTER_TODO();
 //         }
 //     }
 //
-//     BUSTER_TRAP();
+//     BUSTER_TODO();
 // }
 
 // BUSTER_GLOBAL_LOCAL void classify_function(IrModule* module, IrDebugTypeRef return_type, Slice<IrDebugTypeRef> argument_types, IrCallingConvention calling_convention)
@@ -671,7 +671,7 @@ BUSTER_GLOBAL_LOCAL bool calling_convention_is_resolved(IrCallingConvention call
 //         }
 //         break; case IrCallingConvention::Win64:
 //         {
-//             BUSTER_TRAP();
+//             BUSTER_TODO();
 //         }
 //         break; case IrCallingConvention::Count: BUSTER_UNREACHABLE();
 //     }
@@ -839,7 +839,7 @@ BUSTER_GLOBAL_LOCAL bool compare_debug_function_type_at_creation(IrDebugType* fu
     IrDebugTypeFunctionCreationArguments* arguments = (IrDebugTypeFunctionCreationArguments*)context;
     BUSTER_CHECK(function_type->id == IR_DEBUG_TYPE_FUNCTION);
     BUSTER_UNUSED(arguments);
-    BUSTER_TRAP();
+    BUSTER_TODO();
     return false;
 }
 
@@ -878,7 +878,7 @@ BUSTER_GLOBAL_LOCAL bool compare_ir_function_type_at_creation(IrType* function_t
     IrTypeFunctionCreationArguments* arguments = (IrTypeFunctionCreationArguments*)context;
     BUSTER_CHECK(function_type->id == IR_TYPE_FUNCTION);
     BUSTER_UNUSED(arguments);
-    BUSTER_TRAP();
+    BUSTER_TODO();
     return false;
 }
 

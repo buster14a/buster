@@ -1,4 +1,5 @@
 #include <buster/integer.h>
+#include <buster/os.h>
 
 u64 align_forward(u64 n, u64 a)
 {

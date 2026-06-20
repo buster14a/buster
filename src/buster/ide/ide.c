@@ -1,3 +1,4 @@
+#define BUSTER_USE_GRAPHICS 1
 
 #include <buster/base.h>
 #include <buster/entry_point.h>
@@ -19,7 +20,6 @@
 #include <buster/integer.c>
 #include <buster/os.c>
 #include <buster/string.c>
-#include <buster/assertion.c>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.c>
 #endif
@@ -61,6 +61,10 @@ struct IdeWindow
     IdeWindow* next;
     IdePanel* root_panel;
     UI_State* ui;
+    f32 dpi;
+    f32 font_size;
+    u32 font_height;
+    u8 reserved[4];
 };
 
 typedef struct IdeProgram IdeProgram;
@@ -71,7 +75,6 @@ struct IdeProgram
     IdeWindow* last_window;
     WmHandle* windowing;
     RenderingHandle* rendering;
-    WmEventList event_list;
     bool test;
     u8 reserved[7];
     TimeDataType last_frame_timestamp;
@@ -80,6 +83,56 @@ struct IdeProgram
 BUSTER_GLOBAL_LOCAL IdeProgram ide_state = {0};
 
 BUSTER_V_IMPL ProgramState* program_state = &ide_state.state;
+
+#define IDE_BASE_DPI (96.0f)
+#define IDE_BASE_FONT_SIZE (24.0f)
+
+BUSTER_GLOBAL_LOCAL f32 ide_font_size_from_dpi(f32 dpi)
+{
+    if (dpi <= 0.0f)
+    {
+        dpi = IDE_BASE_DPI;
+    }
+
+    return BUSTER_CLAMP(6.0f, IDE_BASE_FONT_SIZE * (dpi / IDE_BASE_DPI), 72.0f);
+}
+
+BUSTER_GLOBAL_LOCAL void ide_window_queue_font_update(IdeWindow* window, f32 dpi)
+{
+    f32 font_size = ide_font_size_from_dpi(dpi);
+    u32 font_height = (u32)(font_size + 0.5f);
+    if (font_height == 0)
+    {
+        font_height = 1;
+    }
+
+    String8 font_path = font_file_get_path(ide_state.state.arena, FONT_INDEX_MONO);
+    FontTextureAtlas font = rendering_font_create(ide_state.state.arena, ide_state.rendering, (FontTextureAtlasCreate) {
+            .font_path = font_path,
+            .text_height = font_height,
+            });
+    rendering_queue_font_update(ide_state.rendering, window->render, RENDER_FONT_TYPE_MONOSPACE, font);
+
+    window->dpi = dpi;
+    window->font_size = font_size;
+    window->font_height = font_height;
+}
+
+BUSTER_GLOBAL_LOCAL void ide_window_update_font_for_dpi(IdeWindow* window)
+{
+    if (window && window->wm && window->render)
+    {
+        f32 dpi = wm_window_get_dpi(ide_state.windowing, window->wm);
+        f32 font_size = ide_font_size_from_dpi(dpi);
+        u32 font_height = (u32)(font_size + 0.5f);
+        if (dpi != window->dpi || font_height != window->font_height)
+        {
+            rendering_window_rect_texture_update_begin(window->render);
+            ide_window_queue_font_update(window, dpi);
+            rendering_window_rect_texture_update_end(ide_state.rendering, window->render);
+        }
+    }
+}
 
 #if BUSTER_FUZZ
 BUSTER_EXPORT s32 buster_fuzz(const u8* pointer, size_t size)
@@ -162,18 +215,28 @@ BUSTER_GLOBAL_LOCAL void ui_node(UI_Node node)
     BUSTER_UNUSED(node_widget);
 }
 
-BUSTER_GLOBAL_LOCAL void app_update(void)
+BUSTER_GLOBAL_LOCAL u64 frame_depth = 0;
+
+bool frame(void)
 {
+    frame_depth += 1;
+
     TimeDataType frame_end = timestamp_take();
-    ide_state.event_list = wm_poll_events(ide_state.state.arena, ide_state.windowing);
+
+    WmEventList event_list = {0};
+    if (frame_depth == 1)
+    {
+        event_list = wm_poll_events(ide_state.state.arena, ide_state.windowing);
+    }
+
     f64 frame_ms = (f64)timestamp_ns_between(ide_state.last_frame_timestamp, frame_end) / (1000 * 1000);
     ide_state.last_frame_timestamp = frame_end;
 
-    for (WmEvent* event = ide_state.event_list.first; event; event = event->next)
+    for (WmEvent* event = event_list.first; event; event = event->next)
     {
         switch (event->kind)
         {
-            case WM_EVENT_WINDOW_CLOSE:
+            break; case WM_EVENT_WINDOW_CLOSE:
             {
                 for (IdeWindow* window = ide_state.first_window; window; window = window->next)
                 {
@@ -207,7 +270,14 @@ BUSTER_GLOBAL_LOCAL void app_update(void)
                         break;
                     }
                 }
-            } break;
+            }
+            break; case WM_EVENT_TEXT_INPUT:
+            {
+                string_print(S8("User wrote \"{S8}\"\n"), event->text);
+            }
+            break; default:
+            {
+            }
             break; case WM_EVENT_COUNT: BUSTER_UNREACHABLE();
         }
     }
@@ -219,12 +289,13 @@ BUSTER_GLOBAL_LOCAL void app_update(void)
 
         RenderingWindowHandle* render_window = window->render;
         rendering_window_frame_begin(ide_state.rendering, render_window);
+        ide_window_update_font_for_dpi(window);
 
         ui_state_select(window->ui);
 
-        ui_build_begin(ide_state.windowing, window->wm, frame_ms, &ide_state.event_list);
+        ui_build_begin(ide_state.windowing, window->wm, frame_ms, event_list);
 
-        ui_push(font_size, 24);
+        ui_push(font_size, window->font_size);
 
         ui_top_bar();
         ui_push(child_layout_axis, AXIS2_X);
@@ -273,13 +344,11 @@ BUSTER_GLOBAL_LOCAL void app_update(void)
 
         window = next;
     }
-}
 
-BUSTER_GLOBAL_LOCAL void window_refresh_callback(WmWindowHandle* window, void* context)
-{
-    BUSTER_UNUSED(window);
-    BUSTER_UNUSED(context);
-    app_update();
+    frame_depth -= 1;
+
+    bool result = !ide_state.first_window;
+    return result;
 }
 
 void async_user_tick(void)
@@ -653,11 +722,11 @@ BUSTER_GLOBAL_LOCAL IrInstruction* ir_next_instruction(IrInstructionIterator* it
     IrInstructionRef ref = iterator->instruction_ref;
     if (ir_ref_is_valid(ref))
     {
-        BUSTER_TRAP();
+        BUSTER_TODO();
     }
     else
     {
-        BUSTER_TRAP();
+        BUSTER_TODO();
     }
 }
 
@@ -722,7 +791,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice module_lower(IrModule* module)
                                 MachineSize size = MACHINE_SIZE_FOUR;
                                 BUSTER_UNUSED(instructions);
                                 BUSTER_UNUSED(size);
-                                BUSTER_TRAP();
+                                BUSTER_TODO();
                                 // instructions[0] = mov_imm(isel, value->constant4.v, size);
                                 // instructions[1] = copy(isel, PhysicalRegisterX8664::RAX, instructions[0].operand_values[0].integer, size);
                                 // instructions[2] = ret(isel, PhysicalRegisterX8664::RAX, size);
@@ -890,7 +959,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice module_lower(IrModule* module)
 
                     if (is_destination_reg64 && is_source_reg64)
                     {
-                        BUSTER_TRAP();
+                        BUSTER_TODO();
                     }
                     else if (is_source_reg64)
                     {
@@ -900,11 +969,11 @@ BUSTER_GLOBAL_LOCAL ByteSlice module_lower(IrModule* module)
                     }
                     else if (is_destination_reg64)
                     {
-                        BUSTER_TRAP();
+                        BUSTER_TODO();
                     }
                     else
                     {
-                        BUSTER_TRAP();
+                        BUSTER_TODO();
                     }
                 }
                 break; case MACHINE_INSTRUCTION_COPY_64: BUSTER_UNREACHABLE();
@@ -939,7 +1008,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice module_lower(IrModule* module)
                     }
                     else
                     {
-                        BUSTER_TRAP();
+                        BUSTER_TODO();
                     }
                 }
                 break; case MACHINE_INSTRUCTION_LOAD_64: BUSTER_UNREACHABLE();
@@ -967,7 +1036,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice module_lower(IrModule* module)
                     }
                     else
                     {
-                        BUSTER_TRAP();
+                        BUSTER_TODO();
                     }
                 }
                 break; case MACHINE_INSTRUCTION_STORE_64: BUSTER_UNREACHABLE();
@@ -1039,7 +1108,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
                         .width = 1600,
                         .height= 900,
                         },
-                        .refresh_callback = &window_refresh_callback,
                         });
                 ide_state.first_window->wm = wm_window;
 
@@ -1056,17 +1124,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
 
                         rendering_window_rect_texture_update_begin(ide_state.first_window->render);
 
-                        String8 font_path = font_file_get_path(arena, FONT_INDEX_MONO);
-                        u32 monospace_font_height = 24;
-
+                        f32 dpi = wm_window_get_dpi(windowing, wm_window);
                         TextureIndex white_texture = white_texture_create(ide_state.state.arena, ide_state.rendering);
-                        FontTextureAtlas font = rendering_font_create(ide_state.state.arena, ide_state.rendering, (FontTextureAtlasCreate) {
-                                .font_path = font_path,
-                                .text_height = monospace_font_height,
-                                });
 
                         rendering_window_queue_rect_texture_update(ide_state.rendering, ide_state.first_window->render, RECT_TEXTURE_SLOT_WHITE, white_texture);
-                        rendering_queue_font_update(ide_state.rendering, ide_state.first_window->render, RENDER_FONT_TYPE_MONOSPACE, font);
+                        ide_window_queue_font_update(ide_state.first_window, dpi);
 
                         rendering_window_rect_texture_update_end(ide_state.rendering, ide_state.first_window->render);
 
@@ -1076,7 +1138,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
                         u64 loop_times = test ? (u64)3 : UINT64_MAX;
                         for (u64 i = 0; i < loop_times && ide_state.first_window; i += 1)
                         {
-                            app_update();
+                            bool quit = update();
+                            if (quit)
+                            {
+                                break;
+                            }
                         }
 
                         if (test)

@@ -12,5 +12,7 @@ BUSTER_F_DECL s32 buster_fuzz(const u8* pointer, size_t size);
 BUSTER_F_DECL ProcessResult process_arguments(void);
 BUSTER_F_DECL ProcessResult entry_point(void);
 BUSTER_F_DECL ProcessResult buster_argument_process(u64 argument_index);
+BUSTER_F_DECL bool update(void);
+BUSTER_F_DECL bool frame(void);
 #endif
 #endif

@@ -1,5 +1,5 @@
 #pragma once
-#include <buster/base.h>
+#include <buster/os.h>
 #include <buster/target.h>
 
 typedef struct InternTable

@@ -5,6 +5,12 @@
 
 typedef struct RenderingHandle RenderingHandle;
 typedef struct RenderingWindowHandle RenderingWindowHandle;
+typedef struct RenderingWindowSize RenderingWindowSize;
+struct RenderingWindowSize
+{
+    u32 width;
+    u32 height;
+};
 
 typedef enum RectTextureSlot
 {
@@ -50,6 +56,7 @@ struct RectDraw
 
 BUSTER_F_DECL RenderingHandle* rendering_initialize(Arena* arena);
 BUSTER_F_DECL RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windowing, RenderingHandle* rendering, WmWindowHandle* window);
+BUSTER_F_DECL RenderingWindowSize rendering_window_get_size(RenderingWindowHandle* window);
 BUSTER_F_DECL void rendering_window_rect_texture_update_begin(RenderingWindowHandle* window);
 BUSTER_F_DECL TextureIndex white_texture_create(Arena* arena, RenderingHandle* rendering);
 BUSTER_F_DECL void rendering_window_queue_rect_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, RectTextureSlot slot, TextureIndex texture_index);

@@ -35,6 +35,16 @@ ProcessResult buster_argument_process(u64 argument_index)
     return result;
 }
 
+bool update(void)
+{
+#if BUSTER_USE_GRAPHICS
+    bool result = frame();
+    return result;
+#else
+    return false;
+#endif
+}
+
 #if defined(__linux__)
 BUSTER_GLOBAL_LOCAL void signal_handler(int sig, siginfo_t *info, void *arg)
 {

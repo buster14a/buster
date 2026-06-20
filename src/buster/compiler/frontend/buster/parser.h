@@ -1,5 +1,5 @@
 #pragma once
-#include <buster/base.h>
+#include <buster/os.h>
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>

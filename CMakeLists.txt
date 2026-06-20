@@ -684,17 +684,27 @@ endfunction()
 
 function(buster_apply_module_options name)
     set(modules ${ARGN})
-
-    if ("WINDOW" IN_LIST modules AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(is_window "WINDOW" IN_LIST modules)
+    if (is_window AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(${name} PRIVATE xcb)
+        target_link_libraries(${name} PRIVATE xcb-imdkit)
+        target_link_libraries(${name} PRIVATE xcb-util)
+        target_link_libraries(${name} PRIVATE xcb-keysyms)
+        target_link_libraries(${name} PRIVATE xcb-xkb)
+        target_link_libraries(${name} PRIVATE xkbcommon-x11)
+        target_link_libraries(${name} PRIVATE xkbcommon)
     endif()
 
-    if ("WINDOW" IN_LIST modules AND APPLE)
+    if (is_window AND APPLE)
         target_link_libraries(${name} PRIVATE "-framework AppKit")
     endif()
 
-    if ("WINDOW" IN_LIST modules AND WIN32 AND C_COMPILER_TCC)
-        target_link_libraries(${name} PRIVATE user32)
+    if (is_window AND WIN32)
+        target_link_libraries(${name} PRIVATE dwmapi)
+
+        if (C_COMPILER_TCC)
+            target_link_libraries(${name} PRIVATE user32)
+        endif()
     endif()
 
     if ("RENDERING" IN_LIST modules AND BUSTER_USE_METAL)
@@ -713,7 +723,6 @@ buster_register_module(string "${BUSTER_SOURCE_DIR}/string${COMMON_EXTENSION}")
 buster_register_module(integer "${BUSTER_SOURCE_DIR}/integer${COMMON_EXTENSION}")
 buster_register_module(float "${BUSTER_SOURCE_DIR}/float${COMMON_EXTENSION}")
 buster_register_module(file "${BUSTER_SOURCE_DIR}/file${COMMON_EXTENSION}")
-buster_register_module(assertion "${BUSTER_SOURCE_DIR}/assertion${COMMON_EXTENSION}")
 buster_register_module(compiler_parser "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/parser${COMMON_EXTENSION}")
 buster_register_module(compiler_analysis "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/analysis${COMMON_EXTENSION}")
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
@@ -1430,7 +1439,6 @@ buster_add_executable(ide src/buster/ide/ide.c
     entry_point
     arena
     integer
-    assertion
     string
     float
     compiler_parser
