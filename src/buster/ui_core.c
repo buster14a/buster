@@ -342,7 +342,7 @@ UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* w
         .pref_height = { .kind = UI_SizeKind_Null, .value = 0, .strictness = 1 },
         .min_width = 0,
         .min_height = 0,
-        .flags = 0,
+        .flags = (UI_BoxFlags){0},
         .background_color = float4_make(0.12f, 0.12f, 0.14f, 1.0f),
         .text_color = float4_make(0.85f, 0.86f, 0.88f, 1.0f),
         .border_color = float4_make(0.22f, 0.23f, 0.26f, 1.0f),
@@ -573,37 +573,19 @@ UI_Box* ui_build_box_from_stringf(UI_BoxFlags flags, String8 format, ...)
     return result;
 }
 
-UI_BoxFlags ui_box_flags_from_widget_flags(UI_WidgetFlags flags)
+UI_Box* ui_box_make(UI_BoxFlags flags, String8 string)
 {
-    UI_BoxFlags result = 0;
-    if (flags.disabled) { result |= UI_BoxFlag_Disabled; }
-    if (flags.mouse_clickable) { result |= UI_BoxFlag_MouseClickable; }
-    if (flags.keyboard_pressable) { result |= UI_BoxFlag_KeyboardClickable; }
-    if (flags.draw_text) { result |= UI_BoxFlag_DrawText; }
-    if (flags.draw_background) { result |= UI_BoxFlag_DrawBackground; }
-    if (flags.overflow_x) { result |= UI_BoxFlag_AllowOverflowX; }
-    if (flags.overflow_y) { result |= UI_BoxFlag_AllowOverflowY; }
-    if (flags.floating_x) { result |= UI_BoxFlag_FloatingX; }
-    if (flags.floating_y) { result |= UI_BoxFlag_FloatingY; }
-    if (flags.draw_border) { result |= UI_BoxFlag_DrawBorder; }
-    if (flags.draw_hot_effects) { result |= UI_BoxFlag_DrawHotEffects; }
-    if (flags.draw_active_effects) { result |= UI_BoxFlag_DrawActiveEffects; }
-    return result;
+    return ui_build_box_from_string(flags, string);
 }
 
-UI_Widget* ui_widget_make(UI_WidgetFlags flags, String8 string)
-{
-    return ui_build_box_from_string(ui_box_flags_from_widget_flags(flags), string);
-}
-
-UI_Widget* ui_widget_make_format(UI_WidgetFlags flags, String8 format, ...)
+UI_Box* ui_box_make_format(UI_BoxFlags flags, String8 format, ...)
 {
     Arena* arena = ui_build_arena();
     va_list args;
     va_start(args, format);
     String8 string = string_format_va(arena, format, args);
     va_end(args);
-    return ui_widget_make(flags, string);
+    return ui_box_make(flags, string);
 }
 
 UI_BoxRec ui_box_rec_df(UI_Box* box, UI_Box* root, u64 sibling_offset, u64 child_offset)
@@ -635,7 +617,7 @@ UI_BoxRec ui_box_rec_df(UI_Box* box, UI_Box* root, u64 sibling_offset, u64 child
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void ui_prune_boxes(void)
+BUSTER_GLOBAL_LOCAL void ui_prune_untouched_boxes(void)
 {
     for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
     {
@@ -643,7 +625,7 @@ BUSTER_GLOBAL_LOCAL void ui_prune_boxes(void)
         for (UI_Box* box = slot->first, *next = 0; box; box = next)
         {
             next = box->hash_next;
-            if (box->last_touched_build_index + 1 < ui_state->build_index)
+            if (box->last_touched_build_index < ui_state->build_index)
             {
                 ui_box_hash_remove(box, slot_index);
                 box->next = ui_state->first_free_box;
@@ -653,38 +635,20 @@ BUSTER_GLOBAL_LOCAL void ui_prune_boxes(void)
     }
 }
 
-u8 ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, WmEventList event_queue)
+BUSTER_GLOBAL_LOCAL bool ui_wm_key_is_mouse(WmKey key)
 {
-    ui_state->build_index += 1;
-    arena_reset_to_start(ui_build_arena());
-    ui_stack_reset(ui_state);
-    ui_state->root = 0;
-    ui_state->windowing = windowing;
-    ui_state->window = window;
-    ui_state->events = (UI_EventList){0};
-    ui_state->frame_time = frame_time;
-    ui_state->is_animating = 0;
+    bool result = (key >= WM_KEY_MOUSE_LEFT && key <= WM_KEY_MOUSE_FORWARD);
+    return result;
+}
 
-    u8 open = 1;
+UI_EventList ui_event_list_from_wm_events(Arena* arena, WmWindowHandle* window, WmEventList event_queue)
+{
+    UI_EventList result = {0};
     for (WmEvent* event = event_queue.first; event; event = event->next)
     {
         if (event->window && event->window != window)
         {
             continue;
-        }
-        switch (event->kind)
-        {
-            case WM_EVENT_WINDOW_CLOSE:
-            {
-                open = 0;
-            } break;
-            case WM_EVENT_MOUSE_MOVE:
-            case WM_EVENT_BUTTON_PRESS:
-            case WM_EVENT_BUTTON_RELEASE:
-            {
-                ui_state->mouse = float2_make((f32)event->position.x, (f32)event->position.y);
-            } break;
-            default: break;
         }
 
         UI_Event ui_event = {0};
@@ -695,11 +659,28 @@ u8 ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, W
         switch (event->kind)
         {
             case WM_EVENT_KEY_PRESS:
-            case WM_EVENT_BUTTON_PRESS:
             {
                 ui_event.kind = UI_EventKind_Press;
             } break;
             case WM_EVENT_KEY_RELEASE:
+            {
+                ui_event.kind = UI_EventKind_Release;
+            } break;
+            case WM_EVENT_BUTTON_PRESS:
+            {
+                if (event->key == WM_KEY_MOUSE_WHEEL_UP || event->key == WM_KEY_MOUSE_WHEEL_DOWN || event->key == WM_KEY_MOUSE_WHEEL_LEFT || event->key == WM_KEY_MOUSE_WHEEL_RIGHT)
+                {
+                    ui_event.kind = UI_EventKind_Scroll;
+                    if (event->key == WM_KEY_MOUSE_WHEEL_UP) { ui_event.delta = float2_make(0.0f, 1.0f); }
+                    else if (event->key == WM_KEY_MOUSE_WHEEL_DOWN) { ui_event.delta = float2_make(0.0f, -1.0f); }
+                    else if (event->key == WM_KEY_MOUSE_WHEEL_LEFT) { ui_event.delta = float2_make(-1.0f, 0.0f); }
+                    else if (event->key == WM_KEY_MOUSE_WHEEL_RIGHT) { ui_event.delta = float2_make(1.0f, 0.0f); }
+                }
+                else
+                {
+                    ui_event.kind = UI_EventKind_Press;
+                }
+            } break;
             case WM_EVENT_BUTTON_RELEASE:
             {
                 ui_event.kind = UI_EventKind_Release;
@@ -718,7 +699,44 @@ u8 ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, W
 
         if (ui_event.kind != UI_EventKind_Null)
         {
-            ui_event_list_push(ui_build_arena(), &ui_state->events, &ui_event);
+            ui_event_list_push(arena, &result, &ui_event);
+        }
+    }
+    return result;
+}
+
+void ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, UI_EventList events)
+{
+    BUSTER_CHECK(ui_state != 0);
+
+    ui_state->build_index += 1;
+    arena_reset_to_start(ui_build_arena());
+    ui_stack_reset(ui_state);
+    ui_state->root = 0;
+    ui_state->windowing = windowing;
+    ui_state->window = window;
+    ui_state->events = events;
+    ui_state->frame_time = frame_time;
+    ui_state->is_animating = 0;
+
+    for (UI_EventNode* event = events.first; event; event = event->next)
+    {
+        switch (event->v.kind)
+        {
+            case UI_EventKind_MouseMove:
+            case UI_EventKind_Scroll:
+            {
+                ui_state->mouse = event->v.pos;
+            } break;
+            case UI_EventKind_Press:
+            case UI_EventKind_Release:
+            {
+                if (ui_wm_key_is_mouse(event->v.key))
+                {
+                    ui_state->mouse = event->v.pos;
+                }
+            } break;
+            default: break;
         }
     }
 
@@ -732,31 +750,41 @@ u8 ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, W
         ui_state->hot_box_key = ui_key_zero();
     }
 
-    ui_prune_boxes();
-
-    if (open)
+    for (u64 i = 0; i < (u64)UI_MouseButtonKind_COUNT; i += 1)
     {
-        RenderingWindowSize framebuffer_dimensions = rendering_window_get_size(ui_state->rendering_window);
-        ui_set_next_pref_width(ui_pixels(framebuffer_dimensions.width, 1.0f));
-        ui_set_next_pref_height(ui_pixels(framebuffer_dimensions.height, 1.0f));
-        ui_set_next_child_layout_axis(AXIS2_Y);
-        UI_Box* root = ui_build_box_from_stringf(0, S8("###window_root_{u64:x}"), (u64)window);
-        root->fixed_size = float2_make((f32)framebuffer_dimensions.width, (f32)framebuffer_dimensions.height);
-        root->rect = ui_rect_make(0.0f, 0.0f, (f32)framebuffer_dimensions.width, (f32)framebuffer_dimensions.height);
-        root->flags |= UI_BoxFlag_FixedSize | UI_BoxFlag_AllowOverflow;
-
-        ui_push_parent(root);
-        ui_push_font_size(12.0f);
-        ui_push_text_padding(4.0f);
-        ui_push_text_color(float4_make(0.86f, 0.87f, 0.90f, 1.0f));
-        ui_push_background_color(float4_make(0.13f, 0.13f, 0.15f, 1.0f));
-        ui_push_border_color(float4_make(0.25f, 0.25f, 0.30f, 1.0f));
-        ui_push_pref_width(ui_percentage(1.0f, 0.0f));
-        ui_push_pref_height(ui_percentage(1.0f, 0.0f));
-        ui_push_child_layout_axis(AXIS2_Y);
+        if (!ui_key_match(ui_state->active_box_key[i], ui_key_zero()))
+        {
+            UI_Box* active_box = ui_box_from_key(ui_state->active_box_key[i]);
+            if (!active_box || (active_box->flags & UI_BoxFlag_Disabled))
+            {
+                ui_state->active_box_key[i] = ui_key_zero();
+            }
+        }
     }
 
-    return open;
+    RenderingWindowSize framebuffer_dimensions = rendering_window_get_size(ui_state->rendering_window);
+    f32 width = (f32)framebuffer_dimensions.width;
+    f32 height = (f32)framebuffer_dimensions.height;
+
+    ui_set_next_fixed_width(width);
+    ui_set_next_fixed_height(height);
+    ui_set_next_child_layout_axis(AXIS2_Y);
+    UI_Box* root = ui_build_box_from_stringf((UI_BoxFlags){0}, S8("###window_root_{u64:x}"), (u64)window);
+    root->fixed_position = float2_make(0.0f, 0.0f);
+    root->fixed_size = float2_make(width, height);
+    root->rect = ui_rect_make(0.0f, 0.0f, width, height);
+    root->flags |= UI_BoxFlag_FixedSize;
+    ui_state->root = root;
+
+    ui_push_parent(root);
+    ui_push_font_size(12.0f);
+    ui_push_text_padding(4.0f);
+    ui_push_text_color(float4_make(0.86f, 0.87f, 0.90f, 1.0f));
+    ui_push_background_color(float4_make(0.13f, 0.13f, 0.15f, 1.0f));
+    ui_push_border_color(float4_make(0.25f, 0.25f, 0.30f, 1.0f));
+    ui_push_pref_width(ui_percentage(1.0f, 0.0f));
+    ui_push_pref_height(ui_percentage(1.0f, 0.0f));
+    ui_push_child_layout_axis(AXIS2_Y);
 }
 
 BUSTER_GLOBAL_LOCAL f32 ui_text_size_for_axis(UI_Box* box, Axis2 axis)
@@ -950,11 +978,47 @@ void ui_build_end(void)
         BUSTER_UNUSED(ui_pop_parent());
     }
 
+    ui_prune_untouched_boxes();
+
     if (ui_state->root)
     {
         for (Axis2 axis = 0; axis < AXIS2_COUNT; axis += 1)
         {
             ui_layout_root(ui_state->root, axis);
+        }
+    }
+
+    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+    {
+        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+        {
+            if ((box->flags & UI_BoxFlag_RoundChildrenByParent) && box->first && box->last)
+            {
+                for (UI_Box* child = box; child; child = ui_box_rec_df_pre(child, box).next)
+                {
+                    if (floor_f32(child->rect.x0) <= floor_f32(box->rect.x0) && floor_f32(child->rect.y0) <= floor_f32(box->rect.y0))
+                    {
+                        child->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
+                    }
+                    if (floor_f32(child->rect.x1) >= floor_f32(box->rect.x1) && floor_f32(child->rect.y0) <= floor_f32(box->rect.y0))
+                    {
+                        child->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
+                    }
+                    if (floor_f32(child->rect.x0) <= floor_f32(box->rect.x0) && floor_f32(child->rect.y1) >= floor_f32(box->rect.y1))
+                    {
+                        child->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
+                    }
+                    if (floor_f32(child->rect.x1) >= floor_f32(box->rect.x1) && floor_f32(child->rect.y1) >= floor_f32(box->rect.y1))
+                    {
+                        child->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
+                    }
+                }
+
+                box->first->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
+                box->first->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
+                box->last->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
+                box->last->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
+            }
         }
     }
 
@@ -1049,11 +1113,6 @@ UI_Signal ui_signal_from_box(UI_Box* box)
     }
 
     return sig;
-}
-
-UI_Signal ui_signal_from_widget(UI_Widget* widget)
-{
-    return ui_signal_from_box(widget);
 }
 
 BUSTER_GLOBAL_LOCAL float2 ui_box_text_position(UI_Box* box)

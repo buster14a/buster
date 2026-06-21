@@ -180,7 +180,7 @@ BUSTER_GLOBAL_LOCAL void ui_top_bar(void)
     ui_push(pref_height, ui_em(1, 1));
     {
         ui_push(child_layout_axis, AXIS2_X);
-        UI_Widget* top_bar = ui_widget_make((UI_WidgetFlags) {0}, S8("top_bar"));
+        UI_Box* top_bar = ui_box_make((UI_BoxFlags) {0}, S8("top_bar"));
         ui_push(parent, top_bar);
         {
             if (ui_button(S8("Button 123")).clicked_left)
@@ -208,10 +208,8 @@ struct UI_Node
 
 BUSTER_GLOBAL_LOCAL void ui_node(UI_Node node)
 {
-    UI_Widget* node_widget = ui_widget_make_format((UI_WidgetFlags) {
-        .draw_background = 1,
-        .draw_text = 1,
-    }, S8("{S8} : {S8} = {S8}##{S8}{S8}"), node.name, node.type, node.value, node.function, node.name_space);
+    UI_BoxFlags flags = UI_BoxFlag_DrawBackground | UI_BoxFlag_DrawText;
+    UI_Box* node_widget = ui_box_make_format(flags, S8("{S8} : {S8} = {S8}##{S8}{S8}"), node.name, node.type, node.value, node.function, node.name_space);
     BUSTER_UNUSED(node_widget);
 }
 
@@ -293,20 +291,20 @@ bool frame(void)
 
         ui_state_select(window->ui);
 
-        ui_build_begin(ide_state.windowing, window->wm, frame_ms, event_list);
+        TemporalArena ui_events_scratch = scratch_begin(0, 0);
+        UI_EventList ui_events = ui_event_list_from_wm_events(ui_events_scratch.arena, window->wm, event_list);
+        ui_build_begin(ide_state.windowing, window->wm, frame_ms, ui_events);
 
         ui_push(font_size, window->font_size);
 
         ui_top_bar();
         ui_push(child_layout_axis, AXIS2_X);
-        UI_Widget* workspace_widget = ui_widget_make_format((UI_WidgetFlags) {0}, S8("workspace{u64}"), window->wm);
+        UI_Box* workspace_widget = ui_box_make_format((UI_BoxFlags) {0}, S8("workspace{u64}"), window->wm);
         ui_push(parent, workspace_widget);
         {
             // Node visualizer
             ui_push(child_layout_axis, AXIS2_Y);
-            UI_Widget* node_visualizer_widget = ui_widget_make_format((UI_WidgetFlags) {
-                .draw_background = 1,
-            }, S8("node_visualizer{u64}"), window->wm);
+            UI_Box* node_visualizer_widget = ui_box_make_format(UI_BoxFlag_DrawBackground, S8("node_visualizer{u64}"), window->wm);
 
             ui_push(parent, node_visualizer_widget);
             {
@@ -341,6 +339,7 @@ bool frame(void)
         BUSTER_UNUSED(ui_pop(font_size));
 
         rendering_window_frame_end(ide_state.rendering, render_window);
+        scratch_end(ui_events_scratch);
 
         window = next;
     }
