@@ -177,6 +177,91 @@ int main(int argc, char* argv[], char* envp[])
 #endif
     return result;
 }
+
+#if BUSTER_ANDROID
+#include <buster/window.h>
+#include <buster/file.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <android/log.h>
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wstrict-prototypes"
+#endif
+#include <android_native_app_glue.h>
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
+// Android drops process stdout/stderr; pump it into logcat so string_print and
+// crashes are visible under `adb logcat -s buster`.
+BUSTER_GLOBAL_LOCAL void* buster_android_stdio_pump(void* arg)
+{
+    int fd = (int)(intptr_t)arg;
+    char buffer[512];
+    char line[1024];
+    u64 line_length = 0;
+
+    for (;;)
+    {
+        ssize_t count = read(fd, buffer, sizeof(buffer));
+        if (count <= 0)
+        {
+            break;
+        }
+
+        for (ssize_t i = 0; i < count; i += 1)
+        {
+            char c = buffer[i];
+            if (c == '\n' || line_length == sizeof(line) - 1)
+            {
+                line[line_length] = 0;
+                __android_log_write(ANDROID_LOG_INFO, "buster", line);
+                line_length = 0;
+            }
+            else if (c != '\r')
+            {
+                line[line_length] = c;
+                line_length += 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL void buster_android_redirect_stdio_to_logcat(void)
+{
+    int pipe_fds[2];
+    if (pipe(pipe_fds) == 0)
+    {
+        dup2(pipe_fds[1], STDOUT_FILENO);
+        dup2(pipe_fds[1], STDERR_FILENO);
+
+        pthread_t thread;
+        if (pthread_create(&thread, 0, buster_android_stdio_pump, (void*)(intptr_t)pipe_fds[0]) == 0)
+        {
+            pthread_detach(thread);
+        }
+    }
+}
+
+// NativeActivity entry point: the glue spawns a thread that calls this.
+void android_main(struct android_app* app)
+{
+    buster_android_redirect_stdio_to_logcat();
+
+    buster_android_app = app;
+    buster_android_asset_manager = app->activity->assetManager;
+
+    char* android_argv[] = { (char*)"buster-ide", 0 };
+    char* android_envp[] = { 0 };
+
+    buster_entry_point((StringOsList)android_argv, (StringOsList)android_envp);
+
+    __android_log_write(ANDROID_LOG_INFO, "buster", "android_main returning (entry point finished)");
+}
+#endif
 #endif
 #else
 #if defined(_WIN32)

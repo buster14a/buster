@@ -4,6 +4,9 @@
 #ifndef BUSTER_VULKAN
 #define BUSTER_VULKAN 0
 #endif
+#ifndef BUSTER_VULKAN_VERTEX_SSBO
+#define BUSTER_VULKAN_VERTEX_SSBO 0
+#endif
 #ifndef BUSTER_METAL
 #define BUSTER_METAL 0
 #endif
@@ -101,11 +104,25 @@ float rounded_rect_sdf(float2 position, float2 center, float2 half_size, float r
 }
 
 #if BUSTER_VULKAN
+#if BUSTER_VULKAN_VERTEX_SSBO
+// Some Vulkan drivers (notably Qualcomm Adreno) crash compiling buffer_reference
+// SPIR-V, so pull vertices from a storage-buffer descriptor instead of a raw
+// GPU pointer. Vertices live at set 0, binding 1 (textures stay at binding 0).
+[[vk::binding(1, 0)]]
+StructuredBuffer<RectVertex> vertices_buffer;
+
+[shader("vertex")]
+VertexOut vs_main(uint vertex_id : SV_VulkanVertexID, uniform DrawConstants constants)
+{
+    return rect_vertex(vertex_id, vertices_buffer[vertex_id], constants.width, constants.height);
+}
+#else
 [shader("vertex")]
 VertexOut vs_main(uint vertex_id : SV_VulkanVertexID, uniform GPUDrawPushConstants constants)
 {
     return rect_vertex(vertex_id, constants.vertex_buffer[vertex_id], constants.width, constants.height);
 }
+#endif
 
 [[vk::binding(0, 0)]]
 Sampler2D<float4> textures[BUSTER_RECT_TEXTURE_SLOT_COUNT];

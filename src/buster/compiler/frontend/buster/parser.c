@@ -1704,6 +1704,13 @@ BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, String8 path)
 
     String8 source = BYTE_SLICE_TO_STRING(8, file_read(arena, path, (FileReadOptions){0}));
 
+    if (!source.pointer || !source.length)
+    {
+        // Missing/empty input (e.g. CWD has no tests/ directory): nothing to parse.
+        arena->position = position;
+        return;
+    }
+
     TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
     print_tokenizer_result(tokenizer, source.pointer);
     parse(source.pointer, tokenizer);

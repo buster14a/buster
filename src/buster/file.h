@@ -21,3 +21,8 @@ struct CopyFileArguments
     String8 new_path;
 };
 BUSTER_F_DECL bool file_copy(CopyFileArguments arguments);
+
+#if BUSTER_ANDROID
+struct AAssetManager;
+extern struct AAssetManager* buster_android_asset_manager;
+#endif

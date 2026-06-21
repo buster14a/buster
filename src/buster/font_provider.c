@@ -7,14 +7,14 @@
 #include <buster/string.h>
 
 #ifndef BUSTER_USE_FONTCONFIG
-#if defined(__linux__)
+#if BUSTER_LINUX
 #define BUSTER_USE_FONTCONFIG 1
 #else
 #define BUSTER_USE_FONTCONFIG 0
 #endif
 #endif
 
-#if BUSTER_USE_FONTCONFIG && defined(__TINYC__) && defined(__linux__) && !defined(__GLIBC__)
+#if BUSTER_USE_FONTCONFIG && defined(__TINYC__) && BUSTER_LINUX && !defined(__GLIBC__)
 typedef unsigned char FcChar8;
 typedef int FcBool;
 typedef struct _FcConfig FcConfig;
@@ -104,6 +104,14 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
 #elif defined(__APPLE__)
         BUSTER_UNUSED(arena);
         table[(uint64_t)FONT_INDEX_MONO] = S8("/Library/Fonts/FiraCode-Regular.ttf");
+        font_config_initialized = true;
+#elif BUSTER_ANDROID
+        BUSTER_UNUSED(arena);
+        table[(uint64_t)FONT_INDEX_MONO] = S8("/system/fonts/DroidSansMono.ttf");
+        font_config_initialized = true;
+#else
+        BUSTER_UNUSED(arena);
+        table[(uint64_t)FONT_INDEX_MONO] = (String8){0};
         font_config_initialized = true;
 #endif
     }

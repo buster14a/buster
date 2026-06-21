@@ -56,6 +56,9 @@ struct RectDraw
 
 BUSTER_F_DECL RenderingHandle* rendering_initialize(Arena* arena);
 BUSTER_F_DECL RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windowing, RenderingHandle* rendering, WmWindowHandle* window);
+#if BUSTER_ANDROID
+BUSTER_F_DECL void rendering_window_surface_recreate(RenderingHandle* rendering, WmHandle* windowing, RenderingWindowHandle* window, WmWindowHandle* wm_window);
+#endif
 BUSTER_F_DECL RenderingWindowSize rendering_window_get_size(RenderingWindowHandle* window);
 BUSTER_F_DECL void rendering_window_rect_texture_update_begin(RenderingWindowHandle* window);
 BUSTER_F_DECL TextureIndex white_texture_create(Arena* arena, RenderingHandle* rendering);

@@ -25,16 +25,17 @@ BUSTER_V_IMPL Target target_native = {
 #pragma error
 #endif
     .cpu_model = CPU_MODEL_NATIVE,
-#if defined(__linux__)
+#if defined(__ANDROID__)
+    .os = OPERATING_SYSTEM_ANDROID,
+#elif defined(__linux__)
     .os = OPERATING_SYSTEM_LINUX,
 #elif defined(_WIN32)
     .os = OPERATING_SYSTEM_WINDOWS,
 #elif defined(__APPLE__)
-#define BUSTER_APPLE 1
-#if TARGET_OS_MAC == 1
+#if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
+    .os = OPERATING_SYSTEM_IOS,
+#elif TARGET_OS_OSX
     .os = OPERATING_SYSTEM_MACOS,
-#elif (TARGET_OS_IPHONE == 1) || (TARGET_IPHONE_SIMULATOR == 1)
-    .os = OPERATING_SYSTEM_IOS
 #else
 #pragma error
 #endif

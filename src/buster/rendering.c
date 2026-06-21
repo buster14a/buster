@@ -11,7 +11,7 @@
 typedef struct RectVertex RectVertex;
 
 #ifndef BUSTER_USE_VULKAN
-#if defined(__linux__) || defined(__TINYC__)
+#if BUSTER_LINUX || defined(__TINYC__)
 #define BUSTER_USE_VULKAN 1
 #else
 #define BUSTER_USE_VULKAN 0
@@ -67,7 +67,9 @@ typedef struct RectVertex RectVertex;
 
 #if defined(_WIN32)
 #define VK_USE_PLATFORM_WIN32_KHR
-#elif defined(__linux__)
+#elif BUSTER_ANDROID
+#define VK_USE_PLATFORM_ANDROID_KHR
+#elif BUSTER_LINUX
 #define VK_USE_PLATFORM_XCB_KHR
 #endif
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
@@ -135,6 +137,7 @@ struct SlicePushConstantRange
 typedef enum DescriptorType
 {
     DESCRIPTOR_TYPE_IMAGE_PLUS_SAMPLER,
+    DESCRIPTOR_TYPE_STORAGE_BUFFER,
     DESCRIPTOR_TYPE_COUNT,
 } DescriptorType;
 
@@ -185,6 +188,15 @@ typedef struct GPUDrawPushConstants GPUDrawPushConstants;
 struct GPUDrawPushConstants
 {
     u64 vertex_buffer;
+    f32 width;
+    f32 height;
+};
+
+// Android pulls vertices from a storage buffer, so its push constant carries
+// only the screen dimensions (no device-address pointer).
+typedef struct DrawConstants DrawConstants;
+struct DrawConstants
+{
     f32 width;
     f32 height;
 };
@@ -248,6 +260,9 @@ BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCreateWin32SurfaceKHR);
 #endif
 #if defined(VK_EXT_metal_surface)
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCreateMetalSurfaceEXT);
+#endif
+#if defined(VK_KHR_android_surface)
+BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCreateAndroidSurfaceKHR);
 #endif
 // INSTANCE FUNCTIONS END
 
@@ -395,7 +410,11 @@ BUSTER_GLOBAL_LOCAL VkDescriptorType vulkan_descriptor_type(DescriptorType type)
         case DESCRIPTOR_TYPE_IMAGE_PLUS_SAMPLER:
             result = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             break;
+        case DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            result = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            break;
         case DESCRIPTOR_TYPE_COUNT: BUSTER_UNREACHABLE();
+        default: BUSTER_UNREACHABLE();
     }
 
     return result;
@@ -664,6 +683,7 @@ BUSTER_GLOBAL_LOCAL DescriptorType descriptor_type_from_vulkan(VkDescriptorType 
     switch (descriptor_type)
     {
         break; case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: result = DESCRIPTOR_TYPE_IMAGE_PLUS_SAMPLER;
+        break; case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: result = DESCRIPTOR_TYPE_STORAGE_BUFFER;
         break; default: BUSTER_UNREACHABLE();
     }
 
@@ -794,7 +814,9 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
     VkAllocationCallbacks* allocator = 0;
     vulkan_frame_begin_log_count = 0;
     vulkan_frame_end_log_count = 0;
-#if defined(__linux__)
+#if BUSTER_ANDROID
+    rendering_handle.vulkan_library = os_dynamic_library_load(S8("libvulkan.so"));
+#elif BUSTER_LINUX
     rendering_handle.vulkan_library = os_dynamic_library_load(S8("libvulkan.so.1"));
 #elif defined(_WIN32)
     rendering_handle.vulkan_library = os_dynamic_library_load(S8("vulkan-1.dll"));
@@ -821,7 +843,9 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
         vulkan_library = os_dynamic_library_load("MoltenVK.framework/MoltenVK");
     }
 #endif
-    bool enable_validation = true;
+    // Android (incl. emulator) does not ship the Khronos validation layers, so
+    // requesting them would make instance creation fail. Keep validation desktop-only.
+    bool enable_validation = !BUSTER_ANDROID;
     string_print(S8("Vulkan rendering initialization: library={u64:x}, validation={u32}\n"), (u64)rendering_handle.vulkan_library, (u32)enable_validation);
     if (rendering_handle.vulkan_library)
     {
@@ -891,7 +915,10 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                     }
 
                     const char* enabled_extension_names[] = {
+#if !BUSTER_ANDROID
+                        // Only needed for the validation/debug messenger, which is desktop-only.
                         VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
+#endif
                         VK_KHR_SURFACE_EXTENSION_NAME,
 #ifdef VK_USE_PLATFORM_WIN32_KHR
                         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
@@ -908,6 +935,9 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 #ifdef VK_USE_PLATFORM_METAL_EXT
                         VK_EXT_METAL_SURFACE_EXTENSION_NAME,
                         VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+#endif
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
+                        VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
 #endif
                     };
 
@@ -969,12 +999,15 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         result = vkCreateInstance(&instance_create_info, allocator, &rendering_handle.instance);
                         string_print(S8("Vulkan instance creation: vkCreateInstance={u64:x}, instance={u64:x}\n"), (u64)(u32)result, (u64)rendering_handle.instance);
 
-                        if (result == VK_SUCCESS)
+                        if (result == VK_SUCCESS && enable_validation)
                         {
                             BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkCreateDebugUtilsMessengerEXT);
                             BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkDestroyDebugUtilsMessengerEXT);
-                            result = vkCreateDebugUtilsMessengerEXT(rendering_handle.instance, &messenger_create_info, allocator, &rendering_handle.messenger);
-                            string_print(S8("Vulkan debug messenger creation: vkCreateDebugUtilsMessengerEXT={u64:x}, messenger={u64:x}\n"), (u64)(u32)result, (u64)rendering_handle.messenger);
+                            if (vkCreateDebugUtilsMessengerEXT)
+                            {
+                                result = vkCreateDebugUtilsMessengerEXT(rendering_handle.instance, &messenger_create_info, allocator, &rendering_handle.messenger);
+                                string_print(S8("Vulkan debug messenger creation: vkCreateDebugUtilsMessengerEXT={u64:x}, messenger={u64:x}\n"), (u64)(u32)result, (u64)rendering_handle.messenger);
+                            }
                         }
                     }
                     else
@@ -1003,6 +1036,9 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 #endif
 #ifdef VK_USE_PLATFORM_METAL_EXT
                         BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkCreateMetalSurfaceEXT);
+#endif
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
+                        BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkCreateAndroidSurfaceKHR);
 #endif
                         BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkDestroySurfaceKHR);
 
@@ -1302,14 +1338,24 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                     }
 
                     String8 shader_binaries[] = {
+#if BUSTER_ANDROID
+                        // Shaders are shipped inside the APK and read via AAssetManager.
+                        S8("shaders/rect.vert.spv"),
+                        S8("shaders/rect.frag.spv"),
+#else
                         S8(BUSTER_SHADER_RECT_VERT_SPV),
                         S8(BUSTER_SHADER_RECT_FRAG_SPV),
+#endif
                     };
 
                     PushConstantRange rect_push_constant_ranges[] = {
                         (PushConstantRange) {
                             .offset = 0,
+#if BUSTER_ANDROID
+                            .size = sizeof(DrawConstants),
+#else
                             .size = sizeof(GPUDrawPushConstants),
+#endif
                             .stage = SHADER_STAGE_VERTEX,
                         },
                     };
@@ -1321,6 +1367,14 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                             .stage = SHADER_STAGE_FRAGMENT,
                             .count = (u8)RECT_TEXTURE_SLOT_COUNT,
                         },
+#if BUSTER_ANDROID
+                        {
+                            .binding = 1,
+                            .type = DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                            .stage = SHADER_STAGE_VERTEX,
+                            .count = 1,
+                        },
+#endif
                     };
 
                     DescriptorSetLayoutCreate rect_descriptor_set_layouts[] = {
@@ -1739,7 +1793,11 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
 
         u32 queue_family_indices[] = { rendering->graphics_queue_family_index };
         VkImageUsageFlags swapchain_image_usage_flags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+#if BUSTER_ANDROID
+        window->swapchain_image_format = VK_FORMAT_R8G8B8A8_UNORM;
+#else
         window->swapchain_image_format = VK_FORMAT_B8G8R8A8_UNORM;
+#endif
         window->last_width = window->width;
         window->last_height = window->height;
         window->width = surface_capabilities.currentExtent.width;
@@ -1939,11 +1997,35 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     {
         os_fail();
     }
+#elif defined(VK_USE_PLATFORM_ANDROID_KHR)
+    BUSTER_UNUSED(windowing);
+    struct ANativeWindow* native_window = (struct ANativeWindow*)wm_window_handle_native_from_wm(window);
+    string_print(S8("Vulkan render window initialization: platform=android, native_window={u64:x}\n"),
+                 (u64)native_window);
+    VkAndroidSurfaceCreateInfoKHR surface_create_info = {
+        .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
+        .pNext = 0,
+        .flags = 0,
+        .window = native_window,
+    };
+
+    VkResult create_surface_result = vkCreateAndroidSurfaceKHR(rendering->instance, &surface_create_info, rendering->allocator, &result->surface);
+    string_print(S8("Vulkan surface creation: vkCreateAndroidSurfaceKHR={u64:x}, surface={u64:x}\n"), (u64)(u32)create_surface_result, (u64)result->surface);
+    if (create_surface_result != VK_SUCCESS)
+    {
+        os_fail();
+    }
 #endif
     string_print(S8("Vulkan surface ready: surface={u64:x}\n"), result->surface);
 
     result->frame_index = 0;
+#if BUSTER_ANDROID
+    // Single frame in flight so the per-frame vertex storage buffer can be bound
+    // into the shared rect descriptor set each frame without an in-flight hazard.
+    result->frame_count = 1;
+#else
     result->frame_count = 2;
+#endif
 
     swapchain_recreate(rendering, result);
     string_print(S8("Vulkan swapchain ready: swapchain={u64:x}, extent={u32}x{u32}, images={u32}\n"), result->swapchain, result->width, result->height, result->swapchain_image_count);
@@ -2100,6 +2182,53 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 
     return result;
 }
+
+#if BUSTER_ANDROID
+// On resume the old ANativeWindow (and thus the VkSurfaceKHR + swapchain) is
+// dead. Rebuild just the surface and swapchain for the new native window; the
+// RenderingWindowHandle, its descriptor sets, textures and frames are kept.
+void rendering_window_surface_recreate(RenderingHandle* rendering, WmHandle* windowing, RenderingWindowHandle* window, WmWindowHandle* wm_window)
+{
+    BUSTER_UNUSED(windowing);
+    vkDeviceWaitIdle(rendering->device);
+
+    for (u32 i = 0; i < window->swapchain_image_count; i += 1)
+    {
+        if (window->swapchain_image_views[i])
+        {
+            vkDestroyImageView(rendering->device, window->swapchain_image_views[i], rendering->allocator);
+            window->swapchain_image_views[i] = 0;
+        }
+    }
+    if (window->render_image.handle)
+    {
+        destroy_image(rendering->device, rendering->allocator, window->render_image.view, window->render_image.handle, window->render_image.memory.handle);
+        window->render_image = (VulkanImage){0};
+    }
+    if (window->swapchain)
+    {
+        vkDestroySwapchainKHR(rendering->device, window->swapchain, rendering->allocator);
+        window->swapchain = 0;
+    }
+    if (window->surface)
+    {
+        vkDestroySurfaceKHR(rendering->instance, window->surface, rendering->allocator);
+        window->surface = 0;
+    }
+
+    struct ANativeWindow* native_window = (struct ANativeWindow*)wm_window_handle_native_from_wm(wm_window);
+    VkAndroidSurfaceCreateInfoKHR surface_create_info = {
+        .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
+        .pNext = 0,
+        .flags = 0,
+        .window = native_window,
+    };
+    VkResult surface_result = vkCreateAndroidSurfaceKHR(rendering->instance, &surface_create_info, rendering->allocator, &window->surface);
+    string_print(S8("Vulkan surface recreate: vkCreateAndroidSurfaceKHR={u64:x}, surface={u64:x}\n"), (u64)(u32)surface_result, (u64)window->surface);
+
+    swapchain_recreate(rendering, window);
+}
+#endif
 
 void rendering_window_queue_pipeline_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, BusterPipeline pipeline_index, u32 resource_slot, TextureIndex texture_index)
 {
@@ -2881,6 +3010,39 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
                     // print("Binding descriptor sets: 0x{u64}\n", frame->index_buffer);
                 }
 
+#if BUSTER_ANDROID
+                // Point the rect descriptor set (set 0, binding 1) at this frame's
+                // vertex storage buffer. Safe to update mid-recording because Android
+                // keeps a single frame in flight, so no submission is using the set.
+                {
+                    VkDescriptorBufferInfo vertex_buffer_info = {
+                        .buffer = frame_pipeline_instantiation->vertex_buffer.gpu.handle,
+                        .offset = 0,
+                        .range = VK_WHOLE_SIZE,
+                    };
+                    VkWriteDescriptorSet vertex_buffer_write = {
+                        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                        .dstSet = pipeline_instantiation->descriptor_sets[0],
+                        .dstBinding = 1,
+                        .dstArrayElement = 0,
+                        .descriptorCount = 1,
+                        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        .pBufferInfo = &vertex_buffer_info,
+                    };
+                    vkUpdateDescriptorSets(rendering->device, 1, &vertex_buffer_write, 0, 0);
+                }
+
+                // Vertices come from the descriptor above; only dimensions are pushed.
+                DrawConstants push_constants = {
+                    .width = (f32)window->width,
+                    .height = (f32)window->height,
+                };
+
+                {
+                    VkPushConstantRange push_constant_range = pipeline->push_constant_ranges[0];
+                    vkCmdPushConstants(frame->command_buffer, pipeline->layout, push_constant_range.stageFlags, push_constant_range.offset, push_constant_range.size, &push_constants);
+                }
+#else
                 // Send vertex buffer and screen dimensions to the shader
                 GPUDrawPushConstants push_constants = {
                     .vertex_buffer = frame_pipeline_instantiation->vertex_buffer.gpu.address,
@@ -2893,6 +3055,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
                     vkCmdPushConstants(frame->command_buffer, pipeline->layout, push_constant_range.stageFlags, push_constant_range.offset, push_constant_range.size, &push_constants);
                     frame->push_constants = push_constants;
                 }
+#endif
 
                 vkCmdDrawIndexed(frame->command_buffer, (u32)(arena_buffer_size(frame_pipeline_instantiation->index_buffer.cpu) / sizeof(u32)), 1, 0, 0, 0);
             }
@@ -5521,6 +5684,135 @@ void rendering_deinitialize(RenderingHandle* rendering)
     rendering->library = 0;
     rendering->command_queue = 0;
     rendering->device = 0;
+}
+#else
+
+struct RenderingHandle
+{
+    u32 texture_count;
+    FontTextureAtlas fonts[RENDER_FONT_TYPE_COUNT];
+};
+
+struct RenderingWindowHandle
+{
+    u32 width;
+    u32 height;
+};
+
+BUSTER_GLOBAL_LOCAL RenderingHandle rendering_handle = {0};
+
+RenderingHandle* rendering_initialize(Arena* arena)
+{
+    BUSTER_UNUSED(arena);
+    rendering_handle = (RenderingHandle){0};
+    return &rendering_handle;
+}
+
+RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windowing, RenderingHandle* rendering, WmWindowHandle* window)
+{
+    BUSTER_UNUSED(rendering);
+    RenderingWindowHandle* result = arena_allocate(arena, RenderingWindowHandle, 1);
+    WmRect rect = wm_window_get_framebuffer_rect(windowing, window);
+    WmOffset size = offset_from_rect(rect);
+    result->width = size.width;
+    result->height = size.height;
+    return result;
+}
+
+RenderingWindowSize rendering_window_get_size(RenderingWindowHandle* window)
+{
+    return (RenderingWindowSize){
+        .width = window->width,
+        .height = window->height,
+    };
+}
+
+void rendering_window_rect_texture_update_begin(RenderingWindowHandle* window)
+{
+    BUSTER_UNUSED(window);
+}
+
+TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory)
+{
+    BUSTER_UNUSED(texture_memory);
+    TextureIndex result = { .value = rendering->texture_count };
+    rendering->texture_count += 1;
+    return result;
+}
+
+TextureIndex white_texture_create(Arena* arena, RenderingHandle* rendering)
+{
+    BUSTER_UNUSED(arena);
+    return rendering_texture_create(rendering, (TextureMemory){0});
+}
+
+void rendering_window_queue_rect_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, RectTextureSlot slot, TextureIndex texture_index)
+{
+    BUSTER_UNUSED(rendering);
+    BUSTER_UNUSED(window);
+    BUSTER_UNUSED(slot);
+    BUSTER_UNUSED(texture_index);
+}
+
+FontTextureAtlas rendering_font_create(Arena* arena, RenderingHandle* rendering, FontTextureAtlasCreate create)
+{
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(create);
+    FontTextureAtlas result = {0};
+    result.texture = rendering_texture_create(rendering, (TextureMemory){0});
+    return result;
+}
+
+void rendering_queue_font_update(RenderingHandle* rendering, RenderingWindowHandle* window, RenderFontType type, FontTextureAtlas atlas)
+{
+    BUSTER_UNUSED(window);
+    rendering->fonts[(u32)type] = atlas;
+}
+
+void rendering_window_rect_texture_update_end(RenderingHandle* rendering, RenderingWindowHandle* window)
+{
+    BUSTER_UNUSED(rendering);
+    BUSTER_UNUSED(window);
+}
+
+void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHandle* window)
+{
+    BUSTER_UNUSED(rendering);
+    BUSTER_UNUSED(window);
+}
+
+void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandle* window)
+{
+    BUSTER_UNUSED(rendering);
+    BUSTER_UNUSED(window);
+}
+
+void rendering_window_render_rect(RenderingWindowHandle* window, RectDraw draw)
+{
+    BUSTER_UNUSED(window);
+    BUSTER_UNUSED(draw);
+}
+
+void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHandle* window, String8 string, float4 color, RenderFontType font_type, f32 x_offset, f32 y_offset)
+{
+    BUSTER_UNUSED(rendering);
+    BUSTER_UNUSED(window);
+    BUSTER_UNUSED(string);
+    BUSTER_UNUSED(color);
+    BUSTER_UNUSED(font_type);
+    BUSTER_UNUSED(x_offset);
+    BUSTER_UNUSED(y_offset);
+}
+
+void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHandle* window)
+{
+    BUSTER_UNUSED(rendering);
+    BUSTER_UNUSED(window);
+}
+
+void rendering_deinitialize(RenderingHandle* rendering)
+{
+    BUSTER_UNUSED(rendering);
 }
 #endif
 

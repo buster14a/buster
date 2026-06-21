@@ -282,7 +282,15 @@ BUSTER_F_DECL WmRect wm_window_get_framebuffer_rect(WmHandle* windowing, WmWindo
 BUSTER_F_DECL f32 wm_window_get_dpi(WmHandle* windowing, WmWindowHandle* wm_window);
 BUSTER_F_DECL WmEventList wm_poll_events(Arena* arena, WmHandle* windowing);
 
+// False while the app is backgrounded/locked (no usable native window).
+BUSTER_F_DECL bool wm_window_is_visible(WmHandle* windowing);
+
 BUSTER_F_DECL void* wm_handle_native_from_wm(WmHandle* windowing);
 BUSTER_F_DECL void* wm_window_handle_native_from_wm(WmWindowHandle* window);
 
 BUSTER_F_DECL WmOffset offset_from_rect(WmRect rect);
+
+#if BUSTER_ANDROID
+struct android_app;
+extern struct android_app* buster_android_app;
+#endif

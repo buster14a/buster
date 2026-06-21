@@ -1,4 +1,5 @@
 /build/
+/build-android*/
 /*.data
 /perf.data*
 project

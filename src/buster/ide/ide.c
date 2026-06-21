@@ -280,6 +280,32 @@ bool frame(void)
         }
     }
 
+#if BUSTER_ANDROID
+    {
+        // While backgrounded/locked the native window (and its Vulkan surface)
+        // is gone: skip rendering instead of crashing. On resume, rebuild the
+        // surface/swapchain for the new native window before drawing again.
+        static bool was_paused = false;
+        if (!wm_window_is_visible(ide_state.windowing))
+        {
+            was_paused = true;
+            frame_depth -= 1;
+            return false;
+        }
+        if (was_paused)
+        {
+            was_paused = false;
+            for (IdeWindow* w = ide_state.first_window; w; w = w->next)
+            {
+                if (w->render)
+                {
+                    rendering_window_surface_recreate(ide_state.rendering, ide_state.windowing, w->render, w->wm);
+                }
+            }
+        }
+    }
+#endif
+
     IdeWindow* window = ide_state.first_window;
     while (window)
     {

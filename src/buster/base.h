@@ -42,7 +42,13 @@
 #define BUSTER_FUZZ 0
 #endif
 
-#if defined(__linux__)
+#if defined(__ANDROID__)
+#define BUSTER_ANDROID 1
+#else
+#define BUSTER_ANDROID 0
+#endif
+
+#if defined(__linux__) && !defined(__ANDROID__)
 #define BUSTER_LINUX 1
 #else
 #define BUSTER_LINUX 0
@@ -150,13 +156,7 @@
 #define BUSTER_INLINE __attribute__((always_inline)) inline
 #endif
 #else
-#define BUSTER_INLINE 
-#endif
-
-#if defined(__APPLE__)
-#define BUSTER_APPLE 1
-#else
-#define BUSTER_APPLE 0
+#define BUSTER_INLINE
 #endif
 
 #ifndef BUSTER_INCLUDE_TESTS

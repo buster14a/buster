@@ -92,7 +92,7 @@ if (DEFINED CMAKE_BUILD_TYPE)
     set(BUSTER_STATUS_CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
 endif()
 
-set(BUSTER_CROSS_COMPILE OFF)
+set(BUSTER_CROSS_COMPILE ${CMAKE_CROSSCOMPILING})
 
 set(C_COMPILER_GNU OFF)
 set(C_COMPILER_APPLE_CLANG OFF)
@@ -136,8 +136,15 @@ option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warnin
 option(BUSTER_DEVELOPER_TARGETS "Enable convenience run/test/debug targets" ON)
 
 set(BUSTER_USE_VULKAN_DEFAULT OFF)
-if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR C_COMPILER_TCC)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR C_COMPILER_TCC)
     set(BUSTER_USE_VULKAN_DEFAULT ON)
+endif()
+
+# Adreno's shader compiler crashes on buffer_reference SPIR-V, so on Android the
+# Vulkan rect shader pulls vertices from a storage buffer instead of a raw pointer.
+set(BUSTER_SLANG_VULKAN_EXTRA_DEFINES "")
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    set(BUSTER_SLANG_VULKAN_EXTRA_DEFINES -DBUSTER_VULKAN_VERTEX_SSBO=1)
 endif()
 option(BUSTER_USE_VULKAN "Use the Vulkan renderer instead of the platform fallback" ${BUSTER_USE_VULKAN_DEFAULT})
 
@@ -227,7 +234,9 @@ if (BUSTER_REQUIRE_VULKAN_SDK AND BUSTER_NEEDS_VULKAN_SDK AND NOT BUSTER_VULKAN_
     message(FATAL_ERROR "BUSTER_REQUIRE_VULKAN_SDK requires the Vulkan SDK. Set the VULKAN_SDK environment variable or configure with -DBUSTER_VULKAN_SDK=/path/to/vulkan-sdk.")
 endif()
 
-if (BUSTER_REQUIRE_VULKAN_SDK AND BUSTER_USE_VULKAN AND NOT BUSTER_VULKAN_INCLUDE_DIR)
+# Android gets Vulkan headers from the NDK sysroot (on the default include path),
+# so the desktop Vulkan SDK headers are not required there.
+if (BUSTER_REQUIRE_VULKAN_SDK AND BUSTER_USE_VULKAN AND NOT BUSTER_VULKAN_INCLUDE_DIR AND NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
     message(FATAL_ERROR "Could not find vulkan/vulkan.h in BUSTER_VULKAN_SDK='${BUSTER_VULKAN_SDK}'.")
 endif()
 
@@ -684,8 +693,7 @@ endfunction()
 
 function(buster_apply_module_options name)
     set(modules ${ARGN})
-    set(is_window "WINDOW" IN_LIST modules)
-    if (is_window AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if ("WINDOW" IN_LIST modules AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(${name} PRIVATE xcb)
         target_link_libraries(${name} PRIVATE xcb-imdkit)
         target_link_libraries(${name} PRIVATE xcb-util)
@@ -695,11 +703,11 @@ function(buster_apply_module_options name)
         target_link_libraries(${name} PRIVATE xkbcommon)
     endif()
 
-    if (is_window AND APPLE)
+    if ("WINDOW" IN_LIST modules AND APPLE)
         target_link_libraries(${name} PRIVATE "-framework AppKit")
     endif()
 
-    if (is_window AND WIN32)
+    if ("WINDOW" IN_LIST modules AND WIN32)
         target_link_libraries(${name} PRIVATE dwmapi)
 
         if (C_COMPILER_TCC)
@@ -1002,6 +1010,7 @@ function(buster_compile_slang_spirv out_var shader_source entry_point stage outp
             ${emit_spirv_flag}
             -DBUSTER_VULKAN=1
             -DBUSTER_RECT_TEXTURE_SLOT_COUNT=${BUSTER_RECT_TEXTURE_SLOT_COUNT}
+            ${BUSTER_SLANG_VULKAN_EXTRA_DEFINES}
             -o "${shader_output}"
         MAIN_DEPENDENCY "${shader_source_path}"
         COMMENT "Compiling Slang shader ${entry_point} to ${output_name}"
@@ -1224,7 +1233,12 @@ function(executable_add name is_buster_program main_file)
     endif()
     message(STATUS "${name} files: ${main_file} ${target_sources}")
 
-    add_executable(${name} ${main_file})
+    if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+        # NativeActivity loads the app as a shared library (android.app.lib_name).
+        add_library(${name} SHARED ${main_file})
+    else()
+        add_executable(${name} ${main_file})
+    endif()
     foreach(target_source IN LISTS target_sources)
         if (IS_ABSOLUTE "${target_source}")
             set(target_source_path "${target_source}")
@@ -1379,6 +1393,19 @@ function(executable_add name is_buster_program main_file)
         if (WIN32)
             target_link_libraries(${name} PRIVATE ws2_32)
         endif()
+        if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+            # NativeActivity glue + platform libraries.
+            set(BUSTER_ANDROID_GLUE
+                "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c")
+            target_sources(${name} PRIVATE "${BUSTER_ANDROID_GLUE}")
+            # Third-party glue is not clean under the project's -Werror set.
+            set_source_files_properties("${BUSTER_ANDROID_GLUE}" PROPERTIES COMPILE_OPTIONS "-w")
+            target_include_directories(${name} PRIVATE
+                "${ANDROID_NDK}/sources/android/native_app_glue")
+            target_link_libraries(${name} PRIVATE android log)
+            # The framework finds ANativeActivity_onCreate via dlsym; keep it.
+            target_link_options(${name} PRIVATE -u ANativeActivity_onCreate)
+        endif()
     endif()
 
     buster_apply_module_options(${name} ${module_names})
@@ -1461,15 +1488,122 @@ if (TARGET buster_shaders)
     target_sources(ide PRIVATE ${BUSTER_SHADER_SOURCES})
 endif()
 
-add_custom_target(test_all
-    COMMAND 
-    ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
-    "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
-    DEPENDS ide
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Test all"
-    VERBATIM
-)
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # --- Android packaging: bundle libide.so into an installable APK -----------
+    find_program(BUSTER_ADB_EXECUTABLE adb)
+
+    if (NOT BUSTER_ANDROID_SDK)
+        if (DEFINED ENV{ANDROID_HOME})
+            set(BUSTER_ANDROID_SDK "$ENV{ANDROID_HOME}")
+        elseif (DEFINED ENV{ANDROID_SDK_ROOT})
+            set(BUSTER_ANDROID_SDK "$ENV{ANDROID_SDK_ROOT}")
+        endif()
+    endif()
+
+    # Pick the newest installed build-tools unless told otherwise.
+    if (NOT BUSTER_ANDROID_BUILD_TOOLS_DIR)
+        file(GLOB BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES "${BUSTER_ANDROID_SDK}/build-tools/*")
+        if (BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES)
+            list(SORT BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES)
+            list(GET BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES -1 BUSTER_ANDROID_BUILD_TOOLS_DIR)
+        endif()
+    endif()
+
+    # android.jar matching the configured platform (fallback to newest available).
+    string(REGEX MATCH "[0-9]+" BUSTER_ANDROID_API_LEVEL "${ANDROID_PLATFORM}")
+    set(BUSTER_ANDROID_JAR "${BUSTER_ANDROID_SDK}/platforms/android-${BUSTER_ANDROID_API_LEVEL}/android.jar")
+    if (NOT EXISTS "${BUSTER_ANDROID_JAR}")
+        file(GLOB BUSTER_ANDROID_PLATFORM_JARS "${BUSTER_ANDROID_SDK}/platforms/*/android.jar")
+        if (BUSTER_ANDROID_PLATFORM_JARS)
+            list(SORT BUSTER_ANDROID_PLATFORM_JARS)
+            list(GET BUSTER_ANDROID_PLATFORM_JARS -1 BUSTER_ANDROID_JAR)
+        endif()
+    endif()
+
+    find_program(BUSTER_AAPT2 aapt2 HINTS "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
+    find_program(BUSTER_ZIPALIGN zipalign HINTS "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
+    find_program(BUSTER_APKSIGNER apksigner HINTS "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
+    find_program(BUSTER_JAR jar)
+    find_program(BUSTER_KEYTOOL keytool)
+
+    set(BUSTER_ANDROID_PACKAGE "dev.buster.ide")
+    set(BUSTER_ANDROID_ACTIVITY "${BUSTER_ANDROID_PACKAGE}/android.app.NativeActivity")
+    set(BUSTER_ANDROID_MANIFEST "${CMAKE_SOURCE_DIR}/android/AndroidManifest.xml")
+    set(BUSTER_APK "${CMAKE_BINARY_DIR}/buster.apk")
+    set(BUSTER_KEYSTORE "${CMAKE_BINARY_DIR}/debug.keystore")
+    set(BUSTER_APK_STAGE "${CMAKE_BINARY_DIR}/apk")
+
+    # Generate a debug keystore once, at configure time.
+    if (BUSTER_KEYTOOL AND NOT EXISTS "${BUSTER_KEYSTORE}")
+        execute_process(COMMAND "${BUSTER_KEYTOOL}" -genkeypair
+            -keystore "${BUSTER_KEYSTORE}" -storepass android -keypass android
+            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000
+            -dname "CN=Android Debug,O=Android,C=US"
+            RESULT_VARIABLE BUSTER_KEYSTORE_RESULT)
+    endif()
+
+    message(STATUS "Android APK tools: aapt2=${BUSTER_AAPT2} zipalign=${BUSTER_ZIPALIGN} apksigner=${BUSTER_APKSIGNER} jar=${BUSTER_JAR}")
+    message(STATUS "Android APK jar: ${BUSTER_ANDROID_JAR}")
+
+    add_custom_command(
+        OUTPUT "${BUSTER_APK}"
+        # 0. Stage assets read at runtime via AAssetManager: tests + compiled shaders.
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${CMAKE_BINARY_DIR}/assets"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/tests" "${CMAKE_BINARY_DIR}/assets/tests"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/assets/shaders"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_BINARY_DIR}/shaders/rect.vert.spv" "${CMAKE_BINARY_DIR}/shaders/rect.frag.spv" "${CMAKE_BINARY_DIR}/assets/shaders/"
+        # 1. Compile the manifest + assets into a base APK (binary manifest + resources.arsc).
+        COMMAND "${BUSTER_AAPT2}" link
+            -I "${BUSTER_ANDROID_JAR}"
+            --manifest "${BUSTER_ANDROID_MANIFEST}"
+            -A "${CMAKE_BINARY_DIR}/assets"
+            --min-sdk-version 24 --target-sdk-version 35
+            -o "${CMAKE_BINARY_DIR}/buster-base.apk"
+        # 2. Stage the native library under lib/<abi>/.
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${BUSTER_APK_STAGE}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUSTER_APK_STAGE}/lib/${ANDROID_ABI}"
+        COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:ide>" "${BUSTER_APK_STAGE}/lib/${ANDROID_ABI}/libide.so"
+        # 3. Add the native library into the APK.
+        COMMAND "${BUSTER_JAR}" uf "${CMAKE_BINARY_DIR}/buster-base.apk" -C "${BUSTER_APK_STAGE}" "lib/${ANDROID_ABI}/libide.so"
+        # 4. Align and sign.
+        COMMAND "${BUSTER_ZIPALIGN}" -f 4 "${CMAKE_BINARY_DIR}/buster-base.apk" "${CMAKE_BINARY_DIR}/buster-aligned.apk"
+        COMMAND "${BUSTER_APKSIGNER}" sign --ks "${BUSTER_KEYSTORE}"
+            --ks-pass pass:android --key-pass pass:android
+            --out "${BUSTER_APK}" "${CMAKE_BINARY_DIR}/buster-aligned.apk"
+        DEPENDS ide "${BUSTER_ANDROID_MANIFEST}"
+        COMMENT "Packaging buster.apk"
+        VERBATIM
+    )
+    add_custom_target(apk DEPENDS "${BUSTER_APK}")
+
+    if (BUSTER_ADB_EXECUTABLE)
+        # Install + launch the app on the connected device/emulator.
+        add_custom_target(test_all
+            COMMAND "${BUSTER_ADB_EXECUTABLE}" install -r "${BUSTER_APK}"
+            COMMAND "${BUSTER_ADB_EXECUTABLE}" shell am start -n "${BUSTER_ANDROID_ACTIVITY}"
+            DEPENDS apk
+            COMMENT "Install and launch buster.apk on device"
+            VERBATIM
+        )
+    else()
+        add_custom_target(test_all
+            COMMAND "${CMAKE_COMMAND}" -E echo "adb not found; built ${BUSTER_APK} but cannot install"
+            DEPENDS apk
+            COMMENT "Build buster.apk (adb unavailable)"
+            VERBATIM
+        )
+    endif()
+else()
+    add_custom_target(test_all
+        COMMAND
+        ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+        "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
+        DEPENDS ide
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Test all"
+        VERBATIM
+    )
+endif()
 
 if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
     if (EXISTS "${BUSTER_CLANG_ANALYZE_DRIVER}")

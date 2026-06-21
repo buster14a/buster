@@ -56,7 +56,7 @@ CpuModel cpu_detect_model_aarch64(void)
 {
     CpuModel result = CPU_MODEL_ERROR;
 
-#if defined(__linux__)
+#if BUSTER_LINUX
 #define BUSTER_AARCH64_BUFFER_LENGTH (sizeof(u64) * 2 + 2)
     char8 buffer[BUSTER_AARCH64_BUFFER_LENGTH + 4096];
     OsFileDescriptor* fd = os_file_open(S8("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"), (OpenFlags){ .read = 1 }, (OpenPermissions){0});
@@ -196,6 +196,8 @@ CpuModel cpu_detect_model_aarch64(void)
     {
         string_print(S8("Error reading CPU model\n"));
     }
+#elif BUSTER_ANDROID
+    result = CPU_MODEL_A64_GENERIC;
 #elif defined(__APPLE__)
       u32 family;
       size_t family_length = sizeof(family);

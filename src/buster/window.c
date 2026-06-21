@@ -1,6 +1,6 @@
 #include <buster/window.h>
 
-#if defined (__linux__)
+#if BUSTER_LINUX
 #include <locale.h>
 #include <string.h>
 #include <xcb/xcb.h>
@@ -15,6 +15,19 @@
 #include <objc/objc.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
+#elif BUSTER_ANDROID
+#include <android/native_window.h>
+#include <android/log.h>
+#include <android/input.h>
+#include <android/configuration.h>
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wstrict-prototypes"
+#endif
+#include <android_native_app_glue.h>
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 #endif
 
 #include <buster/string.h>
@@ -31,7 +44,7 @@
 
 struct WmHandle
 {
-#if defined(__linux__)
+#if BUSTER_LINUX
     xcb_connection_t* connection;
     const xcb_setup_t* setup;
     int screen_id;
@@ -57,6 +70,10 @@ struct WmHandle
     HINSTANCE instance;
 #elif defined(__APPLE__)
     id application;
+#elif BUSTER_ANDROID
+    struct android_app* app;
+    bool quit;
+    bool window_lost;
 #endif
     Arena* window_arena;
     Arena* event_arena;
@@ -68,7 +85,7 @@ struct WmHandle
 struct WmWindowHandle
 {
     WmHandle* owner;
-#if defined(__linux__)
+#if BUSTER_LINUX
     struct xkb_compose_state* xkb_compose_state;
     xcb_window_t handle;
     xcb_xic_t ic;
@@ -78,6 +95,11 @@ struct WmWindowHandle
 #elif defined(_WIN32)
     HWND handle;
 #elif defined(__APPLE__)
+#elif BUSTER_ANDROID
+    struct ANativeWindow* native_window;
+    WmOffset size;
+#else
+    WmOffset size;
 #endif
     bool custom_border;
 };
@@ -175,6 +197,75 @@ BUSTER_GLOBAL_LOCAL void buster_release(id object)
 }
 #endif
 
+#if BUSTER_ANDROID
+struct android_app* buster_android_app = 0;
+
+BUSTER_GLOBAL_LOCAL void buster_android_on_app_cmd(struct android_app* app, int32_t cmd)
+{
+    WmHandle* handle = (WmHandle*)app->userData;
+    if (!handle)
+    {
+        return;
+    }
+
+    switch (cmd)
+    {
+        case APP_CMD_INIT_WINDOW:
+            // A (new) native window is available; rendering can resume.
+            handle->window_lost = false;
+            break;
+        case APP_CMD_TERM_WINDOW:
+            // Backgrounded/locked/rotated: the native window is going away.
+            // Stop rendering but keep running; do NOT treat this as a quit.
+            handle->window_lost = true;
+            break;
+        case APP_CMD_DESTROY:
+            handle->quit = true;
+            break;
+        default:
+            break;
+    }
+}
+
+// Translate Android touch into the mouse events the UI consumes. A tap is a
+// mouse-move to the touch point plus a left button press/release.
+BUSTER_GLOBAL_LOCAL int32_t buster_android_on_input_event(struct android_app* app, AInputEvent* event)
+{
+    BUSTER_UNUSED(app);
+
+    if (AInputEvent_getType(event) != AINPUT_EVENT_TYPE_MOTION)
+    {
+        return 0;
+    }
+
+    int32_t action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
+    WmOffset position = {
+        .x = (WmUnit)AMotionEvent_getX(event, 0),
+        .y = (WmUnit)AMotionEvent_getY(event, 0),
+    };
+
+    switch (action)
+    {
+        case AMOTION_EVENT_ACTION_DOWN:
+            wm_event_push((WmEvent){ .kind = WM_EVENT_MOUSE_MOVE, .position = position });
+            wm_event_push((WmEvent){ .kind = WM_EVENT_BUTTON_PRESS, .key = WM_KEY_MOUSE_LEFT, .position = position });
+            break;
+        case AMOTION_EVENT_ACTION_MOVE:
+            wm_event_push((WmEvent){ .kind = WM_EVENT_MOUSE_MOVE, .position = position });
+            break;
+        case AMOTION_EVENT_ACTION_UP:
+        case AMOTION_EVENT_ACTION_CANCEL:
+            wm_event_push((WmEvent){ .kind = WM_EVENT_MOUSE_MOVE, .position = position });
+            wm_event_push((WmEvent){ .kind = WM_EVENT_BUTTON_RELEASE, .key = WM_KEY_MOUSE_LEFT, .position = position });
+            break;
+        default:
+            break;
+    }
+
+    return 1;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL SliceWmWindowHandle get_windows(WmHandle* handle)
 {
     SliceWmWindowHandle result = {0};
@@ -192,7 +283,7 @@ BUSTER_GLOBAL_LOCAL SliceWmWindowHandle get_windows(WmHandle* handle)
     return result;
 }
 
-#if defined(__linux__)
+#if BUSTER_LINUX
 
 
 BUSTER_GLOBAL_LOCAL WmWindowHandle* wm_x11_window_from_xcb(WmHandle* handle, xcb_window_t window)
@@ -1000,7 +1091,7 @@ BUSTER_GLOBAL_LOCAL WmWindowHandle* wm_win32_window_from_win32(WmHandle* handle,
 }
 #endif
 
-#if defined(__linux__)
+#if BUSTER_LINUX
 typedef enum X11Atom
 {
     X11_ATOM_WM_PROTOCOLS,
@@ -1484,7 +1575,7 @@ WmHandle* wm_initialize(void)
 {
     WmHandle* result = {0};
     bool success = false;
-#if defined(__linux__)
+#if BUSTER_LINUX
     // XCB allocates global state via pthread_once on first connection that it
     // never frees. Disable LSAN for this call so those library-internal
     // allocations aren't reported as leaks.
@@ -1564,6 +1655,22 @@ WmHandle* wm_initialize(void)
     }
 
     success = true;
+#elif BUSTER_ANDROID
+    windowing_handle = (WmHandle){0};
+    windowing_handle.app = buster_android_app;
+    if (windowing_handle.app)
+    {
+        windowing_handle.app->userData = &windowing_handle;
+        windowing_handle.app->onAppCmd = buster_android_on_app_cmd;
+        windowing_handle.app->onInputEvent = buster_android_on_input_event;
+        // Fullscreen: hand the status-bar space to the app and hide the bar.
+        // 0x400 == WindowManager.LayoutParams.FLAG_FULLSCREEN (not exposed by the NDK headers).
+        ANativeActivity_setWindowFlags(windowing_handle.app->activity, 0x00000400, 0);
+        success = true;
+    }
+#else
+    windowing_handle = (WmHandle){0};
+    success = true;
 #endif
 
     if (success)
@@ -1577,7 +1684,7 @@ WmHandle* wm_initialize(void)
 
 void wm_deinitialize(WmHandle* windowing)
 {
-#if defined(__linux__)
+#if BUSTER_LINUX
     if (windowing->connection)
     {
         if (windowing->xim)
@@ -1612,15 +1719,8 @@ void wm_deinitialize(WmHandle* windowing)
             free(atom_replies[i]);
             atom_replies[i] = 0;
         }
-
-        if (windowing->window_arena)
-        {
-            arena_destroy(windowing->window_arena, 1);
-            windowing->window_arena = 0;
-        }
     }
 #elif defined(__APPLE__)
-    BUSTER_UNUSED(windowing);
     for (u32 i = 0; i < buster_apple_window_count; i += 1)
     {
         buster_release(buster_apple_windows[i]);
@@ -1629,16 +1729,20 @@ void wm_deinitialize(WmHandle* windowing)
     buster_apple_window_count = 0;
     buster_release(buster_apple_run_loop_mode);
     buster_apple_run_loop_mode = 0;
-#elif defined(_WIN32)
-    BUSTER_UNUSED(windowing);
 #endif
+
+    if (windowing && windowing->window_arena)
+    {
+        arena_destroy(windowing->window_arena, 1);
+        windowing->window_arena = 0;
+    }
 }
 
 WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
 {
     WmWindowHandle* result = {0};
 
-#if defined(__linux__)
+#if BUSTER_LINUX
     xcb_connection_t* connection = windowing->connection;
     const xcb_setup_t* setup = windowing->setup;
     xcb_screen_t* screen = 0;
@@ -1748,7 +1852,41 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
     }
 
     scratch_end(temp);
+#elif BUSTER_ANDROID
+    BUSTER_UNUSED(create);
+    struct android_app* app = windowing->app;
+    // The Android system owns the surface; wait until it hands us one.
+    while (app && !app->window && !windowing->quit)
+    {
+        int events;
+        struct android_poll_source* source = 0;
+        if (ALooper_pollOnce(-1, 0, &events, (void**)&source) >= 0)
+        {
+            if (source)
+            {
+                source->process(app, source);
+            }
+        }
+    }
+
+    if (app && app->window)
+    {
+        result = arena_allocate(windowing->window_arena, WmWindowHandle, 1);
+        *result = (WmWindowHandle) {
+            .owner = windowing,
+            .native_window = app->window,
+            .size = {
+                .width = (WmUnit)ANativeWindow_getWidth(app->window),
+                .height = (WmUnit)ANativeWindow_getHeight(app->window),
+            },
+        };
+    }
 #else
+    result = arena_allocate(windowing->window_arena, WmWindowHandle, 1);
+    *result = (WmWindowHandle) {
+        .owner = windowing,
+        .size = create.size,
+    };
 #endif
     return result;
 }
@@ -1768,7 +1906,7 @@ WmRect wm_window_get_framebuffer_rect(WmHandle* windowing, WmWindowHandle* wm_wi
     WmRect result = {0};
     if (wm_window)
     {
-#if defined(__linux__)
+#if BUSTER_LINUX
         xcb_connection_t* connection = windowing->connection;
         xcb_get_geometry_cookie_t cookie = xcb_get_geometry(connection, wm_window->handle);
         xcb_get_geometry_reply_t* reply = xcb_get_geometry_reply(connection, cookie, 0);
@@ -1801,7 +1939,26 @@ WmRect wm_window_get_framebuffer_rect(WmHandle* windowing, WmWindowHandle* wm_wi
             result.y0 = (WmUnit)rect.top;
             result.y1 = (WmUnit)rect.bottom;
         }
+#elif BUSTER_ANDROID
+        BUSTER_UNUSED(windowing);
+        result.x0 = 0;
+        result.y0 = 0;
+        if (wm_window->native_window)
+        {
+            result.x1 = (WmUnit)ANativeWindow_getWidth(wm_window->native_window);
+            result.y1 = (WmUnit)ANativeWindow_getHeight(wm_window->native_window);
+        }
+        else
+        {
+            result.x1 = wm_window->size.width;
+            result.y1 = wm_window->size.height;
+        }
 #else
+        BUSTER_UNUSED(windowing);
+        result.x0 = 0;
+        result.y0 = 0;
+        result.x1 = wm_window->size.width;
+        result.y1 = wm_window->size.height;
 #endif
     }
     return result;
@@ -1810,7 +1967,7 @@ WmRect wm_window_get_framebuffer_rect(WmHandle* windowing, WmWindowHandle* wm_wi
 f32 wm_window_get_dpi(WmHandle* windowing, WmWindowHandle* wm_window)
 {
     f32 result = 96.0f;
-#if defined(__linux__)
+#if BUSTER_LINUX
     BUSTER_UNUSED(wm_window);
     if (windowing)
     {
@@ -1838,6 +1995,17 @@ f32 wm_window_get_dpi(WmHandle* windowing, WmWindowHandle* wm_window)
             }
         }
     }
+#elif BUSTER_ANDROID
+    BUSTER_UNUSED(wm_window);
+    // Report the real screen density so text matches its desktop physical size.
+    if (windowing && windowing->app && windowing->app->config)
+    {
+        int32_t density = AConfiguration_getDensity(windowing->app->config);
+        if (density > 0 && density != ACONFIGURATION_DENSITY_NONE && density != ACONFIGURATION_DENSITY_ANY)
+        {
+            result = (f32)density;
+        }
+    }
 #else
     BUSTER_UNUSED(windowing);
     BUSTER_UNUSED(wm_window);
@@ -1847,24 +2015,41 @@ f32 wm_window_get_dpi(WmHandle* windowing, WmWindowHandle* wm_window)
 
 void* wm_handle_native_from_wm(WmHandle* windowing)
 {
-#if defined(__linux__)
+#if BUSTER_LINUX
     return windowing->connection;
 #elif defined(__APPLE__)
     return windowing->application;
 #elif defined(_WIN32)
     return windowing->instance;
 #else
+    BUSTER_UNUSED(windowing);
+    return 0;
 #endif
 }
 
 void* wm_window_handle_native_from_wm(WmWindowHandle* window)
 {
-#if defined(__linux__)
+#if BUSTER_LINUX
     return (void*)(u64)window->handle;
 #elif defined(__APPLE__)
     return window;
 #elif defined(_WIN32)
     return window->handle;
+#elif BUSTER_ANDROID
+    return window->native_window;
+#else
+    BUSTER_UNUSED(window);
+    return 0;
+#endif
+}
+
+bool wm_window_is_visible(WmHandle* windowing)
+{
+#if BUSTER_ANDROID
+    return windowing && windowing->app && windowing->app->window != 0 && !windowing->window_lost && !windowing->quit;
+#else
+    BUSTER_UNUSED(windowing);
+    return true;
 #endif
 }
 
@@ -1873,7 +2058,7 @@ WmEventList wm_poll_events(Arena* arena, WmHandle* windowing)
     windowing->event_arena = arena;
     windowing->event_list = (WmEventList){0};
 
-#if defined(__linux__)
+#if BUSTER_LINUX
     xcb_generic_event_t *event;
     xcb_connection_t* connection = windowing->connection;
 
@@ -3838,6 +4023,51 @@ WmEventList wm_poll_events(Arena* arena, WmHandle* windowing)
 
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+    }
+#elif BUSTER_ANDROID
+    {
+        struct android_app* app = windowing->app;
+        if (app)
+        {
+            // When backgrounded (no window) block until an event so we neither
+            // busy-spin nor render to a dead surface; otherwise poll non-blocking.
+            int timeout = ((windowing->window_lost || !app->window) && !windowing->quit) ? -1 : 0;
+            int events;
+            struct android_poll_source* source = 0;
+            while (ALooper_pollOnce(timeout, 0, &events, (void**)&source) >= 0)
+            {
+                if (source)
+                {
+                    source->process(app, source);
+                }
+                if (app->destroyRequested)
+                {
+                    windowing->quit = true;
+                    break;
+                }
+                timeout = 0;
+            }
+
+            // The native window changes across background/foreground cycles; keep
+            // each window handle pointing at the current one.
+            SliceWmWindowHandle windows = get_windows(windowing);
+            for (u64 i = 0; i < windows.length; i += 1)
+            {
+                windows.pointer[i].native_window = app->window;
+            }
+        }
+
+        if (windowing->quit)
+        {
+            SliceWmWindowHandle windows = get_windows(windowing);
+            for (u64 i = 0; i < windows.length; i += 1)
+            {
+                wm_event_push((WmEvent){
+                    .window = &windows.pointer[i],
+                    .kind = WM_EVENT_WINDOW_CLOSE,
+                });
+            }
+        }
     }
 #else
 #endif
