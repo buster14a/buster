@@ -209,9 +209,11 @@ endif()
 unset(BUSTER_VULKAN_INCLUDE_DIR CACHE)
 unset(BUSTER_GLSLC_EXECUTABLE CACHE)
 unset(BUSTER_SLANGC_EXECUTABLE CACHE)
+unset(BUSTER_SPIRV_OPT_EXECUTABLE CACHE)
 find_path(BUSTER_VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h HINTS ${BUSTER_VULKAN_SDK_INCLUDE_DIRS} NO_DEFAULT_PATH)
 find_program(BUSTER_GLSLC_EXECUTABLE NAMES glslc HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS} NO_DEFAULT_PATH)
 find_program(BUSTER_SLANGC_EXECUTABLE NAMES slangc HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS} NO_DEFAULT_PATH)
+find_program(BUSTER_SPIRV_OPT_EXECUTABLE NAMES spirv-opt HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS} NO_DEFAULT_PATH)
 option(BUSTER_REQUIRE_VULKAN_SDK "Require Vulkan SDK headers and shader tools" ON)
 set(BUSTER_COMPILE_SHADERS_DEFAULT OFF)
 if (BUSTER_USE_VULKAN OR BUSTER_USE_D3D12 OR BUSTER_USE_METAL)
@@ -242,6 +244,9 @@ endif()
 
 if (BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_SLANGC_EXECUTABLE)
     message(FATAL_ERROR "BUSTER_USE_SLANG_SHADERS requires slangc from the Vulkan SDK. Set VULKAN_SDK or -DBUSTER_VULKAN_SDK to a Vulkan SDK that contains slangc.")
+endif()
+if (BUSTER_USE_VULKAN AND BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_SPIRV_OPT_EXECUTABLE)
+    message(FATAL_ERROR "BUSTER_USE_SLANG_SHADERS requires spirv-opt from the Vulkan SDK to strip Slang OpSource debug records for Android/SwiftShader compatibility.")
 endif()
 
 set(BUSTER_SLANGC_COMMAND "${BUSTER_SLANGC_EXECUTABLE}")
@@ -999,6 +1004,7 @@ function(buster_compile_slang_spirv out_var shader_source entry_point stage outp
     endif()
 
     set(shader_output "${BUSTER_SHADER_BINARY_DIR}/${output_name}")
+    set(shader_output_unstripped "${shader_output}.unstripped")
     add_custom_command(
         OUTPUT "${shader_output}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUSTER_SHADER_BINARY_DIR}"
@@ -1011,7 +1017,11 @@ function(buster_compile_slang_spirv out_var shader_source entry_point stage outp
             -DBUSTER_VULKAN=1
             -DBUSTER_RECT_TEXTURE_SLOT_COUNT=${BUSTER_RECT_TEXTURE_SLOT_COUNT}
             ${BUSTER_SLANG_VULKAN_EXTRA_DEFINES}
-            -o "${shader_output}"
+            -o "${shader_output_unstripped}"
+        # Slang emits OpSource Slang records (source language operand 11). The
+        # Android emulator's SwiftShader build rejects that newer debug enum and
+        # can take adb offline while creating shader modules, so ship stripped SPIR-V.
+        COMMAND "${BUSTER_SPIRV_OPT_EXECUTABLE}" --strip-debug "${shader_output_unstripped}" -o "${shader_output}"
         MAIN_DEPENDENCY "${shader_source_path}"
         COMMENT "Compiling Slang shader ${entry_point} to ${output_name}"
         VERBATIM
@@ -1491,6 +1501,7 @@ endif()
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")
     # --- Android packaging: bundle libide.so into an installable APK -----------
     find_program(BUSTER_ADB_EXECUTABLE adb)
+    find_program(BUSTER_BASH_EXECUTABLE bash)
 
     if (NOT BUSTER_ANDROID_SDK)
         if (DEFINED ENV{ANDROID_HOME})
@@ -1529,9 +1540,13 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
     set(BUSTER_ANDROID_PACKAGE "dev.buster.ide")
     set(BUSTER_ANDROID_ACTIVITY "${BUSTER_ANDROID_PACKAGE}/android.app.NativeActivity")
     set(BUSTER_ANDROID_MANIFEST "${CMAKE_SOURCE_DIR}/android/AndroidManifest.xml")
+    set(BUSTER_ANDROID_TEST_SCRIPT "${CMAKE_SOURCE_DIR}/android/run_tests.sh")
+    set(BUSTER_ANDROID_SIGN_SCRIPT "${CMAKE_SOURCE_DIR}/android/sign_apk_ci.sh")
     set(BUSTER_APK "${CMAKE_BINARY_DIR}/buster.apk")
     set(BUSTER_KEYSTORE "${CMAKE_BINARY_DIR}/debug.keystore")
     set(BUSTER_APK_STAGE "${CMAKE_BINARY_DIR}/apk")
+    set(BUSTER_ANDROID_TEST_ARGUMENTS ${TEST_ARGUMENTS})
+    list(JOIN BUSTER_ANDROID_TEST_ARGUMENTS " " BUSTER_ANDROID_TEST_ARGUMENT_STRING)
 
     # Generate a debug keystore once, at configure time.
     if (BUSTER_KEYTOOL AND NOT EXISTS "${BUSTER_KEYSTORE}")
@@ -1565,31 +1580,38 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
         COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:ide>" "${BUSTER_APK_STAGE}/lib/${ANDROID_ABI}/libide.so"
         # 3. Add the native library into the APK.
         COMMAND "${BUSTER_JAR}" uf "${CMAKE_BINARY_DIR}/buster-base.apk" -C "${BUSTER_APK_STAGE}" "lib/${ANDROID_ABI}/libide.so"
-        # 4. Align and sign.
-        COMMAND "${BUSTER_ZIPALIGN}" -f 4 "${CMAKE_BINARY_DIR}/buster-base.apk" "${CMAKE_BINARY_DIR}/buster-aligned.apk"
-        COMMAND "${BUSTER_APKSIGNER}" sign --ks "${BUSTER_KEYSTORE}"
-            --ks-pass pass:android --key-pass pass:android
-            --out "${BUSTER_APK}" "${CMAKE_BINARY_DIR}/buster-aligned.apk"
-        DEPENDS ide "${BUSTER_ANDROID_MANIFEST}"
+        # 4. Align before signing, then sign with APK Signature Scheme v2/v3.
+        COMMAND "${BUSTER_BASH_EXECUTABLE}" "${BUSTER_ANDROID_SIGN_SCRIPT}"
+            "${BUSTER_APKSIGNER}"
+            "${BUSTER_ZIPALIGN}"
+            "${BUSTER_KEYSTORE}"
+            "${CMAKE_BINARY_DIR}/buster-base.apk"
+            "${BUSTER_APK}"
+        DEPENDS ide "${BUSTER_ANDROID_MANIFEST}" "${BUSTER_ANDROID_SIGN_SCRIPT}"
         COMMENT "Packaging buster.apk"
         VERBATIM
     )
     add_custom_target(apk DEPENDS "${BUSTER_APK}")
 
-    if (BUSTER_ADB_EXECUTABLE)
-        # Install + launch the app on the connected device/emulator.
+    if (BUSTER_ADB_EXECUTABLE AND BUSTER_BASH_EXECUTABLE)
+        # Install, launch, and wait for the on-device full GUI test result.
         add_custom_target(test_all
-            COMMAND "${BUSTER_ADB_EXECUTABLE}" install -r "${BUSTER_APK}"
-            COMMAND "${BUSTER_ADB_EXECUTABLE}" shell am start -n "${BUSTER_ANDROID_ACTIVITY}"
+            COMMAND "${BUSTER_BASH_EXECUTABLE}" "${BUSTER_ANDROID_TEST_SCRIPT}"
+                "${BUSTER_ADB_EXECUTABLE}"
+                "${BUSTER_APK}"
+                "${BUSTER_ANDROID_PACKAGE}"
+                "${BUSTER_ANDROID_ACTIVITY}"
+                "${BUSTER_ANDROID_TEST_ARGUMENT_STRING}"
             DEPENDS apk
-            COMMENT "Install and launch buster.apk on device"
+            COMMENT "Install and test buster.apk on device"
             VERBATIM
         )
     else()
         add_custom_target(test_all
-            COMMAND "${CMAKE_COMMAND}" -E echo "adb not found; built ${BUSTER_APK} but cannot install"
+            COMMAND "${CMAKE_COMMAND}" -E echo "adb/bash not found; built ${BUSTER_APK} but cannot run Android tests"
+            COMMAND "${CMAKE_COMMAND}" -E false
             DEPENDS apk
-            COMMENT "Build buster.apk (adb unavailable)"
+            COMMENT "Build buster.apk (Android test runner unavailable)"
             VERBATIM
         )
     endif()

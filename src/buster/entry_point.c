@@ -246,6 +246,93 @@ BUSTER_GLOBAL_LOCAL void buster_android_redirect_stdio_to_logcat(void)
     }
 }
 
+BUSTER_GLOBAL_LOCAL String8 buster_android_intent_string_extra(Arena* arena, struct android_app* app, const char* key)
+{
+    String8 result = {0};
+
+    JavaVM* vm = app->activity->vm;
+    JNIEnv* env = 0;
+    bool detach = false;
+    jint get_env_result = (*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6);
+    if (get_env_result == JNI_EDETACHED)
+    {
+        if ((*vm)->AttachCurrentThread(vm, &env, 0) == JNI_OK)
+        {
+            detach = true;
+        }
+    }
+
+    if (env)
+    {
+        jobject activity = app->activity->clazz;
+        jclass activity_class = (*env)->GetObjectClass(env, activity);
+        jmethodID get_intent = activity_class ? (*env)->GetMethodID(env, activity_class, "getIntent", "()Landroid/content/Intent;") : 0;
+        jobject intent = get_intent ? (*env)->CallObjectMethod(env, activity, get_intent) : 0;
+        jclass intent_class = intent ? (*env)->GetObjectClass(env, intent) : 0;
+        jmethodID get_string_extra = intent_class ? (*env)->GetMethodID(env, intent_class, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;") : 0;
+        jstring key_string = get_string_extra ? (*env)->NewStringUTF(env, key) : 0;
+        jstring value_string = key_string ? (jstring)(*env)->CallObjectMethod(env, intent, get_string_extra, key_string) : 0;
+
+        if ((*env)->ExceptionCheck(env))
+        {
+            (*env)->ExceptionClear(env);
+            result = (String8){0};
+        }
+        else if (value_string)
+        {
+            const char* value = (*env)->GetStringUTFChars(env, value_string, 0);
+            if (value)
+            {
+                result = string_duplicate_arena(arena, string_from_pointer((const char8*)value), true);
+                (*env)->ReleaseStringUTFChars(env, value_string, value);
+            }
+        }
+
+        if (value_string) { (*env)->DeleteLocalRef(env, value_string); }
+        if (key_string) { (*env)->DeleteLocalRef(env, key_string); }
+        if (intent_class) { (*env)->DeleteLocalRef(env, intent_class); }
+        if (intent) { (*env)->DeleteLocalRef(env, intent); }
+        if (activity_class) { (*env)->DeleteLocalRef(env, activity_class); }
+    }
+
+    if (detach)
+    {
+        (*vm)->DetachCurrentThread(vm);
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void buster_android_append_argv(String8 arguments, char** argv, u64 argv_capacity)
+{
+    u64 argc = 1;
+    char* cursor = (char*)arguments.pointer;
+    while (cursor && *cursor && argc + 1 < argv_capacity)
+    {
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == '\n' || *cursor == '\r')
+        {
+            *cursor = 0;
+            cursor += 1;
+        }
+
+        if (!*cursor)
+        {
+            break;
+        }
+
+        argv[argc++] = cursor;
+        while (*cursor && *cursor != ' ' && *cursor != '\t' && *cursor != '\n' && *cursor != '\r')
+        {
+            cursor += 1;
+        }
+    }
+
+    if (argc < argv_capacity)
+    {
+        argv[argc] = 0;
+    }
+}
+
 // NativeActivity entry point: the glue spawns a thread that calls this.
 void android_main(struct android_app* app)
 {
@@ -254,12 +341,17 @@ void android_main(struct android_app* app)
     buster_android_app = app;
     buster_android_asset_manager = app->activity->assetManager;
 
-    char* android_argv[] = { (char*)"buster-ide", 0 };
+    Arena* android_arg_arena = arena_create((ArenaCreation){0});
+    String8 android_args = buster_android_intent_string_extra(android_arg_arena, app, "buster_args");
+    char* android_argv[32] = { (char*)"buster-ide" };
+    buster_android_append_argv(android_args, android_argv, BUSTER_ARRAY_LENGTH(android_argv));
     char* android_envp[] = { 0 };
 
-    buster_entry_point((StringOsList)android_argv, (StringOsList)android_envp);
+    ProcessResult result = buster_entry_point((StringOsList)android_argv, (StringOsList)android_envp);
 
+    __android_log_print(ANDROID_LOG_INFO, "buster", "BUSTER_ANDROID_TEST_RESULT:%u", (unsigned)result);
     __android_log_write(ANDROID_LOG_INFO, "buster", "android_main returning (entry point finished)");
+    arena_destroy(android_arg_arena, 1);
 }
 #endif
 #endif

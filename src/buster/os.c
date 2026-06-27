@@ -858,6 +858,13 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             }
         }
     }
+#elif BUSTER_ANDROID
+    BUSTER_UNUSED(environment_keys);
+    BUSTER_UNUSED(environment_values);
+    BUSTER_UNUSED(options);
+    BUSTER_UNUSED(pipe_creation_results);
+    BUSTER_UNUSED(pipe_result);
+    string_print(S8("Process spawning is not supported on Android: {[]S8}\n"), arguments);
 #else
     pid_t pid = -1;
     posix_spawn_file_actions_t file_actions;

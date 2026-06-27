@@ -13,9 +13,43 @@ jobs:
         uses: https://data.forgejo.org/actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Test (Android)
+        shell: bash
+        if: ${{ contains(matrix.runner, 'x86_64-linux-dedicated') }}
+        timeout-minutes: 10
+        env:
+          BUSTER_ANDROID_AVD: buster-ci
+          BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
+          BUSTER_ANDROID_DEVICE: pixel_6
+          BUSTER_ANDROID_EMULATOR_GPU: swiftshader_indirect
+          BUSTER_ANDROID_EMULATOR_HEADLESS: "1"
+          BUSTER_ANDROID_EMULATOR_LOG: build/android-emulator.log
+          BUSTER_ANDROID_EMULATOR_STARTED_MARKER: build/android-emulator.started
+        run: |
+          cleanup_android_emulator() {
+            status=$?
+            if [[ $status -ne 0 && -f "${BUSTER_ANDROID_EMULATOR_LOG:-}" ]]; then
+              echo "Last Android emulator log lines:"
+              tail -n 200 "$BUSTER_ANDROID_EMULATOR_LOG" || true
+            fi
+            if [[ -f "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER" ]]; then
+              android_sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/android-sdk}}
+              export PATH="$android_sdk/platform-tools:$PATH"
+              adb emu kill || true
+              rm -f "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER"
+            fi
+            exit "$status"
+          }
+          trap cleanup_android_emulator EXIT
+
+          bash ./android/start_emulator_ci.sh
+          for build_config in Debug Release; do
+            echo "Running Android ${build_config} tests"
+            BUSTER_ANDROID_BUILD_CONFIG="$build_config" ./android/test_ci.sh
+          done
       - name: Test (Linux)
         shell: bash
-        if: ${{ contains(matrix.runner, 'linux') }}
+        if: ${{ matrix.runner == 'x86_64-linux' }}
         run: |
           ./build.sh test_all_combinations_ci --verbose=1
       - name: Test (macOS)
