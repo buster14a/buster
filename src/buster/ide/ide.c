@@ -1172,6 +1172,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
 
                         if (test)
                         {
+#if BUSTER_IOS
+                            // The iOS worker thread calls exit() right after this
+                            // returns, so the OS reclaims all GPU/window resources.
+                            // Skip the explicit teardown: in a headless simulator the
+                            // last presented drawable's command buffer never completes
+                            // (nothing drives a subsequent vsync), so
+                            // rendering_window_deinitialize's waitUntilCompleted would
+                            // block forever and the BUSTER_IOS_RESULT marker would
+                            // never be printed.
+#else
                             for (IdeWindow* window = ide_state.first_window; window; window = window->next)
                             {
                                 ui_state_deinitialize(window->ui);
@@ -1179,6 +1189,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
                                 rendering_window_deinitialize(ide_state.rendering, window->render);
                                 window->render = 0;
                             }
+#endif
                         }
 
                         // TODO: OS deinitialization

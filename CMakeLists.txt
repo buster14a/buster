@@ -94,6 +94,16 @@ endif()
 
 set(BUSTER_CROSS_COMPILE ${CMAKE_CROSSCOMPILING})
 
+# CMake leaves CMAKE_SYSTEM_PROCESSOR empty for the iOS platform; derive it from
+# the requested architecture so the per-arch codegen module selection still works.
+if (NOT CMAKE_SYSTEM_PROCESSOR)
+    if (CMAKE_OSX_ARCHITECTURES)
+        list(GET CMAKE_OSX_ARCHITECTURES 0 CMAKE_SYSTEM_PROCESSOR)
+    else()
+        set(CMAKE_SYSTEM_PROCESSOR "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+    endif()
+endif()
+
 set(C_COMPILER_GNU OFF)
 set(C_COMPILER_APPLE_CLANG OFF)
 set(C_COMPILER_CLANG OFF)
@@ -708,7 +718,7 @@ function(buster_apply_module_options name)
         target_link_libraries(${name} PRIVATE xkbcommon)
     endif()
 
-    if ("WINDOW" IN_LIST modules AND APPLE)
+    if ("WINDOW" IN_LIST modules AND APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
         target_link_libraries(${name} PRIVATE "-framework AppKit")
     endif()
 
@@ -1230,9 +1240,9 @@ function(executable_add name is_buster_program main_file)
         list(APPEND target_sources ${BUSTER_MODULE_TEST})
     endif()
 
-    if(${is_buster_program} AND ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
+    if(${is_buster_program} AND "${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
         list(APPEND target_sources ${BUSTER_MODULE_X86_64})
-    elseif(${is_buster_program} AND ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
+    elseif(${is_buster_program} AND "${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
         list(APPEND target_sources ${BUSTER_MODULE_AARCH64})
     endif()
 
@@ -1246,6 +1256,9 @@ function(executable_add name is_buster_program main_file)
     if (CMAKE_SYSTEM_NAME STREQUAL "Android")
         # NativeActivity loads the app as a shared library (android.app.lib_name).
         add_library(${name} SHARED ${main_file})
+    elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        # iOS ships the program as a .app bundle (UIApplicationMain entry point).
+        add_executable(${name} MACOSX_BUNDLE ${main_file})
     else()
         add_executable(${name} ${main_file})
     endif()
@@ -1415,6 +1428,44 @@ function(executable_add name is_buster_program main_file)
             target_link_libraries(${name} PRIVATE android log)
             # The framework finds ANativeActivity_onCreate via dlsym; keep it.
             target_link_options(${name} PRIVATE -u ANativeActivity_onCreate)
+        endif()
+        if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            # Drive the app through UIKit; Metal/QuartzCore back the render layer.
+            target_link_libraries(${name} PRIVATE
+                "-framework UIKit"
+                "-framework Foundation"
+                "-framework CoreGraphics"
+                "-framework QuartzCore"
+                "-framework Metal")
+
+            set_target_properties(${name} PROPERTIES
+                MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/ios/Info-${name}.plist"
+                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "dev.buster.ide"
+                XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO")
+
+            # Stage the bundle Info.plist (kept out of the source tree).
+            configure_file(
+                "${CMAKE_SOURCE_DIR}/ios/Info.plist.in"
+                "${CMAKE_BINARY_DIR}/ios/Info-${name}.plist"
+                @ONLY)
+
+            # Bundle test data (read at runtime via relative paths) into Resources/tests.
+            add_custom_command(TARGET ${name} POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                    "${CMAKE_SOURCE_DIR}/tests"
+                    "$<TARGET_BUNDLE_CONTENT_DIR:${name}>/tests"
+                COMMENT "Bundling test data into ${name}.app")
+
+            # Bundle a monospace font if one is available (see BUSTER_IOS_FONT).
+            if (BUSTER_IOS_FONT AND EXISTS "${BUSTER_IOS_FONT}")
+                add_custom_command(TARGET ${name} POST_BUILD
+                    COMMAND "${CMAKE_COMMAND}" -E copy
+                        "${BUSTER_IOS_FONT}"
+                        "$<TARGET_BUNDLE_CONTENT_DIR:${name}>/FiraCode-Regular.ttf"
+                    COMMENT "Bundling font into ${name}.app")
+            else()
+                message(STATUS "BUSTER_IOS_FONT not set or missing; ${name}.app will have no bundled font")
+            endif()
         endif()
     endif()
 
@@ -1615,6 +1666,18 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
             VERBATIM
         )
     endif()
+elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    # Boot a simulator, install the .app, launch it with the console attached and
+    # parse the in-app test result from stdout (mirrors the Android device flow).
+    add_custom_target(test_all
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "BUSTER_IOS_APP_BUNDLE=$<TARGET_BUNDLE_DIR:ide>"
+            bash "${CMAKE_SOURCE_DIR}/ios/launch_simulator.sh"
+        DEPENDS ide
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Install and run buster on the iOS simulator"
+        VERBATIM
+    )
 else()
     add_custom_target(test_all
         COMMAND

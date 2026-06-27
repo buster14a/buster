@@ -101,6 +101,12 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
         BUSTER_UNUSED(arena);
         table[(uint64_t)FONT_INDEX_MONO] = mono_candidates[0];
         font_config_initialized = true;
+#elif defined(__APPLE__) && BUSTER_IOS
+        BUSTER_UNUSED(arena);
+        // Bundled into the app's Resources by CMake; resolved via file_read's
+        // bundle-path lookup. See BUSTER_IOS_FONT in CMakeLists.txt.
+        table[(uint64_t)FONT_INDEX_MONO] = S8("FiraCode-Regular.ttf");
+        font_config_initialized = true;
 #elif defined(__APPLE__)
         BUSTER_UNUSED(arena);
         table[(uint64_t)FONT_INDEX_MONO] = S8("/Library/Fonts/FiraCode-Regular.ttf");

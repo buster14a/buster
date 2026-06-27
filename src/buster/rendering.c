@@ -5204,8 +5204,16 @@ RenderingHandle* rendering_initialize(Arena* arena)
 
 BUSTER_GLOBAL_LOCAL BusterCGSize metal_window_backing_size(RenderingWindowHandle* window)
 {
+#if BUSTER_IOS
+    // The Metal layer is the UIView's backing layer; backing pixels are its
+    // bounds (points) scaled by contentsScale (the screen's native scale).
+    BusterCGRect bounds = ((BusterCGRect (*)(id, SEL))metal_msg_send_stret)(window->layer, metal_sel("bounds"));
+    BusterCGFloat scale = ((BusterCGFloat (*)(id, SEL))objc_msgSend)(window->layer, metal_sel("contentsScale"));
+    return (BusterCGSize){ .width = bounds.size.width * scale, .height = bounds.size.height * scale };
+#else
     BusterCGRect bounds = ((BusterCGRect (*)(id, SEL))metal_msg_send_stret)(window->content_view, metal_sel("bounds"));
     return ((BusterCGSize (*)(id, SEL, BusterCGSize))objc_msgSend)(window->content_view, metal_sel("convertSizeToBacking:"), bounds.size);
+#endif
 }
 
 BUSTER_GLOBAL_LOCAL void metal_window_update_drawable_size(RenderingWindowHandle* window)
@@ -5229,10 +5237,25 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 {
     BUSTER_UNUSED(windowing);
     RenderingWindowHandle* result = arena_allocate(arena, RenderingWindowHandle, 1);
-    result->ns_window = (id)wm_window_handle_native_from_wm(window);
-    result->content_view = metal_msg_id(result->ns_window, "contentView");
     result->frame_index = 0;
     result->frame_count = BUSTER_METAL_FRAME_COUNT;
+
+#if BUSTER_IOS
+    // On iOS the window handle already exposes a CAMetalLayer (the UIView's
+    // backing layer); use it directly instead of creating and attaching one.
+    result->ns_window = 0;
+    result->content_view = 0;
+    result->layer = (id)wm_window_handle_native_from_wm(window);
+    ((void (*)(id, SEL))objc_msgSend)(result->layer, metal_sel("retain"));
+    metal_msg_void_id(result->layer, "setDevice:", rendering->device);
+    metal_msg_void_ulong(result->layer, "setPixelFormat:", BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM);
+    metal_msg_void_bool(result->layer, "setFramebufferOnly:", true);
+    string_print(S8("Metal render window initialization: platform=ios, layer={u64:x}, frame_count={u32}\n"),
+                 (u64)result->layer,
+                 result->frame_count);
+#else
+    result->ns_window = (id)wm_window_handle_native_from_wm(window);
+    result->content_view = metal_msg_id(result->ns_window, "contentView");
     string_print(S8("Metal render window initialization: ns_window={u64:x}, content_view={u64:x}, frame_count={u32}\n"),
                  (u64)result->ns_window,
                  (u64)result->content_view,
@@ -5245,6 +5268,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     metal_msg_void_bool(result->layer, "setFramebufferOnly:", true);
     metal_msg_void_bool(result->content_view, "setWantsLayer:", true);
     metal_msg_void_id(result->content_view, "setLayer:", result->layer);
+#endif
     metal_window_update_drawable_size(result);
     string_print(S8("Metal layer attached: layer={u64:x}, device={u64:x}, drawable_size={u32}x{u32}\n"),
                  (u64)result->layer,

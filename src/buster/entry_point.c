@@ -159,6 +159,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     return result;
 }
 
+#if BUSTER_IOS
+#include <buster/window.h>
+// argv/envp captured in main() so the worker thread can forward them to the
+// real entry point once UIKit has finished launching.
+BUSTER_GLOBAL_LOCAL char** buster_ios_argv = 0;
+BUSTER_GLOBAL_LOCAL char** buster_ios_envp = 0;
+#endif
+
 int main(int argc, char* argv[], char* envp[])
 {
     BUSTER_UNUSED(argc);
@@ -172,11 +180,40 @@ int main(int argc, char* argv[], char* envp[])
     {
         FreeEnvironmentStringsW(environment);
     }
+#elif BUSTER_IOS
+    // UIApplicationMain owns the main thread/run loop and never returns; the IDE
+    // loop runs on a worker thread started from the app delegate.
+    buster_ios_argv = argv;
+    buster_ios_envp = envp;
+    buster_ios_application_main(argc, argv);
+    result = 0;
 #else
     result = (int)buster_entry_point((StringOsList)argv, (StringOsList)envp);
 #endif
     return result;
 }
+
+#if BUSTER_IOS
+#include <stdlib.h>
+
+// Worker-thread trampoline started by the app delegate (window.c). Runs the IDE
+// loop, then terminates the process so the simulator app exits and CI can read
+// the test result (the IDE loop is otherwise expected to run indefinitely).
+ProcessResult buster_ios_worker_entry(void)
+{
+    char* fallback_argv[] = { (char*)"buster-ide", 0 };
+    char* fallback_envp[] = { 0 };
+    char** ios_argv = buster_ios_argv ? buster_ios_argv : fallback_argv;
+    char** ios_envp = buster_ios_envp ? buster_ios_envp : fallback_envp;
+
+    ProcessResult result = buster_entry_point((StringOsList)ios_argv, (StringOsList)ios_envp);
+    // Deterministic marker the simulator launch script greps for (the app's exit
+    // code is not reliably observable through simctl).
+    string_print(result == PROCESS_RESULT_SUCCESS ? S8("BUSTER_IOS_RESULT: SUCCESS\n") : S8("BUSTER_IOS_RESULT: FAILURE\n"));
+    exit((int)result);
+    return result;
+}
+#endif
 
 #if BUSTER_ANDROID
 #include <buster/window.h>

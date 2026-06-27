@@ -62,8 +62,25 @@
 
 #if defined(__APPLE__)
 #define BUSTER_APPLE 1
+#if defined(__TINYC__)
+// TCC only ever targets the macOS host (it cannot preprocess the SDK's
+// TargetConditionals.h, which relies on clang __is_target_* builtins).
+#define BUSTER_IOS 0
+#define BUSTER_MACOS 1
+#else
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
+#define BUSTER_IOS 1
+#define BUSTER_MACOS 0
+#else
+#define BUSTER_IOS 0
+#define BUSTER_MACOS 1
+#endif
+#endif
 #else
 #define BUSTER_APPLE 0
+#define BUSTER_IOS 0
+#define BUSTER_MACOS 0
 #endif
 
 #if defined(__TINYC__)

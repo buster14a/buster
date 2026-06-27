@@ -9,6 +9,27 @@
 AAssetManager* buster_android_asset_manager = 0;
 #endif
 
+#if BUSTER_IOS
+#include <objc/runtime.h>
+#include <objc/message.h>
+// The iOS app is sandboxed; test data and other assets are bundled under the
+// app's Resources directory, so relative paths must be resolved against it.
+BUSTER_GLOBAL_LOCAL const char* buster_ios_bundle_resource_path(void)
+{
+    id bundle = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSBundle"), sel_registerName("mainBundle"));
+    if (!bundle)
+    {
+        return 0;
+    }
+    id path = ((id (*)(id, SEL))objc_msgSend)(bundle, sel_registerName("resourcePath"));
+    if (!path)
+    {
+        return 0;
+    }
+    return ((const char* (*)(id, SEL))objc_msgSend)(path, sel_registerName("UTF8String"));
+}
+#endif
+
 bool file_write(String8 path, ByteSlice content)
 {
     OsFileDescriptor* fd = os_file_open(path, (OpenFlags) { .write = 1, .create = 1, .truncate = 1 }, (OpenPermissions){ .read = 1, .write = 1 });
@@ -63,6 +84,25 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
             }
             AAsset_close(asset);
             return (ByteSlice) { file_buffer + options.start_padding, file_size };
+        }
+    }
+#endif
+
+#if BUSTER_IOS
+    // Resolve relative paths against the app bundle's Resources directory.
+    if (path.length && path.pointer[0] != '/')
+    {
+        const char* resource_path = buster_ios_bundle_resource_path();
+        if (resource_path)
+        {
+            String8 resource = string_from_pointer((char8*)resource_path);
+            u64 total = resource.length + 1 + path.length;
+            char* buffer = (char*)arena_allocate_bytes(arena, total + 1, 1);
+            memcpy(buffer, resource.pointer, resource.length);
+            buffer[resource.length] = '/';
+            memcpy(buffer + resource.length + 1, path.pointer, path.length);
+            buffer[total] = 0;
+            path = (String8){ (char8*)buffer, total };
         }
     }
 #endif

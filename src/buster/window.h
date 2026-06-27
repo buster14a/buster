@@ -294,3 +294,10 @@ BUSTER_F_DECL WmOffset offset_from_rect(WmRect rect);
 struct android_app;
 extern struct android_app* buster_android_app;
 #endif
+
+#if BUSTER_IOS
+// Runs UIApplicationMain with the buster app delegate (called from main()).
+BUSTER_F_DECL void buster_ios_application_main(int argc, char* argv[]);
+// Worker-thread trampoline (defined in entry_point.c) that runs the IDE loop.
+BUSTER_F_DECL ProcessResult buster_ios_worker_entry(void);
+#endif

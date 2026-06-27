@@ -5,7 +5,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [x86_64-linux-dedicated, x86_64-linux, aarch64-macos-m1, x86_64-windows-znver5]
+        runner: [x86_64-linux-dedicated, x86_64-linux, aarch64-macos-mini, x86_64-windows-znver5]
     name: ${{matrix.runner}}
     runs-on: ${{ matrix.runner }}
     steps:
@@ -52,6 +52,12 @@ jobs:
         if: ${{ matrix.runner == 'x86_64-linux' }}
         run: |
           ./build.sh test_all_combinations_ci --verbose=1
+      - name: Test (iOS simulator)
+        shell: bash
+        if: ${{ contains(matrix.runner, 'macos') }}
+        timeout-minutes: 20
+        run: |
+          ./ios/test_ci.sh
       - name: Test (macOS)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
