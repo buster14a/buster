@@ -5,7 +5,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [x86_64-linux-znver5, x86_64-linux-ubuntu, x86_64-linux-debian, aarch64-macos-m1, x86_64-windows-znver5]
+        runner: [x86_64-linux-dedicated, x86_64-linux, aarch64-macos-m1, x86_64-windows-znver5]
     name: ${{matrix.runner}}
     runs-on: ${{ matrix.runner }}
     steps:
