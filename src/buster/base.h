@@ -21,6 +21,10 @@
 #define BUSTER_OPTIMIZE 0
 #endif
 
+#ifndef BUSTER_SANITIZE
+#define BUSTER_SANITIZE 0
+#endif
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN 1
 #endif

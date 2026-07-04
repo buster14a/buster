@@ -46,6 +46,8 @@ typedef struct RectVertex RectVertex;
 #include <buster/shaders/d3d12.h>
 #endif
 
+#define BUSTER_GPU_VALIDATION_ENABLED (!BUSTER_OPTIMIZE || BUSTER_SANITIZE)
+
 #if BUSTER_USE_VULKAN
 #define BUSTER_VULKAN_FUNCTION_POINTER(n) PFN_ ## n n
 #define BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(n) BUSTER_GLOBAL_LOCAL __attribute__((used)) BUSTER_VULKAN_FUNCTION_POINTER(n)
@@ -71,6 +73,8 @@ typedef struct RectVertex RectVertex;
 #define VK_USE_PLATFORM_ANDROID_KHR
 #elif BUSTER_LINUX
 #define VK_USE_PLATFORM_XCB_KHR
+#elif defined(__APPLE__)
+#define VK_USE_PLATFORM_METAL_EXT
 #endif
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
 #include <vulkan/vk_platform.h>
@@ -237,6 +241,7 @@ typedef enum BusterPipeline
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkGetInstanceProcAddr);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkEnumerateInstanceVersion);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkEnumerateInstanceLayerProperties);
+BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkEnumerateInstanceExtensionProperties);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCreateInstance);
 
 // These functions require an instance as a parameter
@@ -247,6 +252,7 @@ BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkEnumeratePhysicalDevices);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkGetPhysicalDeviceMemoryProperties);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkGetPhysicalDeviceProperties);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkGetPhysicalDeviceQueueFamilyProperties);
+BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkEnumerateDeviceExtensionProperties);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkGetPhysicalDeviceSurfacePresentModesKHR);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkGetPhysicalDeviceSurfaceSupportKHR);
@@ -373,6 +379,45 @@ BUSTER_GLOBAL_LOCAL VkBool32 buster_vulkan_debug_callback(VkDebugUtilsMessageSev
     }
 
     return VK_FALSE;
+}
+
+BUSTER_GLOBAL_LOCAL bool vulkan_instance_extension_supported(VkExtensionProperties* properties, u32 property_count, const char* name)
+{
+    bool result = false;
+    String8 requested = string_from_pointer((char8*)name);
+    for (u32 i = 0; i < property_count; i += 1)
+    {
+        String8 available = string_from_pointer((char8*)properties[i].extensionName);
+        if (string_equal(available, requested))
+        {
+            result = true;
+            break;
+        }
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool vulkan_device_extension_supported(VkExtensionProperties* properties, u32 property_count, const char* name)
+{
+    return vulkan_instance_extension_supported(properties, property_count, name);
+}
+
+BUSTER_GLOBAL_LOCAL bool vulkan_instance_layer_supported(VkLayerProperties* properties, u32 property_count, const char* name)
+{
+    bool result = false;
+    String8 requested = string_from_pointer((char8*)name);
+    for (u32 i = 0; i < property_count; i += 1)
+    {
+        String8 available = string_from_pointer((char8*)properties[i].layerName);
+        if (string_equal(available, requested))
+        {
+            result = true;
+            break;
+        }
+    }
+
+    return result;
 }
 
 #define MAX_DESCRIPTOR_SET_LAYOUT_BINDING_COUNT (16)
@@ -820,7 +865,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
     rendering_handle.vulkan_library = os_dynamic_library_load(S8("libvulkan.so.1"));
 #elif defined(_WIN32)
     rendering_handle.vulkan_library = os_dynamic_library_load(S8("vulkan-1.dll"));
-#elif defined(__APPLE__) && BUSTER_USE_METAL
+#elif defined(__APPLE__)
     rendering_handle.vulkan_library = os_dynamic_library_load("libvulkan.dylib");
 
     if (!os_library_is_valid(rendering_handle.vulkan_library))
@@ -840,12 +885,12 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 
     if (!os_library_is_valid(rendering_handle.vulkan_library))
     {
-        vulkan_library = os_dynamic_library_load("MoltenVK.framework/MoltenVK");
+        rendering_handle.vulkan_library = os_dynamic_library_load("MoltenVK.framework/MoltenVK");
     }
 #endif
     // Android (incl. emulator) does not ship the Khronos validation layers, so
     // requesting them would make instance creation fail. Keep validation desktop-only.
-    bool enable_validation = !BUSTER_ANDROID;
+    bool enable_validation = !BUSTER_ANDROID && BUSTER_GPU_VALIDATION_ENABLED;
     string_print(S8("Vulkan rendering initialization: library={u64:x}, validation={u32}\n"), (u64)rendering_handle.vulkan_library, (u32)enable_validation);
     if (rendering_handle.vulkan_library)
     {
@@ -865,81 +910,128 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                 if (result == VK_SUCCESS && api_version >= VK_API_VERSION_1_3)
                 {
                     BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(0, vkEnumerateInstanceLayerProperties);
+                    BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(0, vkEnumerateInstanceExtensionProperties);
 
-                    const char8* instance_layer_names[] = {
-                        "VK_LAYER_KHRONOS_validation"
-                    };
-                    const char* const* enabled_layer_names = 0;
-                    u64 supported_instance_layer_count = 0;
-                    u32 enabled_layer_count = 0;
-
-                    if (enable_validation)
+                    const char* validation_layer_name = "VK_LAYER_KHRONOS_validation";
+                    VkLayerProperties instance_layer_properties[256];
+                    u32 instance_layer_property_count = 0;
+                    bool validation_layer_supported = false;
+                    if (enable_validation && vkEnumerateInstanceLayerProperties)
                     {
-                        enabled_layer_names = instance_layer_names;
-                        bool layer_supported[BUSTER_ARRAY_LENGTH(instance_layer_names)] = {0};
-                        enabled_layer_count = BUSTER_ARRAY_LENGTH(instance_layer_names);
-
-                        u32 layer_count = 0;
-                        result = vkEnumerateInstanceLayerProperties(&layer_count, 0);
-                        if (result == VK_SUCCESS)
+                        VkResult layer_result = vkEnumerateInstanceLayerProperties(&instance_layer_property_count, 0);
+                        if (layer_result == VK_SUCCESS && instance_layer_property_count <= BUSTER_ARRAY_LENGTH(instance_layer_properties))
                         {
-                            VkLayerProperties instance_layer_properties[256];
-                            if (layer_count <= BUSTER_ARRAY_LENGTH(instance_layer_properties))
+                            layer_result = vkEnumerateInstanceLayerProperties(&instance_layer_property_count, instance_layer_properties);
+                            if (layer_result == VK_SUCCESS)
                             {
-                                result = vkEnumerateInstanceLayerProperties(&layer_count, instance_layer_properties);
-                                if (result == VK_SUCCESS)
-                                {
-                                    for (u32 layer_i = 0; layer_i < layer_count && supported_instance_layer_count < BUSTER_ARRAY_LENGTH(instance_layer_names); layer_i += 1)
-                                    {
-                                        VkLayerProperties* layer_properties = &instance_layer_properties[layer_i];
-                                        String8 layer_name = string_from_pointer(layer_properties->layerName);
-
-                                        for (u64 requested_i = 0; requested_i < BUSTER_ARRAY_LENGTH(instance_layer_names); requested_i += 1)
-                                        {
-                                            bool* is_supported_pointer = &layer_supported[requested_i];
-                                            String8 requested_name = string_from_pointer(instance_layer_names[requested_i]);
-
-                                            if (string_equal(layer_name, requested_name))
-                                            {
-                                                bool is_supported = *is_supported_pointer;
-                                                *is_supported_pointer = true;
-                                                supported_instance_layer_count += !is_supported;
-
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
+                                validation_layer_supported = vulkan_instance_layer_supported(instance_layer_properties, instance_layer_property_count, validation_layer_name);
                             }
                         }
                     }
 
-                    const char* enabled_extension_names[] = {
-#if !BUSTER_ANDROID
-                        // Only needed for the validation/debug messenger, which is desktop-only.
-                        VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
-#endif
-                        VK_KHR_SURFACE_EXTENSION_NAME,
+                    bool enable_validation_layer = enable_validation && validation_layer_supported;
+                    if (enable_validation && !enable_validation_layer)
+                    {
+                        string_print(S8("Vulkan validation layer unavailable; continuing without validation\n"));
+                    }
+
+                    const char* instance_layer_names[] = {
+                        "VK_LAYER_KHRONOS_validation"
+                    };
+                    const char* const* enabled_layer_names = 0;
+                    u32 enabled_layer_count = 0;
+                    if (enable_validation_layer)
+                    {
+                        enabled_layer_names = instance_layer_names;
+                        enabled_layer_count = BUSTER_ARRAY_LENGTH(instance_layer_names);
+                    }
+
+                    VkExtensionProperties instance_extension_properties[512];
+                    u32 instance_extension_property_count = 0;
+                    if (result == VK_SUCCESS && vkEnumerateInstanceExtensionProperties)
+                    {
+                        result = vkEnumerateInstanceExtensionProperties(0, &instance_extension_property_count, 0);
+                        if (result == VK_SUCCESS && instance_extension_property_count <= BUSTER_ARRAY_LENGTH(instance_extension_properties))
+                        {
+                            result = vkEnumerateInstanceExtensionProperties(0, &instance_extension_property_count, instance_extension_properties);
+                        }
+                        else if (result == VK_SUCCESS)
+                        {
+                            result = VK_ERROR_EXTENSION_NOT_PRESENT;
+                        }
+                    }
+
+                    const char* enabled_extension_names[16];
+                    u32 enabled_extension_count = 0;
+                    bool missing_required_instance_extension = false;
+                    bool enable_debug_utils = false;
+                    bool enable_shader_debug_printf = false;
+                    VkInstanceCreateFlags instance_create_flags = 0;
+
+#define BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(extension_name) do { \
+                        if (vulkan_instance_extension_supported(instance_extension_properties, instance_extension_property_count, (extension_name))) \
+                        { \
+                            enabled_extension_names[enabled_extension_count++] = (extension_name); \
+                        } \
+                        else \
+                        { \
+                            missing_required_instance_extension = true; \
+                            string_print(S8("Vulkan required instance extension unavailable: {S8}\n"), string_from_pointer((char8*)(extension_name))); \
+                        } \
+                    } while (0)
+
+#define BUSTER_VULKAN_ENABLE_OPTIONAL_INSTANCE_EXTENSION(extension_name, enabled_variable) do { \
+                        if (vulkan_instance_extension_supported(instance_extension_properties, instance_extension_property_count, (extension_name))) \
+                        { \
+                            enabled_extension_names[enabled_extension_count++] = (extension_name); \
+                            (enabled_variable) = true; \
+                        } \
+                    } while (0)
+
+                    if (result == VK_SUCCESS)
+                    {
+                        BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(VK_KHR_SURFACE_EXTENSION_NAME);
 #ifdef VK_USE_PLATFORM_WIN32_KHR
-                        VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+                        BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #endif
 #ifdef VK_USE_PLATFORM_XLIB_KHR
-                        VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
+                        BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
 #endif 
 #ifdef VK_USE_PLATFORM_XCB_KHR
-                        VK_KHR_XCB_SURFACE_EXTENSION_NAME,
+                        BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(VK_KHR_XCB_SURFACE_EXTENSION_NAME);
 #endif
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
-                        VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+                        BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
 #endif
 #ifdef VK_USE_PLATFORM_METAL_EXT
-                        VK_EXT_METAL_SURFACE_EXTENSION_NAME,
-                        VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+                        BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
+                        if (vulkan_instance_extension_supported(instance_extension_properties, instance_extension_property_count, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+                        {
+                            enabled_extension_names[enabled_extension_count++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+                            instance_create_flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+                        }
 #endif
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
-                        VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
+                        BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
 #endif
-                    };
+
+                        if (enable_validation_layer)
+                        {
+                            BUSTER_VULKAN_ENABLE_OPTIONAL_INSTANCE_EXTENSION(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, enable_debug_utils);
+                            BUSTER_VULKAN_ENABLE_OPTIONAL_INSTANCE_EXTENSION(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME, enable_shader_debug_printf);
+                            if (!enable_debug_utils)
+                            {
+                                string_print(S8("Vulkan debug utils extension unavailable; debug messenger disabled\n"));
+                            }
+                            if (!enable_shader_debug_printf)
+                            {
+                                string_print(S8("Vulkan validation features extension unavailable; shader debug printf disabled\n"));
+                            }
+                        }
+                    }
+
+#undef BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION
+#undef BUSTER_VULKAN_ENABLE_OPTIONAL_INSTANCE_EXTENSION
 
                     VkValidationFeatureEnableEXT enabled_validation_features[] = {
                         VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT,
@@ -954,35 +1046,31 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         .pUserData = 0,
                     };
 
-                    bool enable_shader_debug_printf = enable_validation;
-
                     VkValidationFeaturesEXT validation_features = { 
                         .sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
                         .enabledValidationFeatureCount = BUSTER_ARRAY_LENGTH(enabled_validation_features),
                         .pEnabledValidationFeatures = enabled_validation_features,
-                        .pNext = &messenger_create_info,
+                        .pNext = enable_debug_utils ? &messenger_create_info : 0,
                     };
 
-                    void* p_next = enable_shader_debug_printf ? (void*)&validation_features : (enable_validation ? &messenger_create_info : 0);
+                    void* p_next = enable_shader_debug_printf ? (void*)&validation_features : (enable_debug_utils ? (void*)&messenger_create_info : 0);
 
                     VkApplicationInfo application_info = {
                         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
                         .apiVersion = api_version,
                     };
-                    VkInstanceCreateFlags instance_create_flags = 0;
-#if defined(__APPLE__)
-                    instance_create_flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-#endif
-                    if (enabled_layer_count == supported_instance_layer_count)
+                    if (result == VK_SUCCESS && !missing_required_instance_extension)
                     {
                         u32 portability_enabled = 0;
-#if defined(__APPLE__)
+#if defined(VK_USE_PLATFORM_METAL_EXT)
                         portability_enabled = (u32)((instance_create_flags & VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR) != 0);
 #endif
-                        string_print(S8("Vulkan instance creation: extensions={u32}, layers_enabled={u32}, layers_supported={u64}, portability={u32}\n"),
-                                     (u32)BUSTER_ARRAY_LENGTH(enabled_extension_names),
+                        string_print(S8("Vulkan instance creation: extensions={u32}, layers_enabled={u32}, validation_layer_supported={u32}, debug_utils={u32}, validation_features={u32}, portability={u32}\n"),
+                                     enabled_extension_count,
                                      enabled_layer_count,
-                                     supported_instance_layer_count,
+                                     (u32)validation_layer_supported,
+                                     (u32)enable_debug_utils,
+                                     (u32)enable_shader_debug_printf,
                                      portability_enabled);
 
                         VkInstanceCreateInfo instance_create_info = {
@@ -993,27 +1081,27 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                             .ppEnabledLayerNames = enabled_layer_names,
                             .enabledLayerCount = enabled_layer_count,
                             .ppEnabledExtensionNames = enabled_extension_names,
-                            .enabledExtensionCount = BUSTER_ARRAY_LENGTH(enabled_extension_names),
+                            .enabledExtensionCount = enabled_extension_count,
                         };
 
                         result = vkCreateInstance(&instance_create_info, allocator, &rendering_handle.instance);
                         string_print(S8("Vulkan instance creation: vkCreateInstance={u64:x}, instance={u64:x}\n"), (u64)(u32)result, (u64)rendering_handle.instance);
 
-                        if (result == VK_SUCCESS && enable_validation)
+                        if (result == VK_SUCCESS && enable_debug_utils)
                         {
                             BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkCreateDebugUtilsMessengerEXT);
                             BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkDestroyDebugUtilsMessengerEXT);
                             if (vkCreateDebugUtilsMessengerEXT)
                             {
-                                result = vkCreateDebugUtilsMessengerEXT(rendering_handle.instance, &messenger_create_info, allocator, &rendering_handle.messenger);
-                                string_print(S8("Vulkan debug messenger creation: vkCreateDebugUtilsMessengerEXT={u64:x}, messenger={u64:x}\n"), (u64)(u32)result, (u64)rendering_handle.messenger);
+                                VkResult messenger_result = vkCreateDebugUtilsMessengerEXT(rendering_handle.instance, &messenger_create_info, allocator, &rendering_handle.messenger);
+                                string_print(S8("Vulkan debug messenger creation: vkCreateDebugUtilsMessengerEXT={u64:x}, messenger={u64:x}\n"), (u64)(u32)messenger_result, (u64)rendering_handle.messenger);
                             }
                         }
                     }
                     else
                     {
-                        result = VK_ERROR_LAYER_NOT_PRESENT;
-                        string_print(S8("Vulkan instance creation skipped: validation layer support missing, layers_enabled={u32}, layers_supported={u64}\n"), enabled_layer_count, supported_instance_layer_count);
+                        result = VK_ERROR_EXTENSION_NOT_PRESENT;
+                        string_print(S8("Vulkan instance creation skipped: required instance extension support missing\n"));
                     }
 
                     if (result == VK_SUCCESS)
@@ -1024,6 +1112,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkGetPhysicalDeviceMemoryProperties);
                         BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkGetPhysicalDeviceProperties);
                         BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkGetPhysicalDeviceQueueFamilyProperties);
+                        BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkEnumerateDeviceExtensionProperties);
                         BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkCreateDevice);
                         BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkDestroyDevice);
                         BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
@@ -1125,14 +1214,50 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                                             },
                                         };
 
-                                        const char* extensions[] =
+                                        VkExtensionProperties device_extension_properties[512];
+                                        u32 device_extension_property_count = 0;
+                                        bool missing_required_device_extension = false;
+                                        bool portability_subset_enabled = false;
+                                        const char* extensions[8];
+                                        u32 extension_count = 0;
+
+                                        if (vkEnumerateDeviceExtensionProperties)
                                         {
-                                            VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-#ifdef __APPLE__
-                                            "VK_KHR_portability_subset",
-                                            VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+                                            result = vkEnumerateDeviceExtensionProperties(rendering_handle.physical_device, 0, &device_extension_property_count, 0);
+                                            if (result == VK_SUCCESS && device_extension_property_count <= BUSTER_ARRAY_LENGTH(device_extension_properties))
+                                            {
+                                                result = vkEnumerateDeviceExtensionProperties(rendering_handle.physical_device, 0, &device_extension_property_count, device_extension_properties);
+                                            }
+                                            else if (result == VK_SUCCESS)
+                                            {
+                                                result = VK_ERROR_EXTENSION_NOT_PRESENT;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            result = VK_ERROR_EXTENSION_NOT_PRESENT;
+                                        }
+
+                                        if (result == VK_SUCCESS)
+                                        {
+                                            if (vulkan_device_extension_supported(device_extension_properties, device_extension_property_count, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
+                                            {
+                                                extensions[extension_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+                                            }
+                                            else
+                                            {
+                                                missing_required_device_extension = true;
+                                                string_print(S8("Vulkan required device extension unavailable: {S8}\n"), S8(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
+                                            }
+
+#ifdef VK_USE_PLATFORM_METAL_EXT
+                                            if (vulkan_device_extension_supported(device_extension_properties, device_extension_property_count, "VK_KHR_portability_subset"))
+                                            {
+                                                extensions[extension_count++] = "VK_KHR_portability_subset";
+                                                portability_subset_enabled = true;
+                                            }
 #endif
-                                        };
+                                        }
 
 #ifdef __APPLE__
                                         VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering_features = {
@@ -1170,15 +1295,23 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                                         VkDeviceCreateInfo ci = {
                                             .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                             .ppEnabledExtensionNames = extensions,
-                                            .enabledExtensionCount = BUSTER_ARRAY_LENGTH(extensions),
+                                            .enabledExtensionCount = extension_count,
                                             .pQueueCreateInfos = queue_create_infos,
                                             .queueCreateInfoCount = BUSTER_ARRAY_LENGTH(queue_create_infos),
                                             .pNext = &features,
                                         };
 
-                                        VkDevice device;
-                                        result = vkCreateDevice(rendering_handle.physical_device, &ci, allocator, &device);
-                                        string_print(S8("Vulkan logical device creation: vkCreateDevice={u64:x}, extensions={u32}\n"), (u64)(u32)result, (u32)BUSTER_ARRAY_LENGTH(extensions));
+                                        if (missing_required_device_extension)
+                                        {
+                                            result = VK_ERROR_EXTENSION_NOT_PRESENT;
+                                        }
+
+                                        VkDevice device = 0;
+                                        if (result == VK_SUCCESS)
+                                        {
+                                            result = vkCreateDevice(rendering_handle.physical_device, &ci, allocator, &device);
+                                        }
+                                        string_print(S8("Vulkan logical device creation: vkCreateDevice={u64:x}, extensions={u32}, portability_subset={u32}\n"), (u64)(u32)result, extension_count, (u32)portability_subset_enabled);
 
                                         if (result == VK_SUCCESS)
                                         {
@@ -3539,6 +3672,17 @@ void rendering_deinitialize(RenderingHandle* rendering)
 #include <initguid.h>
 #include <dxgi1_4.h>
 #include <d3d12.h>
+#if defined(__has_include)
+#if __has_include(<d3d12sdklayers.h>)
+#include <d3d12sdklayers.h>
+#define BUSTER_D3D12_HAS_SDK_LAYERS 1
+#else
+#define BUSTER_D3D12_HAS_SDK_LAYERS 0
+#endif
+#else
+#include <d3d12sdklayers.h>
+#define BUSTER_D3D12_HAS_SDK_LAYERS 1
+#endif
 #include <d3dcompiler.h>
 
 #define BUSTER_D3D12_FRAME_COUNT (2)
@@ -3558,6 +3702,7 @@ BUSTER_GLOBAL_LOCAL void d3d12_release_unknown(IUnknown* object)
 BUSTER_CT_CHECK(BUSTER_D3D12_RECT_TEXTURE_SLOT_COUNT == RECT_TEXTURE_SLOT_COUNT);
 
 typedef HRESULT (WINAPI BusterD3D12CreateDeviceFunction)(IUnknown* adapter, D3D_FEATURE_LEVEL minimum_feature_level, REFIID riid, void** device);
+typedef HRESULT (WINAPI BusterD3D12GetDebugInterfaceFunction)(REFIID riid, void** debug);
 typedef HRESULT (WINAPI BusterD3D12SerializeRootSignatureFunction)(const D3D12_ROOT_SIGNATURE_DESC* root_signature, D3D_ROOT_SIGNATURE_VERSION version, ID3DBlob** blob, ID3DBlob** error_blob);
 typedef HRESULT (WINAPI BusterCreateDXGIFactory2Function)(UINT flags, REFIID riid, void** factory);
 typedef HRESULT (WINAPI BusterD3DCompileFunction)(LPCVOID source_data, SIZE_T source_data_size, LPCSTR source_name, const D3D_SHADER_MACRO* defines, ID3DInclude* include, LPCSTR entrypoint, LPCSTR target, UINT flags1, UINT flags2, ID3DBlob** code, ID3DBlob** error_messages);
@@ -3634,9 +3779,14 @@ struct RenderingHandle
     OsModuleHandle* dxgi_library;
     OsModuleHandle* d3dcompiler_library;
     BusterD3D12CreateDeviceFunction* d3d12_create_device;
+    BusterD3D12GetDebugInterfaceFunction* d3d12_get_debug_interface;
     BusterD3D12SerializeRootSignatureFunction* d3d12_serialize_root_signature;
     BusterCreateDXGIFactory2Function* create_dxgi_factory2;
     BusterD3DCompileFunction* d3d_compile;
+#if BUSTER_D3D12_HAS_SDK_LAYERS
+    ID3D12Debug* debug_controller;
+    ID3D12Debug1* debug_controller1;
+#endif
     IDXGIFactory4* factory;
     IDXGIAdapter1* adapter;
     ID3D12Device* device;
@@ -3703,6 +3853,7 @@ BUSTER_GLOBAL_LOCAL bool d3d12_load_libraries(RenderingHandle* rendering)
     if (rendering->d3d12_library && rendering->dxgi_library && rendering->d3dcompiler_library)
     {
         rendering->d3d12_create_device = (BusterD3D12CreateDeviceFunction*)os_dynamic_library_function_load(rendering->d3d12_library, S8("D3D12CreateDevice"));
+        rendering->d3d12_get_debug_interface = (BusterD3D12GetDebugInterfaceFunction*)os_dynamic_library_function_load(rendering->d3d12_library, S8("D3D12GetDebugInterface"));
         rendering->d3d12_serialize_root_signature = (BusterD3D12SerializeRootSignatureFunction*)os_dynamic_library_function_load(rendering->d3d12_library, S8("D3D12SerializeRootSignature"));
         rendering->create_dxgi_factory2 = (BusterCreateDXGIFactory2Function*)os_dynamic_library_function_load(rendering->dxgi_library, S8("CreateDXGIFactory2"));
         rendering->d3d_compile = (BusterD3DCompileFunction*)os_dynamic_library_function_load(rendering->d3dcompiler_library, S8("D3DCompile"));
@@ -3833,7 +3984,7 @@ BUSTER_GLOBAL_LOCAL ID3DBlob* d3d12_compile_shader(const char* source, const cha
     ID3DBlob* result = 0;
     ID3DBlob* errors = 0;
     UINT compile_flags = D3DCOMPILE_ENABLE_STRICTNESS;
-#if !BUSTER_OPTIMIZE
+#if BUSTER_GPU_VALIDATION_ENABLED
     compile_flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
     HRESULT compile_result = rendering_handle.d3d_compile(source, strlen(source), "buster_rect.hlsl", 0, 0, entry_point, target, compile_flags, 0, &result, &errors);
@@ -3974,9 +4125,55 @@ RenderingHandle* rendering_initialize(Arena* arena)
     d3d12_frame_begin_log_count = 0;
     d3d12_frame_end_log_count = 0;
 
+    bool enable_validation = BUSTER_GPU_VALIDATION_ENABLED;
+    bool debug_layer_enabled = false;
     UINT factory_flags = 0;
     bool libraries_loaded = d3d12_load_libraries(&rendering_handle);
-    string_print(S8("DirectX 12 rendering initialization: libraries_loaded={u32}\n"), (u32)libraries_loaded);
+    string_print(S8("DirectX 12 rendering initialization: libraries_loaded={u32}, validation={u32}\n"), (u32)libraries_loaded, (u32)enable_validation);
+#if BUSTER_D3D12_HAS_SDK_LAYERS
+    if (libraries_loaded && enable_validation && rendering_handle.d3d12_get_debug_interface)
+    {
+        HRESULT debug1_interface_result = rendering_handle.d3d12_get_debug_interface(&IID_ID3D12Debug1, (void**)&rendering_handle.debug_controller1);
+        HRESULT debug_interface_result = debug1_interface_result;
+        bool gpu_based_validation_enabled = false;
+        bool synchronized_queue_validation_enabled = false;
+        if (d3d12_ok(debug1_interface_result) && rendering_handle.debug_controller1)
+        {
+            ID3D12Debug1_EnableDebugLayer(rendering_handle.debug_controller1);
+            ID3D12Debug1_SetEnableGPUBasedValidation(rendering_handle.debug_controller1, TRUE);
+            ID3D12Debug1_SetEnableSynchronizedCommandQueueValidation(rendering_handle.debug_controller1, TRUE);
+            debug_layer_enabled = true;
+            gpu_based_validation_enabled = true;
+            synchronized_queue_validation_enabled = true;
+            factory_flags |= DXGI_CREATE_FACTORY_DEBUG;
+        }
+        else
+        {
+            debug_interface_result = rendering_handle.d3d12_get_debug_interface(&IID_ID3D12Debug, (void**)&rendering_handle.debug_controller);
+        }
+
+        if (!debug_layer_enabled && d3d12_ok(debug_interface_result) && rendering_handle.debug_controller)
+        {
+            ID3D12Debug_EnableDebugLayer(rendering_handle.debug_controller);
+            debug_layer_enabled = true;
+            factory_flags |= DXGI_CREATE_FACTORY_DEBUG;
+        }
+        string_print(S8("DirectX 12 debug layer: D3D12GetDebugInterface={u64:x}, enabled={u32}, gpu_validation={u32}, queue_validation={u32}\n"),
+                     (u64)(u32)debug_interface_result,
+                     (u32)debug_layer_enabled,
+                     (u32)gpu_based_validation_enabled,
+                     (u32)synchronized_queue_validation_enabled);
+    }
+    else if (libraries_loaded && enable_validation)
+    {
+        string_print(S8("DirectX 12 debug layer unavailable; continuing without validation\n"));
+    }
+#else
+    if (libraries_loaded && enable_validation)
+    {
+        string_print(S8("DirectX 12 SDK layer headers unavailable; continuing without validation\n"));
+    }
+#endif
 
     HRESULT create_factory_result = E_FAIL;
     if (libraries_loaded)
@@ -4772,6 +4969,10 @@ void rendering_deinitialize(RenderingHandle* rendering)
     BUSTER_D3D12_RELEASE(rendering->device);
     BUSTER_D3D12_RELEASE(rendering->adapter);
     BUSTER_D3D12_RELEASE(rendering->factory);
+#if BUSTER_D3D12_HAS_SDK_LAYERS
+    BUSTER_D3D12_RELEASE(rendering->debug_controller1);
+    BUSTER_D3D12_RELEASE(rendering->debug_controller);
+#endif
     if (rendering->d3dcompiler_library)
     {
         os_dynamic_library_unload(rendering->d3dcompiler_library);
@@ -4800,6 +5001,7 @@ void rendering_deinitialize(RenderingHandle* rendering)
 #include <objc/message.h>
 
 extern id MTLCreateSystemDefaultDevice(void);
+extern int setenv(const char* name, const char* value, int overwrite);
 
 #ifndef BUSTER_APPLE_RUNTIME_TYPES
 #define BUSTER_APPLE_RUNTIME_TYPES
@@ -5154,6 +5356,13 @@ RenderingHandle* rendering_initialize(Arena* arena)
     metal_drawable_size_log_count = 0;
     metal_frame_begin_log_count = 0;
     metal_frame_end_log_count = 0;
+    bool enable_validation = BUSTER_GPU_VALIDATION_ENABLED;
+    if (enable_validation)
+    {
+        setenv("MTL_DEBUG_LAYER", "1", 1);
+        setenv("MTL_SHADER_VALIDATION", "1", 1);
+    }
+    string_print(S8("Metal rendering initialization: validation={u32}\n"), (u32)enable_validation);
     rendering_handle.device = MTLCreateSystemDefaultDevice();
     string_print(S8("Metal rendering initialization: device={u64:x}\n"), (u64)rendering_handle.device);
     if (rendering_handle.device)
