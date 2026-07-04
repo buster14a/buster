@@ -369,12 +369,28 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     }
                     break; case '-': { id = TOKEN_MINUS; it += 1; }
                     break; case '*': { id = TOKEN_ASTERISK; it += 1; }
-                    break; case '/': { id = TOKEN_SLASH; it += 1; }
                     break; case '=': { id = TOKEN_EQUAL; it += 1; }
                     break; case ':': { id = TOKEN_COLON; it += 1; }
                     break; case ';': { id = TOKEN_SEMICOLON; it += 1; }
                     break; case ',': { id = TOKEN_COMMA; it += 1; }
                     break; case '&': { id = TOKEN_AMPERSAND; it += 1; }
+                    break; case '/':
+                    {
+                        if (it + 1 < top && it[1] == '/')
+                        {
+                            id = TOKEN_COMMENT;
+                            it += 2;
+                            while (it < top && *it != '\n' && *it != '\r')
+                            {
+                                it += 1;
+                            }
+                        }
+                        else
+                        {
+                            id = TOKEN_SLASH;
+                            it += 1;
+                        }
+                    }
                     break; case '.':
                     {
                         if (it + 2 < top && it[1] == '.' && it[2] == '.')
@@ -1727,6 +1743,7 @@ void parser_experiments(void)
 {
     Arena* arena = arena_create((ArenaCreation){0});
     parse_experiment(arena, S8("tests/basic.bbb"));
+    parse_experiment(arena, S8("tests/basic_comment.bbb"));
     parse_experiment(arena, S8("tests/basic_hexadecimal.bbb"));
     parse_experiment(arena, S8("tests/basic_octal.bbb"));
     parse_experiment(arena, S8("tests/basic_binary.bbb"));
