@@ -761,7 +761,7 @@ buster_register_module(window "${BUSTER_SOURCE_DIR}/window${COMMON_EXTENSION}")
 buster_register_module(rendering "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSION}")
 buster_register_module(truetype "${BUSTER_SOURCE_DIR}/truetype${COMMON_EXTENSION}")
 buster_register_module(font_provider "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
-
+buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
 
 set(GNU_FAMILY_OPTIONS
     -fwrapv
@@ -1543,6 +1543,7 @@ buster_add_executable(ide src/buster/ide/ide.c
     rendering
     truetype
     font_provider
+    hash
 )
 
 if (TARGET buster_shaders)

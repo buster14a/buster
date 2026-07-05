@@ -11,7 +11,7 @@
 #if defined(__TINYC__)
 #define XXH_VECTOR 0
 #endif
-#include <xxhash/xxhash.h>
+#include <buster/hash.h>
 
 #define first_arena_multiplier ((u64)sizeof(u64))
 #define second_arena_multiplier ((u64)sizeof(u32))
@@ -115,7 +115,7 @@ BUSTER_GLOBAL_LOCAL void table_grow(InternTable* table)
 
 BUSTER_GLOBAL_LOCAL u64 hash_string(String8 string)
 {
-    return XXH3_64bits(string.pointer, string.length);
+    return buster_hash_64((u8*)string.pointer, string.length);
 }
 
 BUSTER_GLOBAL_LOCAL IrInternSlotRef table_intern(InternTable* restrict table, String8 string)

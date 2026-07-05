@@ -38,6 +38,7 @@
 #include <buster/compiler/frontend/buster/parser.c>
 #include <buster/compiler/ir/ir.c>
 #include <buster/compiler/frontend/buster/analysis.c>
+#include <buster/hash.c>
 #endif
 
 typedef struct IdePanel IdePanel;
