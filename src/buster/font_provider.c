@@ -253,6 +253,11 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
         character->width = width;
         character->height = height;
 
+        // The atlas is sized to fit the full glyph set with headroom, but only the horizontal axis
+        // wraps; if a glyph doesn't fit vertically either, fail loudly instead of writing past result.pointer.
+        BUSTER_CHECK(y + height <= result.height);
+        BUSTER_CHECK(x + width <= result.width);
+
         u8* source = bitmap;
         u32* destination = result.pointer;
 
@@ -353,6 +358,11 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
                 character->height = (u32)bitmap.height;
                 character->x_offset = bitmap.x_offset;
                 character->y_offset = bitmap.y_offset;
+
+                // The atlas is sized to fit the full glyph set with headroom, but only the horizontal axis
+                // wraps; if a glyph doesn't fit vertically either, fail loudly instead of writing past result.pointer.
+                BUSTER_CHECK(y + (u32)bitmap.height <= result.height);
+                BUSTER_CHECK(x + (u32)bitmap.width <= result.width);
 
                 for (u32 bitmap_y = 0; bitmap_y < (u32)bitmap.height; bitmap_y += 1)
                 {

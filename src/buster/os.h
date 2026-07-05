@@ -131,7 +131,7 @@ BUSTER_F_DECL OsError os_get_last_error(void);
 BUSTER_F_DECL String8 string8_from_os_error(Arena* arena, OsError error, bool null_terminate);
 BUSTER_F_DECL ProcessSpawnResult os_process_spawn(SliceString8 argv, SliceString8 environment_keys, SliceString8 environment_values, ProcessSpawnOptions options);
 BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
-BUSTER_F_DECL String8 get_environment_variable(String8 variable);
+BUSTER_F_DECL String8 os_get_environment_variable(String8 variable);
 
 BUSTER_F_DECL void os_make_directory(String8 path);
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions);

@@ -821,7 +821,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         if (any_capture)
         {
             startup_info.dwFlags |= STARTF_USESTDHANDLES;
-            startup_info.hStdInput = options.capture & (1 << STANDARD_STREAM_INPUT) ? result.pipes[STANDARD_STREAM_INPUT][1] : GetStdHandle(STD_INPUT_HANDLE);
+            startup_info.hStdInput = options.capture & (1 << STANDARD_STREAM_INPUT) ? result.pipes[STANDARD_STREAM_INPUT][0] : GetStdHandle(STD_INPUT_HANDLE);
             startup_info.hStdOutput = options.capture & (1 << STANDARD_STREAM_OUTPUT) ? result.pipes[STANDARD_STREAM_OUTPUT][1] : GetStdHandle(STD_OUTPUT_HANDLE);
             startup_info.hStdError = options.capture & (1 << STANDARD_STREAM_ERROR) ? result.pipes[STANDARD_STREAM_ERROR][1] : GetStdHandle(STD_ERROR_HANDLE);
         }
@@ -839,6 +839,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         if (CreateProcessW(first_argument.pointer, argv, 0, 0, 1, creation_flags, envp, 0, &startup_info, &process_information))
         {
             result.handle = (OsProcessHandle*)process_information.hProcess;
+            CloseHandle(process_information.hThread);
         }
         else
         {
@@ -850,11 +851,18 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     {
         if (options.capture & ((u64)1 << stream) && pipe_creation_results[stream])
         {
-            CloseHandle(result.pipes[stream][1]);
+            // The child inherits the write end for stdout/stderr capture, or the read end for
+            // stdin capture; the parent only ever needs to keep the other end for itself.
+            u32 child_side = stream == STANDARD_STREAM_INPUT ? 0 : 1;
+            u32 parent_side = stream == STANDARD_STREAM_INPUT ? 1 : 0;
+
+            CloseHandle(result.pipes[stream][child_side]);
+            result.pipes[stream][child_side] = 0;
 
             if (!result.handle)
             {
-                CloseHandle(result.pipes[stream][0]);
+                CloseHandle(result.pipes[stream][parent_side]);
+                result.pipes[stream][parent_side] = 0;
             }
         }
     }
@@ -888,19 +896,25 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             pipe_creation_results[stream] = pipe_creation_result;
             if (pipe_creation_result)
             {
-                if (posix_spawn_file_actions_addclose(&file_actions, pipes[stream][0]) != 0)
+                // For stdin, the child reads from the pipe, so it gets the read end dup2'd onto
+                // its fd and the write end closed; for stdout/stderr it's the other way around.
+                bool is_input = (StandardStream)stream == STANDARD_STREAM_INPUT;
+                int child_end = is_input ? pipes[stream][0] : pipes[stream][1];
+                int other_end = is_input ? pipes[stream][1] : pipes[stream][0];
+
+                if (posix_spawn_file_actions_addclose(&file_actions, other_end) != 0)
                 {
                     pipe_result = false;
                 }
 
                 int fd = generic_fd_to_posix(os_get_standard_stream((StandardStream)stream));
 
-                if (posix_spawn_file_actions_adddup2(&file_actions, pipes[stream][1], fd) != 0)
+                if (posix_spawn_file_actions_adddup2(&file_actions, child_end, fd) != 0)
                 {
                     pipe_result = false;
                 }
 
-                if (posix_spawn_file_actions_addclose(&file_actions, pipes[stream][1]) != 0)
+                if (posix_spawn_file_actions_addclose(&file_actions, child_end) != 0)
                 {
                     pipe_result = false;
                 }
@@ -928,11 +942,17 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     {
         if (options.capture & ((u64)1 << stream) && pipe_creation_results[stream])
         {
-            close(pipes[stream][1]);
+            bool is_input = (StandardStream)stream == STANDARD_STREAM_INPUT;
+            int child_side = is_input ? 0 : 1;
+            int parent_side = is_input ? 1 : 0;
+
+            close(pipes[stream][child_side]);
+            pipes[stream][child_side] = -1;
 
             if (pid == -1)
             {
-                close(pipes[stream][0]);
+                close(pipes[stream][parent_side]);
+                pipes[stream][parent_side] = -1;
             }
         }
 
@@ -1013,6 +1033,7 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
                 result.result = (ProcessResult)exit_code;
             }
         }
+        CloseHandle(spawn.handle);
 #else
         pid_t pid = (pid_t)(u64)spawn.handle;
 

@@ -3499,7 +3499,11 @@ void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHan
 
         rendering_window_pipeline_add_indices(window, BUSTER_PIPELINE_RECT, (Sliceu32)BUSTER_ARRAY_TO_SLICE(indices));
 
-        s32 kerning = (texture_atlas->description.kerning_tables + ch * 256)[(u32)string.pointer[i + 1]];
+        s32 kerning = 0;
+        if (i + 1 < string.length)
+        {
+            kerning = (texture_atlas->description.kerning_tables + ch * 256)[(u32)string.pointer[i + 1]];
+        }
         x_offset += (f32)character->advance + (f32)kerning;
     }
 }
@@ -4915,7 +4919,11 @@ void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHan
         u32 vertex_offset = rendering_window_pipeline_add_vertices(window, BUSTER_PIPELINE_RECT, BUSTER_ARRAY_TO_BYTE_SLICE(vertices), BUSTER_ARRAY_LENGTH(vertices));
         u32 indices[] = { vertex_offset + 0, vertex_offset + 1, vertex_offset + 2, vertex_offset + 1, vertex_offset + 3, vertex_offset + 2 };
         rendering_window_pipeline_add_indices(window, BUSTER_PIPELINE_RECT, (Sliceu32)BUSTER_ARRAY_TO_SLICE(indices));
-        s32 kerning = (texture_atlas->description.kerning_tables + ch * 256)[(u32)string.pointer[i + 1]];
+        s32 kerning = 0;
+        if (i + 1 < string.length)
+        {
+            kerning = (texture_atlas->description.kerning_tables + ch * 256)[(u32)string.pointer[i + 1]];
+        }
         x_offset += (f32)character->advance + (f32)kerning;
     }
 }
@@ -5858,7 +5866,11 @@ void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHan
         u32 vertex_offset = rendering_window_pipeline_add_vertices(window, BUSTER_PIPELINE_RECT, BUSTER_ARRAY_TO_BYTE_SLICE(vertices), BUSTER_ARRAY_LENGTH(vertices));
         u32 indices[] = { vertex_offset + 0, vertex_offset + 1, vertex_offset + 2, vertex_offset + 1, vertex_offset + 3, vertex_offset + 2 };
         rendering_window_pipeline_add_indices(window, BUSTER_PIPELINE_RECT, (Sliceu32)BUSTER_ARRAY_TO_SLICE(indices));
-        s32 kerning = (texture_atlas->description.kerning_tables + ch * 256)[(u32)string.pointer[i + 1]];
+        s32 kerning = 0;
+        if (i + 1 < string.length)
+        {
+            kerning = (texture_atlas->description.kerning_tables + ch * 256)[(u32)string.pointer[i + 1]];
+        }
         x_offset += (f32)character->advance + (f32)kerning;
     }
 }

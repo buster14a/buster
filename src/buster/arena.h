@@ -50,7 +50,6 @@ BUSTER_F_DECL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment);
 BUSTER_F_DECL u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment);
 
 BUSTER_F_DECL TemporalArena arena_begin_temporal(Arena* arena);
-BUSTER_F_DECL void arena_end_temporal(TemporalArena temporal);
 
 BUSTER_F_DECL TemporalArena scratch_begin(Arena** conflicts, u64 count);
 BUSTER_F_DECL void scratch_end(TemporalArena scratch);

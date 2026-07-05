@@ -1263,16 +1263,10 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     }
                     break; case FORMAT_TYPE_COUNT:
                     {
-                        // if (result.real_buffer_index < buffer_slice.length)
-                        {
-                            *arena_allocate(arena, char8, 1) = '{';
-                        }
-
-                        {
-                            char8* pointer = arena_allocate(arena, char8, whole_format_string.length + 1);
-                            memcpy(pointer, whole_format_string.pointer, sizeof(char8) * whole_format_string.length);
-                            pointer[whole_format_string.length] = '}';
-                        }
+                        // Unrecognized specifier: echo the original "{...}" text back verbatim.
+                        // whole_format_string already includes both braces, so no extra ones are added here.
+                        char8* pointer = arena_allocate(arena, char8, whole_format_string.length);
+                        memcpy(pointer, whole_format_string.pointer, sizeof(char8) * whole_format_string.length);
                     }
                 }
             }
@@ -1469,54 +1463,50 @@ PosixStringList posix_string_list_from_slice_string(Arena* arena, SliceString8 p
 
 PosixStringList posix_environment_from_keys_and_values(Arena* arena, SliceString8 keys, SliceString8 values)
 {
-    PosixStringList result = {0};
     BUSTER_CHECK(keys.length == values.length);
 
-    if (keys.length)
+    // Always return a valid NULL-terminated array, even for zero keys: a NULL PosixStringList
+    // (as opposed to an array containing just the terminator) is not a valid execve()/posix_spawn() envp.
+    PosixStringList result = arena_allocate(arena, char8*, keys.length + 1);
+
+    for (u64 i = 0; i < keys.length; i += 1)
     {
-        result = arena_allocate(arena, char8*, keys.length + 1);
+        String8 key = keys.pointer[i];
+        String8 value = values.pointer[i];
 
-        for (u64 i = 0; i < keys.length; i += 1)
-        {
-            String8 key = keys.pointer[i];
-            String8 value = values.pointer[i];
+        String8 parts[] = {
+            key,
+            S8("="),
+            value,
+        };
 
-            String8 parts[] = {
-                key,
-                S8("="),
-                value,
-            };
-
-            result[i] = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true).pointer;
-        }
-
-        result[keys.length] = 0;
+        result[i] = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true).pointer;
     }
+
+    result[keys.length] = 0;
 
     return result;
 }
 
 WindowsStringList windows_environment_from_keys_and_values(Arena* arena, SliceString8 keys, SliceString8 values)
 {
-    WindowsStringList result = {0};
+    // Always return a valid, non-NULL environment block, even for zero keys: passing a NULL
+    // lpEnvironment to CreateProcessW means "inherit the caller's full environment", which is
+    // the opposite of an explicitly empty environment.
+    WindowsStringList result = arena_get_pointer_at_position_align(arena, char16, arena->position);
 
-    if (keys.length)
+    for (u64 i = 0; i < keys.length; i += 1)
     {
-        result = arena_get_pointer_at_position_align(arena, char16, arena->position);
+        String8 key = keys.pointer[i];
+        String8 value = values.pointer[i];
 
-        for (u64 i = 0; i < keys.length; i += 1)
-        {
-            String8 key = keys.pointer[i];
-            String8 value = values.pointer[i];
-
-            string16_from_string8(arena, key, false);
-            *arena_allocate(arena, char16, 1) = '=';
-            string16_from_string8(arena, value, false);
-            *arena_allocate(arena, char16, 1) = 0;
-        }
-
+        string16_from_string8(arena, key, false);
+        *arena_allocate(arena, char16, 1) = '=';
+        string16_from_string8(arena, value, false);
         *arena_allocate(arena, char16, 1) = 0;
     }
+
+    *arena_allocate(arena, char16, 1) = 0;
 
     return result;
 }

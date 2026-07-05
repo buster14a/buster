@@ -60,11 +60,16 @@ CpuModel cpu_detect_model_aarch64(void)
 #define BUSTER_AARCH64_BUFFER_LENGTH (sizeof(u64) * 2 + 2)
     char8 buffer[BUSTER_AARCH64_BUFFER_LENGTH + 4096];
     OsFileDescriptor* fd = os_file_open(S8("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"), (OpenFlags){ .read = 1 }, (OpenPermissions){0});
-    String8 midr_el1_string = (String8)BUSTER_ARRAY_TO_SLICE(buffer);
-    midr_el1_string.length = BUSTER_AARCH64_BUFFER_LENGTH;
-    u64 file_size = os_file_read(fd, BUSTER_SLICE_TO_BYTE_SLICE(midr_el1_string), BUSTER_AARCH64_BUFFER_LENGTH);
-    buffer[file_size] = 0;
-    os_file_close(fd);
+    u64 file_size = 0;
+
+    if (fd)
+    {
+        String8 midr_el1_string = (String8)BUSTER_ARRAY_TO_SLICE(buffer);
+        midr_el1_string.length = BUSTER_AARCH64_BUFFER_LENGTH;
+        file_size = os_file_read(fd, BUSTER_SLICE_TO_BYTE_SLICE(midr_el1_string), BUSTER_AARCH64_BUFFER_LENGTH);
+        buffer[file_size] = 0;
+        os_file_close(fd);
+    }
 
     if (file_size == BUSTER_AARCH64_BUFFER_LENGTH)
     {
@@ -72,7 +77,7 @@ CpuModel cpu_detect_model_aarch64(void)
         {
             u64 value = string8_parse_u64_hexadecimal((char*)buffer + 2).value;
 
-            if (value <= INT32_MAX)
+            if (value <= UINT32_MAX)
             {
                 u32 value_u32 = (u32)value;
                 IdentificationRegister id_register = *(IdentificationRegister*)&value_u32;

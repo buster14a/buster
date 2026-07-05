@@ -67,7 +67,7 @@ BUSTER_GLOBAL_LOCAL u32* get_slot_index(InternTable* table, u32 index)
 {
     u32 capacity = get_hash_table_capacity(table);
     BUSTER_CHECK(index < capacity);
-    u32* result = (u32*)((u8*)table->hash_table_arena + arena_minimum_position + first_arena_multiplier * capacity);
+    u32* result = (u32*)((u8*)table->hash_table_arena + arena_minimum_position + first_arena_multiplier * capacity + second_arena_multiplier * (u64)index);
     return result;
 }
 

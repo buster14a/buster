@@ -154,6 +154,8 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                             }
                         }
 
+                        const char8* restrict digits_start = it;
+
                         bool increment;
 
                         do
@@ -230,6 +232,9 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
 
                             it += increment;
                         } while (increment);
+
+                        // A prefixed literal ("0x"/"0o"/"0b") with no digits after the prefix is malformed.
+                        is_valid = is_valid && (format == INTEGER_FORMAT_DECIMAL || it != digits_start);
 
                         char8 maybe_float_separator = *it;
                         bool is_float = maybe_float_separator == '.';
@@ -1718,7 +1723,10 @@ BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, String8 path)
 {
     u64 position = arena->position;
 
-    String8 source = BYTE_SLICE_TO_STRING(8, file_read(arena, path, (FileReadOptions){0}));
+    // The tokenizer peeks a few bytes past the last consumed character (e.g. exponent sign/digit
+    // lookahead on numeric literals); end_padding guarantees those reads land on zeroed memory
+    // instead of past the arena allocation.
+    String8 source = BYTE_SLICE_TO_STRING(8, file_read(arena, path, (FileReadOptions){ .end_padding = 8 }));
 
     if (!source.pointer || !source.length)
     {

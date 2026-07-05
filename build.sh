@@ -12,4 +12,4 @@ if [[ ${1-} == "test_all_combinations_ci" ]]; then
     fi
 fi
 tcc -Isrc -Wall -Werror -Wno-unused-function -g build.c -o build/build
-build/build $@
+build/build "$@"

@@ -1589,68 +1589,10 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
         operand_total_count += database->forms[i].operand_count;
     }
 
-    parts[part_count++] = S8("STRUCT(X86InstructionOperand)\n{\n");
-    parts[part_count++] = S8("    X86OperandKind kind;\n");
-    parts[part_count++] = S8("    X86OperandRegisterConstraint register_constraint;\n");
-    parts[part_count++] = S8("    X86OperandVisibility visibility;\n");
-    parts[part_count++] = S8("    X86OperandAction action;\n");
-    parts[part_count++] = S8("    X86OperandWidthName width_name;\n");
-    parts[part_count++] = S8("    bool has_register_constraint;\n");
-    parts[part_count++] = S8("    bool has_width;\n");
-    parts[part_count++] = S8("    bool has_element_type;\n");
-    parts[part_count++] = S8("    u8 reserved[5];\n");
-    parts[part_count++] = S8("};\n\n");
-
-    parts[part_count++] = string8_format_z(arena, S8("BUSTER_GLOBAL_LOCAL u64 x86_instruction_operand_count = {u64};\n"), operand_total_count);
-    parts[part_count++] = S8("BUSTER_GLOBAL_LOCAL X86InstructionOperand x86_instruction_operands[] = {\n");
-
-    for (u64 i = 0; i < database->form_count; i += 1)
-    {
-        ScrapeInstructionForm* form = &database->forms[i];
-        for (u32 operand_i = 0; operand_i < form->operand_count; operand_i += 1)
-        {
-            ScrapeOperand* operand = &form->operands[operand_i];
-            String8 operand_kind = scrape_operand_kind_string(operand);
-            String8 operand_action = scrape_operand_action_string(operand);
-            u64 register_constraint_id = scrape_string_table_enum_index(&operand_register_constraint_table, operand->register_name);
-            u64 visibility_id = scrape_string_table_enum_index(&operand_visibility_table, operand->visibility);
-            u64 action_id = scrape_string_table_enum_index(&operand_action_table, operand_action);
-            u64 kind_id = scrape_string_table_enum_index(&operand_kind_table, operand_kind);
-            u64 width_name_id = scrape_string_table_enum_index(&operand_width_name_table, operand->width);
-
-            String8 register_constraint_token = register_constraint_id < operand_register_constraint_table.count ? operand_register_constraint_tokens[register_constraint_id] : S8("NONE");
-            String8 visibility_token = visibility_id < operand_visibility_table.count ? operand_visibility_tokens[visibility_id] : S8("NONE");
-            String8 action_token = action_id < operand_action_table.count ? operand_action_tokens[action_id] : S8("NONE");
-            String8 kind_token = kind_id < operand_kind_table.count ? operand_kind_tokens[kind_id] : S8("SPECIAL");
-            String8 width_name_token = width_name_id < operand_width_name_table.count ? operand_width_name_tokens[width_name_id] : S8("NONE");
-            String8 has_register_constraint = operand->register_name.length > 0 ? S8("true") : S8("false");
-            String8 has_width = operand->width.length > 0 ? S8("true") : S8("false");
-            String8 has_element_type = operand->element_type.length > 0 ? S8("true") : S8("false");
-
-            parts[part_count++] = S8("    { .kind = X86_OPERAND_KIND_");
-            parts[part_count++] = kind_token;
-            parts[part_count++] = S8(", .register_constraint = X86_OPERAND_REGISTER_CONSTRAINT_");
-            parts[part_count++] = register_constraint_token;
-            parts[part_count++] = S8(", .visibility = X86_OPERAND_VISIBILITY_");
-            parts[part_count++] = visibility_token;
-            parts[part_count++] = S8(", .action = X86_OPERAND_ACTION_");
-            parts[part_count++] = action_token;
-            parts[part_count++] = S8(", .width_name = X86_OPERAND_WIDTH_");
-            parts[part_count++] = width_name_token;
-            parts[part_count++] = S8(", .has_register_constraint = ");
-            parts[part_count++] = has_register_constraint;
-            parts[part_count++] = S8(", .has_width = ");
-            parts[part_count++] = has_width;
-            parts[part_count++] = S8(", .has_element_type = ");
-            parts[part_count++] = has_element_type;
-            parts[part_count++] = S8(", .reserved = { 0 } },\n");
-            SCRAPE_FLUSH_IF_NEEDED();
-        }
-    }
-
-    parts[part_count++] = S8("};\n\n");
-
-    // Group forms by iclass for fast encoder-side lookup
+    // Group forms by iclass for fast encoder-side lookup. This has to happen before the operand
+    // table is emitted below, since the operand table is emitted in this same (sorted) order so
+    // that x86_instruction_forms[].operand_start (a running prefix sum over this order) lines up
+    // with the operands actually written for each form.
     if (database->form_count > 65535)
     {
         string8_print(S8("Too many instruction forms ({u64}) for u16 iclass ranges\n"), database->form_count);
@@ -1705,6 +1647,68 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
             return;
         }
     }
+
+    parts[part_count++] = S8("STRUCT(X86InstructionOperand)\n{\n");
+    parts[part_count++] = S8("    X86OperandKind kind;\n");
+    parts[part_count++] = S8("    X86OperandRegisterConstraint register_constraint;\n");
+    parts[part_count++] = S8("    X86OperandVisibility visibility;\n");
+    parts[part_count++] = S8("    X86OperandAction action;\n");
+    parts[part_count++] = S8("    X86OperandWidthName width_name;\n");
+    parts[part_count++] = S8("    bool has_register_constraint;\n");
+    parts[part_count++] = S8("    bool has_width;\n");
+    parts[part_count++] = S8("    bool has_element_type;\n");
+    parts[part_count++] = S8("    u8 reserved[5];\n");
+    parts[part_count++] = S8("};\n\n");
+
+    parts[part_count++] = string8_format_z(arena, S8("BUSTER_GLOBAL_LOCAL u64 x86_instruction_operand_count = {u64};\n"), operand_total_count);
+    parts[part_count++] = S8("BUSTER_GLOBAL_LOCAL X86InstructionOperand x86_instruction_operands[] = {\n");
+
+    for (u64 i = 0; i < database->form_count; i += 1)
+    {
+        u64 source_form_index = form_order[i];
+        ScrapeInstructionForm* form = &database->forms[source_form_index];
+        for (u32 operand_i = 0; operand_i < form->operand_count; operand_i += 1)
+        {
+            ScrapeOperand* operand = &form->operands[operand_i];
+            String8 operand_kind = scrape_operand_kind_string(operand);
+            String8 operand_action = scrape_operand_action_string(operand);
+            u64 register_constraint_id = scrape_string_table_enum_index(&operand_register_constraint_table, operand->register_name);
+            u64 visibility_id = scrape_string_table_enum_index(&operand_visibility_table, operand->visibility);
+            u64 action_id = scrape_string_table_enum_index(&operand_action_table, operand_action);
+            u64 kind_id = scrape_string_table_enum_index(&operand_kind_table, operand_kind);
+            u64 width_name_id = scrape_string_table_enum_index(&operand_width_name_table, operand->width);
+
+            String8 register_constraint_token = register_constraint_id < operand_register_constraint_table.count ? operand_register_constraint_tokens[register_constraint_id] : S8("NONE");
+            String8 visibility_token = visibility_id < operand_visibility_table.count ? operand_visibility_tokens[visibility_id] : S8("NONE");
+            String8 action_token = action_id < operand_action_table.count ? operand_action_tokens[action_id] : S8("NONE");
+            String8 kind_token = kind_id < operand_kind_table.count ? operand_kind_tokens[kind_id] : S8("SPECIAL");
+            String8 width_name_token = width_name_id < operand_width_name_table.count ? operand_width_name_tokens[width_name_id] : S8("NONE");
+            String8 has_register_constraint = operand->register_name.length > 0 ? S8("true") : S8("false");
+            String8 has_width = operand->width.length > 0 ? S8("true") : S8("false");
+            String8 has_element_type = operand->element_type.length > 0 ? S8("true") : S8("false");
+
+            parts[part_count++] = S8("    { .kind = X86_OPERAND_KIND_");
+            parts[part_count++] = kind_token;
+            parts[part_count++] = S8(", .register_constraint = X86_OPERAND_REGISTER_CONSTRAINT_");
+            parts[part_count++] = register_constraint_token;
+            parts[part_count++] = S8(", .visibility = X86_OPERAND_VISIBILITY_");
+            parts[part_count++] = visibility_token;
+            parts[part_count++] = S8(", .action = X86_OPERAND_ACTION_");
+            parts[part_count++] = action_token;
+            parts[part_count++] = S8(", .width_name = X86_OPERAND_WIDTH_");
+            parts[part_count++] = width_name_token;
+            parts[part_count++] = S8(", .has_register_constraint = ");
+            parts[part_count++] = has_register_constraint;
+            parts[part_count++] = S8(", .has_width = ");
+            parts[part_count++] = has_width;
+            parts[part_count++] = S8(", .has_element_type = ");
+            parts[part_count++] = has_element_type;
+            parts[part_count++] = S8(", .reserved = { 0 } },\n");
+            SCRAPE_FLUSH_IF_NEEDED();
+        }
+    }
+
+    parts[part_count++] = S8("};\n\n");
 
     // Generate instruction form table
     parts[part_count++] = string8_format_z(arena, S8("BUSTER_GLOBAL_LOCAL u64 x86_instruction_form_count = {u64};\n\n"), database->form_count);

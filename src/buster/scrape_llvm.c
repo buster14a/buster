@@ -169,8 +169,8 @@ static ScrapeLlvmLoweringCostSpec scrape_llvm_lowering_cost_specs[] = {
     },
     {
         .lowering_name = S8("X86_SELECTOR_LOWERING_ADD_IMMEDIATE_GPR"),
-        .instruction_names = { S8("ADD64rr") },
-        .instruction_name_count = 1,
+        .instruction_names = { S8("ADD64ri8"), S8("ADD64ri32") },
+        .instruction_name_count = 2,
         .schedule_write_names = { S8("WriteALU") },
         .schedule_write_name_count = 1,
     },
@@ -2412,22 +2412,6 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedrw_contexts(ScrapeLlvmDatabase* 
         String8 line = string8_from_pointer_length(remaining.pointer, line_end);
         String8 trimmed = scrape_llvm_trim(line);
 
-        if (string8_first_sequence(trimmed, S8("SchedRW = [")) != BUSTER_STRING_NO_MATCH &&
-            string8_first_sequence(trimmed, S8("in {")) != BUSTER_STRING_NO_MATCH)
-        {
-            u64 bracket_start = string8_first_sequence(trimmed, S8("["));
-            u64 bracket_end = string8_first_sequence(trimmed, S8("]"));
-            if (bracket_start != BUSTER_STRING_NO_MATCH && bracket_end != BUSTER_STRING_NO_MATCH && bracket_end > bracket_start)
-            {
-                String8 write_list = string8_from_pointer_length(trimmed.pointer + bracket_start + 1, bracket_end - bracket_start - 1);
-                String8 write_name = scrape_llvm_first_identifier(write_list);
-                if (write_name.length > 0 && depth + 1 < SCRAPE_LLVM_SCOPE_DEPTH)
-                {
-                    scrape_llvm_copy_name(inherited_writes[depth + 1], write_name);
-                }
-            }
-        }
-
         if (string8_starts_with_sequence(trimmed, S8("def ")))
         {
             String8 instruction_name = scrape_llvm_identifier_after_keyword(trimmed, S8("def "));
@@ -2459,6 +2443,26 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedrw_contexts(ScrapeLlvmDatabase* 
             {
                 depth += 1;
                 memcpy(inherited_writes[depth], inherited_writes[depth - 1], SCRAPE_LLVM_NAME_CAPACITY);
+            }
+        }
+
+        // An explicit "let SchedRW = [...] in {" opens its scope on this same line, so the write
+        // name has to be applied after the open-brace handling above (which just copied the
+        // parent's inherited value into the new depth) -- otherwise this assignment would be
+        // immediately clobbered by that copy.
+        if (string8_first_sequence(trimmed, S8("SchedRW = [")) != BUSTER_STRING_NO_MATCH &&
+            string8_first_sequence(trimmed, S8("in {")) != BUSTER_STRING_NO_MATCH)
+        {
+            u64 bracket_start = string8_first_sequence(trimmed, S8("["));
+            u64 bracket_end = string8_first_sequence(trimmed, S8("]"));
+            if (bracket_start != BUSTER_STRING_NO_MATCH && bracket_end != BUSTER_STRING_NO_MATCH && bracket_end > bracket_start)
+            {
+                String8 write_list = string8_from_pointer_length(trimmed.pointer + bracket_start + 1, bracket_end - bracket_start - 1);
+                String8 write_name = scrape_llvm_first_identifier(write_list);
+                if (write_name.length > 0)
+                {
+                    scrape_llvm_copy_name(inherited_writes[depth], write_name);
+                }
             }
         }
 
