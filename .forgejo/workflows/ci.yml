@@ -55,9 +55,12 @@ jobs:
       - name: Test (iOS simulator)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
-        timeout-minutes: 20
+        timeout-minutes: 40
         run: |
-          ./ios/test_ci.sh
+          for build_config in Debug Release; do
+            echo "Running iOS ${build_config} tests"
+            BUSTER_IOS_BUILD_CONFIG="$build_config" ./ios/test_ci.sh
+          done
       - name: Test (macOS)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
