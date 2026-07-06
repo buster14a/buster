@@ -394,6 +394,8 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     break; case ',': { id = TOKEN_COMMA; it += 1; }
                     break; case '&': { id = TOKEN_AMPERSAND; it += 1; }
                     break; case '%': { id = TOKEN_PERCENTAGE; it += 1; }
+                    break; case '|': { id = TOKEN_BAR; it += 1; }
+                    break; case '^': { id = TOKEN_CARET; it += 1; }
                     break; case '/':
                     {
                         if (it + 1 < top && it[1] == '/')
@@ -980,8 +982,39 @@ typedef enum AstNodeId
     AST_NODE_BINARY_PERCENT,
     AST_NODE_BINARY_SHIFT_LEFT,
     AST_NODE_BINARY_SHIFT_RIGHT,
+    AST_NODE_BINARY_AMPERSAND,
+    AST_NODE_BINARY_BAR,
+    AST_NODE_BINARY_CARET,
     AST_NODE_COUNT,
 } AstNodeId;
+
+BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
+{
+    switch (id)
+    {
+        case AST_NODE_FUNCTION_DEFINITION: return S8("FunctionDefinition");
+        case AST_NODE_FUNCTION_DECLARATION: return S8("FunctionDeclaration");
+        case AST_NODE_BLOCK: return S8("Block");
+        case AST_NODE_CONSTANT_INTEGER: return S8("ConstantInteger");
+        case AST_NODE_UNARY_MINUS: return S8("UnaryMinus");
+        case AST_NODE_UNARY_PLUS: return S8("UnaryPlus");
+        case AST_NODE_BINARY_PLUS: return S8("BinaryPlus");
+        case AST_NODE_BINARY_MINUS: return S8("BinaryMinus");
+        case AST_NODE_BINARY_ASTERISK: return S8("BinaryAsterisk");
+        case AST_NODE_BINARY_SLASH: return S8("BinarySlash");
+        case AST_NODE_BINARY_PERCENT: return S8("BinaryPercent");
+        case AST_NODE_BINARY_SHIFT_LEFT: return S8("BinaryShiftLeft");
+        case AST_NODE_BINARY_SHIFT_RIGHT: return S8("BinaryShiftRight");
+        case AST_NODE_BINARY_AMPERSAND: return S8("BinaryAmpersand");
+        case AST_NODE_BINARY_BAR: return S8("BinaryBar");
+        case AST_NODE_BINARY_CARET: return S8("BinaryCaret");
+        case AST_NODE_COUNT:
+        {
+        }
+    }
+
+    BUSTER_UNREACHABLE();
+}
 
 typedef enum CodeAttributeId
 {
@@ -1068,25 +1101,54 @@ BUSTER_GLOBAL_LOCAL AstNode* allocate_node(Parser* restrict parser)
     return allocate_nodes(parser, 1);
 }
 
+typedef enum BindingPower
+{
+    BINDING_POWER_BITWISE,
+    BINDING_POWER_SHIFT,
+    BINDING_POWER_ADD,
+    BINDING_POWER_MULTIPLY,
+} BindingPower;
+
 // Left binding power of a binary operator: higher binds tighter. Mirrors C/Zig
 // precedence for these operators (multiplicative > additive > shift).
-BUSTER_GLOBAL_LOCAL u8 binary_binding_power(AstNodeId id)
+BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
 {
     switch (id)
     {
+        case AST_NODE_BINARY_AMPERSAND:
+        case AST_NODE_BINARY_BAR:
+        case AST_NODE_BINARY_CARET:
+        {
+            return BINDING_POWER_BITWISE;
+        }
         case AST_NODE_BINARY_SHIFT_LEFT:
         case AST_NODE_BINARY_SHIFT_RIGHT:
-            return 1;
+        {
+            return BINDING_POWER_SHIFT;
+        }
         case AST_NODE_BINARY_PLUS:
         case AST_NODE_BINARY_MINUS:
-            return 2;
+        {
+            return BINDING_POWER_ADD;
+        }
         case AST_NODE_BINARY_ASTERISK:
         case AST_NODE_BINARY_SLASH:
         case AST_NODE_BINARY_PERCENT:
-            return 3;
-        default:
-            BUSTER_UNREACHABLE();
+        {
+            return BINDING_POWER_MULTIPLY;
+        }
+        case AST_NODE_FUNCTION_DEFINITION:
+        case AST_NODE_FUNCTION_DECLARATION:
+        case AST_NODE_BLOCK:
+        case AST_NODE_COUNT:
+        case AST_NODE_UNARY_MINUS:
+        case AST_NODE_UNARY_PLUS:
+        case AST_NODE_CONSTANT_INTEGER:
+        {
+        }
     }
+
+    BUSTER_UNREACHABLE();
 }
 
 // Number of operand subtrees a node consumes. Drives the implicit-tree walk:
@@ -1096,10 +1158,14 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNodeId id)
     switch (id)
     {
         case AST_NODE_CONSTANT_INTEGER:
+        {
             return 0;
+        }
         case AST_NODE_UNARY_MINUS:
         case AST_NODE_UNARY_PLUS:
+        {
             return 1;
+        }
         case AST_NODE_BINARY_PLUS:
         case AST_NODE_BINARY_MINUS:
         case AST_NODE_BINARY_ASTERISK:
@@ -1107,10 +1173,21 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNodeId id)
         case AST_NODE_BINARY_PERCENT:
         case AST_NODE_BINARY_SHIFT_LEFT:
         case AST_NODE_BINARY_SHIFT_RIGHT:
+        case AST_NODE_BINARY_AMPERSAND:
+        case AST_NODE_BINARY_BAR:
+        case AST_NODE_BINARY_CARET:
+        {
             return 2;
-        default:
-            BUSTER_UNREACHABLE();
+        }
+        case AST_NODE_FUNCTION_DEFINITION:
+        case AST_NODE_FUNCTION_DECLARATION:
+        case AST_NODE_BLOCK:
+        case AST_NODE_COUNT:
+        {
+        }
     }
+
+    BUSTER_UNREACHABLE();
 }
 
 BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
@@ -1126,8 +1203,20 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_BINARY_PERCENT: return S8("%");
         case AST_NODE_BINARY_SHIFT_LEFT: return S8("<<");
         case AST_NODE_BINARY_SHIFT_RIGHT: return S8(">>");
-        default: BUSTER_UNREACHABLE();
+        case AST_NODE_BINARY_AMPERSAND: return S8("&");
+        case AST_NODE_BINARY_BAR: return S8("|");
+        case AST_NODE_BINARY_CARET: return S8("^");
+
+        case AST_NODE_FUNCTION_DEFINITION:
+        case AST_NODE_FUNCTION_DECLARATION:
+        case AST_NODE_BLOCK:
+        case AST_NODE_CONSTANT_INTEGER:
+        case AST_NODE_COUNT:
+        {
+        }
     }
+
+    BUSTER_UNREACHABLE();
 }
 
 // Append a node to the current expression's postorder output stream.
@@ -1227,6 +1316,8 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_TRIPLE_DOT: return S8("TripleDot");
         break; case TOKEN_AMPERSAND: return S8("Ampersand");
         break; case TOKEN_PERCENTAGE: return S8("Percent");
+        break; case TOKEN_BAR: return S8("Bar");
+        break; case TOKEN_CARET: return S8("Caret");
         break; case TOKEN_KEYWORD_RETURN: return S8("Keyword_Return");
         break; case TOKEN_KEYWORD_IF: return S8("Keyword_If");
         break; case TOKEN_KEYWORD_ELSE: return S8("Keyword_Else");
@@ -1245,6 +1336,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
 }
 
 #define BUSTER_TODO_TOKEN(id) BUSTER_TODO_MESSAGE(S8("TODO {S8}"), string_from_token_id((TokenIdEnum)id))
+#define BUSTER_TODO_NODE(id) BUSTER_TODO_MESSAGE(S8("TODO {S8}"), string_from_node_id((AstNodeId)id))
 
 BUSTER_GLOBAL_LOCAL AstExpression parse(const char8* restrict source, TokenizerResult tokenizer)
 {
@@ -1888,6 +1980,9 @@ BUSTER_GLOBAL_LOCAL AstExpression parse(const char8* restrict source, TokenizerR
                                 case TOKEN_PERCENTAGE:
                                 case TOKEN_SHIFT_LEFT:
                                 case TOKEN_SHIFT_RIGHT:
+                                case TOKEN_BAR:
+                                case TOKEN_AMPERSAND:
+                                case TOKEN_CARET:
                                 {
                                     consume(&parser.iterator);
 
@@ -1902,6 +1997,9 @@ BUSTER_GLOBAL_LOCAL AstExpression parse(const char8* restrict source, TokenizerR
                                         break; case TOKEN_PERCENTAGE: binary_node_id = AST_NODE_BINARY_PERCENT;
                                         break; case TOKEN_SHIFT_LEFT: binary_node_id = AST_NODE_BINARY_SHIFT_LEFT;
                                         break; case TOKEN_SHIFT_RIGHT: binary_node_id = AST_NODE_BINARY_SHIFT_RIGHT;
+                                        break; case TOKEN_AMPERSAND: binary_node_id = AST_NODE_BINARY_AMPERSAND;
+                                        break; case TOKEN_BAR: binary_node_id = AST_NODE_BINARY_BAR;
+                                        break; case TOKEN_CARET: binary_node_id = AST_NODE_BINARY_CARET;
                                         break; default: BUSTER_TODO_TOKEN(token.id);
                                     }
 
@@ -1909,7 +2007,7 @@ BUSTER_GLOBAL_LOCAL AstExpression parse(const char8* restrict source, TokenizerR
                                     // operator that binds at least as tightly. `>=` makes equal
                                     // precedence left-associative; a strictly-tighter incoming
                                     // operator stays pending so it captures the next operand instead.
-                                    u8 binding_power = binary_binding_power(binary_node_id);
+                                    BindingPower binding_power = binary_binding_power(binary_node_id);
                                     while (st->expression.operator_count &&
                                            binary_binding_power((AstNodeId)st->expression.operator_stack[st->expression.operator_count - 1]) >= binding_power)
                                     {
@@ -2069,6 +2167,9 @@ void parser_experiments(void)
         S8("tests/basic_integer_literal_mod.bbb"),
         S8("tests/basic_integer_literal_shift_left.bbb"),
         S8("tests/basic_integer_literal_shift_right.bbb"),
+        S8("tests/basic_integer_literal_and.bbb"),
+        S8("tests/basic_integer_literal_or.bbb"),
+        S8("tests/basic_integer_literal_xor.bbb"),
         S8("tests/basic_integer_literal_precedence.bbb"),
         // S8("tests/basic_if_else.bbb"),
         // S8("tests/array_slices.bbb"),
