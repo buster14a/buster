@@ -185,9 +185,13 @@ BUSTER_COLD bool is_debugger_present(void)
     return (bool)program_state->_is_debugger_present;
 }
 
-BUSTER_NORETURN BUSTER_COLD void os_fail_ex(String8 context, u32 line, String8 function, String8 file)
+BUSTER_NORETURN BUSTER_COLD void os_fail_va(u32 line, String8 function, String8 file, String8 context, ...)
 {
-    string_print(S8("{S8} at {S8}:{u32} in {S8}\n"), context, file, line, function);
+    va_list variable_arguments;
+    va_start(variable_arguments, context);
+    string_write_to_file_va(os_get_stdout(), context, variable_arguments);
+    va_end(variable_arguments);
+    string_print(S8(" at {S8}:{u32} in {S8}\n"), file, line, function);
     os_exit(1);
 }
 

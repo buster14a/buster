@@ -4,6 +4,7 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
 BUSTER_F_DECL BatchTestResult parser_tests(UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult parser_expression_tests(UnitTestArguments* arguments);
 #endif
 
 typedef enum TokenIdEnum
@@ -35,6 +36,8 @@ typedef enum TokenIdEnum
     TOKEN_EQUAL,
     TOKEN_GREATER,
     TOKEN_LESS,
+    TOKEN_SHIFT_LEFT,
+    TOKEN_SHIFT_RIGHT,
     TOKEN_PLUS,
     TOKEN_PLUS_EQUAL,
     TOKEN_MINUS,

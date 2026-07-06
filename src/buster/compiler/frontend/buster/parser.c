@@ -15,16 +15,6 @@ BUSTER_GLOBAL_LOCAL TokenId block_end_of_statement_token = TOKEN_SEMICOLON;
 
 #define KEYWORD_COUNT ((u64)last_keyword - (u64)first_keyword + 1)
 
-// STRUCT(LexInteger)
-// {
-//     IntegerParsingU64 parsing;
-//     const char8* restrict it;
-//     Format format;
-// };
-// BUSTER_GLOBAL_LOCAL LexInteger lex_integer(const char8* restrict it)
-// {
-// }
-
 BUSTER_GLOBAL_LOCAL bool is_valid_character_after_digit(char8 ch)
 {
     switch (ch)
@@ -357,8 +347,32 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     break; case '}': { id = TOKEN_RIGHT_BRACE; it += 1; }
                     break; case '(': { id = TOKEN_LEFT_PARENTHESIS; it += 1; }
                     break; case ')': { id = TOKEN_RIGHT_PARENTHESIS; it += 1; }
-                    break; case '<': { id = TOKEN_LESS; it += 1; }
-                    break; case '>': { id = TOKEN_GREATER; it += 1; }
+                    break; case '<':
+                    {
+                        if (it + 1 < top && it[1] == '<')
+                        {
+                            id = TOKEN_SHIFT_LEFT;
+                            it += 2;
+                        }
+                        else
+                        {
+                            id = TOKEN_LESS;
+                            it += 1;
+                        }
+                    }
+                    break; case '>':
+                    {
+                        if (it + 1 < top && it[1] == '>')
+                        {
+                            id = TOKEN_SHIFT_RIGHT;
+                            it += 2;
+                        }
+                        else
+                        {
+                            id = TOKEN_GREATER;
+                            it += 1;
+                        }
+                    }
                     break; case '+':
                     {
                         if (it + 1 < top && it[1] == '=')
@@ -379,6 +393,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     break; case ';': { id = TOKEN_SEMICOLON; it += 1; }
                     break; case ',': { id = TOKEN_COMMA; it += 1; }
                     break; case '&': { id = TOKEN_AMPERSAND; it += 1; }
+                    break; case '%': { id = TOKEN_PERCENTAGE; it += 1; }
                     break; case '/':
                     {
                         if (it + 1 < top && it[1] == '/')
@@ -511,6 +526,7 @@ typedef enum AttributeListState
 } AttributeListState;
 
 typedef struct AstNode AstNode;
+typedef struct AstExpressionNode AstExpressionNode;
 
 typedef struct CodeAttributes CodeAttributes;
 struct CodeAttributes
@@ -544,6 +560,12 @@ typedef enum ExpressionState
     EXPRESSION_STATE_TAIL,
     EXPRESSION_STATE_COUNT,
 } ExpressionState;
+
+// Depth of the per-expression operator and unary shunting-yard stacks. Left-
+// associative binary operators only ever stack strictly-increasing binding
+// powers, so this is bounded by the number of precedence levels; the unary
+// stack is bounded by the length of a prefix run (`- - -x`). Both are checked.
+enum { EXPRESSION_STACK_CAPACITY = 16 };
 
 typedef struct ParserState ParserState;
 struct ParserState
@@ -594,10 +616,20 @@ struct ParserState
 
         struct
         {
-            u8 minimum_binding_power;
             ExpressionState state;
-            AstNode* current;
             TokenId end_token;
+            // Postorder (RPN) output stream this expression emits into. The tree
+            // is implicit in this ordering plus each node's arity, so no child
+            // links are stored. `output_base` is the first emitted node.
+            AstExpressionNode* output_base;
+            u32 output_count;
+            // Shunting-yard stacks holding operator/unary kinds (AstNodeId cast to
+            // u8) not yet emitted. Operators are held until precedence resolves;
+            // unaries until their operand is emitted.
+            u16 operator_count;
+            u16 unary_count;
+            u8 operator_stack[EXPRESSION_STACK_CAPACITY];
+            u8 unary_stack[EXPRESSION_STACK_CAPACITY];
         } expression;
     };
 };
@@ -703,6 +735,11 @@ struct Parser
     TokenIterator iterator;
     ParserStateState state;
     Arena* restrict node_arena;
+    // Contiguous backing store for the postorder expression streams.
+    Arena* restrict expression_arena;
+    // Most recently finished expression (e.g. a return value).
+    AstExpressionNode* expression_nodes;
+    u32 expression_count;
 };
 
 BUSTER_GLOBAL_LOCAL void consume_token(TokenIterator* restrict iterator, Token* restrict token)
@@ -934,6 +971,15 @@ typedef enum AstNodeId
     AST_NODE_FUNCTION_DECLARATION,
     AST_NODE_BLOCK,
     AST_NODE_CONSTANT_INTEGER,
+    AST_NODE_UNARY_MINUS,
+    AST_NODE_UNARY_PLUS,
+    AST_NODE_BINARY_PLUS,
+    AST_NODE_BINARY_MINUS,
+    AST_NODE_BINARY_ASTERISK,
+    AST_NODE_BINARY_SLASH,
+    AST_NODE_BINARY_PERCENT,
+    AST_NODE_BINARY_SHIFT_LEFT,
+    AST_NODE_BINARY_SHIFT_RIGHT,
     AST_NODE_COUNT,
 } AstNodeId;
 
@@ -957,6 +1003,23 @@ struct AstCode
     String8 name;
 };
 
+typedef union AstBinary AstBinary;
+union AstBinary
+{
+    struct
+    {
+        AstNode* left;
+        AstNode* right;
+    };
+    AstNode* operands[2];
+};
+
+typedef struct AstUnary AstUnary;
+struct AstUnary
+{
+    AstNode* operand;
+};
+
 typedef struct AstNode AstNode;
 struct AstNode
 {
@@ -965,15 +1028,120 @@ struct AstNode
         AstCode code;
         AstBlock block;
         u64 constant_integer;
+        AstBinary binary;
+        AstUnary unary;
     };
 
     AstNodeId id;
 };
 
+// A node in the flattened, postorder expression stream. The tree is *implicit*:
+// a node's operands are the subtrees emitted immediately before it, and its
+// arity is fixed by its kind (see ast_node_arity), so no child links are stored.
+// Because the whole expression is one contiguous array in evaluation order,
+// analysis and typechecking stream through it front-to-back with a small operand
+// stack — sequential access, branch-predictable, no pointer chasing.
+struct AstExpressionNode
+{
+    AstNodeId id;
+    u32 reserved;
+    u64 constant_integer; // leaf payload; unused by operator nodes
+};
+
+typedef struct AstExpression AstExpression;
+struct AstExpression
+{
+    AstExpressionNode* nodes; // postorder
+    u32 count;
+    u32 reserved;
+};
+
+BUSTER_GLOBAL_LOCAL AstNode* allocate_nodes(Parser* restrict parser, u64 count)
+{
+    AstNode* result = arena_allocate(parser->node_arena, AstNode, count);
+    memset(result, 0, sizeof(*result) * count);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL AstNode* allocate_node(Parser* restrict parser)
 {
-    AstNode* node = arena_allocate(parser->node_arena, AstNode, 1);
-    *node = (AstNode){0};
+    return allocate_nodes(parser, 1);
+}
+
+// Left binding power of a binary operator: higher binds tighter. Mirrors C/Zig
+// precedence for these operators (multiplicative > additive > shift).
+BUSTER_GLOBAL_LOCAL u8 binary_binding_power(AstNodeId id)
+{
+    switch (id)
+    {
+        case AST_NODE_BINARY_SHIFT_LEFT:
+        case AST_NODE_BINARY_SHIFT_RIGHT:
+            return 1;
+        case AST_NODE_BINARY_PLUS:
+        case AST_NODE_BINARY_MINUS:
+            return 2;
+        case AST_NODE_BINARY_ASTERISK:
+        case AST_NODE_BINARY_SLASH:
+        case AST_NODE_BINARY_PERCENT:
+            return 3;
+        default:
+            BUSTER_UNREACHABLE();
+    }
+}
+
+// Number of operand subtrees a node consumes. Drives the implicit-tree walk:
+// leaves push, unary pops 1, binary pops 2.
+BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNodeId id)
+{
+    switch (id)
+    {
+        case AST_NODE_CONSTANT_INTEGER:
+            return 0;
+        case AST_NODE_UNARY_MINUS:
+        case AST_NODE_UNARY_PLUS:
+            return 1;
+        case AST_NODE_BINARY_PLUS:
+        case AST_NODE_BINARY_MINUS:
+        case AST_NODE_BINARY_ASTERISK:
+        case AST_NODE_BINARY_SLASH:
+        case AST_NODE_BINARY_PERCENT:
+        case AST_NODE_BINARY_SHIFT_LEFT:
+        case AST_NODE_BINARY_SHIFT_RIGHT:
+            return 2;
+        default:
+            BUSTER_UNREACHABLE();
+    }
+}
+
+BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
+{
+    switch (id)
+    {
+        case AST_NODE_UNARY_MINUS: return S8("neg");
+        case AST_NODE_UNARY_PLUS: return S8("pos");
+        case AST_NODE_BINARY_PLUS: return S8("+");
+        case AST_NODE_BINARY_MINUS: return S8("-");
+        case AST_NODE_BINARY_ASTERISK: return S8("*");
+        case AST_NODE_BINARY_SLASH: return S8("/");
+        case AST_NODE_BINARY_PERCENT: return S8("%");
+        case AST_NODE_BINARY_SHIFT_LEFT: return S8("<<");
+        case AST_NODE_BINARY_SHIFT_RIGHT: return S8(">>");
+        default: BUSTER_UNREACHABLE();
+    }
+}
+
+// Append a node to the current expression's postorder output stream.
+BUSTER_GLOBAL_LOCAL AstExpressionNode* expression_emit(Parser* restrict parser, ParserState* restrict st, AstNodeId id)
+{
+    AstExpressionNode* node = arena_allocate(parser->expression_arena, AstExpressionNode, 1);
+    node->id = id;
+    node->reserved = 0;
+    node->constant_integer = 0;
+    if (st->expression.output_count == 0)
+    {
+        st->expression.output_base = node;
+    }
+    st->expression.output_count += 1;
     return node;
 }
 
@@ -997,6 +1165,11 @@ BUSTER_GLOBAL_LOCAL void parse_expression(Parser* restrict parser, TokenId end_o
 
 BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
 {
+    ParserState* expression_state = state(parser);
+    BUSTER_CHECK(expression_state->id == PARSER_DECLARATION_EXPRESSION);
+    parser->expression_nodes = expression_state->expression.output_base;
+    parser->expression_count = expression_state->expression.output_count;
+
     state_pop(&parser->state);
 
     ParserState* resume_state = state(parser);
@@ -1008,13 +1181,79 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
     }
 }
 
-BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tokenizer)
+BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
+{
+    switch (id)
+    {
+        break; case TOKEN_ERROR: return S8("Error");
+        break; case TOKEN_SPACE: return S8("Space");
+        break; case TOKEN_TAB: return S8("Tab");
+        break; case TOKEN_LINE_FEED: return S8("LineFeed");
+        break; case TOKEN_CARRIAGE_RETURN: return S8("CarriageReturn");
+        break; case TOKEN_COMMENT: return S8("Comment");
+        break; case TOKEN_EOF: return S8("EOF");
+        break; case TOKEN_IDENTIFIER: return S8("Identifier");
+        break; case TOKEN_HEXADECIMAL_INTEGER_LITERAL: return S8("HexadecimalIntegerLiteral");
+        break; case TOKEN_DECIMAL_INTEGER_LITERAL: return S8("DecimalIntegerLiteral");
+        break; case TOKEN_OCTAL_INTEGER_LITERAL: return S8("OctalIntegerLiteral");
+        break; case TOKEN_BINARY_INTEGER_LITERAL: return S8("BinaryIntegerLiteral");
+        break; case TOKEN_DECIMAL_FLOAT_LITERAL: return S8("DecimalFloatLiteral");
+        break; case TOKEN_DECIMAL_FLOAT_LITERAL_EXPONENT: return S8("DecimalFloatLiteralExponent");
+        break; case TOKEN_HEXADECIMAL_FLOAT_LITERAL: return S8("HexadecimalFloatLiteral");
+        break; case TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT: return S8("HexadecimalFloatLiteralExponent");
+        break; case TOKEN_FLOAT_LITERAL: return S8("FloatLiteral");
+        break; case TOKEN_UNDERSCORE: return S8("Underscore");
+        break; case TOKEN_LEFT_BRACKET: return S8("LeftBracket");
+        break; case TOKEN_RIGHT_BRACKET: return S8("RightBracket");
+        break; case TOKEN_LEFT_BRACE: return S8("LeftBrace");
+        break; case TOKEN_RIGHT_BRACE: return S8("RightBrace");
+        break; case TOKEN_LEFT_PARENTHESIS: return S8("LeftParenthesis");
+        break; case TOKEN_RIGHT_PARENTHESIS: return S8("RightParenthesis");
+        break; case TOKEN_EQUAL: return S8("Equal");
+        break; case TOKEN_GREATER: return S8("Greater");
+        break; case TOKEN_LESS: return S8("Less");
+        break; case TOKEN_SHIFT_LEFT: return S8("ShiftLeft");
+        break; case TOKEN_SHIFT_RIGHT: return S8("ShiftRight");
+        break; case TOKEN_PLUS: return S8("Plus");
+        break; case TOKEN_PLUS_EQUAL: return S8("PlusEqual");
+        break; case TOKEN_MINUS: return S8("Minus");
+        break; case TOKEN_ASTERISK: return S8("Asterisk");
+        break; case TOKEN_SLASH: return S8("Slash");
+        break; case TOKEN_COLON: return S8("Colon");
+        break; case TOKEN_SEMICOLON: return S8("Semicolon");
+        break; case TOKEN_COMMA: return S8("Comma");
+        break; case TOKEN_DOT: return S8("Dot");
+        break; case TOKEN_DOUBLE_DOT: return S8("DoubleDot");
+        break; case TOKEN_TRIPLE_DOT: return S8("TripleDot");
+        break; case TOKEN_AMPERSAND: return S8("Ampersand");
+        break; case TOKEN_PERCENTAGE: return S8("Percent");
+        break; case TOKEN_KEYWORD_RETURN: return S8("Keyword_Return");
+        break; case TOKEN_KEYWORD_IF: return S8("Keyword_If");
+        break; case TOKEN_KEYWORD_ELSE: return S8("Keyword_Else");
+        break; case TOKEN_KEYWORD_FUNCTION: return S8("Keyword_Function");
+        break; case TOKEN_KEYWORD_FOR: return S8("Keyword_For");
+        break; case TOKEN_KEYWORD_WHILE: return S8("Keyword_While");
+        break; case TOKEN_KEYWORD_CODE: return S8("Keyword_Code");
+        break; case TOKEN_KEYWORD_DATA: return S8("Keyword_Data");
+        break; case TOKEN_KEYWORD_TYPE: return S8("Keyword_Type");
+        break; case TOKEN_KEYWORD_STRUCT: return S8("Keyword_Struct");
+        break; case TOKEN_KEYWORD_UNION: return S8("Keyword_Union");
+        break; case TOKEN_COUNT: return S8("Token_Count(Error)");
+    }
+
+    BUSTER_UNREACHABLE();
+}
+
+#define BUSTER_TODO_TOKEN(id) BUSTER_TODO_MESSAGE(S8("TODO {S8}"), string_from_token_id((TokenIdEnum)id))
+
+BUSTER_GLOBAL_LOCAL AstExpression parse(const char8* restrict source, TokenizerResult tokenizer)
 {
     Parser parser = {0};
     parser.iterator.tokens = tokenizer.tokens;
     parser.iterator.source = source;
     parser.state.arena = arena_create((ArenaCreation){0});
     parser.node_arena = arena_create((ArenaCreation){0});
+    parser.expression_arena = arena_create((ArenaCreation){0});
 
     // Push a dummy state so the stack is never empty
     state_push(&parser.state);
@@ -1564,8 +1803,6 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                             case TOKEN_BINARY_INTEGER_LITERAL:
                             {
                                 consume(&parser.iterator);
-                                AstNode* number_node = allocate_node(&parser);
-                                st->expression.current = number_node;
 
                                 String8 number_string = get_string(parser.iterator.source, token);
 
@@ -1600,12 +1837,28 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                                     break; default: BUSTER_UNREACHABLE();
                                 }
 
-                                *number_node = (AstNode){
-                                    .id = AST_NODE_CONSTANT_INTEGER,
-                                    .constant_integer = number_parsing.value,
-                                };
+                                AstExpressionNode* leaf = expression_emit(&parser, st, AST_NODE_CONSTANT_INTEGER);
+                                leaf->constant_integer = number_parsing.value;
+
+                                // Prefix unary operators bind tighter than any binary operator, so
+                                // they are emitted right after their operand, innermost first.
+                                while (st->expression.unary_count)
+                                {
+                                    st->expression.unary_count -= 1;
+                                    expression_emit(&parser, st, (AstNodeId)st->expression.unary_stack[st->expression.unary_count]);
+                                }
 
                                 st->expression.state = EXPRESSION_STATE_TAIL;
+                            }
+                            break;
+                            case TOKEN_MINUS:
+                            case TOKEN_PLUS:
+                            {
+                                consume(&parser.iterator);
+                                AstNodeId unary_id = token.id == TOKEN_MINUS ? AST_NODE_UNARY_MINUS : AST_NODE_UNARY_PLUS;
+                                BUSTER_CHECK(st->expression.unary_count < EXPRESSION_STACK_CAPACITY);
+                                st->expression.unary_stack[st->expression.unary_count] = (u8)unary_id;
+                                st->expression.unary_count += 1;
                             }
                             break; default: BUSTER_TODO();
                         }
@@ -1614,17 +1867,62 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
                     {
                         if (token.id == st->expression.end_token)
                         {
+                            // Emit any operators still held on the stack (tightest-binding
+                            // first) to complete the postorder stream.
+                            while (st->expression.operator_count)
+                            {
+                                st->expression.operator_count -= 1;
+                                expression_emit(&parser, st, (AstNodeId)st->expression.operator_stack[st->expression.operator_count]);
+                            }
                             finish_expression(&parser);
                         }
                         else
                         {
                             switch (token.id)
                             {
-                                break; case TOKEN_PLUS:
+                                break;
+                                case TOKEN_PLUS:
+                                case TOKEN_MINUS:
+                                case TOKEN_ASTERISK:
+                                case TOKEN_SLASH:
+                                case TOKEN_PERCENTAGE:
+                                case TOKEN_SHIFT_LEFT:
+                                case TOKEN_SHIFT_RIGHT:
                                 {
-                                    BUSTER_TODO();
+                                    consume(&parser.iterator);
+
+                                    AstNodeId binary_node_id;
+
+                                    switch (token.id)
+                                    {
+                                        break; case TOKEN_PLUS: binary_node_id = AST_NODE_BINARY_PLUS;
+                                        break; case TOKEN_MINUS: binary_node_id = AST_NODE_BINARY_MINUS;
+                                        break; case TOKEN_ASTERISK: binary_node_id = AST_NODE_BINARY_ASTERISK;
+                                        break; case TOKEN_SLASH: binary_node_id = AST_NODE_BINARY_SLASH;
+                                        break; case TOKEN_PERCENTAGE: binary_node_id = AST_NODE_BINARY_PERCENT;
+                                        break; case TOKEN_SHIFT_LEFT: binary_node_id = AST_NODE_BINARY_SHIFT_LEFT;
+                                        break; case TOKEN_SHIFT_RIGHT: binary_node_id = AST_NODE_BINARY_SHIFT_RIGHT;
+                                        break; default: BUSTER_TODO_TOKEN(token.id);
+                                    }
+
+                                    // Shunting yard: before pushing this operator, emit every stacked
+                                    // operator that binds at least as tightly. `>=` makes equal
+                                    // precedence left-associative; a strictly-tighter incoming
+                                    // operator stays pending so it captures the next operand instead.
+                                    u8 binding_power = binary_binding_power(binary_node_id);
+                                    while (st->expression.operator_count &&
+                                           binary_binding_power((AstNodeId)st->expression.operator_stack[st->expression.operator_count - 1]) >= binding_power)
+                                    {
+                                        st->expression.operator_count -= 1;
+                                        expression_emit(&parser, st, (AstNodeId)st->expression.operator_stack[st->expression.operator_count]);
+                                    }
+
+                                    BUSTER_CHECK(st->expression.operator_count < EXPRESSION_STACK_CAPACITY);
+                                    st->expression.operator_stack[st->expression.operator_count] = (u8)binary_node_id;
+                                    st->expression.operator_count += 1;
+                                    st->expression.state = EXPRESSION_STATE_PREFIX;
                                 }
-                                break; default: BUSTER_TODO();
+                                break; default: BUSTER_TODO_TOKEN(token.id);
                             }
                         }
                     }
@@ -1642,7 +1940,11 @@ BUSTER_GLOBAL_LOCAL void parse(const char8* restrict source, TokenizerResult tok
         }
     }
 
-    // return result;
+    AstExpression result = {
+        .nodes = parser.expression_nodes,
+        .count = parser.expression_count,
+    };
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void print_tokenizer_result(TokenizerResult tokenizer, const char8* restrict source)
@@ -1653,70 +1955,63 @@ BUSTER_GLOBAL_LOCAL void print_tokenizer_result(TokenizerResult tokenizer, const
         ExtendedToken token = token_get(&iterator);
         String8 string = get_string(source, token);
 
-        String8 token_id;
-
-        switch ((TokenIdEnum)token.id)
-        {
-            break; case TOKEN_ERROR: token_id = S8("Error");
-            break; case TOKEN_SPACE: token_id = S8("Space");
-            break; case TOKEN_TAB: token_id = S8("Tab");
-            break; case TOKEN_LINE_FEED: token_id = S8("LineFeed");
-            break; case TOKEN_CARRIAGE_RETURN: token_id = S8("CarriageReturn");
-            break; case TOKEN_COMMENT: token_id = S8("Comment");
-            break; case TOKEN_EOF: token_id = S8("EOF");
-            break; case TOKEN_IDENTIFIER: token_id = S8("Identifier");
-            break; case TOKEN_HEXADECIMAL_INTEGER_LITERAL: token_id = S8("HexadecimalIntegerLiteral");
-            break; case TOKEN_DECIMAL_INTEGER_LITERAL: token_id = S8("DecimalIntegerLiteral");
-            break; case TOKEN_OCTAL_INTEGER_LITERAL: token_id = S8("OctalIntegerLiteral");
-            break; case TOKEN_BINARY_INTEGER_LITERAL: token_id = S8("BinaryIntegerLiteral");
-            break; case TOKEN_DECIMAL_FLOAT_LITERAL: token_id = S8("DecimalFloatLiteral");
-            break; case TOKEN_DECIMAL_FLOAT_LITERAL_EXPONENT: token_id = S8("DecimalFloatLiteralExponent");
-            break; case TOKEN_HEXADECIMAL_FLOAT_LITERAL: token_id = S8("HexadecimalFloatLiteral");
-            break; case TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT: token_id = S8("HexadecimalFloatLiteralExponent");
-            break; case TOKEN_FLOAT_LITERAL: token_id = S8("FloatLiteral");
-            break; case TOKEN_UNDERSCORE: token_id = S8("Underscore");
-            break; case TOKEN_LEFT_BRACKET: token_id = S8("LeftBracket");
-            break; case TOKEN_RIGHT_BRACKET: token_id = S8("RightBracket");
-            break; case TOKEN_LEFT_BRACE: token_id = S8("LeftBrace");
-            break; case TOKEN_RIGHT_BRACE: token_id = S8("RightBrace");
-            break; case TOKEN_LEFT_PARENTHESIS: token_id = S8("LeftParenthesis");
-            break; case TOKEN_RIGHT_PARENTHESIS: token_id = S8("RightParenthesis");
-            break; case TOKEN_EQUAL: token_id = S8("Equal");
-            break; case TOKEN_GREATER: token_id = S8("Greater");
-            break; case TOKEN_LESS: token_id = S8("Less");
-            break; case TOKEN_PLUS: token_id = S8("Plus");
-            break; case TOKEN_PLUS_EQUAL: token_id = S8("PlusEqual");
-            break; case TOKEN_MINUS: token_id = S8("Minus");
-            break; case TOKEN_ASTERISK: token_id = S8("Asterisk");
-            break; case TOKEN_SLASH: token_id = S8("Slash");
-            break; case TOKEN_PERCENTAGE: token_id = S8("Percentage");
-            break; case TOKEN_COLON: token_id = S8("Colon");
-            break; case TOKEN_SEMICOLON: token_id = S8("Semicolon");
-            break; case TOKEN_COMMA: token_id = S8("Comma");
-            break; case TOKEN_DOT: token_id = S8("Dot");
-            break; case TOKEN_DOUBLE_DOT: token_id = S8("DoubleDot");
-            break; case TOKEN_TRIPLE_DOT: token_id = S8("TripleDot");
-            break; case TOKEN_AMPERSAND: token_id = S8("Ampersand");
-            break; case TOKEN_KEYWORD_RETURN: token_id = S8("Keyword_Return");
-            break; case TOKEN_KEYWORD_IF: token_id = S8("Keyword_If");
-            break; case TOKEN_KEYWORD_ELSE: token_id = S8("Keyword_Else");
-            break; case TOKEN_KEYWORD_FUNCTION: token_id = S8("Keyword_Function");
-            break; case TOKEN_KEYWORD_FOR: token_id = S8("Keyword_For");
-            break; case TOKEN_KEYWORD_WHILE: token_id = S8("Keyword_While");
-            break; case TOKEN_KEYWORD_CODE: token_id = S8("Keyword_Code");
-            break; case TOKEN_KEYWORD_DATA: token_id = S8("Keyword_Data");
-            break; case TOKEN_KEYWORD_TYPE: token_id = S8("Keyword_Type");
-            break; case TOKEN_KEYWORD_STRUCT: token_id = S8("Keyword_Struct");
-            break; case TOKEN_KEYWORD_UNION: token_id = S8("Keyword_Union");
-            break; case TOKEN_COUNT: token_id = S8("Token_Count(Error)");
-            break; default: BUSTER_TODO();
-        }
+        String8 token_id = string_from_token_id(token.id);
 
         String8 display_string = string.pointer && string.length > 0 && string.pointer[0] >= ' ' ? string : S8("");
         string_print(S8("[{u64}] {u32}:{u32} at {u32} {S8} \"{S8}\"\n"), i, token.line, token.column, token.offset, token_id, display_string);
 
         consume(&iterator);
     }
+}
+
+// Reconstruct an S-expression from the implicit tree with a single forward pass
+// over the postorder stream. This is the exact shape an analysis/typecheck pass
+// takes: stream the contiguous array, push leaves and reduce operators against a
+// small operand stack. No recursion, no pointer chasing.
+BUSTER_GLOBAL_LOCAL String8 ast_expression_to_string(Arena* arena, AstExpression expression)
+{
+    if (expression.count == 0)
+    {
+        return S8("");
+    }
+
+    String8* stack = arena_allocate(arena, String8, expression.count);
+    u32 top = 0;
+
+    for (u32 i = 0; i < expression.count; i += 1)
+    {
+        AstExpressionNode* node = &expression.nodes[i];
+        String8 formatted;
+
+        switch (ast_node_arity(node->id))
+        {
+            break; case 0:
+            {
+                formatted = string_format(arena, S8("{u64}"), node->constant_integer);
+            }
+            break; case 1:
+            {
+                BUSTER_CHECK(top >= 1);
+                String8 operand = stack[top - 1];
+                top -= 1;
+                formatted = string_format(arena, S8("({S8} {S8})"), ast_node_symbol(node->id), operand);
+            }
+            break; default:
+            {
+                BUSTER_CHECK(top >= 2);
+                String8 right = stack[top - 1];
+                String8 left = stack[top - 2];
+                top -= 2;
+                formatted = string_format(arena, S8("({S8} {S8} {S8})"), ast_node_symbol(node->id), left, right);
+            }
+        }
+
+        stack[top] = formatted;
+        top += 1;
+    }
+
+    BUSTER_CHECK(top == 1);
+    return stack[0];
 }
 
 BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, String8 path)
@@ -1728,6 +2023,8 @@ BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, String8 path)
     // instead of past the arena allocation.
     String8 source = BYTE_SLICE_TO_STRING(8, file_read(arena, path, (FileReadOptions){ .end_padding = 8 }));
 
+    string_print(S8("Tokenizing \"{S8}\"\n"), path);
+
     if (!source.pointer || !source.length)
     {
         // Missing/empty input (e.g. CWD has no tests/ directory): nothing to parse.
@@ -1737,7 +2034,14 @@ BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, String8 path)
 
     TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
     print_tokenizer_result(tokenizer, source.pointer);
-    parse(source.pointer, tokenizer);
+    string_print(S8("Parsing \"{S8}\"\n"), path);
+    AstExpression expression = parse(source.pointer, tokenizer);
+
+    if (expression.count)
+    {
+        String8 dump = ast_expression_to_string(arena, expression);
+        string_print(S8("=== Expression (postorder, {u32} nodes) ===\n{S8}\n"), expression.count, dump);
+    }
 
     // string8_print(S8("=== Input ===\n{S8}\n"), source);
     // string8_print(S8("=== Error Count ===\n{u64}\n"), result.error_count);
@@ -1750,17 +2054,85 @@ BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, String8 path)
 void parser_experiments(void)
 {
     Arena* arena = arena_create((ArenaCreation){0});
-    parse_experiment(arena, S8("tests/basic.bbb"));
-    parse_experiment(arena, S8("tests/basic_comment.bbb"));
-    parse_experiment(arena, S8("tests/basic_hexadecimal.bbb"));
-    parse_experiment(arena, S8("tests/basic_octal.bbb"));
-    parse_experiment(arena, S8("tests/basic_binary.bbb"));
-    // parse_experiment(arena, S8("tests/basic_sum.bbb"));
-    // parse_experiment(arena, S8("tests/if_else.bbb"));
-    // parse_experiment(arena, S8("tests/array_slices.bbb"));
+    String8 experiments[] = {
+        S8("tests/basic_minimal.bbb"),
+        S8("tests/basic_comment.bbb"),
+        S8("tests/basic_hexadecimal_literal.bbb"),
+        S8("tests/basic_octal_literal.bbb"),
+        S8("tests/basic_binary_literal.bbb"),
+        S8("tests/basic_unary_minus.bbb"),
+        S8("tests/basic_unary_plus.bbb"),
+        S8("tests/basic_integer_literal_add.bbb"),
+        S8("tests/basic_integer_literal_sub.bbb"),
+        S8("tests/basic_integer_literal_multiply.bbb"),
+        S8("tests/basic_integer_literal_divide.bbb"),
+        S8("tests/basic_integer_literal_mod.bbb"),
+        S8("tests/basic_integer_literal_shift_left.bbb"),
+        S8("tests/basic_integer_literal_shift_right.bbb"),
+        S8("tests/basic_integer_literal_precedence.bbb"),
+        // S8("tests/basic_if_else.bbb"),
+        // S8("tests/array_slices.bbb"),
+    };
+
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(experiments); i +=1)
+    {
+        String8 experiment = experiments[i];
+        parse_experiment(arena, experiment);
+    }
 }
 
 #if BUSTER_INCLUDE_TESTS
+// Parse a bare expression by wrapping it in a minimal program and returning the
+// postorder stream of its return value.
+BUSTER_GLOBAL_LOCAL AstExpression parse_expression_snippet(Arena* arena, String8 expression)
+{
+    // Built by concatenation rather than string_format: the program braces would
+    // otherwise be mistaken for format directives.
+    String8 prefix = S8("code main[export] : fn[cc(c)] (argument:count: s32, argv: &&u8, envp: &&u8) s32\n{\n    return ");
+    String8 suffix = S8(";\n}\n");
+
+    // The tokenizer peeks a few bytes past the end; give it zeroed padding.
+    u64 padding = 8;
+    u64 length = prefix.length + expression.length + suffix.length;
+    char8* buffer = arena_allocate(arena, char8, length + padding);
+    memcpy(buffer, prefix.pointer, prefix.length);
+    memcpy(buffer + prefix.length, expression.pointer, expression.length);
+    memcpy(buffer + prefix.length + expression.length, suffix.pointer, suffix.length);
+    memset(buffer + length, 0, padding);
+
+    TokenizerResult tokenizer = tokenize(arena, buffer, length);
+    return parse(buffer, tokenizer);
+}
+
+UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+
+    struct { String8 source; String8 expected; } cases[] = {
+        { S8("1 + 2 * 3"),           S8("(+ 1 (* 2 3))") },
+        { S8("1 * 2 + 3"),           S8("(+ (* 1 2) 3)") },
+        { S8("1 + 2 + 3"),           S8("(+ (+ 1 2) 3)") },
+        { S8("1 - 2 - 3"),           S8("(- (- 1 2) 3)") },
+        { S8("2 * 3 + 4 * 5"),       S8("(+ (* 2 3) (* 4 5))") },
+        { S8("2 * -3"),              S8("(* 2 (neg 3))") },
+        { S8("- - 5"),               S8("(neg (neg 5))") },
+        { S8("1 << 2 + 3 * 4"),      S8("(<< 1 (+ 2 (* 3 4)))") },
+        { S8("1 + 2 * 3 << 4 - 5"),  S8("(<< (+ 1 (* 2 3)) (- 4 5))") },
+    };
+
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        u64 position = arena->position;
+        AstExpression expression = parse_expression_snippet(arena, cases[i].source);
+        String8 actual = ast_expression_to_string(arena, expression);
+        BUSTER_STRING_TEST(arguments, actual, cases[i].expected);
+        arena->position = position;
+    }
+
+    return result;
+}
+
 BatchTestResult parser_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);

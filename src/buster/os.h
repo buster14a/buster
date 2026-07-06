@@ -194,12 +194,14 @@ struct ThreadContext
 
 BUSTER_V_DECL ProgramState* program_state;
 
-BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_ex(String8 context, u32 line, String8 function, String8 file);
+BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_va(u32 line, String8 function, String8 file, String8 context, ...);
 
-#define os_fail_message(message) (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_ex(S8(message), (u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__)))
-#define os_fail() os_fail_message("internal error")
-#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message("assertion failed"), 0) : 0))
-#define BUSTER_TODO() do { os_fail_message("TODO"); } while (1)
+#define os_fail_message(message) (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_va((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message))
+#define os_fail_message_format(message, ...) (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_va((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message, __VA_ARGS__))
+#define os_fail() os_fail_message(S8("internal error"))
+#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
+#define BUSTER_TODO_MESSAGE(message, ...) do { os_fail_message_format(message, __VA_ARGS__); } while (1)
+#define BUSTER_TODO() do { os_fail_message(S8("TODO")); } while (1)
 
 BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);
 

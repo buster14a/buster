@@ -1343,21 +1343,29 @@ String8 string_format_z(Arena* arena, String8 format, ...)
     return result;
 }
 
+void string_write_to_file_va(OsFileDescriptor* file_handle, String8 format, va_list variable_arguments)
+{
+    if (file_handle)
+    {
+        TemporalArena scratch = scratch_begin(0, 0);
+        String8 string = string_format_va(scratch.arena, format, variable_arguments);
+
+        if (string.length)
+        {
+            *arena_allocate(scratch.arena, char8, 1) = 0;
+            os_file_write(file_handle, BUSTER_SLICE_TO_BYTE_SLICE(string));
+        }
+
+        scratch_end(scratch);
+    }
+}
+
 void string_print(String8 format, ...)
 {
-    TemporalArena scratch = scratch_begin(0, 0);
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 string = string_format_va(scratch.arena, format, variable_arguments);
+    string_write_to_file_va(os_get_stdout(), format, variable_arguments);
     va_end(variable_arguments);
-
-    if (string.length)
-    {
-        *arena_allocate(scratch.arena, char8, 1) = 0;
-        os_file_write(os_get_stdout(), BUSTER_SLICE_TO_BYTE_SLICE(string));
-    }
-
-    scratch_end(scratch);
 }
 
 u64 string_first_sequence(String8 s, String8 sub)
