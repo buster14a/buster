@@ -4,6 +4,7 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
 BUSTER_F_DECL BatchTestResult parser_tests(UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments);
 BUSTER_F_DECL UnitTestResult parser_expression_tests(UnitTestArguments* arguments);
 #endif
 

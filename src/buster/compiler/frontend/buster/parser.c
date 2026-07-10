@@ -15,453 +15,503 @@ BUSTER_GLOBAL_LOCAL TokenId block_end_of_statement_token = TOKEN_SEMICOLON;
 
 #define KEYWORD_COUNT ((u64)last_keyword - (u64)first_keyword + 1)
 
-BUSTER_GLOBAL_LOCAL bool is_valid_character_after_digit(char8 ch)
+BUSTER_GLOBAL_LOCAL bool tokenizer_is_ascii_alpha(u8 ch)
 {
-    switch (ch)
+    bool result = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool tokenizer_is_ascii_decimal_digit(u8 ch)
+{
+    bool result = ch >= '0' && ch <= '9';
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool tokenizer_is_ascii_hex_digit(u8 ch)
+{
+    bool result =
+        tokenizer_is_ascii_decimal_digit(ch) ||
+        (ch >= 'A' && ch <= 'F') ||
+        (ch >= 'a' && ch <= 'f');
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool tokenizer_is_identifier_start(u8 ch)
+{
+    bool result = tokenizer_is_ascii_alpha(ch) || ch == '_';
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool tokenizer_is_identifier_continue(u8 ch)
+{
+    bool result = tokenizer_is_identifier_start(ch) || tokenizer_is_ascii_decimal_digit(ch);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool tokenizer_is_integer_digit(IntegerFormat format, u8 ch)
+{
+    bool result = false;
+    switch (format)
     {
-        break;
-        case ' ':
-        case ';':
+        break; case INTEGER_FORMAT_HEXADECIMAL:
         {
-            return true;
+            result = tokenizer_is_ascii_hex_digit(ch) || ch == '_';
         }
-        break; default: BUSTER_TODO();
+        break; case INTEGER_FORMAT_DECIMAL:
+        {
+            result = tokenizer_is_ascii_decimal_digit(ch) || ch == '_';
+        }
+        break; case INTEGER_FORMAT_OCTAL:
+        {
+            result = (ch >= '0' && ch <= '7') || ch == '_';
+        }
+        break; case INTEGER_FORMAT_BINARY:
+        {
+            result = ch == '0' || ch == '1' || ch == '_';
+        }
+        break; case INTEGER_FORMAT_COUNT: BUSTER_UNREACHABLE();
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool tokenizer_is_real_digit(IntegerFormat format, u8 ch)
+{
+    bool result = false;
+    switch (format)
+    {
+        break; case INTEGER_FORMAT_HEXADECIMAL:
+        {
+            result = tokenizer_is_ascii_hex_digit(ch) || ch == '_';
+        }
+        break; case INTEGER_FORMAT_DECIMAL:
+        {
+            result = tokenizer_is_ascii_decimal_digit(ch) || ch == '_';
+        }
+        break; case INTEGER_FORMAT_OCTAL:
+        break; case INTEGER_FORMAT_BINARY:
+        break; case INTEGER_FORMAT_COUNT: BUSTER_UNREACHABLE();
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool tokenizer_is_utf8_continuation(u8 ch)
+{
+    bool result = (ch & 0xC0u) == 0x80u;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool tokenizer_is_utf8_second_in_range(u8 ch, u8 min, u8 max)
+{
+    bool result = ch >= min && ch <= max;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 tokenizer_utf8_sequence_length(const char8* restrict it, const char8* restrict top)
+{
+    u64 result = 1;
+    u64 available = (u64)(top - it);
+    u8 first = (u8)it[0];
+
+    if (first >= 0xC2u && first <= 0xDFu && available >= 2)
+    {
+        u8 second = (u8)it[1];
+        if (tokenizer_is_utf8_continuation(second))
+        {
+            result = 2;
+        }
+    }
+    else if (first == 0xE0u && available >= 3)
+    {
+        u8 second = (u8)it[1];
+        u8 third = (u8)it[2];
+        if (tokenizer_is_utf8_second_in_range(second, 0xA0u, 0xBFu) && tokenizer_is_utf8_continuation(third))
+        {
+            result = 3;
+        }
+    }
+    else if (first >= 0xE1u && first <= 0xECu && available >= 3)
+    {
+        u8 second = (u8)it[1];
+        u8 third = (u8)it[2];
+        if (tokenizer_is_utf8_continuation(second) && tokenizer_is_utf8_continuation(third))
+        {
+            result = 3;
+        }
+    }
+    else if (first == 0xEDu && available >= 3)
+    {
+        u8 second = (u8)it[1];
+        u8 third = (u8)it[2];
+        if (tokenizer_is_utf8_second_in_range(second, 0x80u, 0x9Fu) && tokenizer_is_utf8_continuation(third))
+        {
+            result = 3;
+        }
+    }
+    else if (first >= 0xEEu && first <= 0xEFu && available >= 3)
+    {
+        u8 second = (u8)it[1];
+        u8 third = (u8)it[2];
+        if (tokenizer_is_utf8_continuation(second) && tokenizer_is_utf8_continuation(third))
+        {
+            result = 3;
+        }
+    }
+    else if (first == 0xF0u && available >= 4)
+    {
+        u8 second = (u8)it[1];
+        u8 third = (u8)it[2];
+        u8 fourth = (u8)it[3];
+        if (tokenizer_is_utf8_second_in_range(second, 0x90u, 0xBFu) && tokenizer_is_utf8_continuation(third) && tokenizer_is_utf8_continuation(fourth))
+        {
+            result = 4;
+        }
+    }
+    else if (first >= 0xF1u && first <= 0xF3u && available >= 4)
+    {
+        u8 second = (u8)it[1];
+        u8 third = (u8)it[2];
+        u8 fourth = (u8)it[3];
+        if (tokenizer_is_utf8_continuation(second) && tokenizer_is_utf8_continuation(third) && tokenizer_is_utf8_continuation(fourth))
+        {
+            result = 4;
+        }
+    }
+    else if (first == 0xF4u && available >= 4)
+    {
+        u8 second = (u8)it[1];
+        u8 third = (u8)it[2];
+        u8 fourth = (u8)it[3];
+        if (tokenizer_is_utf8_second_in_range(second, 0x80u, 0x8Fu) && tokenizer_is_utf8_continuation(third) && tokenizer_is_utf8_continuation(fourth))
+        {
+            result = 4;
+        }
     }
 
-    return false;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void tokenizer_emit_token(TokenizerResult* restrict result, Token* restrict tokens, u64* restrict token_count, TokenId id, u64 length)
+{
+    if (length == 0)
+    {
+        u64 token_index = *token_count;
+        tokens[token_index] = (Token){ .id = id };
+        token_length_set(&tokens[token_index], 0);
+        *token_count = token_index + 1;
+    }
+    else
+    {
+        while (length)
+        {
+            u32 chunk_length = (u32)BUSTER_MIN(length, (u64)TOKEN_MAX_LENGTH);
+            u64 token_index = *token_count;
+            tokens[token_index] = (Token){ .id = id };
+            token_length_set(&tokens[token_index], chunk_length);
+            *token_count = token_index + 1;
+            length -= chunk_length;
+
+            if (id == TOKEN_ERROR)
+            {
+                result->error_count += 1;
+            }
+        }
+    }
 }
 
 TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length)
 {
     TokenizerResult result = {0};
+    Token* restrict token_start = arena_allocate(arena, Token, file_length + 1);
+    Token* restrict tokens = token_start;
+    u64 token_count = 0;
 
-    if (file_length)
+    const char8* restrict it = file_pointer;
+    const char8* top = file_pointer + file_length;
+
+    while (it < top)
     {
-        Token* restrict token_start = arena_allocate(arena, Token, file_length + 1);
-        Token* restrict tokens = token_start;
-        u64 token_count = 0;
+        const char8* restrict start = it;
+        u8 start_ch = (u8)*start;
+        TokenId id = TOKEN_ERROR;
 
-        const char8* restrict it = file_pointer;
-        const char8* top = file_pointer + file_length;
-
-        while (true)
+        switch (start_ch)
         {
-            if (it >= top)
+            break; BUSTER_SWITCH_ALPHA_UPPER: BUSTER_SWITCH_ALPHA_LOWER:
+            case '_':
             {
-                break;
-            }
-
-            const char8* restrict start = it;
-            char8 start_ch = *start;
-
-            {
-                TokenId id;
-
-                switch (start_ch)
+                while (it < top && tokenizer_is_identifier_continue((u8)*it))
                 {
-                    break; BUSTER_SWITCH_ALPHA_UPPER: BUSTER_SWITCH_ALPHA_LOWER:
-                    case '_':
+                    it += 1;
+                }
+
+                String8 identifier = string_from_pointer_length(start, (u64)(it - start));
+
+                BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
+                    [TOKEN_KEYWORD_FUNCTION - first_keyword] = S8_INITIALIZER("fn"),
+                    [TOKEN_KEYWORD_IF - first_keyword] = S8_INITIALIZER("if"),
+                    [TOKEN_KEYWORD_ELSE - first_keyword] = S8_INITIALIZER("else"),
+                    [TOKEN_KEYWORD_RETURN - first_keyword] = S8_INITIALIZER("return"),
+                    [TOKEN_KEYWORD_FOR - first_keyword] = S8_INITIALIZER("for"),
+                    [TOKEN_KEYWORD_WHILE - first_keyword] = S8_INITIALIZER("while"),
+                    [TOKEN_KEYWORD_CODE - first_keyword] = S8_INITIALIZER("code"),
+                    [TOKEN_KEYWORD_DATA - first_keyword] = S8_INITIALIZER("data"),
+                    [TOKEN_KEYWORD_TYPE - first_keyword] = S8_INITIALIZER("type"),
+                    [TOKEN_KEYWORD_STRUCT - first_keyword] = S8_INITIALIZER("struct"),
+                    [TOKEN_KEYWORD_UNION - first_keyword] = S8_INITIALIZER("union"),
+                };
+
+                BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(keyword_names) == KEYWORD_COUNT);
+
+                u64 i;
+                for (i = 0; i < KEYWORD_COUNT; i += 1)
+                {
+                    if (string_equal(identifier, keyword_names[i]))
                     {
-                        while (true)
-                        {
-                            const char8* restrict it_start = it;
-                            switch (*it_start)
-                            {
-                                break; BUSTER_SWITCH_ALPHA_UPPER: BUSTER_SWITCH_ALPHA_LOWER: BUSTER_SWITCH_DECIMAL_DIGIT:
-                                case '_':
-                                {
-                                    it += 1;
-                                }
-                                break; default: break;
-                            }
-
-                            if (it - it_start == 0)
-                            {
-                                break;
-                            }
-                        }
-
-                        String8 identifier = string_from_pointer_length(start, (u64)(it - start));
-
-                        BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
-                            [TOKEN_KEYWORD_FUNCTION - first_keyword] = S8_INITIALIZER("fn"),
-                            [TOKEN_KEYWORD_IF - first_keyword] = S8_INITIALIZER("if"),
-                            [TOKEN_KEYWORD_ELSE - first_keyword] = S8_INITIALIZER("else"),
-                            [TOKEN_KEYWORD_RETURN - first_keyword] = S8_INITIALIZER("return"),
-                            [TOKEN_KEYWORD_FOR - first_keyword] = S8_INITIALIZER("for"),
-                            [TOKEN_KEYWORD_WHILE - first_keyword] = S8_INITIALIZER("while"),
-                            [TOKEN_KEYWORD_CODE - first_keyword] = S8_INITIALIZER("code"),
-                            [TOKEN_KEYWORD_DATA - first_keyword] = S8_INITIALIZER("data"),
-                            [TOKEN_KEYWORD_TYPE - first_keyword] = S8_INITIALIZER("type"),
-                            [TOKEN_KEYWORD_STRUCT - first_keyword] = S8_INITIALIZER("struct"),
-                            [TOKEN_KEYWORD_UNION - first_keyword] = S8_INITIALIZER("union"),
-                        };
-
-                        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(keyword_names) == KEYWORD_COUNT);
-
-                        u64 i;
-                        for (i = 0; i < KEYWORD_COUNT; i += 1)
-                        {
-                            if (string_equal(identifier, keyword_names[i]))
-                            {
-                                break;
-                            }
-                        }
-
-                        if (i == KEYWORD_COUNT)
-                        {
-                            id = identifier.length == 1 && identifier.pointer[0] == '_' ? TOKEN_UNDERSCORE : TOKEN_IDENTIFIER;
-                        }
-                        else
-                        {
-                            id = (TokenId)(i + (u64)first_keyword);
-                        }
+                        break;
                     }
-                    break; case ' ':
-                    {
-                        id = TOKEN_SPACE;
+                }
 
-                        while (*it == ' ')
-                        {
-                            it += 1;
-                        }
+                if (i == KEYWORD_COUNT)
+                {
+                    id = identifier.length == 1 && identifier.pointer[0] == '_' ? TOKEN_UNDERSCORE : TOKEN_IDENTIFIER;
+                }
+                else
+                {
+                    id = (TokenId)(i + (u64)first_keyword);
+                }
+            }
+            break; case ' ':
+            {
+                id = TOKEN_SPACE;
+
+                while (it < top && *it == ' ')
+                {
+                    it += 1;
+                }
+            }
+            break; case '\t':
+            {
+                id = TOKEN_TAB;
+
+                while (it < top && *it == '\t')
+                {
+                    it += 1;
+                }
+            }
+            break; BUSTER_SWITCH_DECIMAL_DIGIT:
+            {
+                bool is_valid = true;
+                bool has_integer_digit = false;
+                IntegerFormat format = INTEGER_FORMAT_DECIMAL;
+
+                if (start_ch == '0' && it + 1 < top)
+                {
+                    u8 second_ch = (u8)it[1];
+                    switch (second_ch)
+                    {
+                        break; case 'x': it += 2; format = INTEGER_FORMAT_HEXADECIMAL;
+                        break; case 'o': it += 2; format = INTEGER_FORMAT_OCTAL;
+                        break; case 'b': it += 2; format = INTEGER_FORMAT_BINARY;
+                        break; default: {}
                     }
-                    break; BUSTER_SWITCH_DECIMAL_DIGIT:
+                }
+
+                while (it < top && tokenizer_is_integer_digit(format, (u8)*it))
+                {
+                    has_integer_digit = has_integer_digit || *it != '_';
+                    it += 1;
+                }
+
+                is_valid = is_valid && (format == INTEGER_FORMAT_DECIMAL || has_integer_digit);
+
+                bool is_float = (format == INTEGER_FORMAT_DECIMAL || format == INTEGER_FORMAT_HEXADECIMAL) && it < top && *it == '.' && !(it + 1 < top && it[1] == '.');
+
+                if (is_float)
+                {
+                    it += 1;
+
+                    while (it < top && tokenizer_is_real_digit(format, (u8)*it))
                     {
-                        bool is_valid = true;
+                        it += 1;
+                    }
 
-                        IntegerFormat format = INTEGER_FORMAT_DECIMAL;
+                    u8 exponent_ch = it < top ? (u8)*it : 0;
 
-                        if (start_ch == '0')
+                    switch (exponent_ch)
+                    {
+                        break;
+                        case 'E':
+                        case 'e':
+                        case 'P':
+                        case 'p':
                         {
-                            char8 second_ch = *(it + 1);
-                            switch (second_ch)
-                            {
-                                break; case 'x': it += 2; format = INTEGER_FORMAT_HEXADECIMAL;
-                                break; case 'o': it += 2; format = INTEGER_FORMAT_OCTAL;
-                                break; case 'b': it += 2; format = INTEGER_FORMAT_BINARY;
-                                break; default: {}
-                            }
-                        }
-
-                        const char8* restrict digits_start = it;
-
-                        bool increment;
-
-                        do
-                        {
-                            const char8* restrict it_start = it;
-
-                            char8 ch = *it_start;
-
                             switch (format)
                             {
                                 break; case INTEGER_FORMAT_HEXADECIMAL:
                                 {
-                                    switch (ch)
-                                    {
-                                        break; 
-                                        BUSTER_SWITCH_DECIMAL_DIGIT:
-                                        BUSTER_SWITCH_HEX_ALPHA:
-                                        case '_':
-                                        {
-                                            increment = true;
-                                        }
-                                        break; default: increment = false;
-                                    }
+                                    id = TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT;
+                                    is_valid = is_valid && (exponent_ch == 'P' || exponent_ch == 'p');
                                 }
                                 break; case INTEGER_FORMAT_DECIMAL:
                                 {
-                                    switch (ch)
-                                    {
-                                        break; 
-                                        BUSTER_SWITCH_DECIMAL_DIGIT:
-                                        case '_':
-                                        {
-                                            increment = true;
-                                        }
-                                        break; default: increment = false;
-                                    }
+                                    id = TOKEN_DECIMAL_FLOAT_LITERAL_EXPONENT;
+                                    is_valid = is_valid && (exponent_ch == 'E' || exponent_ch == 'e');
                                 }
-                                break; case INTEGER_FORMAT_OCTAL:
-                                {
-                                    switch (ch)
-                                    {
-                                        break; 
-                                        case '0':
-                                        case '1':
-                                        case '2':
-                                        case '3':
-                                        case '4':
-                                        case '5':
-                                        case '6':
-                                        case '7':
-                                        case '_':
-                                        {
-                                            increment = true;
-                                        }
-                                        break; default: increment = false;
-                                    }
-                                }
-                                break; case INTEGER_FORMAT_BINARY:
-                                {
-                                    switch (ch)
-                                    {
-                                        break; 
-                                        case '0':
-                                        case '1':
-                                        case '_':
-                                        {
-                                            increment = true;
-                                        }
-                                        break; default: increment = false;
-                                    }
-                                }
-                                break; case INTEGER_FORMAT_COUNT: BUSTER_UNREACHABLE();
+                                break; default: BUSTER_UNREACHABLE();
                             }
-
-                            it += increment;
-                        } while (increment);
-
-                        // A prefixed literal ("0x"/"0o"/"0b") with no digits after the prefix is malformed.
-                        is_valid = is_valid && (format == INTEGER_FORMAT_DECIMAL || it != digits_start);
-
-                        char8 maybe_float_separator = *it;
-                        bool is_float = maybe_float_separator == '.';
-                        is_valid = is_valid && is_valid_character_after_digit(maybe_float_separator);
-
-                        if (is_float)
-                        {
-                            is_valid = is_valid && (format == INTEGER_FORMAT_DECIMAL || format == INTEGER_FORMAT_HEXADECIMAL);
 
                             it += 1;
 
-                            do
+                            u8 exponent_sign = it < top ? (u8)*it : 0;
+                            bool has_exponent_sign = exponent_sign == '+' || exponent_sign == '-';
+                            is_valid = is_valid && has_exponent_sign;
+                            it += has_exponent_sign;
+
+                            bool has_exponent_digit = false;
+                            while (it < top && (tokenizer_is_ascii_decimal_digit((u8)*it) || *it == '_'))
                             {
-                                char8 ch = *it;
-
-                                switch (format)
-                                {
-                                    break; case INTEGER_FORMAT_HEXADECIMAL:
-                                    {
-                                        switch (ch)
-                                        {
-                                            break; BUSTER_SWITCH_DECIMAL_DIGIT: BUSTER_SWITCH_HEX_ALPHA: case '_': increment = true;
-                                            break; default: increment = false;
-                                        }
-                                    }
-                                    break; case INTEGER_FORMAT_DECIMAL:
-                                    {
-                                        switch (ch)
-                                        {
-                                            break; BUSTER_SWITCH_DECIMAL_DIGIT: BUSTER_SWITCH_HEX_ALPHA: case '_': increment = true;
-                                            break; default: increment = false;
-                                        }
-                                    }
-                                    break; default: BUSTER_UNREACHABLE();
-                                }
-
-                                it += increment;
-                            } while (increment);
-
-                            char8 exponent_ch = *it;
-
-                            switch (exponent_ch)
-                            {
-                                break;
-                                case 'E':
-                                case 'e':
-                                case 'P':
-                                case 'p':
-                                {
-                                    switch (format)
-                                    {
-                                        break; case INTEGER_FORMAT_HEXADECIMAL:
-                                        {
-                                            id = TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT;
-                                            is_valid = is_valid && (exponent_ch == 'P' || exponent_ch == 'p');
-                                        }
-                                        break; case INTEGER_FORMAT_DECIMAL:
-                                        {
-                                            id = TOKEN_DECIMAL_FLOAT_LITERAL_EXPONENT;
-                                            is_valid = is_valid && (exponent_ch == 'E' || exponent_ch == 'e');
-                                        }
-                                        break; default: BUSTER_UNREACHABLE();
-                                    }
-
-                                    it += 1;
-
-                                    char8 exponent_sign = *it; // '+' or '-'
-                                    is_valid = is_valid && (exponent_sign == '+' || exponent_sign == '-');
-                                    it += 1;
-
-                                    do
-                                    {
-                                        const char8* restrict it_start = it;
-
-                                        switch (*it_start)
-                                        {
-                                            break; BUSTER_SWITCH_DECIMAL_DIGIT: increment = true;
-                                            break; default: increment = false;
-                                        }
-
-                                        it += increment;
-                                    }
-                                    while (increment);
-                                }
-                                break; default:
-                                {
-                                    switch (format)
-                                    {
-                                        break; case INTEGER_FORMAT_HEXADECIMAL: id = TOKEN_HEXADECIMAL_FLOAT_LITERAL;
-                                        break; case INTEGER_FORMAT_DECIMAL: id = TOKEN_DECIMAL_FLOAT_LITERAL;
-                                        break; default: BUSTER_UNREACHABLE();
-                                    }
-                                }
+                                has_exponent_digit = has_exponent_digit || *it != '_';
+                                it += 1;
                             }
+                            is_valid = is_valid && has_exponent_digit;
                         }
-                        else
+                        break; default:
                         {
                             switch (format)
                             {
-                                break; case INTEGER_FORMAT_HEXADECIMAL: id = TOKEN_HEXADECIMAL_INTEGER_LITERAL;
-                                break; case INTEGER_FORMAT_DECIMAL: id = TOKEN_DECIMAL_INTEGER_LITERAL;
-                                break; case INTEGER_FORMAT_OCTAL: id = TOKEN_OCTAL_INTEGER_LITERAL;
-                                break; case INTEGER_FORMAT_BINARY: id = TOKEN_BINARY_INTEGER_LITERAL;
-                                break; case INTEGER_FORMAT_COUNT: BUSTER_UNREACHABLE();
+                                break; case INTEGER_FORMAT_HEXADECIMAL: id = TOKEN_HEXADECIMAL_FLOAT_LITERAL;
+                                break; case INTEGER_FORMAT_DECIMAL: id = TOKEN_DECIMAL_FLOAT_LITERAL;
+                                break; default: BUSTER_UNREACHABLE();
                             }
                         }
-
-                        is_valid = is_valid && is_valid_character_after_digit(*it);
-
-                        if (!is_valid)
-                        {
-                            BUSTER_TODO();
-                        }
                     }
-                    break; case '\n': { id = TOKEN_LINE_FEED; it += 1; }
-                    break; case '\r': { id = TOKEN_CARRIAGE_RETURN; it += 1; }
-                    break; case '[': { id = TOKEN_LEFT_BRACKET; it += 1; }
-                    break; case ']': { id = TOKEN_RIGHT_BRACKET; it += 1; }
-                    break; case '{': { id = TOKEN_LEFT_BRACE; it += 1; }
-                    break; case '}': { id = TOKEN_RIGHT_BRACE; it += 1; }
-                    break; case '(': { id = TOKEN_LEFT_PARENTHESIS; it += 1; }
-                    break; case ')': { id = TOKEN_RIGHT_PARENTHESIS; it += 1; }
-                    break; case '<':
-                    {
-                        if (it + 1 < top && it[1] == '<')
-                        {
-                            id = TOKEN_SHIFT_LEFT;
-                            it += 2;
-                        }
-                        else
-                        {
-                            id = TOKEN_LESS;
-                            it += 1;
-                        }
-                    }
-                    break; case '>':
-                    {
-                        if (it + 1 < top && it[1] == '>')
-                        {
-                            id = TOKEN_SHIFT_RIGHT;
-                            it += 2;
-                        }
-                        else
-                        {
-                            id = TOKEN_GREATER;
-                            it += 1;
-                        }
-                    }
-                    break; case '+':
-                    {
-                        if (it + 1 < top && it[1] == '=')
-                        {
-                            id = TOKEN_PLUS_EQUAL;
-                            it += 2;
-                        }
-                        else
-                        {
-                            id = TOKEN_PLUS;
-                            it += 1;
-                        }
-                    }
-                    break; case '-': { id = TOKEN_MINUS; it += 1; }
-                    break; case '*': { id = TOKEN_ASTERISK; it += 1; }
-                    break; case '=': { id = TOKEN_EQUAL; it += 1; }
-                    break; case ':': { id = TOKEN_COLON; it += 1; }
-                    break; case ';': { id = TOKEN_SEMICOLON; it += 1; }
-                    break; case ',': { id = TOKEN_COMMA; it += 1; }
-                    break; case '&': { id = TOKEN_AMPERSAND; it += 1; }
-                    break; case '%': { id = TOKEN_PERCENTAGE; it += 1; }
-                    break; case '|': { id = TOKEN_BAR; it += 1; }
-                    break; case '^': { id = TOKEN_CARET; it += 1; }
-                    break; case '/':
-                    {
-                        if (it + 1 < top && it[1] == '/')
-                        {
-                            id = TOKEN_COMMENT;
-                            it += 2;
-                            while (it < top && *it != '\n' && *it != '\r')
-                            {
-                                it += 1;
-                            }
-                        }
-                        else
-                        {
-                            id = TOKEN_SLASH;
-                            it += 1;
-                        }
-                    }
-                    break; case '.':
-                    {
-                        if (it + 2 < top && it[1] == '.' && it[2] == '.')
-                        {
-                            id = TOKEN_TRIPLE_DOT;
-                        }
-                        else if (it + 1 < top && it[1] == '.')
-                        {
-                            id = TOKEN_DOUBLE_DOT;
-                        }
-                        else
-                        {
-                            id = TOKEN_DOT;
-                        }
-
-                        it += (u64)id - (u64)TOKEN_DOT + 1;
-                    }
-                    break; default: BUSTER_UNREACHABLE();
                 }
-
-                const char8* restrict end = it;
-                u64 length = (u64)(end - start);
-                if (length > (((u64)1 << 24) - 1))
+                else
                 {
-                    BUSTER_TODO(); // TODO: error
+                    switch (format)
+                    {
+                        break; case INTEGER_FORMAT_HEXADECIMAL: id = TOKEN_HEXADECIMAL_INTEGER_LITERAL;
+                        break; case INTEGER_FORMAT_DECIMAL: id = TOKEN_DECIMAL_INTEGER_LITERAL;
+                        break; case INTEGER_FORMAT_OCTAL: id = TOKEN_OCTAL_INTEGER_LITERAL;
+                        break; case INTEGER_FORMAT_BINARY: id = TOKEN_BINARY_INTEGER_LITERAL;
+                        break; case INTEGER_FORMAT_COUNT: BUSTER_UNREACHABLE();
+                    }
                 }
 
-                u64 token_index = token_count;
+                id = is_valid ? id : TOKEN_ERROR;
+            }
+            break; case '\n': { id = TOKEN_LINE_FEED; it += 1; }
+            break; case '\r': { id = TOKEN_CARRIAGE_RETURN; it += 1; }
+            break; case '[': { id = TOKEN_LEFT_BRACKET; it += 1; }
+            break; case ']': { id = TOKEN_RIGHT_BRACKET; it += 1; }
+            break; case '{': { id = TOKEN_LEFT_BRACE; it += 1; }
+            break; case '}': { id = TOKEN_RIGHT_BRACE; it += 1; }
+            break; case '(': { id = TOKEN_LEFT_PARENTHESIS; it += 1; }
+            break; case ')': { id = TOKEN_RIGHT_PARENTHESIS; it += 1; }
+            break; case '<':
+            {
+                if (it + 1 < top && it[1] == '<')
+                {
+                    id = TOKEN_SHIFT_LEFT;
+                    it += 2;
+                }
+                else
+                {
+                    id = TOKEN_LESS;
+                    it += 1;
+                }
+            }
+            break; case '>':
+            {
+                if (it + 1 < top && it[1] == '>')
+                {
+                    id = TOKEN_SHIFT_RIGHT;
+                    it += 2;
+                }
+                else
+                {
+                    id = TOKEN_GREATER;
+                    it += 1;
+                }
+            }
+            break; case '+':
+            {
+                if (it + 1 < top && it[1] == '=')
+                {
+                    id = TOKEN_PLUS_EQUAL;
+                    it += 2;
+                }
+                else
+                {
+                    id = TOKEN_PLUS;
+                    it += 1;
+                }
+            }
+            break; case '-': { id = TOKEN_MINUS; it += 1; }
+            break; case '*': { id = TOKEN_ASTERISK; it += 1; }
+            break; case '=': { id = TOKEN_EQUAL; it += 1; }
+            break; case ':': { id = TOKEN_COLON; it += 1; }
+            break; case ';': { id = TOKEN_SEMICOLON; it += 1; }
+            break; case ',': { id = TOKEN_COMMA; it += 1; }
+            break; case '&': { id = TOKEN_AMPERSAND; it += 1; }
+            break; case '%': { id = TOKEN_PERCENTAGE; it += 1; }
+            break; case '|': { id = TOKEN_BAR; it += 1; }
+            break; case '^': { id = TOKEN_CARET; it += 1; }
+            break; case '/':
+            {
+                if (it + 1 < top && it[1] == '/')
+                {
+                    id = TOKEN_COMMENT;
+                    it += 2;
+                    while (it < top && *it != '\n' && *it != '\r')
+                    {
+                        it += 1;
+                    }
+                }
+                else
+                {
+                    id = TOKEN_SLASH;
+                    it += 1;
+                }
+            }
+            break; case '.':
+            {
+                if (it + 2 < top && it[1] == '.' && it[2] == '.')
+                {
+                    id = TOKEN_TRIPLE_DOT;
+                }
+                else if (it + 1 < top && it[1] == '.')
+                {
+                    id = TOKEN_DOUBLE_DOT;
+                }
+                else
+                {
+                    id = TOKEN_DOT;
+                }
 
-                tokens[token_index] = (Token){ .id = id };
-                token_length_set(&tokens[token_index], (u32)length);
-
-                token_count = token_index + 1;
+                it += (u64)id - (u64)TOKEN_DOT + 1;
+            }
+            break; default:
+            {
+                it += tokenizer_utf8_sequence_length(it, top);
             }
         }
 
-        tokens[token_count++] = (Token){ .id = TOKEN_EOF };
-        token_length_set(&tokens[token_count - 1], 0);
-
-        result.tokens = token_start;
-
-        if (result.token_count > UINT32_MAX)
-        {
-            BUSTER_TODO();
-        }
-
-        result.token_count = (u32)token_count;
+        const char8* restrict end = it;
+        u64 length = (u64)(end - start);
+        tokenizer_emit_token(&result, tokens, &token_count, id, length);
     }
 
+    tokenizer_emit_token(&result, tokens, &token_count, TOKEN_EOF, 0);
+
+    result.tokens = token_start;
+
+    if (token_count > UINT32_MAX)
+    {
+        BUSTER_TODO();
+    }
+
+    result.token_count = (u32)token_count;
     return result;
 }
 
@@ -2116,10 +2166,7 @@ BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, String8 path)
 {
     u64 position = arena->position;
 
-    // The tokenizer peeks a few bytes past the last consumed character (e.g. exponent sign/digit
-    // lookahead on numeric literals); end_padding guarantees those reads land on zeroed memory
-    // instead of past the arena allocation.
-    String8 source = BYTE_SLICE_TO_STRING(8, file_read(arena, path, (FileReadOptions){ .end_padding = 8 }));
+    String8 source = BYTE_SLICE_TO_STRING(8, file_read(arena, path, (FileReadOptions){0}));
 
     string_print(S8("Tokenizing \"{S8}\"\n"), path);
 
@@ -2183,6 +2230,157 @@ void parser_experiments(void)
 }
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL bool tokenizer_stream_covers_source(TokenizerResult tokenizer, u64 source_length)
+{
+    bool result = tokenizer.token_count >= 1;
+    u64 consumed_length = 0;
+    u32 error_count = 0;
+
+    for (u32 i = 0; i < tokenizer.token_count; i += 1)
+    {
+        Token* token = &tokenizer.tokens[i];
+        u32 token_length = token_length_get(token);
+        bool is_last = i + 1 == tokenizer.token_count;
+
+        result = result && token->id < TOKEN_COUNT;
+        if (is_last)
+        {
+            result = result && token->id == TOKEN_EOF && token_length == 0;
+        }
+        else
+        {
+            result = result && token->id != TOKEN_EOF && token_length > 0;
+            consumed_length += token_length;
+            error_count += token->id == TOKEN_ERROR;
+        }
+    }
+
+    result = result && consumed_length == source_length;
+    result = result && error_count == tokenizer.error_count;
+    return result;
+}
+
+UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+
+    {
+        TokenizerResult tokenizer = tokenize(arena, S8("").pointer, 0);
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, 0));
+        BUSTER_TEST(arguments, tokenizer.token_count == 1);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_EOF);
+        arena->position = position;
+    }
+
+    {
+        char8 source[] = { '1', '2', '3' };
+        TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source)));
+        BUSTER_TEST(arguments, tokenizer.token_count == 2);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_DECIMAL_INTEGER_LITERAL);
+        BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[0]) == BUSTER_ARRAY_LENGTH(source));
+        arena->position = position;
+    }
+
+    {
+        char8 source[] = { '1', '+', '2' };
+        TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source)));
+        BUSTER_TEST(arguments, tokenizer.token_count == 4);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_DECIMAL_INTEGER_LITERAL);
+        BUSTER_TEST(arguments, tokenizer.tokens[1].id == TOKEN_PLUS);
+        BUSTER_TEST(arguments, tokenizer.tokens[2].id == TOKEN_DECIMAL_INTEGER_LITERAL);
+        arena->position = position;
+    }
+
+    {
+        char8 source[] = { '\t', '\t' };
+        TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source)));
+        BUSTER_TEST(arguments, tokenizer.token_count == 2);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_TAB);
+        BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[0]) == BUSTER_ARRAY_LENGTH(source));
+        arena->position = position;
+    }
+
+    {
+        char8 source[] = { '0', 'x' };
+        TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source)));
+        BUSTER_TEST(arguments, tokenizer.token_count == 2);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_ERROR);
+        BUSTER_TEST(arguments, tokenizer.error_count == 1);
+        arena->position = position;
+    }
+
+    {
+        char8 source[] = { (char8)0xC3u, (char8)0xA9u };
+        TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source)));
+        BUSTER_TEST(arguments, tokenizer.token_count == 2);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_ERROR);
+        BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[0]) == BUSTER_ARRAY_LENGTH(source));
+        BUSTER_TEST(arguments, tokenizer.error_count == 1);
+        arena->position = position;
+    }
+
+    {
+        char8 source[] = { (char8)0xF0u, (char8)0x80u, (char8)0x80u, (char8)0x80u };
+        TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source)));
+        BUSTER_TEST(arguments, tokenizer.token_count == BUSTER_ARRAY_LENGTH(source) + 1);
+        BUSTER_TEST(arguments, tokenizer.error_count == BUSTER_ARRAY_LENGTH(source));
+        arena->position = position;
+    }
+
+    {
+        char8 source[] = { '1', '+', '2', '\t', (char8)0xE2u, (char8)0x82u, (char8)0xACu, 0 };
+        TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source)));
+        BUSTER_TEST(arguments, tokenizer.token_count == 7);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_DECIMAL_INTEGER_LITERAL);
+        BUSTER_TEST(arguments, tokenizer.tokens[1].id == TOKEN_PLUS);
+        BUSTER_TEST(arguments, tokenizer.tokens[2].id == TOKEN_DECIMAL_INTEGER_LITERAL);
+        BUSTER_TEST(arguments, tokenizer.tokens[3].id == TOKEN_TAB);
+        BUSTER_TEST(arguments, tokenizer.tokens[4].id == TOKEN_ERROR);
+        BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[4]) == 3);
+        BUSTER_TEST(arguments, tokenizer.tokens[5].id == TOKEN_ERROR);
+        BUSTER_TEST(arguments, tokenizer.error_count == 2);
+        arena->position = position;
+    }
+
+    {
+        bool all_single_byte_inputs_pass = true;
+        for (u32 byte = 0; byte <= 0xFFu; byte += 1)
+        {
+            char8 source[] = { (char8)byte };
+            TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
+            all_single_byte_inputs_pass = all_single_byte_inputs_pass && tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source));
+            arena->position = position;
+        }
+        BUSTER_TEST(arguments, all_single_byte_inputs_pass);
+    }
+
+    {
+        bool all_byte_pairs_pass = true;
+        for (u32 first = 0; first <= 0xFFu && all_byte_pairs_pass; first += 1)
+        {
+            for (u32 second = 0; second <= 0xFFu; second += 1)
+            {
+                char8 source[] = { (char8)first, (char8)second };
+                TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
+                all_byte_pairs_pass = all_byte_pairs_pass && tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source));
+                arena->position = position;
+            }
+        }
+        BUSTER_TEST(arguments, all_byte_pairs_pass);
+    }
+
+    return result;
+}
+
 // Parse a bare expression by wrapping it in a minimal program and returning the
 // postorder stream of its return value.
 BUSTER_GLOBAL_LOCAL AstExpression parse_expression_snippet(Arena* arena, String8 expression)
@@ -2192,14 +2390,11 @@ BUSTER_GLOBAL_LOCAL AstExpression parse_expression_snippet(Arena* arena, String8
     String8 prefix = S8("code main[export] : fn[cc(c)] (argument:count: s32, argv: &&u8, envp: &&u8) s32\n{\n    return ");
     String8 suffix = S8(";\n}\n");
 
-    // The tokenizer peeks a few bytes past the end; give it zeroed padding.
-    u64 padding = 8;
     u64 length = prefix.length + expression.length + suffix.length;
-    char8* buffer = arena_allocate(arena, char8, length + padding);
+    char8* buffer = arena_allocate(arena, char8, length);
     memcpy(buffer, prefix.pointer, prefix.length);
     memcpy(buffer + prefix.length, expression.pointer, expression.length);
     memcpy(buffer + prefix.length + expression.length, suffix.pointer, suffix.length);
-    memset(buffer + length, 0, padding);
 
     TokenizerResult tokenizer = tokenize(arena, buffer, length);
     return parse(buffer, tokenizer);
@@ -2212,6 +2407,7 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
 
     struct { String8 source; String8 expected; } cases[] = {
         { S8("1 + 2 * 3"),           S8("(+ 1 (* 2 3))") },
+        { S8("1+2"),                 S8("(+ 1 2)") },
         { S8("1 * 2 + 3"),           S8("(+ (* 1 2) 3)") },
         { S8("1 + 2 + 3"),           S8("(+ (+ 1 2) 3)") },
         { S8("1 - 2 - 3"),           S8("(- (- 1 2) 3)") },
