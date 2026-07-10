@@ -415,6 +415,11 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     id = TOKEN_SHIFT_LEFT;
                     it += 2;
                 }
+                else if (it + 1 < top && it[1] == '=')
+                {
+                    id = TOKEN_LESS_EQUAL;
+                    it += 2;
+                }
                 else
                 {
                     id = TOKEN_LESS;
@@ -426,6 +431,11 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                 if (it + 1 < top && it[1] == '>')
                 {
                     id = TOKEN_SHIFT_RIGHT;
+                    it += 2;
+                }
+                else if (it + 1 < top && it[1] == '=')
+                {
+                    id = TOKEN_GREATER_EQUAL;
                     it += 2;
                 }
                 else
@@ -449,7 +459,32 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
             }
             break; case '-': { id = TOKEN_MINUS; it += 1; }
             break; case '*': { id = TOKEN_ASTERISK; it += 1; }
-            break; case '=': { id = TOKEN_EQUAL; it += 1; }
+            break; case '=':
+            {
+                if (it + 1 < top && it[1] == '=')
+                {
+                    id = TOKEN_EQUAL_EQUAL;
+                    it += 2;
+                }
+                else
+                {
+                    id = TOKEN_EQUAL;
+                    it += 1;
+                }
+            }
+            break; case '!':
+            {
+                if (it + 1 < top && it[1] == '=')
+                {
+                    id = TOKEN_BANG_EQUAL;
+                    it += 2;
+                }
+                else
+                {
+                    id = TOKEN_BANG;
+                    it += 1;
+                }
+            }
             break; case ':': { id = TOKEN_COLON; it += 1; }
             break; case ';': { id = TOKEN_SEMICOLON; it += 1; }
             break; case ',': { id = TOKEN_COMMA; it += 1; }
@@ -457,6 +492,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
             break; case '%': { id = TOKEN_PERCENTAGE; it += 1; }
             break; case '|': { id = TOKEN_BAR; it += 1; }
             break; case '^': { id = TOKEN_CARET; it += 1; }
+            break; case '~': { id = TOKEN_TILDE; it += 1; }
             break; case '/':
             {
                 if (it + 1 < top && it[1] == '/')
@@ -1025,6 +1061,8 @@ typedef enum AstNodeId
     AST_NODE_CONSTANT_INTEGER,
     AST_NODE_UNARY_MINUS,
     AST_NODE_UNARY_PLUS,
+    AST_NODE_UNARY_LOGICAL_NOT,
+    AST_NODE_UNARY_BITWISE_NOT,
     AST_NODE_BINARY_PLUS,
     AST_NODE_BINARY_MINUS,
     AST_NODE_BINARY_ASTERISK,
@@ -1032,6 +1070,12 @@ typedef enum AstNodeId
     AST_NODE_BINARY_PERCENT,
     AST_NODE_BINARY_SHIFT_LEFT,
     AST_NODE_BINARY_SHIFT_RIGHT,
+    AST_NODE_BINARY_EQUAL,
+    AST_NODE_BINARY_NOT_EQUAL,
+    AST_NODE_BINARY_LESS,
+    AST_NODE_BINARY_LESS_EQUAL,
+    AST_NODE_BINARY_GREATER,
+    AST_NODE_BINARY_GREATER_EQUAL,
     AST_NODE_BINARY_AMPERSAND,
     AST_NODE_BINARY_BAR,
     AST_NODE_BINARY_CARET,
@@ -1048,6 +1092,8 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
         case AST_NODE_CONSTANT_INTEGER: return S8("ConstantInteger");
         case AST_NODE_UNARY_MINUS: return S8("UnaryMinus");
         case AST_NODE_UNARY_PLUS: return S8("UnaryPlus");
+        case AST_NODE_UNARY_LOGICAL_NOT: return S8("UnaryLogicalNot");
+        case AST_NODE_UNARY_BITWISE_NOT: return S8("UnaryBitwiseNot");
         case AST_NODE_BINARY_PLUS: return S8("BinaryPlus");
         case AST_NODE_BINARY_MINUS: return S8("BinaryMinus");
         case AST_NODE_BINARY_ASTERISK: return S8("BinaryAsterisk");
@@ -1055,6 +1101,12 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
         case AST_NODE_BINARY_PERCENT: return S8("BinaryPercent");
         case AST_NODE_BINARY_SHIFT_LEFT: return S8("BinaryShiftLeft");
         case AST_NODE_BINARY_SHIFT_RIGHT: return S8("BinaryShiftRight");
+        case AST_NODE_BINARY_EQUAL: return S8("BinaryEqual");
+        case AST_NODE_BINARY_NOT_EQUAL: return S8("BinaryNotEqual");
+        case AST_NODE_BINARY_LESS: return S8("BinaryLess");
+        case AST_NODE_BINARY_LESS_EQUAL: return S8("BinaryLessEqual");
+        case AST_NODE_BINARY_GREATER: return S8("BinaryGreater");
+        case AST_NODE_BINARY_GREATER_EQUAL: return S8("BinaryGreaterEqual");
         case AST_NODE_BINARY_AMPERSAND: return S8("BinaryAmpersand");
         case AST_NODE_BINARY_BAR: return S8("BinaryBar");
         case AST_NODE_BINARY_CARET: return S8("BinaryCaret");
@@ -1154,13 +1206,14 @@ BUSTER_GLOBAL_LOCAL AstNode* allocate_node(Parser* restrict parser)
 typedef enum BindingPower
 {
     BINDING_POWER_BITWISE,
+    BINDING_POWER_EQUALITY,
+    BINDING_POWER_RELATIONAL,
     BINDING_POWER_SHIFT,
     BINDING_POWER_ADD,
     BINDING_POWER_MULTIPLY,
 } BindingPower;
 
-// Left binding power of a binary operator: higher binds tighter. Mirrors C/Zig
-// precedence for these operators (multiplicative > additive > shift).
+// Left binding power of a binary operator: higher binds tighter.
 BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
 {
     switch (id)
@@ -1170,6 +1223,18 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
         case AST_NODE_BINARY_CARET:
         {
             return BINDING_POWER_BITWISE;
+        }
+        case AST_NODE_BINARY_EQUAL:
+        case AST_NODE_BINARY_NOT_EQUAL:
+        {
+            return BINDING_POWER_EQUALITY;
+        }
+        case AST_NODE_BINARY_LESS:
+        case AST_NODE_BINARY_LESS_EQUAL:
+        case AST_NODE_BINARY_GREATER:
+        case AST_NODE_BINARY_GREATER_EQUAL:
+        {
+            return BINDING_POWER_RELATIONAL;
         }
         case AST_NODE_BINARY_SHIFT_LEFT:
         case AST_NODE_BINARY_SHIFT_RIGHT:
@@ -1193,6 +1258,8 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
         case AST_NODE_COUNT:
         case AST_NODE_UNARY_MINUS:
         case AST_NODE_UNARY_PLUS:
+        case AST_NODE_UNARY_LOGICAL_NOT:
+        case AST_NODE_UNARY_BITWISE_NOT:
         case AST_NODE_CONSTANT_INTEGER:
         {
         }
@@ -1213,6 +1280,8 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNodeId id)
         }
         case AST_NODE_UNARY_MINUS:
         case AST_NODE_UNARY_PLUS:
+        case AST_NODE_UNARY_LOGICAL_NOT:
+        case AST_NODE_UNARY_BITWISE_NOT:
         {
             return 1;
         }
@@ -1223,6 +1292,12 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNodeId id)
         case AST_NODE_BINARY_PERCENT:
         case AST_NODE_BINARY_SHIFT_LEFT:
         case AST_NODE_BINARY_SHIFT_RIGHT:
+        case AST_NODE_BINARY_EQUAL:
+        case AST_NODE_BINARY_NOT_EQUAL:
+        case AST_NODE_BINARY_LESS:
+        case AST_NODE_BINARY_LESS_EQUAL:
+        case AST_NODE_BINARY_GREATER:
+        case AST_NODE_BINARY_GREATER_EQUAL:
         case AST_NODE_BINARY_AMPERSAND:
         case AST_NODE_BINARY_BAR:
         case AST_NODE_BINARY_CARET:
@@ -1246,6 +1321,8 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
     {
         case AST_NODE_UNARY_MINUS: return S8("neg");
         case AST_NODE_UNARY_PLUS: return S8("pos");
+        case AST_NODE_UNARY_LOGICAL_NOT: return S8("not");
+        case AST_NODE_UNARY_BITWISE_NOT: return S8("bit_not");
         case AST_NODE_BINARY_PLUS: return S8("+");
         case AST_NODE_BINARY_MINUS: return S8("-");
         case AST_NODE_BINARY_ASTERISK: return S8("*");
@@ -1253,6 +1330,12 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_BINARY_PERCENT: return S8("%");
         case AST_NODE_BINARY_SHIFT_LEFT: return S8("<<");
         case AST_NODE_BINARY_SHIFT_RIGHT: return S8(">>");
+        case AST_NODE_BINARY_EQUAL: return S8("==");
+        case AST_NODE_BINARY_NOT_EQUAL: return S8("!=");
+        case AST_NODE_BINARY_LESS: return S8("<");
+        case AST_NODE_BINARY_LESS_EQUAL: return S8("<=");
+        case AST_NODE_BINARY_GREATER: return S8(">");
+        case AST_NODE_BINARY_GREATER_EQUAL: return S8(">=");
         case AST_NODE_BINARY_AMPERSAND: return S8("&");
         case AST_NODE_BINARY_BAR: return S8("|");
         case AST_NODE_BINARY_CARET: return S8("^");
@@ -1349,8 +1432,13 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_LEFT_PARENTHESIS: return S8("LeftParenthesis");
         break; case TOKEN_RIGHT_PARENTHESIS: return S8("RightParenthesis");
         break; case TOKEN_EQUAL: return S8("Equal");
+        break; case TOKEN_EQUAL_EQUAL: return S8("EqualEqual");
+        break; case TOKEN_BANG: return S8("Bang");
+        break; case TOKEN_BANG_EQUAL: return S8("BangEqual");
         break; case TOKEN_GREATER: return S8("Greater");
+        break; case TOKEN_GREATER_EQUAL: return S8("GreaterEqual");
         break; case TOKEN_LESS: return S8("Less");
+        break; case TOKEN_LESS_EQUAL: return S8("LessEqual");
         break; case TOKEN_SHIFT_LEFT: return S8("ShiftLeft");
         break; case TOKEN_SHIFT_RIGHT: return S8("ShiftRight");
         break; case TOKEN_PLUS: return S8("Plus");
@@ -1368,6 +1456,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_PERCENTAGE: return S8("Percent");
         break; case TOKEN_BAR: return S8("Bar");
         break; case TOKEN_CARET: return S8("Caret");
+        break; case TOKEN_TILDE: return S8("Tilde");
         break; case TOKEN_KEYWORD_RETURN: return S8("Keyword_Return");
         break; case TOKEN_KEYWORD_IF: return S8("Keyword_If");
         break; case TOKEN_KEYWORD_ELSE: return S8("Keyword_Else");
@@ -1995,9 +2084,19 @@ BUSTER_GLOBAL_LOCAL AstExpression parse(const char8* restrict source, TokenizerR
                             break;
                             case TOKEN_MINUS:
                             case TOKEN_PLUS:
+                            case TOKEN_BANG:
+                            case TOKEN_TILDE:
                             {
                                 consume(&parser.iterator);
-                                AstNodeId unary_id = token.id == TOKEN_MINUS ? AST_NODE_UNARY_MINUS : AST_NODE_UNARY_PLUS;
+                                AstNodeId unary_id;
+                                switch (token.id)
+                                {
+                                    break; case TOKEN_MINUS: unary_id = AST_NODE_UNARY_MINUS;
+                                    break; case TOKEN_PLUS: unary_id = AST_NODE_UNARY_PLUS;
+                                    break; case TOKEN_BANG: unary_id = AST_NODE_UNARY_LOGICAL_NOT;
+                                    break; case TOKEN_TILDE: unary_id = AST_NODE_UNARY_BITWISE_NOT;
+                                    break; default: BUSTER_TODO_TOKEN(token.id);
+                                }
                                 BUSTER_CHECK(st->expression.unary_count < EXPRESSION_STACK_CAPACITY);
                                 st->expression.unary_stack[st->expression.unary_count] = (u8)unary_id;
                                 st->expression.unary_count += 1;
@@ -2030,6 +2129,12 @@ BUSTER_GLOBAL_LOCAL AstExpression parse(const char8* restrict source, TokenizerR
                                 case TOKEN_PERCENTAGE:
                                 case TOKEN_SHIFT_LEFT:
                                 case TOKEN_SHIFT_RIGHT:
+                                case TOKEN_EQUAL_EQUAL:
+                                case TOKEN_BANG_EQUAL:
+                                case TOKEN_LESS:
+                                case TOKEN_LESS_EQUAL:
+                                case TOKEN_GREATER:
+                                case TOKEN_GREATER_EQUAL:
                                 case TOKEN_BAR:
                                 case TOKEN_AMPERSAND:
                                 case TOKEN_CARET:
@@ -2047,6 +2152,12 @@ BUSTER_GLOBAL_LOCAL AstExpression parse(const char8* restrict source, TokenizerR
                                         break; case TOKEN_PERCENTAGE: binary_node_id = AST_NODE_BINARY_PERCENT;
                                         break; case TOKEN_SHIFT_LEFT: binary_node_id = AST_NODE_BINARY_SHIFT_LEFT;
                                         break; case TOKEN_SHIFT_RIGHT: binary_node_id = AST_NODE_BINARY_SHIFT_RIGHT;
+                                        break; case TOKEN_EQUAL_EQUAL: binary_node_id = AST_NODE_BINARY_EQUAL;
+                                        break; case TOKEN_BANG_EQUAL: binary_node_id = AST_NODE_BINARY_NOT_EQUAL;
+                                        break; case TOKEN_LESS: binary_node_id = AST_NODE_BINARY_LESS;
+                                        break; case TOKEN_LESS_EQUAL: binary_node_id = AST_NODE_BINARY_LESS_EQUAL;
+                                        break; case TOKEN_GREATER: binary_node_id = AST_NODE_BINARY_GREATER;
+                                        break; case TOKEN_GREATER_EQUAL: binary_node_id = AST_NODE_BINARY_GREATER_EQUAL;
                                         break; case TOKEN_AMPERSAND: binary_node_id = AST_NODE_BINARY_AMPERSAND;
                                         break; case TOKEN_BAR: binary_node_id = AST_NODE_BINARY_BAR;
                                         break; case TOKEN_CARET: binary_node_id = AST_NODE_BINARY_CARET;
@@ -2217,6 +2328,9 @@ void parser_experiments(void)
         S8("tests/basic_integer_literal_and.bbb"),
         S8("tests/basic_integer_literal_or.bbb"),
         S8("tests/basic_integer_literal_xor.bbb"),
+        S8("tests/basic_integer_literal_compare.bbb"),
+        S8("tests/basic_logical_not.bbb"),
+        S8("tests/basic_bitwise_not.bbb"),
         S8("tests/basic_integer_literal_precedence.bbb"),
         // S8("tests/basic_if_else.bbb"),
         // S8("tests/array_slices.bbb"),
@@ -2414,8 +2528,18 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
         { S8("2 * 3 + 4 * 5"),       S8("(+ (* 2 3) (* 4 5))") },
         { S8("2 * -3"),              S8("(* 2 (neg 3))") },
         { S8("- - 5"),               S8("(neg (neg 5))") },
+        { S8("!!1"),                 S8("(not (not 1))") },
+        { S8("~!1"),                 S8("(bit_not (not 1))") },
         { S8("1 << 2 + 3 * 4"),      S8("(<< 1 (+ 2 (* 3 4)))") },
         { S8("1 + 2 * 3 << 4 - 5"),  S8("(<< (+ 1 (* 2 3)) (- 4 5))") },
+        { S8("1 + 2 < 3 << 4"),      S8("(< (+ 1 2) (<< 3 4))") },
+        { S8("1 <= 2"),              S8("(<= 1 2)") },
+        { S8("1 > 2"),               S8("(> 1 2)") },
+        { S8("1 >= 2"),              S8("(>= 1 2)") },
+        { S8("1 == 2"),              S8("(== 1 2)") },
+        { S8("1 != 2"),              S8("(!= 1 2)") },
+        { S8("1 < 2 == 3"),          S8("(== (< 1 2) 3)") },
+        { S8("1 & 2 == 3"),          S8("(& 1 (== 2 3))") },
     };
 
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
