@@ -1751,3 +1751,90 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
 
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+#include <buster/test.h>
+
+UnitTestResult os_tests(UnitTestArguments* arguments)
+{
+    BUSTER_UNUSED(arguments);
+
+    UnitTestResult result = {0};
+
+    // flag_set_ex/flag_get_ex pack one flag per bit across u64 words.
+    {
+        u64 flags[FLAG_ARRAY_LENGTH(u64, 100)] = {0};
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(flags) == 2);
+
+        u64 set_indices[] = { 0, 1, 63, 64, 99 };
+        for (EACH_ARRAY_INDEX(i, set_indices))
+        {
+            flag_set_ex(flags, 100, set_indices[i], true);
+        }
+
+        u64 set_i = 0;
+        bool all_match = true;
+        for (u64 flag_index = 0; flag_index < 100; flag_index += 1)
+        {
+            bool expected = set_i < BUSTER_ARRAY_LENGTH(set_indices) && set_indices[set_i] == flag_index;
+            set_i += expected;
+            all_match = all_match && flag_get_ex(flags, 100, flag_index) == expected;
+        }
+        BUSTER_TEST(arguments, all_match);
+
+        flag_set_ex(flags, 100, 64, false);
+        BUSTER_TEST(arguments, !flag_get_ex(flags, 100, 64));
+        BUSTER_TEST(arguments, flag_get_ex(flags, 100, 63));
+    }
+
+    // Every standard stream must be representable; fd 0 (stdin) used to
+    // collide with the null "no descriptor" encoding.
+    {
+        bool all_streams_valid = true;
+        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+        {
+            all_streams_valid = all_streams_valid && os_get_standard_stream((StandardStream)stream) != 0;
+        }
+        BUSTER_TEST(arguments, all_streams_valid);
+#if defined(__linux__) || defined(__APPLE__)
+        BUSTER_TEST(arguments, generic_fd_to_posix(os_get_standard_stream(STANDARD_STREAM_INPUT)) == 0);
+        BUSTER_TEST(arguments, generic_fd_to_posix(os_get_standard_stream(STANDARD_STREAM_OUTPUT)) == 1);
+        BUSTER_TEST(arguments, generic_fd_to_posix(os_get_standard_stream(STANDARD_STREAM_ERROR)) == 2);
+#endif
+    }
+
+#if BUSTER_LINUX || BUSTER_MACOS
+    // Regression: draining captured stdout/stderr sequentially deadlocked when
+    // the child filled one pipe while the parent blocked on the other. The
+    // child writes far more than a pipe buffer to stderr before touching
+    // stdout.
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+
+        String8 spawn_arguments[] = {
+            S8("/bin/sh"),
+            S8("-c"),
+            S8("head -c 262144 /dev/zero | tr '\\0' e >&2; head -c 262144 /dev/zero | tr '\\0' o"),
+        };
+        ProcessSpawnOptions options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = 1,
+        };
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments), (SliceString8){0}, (SliceString8){0}, options);
+        BUSTER_TEST(arguments, spawn.handle != 0);
+        if (spawn.handle)
+        {
+            ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
+            BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
+            BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length == 262144);
+            BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_ERROR].length == 262144);
+        }
+
+        arena->position = position;
+    }
+#endif
+
+    return result;
+}
+#endif

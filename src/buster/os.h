@@ -245,3 +245,8 @@ BUSTER_F_DECL BooleanArgumentProcessResult boolean_argument_process(String8* fla
 
 BUSTER_F_DECL bool program_flag_get(ProgramFlag flag);
 BUSTER_F_DECL String8 executable_resolve_in_path(Arena* arena, String8 file);
+
+#if BUSTER_INCLUDE_TESTS
+#include <buster/test.h>
+BUSTER_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments);
+#endif
