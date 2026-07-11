@@ -477,6 +477,13 @@ BUSTER_GLOBAL_LOCAL void* pthread_entry_point(void* argument)
     thread_entry_point(entity->thread.callback, entity->thread.argument);
     return (void*)0;
 }
+#elif defined(_WIN32)
+BUSTER_GLOBAL_LOCAL DWORD WINAPI windows_thread_entry_point(LPVOID argument)
+{
+    OsEntity* entity = (OsEntity*)argument;
+    thread_entry_point(entity->thread.callback, entity->thread.argument);
+    return 0;
+}
 #endif
 
 OsThreadHandle* os_thread_create(ThreadCreateOptions options)
@@ -494,6 +501,16 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
         result = 0;
     }
 #elif defined (_WIN32)
+    HANDLE handle = CreateThread(0, 0, &windows_thread_entry_point, result, 0, 0);
+    if (handle)
+    {
+        result->thread.handle = handle;
+    }
+    else
+    {
+        os_entity_release(result);
+        result = 0;
+    }
 #endif
     return (OsThreadHandle*)result;
 }
@@ -508,20 +525,9 @@ bool os_thread_join(OsThreadHandle* handle)
     int join_result = pthread_join(entity->thread.handle, &void_return_value);
     result = (join_result == 0);
 #elif defined(_WIN32)
-    WaitForSingleObject(handle, INFINITE);
-
-    DWORD exit_code;
-    BOOL exit_code_result = GetExitCodeThread(handle, &exit_code);
-    if (exit_code_result)
-    {
-        result = (u32)exit_code;
-    }
-    else
-    {
-        result = ~(DWORD)0;
-    }
-
-    CloseHandle(handle);
+    DWORD wait_result = WaitForSingleObject(entity->thread.handle, INFINITE);
+    result = wait_result == WAIT_OBJECT_0;
+    CloseHandle(entity->thread.handle);
 #endif
     os_entity_release(entity);
     return result;
