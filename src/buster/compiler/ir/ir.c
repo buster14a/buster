@@ -5,12 +5,6 @@
 #include <buster/arena.h>
 #include <buster/integer.h>
 
-#define XXH_IMPLEMENTATION
-#define XXH_STATIC_LINKING_ONLY
-#define XXH_INLINE_ALL
-#if defined(__TINYC__)
-#define XXH_VECTOR 0
-#endif
 #include <buster/hash.h>
 
 #define first_arena_multiplier ((u64)sizeof(u64))

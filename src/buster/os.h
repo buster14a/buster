@@ -108,7 +108,7 @@ struct ProcessSpawnOptions
 {
     u64 capture:(size_t)STANDARD_STREAM_COUNT;
     u64 use_process_environment:1;
-    u64 reserved:sizeof(u64)*8-(size_t)STANDARD_STREAM_COUNT;
+    u64 reserved:sizeof(u64)*8-(size_t)STANDARD_STREAM_COUNT-1;
 };
 
 typedef struct ProcessWaitResult ProcessWaitResult;

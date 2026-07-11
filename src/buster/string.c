@@ -399,6 +399,11 @@ String8 string8_from_string16(Arena* arena, String16 s, bool null_terminate)
 
 BUSTER_GLOBAL_LOCAL void string_reverse(String8 s)
 {
+    if (s.length < 2)
+    {
+        return;
+    }
+
     char8* restrict pointer = s.pointer;
     for (u64 i = 0, reverse_i = s.length - 1; i < reverse_i; i += 1, reverse_i -= 1)
     {
@@ -897,7 +902,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                             {
                                 if (next_character == '=')
                                 {
-                                    if (left_format_specifiers_string.pointer[0] == '[')
+                                    if (left_format_specifiers_string.length >= 3 && left_format_specifiers_string.pointer[0] == '[')
                                     {
                                         width_character = left_format_specifiers_string.pointer[1];
 
@@ -1250,11 +1255,13 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                     }
                     break; case FORMAT_TYPE_UNSIGNED_INTEGER_128:
                     {
-                        // TODO:
+                        // Not implemented; silently skipping would leave the
+                        // argument unconsumed and corrupt every later va_arg.
+                        BUSTER_TODO();
                     }
                     break; case FORMAT_TYPE_SIGNED_INTEGER_128:
                     {
-                        // TODO:
+                        BUSTER_TODO();
                     }
                     break; case FORMAT_TYPE_OS_ERROR:
                     {

@@ -22,7 +22,7 @@ BUSTER_V_IMPL Target target_native = {
 #elif BUSTER_CPU_ARCH_AARCH64
     .cpu_arch = CPU_ARCH_AARCH64,
 #else
-#pragma error
+#error unsupported CPU architecture
 #endif
     .cpu_model = CPU_MODEL_NATIVE,
 #if defined(__ANDROID__)
@@ -37,7 +37,7 @@ BUSTER_V_IMPL Target target_native = {
 #elif TARGET_OS_OSX
     .os = OPERATING_SYSTEM_MACOS,
 #else
-#pragma error
+#error unsupported Apple platform
 #endif
 #endif
 };
@@ -55,7 +55,7 @@ CpuModel cpu_detect_model(void)
 #elif BUSTER_CPU_ARCH_AARCH64
     cpu_model = cpu_detect_model_aarch64();
 #else
-#pragma error // TODO: implement CPU detection code for this architecture
+#error TODO: implement CPU detection code for this architecture
 #endif
     target_native.cpu_model = cpu_model;
     return cpu_model;

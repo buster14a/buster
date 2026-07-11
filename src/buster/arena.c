@@ -63,57 +63,90 @@ void arena_set_position(Arena* arena, u64 position)
     arena->position = position;
 }
 
-Arena* arena_create(ArenaCreation initialization)
+BUSTER_GLOBAL_LOCAL ArenaCreation arena_creation_parameters(ArenaCreation original)
 {
-    if (!initialization.reserved_size)
+    ArenaCreation result = original;
+
+    if (!result.reserved_size)
     {
-        initialization.reserved_size = default_reserve_size;
+        result.reserved_size = default_reserve_size;
     }
 
-    if (!initialization.count)
+    if (!result.count)
     {
-        initialization.count = 1;
+        result.count = 1;
     }
 
-    u64 count = initialization.count;
-    u64 individual_reserved_size = initialization.reserved_size;
-    u64 total_reserved_size = individual_reserved_size * count;
-
-    ProtectionFlags protection_flags = { .read = 1, .write = 1, .execute = initialization.flags.execute };
-    MapFlags map_flags = { .priv = 1, .anonymous = 1, .no_reserve = 1, .populate = 0 };
-    u8* raw_pointer = (u8*)os_reserve(0, total_reserved_size, protection_flags, map_flags);
-
-    if (!initialization.granularity)
+    if (!result.granularity)
     {
-        initialization.granularity = default_granularity;
+        result.granularity = default_granularity;
     }
 
-    if (!initialization.initial_size)
+    if (!result.initial_size)
     {
-        initialization.initial_size = default_granularity * initial_size_granularity_factor;
+        result.initial_size = default_granularity * initial_size_granularity_factor;
     }
 
-    for (u64 i = 0; i < count; i += 1)
-    {
-        Arena* arena = (Arena*)((u8*)raw_pointer + (individual_reserved_size * i));
-        os_commit(arena, initialization.initial_size, protection_flags, arena_lock_pages);
-        *arena = (Arena){ 
-            .reserved_size = individual_reserved_size,
-            .position = arena_minimum_position,
-            .os_position = initialization.initial_size,
-            .granularity = initialization.granularity,
-        };
-    }
+    return result;
+}
 
-    return (Arena*)raw_pointer;
+BUSTER_GLOBAL_LOCAL bool arena_destroy_extended(Arena* arena, u64 count, u64 reserved_size)
+{
+    u64 size = reserved_size * count;
+    return os_unreserve(arena, size);
 }
 
 bool arena_destroy(Arena* arena, u64 count)
 {
     count = count == 0 ? 1 : count;
     u64 reserved_size = arena->reserved_size;
-    u64 size = reserved_size * count;
-    return os_unreserve(arena, size);
+    return arena_destroy_extended(arena, count, reserved_size);
+}
+
+Arena* arena_create(ArenaCreation original_creation)
+{
+    ArenaCreation creation = arena_creation_parameters(original_creation);
+    u64 count = creation.count;
+    u64 individual_reserved_size = creation.reserved_size;
+    BUSTER_CHECK(count <= UINT64_MAX / individual_reserved_size);
+    u64 total_reserved_size = individual_reserved_size * count;
+
+    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(creation.granularity));
+    BUSTER_CHECK(creation.initial_size >= arena_minimum_position);
+    BUSTER_CHECK(creation.initial_size <= individual_reserved_size);
+
+    ProtectionFlags protection_flags = { .read = 1, .write = 1, .execute = creation.flags.execute };
+    MapFlags map_flags = { .priv = 1, .anonymous = 1, .no_reserve = 1, .populate = 0 };
+    u8* result = (u8*)os_reserve(0, total_reserved_size, protection_flags, map_flags);
+
+    if (result)
+    {
+        for (u64 i = 0; i < count; i += 1)
+        {
+            Arena* arena = (Arena*)(result + (individual_reserved_size * i));
+
+            bool commit_result = os_commit(arena, creation.initial_size, protection_flags, arena_lock_pages);
+            if (commit_result)
+            {
+                *arena = (Arena){ 
+                    .reserved_size = individual_reserved_size,
+                    .position = arena_minimum_position,
+                    .os_position = creation.initial_size,
+                    .granularity = creation.granularity,
+                    .flags = creation.flags,
+                };
+            }
+            else
+            {
+                bool destroy_result = arena_destroy_extended((Arena*)result, count, individual_reserved_size);
+                result = 0;
+                BUSTER_CHECK(destroy_result);
+                break;
+            }
+        }
+    }
+
+    return (Arena*)result;
 }
 
 TemporalArena arena_begin_temporal(Arena* arena)

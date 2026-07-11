@@ -108,7 +108,7 @@ struct OsState
 #elif defined(_WIN32)
     CRITICAL_SECTION entity_mutex;
 #else
-#pragma error
+#error unsupported platform
 #endif
 #if defined(_WIN32)
     u64 frequency;

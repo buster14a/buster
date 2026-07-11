@@ -96,7 +96,7 @@
 #elif defined(__GNUC__)
 #define BUSTER_COMPILER_GCC 1
 #else
-#pragma error
+#error unsupported compiler
 #endif
 
 #ifndef BUSTER_COMPILER_TCC
@@ -194,24 +194,6 @@
 #define BUSTER_CONCAT(a, b) BUSTER_CONCAT_HELPER(a, b)
 #define BUSTER_COUNTER_NAME(x) BUSTER_CONCAT(x, __COUNTER__)
 #define BUSTER_STRINGIFY(x) #x
-
-#if defined(__cplusplus)
-template <typename F>
-struct ScopeExit
-{
-    ScopeExit( F f_ ) : f( f_ ) { }
-    ~ScopeExit() { f(); }
-    F f;
-};
-
-struct DeferHelper
-{
-    template <typename F>
-    ScopeExit<F> operator+(F f) { return f; }
-};
-
-#define defer [[maybe_unused]] const auto & COUNTER_NAME( DEFER_ ) = DeferHelper() + [&]()
-#endif
 
 #ifndef BUSTER_UNITY_BUILD
 #define BUSTER_UNITY_BUILD 0
@@ -709,7 +691,7 @@ struct FontTextureAtlas
 //   String8List strings;
 // };
 
-#define FLAG_ARRAY_LENGTH(T, count) ((count) / sizeof(T) + ((count) % sizeof(T) != 0))
+#define FLAG_ARRAY_LENGTH(T, count) ((count) / (sizeof(T) * 8) + ((count) % (sizeof(T) * 8) != 0))
 #define FLAG_ARRAY_GENERIC(T, N, count) T N[FLAG_ARRAY_LENGTH(T, count)]
 #define FLAG_ARRAY_U64(N, E, Count) FLAG_ARRAY_GENERIC(u64, N, (u64)(Count))
 

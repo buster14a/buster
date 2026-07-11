@@ -203,7 +203,7 @@ BUSTER_NORETURN BUSTER_COLD void os_exit(u32 code)
 #if defined(_WIN32)
     ExitProcess(code);
 #else
-#pragma error
+#error os_exit requires libc on this platform
 #endif
 #endif
 }
@@ -620,13 +620,24 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
             shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         }
 
-        if (permissions.write)
+        // The creation disposition must come from the open flags, not the share
+        // mode: mapping "writable" to CREATE_ALWAYS truncated existing files on
+        // every open with write permission.
+        if (flags.create && flags.truncate)
         {
-            creation_disposition |= CREATE_ALWAYS;
+            creation_disposition = CREATE_ALWAYS;
+        }
+        else if (flags.create)
+        {
+            creation_disposition = OPEN_ALWAYS;
+        }
+        else if (flags.truncate)
+        {
+            creation_disposition = TRUNCATE_EXISTING;
         }
         else
         {
-            creation_disposition |= OPEN_EXISTING;
+            creation_disposition = OPEN_EXISTING;
         }
 
         String16 path_w = string16_from_string8(scratch.arena, path, true);
@@ -1127,10 +1138,15 @@ String8 string8_from_os_error(Arena* arena, OsError error, bool null_terminate)
     DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)error.v, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer, buffer_size, 0);
     if (length != 0)
     {
-        String16 string16 = (String16){ .pointer = buffer, .length = length - 2 };
-        u64 position = arena->position;
+        // Strip the trailing "\r\n" FormatMessage usually appends, but do not
+        // assume it is present.
+        while (length && (buffer[length - 1] == '\r' || buffer[length - 1] == '\n'))
+        {
+            length -= 1;
+        }
+
+        String16 string16 = (String16){ .pointer = buffer, .length = length };
         result = string8_from_string16(arena, string16, null_terminate);
-        BUSTER_CHECK(position + string16.length == arena->position);
     }
 
     scratch_end(temp);
@@ -1329,7 +1345,7 @@ void os_thread_set_name(String8 thread_name)
     scratch_end(scratch);
 #endif
 #else
-#pragma error
+#error unsupported platform
 #endif
 }
 
@@ -1419,7 +1435,13 @@ u64 os_now_microseconds(void)
     LARGE_INTEGER os_counter;
     if(QueryPerformanceCounter(&os_counter))
     {
-        result = (u64)(os_counter.QuadPart * 1000 * 1000) / os_state.frequency;
+        // Split the conversion so counter * 1e6 cannot overflow 64 bits
+        // (a 10 MHz counter would overflow after ~10 days of uptime).
+        u64 counter = (u64)os_counter.QuadPart;
+        u64 frequency = os_state.frequency;
+        u64 whole_seconds = counter / frequency;
+        u64 remainder_ticks = counter % frequency;
+        result = whole_seconds * (1000 * 1000) + (remainder_ticks * (1000 * 1000)) / frequency;
     }
     return result;
 #else
@@ -1433,18 +1455,18 @@ u64 os_now_microseconds(void)
 void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value)
 {
     BUSTER_CHECK(flag_index < flag_count);
-    u64 divisor = sizeof(*flag_pointer);
-    u64 element_index = flag_index / divisor;
-    u64 bit_index = flag_index % divisor;
+    u64 bits_per_element = sizeof(*flag_pointer) * 8;
+    u64 element_index = flag_index / bits_per_element;
+    u64 bit_index = flag_index % bits_per_element;
     flag_pointer[element_index] = (flag_pointer[element_index] & ~((u64)1 << bit_index)) | ((u64)flag_value << bit_index);
 }
 
 bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index)
 {
     BUSTER_CHECK(flag_index < flag_count);
-    u64 divisor = sizeof(*flag_pointer);
-    u64 element_index = flag_index / divisor;
-    u64 bit_index = flag_index % divisor;
+    u64 bits_per_element = sizeof(*flag_pointer) * 8;
+    u64 element_index = flag_index / bits_per_element;
+    u64 bit_index = flag_index % bits_per_element;
     return (flag_pointer[element_index] & ((u64)1 << bit_index)) != 0;
 }
 
