@@ -3,9 +3,11 @@
 #include <buster/base.h>
 #include <buster/compiler/link/link.h>
 
-STRUCT(JitModule)
+typedef struct JitModule JitModule;
+struct JitModule
 {
     u32 v;
 };
-BUSTER_DECL JitModule module_jit(Arena* arena, LinkArguments arguments);
-BUSTER_DECL int jit_module_run(JitModule module);
+
+BUSTER_F_DECL JitModule module_jit(Arena* arena, LinkArguments arguments);
+BUSTER_F_DECL int jit_module_run(JitModule module);

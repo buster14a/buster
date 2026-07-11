@@ -2,9 +2,10 @@
 
 #include <buster/base.h>
 
-STRUCT(LinkArguments)
+typedef struct LinkArguments LinkArguments;
+struct LinkArguments
 {
-    StringOs* objects;
+    String8* objects;
     u64 object_count;
     String8* section_contents;
     String8* section_names;
