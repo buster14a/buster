@@ -1020,6 +1020,58 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     return result;
 }
 
+// Captured pipe output is accumulated as a chunk list in scratch memory while
+// draining, because the streams are read interleaved (see below) but each
+// stream's bytes must end up contiguous in the caller's arena.
+typedef struct PipeChunk PipeChunk;
+struct PipeChunk
+{
+    PipeChunk* next;
+    u64 length;
+    u8* data;
+};
+
+typedef struct PipeCapture PipeCapture;
+struct PipeCapture
+{
+    PipeChunk* first;
+    PipeChunk* last;
+    u64 total_length;
+};
+
+BUSTER_GLOBAL_LOCAL void pipe_capture_append(Arena* arena, PipeCapture* capture, u8* data, u64 length)
+{
+    PipeChunk* chunk = arena_allocate(arena, PipeChunk, 1);
+    chunk->next = 0;
+    chunk->length = length;
+    chunk->data = arena_allocate(arena, u8, length);
+    memcpy(chunk->data, data, length);
+
+    if (capture->last)
+    {
+        capture->last->next = chunk;
+    }
+    else
+    {
+        capture->first = chunk;
+    }
+    capture->last = chunk;
+    capture->total_length += length;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* capture)
+{
+    u8* pointer = arena_allocate(arena, u8, capture->total_length);
+    u64 offset = 0;
+    for (PipeChunk* chunk = capture->first; chunk; chunk = chunk->next)
+    {
+        memcpy(pointer + offset, chunk->data, chunk->length);
+        offset += chunk->length;
+    }
+    BUSTER_CHECK(offset == capture->total_length);
+    return (ByteSlice) { pointer, capture->total_length };
+}
+
 ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
 {
     ProcessWaitResult result = {0};
@@ -1027,42 +1079,76 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
 
     if (spawn.handle)
     {
+        // The captured streams must be drained together: reading one pipe to
+        // EOF while the child blocks writing a full second pipe deadlocks both
+        // processes.
+        TemporalArena scratch = scratch_begin(&arena, 1);
+        PipeCapture captures[(u64)STANDARD_STREAM_COUNT] = {0};
+        bool captured[(u64)STANDARD_STREAM_COUNT] = {0};
 #if defined(_WIN32)
-        for (StandardStream stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+        HANDLE read_pipes[(u64)STANDARD_STREAM_COUNT];
+        u64 open_pipe_count = 0;
+        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
         {
-            HANDLE read_pipe = (HANDLE)spawn.pipes[stream][0];
-            if (read_pipe)
+            read_pipes[stream] = (HANDLE)spawn.pipes[stream][0];
+            captured[stream] = read_pipes[stream] != 0;
+            open_pipe_count += captured[stream];
+        }
+
+        while (open_pipe_count)
+        {
+            bool made_progress = false;
+
+            for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
             {
-                u64 start_position = arena->position;
-
-                u8 buffer[16 * 1024];
-                u64 total_read_byte_count = 0;
-
-                DWORD iteration_read_byte_count;
-                bool iteration_read_result;
-                while ((iteration_read_result = ReadFile(read_pipe, buffer, sizeof(buffer), &iteration_read_byte_count, 0) != 0) && iteration_read_byte_count > 0)
+                HANDLE read_pipe = read_pipes[stream];
+                if (!read_pipe)
                 {
-                    u8* iteration_buffer = arena_allocate(arena, u8, iteration_read_byte_count);
-                    memcpy(iteration_buffer, buffer, iteration_read_byte_count);
-
-                    total_read_byte_count += iteration_read_byte_count;
+                    continue;
                 }
 
-                if (!iteration_read_result)
+                // ReadFile on an anonymous pipe blocks, so only read bytes
+                // PeekNamedPipe reports as available.
+                DWORD available_byte_count = 0;
+                if (!PeekNamedPipe(read_pipe, 0, 0, 0, &available_byte_count, 0))
                 {
                     OsError os_error = os_get_last_error();
                     if (os_error.v != ERROR_BROKEN_PIPE)
                     {
                         string_print(S8("Failed to read from process pipe: {EOs}\n"), os_error);
                     }
+                    CloseHandle(read_pipe);
+                    read_pipes[stream] = 0;
+                    open_pipe_count -= 1;
+                    made_progress = true;
                 }
+                else if (available_byte_count)
+                {
+                    u8 buffer[16 * 1024];
+                    DWORD read_byte_count = 0;
+                    DWORD requested_byte_count = available_byte_count < sizeof(buffer) ? available_byte_count : (DWORD)sizeof(buffer);
+                    if (ReadFile(read_pipe, buffer, requested_byte_count, &read_byte_count, 0) && read_byte_count)
+                    {
+                        pipe_capture_append(scratch.arena, &captures[stream], buffer, read_byte_count);
+                        made_progress = true;
+                    }
+                }
+            }
 
-                CloseHandle(read_pipe);
+            if (!made_progress)
+            {
+                // Nothing readable right now: sleep briefly instead of
+                // spinning. The pipes report ERROR_BROKEN_PIPE once the child
+                // exits and the buffered data has been drained.
+                WaitForSingleObject(spawn.handle, 10);
+            }
+        }
 
-                u64 length = arena->position - start_position;
-                BUSTER_CHECK(total_read_byte_count == length);
-
-                result.streams[stream] = (ByteSlice) { (u8*)arena + start_position, length };
+        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+        {
+            if (captured[stream])
+            {
+                result.streams[stream] = pipe_capture_flatten(arena, &captures[stream]);
             }
         }
 
@@ -1079,38 +1165,80 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
 #else
         pid_t pid = (pid_t)(u64)spawn.handle;
 
+        int read_pipes[(u64)STANDARD_STREAM_COUNT];
+        u64 open_pipe_count = 0;
         for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
         {
             OsFileDescriptor* generic_read_pipe = spawn.pipes[stream][0];
-            if (generic_read_pipe)
+            read_pipes[stream] = generic_read_pipe ? generic_fd_to_posix(generic_read_pipe) : -1;
+            captured[stream] = read_pipes[stream] >= 0;
+            open_pipe_count += captured[stream];
+        }
+
+        while (open_pipe_count)
+        {
+            struct pollfd poll_fds[(u64)STANDARD_STREAM_COUNT];
+            u64 poll_streams[(u64)STANDARD_STREAM_COUNT];
+            nfds_t poll_count = 0;
+
+            for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
             {
-                int read_pipe = generic_fd_to_posix(generic_read_pipe);
-                u64 start_position = arena->position;
+                if (read_pipes[stream] >= 0)
+                {
+                    poll_fds[poll_count] = (struct pollfd) { .fd = read_pipes[stream], .events = POLLIN };
+                    poll_streams[poll_count] = stream;
+                    poll_count += 1;
+                }
+            }
 
+            int poll_result = poll(poll_fds, poll_count, -1);
+            if (poll_result < 0)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                string_print(S8("Failed to poll process pipes: {EOs}\n"), os_get_last_error());
+                break;
+            }
+
+            for (nfds_t poll_index = 0; poll_index < poll_count; poll_index += 1)
+            {
+                if (!(poll_fds[poll_index].revents & (POLLIN | POLLHUP | POLLERR)))
+                {
+                    continue;
+                }
+
+                u64 stream = poll_streams[poll_index];
                 u8 buffer[16 * 1024];
-                u64 total_read_byte_count = 0;
+                ssize_t read_result = read(read_pipes[stream], buffer, sizeof(buffer));
 
-                ssize_t iteration_read_result;
-                while ((iteration_read_result = read(read_pipe, buffer, sizeof(buffer))) > 0)
+                if (read_result > 0)
                 {
-                    u64 iteration_read_byte_count = (u64)iteration_read_result;
-                    u8* iteration_buffer = arena_allocate(arena, u8, iteration_read_byte_count);
-                    memcpy(iteration_buffer, buffer, iteration_read_byte_count);
-
-                    total_read_byte_count += iteration_read_byte_count;
+                    pipe_capture_append(scratch.arena, &captures[stream], buffer, (u64)read_result);
                 }
-                
-                if (iteration_read_result < 0)
+                else
                 {
-                    string_print(S8("Failed to read from process pipe: {OsE}\n"), os_get_last_error());
+                    if (read_result < 0 && errno != EINTR)
+                    {
+                        string_print(S8("Failed to read from process pipe: {EOs}\n"), os_get_last_error());
+                    }
+
+                    if (read_result == 0 || (read_result < 0 && errno != EINTR))
+                    {
+                        close(read_pipes[stream]);
+                        read_pipes[stream] = -1;
+                        open_pipe_count -= 1;
+                    }
                 }
+            }
+        }
 
-                close(read_pipe);
-
-                u64 length = arena->position - start_position;
-                BUSTER_CHECK(total_read_byte_count == length);
-
-                result.streams[stream] = (ByteSlice) { (u8*)arena + start_position, length };
+        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+        {
+            if (captured[stream])
+            {
+                result.streams[stream] = pipe_capture_flatten(arena, &captures[stream]);
             }
         }
 
@@ -1136,6 +1264,7 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
             result.result = PROCESS_RESULT_FAILED;
         }
 #endif
+        scratch_end(scratch);
     }
 
     return result;
