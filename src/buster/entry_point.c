@@ -465,11 +465,21 @@ void android_main(struct android_app* app)
 #endif
 #endif
 #else
+#include <setjmp.h>
+
+// Some libc headers (glibc) wrap these in function-like macros; the
+// replacement definitions below need the plain names.
+#undef memset
+#undef memcmp
+#undef memcpy
+#undef memchr
+#undef strlen
+
 #if defined(_WIN32)
-[[gnu::noreturn]] BUSTER_EXPORT void mainCRTStartup()
+BUSTER_NORETURN BUSTER_EXPORT void mainCRTStartup(void)
 {
     CharOs* environment = GetEnvironmentStringsW();
-    let result = buster_entry_point(GetCommandLineW(), environment);
+    ProcessResult result = buster_entry_point(GetCommandLineW(), environment);
     if (environment)
     {
         FreeEnvironmentStringsW(environment);
@@ -484,7 +494,7 @@ BUSTER_EXPORT void *memset(void* pointer, int c, size_t n)
 
     for (u64 i = 0; i < n; i += 1)
     {
-        p[i] = c;
+        p[i] = (u8)c;
     }
 
     return pointer;
@@ -492,14 +502,14 @@ BUSTER_EXPORT void *memset(void* pointer, int c, size_t n)
 
 BUSTER_EXPORT int memcmp(const void* s1, const void* s2, size_t n)
 {
-    let a = (u8*)s1;
-    let b = (u8*)s2;
+    const u8* a = (const u8*)s1;
+    const u8* b = (const u8*)s2;
 
     int result = 0;
 
     for (u64 i = 0; i < n; i += 1)
     {
-        result = a - b;
+        result = (int)a[i] - (int)b[i];
         if (result)
         {
             break;
@@ -513,7 +523,7 @@ BUSTER_EXPORT void *memcpy(void* restrict destination, const void* restrict sour
 {
     for (u64 i = 0; i < n; i += 1)
     {
-        ((u8*)(destination))[i] = ((u8*)(source))[i];
+        ((u8*)(destination))[i] = ((const u8*)(source))[i];
     }
 
     return destination;
@@ -521,30 +531,51 @@ BUSTER_EXPORT void *memcpy(void* restrict destination, const void* restrict sour
 
 BUSTER_EXPORT size_t strlen(const char* s)
 {
-    let i = s;
-    let it = (char*)s;
+    const char* it = s;
 
     while (*it)
     {
         it += 1;
     }
 
-    return (size_t)(it - i);
+    return (size_t)(it - s);
 }
 
-[[gnu::noreturn]] BUSTER_EXPORT void abort()
+BUSTER_NORETURN BUSTER_EXPORT void abort(void)
 {
     BUSTER_TRAP();
 }
 
+BUSTER_GLOBAL_LOCAL long long parse_decimal_scalar(const char* pointer)
+{
+    const char* it = pointer;
+
+    while (*it == ' ' || *it == '\t' || *it == '\n' || *it == '\r')
+    {
+        it += 1;
+    }
+
+    bool negative = *it == '-';
+    it += negative || *it == '+';
+
+    long long result = 0;
+    while (*it >= '0' && *it <= '9')
+    {
+        result = result * 10 + (*it - '0');
+        it += 1;
+    }
+
+    return negative ? -result : result;
+}
+
 BUSTER_EXPORT int atoi(const char* pointer)
 {
-    return parse_decimal_scalar(pointer);
+    return (int)parse_decimal_scalar(pointer);
 }
 
 BUSTER_EXPORT long atol(const char* pointer)
 {
-    return parse_decimal_scalar(pointer);
+    return (long)parse_decimal_scalar(pointer);
 }
 
 BUSTER_EXPORT long long atoll(const char* pointer)
@@ -554,21 +585,49 @@ BUSTER_EXPORT long long atoll(const char* pointer)
 
 BUSTER_EXPORT double frexp(double x, int* e)
 {
-    // TODO:
-    BUSTER_UNUSED(x);
-    BUSTER_UNUSED(e);
-    return 0.0;
+    u64 bits;
+    memcpy(&bits, &x, sizeof(bits));
+    u64 exponent_bits = (bits >> 52) & 0x7ff;
+
+    if (exponent_bits == 0x7ff || x == 0.0)
+    {
+        // Inf/NaN: return x with *e unspecified (0 here). Zero: (0, 0).
+        *e = 0;
+        return x;
+    }
+
+    if (exponent_bits == 0)
+    {
+        // Subnormal: scale into the normal range first, then adjust the
+        // exponent by the scale factor.
+        double scaled = x * 18446744073709551616.0; // 2^64
+        memcpy(&bits, &scaled, sizeof(bits));
+        exponent_bits = (bits >> 52) & 0x7ff;
+        *e = (int)exponent_bits - 1022 - 64;
+    }
+    else
+    {
+        *e = (int)exponent_bits - 1022;
+    }
+
+    // Force the exponent field to 1022 so the mantissa lands in [0.5, 1).
+    bits = (bits & ~((u64)0x7ff << 52)) | ((u64)0x3fe << 52);
+    double result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
 }
 
-[[gnu::noreturn]] BUSTER_EXPORT void longjmp(jmp_buf env, int val)
+BUSTER_NORETURN BUSTER_EXPORT void longjmp(jmp_buf env, int val)
 {
     // TODO:
+    BUSTER_UNUSED(env);
+    BUSTER_UNUSED(val);
     BUSTER_TRAP();
 }
 
 BUSTER_EXPORT void *memchr(const void* s, int c, size_t n)
 {
-    u8* pointer = s;
+    const u8* pointer = (const u8*)s;
     u8 ch = (u8)c;
     u64 i;
     for (i = 0; i < n; i += 1)
@@ -579,12 +638,13 @@ BUSTER_EXPORT void *memchr(const void* s, int c, size_t n)
         }
     }
 
-    return pointer + i == pointer + n ? 0 : pointer + i;
+    return i == n ? 0 : (void*)(pointer + i);
 }
 
-BUSTER_IMPL int _fltused = 1;
-
 #if defined(_WIN32)
+// Referenced by MSVC-compiled objects that use floating point.
+int _fltused = 1;
+
 BUSTER_EXPORT void __chkstk(void)
 {
 }
