@@ -3,7 +3,6 @@
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
-BUSTER_F_DECL BatchTestResult parser_tests(UnitTestArguments* arguments);
 BUSTER_F_DECL UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments);
 BUSTER_F_DECL UnitTestResult parser_expression_tests(UnitTestArguments* arguments);
 BUSTER_F_DECL UnitTestResult parser_file_tests(UnitTestArguments* arguments);
@@ -123,6 +122,5 @@ struct LineAndColumn
     u32 column;
 };
 
-BUSTER_F_DECL void parser_experiments(void);
 BUSTER_F_DECL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length);
 BUSTER_F_DECL String8 get_token_content(const char8* source, Token* restrict tokens, u32 lexer_token_index);

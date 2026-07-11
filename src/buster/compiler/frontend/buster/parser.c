@@ -2273,40 +2273,6 @@ BUSTER_GLOBAL_LOCAL String8 ast_expression_to_string(Arena* arena, AstExpression
     return stack[0];
 }
 
-BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, String8 path)
-{
-    u64 position = arena->position;
-
-    String8 source = BYTE_SLICE_TO_STRING(8, file_read(arena, path, (FileReadOptions){0}));
-
-    string_print(S8("Tokenizing \"{S8}\"\n"), path);
-
-    if (!source.pointer || !source.length)
-    {
-        // Missing/empty input (e.g. CWD has no tests/ directory): nothing to parse.
-        arena->position = position;
-        return;
-    }
-
-    TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-    print_tokenizer_result(tokenizer, source.pointer);
-    string_print(S8("Parsing \"{S8}\"\n"), path);
-    AstExpression expression = parse(source.pointer, tokenizer);
-
-    if (expression.count)
-    {
-        String8 dump = ast_expression_to_string(arena, expression);
-        string_print(S8("=== Expression (postorder, {u32} nodes) ===\n{S8}\n"), expression.count, dump);
-    }
-
-    // string8_print(S8("=== Input ===\n{S8}\n"), source);
-    // string8_print(S8("=== Error Count ===\n{u64}\n"), result.error_count);
-    // string8_print(S8("=== Prefix Output (token reordering) ===\n"));
-    // print_prefix(result, tokenizer.tokens.pointer, source.pointer);
-    
-    arena->position = position;
-}
-
 typedef struct ParserFileTestCase ParserFileTestCase;
 struct ParserFileTestCase
 {
@@ -2339,16 +2305,6 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] = {
     // { S8_INITIALIZER("tests/basic_if_else.bbb"), S8_INITIALIZER("") },
     // { S8_INITIALIZER("tests/array_slices.bbb"), S8_INITIALIZER("") },
 };
-
-void parser_experiments(void)
-{
-    Arena* arena = arena_create((ArenaCreation){0});
-
-    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parser_file_test_cases); i +=1)
-    {
-        parse_experiment(arena, parser_file_test_cases[i].path);
-    }
-}
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL bool tokenizer_stream_covers_source(TokenizerResult tokenizer, u64 source_length)
@@ -2589,14 +2545,6 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
         arena->position = position;
     }
 
-    return result;
-}
-
-BatchTestResult parser_tests(UnitTestArguments* arguments)
-{
-    BUSTER_UNUSED(arguments);
-    BatchTestResult result = {0};
-    parser_experiments();
     return result;
 }
 #endif

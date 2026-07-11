@@ -1086,145 +1086,141 @@ BUSTER_GLOBAL_LOCAL void compiler_experiments(void)
     BUSTER_CHECK(fn() == 0);
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
+BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
 
+    WmHandle* windowing = ide_state.windowing = wm_initialize();
+    if (windowing)
+    {
+        Arena* arena = program_state->arena;
+        RenderingHandle* r = ide_state.rendering = rendering_initialize(arena);
+        if (r)
+        {
+            ide_state.first_window = ide_state.last_window = arena_allocate(arena, IdeWindow, 1);
+            WmWindowHandle* wm_window = wm_window_create(windowing, (WmWindowCreate) {
+                    .name = S8("Ide"),
+                    .size = {
+                    .width = 1600,
+                    .height= 900,
+                    },
+                    });
+            ide_state.first_window->wm = wm_window;
+
+            if (wm_window)
+            {
+                RenderingWindowHandle* render_window = ide_state.first_window->render = rendering_window_initialize(arena, windowing, r, wm_window);
+
+                if (render_window)
+                {
+                    ide_state.first_window->ui = ui_state_allocate(r, render_window);
+                    ide_state.first_window->root_panel = arena_allocate(ide_state.state.arena, IdePanel, 1);
+                    ide_state.first_window->root_panel->parent_percentage = 1.0f;
+                    ide_state.first_window->root_panel->split_axis = AXIS2_X;
+
+                    rendering_window_rect_texture_update_begin(ide_state.first_window->render);
+
+                    f32 dpi = wm_window_get_dpi(windowing, wm_window);
+                    TextureIndex white_texture = white_texture_create(ide_state.state.arena, ide_state.rendering);
+
+                    rendering_window_queue_rect_texture_update(ide_state.rendering, ide_state.first_window->render, RECT_TEXTURE_SLOT_WHITE, white_texture);
+                    ide_window_queue_font_update(ide_state.first_window, dpi);
+
+                    rendering_window_rect_texture_update_end(ide_state.rendering, ide_state.first_window->render);
+
+                    ide_state.last_frame_timestamp = timestamp_take();
+
+                    bool test = ide_state.test && !program_flag_get(PROGRAM_FLAG_TEST_PERSIST);
+                    u64 loop_times = test ? (u64)3 : UINT64_MAX;
+                    for (u64 i = 0; i < loop_times && ide_state.first_window; i += 1)
+                    {
+                        bool quit = update();
+                        if (quit)
+                        {
+                            break;
+                        }
+                    }
+
+                    if (test)
+                    {
+#if BUSTER_IOS
+                        // The iOS worker thread calls exit() right after this
+                        // returns, so the OS reclaims all GPU/window resources.
+                        // Skip the explicit teardown: in a headless simulator the
+                        // last presented drawable's command buffer never completes
+                        // (nothing drives a subsequent vsync), so
+                        // rendering_window_deinitialize's waitUntilCompleted would
+                        // block forever and the BUSTER_IOS_RESULT marker would
+                        // never be printed.
+#else
+                        for (IdeWindow* window = ide_state.first_window; window; window = window->next)
+                        {
+                            ui_state_deinitialize(window->ui);
+                            window->ui = 0;
+                            rendering_window_deinitialize(ide_state.rendering, window->render);
+                            window->render = 0;
+                        }
+#endif
+                    }
+
+                    // TODO: OS deinitialization
+                }
+                else
+                {
+                    string_print(S8("Failed to create render window\n"));
+                    result = PROCESS_RESULT_FAILED;
+                }
+            }
+            else
+            {
+                string_print(S8("Failed to create window\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+
+            rendering_deinitialize(r);
+        }
+        else
+        {
+            string_print(S8("Failed to initialize rendering\n"));
+            result = PROCESS_RESULT_FAILED;
+        }
+
+        wm_deinitialize(windowing);
+    }
+    else
+    {
+        string_print(S8("Failed to initialize windowing\n"));
+        result = PROCESS_RESULT_FAILED;
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
+{
 #if BUSTER_INCLUDE_TESTS
     if (ide_state.test)
     {
         Arena* arena = arena_create((ArenaCreation){0});
+        UnitTestArguments arguments = { arena, &default_show };
 
-        {
-            u64 position = arena->position;
-            UnitTestArguments arguments = { arena, &default_show };
-            BatchTestResult batch_test_result = library_tests(&arguments);
-            result = batch_test_report(&arguments, batch_test_result) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-            arena->position = position;
-        }
+        u64 position = arena->position;
+        BatchTestResult batch_test_result = library_tests(&arguments);
+        arena->position = position;
 
-        // {
-        //     u64 position = arena->position;
-        //     UnitTestArguments arguments = { arena, &default_show };
-        //     BatchTestResult batch_test_result = parser_tests(&arguments);
-        //     result = batch_test_report(&arguments, batch_test_result) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-        //     arena->position = position;
-        // }
+        ProcessResult app_test_result = run_graphical_app();
+        consume_external_tests(&batch_test_result, app_test_result);
+
+        position = arena->position;
+        ProcessResult result = batch_test_report(&arguments, batch_test_result) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        arena->position = position;
 
         arena_destroy(arena, 1);
+        return result;
     }
 #endif
-    parser_experiments();
-    // compiler_experiments();
-    // analysis_experiments();
 
-    if (result == PROCESS_RESULT_SUCCESS)
-    {
-        WmHandle* windowing = ide_state.windowing = wm_initialize();
-        if (windowing)
-        {
-            Arena* arena = program_state->arena;
-            RenderingHandle* r = ide_state.rendering = rendering_initialize(arena);
-            if (r)
-            {
-                ide_state.first_window = ide_state.last_window = arena_allocate(arena, IdeWindow, 1);
-                WmWindowHandle* wm_window = wm_window_create(windowing, (WmWindowCreate) {
-                        .name = S8("Ide"),
-                        .size = {
-                        .width = 1600,
-                        .height= 900,
-                        },
-                        });
-                ide_state.first_window->wm = wm_window;
-
-                if (wm_window)
-                {
-                    RenderingWindowHandle* render_window = ide_state.first_window->render = rendering_window_initialize(arena, windowing, r, wm_window);
-
-                    if (render_window)
-                    {
-                        ide_state.first_window->ui = ui_state_allocate(r, render_window);
-                        ide_state.first_window->root_panel = arena_allocate(ide_state.state.arena, IdePanel, 1);
-                        ide_state.first_window->root_panel->parent_percentage = 1.0f;
-                        ide_state.first_window->root_panel->split_axis = AXIS2_X;
-
-                        rendering_window_rect_texture_update_begin(ide_state.first_window->render);
-
-                        f32 dpi = wm_window_get_dpi(windowing, wm_window);
-                        TextureIndex white_texture = white_texture_create(ide_state.state.arena, ide_state.rendering);
-
-                        rendering_window_queue_rect_texture_update(ide_state.rendering, ide_state.first_window->render, RECT_TEXTURE_SLOT_WHITE, white_texture);
-                        ide_window_queue_font_update(ide_state.first_window, dpi);
-
-                        rendering_window_rect_texture_update_end(ide_state.rendering, ide_state.first_window->render);
-
-                        ide_state.last_frame_timestamp = timestamp_take();
-
-                        bool test = ide_state.test && !program_flag_get(PROGRAM_FLAG_TEST_PERSIST);
-                        u64 loop_times = test ? (u64)3 : UINT64_MAX;
-                        for (u64 i = 0; i < loop_times && ide_state.first_window; i += 1)
-                        {
-                            bool quit = update();
-                            if (quit)
-                            {
-                                break;
-                            }
-                        }
-
-                        if (test)
-                        {
-#if BUSTER_IOS
-                            // The iOS worker thread calls exit() right after this
-                            // returns, so the OS reclaims all GPU/window resources.
-                            // Skip the explicit teardown: in a headless simulator the
-                            // last presented drawable's command buffer never completes
-                            // (nothing drives a subsequent vsync), so
-                            // rendering_window_deinitialize's waitUntilCompleted would
-                            // block forever and the BUSTER_IOS_RESULT marker would
-                            // never be printed.
-#else
-                            for (IdeWindow* window = ide_state.first_window; window; window = window->next)
-                            {
-                                ui_state_deinitialize(window->ui);
-                                window->ui = 0;
-                                rendering_window_deinitialize(ide_state.rendering, window->render);
-                                window->render = 0;
-                            }
-#endif
-                        }
-
-                        // TODO: OS deinitialization
-                    }
-                    else
-                    {
-                        string_print(S8("Failed to create render window\n"));
-                        result = PROCESS_RESULT_FAILED;
-                    }
-                }
-                else
-                {
-                    string_print(S8("Failed to create window\n"));
-                    result = PROCESS_RESULT_FAILED;
-                }
-
-                rendering_deinitialize(r);
-            }
-            else
-            {
-                string_print(S8("Failed to initialize rendering\n"));
-                result = PROCESS_RESULT_FAILED;
-            }
-
-            wm_deinitialize(windowing);
-        }
-        else
-        {
-            string_print(S8("Failed to initialize windowing\n"));
-            result = PROCESS_RESULT_FAILED;
-        }
-    }
-
-    return result;
+    return run_graphical_app();
 }
 
 ProcessResult entry_point(void)
