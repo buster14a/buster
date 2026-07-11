@@ -171,8 +171,33 @@ BUSTER_COLD bool is_debugger_present(void)
     {
         program_state->is_debugger_present_called = true;
 #if defined(__linux__)
-        bool os_result = ptrace(PTRACE_TRACEME, 0, 0, 0) == -1;
-        program_state->_is_debugger_present = os_result != 0;
+        // Parse TracerPid out of /proc/self/status. The previous
+        // PTRACE_TRACEME probe left the process permanently traced by its
+        // parent and blocked a real debugger from attaching later.
+        bool traced = false;
+        int status_fd = open("/proc/self/status", O_RDONLY);
+        if (status_fd >= 0)
+        {
+            char8 status_buffer[4096];
+            ssize_t read_byte_count = read(status_fd, status_buffer, sizeof(status_buffer));
+            close(status_fd);
+            if (read_byte_count > 0)
+            {
+                String8 contents = { .pointer = status_buffer, .length = (u64)read_byte_count };
+                String8 key = S8("TracerPid:");
+                u64 key_index = string_first_sequence(contents, key);
+                if (key_index != BUSTER_STRING_NO_MATCH)
+                {
+                    u64 value_index = key_index + key.length;
+                    while (value_index < contents.length && (contents.pointer[value_index] == ' ' || contents.pointer[value_index] == '\t'))
+                    {
+                        value_index += 1;
+                    }
+                    traced = value_index < contents.length && contents.pointer[value_index] != '0';
+                }
+            }
+        }
+        program_state->_is_debugger_present = traced;
 #elif defined(__APPLE__)
 #elif defined(_WIN32)
         BOOL os_result = IsDebuggerPresent();

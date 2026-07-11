@@ -46,11 +46,78 @@ bool update(void)
 }
 
 #if defined(__linux__)
+// Everything below runs inside a signal handler for a fatal signal, so it must
+// be async-signal-safe: raw write(2) into a stack buffer, no allocation, no
+// locks, no stdio.
+BUSTER_GLOBAL_LOCAL u64 crash_report_append_string(char8* buffer, u64 length, u64 capacity, String8 string)
+{
+    for (u64 i = 0; i < string.length && length < capacity; i += 1, length += 1)
+    {
+        buffer[length] = string.pointer[i];
+    }
+    return length;
+}
+
+BUSTER_GLOBAL_LOCAL u64 crash_report_append_hex_u64(char8* buffer, u64 length, u64 capacity, u64 value)
+{
+    length = crash_report_append_string(buffer, length, capacity, S8("0x"));
+    for (u32 i = 0; i < 16 && length < capacity; i += 1, length += 1)
+    {
+        u64 digit = (value >> (60 - i * 4)) & 0xf;
+        buffer[length] = (char8)(digit > 9 ? ('a' + (digit - 10)) : ('0' + digit));
+    }
+    return length;
+}
+
+BUSTER_GLOBAL_LOCAL String8 crash_signal_name(int sig)
+{
+    switch (sig)
+    {
+        case SIGILL: return S8("SIGILL");
+        case SIGTRAP: return S8("SIGTRAP");
+        case SIGABRT: return S8("SIGABRT");
+        case SIGFPE: return S8("SIGFPE");
+        case SIGBUS: return S8("SIGBUS");
+        case SIGSEGV: return S8("SIGSEGV");
+        case SIGQUIT: return S8("SIGQUIT");
+        default: return S8("signal");
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void signal_handler(int sig, siginfo_t *info, void *arg)
 {
-    BUSTER_UNUSED(sig);
-    BUSTER_UNUSED(info);
+    u64 pc = 0;
+#if BUSTER_CPU_ARCH_X86_64
+    ucontext_t* context = (ucontext_t*)arg;
+    pc = (u64)context->uc_mcontext.gregs[REG_RIP];
+#elif BUSTER_CPU_ARCH_AARCH64
+    ucontext_t* context = (ucontext_t*)arg;
+    pc = (u64)context->uc_mcontext.pc;
+#else
     BUSTER_UNUSED(arg);
+#endif
+
+    char8 buffer[256];
+    u64 length = 0;
+    length = crash_report_append_string(buffer, length, sizeof(buffer), S8("fatal signal "));
+    length = crash_report_append_string(buffer, length, sizeof(buffer), crash_signal_name(sig));
+    length = crash_report_append_string(buffer, length, sizeof(buffer), S8(" at address "));
+    length = crash_report_append_hex_u64(buffer, length, sizeof(buffer), (u64)info->si_addr);
+    length = crash_report_append_string(buffer, length, sizeof(buffer), S8(", pc "));
+    length = crash_report_append_hex_u64(buffer, length, sizeof(buffer), pc);
+    length = crash_report_append_string(buffer, length, sizeof(buffer), S8("\n"));
+
+    ssize_t write_result = write(STDERR_FILENO, buffer, length);
+    BUSTER_UNUSED(write_result);
+
+    // Restore the default disposition and re-raise so the process still dies
+    // with this signal (core dump, correct exit status for CI). Returning from
+    // a handler for a synchronous fault would re-execute the faulting
+    // instruction forever.
+    struct sigaction default_action = {0};
+    default_action.sa_handler = SIG_DFL;
+    sigaction(sig, &default_action, 0);
+    raise(sig);
 }
 #endif
 
@@ -75,6 +142,11 @@ BUSTER_GLOBAL_LOCAL void install_signal_handlers(void)
 
 BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOsList envp)
 {
+#if !BUSTER_SANITIZE
+    // Sanitizer runtimes install their own fault handlers with much richer
+    // reports; only take over crash reporting in non-sanitized builds.
+    install_signal_handlers();
+#endif
     os_state.arena = arena_create((ArenaCreation){0});
     SliceString8 environments_raw;
 #if defined(_WIN32)

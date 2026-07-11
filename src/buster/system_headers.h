@@ -16,6 +16,8 @@ BUSTER_V_DECL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions;
 #include <errno.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <spawn.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -26,9 +28,9 @@ BUSTER_V_DECL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions;
 #include <pthread.h>
 
 #if defined(__linux__)
-#include <sys/ptrace.h>
 #include <sys/sysinfo.h>
 #include <linux/limits.h>
+#include <ucontext.h>
 #endif
 
 #if defined(__APPLE__)
