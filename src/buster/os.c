@@ -233,16 +233,18 @@ BUSTER_GLOBAL_LOCAL int os_posix_map_flags(MapFlags flags)
     return result;
 }
 
+// File descriptors are stored biased by +1 so that fd 0 (stdin) does not
+// collide with the null pointer, which means "no descriptor" everywhere.
 BUSTER_GLOBAL_LOCAL OsFileDescriptor* posix_fd_to_generic_fd(int fd)
 {
     BUSTER_CHECK(fd >= 0);
-    return (OsFileDescriptor*)(u64)(fd);
+    return (OsFileDescriptor*)((u64)fd + 1);
 }
 
 BUSTER_GLOBAL_LOCAL int generic_fd_to_posix(OsFileDescriptor* fd)
 {
     BUSTER_CHECK(fd);
-    return (int)(u64)fd;
+    return (int)((u64)fd - 1);
 }
 #elif defined(_WIN32)
 BUSTER_GLOBAL_LOCAL DWORD os_windows_protection_flags(ProtectionFlags flags)
@@ -583,7 +585,7 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
 
         if (fd >= 0)
         {
-            result = (OsFileDescriptor*)(u64)fd;
+            result = posix_fd_to_generic_fd(fd);
         }
 #elif defined(_WIN32)
         TemporalArena scratch = scratch_begin(0, 0);
