@@ -71,17 +71,17 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
         if (asset)
         {
             u64 file_size = (u64)AAsset_getLength64(asset);
-            u8* file_buffer = (u8*)&file_read;
+            u64 allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
+            allocation_size = BUSTER_MAX(allocation_size, 1);
+            u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
+            u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
+            u8* file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
             if (file_size)
             {
                 const void* asset_buffer = AAsset_getBuffer(asset);
-                u64 allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
-                u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
-                u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
-                file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
                 memcpy(file_buffer + options.start_padding, asset_buffer, file_size);
-                memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
             }
+            memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
             AAsset_close(asset);
             return (ByteSlice) { file_buffer + options.start_padding, file_size };
         }
@@ -112,16 +112,16 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
     if (fd)
     {
         u64 file_size = os_file_get_size(fd);
-        u8* file_buffer = (u8*)&file_read;
+        u64 allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
+        allocation_size = BUSTER_MAX(allocation_size, 1);
+        u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
+        u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
+        u8* file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
         if (file_size)
         {
-            u64 allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
-            u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
-            u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
-            file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
             file_size = os_file_read(fd, (ByteSlice) { file_buffer + options.start_padding, file_size }, file_size);
-            memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
         }
+        memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
         os_file_close(fd);
         result = (ByteSlice) { file_buffer + options.start_padding, file_size };
     }
@@ -131,32 +131,80 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
 
 bool file_copy(CopyFileArguments arguments)
 {
-    bool result = true;
-#if defined(_WIN32)
-    TemporalArena temp = scratch_begin(0, 0);
-    String16 original_path = string16_from_string8(temp.arena, arguments.original_path, true);
-    String16 new_path = string16_from_string8(temp.arena, arguments.new_path, true);
-    result = CopyFileW(original_path.pointer, new_path.pointer, false) != 0;
-    if (!result)
+    bool result = false;
+    if (string_equal(arguments.original_path, arguments.new_path))
     {
-        // If the copy failed (e.g., file is locked by another process), check if the destination already exists.
-        // This handles the case where a DLL is already loaded by a running process - we can just use it.
-        DWORD attributes = GetFileAttributesW(new_path.pointer);
-        if (attributes != INVALID_FILE_ATTRIBUTES)
-        {
-            // Destination exists, assume it's correct
-            result = true;
-        }
-        else
-        {
-            string_print(S8("Error message: {EOs}. Original: {S8}. New: {S8}\n"), os_get_last_error(), arguments.original_path, arguments.new_path);
-            os_fail();
-        }
+        return result;
     }
-    scratch_end(temp);
+    OsFileDescriptor* source = os_file_open(arguments.original_path, (OpenFlags){ .read = 1 }, (OpenPermissions){ .read = 1 });
+    if (source)
+    {
+        OsFileDescriptor* destination = os_file_open(arguments.new_path, (OpenFlags){ .write = 1, .create = 1, .truncate = 1 }, (OpenPermissions){ .read = 1, .write = 1 });
+        if (destination)
+        {
+            result = true;
+            u64 remaining = os_file_get_size(source);
+            u8 buffer[BUSTER_KB(64)];
+            while (remaining)
+            {
+                u64 requested = BUSTER_MIN(remaining, sizeof(buffer));
+                u64 read_count = os_file_read(source, (ByteSlice){ buffer, sizeof(buffer) }, requested);
+                if (read_count != requested)
+                {
+                    result = false;
+                    break;
+                }
+                os_file_write(destination, (ByteSlice){ buffer, read_count });
+                remaining -= read_count;
+            }
+            result = os_file_close(destination) && result;
+        }
+        result = os_file_close(source) && result;
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+UnitTestResult file_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = S8("build/buster_file_test_source.bin");
+    String8 destination_path = S8("build/buster_file_test_destination.bin");
+    String8 content = S8("buster file copy test");
+
+    BUSTER_TEST(arguments, file_write(source_path, (ByteSlice){ (u8*)content.pointer, content.length }));
+    String8 stale_content = S8("stale destination");
+    BUSTER_TEST(arguments, file_write(destination_path, (ByteSlice){ (u8*)stale_content.pointer, stale_content.length }));
+    BUSTER_TEST(arguments, file_copy((CopyFileArguments){
+        .original_path = source_path,
+        .new_path = destination_path,
+    }));
+
+    u64 arena_position = arguments->arena->position;
+    ByteSlice copied_bytes = file_read(arguments->arena, destination_path, (FileReadOptions){0});
+    String8 copied = { (char8*)copied_bytes.pointer, copied_bytes.length };
+    BUSTER_STRING_TEST(arguments, copied, content);
+    arguments->arena->position = arena_position;
+
+    BUSTER_TEST(arguments, file_write(source_path, (ByteSlice){0}));
+    ByteSlice empty = file_read(arguments->arena, source_path, (FileReadOptions){
+        .start_alignment = 4,
+        .end_padding = 4,
+    });
+    BUSTER_TEST(arguments, empty.pointer != 0);
+    BUSTER_TEST(arguments, empty.length == 0);
+    BUSTER_TEST(arguments, ((u64)empty.pointer & 3) == 0);
+    bool padding_is_zero = false;
+    if (empty.pointer)
+    {
+        padding_is_zero = empty.pointer[0] == 0 && empty.pointer[1] == 0 && empty.pointer[2] == 0 && empty.pointer[3] == 0;
+    }
+    BUSTER_TEST(arguments, padding_is_zero);
+    arguments->arena->position = arena_position;
 #else
     BUSTER_UNUSED(arguments);
 #endif
     return result;
 }
-
+#endif

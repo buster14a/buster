@@ -3,6 +3,7 @@
 #include <buster/os.h>
 #include <buster/arena.h>
 #include <buster/string.h>
+#include <buster/file.h>
 #include <buster/compiler/frontend/buster/parser.h>
 
 bool unit_test_succeeded(UnitTestResult result)
@@ -79,6 +80,7 @@ bool batch_test_report(UnitTestArguments* arguments, BatchTestResult test)
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &string_tests,
+    &file_tests,
     &parser_tokenizer_tests,
     &parser_expression_tests,
     &parser_file_tests,

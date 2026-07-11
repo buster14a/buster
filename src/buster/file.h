@@ -22,6 +22,11 @@ struct CopyFileArguments
 };
 BUSTER_F_DECL bool file_copy(CopyFileArguments arguments);
 
+#if BUSTER_INCLUDE_TESTS
+#include <buster/test.h>
+BUSTER_F_DECL UnitTestResult file_tests(UnitTestArguments* arguments);
+#endif
+
 #if BUSTER_ANDROID
 struct AAssetManager;
 extern struct AAssetManager* buster_android_asset_manager;
