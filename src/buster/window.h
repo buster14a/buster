@@ -43,6 +43,25 @@ union WmRect
 typedef struct WmHandle WmHandle;
 typedef struct WmWindowHandle WmWindowHandle;
 
+typedef enum WmNativeSurfaceKind
+{
+    WM_NATIVE_SURFACE_NONE,
+    WM_NATIVE_SURFACE_XCB,
+    WM_NATIVE_SURFACE_WIN32,
+    WM_NATIVE_SURFACE_APPKIT,
+    WM_NATIVE_SURFACE_METAL_LAYER,
+    WM_NATIVE_SURFACE_ANDROID,
+} WmNativeSurfaceKind;
+
+typedef struct WmNativeSurface WmNativeSurface;
+struct WmNativeSurface
+{
+    void* display;
+    void* window;
+    WmNativeSurfaceKind kind;
+    u8 reserved[4];
+};
+
 typedef struct SliceWmWindowHandle SliceWmWindowHandle;
 struct SliceWmWindowHandle
 {
@@ -285,8 +304,7 @@ BUSTER_F_DECL WmEventList wm_poll_events(Arena* arena, WmHandle* windowing);
 // False while the app is backgrounded/locked (no usable native window).
 BUSTER_F_DECL bool wm_window_is_visible(WmHandle* windowing);
 
-BUSTER_F_DECL void* wm_handle_native_from_wm(WmHandle* windowing);
-BUSTER_F_DECL void* wm_window_handle_native_from_wm(WmWindowHandle* window);
+BUSTER_F_DECL WmNativeSurface wm_window_get_native_surface(WmHandle* windowing, WmWindowHandle* window);
 
 BUSTER_F_DECL WmOffset offset_from_rect(WmRect rect);
 

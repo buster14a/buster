@@ -217,11 +217,9 @@ if (BUSTER_VULKAN_SDK)
 endif()
 
 unset(BUSTER_VULKAN_INCLUDE_DIR CACHE)
-unset(BUSTER_GLSLC_EXECUTABLE CACHE)
 unset(BUSTER_SLANGC_EXECUTABLE CACHE)
 unset(BUSTER_SPIRV_OPT_EXECUTABLE CACHE)
 find_path(BUSTER_VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h HINTS ${BUSTER_VULKAN_SDK_INCLUDE_DIRS} NO_DEFAULT_PATH)
-find_program(BUSTER_GLSLC_EXECUTABLE NAMES glslc HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS} NO_DEFAULT_PATH)
 find_program(BUSTER_SLANGC_EXECUTABLE NAMES slangc HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS} NO_DEFAULT_PATH)
 find_program(BUSTER_SPIRV_OPT_EXECUTABLE NAMES spirv-opt HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS} NO_DEFAULT_PATH)
 option(BUSTER_REQUIRE_VULKAN_SDK "Require Vulkan SDK headers and shader tools" ON)
@@ -230,15 +228,14 @@ if (BUSTER_USE_VULKAN OR BUSTER_USE_D3D12 OR BUSTER_USE_METAL)
     set(BUSTER_COMPILE_SHADERS_DEFAULT ON)
 endif()
 option(BUSTER_COMPILE_SHADERS "Compile renderer shaders" ${BUSTER_COMPILE_SHADERS_DEFAULT})
-option(BUSTER_USE_SLANG_SHADERS "Compile supported backend shaders from Slang" ON)
 
 set(BUSTER_USE_SLANG_SHADERS_DEFINE OFF)
-if (BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS)
+if (BUSTER_COMPILE_SHADERS)
     set(BUSTER_USE_SLANG_SHADERS_DEFINE ON)
 endif()
 
 set(BUSTER_NEEDS_VULKAN_SDK OFF)
-if (BUSTER_USE_VULKAN OR (BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS))
+if (BUSTER_USE_VULKAN OR BUSTER_COMPILE_SHADERS)
     set(BUSTER_NEEDS_VULKAN_SDK ON)
 endif()
 
@@ -252,11 +249,11 @@ if (BUSTER_REQUIRE_VULKAN_SDK AND BUSTER_USE_VULKAN AND NOT BUSTER_VULKAN_INCLUD
     message(FATAL_ERROR "Could not find vulkan/vulkan.h in BUSTER_VULKAN_SDK='${BUSTER_VULKAN_SDK}'.")
 endif()
 
-if (BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_SLANGC_EXECUTABLE)
-    message(FATAL_ERROR "BUSTER_USE_SLANG_SHADERS requires slangc from the Vulkan SDK. Set VULKAN_SDK or -DBUSTER_VULKAN_SDK to a Vulkan SDK that contains slangc.")
+if (BUSTER_COMPILE_SHADERS AND NOT BUSTER_SLANGC_EXECUTABLE)
+    message(FATAL_ERROR "BUSTER_COMPILE_SHADERS requires slangc from the Vulkan SDK. Set VULKAN_SDK or -DBUSTER_VULKAN_SDK to a Vulkan SDK that contains slangc.")
 endif()
-if (BUSTER_USE_VULKAN AND BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_SPIRV_OPT_EXECUTABLE)
-    message(FATAL_ERROR "BUSTER_USE_SLANG_SHADERS requires spirv-opt from the Vulkan SDK to strip Slang OpSource debug records for Android/SwiftShader compatibility.")
+if (BUSTER_USE_VULKAN AND BUSTER_COMPILE_SHADERS AND NOT BUSTER_SPIRV_OPT_EXECUTABLE)
+    message(FATAL_ERROR "BUSTER_COMPILE_SHADERS requires spirv-opt from the Vulkan SDK to strip Slang OpSource debug records for Android/SwiftShader compatibility.")
 endif()
 
 set(BUSTER_SLANGC_COMMAND "${BUSTER_SLANGC_EXECUTABLE}")
@@ -289,12 +286,6 @@ if (BUSTER_SLANGC_EXECUTABLE)
             endif()
             set(BUSTER_SLANGC_COMMAND "${CMAKE_COMMAND}" -E env "LD_LIBRARY_PATH=${BUSTER_SLANGC_LIBRARY_PATH}" "${BUSTER_SLANGC_EXECUTABLE}")
         endif()
-    endif()
-endif()
-
-if (BUSTER_USE_VULKAN AND BUSTER_REQUIRE_VULKAN_SDK)
-    if (BUSTER_COMPILE_SHADERS AND NOT BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_GLSLC_EXECUTABLE)
-        message(FATAL_ERROR "BUSTER_COMPILE_SHADERS requires glslc from the Vulkan SDK. Set VULKAN_SDK or -DBUSTER_VULKAN_SDK to a Vulkan SDK that contains glslc.")
     endif()
 endif()
 
@@ -631,7 +622,7 @@ message(STATUS "BUSTER_CHECK_OPTIONAL_WARNINGS: ${BUSTER_CHECK_OPTIONAL_WARNINGS
 message(STATUS "BUSTER_DEVELOPER_TARGETS: ${BUSTER_DEVELOPER_TARGETS}")
 message(STATUS "BUSTER_REQUIRE_VULKAN_SDK: ${BUSTER_REQUIRE_VULKAN_SDK}")
 message(STATUS "BUSTER_COMPILE_SHADERS: ${BUSTER_COMPILE_SHADERS}")
-message(STATUS "BUSTER_USE_SLANG_SHADERS: ${BUSTER_USE_SLANG_SHADERS}")
+message(STATUS "BUSTER_USE_SLANG_SHADERS: ${BUSTER_USE_SLANG_SHADERS_DEFINE}")
 message(STATUS "BUSTER_SINGLE_THREADED: ${BUSTER_SINGLE_THREADED}")
 
 message(STATUS "CMAKE_HOST_SYSTEM_PROCESSOR: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
@@ -971,34 +962,6 @@ function(buster_c_string out_var value)
     set(${out_var} "${escaped}" PARENT_SCOPE)
 endfunction()
 
-function(buster_compile_shader out_var shader_source)
-    if (IS_ABSOLUTE "${shader_source}")
-        set(shader_source_path "${shader_source}")
-    else()
-        set(shader_source_path "${CMAKE_CURRENT_SOURCE_DIR}/${shader_source}")
-    endif()
-
-    get_filename_component(shader_source_name "${shader_source_path}" NAME)
-    set(shader_output "${BUSTER_SHADER_BINARY_DIR}/${shader_source_name}.spv")
-
-    add_custom_command(
-        OUTPUT "${shader_output}"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUSTER_SHADER_BINARY_DIR}"
-        COMMAND "${BUSTER_GLSLC_EXECUTABLE}"
-            --target-env=vulkan1.3
-            -I "${BUSTER_SHADER_SOURCE_DIR}"
-            "${shader_source_path}"
-            -o "${shader_output}"
-        MAIN_DEPENDENCY "${shader_source_path}"
-        DEPENDS "${BUSTER_SHADER_SOURCE_DIR}/rect.inc"
-        COMMENT "Compiling shader ${shader_source_name}"
-        VERBATIM
-    )
-
-    set_source_files_properties("${shader_output}" PROPERTIES GENERATED TRUE)
-    set(${out_var} "${shader_output}" PARENT_SCOPE)
-endfunction()
-
 function(buster_compile_slang_spirv out_var shader_source entry_point stage output_name)
     if (IS_ABSOLUTE "${shader_source}")
         set(shader_source_path "${shader_source}")
@@ -1033,6 +996,7 @@ function(buster_compile_slang_spirv out_var shader_source entry_point stage outp
         # can take adb offline while creating shader modules, so ship stripped SPIR-V.
         COMMAND "${BUSTER_SPIRV_OPT_EXECUTABLE}" --strip-debug "${shader_output_unstripped}" -o "${shader_output}"
         MAIN_DEPENDENCY "${shader_source_path}"
+        DEPENDS "${BUSTER_SHADER_SOURCE_DIR}/rect_shared.h"
         COMMENT "Compiling Slang shader ${entry_point} to ${output_name}"
         VERBATIM
     )
@@ -1146,8 +1110,6 @@ endfunction()
 
 set(BUSTER_SHADER_SOURCES
     src/buster/shaders/rect.slang
-    src/buster/shaders/rect.vert
-    src/buster/shaders/rect.frag
 )
 
 set(BUSTER_RECT_VERTEX_SHADER_BINARY "${BUSTER_SHADER_BINARY_DIR}/rect.vert.spv")
@@ -1160,34 +1122,23 @@ set(BUSTER_RECT_D3D12_PIXEL_SHADER_SOURCE "${BUSTER_SHADER_BINARY_DIR}/rect.frag
 set(BUSTER_SHADER_TARGET_DEPENDS)
 
 if (BUSTER_USE_VULKAN AND BUSTER_COMPILE_SHADERS)
-    if (BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_SLANGC_EXECUTABLE)
-        message(FATAL_ERROR "BUSTER_USE_SLANG_SHADERS requires slangc. Install Slang or set BUSTER_SLANGC_EXECUTABLE.")
-    endif()
-    if (NOT BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_GLSLC_EXECUTABLE)
-        message(FATAL_ERROR "BUSTER_COMPILE_SHADERS requires glslc. Install the Vulkan SDK/shaderc or set BUSTER_GLSLC_EXECUTABLE.")
+    if (NOT BUSTER_SLANGC_EXECUTABLE)
+        message(FATAL_ERROR "BUSTER_COMPILE_SHADERS requires slangc. Install Slang or set BUSTER_SLANGC_EXECUTABLE.")
     endif()
 
     message(STATUS "BUSTER_VULKAN_INCLUDE_DIR: ${BUSTER_VULKAN_INCLUDE_DIR}")
 
-    if (BUSTER_USE_SLANG_SHADERS)
-        message(STATUS "BUSTER_SLANGC_EXECUTABLE: ${BUSTER_SLANGC_EXECUTABLE}")
-        buster_compile_slang_spirv(BUSTER_RECT_VERTEX_SHADER_BINARY src/buster/shaders/rect.slang vs_main vertex rect.vert.spv)
-        buster_compile_slang_spirv(BUSTER_RECT_FRAGMENT_SHADER_BINARY src/buster/shaders/rect.slang ps_main fragment rect.frag.spv)
-    else()
-        message(STATUS "BUSTER_GLSLC_EXECUTABLE: ${BUSTER_GLSLC_EXECUTABLE}")
-        buster_compile_shader(BUSTER_RECT_VERTEX_SHADER_BINARY src/buster/shaders/rect.vert)
-        buster_compile_shader(BUSTER_RECT_FRAGMENT_SHADER_BINARY src/buster/shaders/rect.frag)
-    endif()
+    message(STATUS "BUSTER_SLANGC_EXECUTABLE: ${BUSTER_SLANGC_EXECUTABLE}")
+    buster_compile_slang_spirv(BUSTER_RECT_VERTEX_SHADER_BINARY src/buster/shaders/rect.slang vs_main vertex rect.vert.spv)
+    buster_compile_slang_spirv(BUSTER_RECT_FRAGMENT_SHADER_BINARY src/buster/shaders/rect.slang ps_main fragment rect.frag.spv)
 
     list(APPEND BUSTER_SHADER_TARGET_DEPENDS
         "${BUSTER_RECT_VERTEX_SHADER_BINARY}"
         "${BUSTER_RECT_FRAGMENT_SHADER_BINARY}"
     )
-elseif(BUSTER_USE_VULKAN AND NOT BUSTER_USE_SLANG_SHADERS AND NOT BUSTER_GLSLC_EXECUTABLE)
-    message(STATUS "glslc not found; shader compilation is disabled")
 endif()
 
-if (BUSTER_USE_METAL AND BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS)
+if (BUSTER_USE_METAL AND BUSTER_COMPILE_SHADERS)
     buster_compile_slang_metal(BUSTER_RECT_METAL_VERTEX_SHADER_SOURCE src/buster/shaders/rect.slang rect_vs vertex rect.vert.metal)
     buster_compile_slang_metal(BUSTER_RECT_METAL_FRAGMENT_SHADER_SOURCE src/buster/shaders/rect.slang rect_fs fragment rect.frag.metal)
     buster_embed_metal_shaders(BUSTER_RECT_METAL_SHADER_HEADER "${BUSTER_RECT_METAL_VERTEX_SHADER_SOURCE}" "${BUSTER_RECT_METAL_FRAGMENT_SHADER_SOURCE}" metal.h)
@@ -1196,7 +1147,7 @@ if (BUSTER_USE_METAL AND BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS)
     )
 endif()
 
-if (BUSTER_USE_D3D12 AND BUSTER_COMPILE_SHADERS AND BUSTER_USE_SLANG_SHADERS)
+if (BUSTER_USE_D3D12 AND BUSTER_COMPILE_SHADERS)
     buster_compile_slang_hlsl(BUSTER_RECT_D3D12_VERTEX_SHADER_SOURCE src/buster/shaders/rect.slang vs_main vertex rect.vert.hlsl)
     buster_compile_slang_hlsl(BUSTER_RECT_D3D12_PIXEL_SHADER_SOURCE src/buster/shaders/rect.slang ps_main fragment rect.frag.hlsl)
     buster_embed_d3d12_shaders(BUSTER_RECT_D3D12_SHADER_HEADER "${BUSTER_RECT_D3D12_VERTEX_SHADER_SOURCE}" "${BUSTER_RECT_D3D12_PIXEL_SHADER_SOURCE}" d3d12.h)

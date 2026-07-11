@@ -14,17 +14,7 @@
 #define BUSTER_D3D12 0
 #endif
 
-struct RectVertex
-{
-    float2 p0;
-    float2 uv0;
-    float2 extent;
-    float corner_radius;
-    float softness;
-    float4 colors[4];
-    uint texture_index;
-    uint reserved[3];
-}
+#include "rect_shared.h"
 
 struct VertexOut
 {

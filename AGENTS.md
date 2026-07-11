@@ -79,6 +79,25 @@ required whenever Vulkan or Slang shader compilation is enabled.
 - Headers are included as `<buster/...>` (include root is `src/`).
   `compile_commands.json` is exported to `build/` by default.
 
+## Platform and backend boundaries
+
+- In rendering and windowing, keep platform-neutral policy and data flow in
+  the module front door (`rendering.c`, `window.c`). Native API calls
+  belong in the selected backend implementation.
+- Rendering backends live in `src/buster/rendering/*.c`; window backends
+  live in `src/buster/window/*.c`. These are implementation files
+  included by their owning module, not standalone CMake modules, so do not
+  register them or add them to the unity-build include list.
+- Every backend `.c` includes its directory's `internal.h` before its
+  implementation declarations. Those private headers own the shared types,
+  helper declarations, and native headers needed for clangd to parse a backend
+  independently; do not depend on declarations only earlier in the owning `.c`.
+- Share CPU-side draw generation, font/texture orchestration, event-list
+  ownership, and lifecycle policy. Keep device resources, synchronization,
+  swapchains, native event translation, and native handles backend-specific.
+- Renderers consume window-system handles through `WmNativeSurface`; do not
+  reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
+
 ## Parser rules
 
 The buster-language parser (`src/buster/compiler/frontend/buster/parser.c`)
@@ -116,6 +135,7 @@ Top level:
 |---|---|
 | `base.h` | Root header: platform detection, fixed-width types (`u8`…`s64`), `String8` + `S8("...")`, `STRUCT`/`BUSTER_*` macros, build-mode flags. Header-only. |
 | `system_headers.h` | Central OS/libc header includes. `tls.h` is an empty placeholder. |
+| `apple_runtime.h` | Objective-C runtime includes and ABI-compatible scalar/geometry types shared by Apple windowing and Metal. |
 | `os.{c,h}`, `entry_point.{c,h}` | OS abstraction (processes, virtual memory) and per-platform entry glue (`main`, NativeActivity, UIKit). |
 | `arena.{c,h}`, `string.{c,h}`, `integer.{c,h}`, `float.{c,h}`, `hash.{c,h}`, `simd.{c,h}`, `file.{c,h}`, `time.{c,h}` | Arena allocator; `String8` operations and `string_print` (`{S8}` placeholders); numeric parse/format; hashing; SIMD; file IO; clocks. |
 | `test.{c,h}` | In-process test harness: `UnitTestArguments`, `BatchTestResult`, `library_tests()`. |
@@ -125,10 +145,10 @@ UI / graphics:
 | Path | Contents |
 |---|---|
 | `ui_core.{c,h}`, `ui_builder.{c,h}` | Immediate-mode UI core (widget tree, layout, input) and higher-level construction helpers. |
-| `window.{c,h}` | Windowing: xcb/xkbcommon (Linux), AppKit (macOS), Win32+dwmapi (Windows), NativeActivity (Android), UIKit (iOS). |
-| `rendering.{c,h}` | Renderer front door; backend picked at configure time (Vulkan default on Linux/Android, Metal on Apple, D3D12 on Windows). |
+| `window.{c,h}`, `window/internal.h`, `window/*.c` | Shared window/event front door, private backend contract, and xcb/xkbcommon, AppKit/UIKit, Win32, Android, and null backends. |
+| `rendering.{c,h}`, `rendering/internal.h`, `rendering/*.c` | Shared CPU-side renderer front door, private backend contract, and Vulkan, Metal, D3D12, and null backends selected at compile time. |
 | `truetype.{c,h}`, `font_provider.{c,h}` | From-scratch TrueType rasterizer; system font discovery (fontconfig on Linux). |
-| `shaders/` | `rect.slang` (Slang source, compiled by `slangc`), `rect.vert`/`.frag` (GLSL fallback), `rect.inc`. Android uses an SSBO vertex path (`BUSTER_VULKAN_VERTEX_SSBO`, Adreno workaround). |
+| `shaders/` | `rect.slang` (Slang source, compiled by `slangc`), `rect.vert`/`.frag` (GLSL fallback), and their shared `rect_shared.glsl` declarations. Android uses an SSBO vertex path (`BUSTER_VULKAN_VERTEX_SSBO`, Adreno workaround). |
 
 Compiler:
 
