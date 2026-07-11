@@ -81,6 +81,7 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &string_tests,
     &parser_tokenizer_tests,
     &parser_expression_tests,
+    &parser_file_tests,
 };
 
 BatchTestResult library_tests(UnitTestArguments* arguments)

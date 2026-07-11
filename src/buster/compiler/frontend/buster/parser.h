@@ -6,6 +6,7 @@
 BUSTER_F_DECL BatchTestResult parser_tests(UnitTestArguments* arguments);
 BUSTER_F_DECL UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments);
 BUSTER_F_DECL UnitTestResult parser_expression_tests(UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult parser_file_tests(UnitTestArguments* arguments);
 #endif
 
 typedef enum TokenIdEnum

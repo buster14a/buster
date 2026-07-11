@@ -48,9 +48,10 @@ required whenever Vulkan or Slang shader compilation is enabled.
 - Run from the **repo root**: parser tests open `tests/*.bbb` by relative
   path.
 - To add a language test: drop a `.bbb` file in `tests/` **and** append it to
-  the hardcoded list inside `parser_experiments()` in
+  the hardcoded `parser_file_test_cases` list in
   `src/buster/compiler/frontend/buster/parser.c` (called by
-  `parser_tests()`). Commented-out entries there are known-failing/WIP.
+  `parser_experiments()` and `parser_file_tests()`). Commented-out entries
+  there are known-failing/WIP.
 - CI (`.forgejo/workflows/ci.yml`, Forgejo not GitHub) runs
   `./build.sh test_all_combinations_ci` on Linux/macOS/Windows plus
   Debug+Release on an Android emulator and the iOS simulator, on every push.

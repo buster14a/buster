@@ -2307,39 +2307,46 @@ BUSTER_GLOBAL_LOCAL void parse_experiment(Arena* arena, String8 path)
     arena->position = position;
 }
 
+typedef struct ParserFileTestCase ParserFileTestCase;
+struct ParserFileTestCase
+{
+    String8 path;
+    String8 expected_expression;
+};
+
+BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] = {
+    { S8_INITIALIZER("tests/basic_minimal.bbb"), S8_INITIALIZER("0") },
+    { S8_INITIALIZER("tests/basic_comment.bbb"), S8_INITIALIZER("0") },
+    { S8_INITIALIZER("tests/basic_hexadecimal_literal.bbb"), S8_INITIALIZER("0") },
+    { S8_INITIALIZER("tests/basic_octal_literal.bbb"), S8_INITIALIZER("0") },
+    { S8_INITIALIZER("tests/basic_binary_literal.bbb"), S8_INITIALIZER("0") },
+    { S8_INITIALIZER("tests/basic_unary_minus.bbb"), S8_INITIALIZER("(neg 0)") },
+    { S8_INITIALIZER("tests/basic_unary_plus.bbb"), S8_INITIALIZER("(pos 0)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_add.bbb"), S8_INITIALIZER("(+ 0 0)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_sub.bbb"), S8_INITIALIZER("(- 0 0)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_multiply.bbb"), S8_INITIALIZER("(* 0 0)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_divide.bbb"), S8_INITIALIZER("(/ 0 1)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_mod.bbb"), S8_INITIALIZER("(% 0 1)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_shift_left.bbb"), S8_INITIALIZER("(<< 0 0)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_shift_right.bbb"), S8_INITIALIZER("(>> 0 0)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_and.bbb"), S8_INITIALIZER("(& 0 1)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_or.bbb"), S8_INITIALIZER("(| 0 0)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_xor.bbb"), S8_INITIALIZER("(^ 1 1)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_compare.bbb"), S8_INITIALIZER("(!= (== (< 1 2) 3) (> (>= (<= 4 5) 6) 7))") },
+    { S8_INITIALIZER("tests/basic_logical_not.bbb"), S8_INITIALIZER("(not (not 0))") },
+    { S8_INITIALIZER("tests/basic_bitwise_not.bbb"), S8_INITIALIZER("(bit_not 0)") },
+    { S8_INITIALIZER("tests/basic_integer_literal_precedence.bbb"), S8_INITIALIZER("(<< (+ 1 (* 2 3)) (- 4 5))") },
+    // { S8_INITIALIZER("tests/basic_if_else.bbb"), S8_INITIALIZER("") },
+    // { S8_INITIALIZER("tests/array_slices.bbb"), S8_INITIALIZER("") },
+};
+
 void parser_experiments(void)
 {
     Arena* arena = arena_create((ArenaCreation){0});
-    String8 experiments[] = {
-        S8("tests/basic_minimal.bbb"),
-        S8("tests/basic_comment.bbb"),
-        S8("tests/basic_hexadecimal_literal.bbb"),
-        S8("tests/basic_octal_literal.bbb"),
-        S8("tests/basic_binary_literal.bbb"),
-        S8("tests/basic_unary_minus.bbb"),
-        S8("tests/basic_unary_plus.bbb"),
-        S8("tests/basic_integer_literal_add.bbb"),
-        S8("tests/basic_integer_literal_sub.bbb"),
-        S8("tests/basic_integer_literal_multiply.bbb"),
-        S8("tests/basic_integer_literal_divide.bbb"),
-        S8("tests/basic_integer_literal_mod.bbb"),
-        S8("tests/basic_integer_literal_shift_left.bbb"),
-        S8("tests/basic_integer_literal_shift_right.bbb"),
-        S8("tests/basic_integer_literal_and.bbb"),
-        S8("tests/basic_integer_literal_or.bbb"),
-        S8("tests/basic_integer_literal_xor.bbb"),
-        S8("tests/basic_integer_literal_compare.bbb"),
-        S8("tests/basic_logical_not.bbb"),
-        S8("tests/basic_bitwise_not.bbb"),
-        S8("tests/basic_integer_literal_precedence.bbb"),
-        // S8("tests/basic_if_else.bbb"),
-        // S8("tests/array_slices.bbb"),
-    };
 
-    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(experiments); i +=1)
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parser_file_test_cases); i +=1)
     {
-        String8 experiment = experiments[i];
-        parse_experiment(arena, experiment);
+        parse_experiment(arena, parser_file_test_cases[i].path);
     }
 }
 
@@ -2548,6 +2555,37 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
         AstExpression expression = parse_expression_snippet(arena, cases[i].source);
         String8 actual = ast_expression_to_string(arena, expression);
         BUSTER_STRING_TEST(arguments, actual, cases[i].expected);
+        arena->position = position;
+    }
+
+    return result;
+}
+
+UnitTestResult parser_file_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parser_file_test_cases); i += 1)
+    {
+        u64 position = arena->position;
+        ParserFileTestCase test_case = parser_file_test_cases[i];
+        String8 source = BYTE_SLICE_TO_STRING(8, file_read(arena, test_case.path, (FileReadOptions){0}));
+
+        BUSTER_TEST(arguments, source.pointer != 0);
+        BUSTER_TEST(arguments, source.length > 0);
+
+        if (source.pointer && source.length)
+        {
+            TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+            BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, source.length));
+            BUSTER_TEST(arguments, tokenizer.error_count == 0);
+
+            AstExpression expression = parse(source.pointer, tokenizer);
+            String8 actual = ast_expression_to_string(arena, expression);
+            BUSTER_STRING_TEST(arguments, actual, test_case.expected_expression);
+        }
+
         arena->position = position;
     }
 
