@@ -107,8 +107,15 @@ has hard design constraints:
   arena-backed `ParserState` stack (`state_push`/`state_pop`). New grammar
   constructs get new state kinds and stack frames — never recursive helper
   calls.
-- **Unary operators are AST operators** (e.g. `AstUnary`), not part of
-  numeric literal tokens.
+- `parser_parse()` writes its public `ParserResult` AST and diagnostics into a
+  caller-owned result arena. Source/token storage must outlive the result; the
+  `ParserState` stack (including pending prefix-unary frames) is scratch,
+  borrowed via `scratch_begin`/`scratch_end`, and must not escape.
+- Invalid user input produces `ParserDiagnostic` entries and synchronizes at a
+  statement or top-level declaration boundary. `BUSTER_TODO()`/assertions are
+  reserved for internal invariants, never ordinary syntax errors.
+- **Unary operators are AST expression nodes** (for example,
+  `AST_NODE_UNARY_MINUS`), not part of numeric literal tokens.
 - Expression precedence may use binding-power concepts, but the
   implementation must remain state-machine based.
 

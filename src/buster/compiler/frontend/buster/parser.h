@@ -5,6 +5,7 @@
 #include <buster/test.h>
 BUSTER_F_DECL UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments);
 BUSTER_F_DECL UnitTestResult parser_expression_tests(UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult parser_result_tests(UnitTestArguments* arguments);
 BUSTER_F_DECL UnitTestResult parser_file_tests(UnitTestArguments* arguments);
 #endif
 
@@ -115,6 +116,188 @@ struct TokenizerResult
     u32 error_count;
 };
 
+typedef struct ParserSourceRange ParserSourceRange;
+struct ParserSourceRange
+{
+    u32 offset;
+    u32 length;
+    u32 line;
+    u32 column;
+};
+
+typedef enum AstNodeId
+{
+    AST_NODE_CONSTANT_INTEGER,
+    AST_NODE_UNARY_MINUS,
+    AST_NODE_UNARY_PLUS,
+    AST_NODE_UNARY_LOGICAL_NOT,
+    AST_NODE_UNARY_BITWISE_NOT,
+    AST_NODE_BINARY_PLUS,
+    AST_NODE_BINARY_MINUS,
+    AST_NODE_BINARY_ASTERISK,
+    AST_NODE_BINARY_SLASH,
+    AST_NODE_BINARY_PERCENT,
+    AST_NODE_BINARY_SHIFT_LEFT,
+    AST_NODE_BINARY_SHIFT_RIGHT,
+    AST_NODE_BINARY_EQUAL,
+    AST_NODE_BINARY_NOT_EQUAL,
+    AST_NODE_BINARY_LESS,
+    AST_NODE_BINARY_LESS_EQUAL,
+    AST_NODE_BINARY_GREATER,
+    AST_NODE_BINARY_GREATER_EQUAL,
+    AST_NODE_BINARY_AMPERSAND,
+    AST_NODE_BINARY_BAR,
+    AST_NODE_BINARY_CARET,
+    AST_NODE_COUNT,
+} AstNodeId;
+
+typedef struct AstExpressionNode AstExpressionNode;
+typedef struct AstIntegerLiteral AstIntegerLiteral;
+struct AstIntegerLiteral
+{
+    String8 spelling;
+    u64 value;
+    u8 base;
+    bool fits_u64;
+    u8 reserved[6];
+};
+
+struct AstExpressionNode
+{
+    AstNodeId id;
+    u32 reserved;
+    AstIntegerLiteral integer;
+};
+
+typedef struct AstExpression AstExpression;
+struct AstExpression
+{
+    AstExpressionNode* nodes;
+    u32 count;
+    u32 reserved;
+};
+
+typedef enum AstStatementId
+{
+    AST_STATEMENT_RETURN,
+    AST_STATEMENT_COUNT,
+} AstStatementId;
+
+typedef struct AstStatement AstStatement;
+struct AstStatement
+{
+    AstStatement* next;
+    ParserSourceRange range;
+    AstExpression expression;
+    AstStatementId id;
+    u8 reserved[4];
+};
+
+typedef struct AstBlock AstBlock;
+struct AstBlock
+{
+    AstStatement* first_statement;
+    AstStatement* last_statement;
+    ParserSourceRange range;
+    u32 statement_count;
+    u32 reserved;
+};
+
+typedef enum AstCallingConvention
+{
+    AST_CALLING_CONVENTION_C,
+    AST_CALLING_CONVENTION_SYSTEMV,
+    AST_CALLING_CONVENTION_WIN64,
+    AST_CALLING_CONVENTION_COUNT,
+} AstCallingConvention;
+
+typedef enum AstTypeId
+{
+    AST_TYPE_NAMED,
+    AST_TYPE_POINTER,
+    AST_TYPE_SLICE,
+    AST_TYPE_INFERRED_ARRAY,
+    AST_TYPE_FUNCTION,
+    AST_TYPE_COUNT,
+} AstTypeId;
+
+typedef struct AstType AstType;
+typedef struct AstTypeArgument AstTypeArgument;
+
+struct AstTypeArgument
+{
+    AstTypeArgument* next;
+    String8 name;
+    AstType* type;
+    ParserSourceRange range;
+};
+
+struct AstType
+{
+    ParserSourceRange range;
+    AstTypeId id;
+    u32 reserved;
+    union
+    {
+        String8 name;
+        AstType* element_type;
+        struct
+        {
+            AstTypeArgument* first_argument;
+            AstTypeArgument* last_argument;
+            AstType* return_type;
+            AstCallingConvention calling_convention;
+            u32 argument_count;
+        } function;
+    };
+};
+
+typedef struct AstCode AstCode;
+struct AstCode
+{
+    AstCode* next;
+    String8 name;
+    AstType* type;
+    AstBlock body;
+    ParserSourceRange range;
+    bool exported;
+    bool inline_hint;
+    bool has_body;
+    u8 reserved[1];
+};
+
+typedef enum ParserDiagnosticKind
+{
+    PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN,
+    PARSER_DIAGNOSTIC_INVALID_INTEGER,
+    PARSER_DIAGNOSTIC_EXPRESSION_TOO_DEEP,
+    PARSER_DIAGNOSTIC_COUNT,
+} ParserDiagnosticKind;
+
+typedef struct ParserDiagnostic ParserDiagnostic;
+struct ParserDiagnostic
+{
+    ParserDiagnostic* next;
+    String8 message;
+    ParserSourceRange range;
+    ParserDiagnosticKind kind;
+    TokenId found;
+    TokenId expected;
+    u8 reserved[2];
+};
+
+typedef struct ParserResult ParserResult;
+struct ParserResult
+{
+    String8 source;
+    AstCode* first_code;
+    AstCode* last_code;
+    ParserDiagnostic* first_diagnostic;
+    ParserDiagnostic* last_diagnostic;
+    u32 code_count;
+    u32 diagnostic_count;
+};
+
 typedef struct LineAndColumn LineAndColumn;
 struct LineAndColumn
 {
@@ -123,4 +306,5 @@ struct LineAndColumn
 };
 
 BUSTER_F_DECL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length);
+BUSTER_F_DECL ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult tokenizer);
 BUSTER_F_DECL String8 get_token_content(const char8* source, Token* restrict tokens, u32 lexer_token_index);
