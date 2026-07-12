@@ -17,7 +17,7 @@
 # Required env:
 #   RUNNER_NAME     matrix.runner name
 #   CONFIG          build config, e.g. Debug or Release
-#   COMPILE_SECONDS wall-clock seconds for the clean build
+#   COMPILE_MILLISECONDS wall-clock milliseconds for the clean build
 #   BENCH_LINE      the raw "BENCH parse_all_tests iterations=... files=...
 #                   min_ns=... median_ns=..." line printed by `ide bench`
 #   COMMIT_SHA      git sha for this run
@@ -46,7 +46,7 @@ set -euo pipefail
 
 : "${RUNNER_NAME:?RUNNER_NAME is required}"
 : "${CONFIG:?CONFIG is required}"
-: "${COMPILE_SECONDS:?COMPILE_SECONDS is required}"
+: "${COMPILE_MILLISECONDS:?COMPILE_MILLISECONDS is required}"
 : "${BENCH_LINE:?BENCH_LINE is required}"
 : "${COMMIT_SHA:?COMMIT_SHA is required}"
 : "${REPO_PUSH_URL:?REPO_PUSH_URL is required}"
@@ -76,7 +76,7 @@ fi
 # "metric=<m> value=<v>[ file=<f>]", ready to be prefixed with ts/runner/
 # config/commit and written out.
 new_rows=()
-new_rows+=("metric=compile_seconds value=$COMPILE_SECONDS")
+new_rows+=("metric=compile_milliseconds value=$COMPILE_MILLISECONDS")
 new_rows+=("metric=bench_median_ns value=$bench_median_ns")
 new_rows+=("metric=bench_min_ns value=$bench_min_ns")
 
@@ -163,8 +163,8 @@ check_regression() {
 
 regressed=0
 
-for gated_metric in compile_seconds bench_median_ns; do
-    gated_value=$([[ "$gated_metric" == "compile_seconds" ]] && echo "$COMPILE_SECONDS" || echo "$bench_median_ns")
+for gated_metric in compile_milliseconds bench_median_ns; do
+    gated_value=$([[ "$gated_metric" == "compile_milliseconds" ]] && echo "$COMPILE_MILLISECONDS" || echo "$bench_median_ns")
     if baseline=$(median_of "$gated_metric"); then
         check_regression "$gated_metric" "$gated_value" "$baseline" || regressed=1
     else

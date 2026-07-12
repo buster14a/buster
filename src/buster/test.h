@@ -34,7 +34,7 @@ do \
 {\
     String8 string_a = (a);\
     String8 string_b = (b);\
-    BUSTER_TEST_RAW((args), string_equal(string_a, string_b), S8(#a "!=" #b));\
+    BUSTER_TEST_RAW((args), string_equal(string_a, string_b), S8(#a " != " #b));\
 } while (0)
 
 #if defined(_WIN32)

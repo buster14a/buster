@@ -557,21 +557,21 @@ String8 get_token_content(const char8* source, Token* restrict tokens, u32 lexer
     };
 }
 
-typedef enum ParserDeclaration
+typedef enum ParserStateId
 {
-    PARSER_DECLARATION_ROOT,
-    PARSER_DECLARATION_CODE,
-    PARSER_DECLARATION_TYPE_REFERENCE,
-    PARSER_DECLARATION_ATTRIBUTE_LIST,
-    PARSER_DECLARATION_BLOCK,
-    PARSER_DECLARATION_STATEMENT,
-    PARSER_DECLARATION_RETURN_STATEMENT,
-    PARSER_DECLARATION_TYPE_DECLARATION,
-    PARSER_DECLARATION_DATA_DECLARATION,
-    PARSER_DECLARATION_EXPRESSION,
-    PARSER_DECLARATION_UNARY_PREFIX,
-    PARSER_DECLARATION_COUNT,
-}ParserDeclaration;
+    PARSER_STATE_ROOT,
+    PARSER_STATE_CODE,
+    PARSER_STATE_TYPE_REFERENCE,
+    PARSER_STATE_ATTRIBUTE_LIST,
+    PARSER_STATE_BLOCK,
+    PARSER_STATE_STATEMENT,
+    PARSER_STATE_RETURN_STATEMENT,
+    PARSER_STATE_DATA_STATEMENT,
+    PARSER_STATE_TYPE_STATEMENT,
+    PARSER_STATE_EXPRESSION,
+    PARSER_STATE_UNARY_PREFIX,
+    PARSER_STATE_COUNT,
+}ParserStateId;
 
 typedef enum CodeState
 {
@@ -622,17 +622,39 @@ typedef enum AttributeListState
 
 typedef enum StatementStateId
 {
-        STATEMENT_STATE_START,
-        STATEMENT_STATE_END,
-        STATEMENT_STATE_COUNT,
+    STATEMENT_STATE_START,
+    STATEMENT_STATE_END,
+    STATEMENT_STATE_COUNT,
 } StatementStateId;
 
-typedef enum ReturnStatementState
+typedef enum ReturnStatementStateId
 {
     RETURN_STATEMENT_STATE_VALUE_OR_END,
     RETURN_STATEMENT_STATE_END,
     RETURN_STATEMENT_STATE_COUNT,
-} ReturnStatementState;
+} ReturnStatementStateId;
+
+typedef struct ReturnStatementState ReturnStatementState;
+struct ReturnStatementState
+{
+    ReturnStatementStateId id;
+};
+
+typedef enum DataStatementStateId
+{
+    DATA_STATEMENT_STATE_NAME,
+    DATA_STATEMENT_STATE_AFTER_NAME,
+    DATA_STATEMENT_STATE_AFTER_TYPE,
+    DATA_STATEMENT_STATE_INITIALIZER,
+    DATA_STATEMENT_STATE_END,
+    DATA_STATEMENT_STATE_COUNT,
+} DataStatementStateId;
+
+typedef struct DataStatementState DataStatementState;
+struct DataStatementState
+{
+    DataStatementStateId id;
+};
 
 typedef enum ExpressionState
 {
@@ -655,7 +677,7 @@ typedef enum BindingPower
 typedef struct ParserState ParserState;
 struct ParserState
 {
-    ParserDeclaration id;
+    ParserStateId id;
     union
     {
         struct
@@ -692,17 +714,15 @@ struct ParserState
 
         struct
         {
-            StatementStateId state;
-            AstStatement* statement;
+            union
+            {
+                StatementStateId statement_state;
+                ReturnStatementState return_state;
+                DataStatementState data_state;
+            };
+            AstStatement* pointer;
             TokenId end_token;
         } statement;
-
-        struct
-        {
-            ReturnStatementState state;
-            AstStatement* statement;
-            TokenId end_token;
-        } return_statement;
 
         struct
         {
@@ -711,7 +731,7 @@ struct ParserState
             // Postorder (RPN) output stream this expression emits into. The tree
             // is implicit in this ordering plus each node's arity, so no child
             // links are stored. `output_base` is the first emitted node.
-            AstExpressionNode* output_base;
+            AstNode* output_base;
             u32 output_count;
             // Shunting-yard stack holding binary operator kinds (AstNodeId cast
             // to u8) not yet emitted; operators are held until precedence
@@ -908,7 +928,7 @@ BUSTER_GLOBAL_LOCAL AstType* parser_type_push(Parser* parser, AstTypeId id, Exte
 
 BUSTER_GLOBAL_LOCAL AstType* parser_type_attach(Parser* parser, ParserState* type_state, AstTypeId id, ExtendedToken token)
 {
-    BUSTER_CHECK(type_state->id == PARSER_DECLARATION_TYPE_REFERENCE);
+    BUSTER_CHECK(type_state->id == PARSER_STATE_TYPE_REFERENCE);
     BUSTER_CHECK(type_state->type.destination);
     AstType* type = parser_type_push(parser, id, token);
     *type_state->type.destination = type;
@@ -983,9 +1003,9 @@ BUSTER_GLOBAL_LOCAL ParserDiagnostic* parser_diagnostic_push(Parser* parser, Par
 BUSTER_GLOBAL_LOCAL void parser_unexpected(Parser* parser, ExtendedToken token, TokenId expected)
 {
     parser_diagnostic_push(parser, PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN, token, expected, S8("unexpected token"));
-    ParserDeclaration declaration = state(parser)->id;
-    if (declaration == PARSER_DECLARATION_STATEMENT || declaration == PARSER_DECLARATION_RETURN_STATEMENT ||
-        declaration == PARSER_DECLARATION_EXPRESSION || declaration == PARSER_DECLARATION_UNARY_PREFIX)
+    ParserStateId state_id = state(parser)->id;
+    if (state_id == PARSER_STATE_STATEMENT || state_id == PARSER_STATE_RETURN_STATEMENT ||
+        state_id == PARSER_STATE_EXPRESSION || state_id == PARSER_STATE_UNARY_PREFIX)
     {
         parser->recovery = PARSER_RECOVERY_STATEMENT;
     }
@@ -1000,11 +1020,11 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
     if (parser->recovery == PARSER_RECOVERY_STATEMENT)
     {
         AstStatement* statement = 0;
-        while (state(parser)->id != PARSER_DECLARATION_BLOCK && state(parser)->id != PARSER_DECLARATION_ROOT)
+        while (state(parser)->id != PARSER_STATE_BLOCK && state(parser)->id != PARSER_STATE_ROOT)
         {
             ParserState popped = state_pop(&parser->state);
-            if (popped.id == PARSER_DECLARATION_STATEMENT) { statement = popped.statement.statement; }
-            else if (popped.id == PARSER_DECLARATION_RETURN_STATEMENT) { statement = popped.return_statement.statement; }
+            if (popped.id == PARSER_STATE_STATEMENT) { statement = popped.statement.pointer; }
+            else if (popped.id == PARSER_STATE_RETURN_STATEMENT) { statement = popped.statement.pointer; }
         }
 
         ExtendedToken token = peek(parser);
@@ -1288,7 +1308,7 @@ BUSTER_GLOBAL_LOCAL void finish_type_reference(Parser* parser, u32 end_offset)
 
     switch (resume_state->id)
     {
-        break; case PARSER_DECLARATION_CODE:
+        break; case PARSER_STATE_CODE:
         {
             if (resume_state->code.current_state != CODE_STATE_TYPE)
             {
@@ -1297,7 +1317,7 @@ BUSTER_GLOBAL_LOCAL void finish_type_reference(Parser* parser, u32 end_offset)
 
             resume_state->code.current_state = CODE_STATE_AFTER_TYPE;
         }
-        break; case PARSER_DECLARATION_TYPE_REFERENCE:
+        break; case PARSER_STATE_TYPE_REFERENCE:
         {
             switch (resume_state->type.current_state)
             {
@@ -1377,9 +1397,8 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
         case AST_NODE_BINARY_AMPERSAND: return S8("BinaryAmpersand");
         case AST_NODE_BINARY_BAR: return S8("BinaryBar");
         case AST_NODE_BINARY_CARET: return S8("BinaryCaret");
-        case AST_NODE_COUNT:
-        {
-        }
+        case AST_NODE_IDENTIFIER: return S8("Identifier");
+        case AST_NODE_COUNT: {}
     }
 
     BUSTER_UNREACHABLE();
@@ -1448,6 +1467,7 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
         case AST_NODE_UNARY_LOGICAL_NOT:
         case AST_NODE_UNARY_BITWISE_NOT:
         case AST_NODE_CONSTANT_INTEGER:
+        case AST_NODE_IDENTIFIER:
         {
         }
     }
@@ -1462,6 +1482,7 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNodeId id)
     switch (id)
     {
         case AST_NODE_CONSTANT_INTEGER:
+        case AST_NODE_IDENTIFIER:
         {
             return 0;
         }
@@ -1525,6 +1546,7 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_BINARY_CARET: return S8("^");
 
         case AST_NODE_CONSTANT_INTEGER:
+        case AST_NODE_IDENTIFIER:
         case AST_NODE_COUNT:
         {
         }
@@ -1534,11 +1556,10 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
 }
 
 // Append a node to the current expression's postorder output stream.
-BUSTER_GLOBAL_LOCAL AstExpressionNode* expression_emit(Parser* restrict parser, ParserState* restrict st, AstNodeId id)
+BUSTER_GLOBAL_LOCAL AstNode* expression_emit(Parser* restrict parser, ParserState* restrict st, AstNodeId id)
 {
-    AstExpressionNode* node = arena_allocate(parser->expression_arena, AstExpressionNode, 1);
+    AstNode* node = arena_allocate(parser->expression_arena, AstNode, 1);
     node->id = id;
-    node->reserved = 0;
     node->integer = (AstIntegerLiteral){0};
     if (st->expression.output_count == 0)
     {
@@ -1552,7 +1573,7 @@ BUSTER_GLOBAL_LOCAL void parse_block(Parser* restrict parser, AstBlock* block, E
 {
     *block = (AstBlock){ .range = source_range_from_token(opening_brace) };
     ParserState* block_state = state_push(&parser->state);
-    block_state->id = PARSER_DECLARATION_BLOCK;
+    block_state->id = PARSER_STATE_BLOCK;
     block_state->block.brace_depth = 1;
     block_state->block.block = block;
 }
@@ -1561,18 +1582,41 @@ BUSTER_GLOBAL_LOCAL void parse_expression(Parser* restrict parser, TokenId end_o
 {
     arena_set_position(parser->expression_arena, parser->expression_arena_minimum_position);
     ParserState* state = state_push(&parser->state);
-    state->id = PARSER_DECLARATION_EXPRESSION;
+    state->id = PARSER_STATE_EXPRESSION;
     state->expression.state = EXPRESSION_STATE_PREFIX;
     state->expression.end_token = end_of_statement_token;
 }
 
+BUSTER_GLOBAL_LOCAL ParserState* expression_owner(Parser* restrict parser);
+BUSTER_GLOBAL_LOCAL void expression_finish_operand(Parser* restrict parser, ParserState* restrict owner);
+
 BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
 {
     ParserState* expression_state = state(parser);
-    BUSTER_CHECK(expression_state->id == PARSER_DECLARATION_EXPRESSION);
+    BUSTER_CHECK(expression_state->id == PARSER_STATE_EXPRESSION);
     u32 output_count = expression_state->expression.output_count;
     BUSTER_CHECK(output_count);
-    AstExpressionNode* output = arena_allocate(parser->result_arena, AstExpressionNode, output_count);
+
+    if (expression_state->expression.end_token == TOKEN_RIGHT_PARENTHESIS)
+    {
+        AstNode* output_base = expression_state->expression.output_base;
+        state_pop(&parser->state);
+
+        ExtendedToken closing_parenthesis = peek(parser);
+        BUSTER_CHECK(closing_parenthesis.id == TOKEN_RIGHT_PARENTHESIS);
+        consume(&parser->iterator);
+
+        ParserState* owner = expression_owner(parser);
+        if (owner->expression.output_count == 0)
+        {
+            owner->expression.output_base = output_base;
+        }
+        owner->expression.output_count += output_count;
+        expression_finish_operand(parser, owner);
+        return;
+    }
+
+    AstNode* output = arena_allocate(parser->result_arena, AstNode, output_count);
     memcpy(output, expression_state->expression.output_base, sizeof(*output) * output_count);
     AstExpression expression = { .nodes = output, .count = output_count };
 
@@ -1582,10 +1626,15 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
 
     switch (resume_state->id)
     {
-        break; case PARSER_DECLARATION_RETURN_STATEMENT:
+        break; case PARSER_STATE_RETURN_STATEMENT:
         {
-            resume_state->return_statement.statement->expression = expression;
-            resume_state->return_statement.state = RETURN_STATEMENT_STATE_END;
+            resume_state->statement.pointer->return_statement.expression = expression;
+            resume_state->statement.return_state.id = RETURN_STATEMENT_STATE_END;
+        }
+        break; case PARSER_STATE_DATA_STATEMENT:
+        {
+            resume_state->statement.pointer->data_statement.initializer = expression;
+            resume_state->statement.data_state.id = DATA_STATEMENT_STATE_END;
         }
         break; default: BUSTER_TODO();
     }
@@ -1671,12 +1720,30 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
 BUSTER_GLOBAL_LOCAL ParserState* expression_owner(Parser* restrict parser)
 {
     ParserState* frame = state(parser);
-    while (frame->id == PARSER_DECLARATION_UNARY_PREFIX)
+    while (frame->id == PARSER_STATE_UNARY_PREFIX)
     {
         frame -= 1;
     }
-    BUSTER_CHECK(frame->id == PARSER_DECLARATION_EXPRESSION);
+    BUSTER_CHECK(frame->id == PARSER_STATE_EXPRESSION);
     return frame;
+}
+
+// Prefix unary operators bind tighter than any binary operator, so
+// they are emitted right after their operand, innermost first, by
+// popping their frames.
+BUSTER_GLOBAL_LOCAL void expression_finish_operand(Parser* restrict parser, ParserState* restrict owner)
+{
+    while (state(parser)->id == PARSER_STATE_UNARY_PREFIX)
+    {
+        ParserState unary_frame = state_pop(&parser->state);
+        expression_emit(
+                parser,
+                owner,
+                (AstNodeId)unary_frame.unary_prefix.id);
+    }
+
+    BUSTER_CHECK(state(parser) == owner);
+    owner->expression.state = EXPRESSION_STATE_TAIL;
 }
 
 // Prefix position of an expression: either an operand or another prefix unary
@@ -1688,6 +1755,28 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
 
     switch (token.id)
     {
+        break; case TOKEN_LEFT_PARENTHESIS:
+        {
+            consume(&parser->iterator);
+
+            ParserState* group_state = state_push(&parser->state);
+            group_state->id = PARSER_STATE_EXPRESSION;
+            group_state->expression.state = EXPRESSION_STATE_PREFIX;
+            group_state->expression.end_token = TOKEN_RIGHT_PARENTHESIS;
+        }
+        break; case TOKEN_IDENTIFIER:
+        {
+            consume(&parser->iterator);
+
+            ParserState* owner = expression_owner(parser);
+            AstNode* leaf = expression_emit(parser, owner, AST_NODE_IDENTIFIER);
+            leaf->identifier = (AstIdentifier){
+                .text = get_string(parser->iterator.source, token),
+                .range = source_range_from_token(token),
+            };
+
+            expression_finish_operand(parser, owner);
+        }
         break;
         case TOKEN_HEXADECIMAL_INTEGER_LITERAL:
         case TOKEN_DECIMAL_INTEGER_LITERAL:
@@ -1706,7 +1795,7 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
             }
 
             ParserState* owner = expression_owner(parser);
-            AstExpressionNode* leaf = expression_emit(parser, owner, AST_NODE_CONSTANT_INTEGER);
+            AstNode* leaf = expression_emit(parser, owner, AST_NODE_CONSTANT_INTEGER);
             leaf->integer = (AstIntegerLiteral){
                 .spelling = number_string,
                 .value = number_parsing.value,
@@ -1714,17 +1803,7 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
                 .fits_u64 = number_parsing.fits_u64,
             };
 
-            // Prefix unary operators bind tighter than any binary operator, so
-            // they are emitted right after their operand, innermost first, by
-            // popping their frames.
-            while (state(parser)->id == PARSER_DECLARATION_UNARY_PREFIX)
-            {
-                ParserState unary_frame = state_pop(&parser->state);
-                expression_emit(parser, owner, (AstNodeId)unary_frame.unary_prefix.id);
-            }
-
-            BUSTER_CHECK(state(parser) == owner);
-            owner->expression.state = EXPRESSION_STATE_TAIL;
+            expression_finish_operand(parser, owner);
         }
         break;
         case TOKEN_MINUS:
@@ -1743,7 +1822,7 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
                 break; default: BUSTER_TODO_TOKEN(token.id);
             }
             ParserState* unary_state = state_push(&parser->state);
-            unary_state->id = PARSER_DECLARATION_UNARY_PREFIX;
+            unary_state->id = PARSER_STATE_UNARY_PREFIX;
             unary_state->unary_prefix.id = (u8)unary_id;
         }
         break; default: parser_unexpected(parser, token, TOKEN_DECIMAL_INTEGER_LITERAL);
@@ -1777,10 +1856,12 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
             parser_recover(&parser);
             continue;
         }
-        switch (state(&parser)->id)
+
+        ParserState* original_state = state(&parser);
+        switch (original_state->id)
         {
-            break; case PARSER_DECLARATION_COUNT: BUSTER_UNREACHABLE();
-            break; case PARSER_DECLARATION_ROOT:
+            break; case PARSER_STATE_COUNT: BUSTER_UNREACHABLE();
+            break; case PARSER_STATE_ROOT:
             {
                 ExtendedToken token = peek_and_consume(&parser);
 
@@ -1789,7 +1870,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; case TOKEN_KEYWORD_CODE:
                     {
                         ParserState* function_state = state_push(&parser.state);
-                        function_state->id = PARSER_DECLARATION_CODE;
+                        function_state->id = PARSER_STATE_CODE;
                         function_state->code.current_state = CODE_STATE_BEFORE_NAME;
                         function_state->code.code = parser_code_push(&parser, token);
                     }
@@ -1800,7 +1881,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; default: parser_unexpected(&parser, token, TOKEN_KEYWORD_CODE);
                 }
             }
-            break; case PARSER_DECLARATION_CODE:
+            break; case PARSER_STATE_CODE:
             {
                 ParserState* code_state = state(&parser);
                 ExtendedToken token = peek(&parser);
@@ -1816,7 +1897,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                             break; case TOKEN_LEFT_BRACKET:
                             {
                                 ParserState* attribute_list_state = state_push(&parser.state);
-                                attribute_list_state->id = PARSER_DECLARATION_ATTRIBUTE_LIST;
+                                attribute_list_state->id = PARSER_STATE_ATTRIBUTE_LIST;
                                 attribute_list_state->attribute_list.kind = ATTRIBUTE_LIST_CODE;
                                 attribute_list_state->attribute_list.current_state = ATTRIBUTE_LIST_STATE_ITEM_OR_CLOSE;
                                 attribute_list_state->attribute_list.code = code_state->code.code;
@@ -1840,7 +1921,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                                 code_state->code.current_state = CODE_STATE_TYPE;
 
                                 ParserState* type_state = state_push(&parser.state);
-                                type_state->id = PARSER_DECLARATION_TYPE_REFERENCE;
+                                type_state->id = PARSER_STATE_TYPE_REFERENCE;
                                 type_state->type.current_state = TYPE_STATE_PREFIX_OR_BASE;
                                 type_state->type.code = code_state->code.code;
                                 type_state->type.destination = &code_state->code.code->type;
@@ -1852,7 +1933,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                             break; case TOKEN_LEFT_BRACKET:
                             {
                                 ParserState* attribute_list_state = state_push(&parser.state);
-                                attribute_list_state->id = PARSER_DECLARATION_ATTRIBUTE_LIST;
+                                attribute_list_state->id = PARSER_STATE_ATTRIBUTE_LIST;
                                 attribute_list_state->attribute_list.kind = ATTRIBUTE_LIST_SYMBOL;
                                 attribute_list_state->attribute_list.current_state = ATTRIBUTE_LIST_STATE_ITEM_OR_CLOSE;
                                 attribute_list_state->attribute_list.code = code_state->code.code;
@@ -1912,7 +1993,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; case CODE_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
-            break; case PARSER_DECLARATION_TYPE_REFERENCE:
+            break; case PARSER_STATE_TYPE_REFERENCE:
             {
                 ParserState* type_state = state(&parser);
                 ExtendedToken token = peek(&parser);
@@ -1965,10 +2046,6 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                                 type_state->type.destination = &slice->element_type;
                                 type_state->type.current_state = TYPE_STATE_PREFIX_OR_BASE;
                             }
-                            // break; case TOKEN_Number:
-                            // {
-                            //     consume(&parser.iterator)                            //     type_state->type.current_state = TYPE_STATE_AfterArrayCount;
-                            // }
                             break; case TOKEN_UNDERSCORE:
                             {
                                 consume(&parser.iterator);
@@ -2013,7 +2090,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                                 consume(&parser.iterator);
 
                                 ParserState* attribute_list_state = state_push(&parser.state);
-                                attribute_list_state->id = PARSER_DECLARATION_ATTRIBUTE_LIST;
+                                attribute_list_state->id = PARSER_STATE_ATTRIBUTE_LIST;
                                 attribute_list_state->attribute_list.kind = ATTRIBUTE_LIST_FUNCTION;
                                 attribute_list_state->attribute_list.current_state = ATTRIBUTE_LIST_STATE_ITEM_OR_CLOSE;
                                 attribute_list_state->attribute_list.code = type_state->type.code;
@@ -2084,7 +2161,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                         };
 
                         ParserState* child_type_state = state_push(&parser.state);
-                        child_type_state->id = PARSER_DECLARATION_TYPE_REFERENCE;
+                        child_type_state->id = PARSER_STATE_TYPE_REFERENCE;
                         child_type_state->type.current_state = TYPE_STATE_PREFIX_OR_BASE;
                         child_type_state->type.code = type_state->type.code;
                         child_type_state->type.destination = &type_state->type.argument->type;
@@ -2119,7 +2196,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                         }
 
                         ParserState* child_type_state = state_push(&parser.state);
-                        child_type_state->id = PARSER_DECLARATION_TYPE_REFERENCE;
+                        child_type_state->id = PARSER_STATE_TYPE_REFERENCE;
                         child_type_state->type.current_state = TYPE_STATE_PREFIX_OR_BASE;
                         child_type_state->type.code = type_state->type.code;
                         child_type_state->type.destination = &type_state->type.type->function.return_type;
@@ -2132,7 +2209,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; case TYPE_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
-            break; case PARSER_DECLARATION_ATTRIBUTE_LIST:
+            break; case PARSER_STATE_ATTRIBUTE_LIST:
             {
                 ParserState* attribute_list_state = state(&parser);
                 ExtendedToken token = peek_and_consume(&parser);
@@ -2250,7 +2327,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; case ATTRIBUTE_LIST_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
-            break; case PARSER_DECLARATION_BLOCK:
+            break; case PARSER_STATE_BLOCK:
             {
                 ParserState* block_state = state(&parser);
                 ExtendedToken token = peek(&parser);
@@ -2276,39 +2353,51 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; default:
                     {
                         ParserState* statement_state = state_push(&parser.state);
-                        statement_state->id = PARSER_DECLARATION_STATEMENT;
-                        statement_state->statement.state = STATEMENT_STATE_START;
+                        statement_state->id = PARSER_STATE_STATEMENT;
+                        statement_state->statement.statement_state = STATEMENT_STATE_START;
                     }
                 }
             }
-            break; case PARSER_DECLARATION_STATEMENT:
+            break; case PARSER_STATE_STATEMENT:
             {
                 ParserState* statement_state = state(&parser);
                 ExtendedToken token = peek(&parser);
 
-                switch (statement_state->statement.state)
+                switch (statement_state->statement.statement_state)
                 {
                     break; case STATEMENT_STATE_START:
                     {
-                        statement_state->statement.state = STATEMENT_STATE_END;
+                        statement_state->statement.statement_state = STATEMENT_STATE_END;
                         statement_state->statement.end_token = block_end_of_statement_token;
 
                         consume(&parser.iterator);
+
+                        ParserState* block_state = state_previous(&parser.state);
+                        BUSTER_CHECK(block_state->id == PARSER_STATE_BLOCK);
 
                         switch (token.id)
                         {
                             break; case TOKEN_KEYWORD_RETURN:
                             {
-                                ParserState* block_state = state_previous(&parser.state);
-                                BUSTER_CHECK(block_state->id == PARSER_DECLARATION_BLOCK);
                                 AstStatement* statement = parser_statement_push(&parser, block_state->block.block, AST_STATEMENT_RETURN, token);
-                                statement_state->statement.statement = statement;
+                                statement_state->statement.pointer = statement;
 
                                 ParserState* state = state_push(&parser.state);
-                                state->id = PARSER_DECLARATION_RETURN_STATEMENT;
-                                state->return_statement.state = RETURN_STATEMENT_STATE_VALUE_OR_END;
-                                state->return_statement.statement = statement;
-                                state->return_statement.end_token = statement_state->statement.end_token;
+                                state->id = PARSER_STATE_RETURN_STATEMENT;
+                                state->statement.return_state.id = RETURN_STATEMENT_STATE_VALUE_OR_END;
+                                state->statement.pointer = statement;
+                                state->statement.end_token = statement_state->statement.end_token;
+                            }
+                            break; case TOKEN_KEYWORD_DATA:
+                            {
+                                AstStatement* statement = parser_statement_push(&parser, block_state->block.block, AST_STATEMENT_DATA, token);
+                                statement_state->statement.pointer = statement;
+
+                                ParserState* state = state_push(&parser.state);
+                                state->id = PARSER_STATE_DATA_STATEMENT;
+                                state->statement.data_state.id = DATA_STATEMENT_STATE_NAME;
+                                state->statement.pointer = statement;
+                                state->statement.end_token = statement_state->statement.end_token;
                             }
                             break; default: parser_unexpected(&parser, token, TOKEN_KEYWORD_RETURN);
                         }
@@ -2326,7 +2415,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                             }
 
                             consume(&parser.iterator);
-                            statement_state->statement.statement->range.length = token.offset + token.length - statement_state->statement.statement->range.offset;
+                            statement_state->statement.pointer->range.length = token.offset + token.length - statement_state->statement.pointer->range.offset;
                         }
 
                         state_pop(&parser.state);
@@ -2334,20 +2423,20 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; case STATEMENT_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
-            break; case PARSER_DECLARATION_RETURN_STATEMENT:
+            break; case PARSER_STATE_RETURN_STATEMENT:
             {
                 ParserState* return_statement_state = state(&parser);
                 ExtendedToken token = peek(&parser);
 
-                TokenId end_of_statement_token = return_statement_state->return_statement.end_token;
+                TokenId end_of_statement_token = return_statement_state->statement.end_token;
 
-                switch (return_statement_state->return_statement.state)
+                switch (return_statement_state->statement.return_state.id)
                 {
                     break; case RETURN_STATEMENT_STATE_VALUE_OR_END:
                     {
                         if (token.id == end_of_statement_token)
                         {
-                            return_statement_state->return_statement.state = RETURN_STATEMENT_STATE_END;
+                            return_statement_state->statement.return_state.id = RETURN_STATEMENT_STATE_END;
                         }
                         else
                         {
@@ -2367,7 +2456,81 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; case RETURN_STATEMENT_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
-            break; case PARSER_DECLARATION_EXPRESSION:
+            break; case PARSER_STATE_DATA_STATEMENT:
+            {
+                ParserState* data_statement_state = state(&parser);
+                ExtendedToken token = peek(&parser);
+
+                TokenIdEnum start_token_id = (TokenIdEnum)token.id;
+                TokenId end_of_statement_token = data_statement_state->statement.end_token;
+
+                BUSTER_UNUSED(end_of_statement_token);
+
+                switch (data_statement_state->statement.data_state.id)
+                {
+                    break; case DATA_STATEMENT_STATE_NAME:
+                    {
+                        switch (start_token_id)
+                        {
+                            break; case TOKEN_IDENTIFIER:
+                            {
+                                consume(&parser.iterator);
+                                String8 name = get_string(parser.iterator.source, token);
+                                ParserSourceRange range = source_range_from_token(token);
+                                data_statement_state->statement.pointer->data_statement.name = (AstIdentifier) {
+                                    .range = range,
+                                    .text = name,
+                                };
+                                data_statement_state->statement.data_state.id = DATA_STATEMENT_STATE_AFTER_NAME;
+                            }
+                            break; default: parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
+                        }
+                    }
+                    break; case DATA_STATEMENT_STATE_AFTER_NAME:
+                    {
+                        if (start_token_id == TOKEN_COLON)
+                        {
+                            consume(&parser.iterator);
+
+                            ParserState* type_state = state_push(&parser.state);
+                            type_state->id = PARSER_STATE_TYPE_REFERENCE;
+                            type_state->type.current_state = TYPE_STATE_PREFIX_OR_BASE;
+                            type_state->type.code = 0;
+                            type_state->type.destination = &data_statement_state->statement.pointer->data_statement.type;
+                        }
+
+                        data_statement_state->statement.data_state.id = DATA_STATEMENT_STATE_AFTER_TYPE;
+                    }
+                    break; case DATA_STATEMENT_STATE_AFTER_TYPE:
+                    {
+                        switch (start_token_id)
+                        {
+                            break; case TOKEN_EQUAL:
+                            {
+                                consume(&parser.iterator);
+                                data_statement_state->statement.data_state.id = DATA_STATEMENT_STATE_INITIALIZER;
+                            }
+                            break; default: parser_unexpected(&parser, token, TOKEN_EQUAL);
+                        }
+                    }
+                    break; case DATA_STATEMENT_STATE_INITIALIZER:
+                    {
+                        parse_expression(&parser, data_statement_state->statement.end_token);
+                    }
+                    break; case DATA_STATEMENT_STATE_END:
+                    {
+                        if (token.id != end_of_statement_token)
+                        {
+                            parser_unexpected(&parser, token, end_of_statement_token);
+                            continue;
+                        }
+
+                        state_pop(&parser.state);
+                    }
+                    break; case DATA_STATEMENT_STATE_COUNT: BUSTER_UNREACHABLE();
+                }
+            }
+            break; case PARSER_STATE_EXPRESSION:
             {
                 ParserState* st = state(&parser);
                 ExtendedToken token = peek(&parser);
@@ -2462,15 +2625,11 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; case EXPRESSION_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
-            break; case PARSER_DECLARATION_UNARY_PREFIX:
+            break; case PARSER_STATE_UNARY_PREFIX:
             {
                 expression_parse_prefix(&parser);
             }
-            break; case PARSER_DECLARATION_TYPE_DECLARATION:
-            {
-                BUSTER_TODO();
-            }
-            break; case PARSER_DECLARATION_DATA_DECLARATION:
+            break; case PARSER_STATE_TYPE_STATEMENT:
             {
                 BUSTER_TODO();
             }
@@ -2515,14 +2674,25 @@ BUSTER_GLOBAL_LOCAL String8 ast_expression_to_string(Arena* arena, AstExpression
 
     for (u32 i = 0; i < expression.count; i += 1)
     {
-        AstExpressionNode* node = &expression.nodes[i];
+        AstNode* node = &expression.nodes[i];
         String8 formatted;
 
         switch (ast_node_arity(node->id))
         {
             break; case 0:
             {
-                formatted = node->integer.fits_u64 ? string_format(arena, S8("{u64}"), node->integer.value) : node->integer.spelling;
+                switch (node->id)
+                {
+                    break; case AST_NODE_CONSTANT_INTEGER:
+                    {
+                        formatted = node->integer.fits_u64 ? string_format(arena, S8("{u64}"), node->integer.value) : node->integer.spelling;
+                    }
+                    break; case AST_NODE_IDENTIFIER:
+                    {
+                        formatted = node->identifier.text;
+                    }
+                    break; default: BUSTER_TODO();
+                }
             }
             break; case 1:
             {
@@ -2556,7 +2726,8 @@ struct ParserFileTestCase
     String8 expected_expression;
 };
 
-BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] = {
+BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
+{
     {
         .path = S8_INITIALIZER("tests/basic_minimal.bbb"),
         .expected_expression = S8_INITIALIZER("0")
@@ -2641,10 +2812,10 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] = {
         .path = S8_INITIALIZER("tests/basic_integer_literal_precedence.bbb"),
         .expected_expression = S8_INITIALIZER("(<< (+ 1 (* 2 3)) (- 4 5))")
     },
-    // {
-    //     .path = S8_INITIALIZER("tests/basic_variable.bbb"),
-    //     .expected_expression = S8_INITIALIZER("(<< (+ 1 (* 2 3)) (- 4 5))")
-    // },
+    {
+        .path = S8_INITIALIZER("tests/basic_variable.bbb"),
+        .expected_expression = S8_INITIALIZER("result")
+    },
     // { S8_INITIALIZER("tests/basic_if_else.bbb"), S8_INITIALIZER("") },
     // { S8_INITIALIZER("tests/array_slices.bbb"), S8_INITIALIZER("") },
 };
@@ -2926,7 +3097,7 @@ BUSTER_GLOBAL_LOCAL AstExpression parse_expression_snippet(Arena* arena, String8
     BUSTER_CHECK(parsed.diagnostic_count == 0);
     BUSTER_CHECK(parsed.first_code);
     BUSTER_CHECK(parsed.first_code->body.first_statement);
-    return parsed.first_code->body.first_statement->expression;
+    return parsed.first_code->body.first_statement->return_statement.expression;
 }
 
 UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
@@ -2955,6 +3126,21 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
         { S8("1 != 2"),              S8("(!= 1 2)") },
         { S8("1 < 2 == 3"),          S8("(== (< 1 2) 3)") },
         { S8("1 & 2 == 3"),          S8("(& 1 (== 2 3))") },
+        { S8("value"),               S8("value") },
+        { S8("value + 2 * count"),   S8("(+ value (* 2 count))") },
+        { S8("left * 3 + right / 4"), S8("(+ (* left 3) (/ right 4))") },
+        { S8("value - 1 - offset"),  S8("(- (- value 1) offset)") },
+        { S8("value << 1 + offset"), S8("(<< value (+ 1 offset))") },
+        { S8("value + 1 < limit << 2"), S8("(< (+ value 1) (<< limit 2))") },
+        { S8("flags & mask == 3"),   S8("(& flags (== mask 3))") },
+        { S8("a | b ^ 1"),           S8("(^ (| a b) 1)") },
+        { S8("(value + 2) * count"), S8("(* (+ value 2) count)") },
+        { S8("value * (count + 3)"), S8("(* value (+ count 3))") },
+        { S8("(a + b) * (c - 2)"),   S8("(* (+ a b) (- c 2))") },
+        { S8("((a + 1) * (b - 2)) << shift"), S8("(<< (* (+ a 1) (- b 2)) shift)") },
+        { S8("-(value + 2) * count"), S8("(* (neg (+ value 2)) count)") },
+        { S8("!(value == 0)"),       S8("(not (== value 0))") },
+        { S8("~(mask | 3) & flags"), S8("(& (bit_not (| mask 3)) flags)") },
     };
 
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
@@ -3000,9 +3186,9 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, parsed.last_code->body.statement_count == 1);
             if (parsed.first_code->body.first_statement && parsed.last_code->body.first_statement)
             {
-                BUSTER_TEST(arguments, parsed.first_code->body.first_statement->expression.count == 1);
-                BUSTER_TEST(arguments, parsed.first_code->body.first_statement->expression.nodes[0].integer.value == 1);
-                BUSTER_TEST(arguments, parsed.last_code->body.first_statement->expression.nodes[0].integer.value == 2);
+                BUSTER_TEST(arguments, parsed.first_code->body.first_statement->return_statement.expression.count == 1);
+                BUSTER_TEST(arguments, parsed.first_code->body.first_statement->return_statement.expression.nodes[0].integer.value == 1);
+                BUSTER_TEST(arguments, parsed.last_code->body.first_statement->return_statement.expression.nodes[0].integer.value == 2);
             }
         }
         arena->position = position;
@@ -3017,7 +3203,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.statement_count == 2);
         if (parsed.first_code && parsed.first_code->body.last_statement)
         {
-            AstExpression recovered_expression = parsed.first_code->body.last_statement->expression;
+            AstExpression recovered_expression = parsed.first_code->body.last_statement->return_statement.expression;
             BUSTER_TEST(arguments, recovered_expression.count == 1 && recovered_expression.nodes[0].integer.value == 3);
         }
         BUSTER_TEST(arguments, parsed.last_code != 0);
@@ -3052,10 +3238,10 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         ParserResult parsed = parser_parse(arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         AstStatement* statement = parsed.first_code ? parsed.first_code->body.first_statement : 0;
-        BUSTER_TEST(arguments, statement != 0 && statement->expression.count == 3);
-        if (statement && statement->expression.count == 3)
+        BUSTER_TEST(arguments, statement != 0 && statement->return_statement.expression.count == 3);
+        if (statement && statement->return_statement.expression.count == 3)
         {
-            AstExpressionNode* nodes = statement->expression.nodes;
+            AstNode* nodes = statement->return_statement.expression.nodes;
             BUSTER_TEST(arguments, nodes[0].id == AST_NODE_CONSTANT_INTEGER && nodes[0].integer.value == 1);
             BUSTER_TEST(arguments, nodes[1].id == AST_NODE_CONSTANT_INTEGER && nodes[1].integer.value == 0);
             BUSTER_TEST(arguments, nodes[2].id == AST_NODE_BINARY_PLUS);
@@ -3150,7 +3336,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.first_statement != 0);
         if (parsed.first_code && parsed.first_code->body.first_statement)
         {
-            AstExpression expression = parsed.first_code->body.first_statement->expression;
+            AstExpression expression = parsed.first_code->body.first_statement->return_statement.expression;
             BUSTER_TEST(arguments, expression.count == 1);
             if (expression.count == 1)
             {
@@ -3243,11 +3429,22 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
             ParserResult parsed = parser_parse(arena, source, tokenizer);
             BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
             BUSTER_TEST(arguments, parsed.code_count == 1);
+
             AstExpression expression = {0};
-            if (parsed.first_code && parsed.first_code->body.first_statement)
+
+            if (parsed.first_code)
             {
-                expression = parsed.first_code->body.first_statement->expression;
+                AstStatement* last_statement = parsed.first_code->body.last_statement;
+                if (last_statement)
+                {
+                    switch (last_statement->id)
+                    {
+                        break; case AST_STATEMENT_RETURN: expression = last_statement->return_statement.expression;
+                        break; default: os_fail();
+                    }
+                }
             }
+
             String8 actual = ast_expression_to_string(arena, expression);
             BUSTER_STRING_TEST(arguments, actual, test_case.expected_expression);
         }

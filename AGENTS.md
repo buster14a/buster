@@ -99,7 +99,7 @@ Vulkan or Slang shader compilation is enabled.
   `perf-history` git branch — one row per metric, not one wide line per run
   (`ts=... runner=... config=... commit=... metric=... value=...
   [file=...]`, plain text, no JSON/`jq`) — and **fails the CI job** only if
-  `compile_seconds` or `bench_median_ns` regresses more than 10%
+  `compile_milliseconds` or `bench_median_ns` regresses more than 10%
   (`PERF_REGRESSION_THRESHOLD`) past that `(runner, config)`'s median. The
   phase (`bench_tokenize_median_ns`, `bench_parse_median_ns`) and per-file
   (`bench_file_median_ns` + `file=`) rows are recorded for trend/diagnostic

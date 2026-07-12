@@ -128,10 +128,15 @@ struct ParserSourceRange
 typedef enum AstNodeId
 {
     AST_NODE_CONSTANT_INTEGER,
+    AST_NODE_IDENTIFIER,
+
+    // Unary operations
     AST_NODE_UNARY_MINUS,
     AST_NODE_UNARY_PLUS,
     AST_NODE_UNARY_LOGICAL_NOT,
     AST_NODE_UNARY_BITWISE_NOT,
+
+    // Binary operations
     AST_NODE_BINARY_PLUS,
     AST_NODE_BINARY_MINUS,
     AST_NODE_BINARY_ASTERISK,
@@ -148,10 +153,17 @@ typedef enum AstNodeId
     AST_NODE_BINARY_AMPERSAND,
     AST_NODE_BINARY_BAR,
     AST_NODE_BINARY_CARET,
+
     AST_NODE_COUNT,
 } AstNodeId;
 
-typedef struct AstExpressionNode AstExpressionNode;
+typedef struct AstIdentifier AstIdentifier;
+struct AstIdentifier
+{
+    String8 text;
+    ParserSourceRange range;
+};
+
 typedef struct AstIntegerLiteral AstIntegerLiteral;
 struct AstIntegerLiteral
 {
@@ -162,17 +174,23 @@ struct AstIntegerLiteral
     u8 reserved[6];
 };
 
-struct AstExpressionNode
+typedef struct AstType AstType;
+typedef struct AstNode AstNode;
+
+struct AstNode
 {
     AstNodeId id;
-    u32 reserved;
-    AstIntegerLiteral integer;
+    union
+    {
+        AstIntegerLiteral integer;
+        AstIdentifier identifier;
+    };
 };
 
 typedef struct AstExpression AstExpression;
 struct AstExpression
 {
-    AstExpressionNode* nodes;
+    AstNode* nodes;
     u32 count;
     u32 reserved;
 };
@@ -180,17 +198,35 @@ struct AstExpression
 typedef enum AstStatementId
 {
     AST_STATEMENT_RETURN,
+    AST_STATEMENT_DATA,
     AST_STATEMENT_COUNT,
 } AstStatementId;
+
+typedef struct AstReturnStatement AstReturnStatement;
+struct AstReturnStatement
+{
+    AstExpression expression;
+};
+
+typedef struct AstDataStatement AstDataStatement;
+struct AstDataStatement
+{
+    AstIdentifier name;
+    AstType* type;
+    AstExpression initializer;
+};
 
 typedef struct AstStatement AstStatement;
 struct AstStatement
 {
     AstStatement* next;
     ParserSourceRange range;
-    AstExpression expression;
     AstStatementId id;
-    u8 reserved[4];
+    union
+    {
+        AstReturnStatement return_statement;
+        AstDataStatement data_statement;
+    };
 };
 
 typedef struct AstBlock AstBlock;
@@ -221,7 +257,6 @@ typedef enum AstTypeId
     AST_TYPE_COUNT,
 } AstTypeId;
 
-typedef struct AstType AstType;
 typedef struct AstTypeArgument AstTypeArgument;
 
 struct AstTypeArgument

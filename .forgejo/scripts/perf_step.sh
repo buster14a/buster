@@ -28,17 +28,25 @@ for config in Debug Release; do
     build_dir="build/perf-${config}"
     rm -rf "$build_dir"
 
-    generate_start=$(date +%s)
-    ./build.sh generate --build-dir "$build_dir" --config "$config" \
-        --no-sanitize --no-fuzz --instrument --time-trace
-    generate_end=$(date +%s)
-
-    build_start=$(date +%s)
-    ./build.sh build --build-dir "$build_dir" --config "$config" -t bench_all | tee "$build_dir/bench_output.log"
-    build_end=$(date +%s)
+    # Bash's time keyword is available on both Linux and macOS and reports
+    # fractional seconds. `date +%s` is too coarse here: independently
+    # rounding generation and building can add almost two seconds of error
+    # to a build that only takes a few seconds in total. Keep the timing file
+    # outside build_dir because `build.sh generate` recreates that directory.
+    timing_file=$(mktemp)
+    trap 'rm -f "$timing_file"' EXIT
+    TIMEFORMAT='%R'
+    { time {
+        ./build.sh generate --build-dir "$build_dir" --config "$config" \
+            --no-sanitize --no-fuzz --instrument --time-trace 2>&3
+        ./build.sh build --build-dir "$build_dir" --config "$config" -t bench_all \
+            2>&3 | tee "$build_dir/bench_output.log"
+    }; } 3>&2 2>"$timing_file"
 
     export CONFIG="$config"
-    export COMPILE_SECONDS=$(( (generate_end - generate_start) + (build_end - build_start) ))
+    export COMPILE_MILLISECONDS
+    COMPILE_MILLISECONDS=$(awk '{ printf "%.0f\n", $1 * 1000 }' "$timing_file")
+    rm -f "$timing_file"
     export BENCH_LINE=$(grep '^BENCH ' "$build_dir/bench_output.log" | tail -n1)
     export BENCH_PHASE_LINES=$(grep '^BENCH_PHASE ' "$build_dir/bench_output.log" || true)
     export BENCH_FILE_LINES=$(grep '^BENCH_FILE ' "$build_dir/bench_output.log" || true)

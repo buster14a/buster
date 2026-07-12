@@ -151,11 +151,11 @@ jobs:
             $benchPhaseLines = ($benchOutput | Select-String '^BENCH_PHASE ' | ForEach-Object { $_.Line }) -join "`n"
             $benchFileLines = ($benchOutput | Select-String '^BENCH_FILE ' | ForEach-Object { $_.Line }) -join "`n"
 
-            $compileSeconds = [int](($genEnd - $genStart).TotalSeconds + ($buildEnd - $buildStart).TotalSeconds)
+            $compileMilliseconds = [int](($genEnd - $genStart).TotalMilliseconds + ($buildEnd - $buildStart).TotalMilliseconds)
 
             $env:RUNNER_NAME = "${{ matrix.runner }}"
             $env:CONFIG = $config
-            $env:COMPILE_SECONDS = "$compileSeconds"
+            $env:COMPILE_MILLISECONDS = "$compileMilliseconds"
             $env:BENCH_LINE = $benchLine
             $env:BENCH_PHASE_LINES = $benchPhaseLines
             $env:BENCH_FILE_LINES = $benchFileLines
