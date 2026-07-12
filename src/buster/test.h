@@ -60,6 +60,10 @@ struct UnitTestResult
 
 typedef UnitTestResult TestFunction(UnitTestArguments*);
 
+// Declared here rather than in arena.h: test.h includes arena.h, so arena.h
+// cannot include test.h back for the UnitTest* types.
+BUSTER_F_DECL UnitTestResult arena_tests(UnitTestArguments* arguments);
+
 BUSTER_F_DECL bool batch_test_succeeded(BatchTestResult test);
 BUSTER_F_DECL bool unit_test_succeeded(UnitTestResult result);
 BUSTER_F_DECL void consume_unit_tests(BatchTestResult* batch, UnitTestResult unit_test);

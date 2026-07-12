@@ -12,12 +12,18 @@ void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 {
     u64 aligned_offset = align_forward(arena->position, alignment);
     u64 aligned_size_after = aligned_offset + size;
+    u64 target_committed_size = align_forward(aligned_size_after, arena->granularity);
+    // Arenas created with count > 1 share one reservation, so committing past
+    // reserved_size would land on the next arena's pages and corrupt it
+    // silently; fail loudly instead. Callers never check for null, so this
+    // must not return one.
+    BUSTER_CHECK(target_committed_size <= arena->reserved_size);
+
     u8* arena_byte_pointer = (u8*)arena;
     u64 os_position = arena->os_position;
 
     if (BUSTER_UNLIKELY(aligned_size_after > os_position))
     {
-        u64 target_committed_size = align_forward(aligned_size_after, arena->granularity);
         u64 size_to_commit = target_committed_size - os_position;
         u8* commit_pointer = arena_byte_pointer + os_position;
 
@@ -165,3 +171,36 @@ void scratch_end(TemporalArena temporal)
     Arena* arena = temporal.arena;
     arena->position = temporal.position;
 }
+
+#if BUSTER_INCLUDE_TESTS
+#include <buster/test.h>
+
+UnitTestResult arena_tests(UnitTestArguments* arguments)
+{
+    BUSTER_UNUSED(arguments);
+    UnitTestResult result = {0};
+
+    // Companion to the reserved_size bound: filling an arena up to its
+    // reservation stays within bounds and keeps working. Requests past
+    // reserved_size abort via BUSTER_CHECK, so they cannot be observed
+    // in-process.
+    {
+        Arena* arena = arena_create((ArenaCreation){ .reserved_size = BUSTER_MB(1) });
+        BUSTER_TEST(arguments, arena != 0);
+        if (arena)
+        {
+            void* fits = arena_allocate_bytes(arena, BUSTER_KB(1), 1);
+            BUSTER_TEST(arguments, fits != 0);
+
+            u64 remaining = arena->reserved_size - arena->position;
+            void* rest = arena_allocate_bytes(arena, remaining, 1);
+            BUSTER_TEST(arguments, rest != 0);
+            BUSTER_TEST(arguments, arena->position == arena->reserved_size);
+
+            arena_destroy(arena, 1);
+        }
+    }
+
+    return result;
+}
+#endif
