@@ -43,11 +43,24 @@ CpuModel cpu_detect_model_x86_64(void)
     u8 family = original_family == 0xf ? original_family + extended_family : original_family;
     model = ((original_family == 0x6) | (original_family == 0xf)) ? (u8)((extended_model << 4) | model) : model;
 
-    // TODO fill these in
-    bool has_sse = false;
-    bool has_sse3 = false;
+    bool has_sse = ((family_model_cpuid.edx >> 25) & 1) != 0;
+    bool has_sse3 = ((family_model_cpuid.ecx >> 0) & 1) != 0;
     bool has_avx512bf16 = false;
     bool has_avx512vnni = false;
+
+    // vendor_cpuid.eax is the maximum supported standard leaf; leaf 7's own
+    // eax is the maximum supported subleaf.
+    if (vendor_cpuid.eax >= 7)
+    {
+        CpuId extended_features = cpuid(7, 0);
+        has_avx512vnni = ((extended_features.ecx >> 11) & 1) != 0;
+
+        if (extended_features.eax >= 1)
+        {
+            CpuId extended_features_1 = cpuid(7, 1);
+            has_avx512bf16 = ((extended_features_1.eax >> 5) & 1) != 0;
+        }
+    }
 
     if (string_equal(vendor_string, S8("AuthenticAMD")))
     {
