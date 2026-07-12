@@ -304,6 +304,11 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
             u32 character_count = UINT8_MAX + 1u;
             result.characters = arena_allocate(arena, FontCharacter, character_count);
             result.kerning_tables = arena_allocate(arena, s32, (u64)character_count * (u64)character_count);
+            // Only ' '..'~' get filled below, but the renderer indexes these
+            // tables with arbitrary bytes; zero the rest so unknown bytes
+            // render as empty glyphs instead of reading stale arena memory.
+            memset(result.characters, 0, sizeof(*result.characters) * character_count);
+            memset(result.kerning_tables, 0, sizeof(*result.kerning_tables) * (u64)character_count * (u64)character_count);
             result.height = (u32)sqrt_f32((f32)(create.text_height * create.text_height * character_count));
             result.width = result.height;
             result.pointer = arena_allocate(arena, u32, (u64)result.width * (u64)result.height);
