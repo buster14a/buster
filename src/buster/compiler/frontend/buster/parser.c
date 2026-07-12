@@ -3,6 +3,7 @@
 #include <buster/arena.h>
 #include <buster/string.h>
 #include <buster/file.h>
+#include <buster/time.h>
 
 #define first_keyword TOKEN_KEYWORD_RETURN
 #define last_keyword TOKEN_KEYWORD_UNION
@@ -2580,6 +2581,111 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] = {
     // { S8_INITIALIZER("tests/basic_if_else.bbb"), S8_INITIALIZER("") },
     // { S8_INITIALIZER("tests/array_slices.bbb"), S8_INITIALIZER("") },
 };
+
+BUSTER_GLOBAL_LOCAL int parser_bench_u64_compare(const void* a, const void* b)
+{
+    u64 left = *(const u64*)a;
+    u64 right = *(const u64*)b;
+    return (left > right) - (left < right);
+}
+
+#if BUSTER_INSTRUMENT
+BUSTER_GLOBAL_LOCAL int parser_bench_file_result_compare_desc(const void* a, const void* b)
+{
+    const ParserBenchFileResult* left = (const ParserBenchFileResult*)a;
+    const ParserBenchFileResult* right = (const ParserBenchFileResult*)b;
+    return (left->median_ns < right->median_ns) - (left->median_ns > right->median_ns);
+}
+#endif
+
+ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
+{
+    ParserBenchResult result = {0};
+    result.iterations = iterations;
+    result.file_count = BUSTER_ARRAY_LENGTH(parser_file_test_cases);
+
+    u64* durations_ns = arena_allocate(arena, u64, iterations);
+#if BUSTER_INSTRUMENT
+    u64* tokenize_durations_ns = arena_allocate(arena, u64, iterations);
+    u64* parse_durations_ns = arena_allocate(arena, u64, iterations);
+    u64* file_durations_ns = arena_allocate(arena, u64, iterations * result.file_count);
+#endif
+
+    for (u64 iteration = 0; iteration < iterations; iteration += 1)
+    {
+        TemporalArena scratch = scratch_begin(&arena, 1);
+
+#if BUSTER_INSTRUMENT
+        u64 tokenize_ns_sum = 0;
+        u64 parse_ns_sum = 0;
+#endif
+        TimeDataType start = timestamp_take();
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parser_file_test_cases); i += 1)
+        {
+            ParserFileTestCase test_case = parser_file_test_cases[i];
+            String8 source = BYTE_SLICE_TO_STRING(8, file_read(scratch.arena, test_case.path, (FileReadOptions){0}));
+
+            if (source.pointer && source.length)
+            {
+#if BUSTER_INSTRUMENT
+                TimeDataType file_start = timestamp_take();
+                TokenizerResult tokenizer = tokenize(scratch.arena, source.pointer, source.length);
+                TimeDataType tokenize_end = timestamp_take();
+                parser_parse(scratch.arena, source, tokenizer);
+                TimeDataType parse_end = timestamp_take();
+
+                tokenize_ns_sum += timestamp_ns_between(file_start, tokenize_end);
+                parse_ns_sum += timestamp_ns_between(tokenize_end, parse_end);
+                file_durations_ns[iteration * result.file_count + i] = timestamp_ns_between(file_start, parse_end);
+#else
+                TokenizerResult tokenizer = tokenize(scratch.arena, source.pointer, source.length);
+                parser_parse(scratch.arena, source, tokenizer);
+#endif
+            }
+        }
+        TimeDataType end = timestamp_take();
+        durations_ns[iteration] = timestamp_ns_between(start, end);
+#if BUSTER_INSTRUMENT
+        tokenize_durations_ns[iteration] = tokenize_ns_sum;
+        parse_durations_ns[iteration] = parse_ns_sum;
+#endif
+
+        scratch_end(scratch);
+    }
+
+    qsort(durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+    result.min_ns = iterations ? durations_ns[0] : 0;
+    result.median_ns = iterations ? durations_ns[iterations / 2] : 0;
+
+#if BUSTER_INSTRUMENT
+    qsort(tokenize_durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+    qsort(parse_durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+    result.tokenize_min_ns = iterations ? tokenize_durations_ns[0] : 0;
+    result.tokenize_median_ns = iterations ? tokenize_durations_ns[iterations / 2] : 0;
+    result.parse_min_ns = iterations ? parse_durations_ns[0] : 0;
+    result.parse_median_ns = iterations ? parse_durations_ns[iterations / 2] : 0;
+
+    result.files = arena_allocate(arena, ParserBenchFileResult, result.file_count);
+    u64* per_file_ns = arena_allocate(arena, u64, iterations);
+    for (u64 file_i = 0; file_i < result.file_count; file_i += 1)
+    {
+        for (u64 iteration = 0; iteration < iterations; iteration += 1)
+        {
+            per_file_ns[iteration] = file_durations_ns[iteration * result.file_count + file_i];
+        }
+        qsort(per_file_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+
+        result.files[file_i] = (ParserBenchFileResult){
+            .path = parser_file_test_cases[file_i].path,
+            .min_ns = iterations ? per_file_ns[0] : 0,
+            .median_ns = iterations ? per_file_ns[iterations / 2] : 0,
+        };
+    }
+    qsort(result.files, result.file_count, sizeof(ParserBenchFileResult), parser_bench_file_result_compare_desc);
+#endif
+
+    return result;
+}
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL bool tokenizer_stream_covers_source(TokenizerResult tokenizer, u64 source_length)

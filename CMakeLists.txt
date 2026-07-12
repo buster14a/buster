@@ -140,6 +140,7 @@ option(BUSTER_UNITY_BUILD "Enable unity builds for optimized configurations" ON)
 option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
 option(BUSTER_SANITIZE "Enable sanitizers" OFF)
 option(BUSTER_TIME_TRACE "Enable time tracing" OFF)
+option(BUSTER_INSTRUMENT "Enable fine-grained timing instrumentation for ide bench" OFF)
 option(BUSTER_FUZZ "Enable fuzzing" OFF)
 option(BUSTER_LTO "Enable LTO" OFF)
 option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warning flags" ON)
@@ -616,6 +617,7 @@ message(STATUS "BUSTER_UNITY_BUILD: ${BUSTER_UNITY_BUILD}")
 message(STATUS "BUSTER_INCLUDE_TESTS: ${BUSTER_INCLUDE_TESTS}")
 message(STATUS "BUSTER_SANITIZE: ${BUSTER_SANITIZE}")
 message(STATUS "BUSTER_TIME_TRACE: ${BUSTER_TIME_TRACE}")
+message(STATUS "BUSTER_INSTRUMENT: ${BUSTER_INSTRUMENT}")
 message(STATUS "BUSTER_FUZZ: ${BUSTER_FUZZ}")
 message(STATUS "BUSTER_LTO: ${BUSTER_LTO}")
 message(STATUS "BUSTER_CHECK_OPTIONAL_WARNINGS: ${BUSTER_CHECK_OPTIONAL_WARNINGS}")
@@ -1249,6 +1251,7 @@ function(executable_add name is_buster_program main_file)
         BUSTER_USE_METAL=$<IF:$<BOOL:${BUSTER_USE_METAL}>,1,0>
         BUSTER_USE_SLANG_SHADERS=$<IF:$<BOOL:${BUSTER_USE_SLANG_SHADERS_DEFINE}>,1,0>
         BUSTER_COMPILER_ZIG=$<IF:$<BOOL:${C_COMPILER_ZIG}>,1,0>
+        BUSTER_INSTRUMENT=$<IF:$<BOOL:${BUSTER_INSTRUMENT}>,1,0>
     )
 
     if (C_COMPILER_GNU_FAMILY)
@@ -1639,6 +1642,19 @@ else()
         DEPENDS ide
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "Test all"
+        VERBATIM
+    )
+
+    # Desktop-only performance benchmark, tracked by CI perf steps. Not wired
+    # up for Android/iOS: emulator/simulator numbers are too noisy to be
+    # worth tracking as compile/run-time regressions.
+    add_custom_target(bench_all
+        COMMAND
+        ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+        "$<TARGET_FILE:ide>" bench
+        DEPENDS ide
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Bench all"
         VERBATIM
     )
 endif()

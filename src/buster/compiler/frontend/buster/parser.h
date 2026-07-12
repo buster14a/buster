@@ -308,3 +308,36 @@ struct LineAndColumn
 BUSTER_F_DECL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length);
 BUSTER_F_DECL ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult tokenizer);
 BUSTER_F_DECL String8 get_token_content(const char8* source, Token* restrict tokens, u32 lexer_token_index);
+
+#if BUSTER_INSTRUMENT
+typedef struct ParserBenchFileResult ParserBenchFileResult;
+struct ParserBenchFileResult
+{
+    String8 path;
+    u64 min_ns;
+    u64 median_ns;
+};
+#endif
+
+typedef struct ParserBenchResult ParserBenchResult;
+struct ParserBenchResult
+{
+    u64 iterations;
+    u64 file_count;
+    u64 min_ns;
+    u64 median_ns;
+#if BUSTER_INSTRUMENT
+    u64 tokenize_min_ns;
+    u64 tokenize_median_ns;
+    u64 parse_min_ns;
+    u64 parse_median_ns;
+    // Sorted slowest (by median_ns) first.
+    ParserBenchFileResult* files;
+#endif
+};
+
+// Parses every entry in the file-test corpus `iterations` times, timing each
+// full pass, and returns min/median wall time. Not gated by
+// BUSTER_INCLUDE_TESTS: this is a benchmark, not a test, and must stay
+// buildable in Release for CI perf tracking.
+BUSTER_F_DECL ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations);

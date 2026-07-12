@@ -77,7 +77,8 @@ struct IdeProgram
     WmHandle* windowing;
     RenderingHandle* rendering;
     bool test;
-    u8 reserved[7];
+    bool bench;
+    u8 reserved[6];
     TimeDataType last_frame_timestamp;
 };
 
@@ -157,7 +158,15 @@ ProcessResult process_arguments(void)
     for (u64 i = 1; i < arguments.length; i += 1)
     {
         String8 arg = arguments.pointer[i];
-        if (!string_equal(arg, S8("test")))
+        if (string_equal(arg, S8("test")))
+        {
+            ide_state.test = true;
+        }
+        else if (string_equal(arg, S8("bench")))
+        {
+            ide_state.bench = true;
+        }
+        else
         {
             ProcessResult r = buster_argument_process(i);
             if (r != PROCESS_RESULT_SUCCESS)
@@ -166,10 +175,6 @@ ProcessResult process_arguments(void)
                 result = r;
                 break;
             }
-        }
-        else
-        {
-            ide_state.test = true;
         }
     }
 
@@ -1196,6 +1201,34 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
     return result;
 }
 
+// Deliberately independent of the windowing/rendering path `test` drives via
+// run_graphical_app(): bench must run headless on a plain CI runner with no
+// display server, and BUSTER_INCLUDE_TESTS off must not disable it either.
+BUSTER_GLOBAL_LOCAL ProcessResult run_benchmarks(void)
+{
+    Arena* arena = arena_create((ArenaCreation){0});
+
+    ParserBenchResult parse_result = parser_parse_bench(arena, 200);
+    string_print(S8("BENCH parse_all_tests iterations={u64} files={u64} min_ns={u64} median_ns={u64}\n"),
+            parse_result.iterations, parse_result.file_count, parse_result.min_ns, parse_result.median_ns);
+
+#if BUSTER_INSTRUMENT
+    string_print(S8("BENCH_PHASE tokenize min_ns={u64} median_ns={u64}\n"),
+            parse_result.tokenize_min_ns, parse_result.tokenize_median_ns);
+    string_print(S8("BENCH_PHASE parse min_ns={u64} median_ns={u64}\n"),
+            parse_result.parse_min_ns, parse_result.parse_median_ns);
+    for (u64 i = 0; i < parse_result.file_count; i += 1)
+    {
+        ParserBenchFileResult file_result = parse_result.files[i];
+        string_print(S8("BENCH_FILE path={S8} min_ns={u64} median_ns={u64}\n"),
+                file_result.path, file_result.min_ns, file_result.median_ns);
+    }
+#endif
+
+    arena_destroy(arena, 1);
+    return PROCESS_RESULT_SUCCESS;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
 {
 #if BUSTER_INCLUDE_TESTS
@@ -1225,6 +1258,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
 
 ProcessResult entry_point(void)
 {
+    if (ide_state.bench)
+    {
+        return run_benchmarks();
+    }
+
     return run_app();
 }
 #endif

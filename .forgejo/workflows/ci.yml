@@ -52,6 +52,17 @@ jobs:
         if: ${{ matrix.runner == 'x86_64-linux' }}
         run: |
           ./build.sh test_all_combinations_ci --verbose=1
+      - name: Perf (Linux)
+        shell: bash
+        if: ${{ matrix.runner == 'x86_64-linux' || contains(matrix.runner, 'x86_64-linux-dedicated') }}
+        env:
+          PERF_HISTORY_TOKEN: ${{ secrets.PERF_HISTORY_TOKEN }}
+          RUNNER_NAME: ${{ matrix.runner }}
+          COMMIT_SHA: ${{ github.sha }}
+          PUSH_HISTORY: ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
+        run: |
+          source /opt/vulkan-sdk/current/setup-env.sh
+          ./.forgejo/scripts/perf_step.sh
       - name: Test (iOS simulator)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
@@ -66,9 +77,22 @@ jobs:
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
           ./build.sh test_all_combinations_ci --verbose=1
+      - name: Perf (macOS)
+        shell: bash
+        if: ${{ contains(matrix.runner, 'macos') }}
+        env:
+          PERF_HISTORY_TOKEN: ${{ secrets.PERF_HISTORY_TOKEN }}
+          RUNNER_NAME: ${{ matrix.runner }}
+          COMMIT_SHA: ${{ github.sha }}
+          PUSH_HISTORY: ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
+        run: |
+          source /opt/vulkan-sdk/current/setup-env.sh
+          ./.forgejo/scripts/perf_step.sh
       - name: Test (Windows)
         shell: powershell
         if: ${{ contains(matrix.runner, 'windows') }}
+        env:
+          PERF_HISTORY_TOKEN: ${{ secrets.PERF_HISTORY_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -95,3 +119,54 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           ./build.ps1 test_all_combinations_ci --verbose=1
+
+          # --- Perf: compile-time + parse-bench tracking ---------------------
+          # Appended to this same step (rather than a separate one) so it
+          # inherits the VsDevShell environment (INCLUDE/LIB/PATH) set up
+          # above -- a fresh step would start a new process without it.
+          # Unlike the Linux/macOS Perf steps, this doesn't also run
+          # ninja_log_summary/time_trace_summary: those are diagnostics
+          # only and there's no safe way to ignore-and-continue past a
+          # build.ps1 failure here (its internal error handling calls
+          # `exit`, which would kill this whole process, not just the call).
+          $overallExitCode = 0
+
+          foreach ($config in @('Debug', 'Release')) {
+            $buildDir = "build/perf-$config"
+            Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
+
+            $genStart = Get-Date
+            ./build.ps1 generate --build-dir $buildDir --config $config --no-sanitize --no-fuzz --instrument --time-trace
+            $genEnd = Get-Date
+
+            $buildStart = Get-Date
+            $benchOutput = ./build.ps1 build --build-dir $buildDir --config $config -t bench_all
+            $buildEnd = Get-Date
+            $benchOutput | ForEach-Object { Write-Output $_ }
+
+            $benchLine = ($benchOutput | Select-String '^BENCH ' | Select-Object -Last 1).Line
+            if (-not $benchLine) {
+              throw "Perf: no BENCH line found in bench_all output for $config"
+            }
+            $benchPhaseLines = ($benchOutput | Select-String '^BENCH_PHASE ' | ForEach-Object { $_.Line }) -join "`n"
+            $benchFileLines = ($benchOutput | Select-String '^BENCH_FILE ' | ForEach-Object { $_.Line }) -join "`n"
+
+            $compileSeconds = [int](($genEnd - $genStart).TotalSeconds + ($buildEnd - $buildStart).TotalSeconds)
+
+            $env:RUNNER_NAME = "${{ matrix.runner }}"
+            $env:CONFIG = $config
+            $env:COMPILE_SECONDS = "$compileSeconds"
+            $env:BENCH_LINE = $benchLine
+            $env:BENCH_PHASE_LINES = $benchPhaseLines
+            $env:BENCH_FILE_LINES = $benchFileLines
+            $env:COMMIT_SHA = "${{ github.sha }}"
+            $env:PUSH_HISTORY = "${{ github.ref == 'refs/heads/main' && '1' || '0' }}"
+
+            $serverHost = "${{ github.server_url }}" -replace '^https?://', ''
+            $env:REPO_PUSH_URL = "https://x-access-token:$($env:PERF_HISTORY_TOKEN)@$serverHost/${{ github.repository }}.git"
+
+            bash ./.forgejo/scripts/record_perf.sh
+            if ($LASTEXITCODE -ne 0) { $overallExitCode = $LASTEXITCODE }
+          }
+
+          if ($overallExitCode -ne 0) { exit $overallExitCode }

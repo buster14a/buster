@@ -27,6 +27,8 @@ typedef enum BuildCommand
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_CLANG_ANALYZE,
     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
+    BUILD_COMMAND_NINJA_LOG_SUMMARY,
+    BUILD_COMMAND_TIME_TRACE_SUMMARY,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -103,6 +105,7 @@ typedef enum BuildArgument
     BUILD_ARGUMENT_DEVELOPER_TARGETS,
     BUILD_ARGUMENT_FUZZ,
     BUILD_ARGUMENT_INCLUDE_TESTS,
+    BUILD_ARGUMENT_INSTRUMENT,
     BUILD_ARGUMENT_LIMIT,
     BUILD_ARGUMENT_LINK_LIBC,
     BUILD_ARGUMENT_LINKER,
@@ -112,6 +115,7 @@ typedef enum BuildArgument
     BUILD_ARGUMENT_NO_DEVELOPER_TARGETS,
     BUILD_ARGUMENT_NO_FUZZ,
     BUILD_ARGUMENT_NO_INCLUDE_TESTS,
+    BUILD_ARGUMENT_NO_INSTRUMENT,
     BUILD_ARGUMENT_NO_LINK_LIBC,
     BUILD_ARGUMENT_NO_LTO,
     BUILD_ARGUMENT_NO_OPTIMIZE,
@@ -143,6 +147,7 @@ BUSTER_GLOBAL_LOCAL String8 build_arguments[] = {
     [BUILD_ARGUMENT_DEVELOPER_TARGETS] = S8_INITIALIZER("--developer-targets"),
     [BUILD_ARGUMENT_FUZZ] = S8_INITIALIZER("--fuzz"),
     [BUILD_ARGUMENT_INCLUDE_TESTS] = S8_INITIALIZER("--include-tests"),
+    [BUILD_ARGUMENT_INSTRUMENT] = S8_INITIALIZER("--instrument"),
     [BUILD_ARGUMENT_LIMIT] = S8_INITIALIZER("--limit"),
     [BUILD_ARGUMENT_LINK_LIBC] = S8_INITIALIZER("--link-libc"),
     [BUILD_ARGUMENT_LINKER] = S8_INITIALIZER("--linker"),
@@ -152,6 +157,7 @@ BUSTER_GLOBAL_LOCAL String8 build_arguments[] = {
     [BUILD_ARGUMENT_NO_DEVELOPER_TARGETS] = S8_INITIALIZER("--no-developer-targets"),
     [BUILD_ARGUMENT_NO_FUZZ] = S8_INITIALIZER("--no-fuzz"),
     [BUILD_ARGUMENT_NO_INCLUDE_TESTS] = S8_INITIALIZER("--no-include-tests"),
+    [BUILD_ARGUMENT_NO_INSTRUMENT] = S8_INITIALIZER("--no-instrument"),
     [BUILD_ARGUMENT_NO_LINK_LIBC] = S8_INITIALIZER("--no-link-libc"),
     [BUILD_ARGUMENT_NO_LTO] = S8_INITIALIZER("--no-lto"),
     [BUILD_ARGUMENT_NO_OPTIMIZE] = S8_INITIALIZER("--no-optimize"),
@@ -345,6 +351,7 @@ struct Generate
     u32 optimize:1;
     u32 link_libc:1;
     u32 time_trace:1;
+    u32 instrument:1;
     u32 lto:1;
     u32 include_tests:1;
     u32 check_optional_warnings:1;
@@ -739,6 +746,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     String8 optimize = cmake_flag(arena, S8("BUSTER_OPTIMIZE"), generate.optimize);
     String8 lto = cmake_flag(arena, S8("BUSTER_LTO"), generate.lto);
     String8 time_trace = cmake_flag(arena, S8("BUSTER_TIME_TRACE"), generate.time_trace);
+    String8 instrument = cmake_flag(arena, S8("BUSTER_INSTRUMENT"), generate.instrument);
     String8 fuzz = cmake_flag(arena, S8("BUSTER_FUZZ"), generate.fuzz);
     String8 sanitize = cmake_flag(arena, S8("BUSTER_SANITIZE"), generate.sanitize);
     String8 include_tests = cmake_flag(arena, S8("BUSTER_INCLUDE_TESTS"), generate.include_tests);
@@ -776,6 +784,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
 
     os_argument_builder_append(b, lto);
     os_argument_builder_append(b, time_trace);
+    os_argument_builder_append(b, instrument);
     os_argument_builder_append(b, include_tests);
     os_argument_builder_append(b, link_libc);
     os_argument_builder_append(b, check_optional_warnings);
@@ -2319,6 +2328,513 @@ BUSTER_GLOBAL_LOCAL void cmake_profile_summary_action_add(Arena* arena, CmakePro
     };
 }
 
+// --- ninja_log_summary ---------------------------------------------------
+// Diagnostic only: reports which build edges (translation units) in a
+// `.ninja_log` took the longest. Only meaningful for multi-TU (Debug)
+// builds -- optimized configs compile as a single unity TU, so there's
+// nothing to break down there.
+
+typedef struct NinjaLogSummaryOptions NinjaLogSummaryOptions;
+struct NinjaLogSummaryOptions
+{
+    String8 build_directory;
+    u64 limit;
+    u32 build_directory_set:1;
+};
+
+typedef struct NinjaLogRow NinjaLogRow;
+struct NinjaLogRow
+{
+    String8 output;
+    s64 duration_ms;
+};
+
+typedef struct NinjaLogRowNode NinjaLogRowNode;
+struct NinjaLogRowNode
+{
+    NinjaLogRow row;
+    NinjaLogRowNode* next;
+};
+
+typedef struct NinjaLogRowList NinjaLogRowList;
+struct NinjaLogRowList
+{
+    NinjaLogRowNode* first;
+    NinjaLogRowNode* last;
+    u64 count;
+};
+
+// Splits one tab-delimited field off the front of `line`. Returns false
+// only when `line` is already empty (i.e. no more fields on this line).
+BUSTER_GLOBAL_LOCAL bool ninja_log_next_field(String8* line, String8* field)
+{
+    if (!line->length)
+    {
+        return false;
+    }
+
+    u64 tab_index = string_first_code_unit(*line, '\t');
+    bool is_last = tab_index == BUSTER_STRING_NO_MATCH;
+    u64 field_end = is_last ? line->length : tab_index;
+
+    *field = string_slice(*line, 0, field_end);
+    *line = is_last ? (String8){0} : string_slice(*line, field_end + 1, line->length);
+    return true;
+}
+
+// A target can appear more than once across a log's history (rebuilds);
+// keep only the most recent entry per output path.
+BUSTER_GLOBAL_LOCAL void ninja_log_row_list_upsert(Arena* arena, NinjaLogRowList* list, NinjaLogRow row)
+{
+    for (NinjaLogRowNode* node = list->first; node; node = node->next)
+    {
+        if (string_equal(node->row.output, row.output))
+        {
+            node->row = row;
+            return;
+        }
+    }
+
+    NinjaLogRowNode* node = arena_allocate(arena, NinjaLogRowNode, 1);
+    *node = (NinjaLogRowNode){ .row = row };
+
+    if (list->last)
+    {
+        list->last->next = node;
+    }
+    else
+    {
+        list->first = node;
+    }
+    list->last = node;
+    list->count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL int ninja_log_row_compare(const void* a, const void* b)
+{
+    const NinjaLogRow* left = (const NinjaLogRow*)a;
+    const NinjaLogRow* right = (const NinjaLogRow*)b;
+    return (left->duration_ms < right->duration_ms) - (left->duration_ms > right->duration_ms);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult ninja_log_summary_run(Arena* arena, NinjaLogSummaryOptions options)
+{
+    if (!options.limit)
+    {
+        options.limit = 25;
+    }
+
+    if (!options.build_directory.pointer || !options.build_directory.length)
+    {
+        string_print(S8("error: ninja_log_summary requires a build directory\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 log_path = path_join(arena, options.build_directory, S8(".ninja_log"));
+    ByteSlice bytes = file_read(arena, log_path, (FileReadOptions){ .end_padding = 1 });
+    if (!bytes.pointer)
+    {
+        string_print(S8("error: failed to read {S8}\n"), log_path);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+    NinjaLogRowList row_list = {0};
+
+    while (text.length)
+    {
+        u64 newline_index = string_first_code_unit(text, '\n');
+        bool is_last_line = newline_index == BUSTER_STRING_NO_MATCH;
+        u64 line_end = is_last_line ? text.length : newline_index;
+        String8 line = string_slice(text, 0, line_end);
+        text = is_last_line ? (String8){0} : string_slice(text, line_end + 1, text.length);
+
+        if (!line.length || line.pointer[0] == '#')
+        {
+            continue;
+        }
+
+        String8 start_field = {0};
+        String8 end_field = {0};
+        String8 restat_field = {0};
+        String8 output_field = {0};
+
+        if (!ninja_log_next_field(&line, &start_field) ||
+            !ninja_log_next_field(&line, &end_field) ||
+            !ninja_log_next_field(&line, &restat_field) ||
+            !ninja_log_next_field(&line, &output_field))
+        {
+            continue;
+        }
+
+        IntegerParsingU64 start_ms = string8_parse_u64_decimal(start_field.pointer);
+        IntegerParsingU64 end_ms = string8_parse_u64_decimal(end_field.pointer);
+        if (!start_ms.length || !end_ms.length)
+        {
+            continue;
+        }
+
+        ninja_log_row_list_upsert(arena, &row_list, (NinjaLogRow){
+            .output = output_field,
+            .duration_ms = (s64)end_ms.value - (s64)start_ms.value,
+        });
+    }
+
+    if (!row_list.count)
+    {
+        string_print(S8("No ninja log entries found in {S8}.\n"), log_path);
+        return PROCESS_RESULT_SUCCESS;
+    }
+
+    NinjaLogRow* rows = arena_allocate(arena, NinjaLogRow, row_list.count);
+    u64 row_i = 0;
+    for (NinjaLogRowNode* node = row_list.first; node; node = node->next)
+    {
+        rows[row_i++] = node->row;
+    }
+    qsort(rows, row_list.count, sizeof(rows[0]), ninja_log_row_compare);
+
+    string_print(S8("Slowest build edges in {S8}:\n"), log_path);
+    u64 limit = BUSTER_MIN(options.limit, row_list.count);
+    for (u64 i = 0; i < limit; i += 1)
+    {
+        NinjaLogRow row = rows[i];
+        s64 duration_ms = row.duration_ms < 0 ? 0 : row.duration_ms;
+        printf("%6lld ms  %.*s\n", (long long)duration_ms, string8_printf_length(row.output, UINT64_MAX), row.output.pointer ? row.output.pointer : "");
+    }
+
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult ninja_log_summary_action(Arena* arena, void* data)
+{
+    NinjaLogSummaryOptions* options = (NinjaLogSummaryOptions*)data;
+    return ninja_log_summary_run(arena, *options);
+}
+
+BUSTER_GLOBAL_LOCAL void ninja_log_summary_action_add(Arena* arena, NinjaLogSummaryOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    NinjaLogSummaryOptions* options_copy = arena_allocate(arena, NinjaLogSummaryOptions, 1);
+    *options_copy = options;
+
+    *run = (ProcessRun){
+        .callback = ninja_log_summary_action,
+        .callback_data = options_copy,
+    };
+}
+
+// --- time_trace_summary ---------------------------------------------------
+// Diagnostic only: parses one or more clang -ftime-trace JSON files (see
+// BUSTER_TIME_TRACE) and reports the slowest "Total *" rollups clang itself
+// pre-aggregates (Total Frontend, Total Backend, Total InstantiateFunction,
+// ...), summed across every file given. That directly answers "where did
+// compile time go" without re-implementing clang's own per-include b/e
+// event pairing (out of scope here).
+
+typedef struct TimeTraceSummaryOptions TimeTraceSummaryOptions;
+struct TimeTraceSummaryOptions
+{
+    SliceString8 paths;
+    u64 limit;
+};
+
+typedef struct TimeTraceRow TimeTraceRow;
+struct TimeTraceRow
+{
+    String8 name;
+    s64 duration_us;
+};
+
+typedef struct TimeTraceRowNode TimeTraceRowNode;
+struct TimeTraceRowNode
+{
+    TimeTraceRow row;
+    TimeTraceRowNode* next;
+};
+
+typedef struct TimeTraceRowList TimeTraceRowList;
+struct TimeTraceRowList
+{
+    TimeTraceRowNode* first;
+    TimeTraceRowNode* last;
+    u64 count;
+};
+
+BUSTER_GLOBAL_LOCAL void time_trace_row_list_add(Arena* arena, TimeTraceRowList* list, String8 name, s64 duration_us)
+{
+    for (TimeTraceRowNode* node = list->first; node; node = node->next)
+    {
+        if (string_equal(node->row.name, name))
+        {
+            node->row.duration_us += duration_us;
+            return;
+        }
+    }
+
+    TimeTraceRowNode* node = arena_allocate(arena, TimeTraceRowNode, 1);
+    *node = (TimeTraceRowNode){ .row = { .name = name, .duration_us = duration_us } };
+
+    if (list->last)
+    {
+        list->last->next = node;
+    }
+    else
+    {
+        list->first = node;
+    }
+    list->last = node;
+    list->count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL int time_trace_row_compare(const void* a, const void* b)
+{
+    const TimeTraceRow* left = (const TimeTraceRow*)a;
+    const TimeTraceRow* right = (const TimeTraceRow*)b;
+    return (left->duration_us < right->duration_us) - (left->duration_us > right->duration_us);
+}
+
+typedef struct TimeTraceEvent TimeTraceEvent;
+struct TimeTraceEvent
+{
+    String8 name;
+    s64 duration_us;
+    char8 phase;
+    u32 has_duration:1;
+};
+
+BUSTER_GLOBAL_LOCAL TimeTraceEvent time_trace_parse_event(Arena* arena, JsonParser* parser, bool* valid)
+{
+    TimeTraceEvent result = {0};
+
+    if (!json_consume(parser, '{'))
+    {
+        *valid = false;
+        return result;
+    }
+
+    for (;;)
+    {
+        json_skip_whitespace(parser);
+        if (json_consume(parser, '}'))
+        {
+            break;
+        }
+
+        String8 key = json_parse_string(arena, parser, valid);
+        if (!*valid || !json_consume(parser, ':'))
+        {
+            *valid = false;
+            break;
+        }
+
+        if (string_equal(key, S8("ph")))
+        {
+            String8 phase = json_parse_string(arena, parser, valid);
+            result.phase = phase.length ? phase.pointer[0] : 0;
+        }
+        else if (string_equal(key, S8("name")))
+        {
+            result.name = json_parse_string(arena, parser, valid);
+        }
+        else if (string_equal(key, S8("dur")))
+        {
+            result.duration_us = json_parse_s64(parser, valid);
+            result.has_duration = 1;
+        }
+        else
+        {
+            json_skip_value(arena, parser, valid);
+        }
+
+        if (!*valid)
+        {
+            break;
+        }
+        if (json_consume(parser, ','))
+        {
+            continue;
+        }
+        if (json_consume(parser, '}'))
+        {
+            break;
+        }
+
+        *valid = false;
+        break;
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(Arena* arena, String8 path, TimeTraceRowList* row_list)
+{
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){ .end_padding = 1 });
+    if (!bytes.pointer)
+    {
+        string_print(S8("error: failed to read {S8}\n"), path);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    JsonParser parser = { .text = { .pointer = (char8*)bytes.pointer, .length = bytes.length } };
+    if (!json_consume(&parser, '{'))
+    {
+        string_print(S8("error: failed to parse {S8}: expected a JSON object\n"), path);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    bool valid = true;
+    for (;;)
+    {
+        json_skip_whitespace(&parser);
+        if (json_consume(&parser, '}'))
+        {
+            break;
+        }
+
+        String8 key = json_parse_string(arena, &parser, &valid);
+        if (!valid || !json_consume(&parser, ':'))
+        {
+            string_print(S8("error: failed to parse {S8}: expected an object key\n"), path);
+            return PROCESS_RESULT_FAILED;
+        }
+
+        if (string_equal(key, S8("traceEvents")))
+        {
+            if (!json_consume(&parser, '['))
+            {
+                string_print(S8("error: failed to parse {S8}: expected traceEvents array\n"), path);
+                return PROCESS_RESULT_FAILED;
+            }
+
+            for (;;)
+            {
+                json_skip_whitespace(&parser);
+                if (json_consume(&parser, ']'))
+                {
+                    break;
+                }
+
+                TimeTraceEvent event = time_trace_parse_event(arena, &parser, &valid);
+                if (!valid)
+                {
+                    string_print(S8("error: failed to parse {S8}: invalid trace event\n"), path);
+                    return PROCESS_RESULT_FAILED;
+                }
+
+                if (event.phase == 'X' && event.has_duration && string_starts_with_sequence(event.name, S8("Total ")))
+                {
+                    time_trace_row_list_add(arena, row_list, event.name, event.duration_us);
+                }
+
+                if (json_consume(&parser, ','))
+                {
+                    continue;
+                }
+                if (json_consume(&parser, ']'))
+                {
+                    break;
+                }
+
+                string_print(S8("error: failed to parse {S8}: expected ',' or ']'\n"), path);
+                return PROCESS_RESULT_FAILED;
+            }
+        }
+        else
+        {
+            json_skip_value(arena, &parser, &valid);
+            if (!valid)
+            {
+                string_print(S8("error: failed to parse {S8}: invalid value\n"), path);
+                return PROCESS_RESULT_FAILED;
+            }
+        }
+
+        if (json_consume(&parser, ','))
+        {
+            continue;
+        }
+        if (json_consume(&parser, '}'))
+        {
+            break;
+        }
+
+        string_print(S8("error: failed to parse {S8}: expected ',' or '}'\n"), path);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_run(Arena* arena, TimeTraceSummaryOptions options)
+{
+    if (!options.limit)
+    {
+        options.limit = 25;
+    }
+
+    if (!options.paths.length)
+    {
+        string_print(S8("error: time_trace_summary requires at least one -ftime-trace JSON path\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    TimeTraceRowList row_list = {0};
+    for (u64 i = 0; i < options.paths.length; i += 1)
+    {
+        ProcessResult file_result = time_trace_summary_parse_file(arena, options.paths.pointer[i], &row_list);
+        if (file_result != PROCESS_RESULT_SUCCESS)
+        {
+            return file_result;
+        }
+    }
+
+    if (!row_list.count)
+    {
+        string_print(S8("No \"Total *\" time-trace entries found.\n"));
+        return PROCESS_RESULT_SUCCESS;
+    }
+
+    TimeTraceRow* rows = arena_allocate(arena, TimeTraceRow, row_list.count);
+    u64 row_i = 0;
+    for (TimeTraceRowNode* node = row_list.first; node; node = node->next)
+    {
+        rows[row_i++] = node->row;
+    }
+    qsort(rows, row_list.count, sizeof(rows[0]), time_trace_row_compare);
+
+    string_print(S8("Slowest compiler phases across {u64} time-trace file(s):\n"), options.paths.length);
+    u64 limit = BUSTER_MIN(options.limit, row_list.count);
+    for (u64 i = 0; i < limit; i += 1)
+    {
+        TimeTraceRow row = rows[i];
+        s64 duration_ms = row.duration_us < 0 ? 0 : row.duration_us / 1000;
+        printf("%6lld ms  %.*s\n", (long long)duration_ms, string8_printf_length(row.name, UINT64_MAX), row.name.pointer ? row.name.pointer : "");
+    }
+
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_action(Arena* arena, void* data)
+{
+    TimeTraceSummaryOptions* options = (TimeTraceSummaryOptions*)data;
+    return time_trace_summary_run(arena, *options);
+}
+
+BUSTER_GLOBAL_LOCAL void time_trace_summary_action_add(Arena* arena, TimeTraceSummaryOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TimeTraceSummaryOptions* options_copy = arena_allocate(arena, TimeTraceSummaryOptions, 1);
+    *options_copy = options;
+
+    *run = (ProcessRun){
+        .callback = time_trace_summary_action,
+        .callback_data = options_copy,
+    };
+}
+
 BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     BuildStep* generate_step = step_add(arena);
@@ -2436,6 +2952,8 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
+        [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
+        [BUILD_COMMAND_TIME_TRACE_SUMMARY] = S8_INITIALIZER("time_trace_summary"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -2489,6 +3007,9 @@ ProcessResult process_arguments(void)
     CmakeBuildOptions options = {0};
     ClangAnalyzeOptions clang_analyze_options = { .compile_commands = build_directory };
     CmakeProfileSummaryOptions cmake_profile_summary_options = { .limit = 25 };
+    NinjaLogSummaryOptions ninja_log_summary_options = { .limit = 25 };
+    TimeTraceSummaryOptions time_trace_summary_options = { .limit = 25 };
+    String8List time_trace_summary_paths = {0};
     String8List generate_cmake_arguments = {0};
     String8List build_targets = {0};
     String8List native_arguments = {0};
@@ -2555,6 +3076,17 @@ ProcessResult process_arguments(void)
                 {
                     cmake_profile_summary_options.profile = argument;
                     cmake_profile_summary_options.profile_set = 1;
+                    argument_i += 1;
+                }
+                else if (command == BUILD_COMMAND_NINJA_LOG_SUMMARY && !ninja_log_summary_options.build_directory_set && !string_starts_with_sequence(argument, S8("--")))
+                {
+                    ninja_log_summary_options.build_directory = argument;
+                    ninja_log_summary_options.build_directory_set = 1;
+                    argument_i += 1;
+                }
+                else if (command == BUILD_COMMAND_TIME_TRACE_SUMMARY && !string_starts_with_sequence(argument, S8("--")))
+                {
+                    string8_list_push(arena, &time_trace_summary_paths, argument);
                     argument_i += 1;
                 }
                 else if (command == BUILD_COMMAND_GENERATE)
@@ -2671,12 +3203,21 @@ ProcessResult process_arguments(void)
             break; case BUILD_ARGUMENT_LIMIT:
             {
                 String8 candidate_limit = {0};
-                if (command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &candidate_limit))
+                bool is_summary_command = command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY
+                    || command == BUILD_COMMAND_NINJA_LOG_SUMMARY
+                    || command == BUILD_COMMAND_TIME_TRACE_SUMMARY;
+                if (is_summary_command && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &candidate_limit))
                 {
                     IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit.pointer);
                     if (parsed_limit.length == candidate_limit.length && parsed_limit.value > 0)
                     {
-                        cmake_profile_summary_options.limit = parsed_limit.value;
+                        switch (command)
+                        {
+                            break; case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY: cmake_profile_summary_options.limit = parsed_limit.value;
+                            break; case BUILD_COMMAND_NINJA_LOG_SUMMARY: ninja_log_summary_options.limit = parsed_limit.value;
+                            break; case BUILD_COMMAND_TIME_TRACE_SUMMARY: time_trace_summary_options.limit = parsed_limit.value;
+                            break; default: BUSTER_UNREACHABLE();
+                        }
                     }
                     else
                     {
@@ -2779,6 +3320,7 @@ ProcessResult process_arguments(void)
             case BUILD_ARGUMENT_SANITIZE:
             case BUILD_ARGUMENT_LTO:
             case BUILD_ARGUMENT_TIME_TRACE:
+            case BUILD_ARGUMENT_INSTRUMENT:
             case BUILD_ARGUMENT_INCLUDE_TESTS:
             case BUILD_ARGUMENT_LINK_LIBC:
             case BUILD_ARGUMENT_CHECK_OPTIONAL_WARNINGS:
@@ -2795,6 +3337,7 @@ ProcessResult process_arguments(void)
                         break; case BUILD_ARGUMENT_SANITIZE: generate.sanitize = value;
                         break; case BUILD_ARGUMENT_LTO: generate.lto = value;
                         break; case BUILD_ARGUMENT_TIME_TRACE: generate.time_trace = value;
+                        break; case BUILD_ARGUMENT_INSTRUMENT: generate.instrument = value;
                         break; case BUILD_ARGUMENT_INCLUDE_TESTS: generate.include_tests = value;
                         break; case BUILD_ARGUMENT_LINK_LIBC: generate.link_libc = value;
                         break; case BUILD_ARGUMENT_CHECK_OPTIONAL_WARNINGS: generate.check_optional_warnings = value;
@@ -2818,6 +3361,7 @@ ProcessResult process_arguments(void)
             case BUILD_ARGUMENT_NO_SANITIZE:
             case BUILD_ARGUMENT_NO_LTO:
             case BUILD_ARGUMENT_NO_TIME_TRACE:
+            case BUILD_ARGUMENT_NO_INSTRUMENT:
             case BUILD_ARGUMENT_NO_INCLUDE_TESTS:
             case BUILD_ARGUMENT_NO_LINK_LIBC:
             case BUILD_ARGUMENT_NO_CHECK_OPTIONAL_WARNINGS:
@@ -2833,6 +3377,7 @@ ProcessResult process_arguments(void)
                         break; case BUILD_ARGUMENT_NO_SANITIZE: generate.sanitize = false;
                         break; case BUILD_ARGUMENT_NO_LTO: generate.lto = false;
                         break; case BUILD_ARGUMENT_NO_TIME_TRACE: generate.time_trace = false;
+                        break; case BUILD_ARGUMENT_NO_INSTRUMENT: generate.instrument = false;
                         break; case BUILD_ARGUMENT_NO_INCLUDE_TESTS: generate.include_tests = false;
                         break; case BUILD_ARGUMENT_NO_LINK_LIBC: generate.link_libc = false;
                         break; case BUILD_ARGUMENT_NO_CHECK_OPTIONAL_WARNINGS: generate.check_optional_warnings = false;
@@ -2968,6 +3513,15 @@ ProcessResult process_arguments(void)
             break; case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY:
             {
                 cmake_profile_summary_action_add(arena, cmake_profile_summary_options);
+            }
+            break; case BUILD_COMMAND_NINJA_LOG_SUMMARY:
+            {
+                ninja_log_summary_action_add(arena, ninja_log_summary_options);
+            }
+            break; case BUILD_COMMAND_TIME_TRACE_SUMMARY:
+            {
+                time_trace_summary_options.paths = string8_list_to_slice(arena, time_trace_summary_paths);
+                time_trace_summary_action_add(arena, time_trace_summary_options);
             }
             break;
             case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

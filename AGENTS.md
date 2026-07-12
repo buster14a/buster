@@ -27,18 +27,21 @@ Three layers: `./build.sh` bootstraps `build/build` from `build.c` using
 ```
 
 `build/build` commands: `generate`, `build` (default), `clang_analyze`,
-`cmake_profile_summary`, `test_all_combinations`, `test_all_combinations_ci`.
-Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`,
-`--cc <clang|gcc|tcc|zig|cl>` are accepted **only by `generate`** — passing
-them to `build` fails silently with exit 1 and no output. `build` accepts
+`cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
+`test_all_combinations`, `test_all_combinations_ci`.
+Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
+`--instrument`, `--cc <clang|gcc|tcc|zig|cl>` are accepted **only by
+`generate`** — passing them to `build` fails silently with exit 1 and no
+output. `build` accepts
 `--config <name>`, `--optimize`, `--target/-t <ninja target>`,
 `--verbose/-v`. Booleans have `--no-` twins; `--` passes the rest through to
 ninja (`build`) or CMake (`generate`).
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
-drives the simulator), `run_ide`, `test_ide`, `debug_ide`, `buster_shaders`,
-`apk` (Android), `clang_analyze`. The Vulkan SDK (`VULKAN_SDK` env) is
-required whenever Vulkan or Slang shader compilation is enabled.
+drives the simulator), `bench_all` (desktop only — runs `ide bench`),
+`run_ide`, `test_ide`, `debug_ide`, `buster_shaders`, `apk` (Android),
+`clang_analyze`. The Vulkan SDK (`VULKAN_SDK` env) is required whenever
+Vulkan or Slang shader compilation is enabled.
 
 ## Tests
 
@@ -55,6 +58,56 @@ required whenever Vulkan or Slang shader compilation is enabled.
 - CI (`.forgejo/workflows/ci.yml`, Forgejo not GitHub) runs
   `./build.sh test_all_combinations_ci` on Linux/macOS/Windows plus
   Debug+Release on an Android emulator and the iOS simulator, on every push.
+
+## Performance tracking
+
+- `ide bench` (built via the `bench_all` ninja target) parses the
+  `parser_file_test_cases` corpus 200 times and prints one line,
+  `BENCH parse_all_tests iterations=... files=... min_ns=... median_ns=...`.
+  It's implemented by `parser_parse_bench()` in
+  `src/buster/compiler/frontend/buster/parser.c`, deliberately **not** gated
+  behind `BUSTER_INCLUDE_TESTS` (it's a benchmark, not a test, and must stay
+  buildable in Release) and deliberately independent of the windowing/
+  rendering path `ide test` also drives, so it runs headless on a plain CI
+  runner with no display server.
+- **`BUSTER_INSTRUMENT`** (CMake option, mirrors `BUSTER_TIME_TRACE`
+  end-to-end — `--instrument`/`--no-instrument` on `generate`) compiles in
+  finer-grained bench timing, compiled out entirely by default. With it on,
+  `ide bench` additionally prints `BENCH_PHASE tokenize|parse min_ns=...
+  median_ns=...` (splitting `tokenize()` from `parser_parse()`) and one
+  `BENCH_FILE path=... min_ns=... median_ns=...` line per test file, slowest
+  first.
+- **`ninja_log_summary <build-dir> [--limit N]`** and **`time_trace_summary
+  <json-path>... [--limit N]`** (both new `build/build` commands, same
+  shape as `cmake_profile_summary` — see `build.c`) are diagnostics for
+  *where compile time goes*: the former reads `<build-dir>/.ninja_log`
+  directly (only useful for multi-TU/Debug builds — Release is a single
+  unity TU); the latter parses one or more clang `-ftime-trace` JSON files
+  (enable via `--time-trace`) and reports the slowest `"Total *"` rollups
+  clang itself pre-aggregates (`Total Frontend`, `Total Backend`,
+  `Total InstantiateFunction`, ...), summed across every file given. Neither
+  is wired into `perf-history` or the regression gate — they're printed to
+  the CI log (or run manually) for a human to read when the aggregate
+  numbers below say something regressed.
+- CI's `Perf` steps (one per platform, see `.forgejo/workflows/ci.yml` and
+  `.forgejo/scripts/perf_step.sh`) build **both Debug and Release**
+  (sanitize/fuzz off, `--instrument --time-trace` on) in dedicated
+  `build/perf-<Config>` directories, run `bench_all`, print the two
+  diagnostics above, and hand the numbers to
+  `.forgejo/scripts/record_perf.sh`. That script compares the run against
+  the same `(runner, config)`'s own rolling history on the orphan
+  `perf-history` git branch — one row per metric, not one wide line per run
+  (`ts=... runner=... config=... commit=... metric=... value=...
+  [file=...]`, plain text, no JSON/`jq`) — and **fails the CI job** only if
+  `compile_seconds` or `bench_median_ns` regresses more than 10%
+  (`PERF_REGRESSION_THRESHOLD`) past that `(runner, config)`'s median. The
+  phase (`bench_tokenize_median_ns`, `bench_parse_median_ns`) and per-file
+  (`bench_file_median_ns` + `file=`) rows are recorded for trend/diagnostic
+  purposes but never gate the build — 20+ per-file checks per run would make
+  the job flaky on any one noisy file. History is only appended/pushed on
+  `main`; other branches are compared but don't pollute it. Pushing needs a
+  `PERF_HISTORY_TOKEN` repo secret with push access, since the main
+  `Checkout` step deliberately uses `persist-credentials: false`.
 
 ## Core rules
 
@@ -132,7 +185,8 @@ Top level:
 | `tests/` | Compiler test corpus: `.bbb` programs + `assembly.S` for the asm frontend. Read at runtime by the test suite. |
 | `test/` | Empty placeholder; unused. |
 | `android/`, `ios/` | Manifest/plist plus CI scripts to package, install, and run the on-device/simulator test suite. |
-| `.forgejo/workflows/ci.yml` | CI pipeline. |
+| `.forgejo/workflows/ci.yml` | CI pipeline, including the per-platform `Perf` steps. |
+| `.forgejo/scripts/` | `perf_step.sh` (clean Release build + `bench_all`), `record_perf.sh` (perf-history compare/append/push — see Performance tracking above). |
 | `lsan.supp` | LeakSanitizer suppressions. |
 | `build/` | Generated build output (ninja files, per-config dirs, `compile_commands.json`, `build/build`). Never edit. |
 
