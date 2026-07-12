@@ -3103,8 +3103,9 @@ ProcessResult process_arguments(void)
                     }
                     else
                     {
+                        // The catch-all after the loop reports the offending
+                        // argument for every failure path.
                         result = generic_argument_result;
-                        string_print(S8("error: unknown argument => \"{S8}\"\n"), argument);
                     }
                 }
             }
@@ -3473,6 +3474,20 @@ ProcessResult process_arguments(void)
                 };
                 pending_cmake_profile_summary = true;
             }
+        }
+    }
+
+    // Every parse-failure path above leaves argument_i on the offending
+    // argument; report it here so no failure exits silently with code 1.
+    if (result != PROCESS_RESULT_SUCCESS)
+    {
+        if (argument_i < arguments.length)
+        {
+            string_print(S8("error: unknown or misplaced argument => \"{S8}\"\n"), arguments.pointer[argument_i]);
+        }
+        else
+        {
+            string_print(S8("error: invalid command-line arguments\n"));
         }
     }
 
