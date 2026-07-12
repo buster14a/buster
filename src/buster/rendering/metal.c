@@ -451,6 +451,12 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     metal_msg_void_id(result->layer, "setDevice:", rendering->device);
     metal_msg_void_ulong(result->layer, "setPixelFormat:", BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM);
     metal_msg_void_bool(result->layer, "setFramebufferOnly:", true);
+    // Headless CI runners have no WindowServer session actively cycling
+    // drawables, so nextDrawable's default ~1s internal wait (looking for a
+    // free one) turns every frame in `ide test`'s 3-frame smoke test into a
+    // multi-second stall. frame_end already logs and skips a null drawable
+    // (see below), so failing fast here instead of blocking is safe.
+    metal_msg_void_bool(result->layer, "setAllowsNextDrawableTimeout:", false);
     metal_msg_void_bool(result->content_view, "setWantsLayer:", true);
     metal_msg_void_id(result->content_view, "setLayer:", result->layer);
 #endif
