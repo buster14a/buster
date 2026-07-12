@@ -59,6 +59,7 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
     {
         font_config_initialized = true;
 #if BUSTER_USE_FONTCONFIG
+        BUSTER_UNUSED(arena);
         if (FcInit())
         {
             FcPattern *pat = FcPatternCreate();
@@ -82,7 +83,10 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
                     FcChar8 *file = NULL;
                     if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch)
                     {
-                        table[(u64)FONT_INDEX_MONO] = string_duplicate_arena(arena, string_from_pointer((char*)file), true);
+                        // The path is cached in the function-local static table
+                        // across calls, so it must not live in the (possibly
+                        // reset) caller arena; use the process-lifetime arena.
+                        table[(u64)FONT_INDEX_MONO] = string_duplicate_arena(os_state.arena, string_from_pointer((char*)file), true);
                     }
                     FcPatternDestroy(match);
                 }
