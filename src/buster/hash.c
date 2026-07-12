@@ -59,7 +59,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u64 buster_hash_avalanche(u64 hash)
 u64 buster_hash_64(u8* pointer, u64 length)
 {
 #if USE_XXHASH
-    return XXH3_64bits(pointer, length);
+    // Callers may reserve 0 as an "empty" sentinel; the non-xxhash path below
+    // never returns it, so keep both paths consistent.
+    u64 xxhash = XXH3_64bits(pointer, length);
+    return xxhash ? xxhash : 1;
 #else
     if (length == 0)
     {
@@ -67,13 +70,14 @@ u64 buster_hash_64(u8* pointer, u64 length)
         return empty_hash ? empty_hash : 1;
     }
 
-    u8* current = pointer;
-    u8* end = pointer + length;
+    // The cursor is a byte offset rather than a pointer: comparing derived
+    // pointers (P + C1 < P + C2) trips gcc's -Wstrict-overflow=5 whenever the
+    // length constant-propagates into a specialized clone.
+    u64 i = 0;
     u64 hash = 0;
 
     if (length >= 32)
     {
-        u8* limit = end - 32;
         u64 v1 = 11400714785074694791ULL + 14029467366897019727ULL;
         u64 v2 = 14029467366897019727ULL;
         u64 v3 = 0;
@@ -81,15 +85,15 @@ u64 buster_hash_64(u8* pointer, u64 length)
 
         do
         {
-            v1 = buster_hash_round(v1, buster_hash_read_u64(current));
-            current += 8;
-            v2 = buster_hash_round(v2, buster_hash_read_u64(current));
-            current += 8;
-            v3 = buster_hash_round(v3, buster_hash_read_u64(current));
-            current += 8;
-            v4 = buster_hash_round(v4, buster_hash_read_u64(current));
-            current += 8;
-        } while (current <= limit);
+            v1 = buster_hash_round(v1, buster_hash_read_u64(pointer + i));
+            i += 8;
+            v2 = buster_hash_round(v2, buster_hash_read_u64(pointer + i));
+            i += 8;
+            v3 = buster_hash_round(v3, buster_hash_read_u64(pointer + i));
+            i += 8;
+            v4 = buster_hash_round(v4, buster_hash_read_u64(pointer + i));
+            i += 8;
+        } while (length - i >= 32);
 
         hash = buster_hash_rotl64(v1, 1) +
                buster_hash_rotl64(v2, 7) +
@@ -108,29 +112,54 @@ u64 buster_hash_64(u8* pointer, u64 length)
 
     hash += length;
 
-    while ((u64)(end - current) >= 8)
+    while (length - i >= 8)
     {
-        u64 k1 = buster_hash_round(0, buster_hash_read_u64(current));
+        u64 k1 = buster_hash_round(0, buster_hash_read_u64(pointer + i));
         hash ^= k1;
         hash = buster_hash_rotl64(hash, 27) * 11400714785074694791ULL + 9650029242287828579ULL;
-        current += 8;
+        i += 8;
     }
 
-    if ((u64)(end - current) >= 4)
+    if (length - i >= 4)
     {
-        hash ^= (u64)buster_hash_read_u32(current) * 11400714785074694791ULL;
+        hash ^= (u64)buster_hash_read_u32(pointer + i) * 11400714785074694791ULL;
         hash = buster_hash_rotl64(hash, 23) * 14029467366897019727ULL + 1609587929392839161ULL;
-        current += 4;
+        i += 4;
     }
 
-    while (current < end)
+    while (i < length)
     {
-        hash ^= (u64)*current * 2870177450012600261ULL;
+        hash ^= (u64)pointer[i] * 2870177450012600261ULL;
         hash = buster_hash_rotl64(hash, 11) * 11400714785074694791ULL;
-        current += 1;
+        i += 1;
     }
 
     hash = buster_hash_avalanche(hash);
     return hash ? hash : 1;
 #endif
 }
+
+#if BUSTER_INCLUDE_TESTS
+UnitTestResult hash_tests(UnitTestArguments* arguments)
+{
+    BUSTER_UNUSED(arguments);
+    UnitTestResult result = {0};
+
+    // 0 is reserved as an "empty" sentinel by hash consumers; no input may
+    // hash to it, and equal inputs must hash equally.
+    BUSTER_TEST(arguments, buster_hash_64(0, 0) != 0);
+
+    u8 zero_byte[] = { 0 };
+    BUSTER_TEST(arguments, buster_hash_64(zero_byte, sizeof(zero_byte)) != 0);
+
+    String8 sample = S8("sample");
+    u64 first = buster_hash_64((u8*)sample.pointer, sample.length);
+    BUSTER_TEST(arguments, first != 0);
+    BUSTER_TEST(arguments, first == buster_hash_64((u8*)sample.pointer, sample.length));
+
+    String8 other = S8("sampl3");
+    BUSTER_TEST(arguments, first != buster_hash_64((u8*)other.pointer, other.length));
+
+    return result;
+}
+#endif
