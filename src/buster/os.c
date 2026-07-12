@@ -1180,7 +1180,18 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
             DWORD exit_code;
             if (GetExitCodeProcess(spawn.handle, &exit_code))
             {
-                result.result = (ProcessResult)exit_code;
+                if (exit_code >= 0xC0000000u)
+                {
+                    // NTSTATUS failure codes (e.g. 0xC0000005, access
+                    // violation) mean the child died abnormally.
+                    result.result = PROCESS_RESULT_CRASH;
+                }
+                else
+                {
+                    // Exit codes past the enum range carry no meaning as
+                    // ProcessResult values; collapse them to plain failure.
+                    result.result = exit_code < (DWORD)PROCESS_RESULT_COUNT ? (ProcessResult)exit_code : PROCESS_RESULT_FAILED;
+                }
             }
         }
         CloseHandle(spawn.handle);
@@ -1282,15 +1293,19 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
             string_print(S8("Process [{s32}]: Time (user): {s64}:{s64} s,us, (system): {s64}:{s64} s,us. Max RSS: {s64} KB. PF (soft): {s64}, (hard): {s64}. Block (input): {s64}, (output): {s64}. CTX SW (vol): {s64}, (invol): {s64}\n"), pid, usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, usage.ru_stime.tv_sec, usage.ru_stime.tv_usec, usage.ru_maxrss, usage.ru_minflt, usage.ru_majflt, usage.ru_inblock, usage.ru_oublock, usage.ru_nvcsw, usage.ru_nivcsw);
         }
 
-        // Normal exit
-        if ((wait_result == pid) & WIFEXITED(status))
+        if (wait_result == pid && WIFEXITED(status))
         {
             int exit_code = WEXITSTATUS(status);
-            result.result = (ProcessResult)exit_code;
+            // Exit codes past the enum range carry no meaning as ProcessResult
+            // values; collapse them to plain failure.
+            result.result = exit_code < (int)PROCESS_RESULT_COUNT ? (ProcessResult)exit_code : PROCESS_RESULT_FAILED;
+        }
+        else if (wait_result == pid && WIFSIGNALED(status))
+        {
+            result.result = PROCESS_RESULT_CRASH;
         }
         else
         {
-            // TODO
             result.result = PROCESS_RESULT_FAILED;
         }
 #endif
@@ -1881,6 +1896,47 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
             BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
             BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length == 2);
+        }
+
+        arena->position = position;
+    }
+
+    // Exit codes past the ProcessResult range must not alias enum values, and
+    // a child killed by a signal reports a crash rather than an exit code.
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+
+        struct
+        {
+            String8 script;
+            ProcessResult expected;
+        } exit_cases[] = {
+            { S8("exit 200"), PROCESS_RESULT_FAILED },
+            { S8("kill -SEGV $$"), PROCESS_RESULT_CRASH },
+        };
+
+        for (EACH_ARRAY_INDEX(i, exit_cases))
+        {
+            String8 spawn_arguments[] = {
+                S8("/bin/sh"),
+                S8("-c"),
+                exit_cases[i].script,
+            };
+            // Spawn with an empty environment: under sanitized builds the
+            // suite runs with LD_PRELOAD pointing at the ASan runtime, and an
+            // inherited preload would catch the child's SIGSEGV and turn it
+            // into a plain exit(1) instead of a death by signal.
+            ProcessSpawnOptions options = {
+                .capture = ((u64)1 << STANDARD_STREAM_ERROR),
+            };
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments), (SliceString8){0}, (SliceString8){0}, options);
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
+                BUSTER_TEST(arguments, wait_result.result == exit_cases[i].expected);
+            }
         }
 
         arena->position = position;
