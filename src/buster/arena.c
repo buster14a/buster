@@ -163,7 +163,11 @@ TemporalArena arena_begin_temporal(Arena* arena)
 
 TemporalArena scratch_begin(Arena** conflicts, u64 count)
 {
-    return arena_begin_temporal(thread_context_get_scratch(conflicts, count));
+    Arena* arena = thread_context_get_scratch(conflicts, count);
+    // Null means every scratch arena conflicted with the caller's arenas;
+    // fail here instead of dereferencing null in arena_begin_temporal.
+    BUSTER_CHECK(arena);
+    return arena_begin_temporal(arena);
 }
 
 void scratch_end(TemporalArena temporal)
