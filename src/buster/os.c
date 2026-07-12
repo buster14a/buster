@@ -851,8 +851,12 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             if (pipe_creation_result)
             {
                 any_capture = true;
+                // The child must inherit the read end for stdin and the write
+                // end for stdout/stderr; only the parent's end may be made
+                // non-inheritable.
+                u32 parent_side = stream == STANDARD_STREAM_INPUT ? 1 : 0;
                 // TODO: handle error for this
-                SetHandleInformation(result.pipes[stream][0], HANDLE_FLAG_INHERIT, 0);
+                SetHandleInformation(result.pipes[stream][parent_side], HANDLE_FLAG_INHERIT, 0);
             }
             else
             {
@@ -1092,6 +1096,14 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
         PipeCapture captures[(u64)STANDARD_STREAM_COUNT] = {0};
         bool captured[(u64)STANDARD_STREAM_COUNT] = {0};
 #if defined(_WIN32)
+        // The parent never writes to a captured stdin; close the write end up
+        // front so a child reading stdin sees EOF instead of blocking forever.
+        if (spawn.pipes[STANDARD_STREAM_INPUT][1])
+        {
+            CloseHandle((HANDLE)spawn.pipes[STANDARD_STREAM_INPUT][1]);
+            spawn.pipes[STANDARD_STREAM_INPUT][1] = 0;
+        }
+
         HANDLE read_pipes[(u64)STANDARD_STREAM_COUNT];
         u64 open_pipe_count = 0;
         for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
@@ -1170,6 +1182,14 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
         CloseHandle(spawn.handle);
 #else
         pid_t pid = (pid_t)(u64)spawn.handle;
+
+        // The parent never writes to a captured stdin; close the write end up
+        // front so a child reading stdin sees EOF instead of blocking forever.
+        if (spawn.pipes[STANDARD_STREAM_INPUT][1])
+        {
+            close(generic_fd_to_posix(spawn.pipes[STANDARD_STREAM_INPUT][1]));
+            spawn.pipes[STANDARD_STREAM_INPUT][1] = 0;
+        }
 
         int read_pipes[(u64)STANDARD_STREAM_COUNT];
         u64 open_pipe_count = 0;
@@ -1829,6 +1849,34 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
             BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length == 262144);
             BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_ERROR].length == 262144);
+        }
+
+        arena->position = position;
+    }
+
+    // Regression: a captured stdin used to leave the parent's write end open
+    // (and, on Windows, made the child's read end non-inheritable), so a
+    // child reading stdin to EOF deadlocked the wait.
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+
+        String8 spawn_arguments[] = {
+            S8("/bin/sh"),
+            S8("-c"),
+            S8("cat; printf ok"),
+        };
+        ProcessSpawnOptions options = {
+            .capture = ((u64)1 << STANDARD_STREAM_INPUT) | ((u64)1 << STANDARD_STREAM_OUTPUT),
+            .use_process_environment = 1,
+        };
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments), (SliceString8){0}, (SliceString8){0}, options);
+        BUSTER_TEST(arguments, spawn.handle != 0);
+        if (spawn.handle)
+        {
+            ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
+            BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
+            BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length == 2);
         }
 
         arena->position = position;
