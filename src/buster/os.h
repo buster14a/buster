@@ -143,6 +143,7 @@ BUSTER_F_DECL bool os_file_close(OsFileDescriptor* file_descriptor);
 
 BUSTER_F_DECL String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_terminate);
 BUSTER_F_DECL OsFileDescriptor* os_get_stdout(void);
+BUSTER_F_DECL OsFileDescriptor* os_get_standard_stream(StandardStream stream);
 BUSTER_F_DECL OsThreadHandle* os_thread_create(ThreadCreateOptions options);
 BUSTER_F_DECL bool os_thread_join(OsThreadHandle* handle);
 
