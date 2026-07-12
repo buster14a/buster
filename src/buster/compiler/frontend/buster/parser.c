@@ -2557,27 +2557,94 @@ struct ParserFileTestCase
 };
 
 BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] = {
-    { S8_INITIALIZER("tests/basic_minimal.bbb"), S8_INITIALIZER("0") },
-    { S8_INITIALIZER("tests/basic_comment.bbb"), S8_INITIALIZER("0") },
-    { S8_INITIALIZER("tests/basic_hexadecimal_literal.bbb"), S8_INITIALIZER("0") },
-    { S8_INITIALIZER("tests/basic_octal_literal.bbb"), S8_INITIALIZER("0") },
-    { S8_INITIALIZER("tests/basic_binary_literal.bbb"), S8_INITIALIZER("0") },
-    { S8_INITIALIZER("tests/basic_unary_minus.bbb"), S8_INITIALIZER("(neg 0)") },
-    { S8_INITIALIZER("tests/basic_unary_plus.bbb"), S8_INITIALIZER("(pos 0)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_add.bbb"), S8_INITIALIZER("(+ 0 0)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_sub.bbb"), S8_INITIALIZER("(- 0 0)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_multiply.bbb"), S8_INITIALIZER("(* 0 0)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_divide.bbb"), S8_INITIALIZER("(/ 0 1)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_mod.bbb"), S8_INITIALIZER("(% 0 1)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_shift_left.bbb"), S8_INITIALIZER("(<< 0 0)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_shift_right.bbb"), S8_INITIALIZER("(>> 0 0)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_and.bbb"), S8_INITIALIZER("(& 0 1)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_or.bbb"), S8_INITIALIZER("(| 0 0)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_xor.bbb"), S8_INITIALIZER("(^ 1 1)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_compare.bbb"), S8_INITIALIZER("(!= (== (< 1 2) 3) (> (>= (<= 4 5) 6) 7))") },
-    { S8_INITIALIZER("tests/basic_logical_not.bbb"), S8_INITIALIZER("(not (not 0))") },
-    { S8_INITIALIZER("tests/basic_bitwise_not.bbb"), S8_INITIALIZER("(bit_not 0)") },
-    { S8_INITIALIZER("tests/basic_integer_literal_precedence.bbb"), S8_INITIALIZER("(<< (+ 1 (* 2 3)) (- 4 5))") },
+    {
+        .path = S8_INITIALIZER("tests/basic_minimal.bbb"),
+        .expected_expression = S8_INITIALIZER("0")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_comment.bbb"),
+        .expected_expression = S8_INITIALIZER("0")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_hexadecimal_literal.bbb"),
+        .expected_expression = S8_INITIALIZER("0")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_octal_literal.bbb"),
+        .expected_expression = S8_INITIALIZER("0")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_binary_literal.bbb"),
+        .expected_expression = S8_INITIALIZER("0")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_unary_minus.bbb"),
+        .expected_expression = S8_INITIALIZER("(neg 0)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_unary_plus.bbb"),
+        .expected_expression = S8_INITIALIZER("(pos 0)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_add.bbb"),
+        .expected_expression = S8_INITIALIZER("(+ 0 0)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_sub.bbb"),
+        .expected_expression = S8_INITIALIZER("(- 0 0)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_multiply.bbb"),
+        .expected_expression = S8_INITIALIZER("(* 0 0)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_divide.bbb"),
+        .expected_expression = S8_INITIALIZER("(/ 0 1)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_mod.bbb"),
+        .expected_expression = S8_INITIALIZER("(% 0 1)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_shift_left.bbb"),
+        .expected_expression = S8_INITIALIZER("(<< 0 0)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_shift_right.bbb"),
+        .expected_expression = S8_INITIALIZER("(>> 0 0)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_and.bbb"),
+        .expected_expression = S8_INITIALIZER("(& 0 1)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_or.bbb"),
+        .expected_expression = S8_INITIALIZER("(| 0 0)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_xor.bbb"),
+        .expected_expression = S8_INITIALIZER("(^ 1 1)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_compare.bbb"),
+        .expected_expression = S8_INITIALIZER("(!= (== (< 1 2) 3) (> (>= (<= 4 5) 6) 7))")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_logical_not.bbb"),
+        .expected_expression = S8_INITIALIZER("(not (not 0))")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_bitwise_not.bbb"),
+        .expected_expression = S8_INITIALIZER("(bit_not 0)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_integer_literal_precedence.bbb"),
+        .expected_expression = S8_INITIALIZER("(<< (+ 1 (* 2 3)) (- 4 5))")
+    },
+    // {
+    //     .path = S8_INITIALIZER("tests/basic_variable.bbb"),
+    //     .expected_expression = S8_INITIALIZER("(<< (+ 1 (* 2 3)) (- 4 5))")
+    // },
     // { S8_INITIALIZER("tests/basic_if_else.bbb"), S8_INITIALIZER("") },
     // { S8_INITIALIZER("tests/array_slices.bbb"), S8_INITIALIZER("") },
 };
@@ -3164,8 +3231,8 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
         ParserFileTestCase test_case = parser_file_test_cases[i];
         String8 source = BYTE_SLICE_TO_STRING(8, file_read(arena, test_case.path, (FileReadOptions){0}));
 
-        BUSTER_TEST(arguments, source.pointer != 0);
-        BUSTER_TEST(arguments, source.length > 0);
+        bool file_valid = source.pointer != 0 && source.length != 0;
+        BUSTER_TEST(arguments, file_valid);
 
         if (source.pointer && source.length)
         {
