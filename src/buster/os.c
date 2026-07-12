@@ -1823,6 +1823,7 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
+#include <buster/time.h>
 
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
@@ -2007,6 +2008,16 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
 
         arena->position = position;
+    }
+#endif
+
+#if defined(_WIN32)
+    // Regression: the tick-to-nanosecond conversion overflowed u64 for
+    // intervals over ~30 minutes at a 10 MHz QueryPerformanceCounter rate.
+    {
+        TimeDataType start = 0;
+        TimeDataType end = (TimeDataType)(os_state.frequency * 7200);
+        BUSTER_TEST(arguments, timestamp_ns_between(start, end) == (u64)7200 * 1000 * 1000 * 1000);
     }
 #endif
 
