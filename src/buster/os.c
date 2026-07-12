@@ -1764,6 +1764,12 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
             bool is_end = colon_index == BUSTER_STRING_NO_MATCH;
             u64 it_end = is_end ? path_it.length : colon_index;
             String8 it = string_slice(path_it, 0, it_end);
+            if (it.length == 0)
+            {
+                // An empty PATH component conventionally means the current
+                // directory, not the filesystem root.
+                it = S8(".");
+            }
             String8 parts[] = {
                 it,
                 S8("/"),
@@ -1780,7 +1786,12 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
             DWORD file_attributes = GetFileAttributesW(string16_from_string8(temp.arena, full_path, true).pointer);
             found = file_attributes != INVALID_FILE_ATTRIBUTES && (file_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
 #else
-            found = access(full_path.pointer, X_OK) == 0;
+            // access(X_OK) alone also matches directories (e.g. a "cmake/"
+            // directory in a "." PATH component); require a regular file.
+            struct stat file_stat;
+            found = access(full_path.pointer, X_OK) == 0 &&
+                stat(full_path.pointer, &file_stat) == 0 &&
+                S_ISREG(file_stat.st_mode);
 #endif
             if (found)
             {
@@ -1948,6 +1959,43 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
                 BUSTER_TEST(arguments, wait_result.result == exit_cases[i].expected);
             }
+        }
+
+        arena->position = position;
+    }
+
+    // Regression: executable_resolve_in_path must treat empty PATH components
+    // as the current directory and must skip directories ("cmake" is a
+    // directory in the repository root, which is the test working directory).
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+
+        SliceString8 keys = program_state->input.environment_keys;
+        u64 path_index = BUSTER_STRING_NO_MATCH;
+        for (u64 i = 0; i < keys.length; i += 1)
+        {
+            if (string_equal(keys.pointer[i], S8("PATH")))
+            {
+                path_index = i;
+                break;
+            }
+        }
+
+        BUSTER_TEST(arguments, path_index != BUSTER_STRING_NO_MATCH);
+        if (path_index != BUSTER_STRING_NO_MATCH)
+        {
+            String8* path_value = &program_state->input.environment_values.pointer[path_index];
+            String8 saved_path = *path_value;
+            *path_value = S8(":");
+
+            String8 resolved = executable_resolve_in_path(arena, S8("build.sh"));
+            BUSTER_TEST(arguments, string_ends_with_sequence(resolved, S8("/build.sh")));
+
+            String8 directory_resolved = executable_resolve_in_path(arena, S8("cmake"));
+            BUSTER_TEST(arguments, directory_resolved.length == 0);
+
+            *path_value = saved_path;
         }
 
         arena->position = position;
