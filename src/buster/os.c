@@ -696,7 +696,11 @@ BUSTER_GLOBAL_LOCAL u64 os_file_write_partially(OsFileDescriptor* file_descripto
 {
 #if defined(__linux__) || defined(__APPLE__)
     int fd = generic_fd_to_posix(file_descriptor);
-    ssize_t result = write(fd, pointer, length);
+    ssize_t result;
+    do
+    {
+        result = write(fd, pointer, length);
+    } while (result < 0 && errno == EINTR);
     BUSTER_CHECK(result > 0);
     return (u64)result;
 #elif defined(_WIN32)
