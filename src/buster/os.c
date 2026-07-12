@@ -991,6 +991,10 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         if (spawn_result != 0)
         {
             pid = -1;
+            // Report unconditionally, like the Windows branch: a spawn failure
+            // that only surfaces under --verbose is undebuggable.
+            errno = spawn_result;
+            string_print(S8("Error creating a process: \"{EOs}\" => {[]S8}\n"), os_get_last_error(), arguments);
         }
     }
 
@@ -1018,8 +1022,15 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         }
     }
 
-    posix_spawn_file_actions_destroy(&file_actions);
-    posix_spawnattr_destroy(&attributes);
+    // Destroying an object whose _init failed is undefined behavior.
+    if (file_actions_init == 0)
+    {
+        posix_spawn_file_actions_destroy(&file_actions);
+    }
+    if (attribute_init == 0)
+    {
+        posix_spawnattr_destroy(&attributes);
+    }
 
     result.handle = (OsProcessHandle*)(pid == -1 ? 0 : (u64)pid);
 #endif
