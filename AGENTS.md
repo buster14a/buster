@@ -166,9 +166,12 @@ has hard design constraints:
   constructs get new state kinds and stack frames — never recursive helper
   calls.
 - `parser_parse()` writes its public `ParserResult` AST and diagnostics into a
-  caller-owned result arena. Source/token storage must outlive the result; the
-  `ParserState` stack (including pending prefix-unary frames) is scratch,
-  borrowed via `scratch_begin`/`scratch_end`, and must not escape.
+  caller-owned result arena. It also takes a distinct caller-owned expression
+  arena, resets it at the start of each parse, and uses it only as reusable
+  staging before copying completed expressions into the result arena. Source/
+  token storage must outlive the result; neither expression staging nor the
+  `ParserState` stack (including pending prefix-unary frames) may escape. The
+  state stack is scratch, borrowed via `scratch_begin`/`scratch_end`.
 - Invalid user input produces `ParserDiagnostic` entries and synchronizes at a
   statement or top-level declaration boundary. `BUSTER_TODO()`/assertions are
   reserved for internal invariants, never ordinary syntax errors.

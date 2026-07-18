@@ -2443,10 +2443,20 @@ BUSTER_GLOBAL_LOCAL void finish_intrinsic_call(Parser* restrict parser, Extended
     expression_finish_operand(parser, owner);
 }
 
-ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult tokenizer)
+ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 source, TokenizerResult tokenizer)
 {
+    BUSTER_CHECK(result_arena);
+    BUSTER_CHECK(expression_arena);
+    BUSTER_CHECK(result_arena != expression_arena);
+
+    // Expression nodes are copied into result_arena when an expression is
+    // finished. Rewind this caller-owned staging arena for every parse so one
+    // reservation can be reused across an entire test or benchmark run.
+    arena_reset_to_start(expression_arena);
+
     ParserResult result = { .source = source };
-    TemporalArena scratch = scratch_begin(&result_arena, 1);
+    Arena* scratch_conflicts[] = { result_arena, expression_arena };
+    TemporalArena scratch = scratch_begin(scratch_conflicts, BUSTER_ARRAY_LENGTH(scratch_conflicts));
     Parser parser = {0};
     parser.iterator.tokens = tokenizer.tokens;
     parser.iterator.token_count = tokenizer.token_count;
@@ -2454,7 +2464,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
     parser.state.arena = scratch.arena;
     parser.state.minimum_position = scratch.arena->position;
     parser.result_arena = result_arena;
-    parser.expression_arena = arena_create((ArenaCreation){0});
+    parser.expression_arena = expression_arena;
     parser.expression_arena_minimum_position = parser.expression_arena->position;
     parser.result = &result;
 
@@ -3846,7 +3856,6 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
         }
     }
 
-    arena_destroy(parser.expression_arena, 1);
     scratch_end(scratch);
     return result;
 }
@@ -4123,6 +4132,9 @@ ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
     result.iterations = iterations;
     result.file_count = BUSTER_ARRAY_LENGTH(parser_file_test_cases);
 
+    Arena* expression_arena = arena_create((ArenaCreation){0});
+    BUSTER_CHECK(expression_arena);
+
     u64* durations_ns = arena_allocate(arena, u64, iterations);
 #if BUSTER_INSTRUMENT
     u64* tokenize_durations_ns = arena_allocate(arena, u64, iterations);
@@ -4150,7 +4162,7 @@ ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
                 TimeDataType file_start = timestamp_take();
                 TokenizerResult tokenizer = tokenize(scratch.arena, source.pointer, source.length);
                 TimeDataType tokenize_end = timestamp_take();
-                parser_parse(scratch.arena, source, tokenizer);
+                parser_parse(scratch.arena, expression_arena, source, tokenizer);
                 TimeDataType parse_end = timestamp_take();
 
                 tokenize_ns_sum += timestamp_ns_between(file_start, tokenize_end);
@@ -4158,7 +4170,7 @@ ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
                 file_durations_ns[iteration * result.file_count + i] = timestamp_ns_between(file_start, parse_end);
 #else
                 TokenizerResult tokenizer = tokenize(scratch.arena, source.pointer, source.length);
-                parser_parse(scratch.arena, source, tokenizer);
+                parser_parse(scratch.arena, expression_arena, source, tokenizer);
 #endif
             }
         }
@@ -4202,6 +4214,9 @@ ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
     }
     qsort(result.files, result.file_count, sizeof(ParserBenchFileResult), parser_bench_file_result_compare_desc);
 #endif
+
+    bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
+    BUSTER_CHECK(expression_arena_destroyed);
 
     return result;
 }
@@ -4408,7 +4423,7 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
 
 // Parse a bare expression by wrapping it in a minimal program and returning the
 // postorder stream of its return value.
-BUSTER_GLOBAL_LOCAL AstExpression parse_expression_snippet(Arena* arena, String8 expression)
+BUSTER_GLOBAL_LOCAL AstExpression parse_expression_snippet(Arena* arena, Arena* expression_arena, String8 expression)
 {
     // Built by concatenation rather than string_format: the program braces would
     // otherwise be mistaken for format directives.
@@ -4422,7 +4437,7 @@ BUSTER_GLOBAL_LOCAL AstExpression parse_expression_snippet(Arena* arena, String8
     memcpy(buffer + prefix.length + expression.length, suffix.pointer, suffix.length);
 
     TokenizerResult tokenizer = tokenize(arena, buffer, length);
-    ParserResult parsed = parser_parse(arena, (String8){ buffer, length }, tokenizer);
+    ParserResult parsed = parser_parse(arena, expression_arena, (String8){ buffer, length }, tokenizer);
     BUSTER_CHECK(parsed.diagnostic_count == 0);
     BUSTER_CHECK(parsed.first_code);
     BUSTER_CHECK(parsed.first_code->body.first_statement);
@@ -4433,6 +4448,8 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
+    Arena* expression_arena = arena_create((ArenaCreation){0});
+    BUSTER_CHECK(expression_arena);
 
     struct { String8 source; String8 expected; } cases[] = {
         { S8("1 + 2 * 3"),           S8("(+ 1 (* 2 3))") },
@@ -4498,12 +4515,14 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
         u64 position = arena->position;
-        AstExpression expression = parse_expression_snippet(arena, cases[i].source);
+        AstExpression expression = parse_expression_snippet(arena, expression_arena, cases[i].source);
         String8 actual = ast_expression_to_string(arena, expression);
         BUSTER_STRING_TEST(arguments, actual, cases[i].expected);
         arena->position = position;
     }
 
+    bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
+    BUSTER_CHECK(expression_arena_destroyed);
     return result;
 }
 
@@ -4511,6 +4530,8 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
+    Arena* expression_arena = arena_create((ArenaCreation){0});
+    BUSTER_CHECK(expression_arena);
     u64 position = arena->position;
 
     {
@@ -4518,7 +4539,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             "code first[export] : fn[cc(systemv)] () s32 { return 1; }\n"
             "code second : fn[cc(win64)] () s32 { return 2; }\n");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         BUSTER_TEST(arguments, parsed.code_count == 2);
         BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.last_code != 0 && parsed.first_code != parsed.last_code);
@@ -4554,7 +4575,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             "    return result;\n"
             "}\n");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.statement_count == 3);
         AstStatement* data_statement = parsed.first_code ? parsed.first_code->body.first_statement : 0;
@@ -4590,7 +4611,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             "    return values;\n"
             "}\n");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         AstStatement* data = parsed.first_code ? parsed.first_code->body.first_statement : 0;
         BUSTER_TEST(arguments, data != 0 && data->id == AST_STATEMENT_DATA);
@@ -4624,7 +4645,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { data values = [1 2]; return 3; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0 && parsed.first_diagnostic->found == TOKEN_DECIMAL_INTEGER_LITERAL);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
@@ -4652,7 +4673,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             "    return values[0];\n"
             "}\n");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         AstStatement* assignment = parsed.first_code && parsed.first_code->body.first_statement ?
                 parsed.first_code->body.first_statement->next : 0;
@@ -4676,7 +4697,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { data value = values[]; return 3; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
                 parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_EXPECTED_EXPRESSION);
@@ -4697,7 +4718,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             "    return sliced;\n"
             "}\n");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         AstStatement* data = parsed.first_code ? parsed.first_code->body.first_statement : 0;
         BUSTER_TEST(arguments, data != 0 && data->id == AST_STATEMENT_DATA);
@@ -4723,7 +4744,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { data value = values[1..2..3]; return 3; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
                 parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN);
@@ -4753,7 +4774,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         String8 source = { source_pointer, source_length };
 
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.statement_count == 2);
         AstStatement* assignment = parsed.first_code ? parsed.first_code->body.first_statement : 0;
@@ -4770,7 +4791,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { target += ; return 1; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
                 parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_EXPECTED_EXPRESSION);
@@ -4788,7 +4809,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { target; return 1; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
                 parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_EXPECTED_ASSIGNMENT_OPERATOR);
@@ -4818,7 +4839,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             "    return a + b;\n"
             "}\n");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.statement_count == 2);
         AstStatement* if_statement = parsed.first_code ? parsed.first_code->body.first_statement : 0;
@@ -4847,7 +4868,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { if (value) return 1; return 2; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0 && parsed.first_diagnostic->expected == TOKEN_LEFT_BRACE);
         BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.last_statement != 0);
@@ -4871,7 +4892,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             "    return total;\n"
             "}\n");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.statement_count == 2);
         AstStatement* outer = parsed.first_code ? parsed.first_code->body.first_statement : 0;
@@ -4922,7 +4943,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             "    return value;\n"
             "}\n");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.statement_count == 2);
         AstStatement* conditional = parsed.first_code ? parsed.first_code->body.first_statement : 0;
@@ -4949,7 +4970,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { loop (value) return 1; return 2; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
                 parsed.first_diagnostic->expected == TOKEN_LEFT_BRACE);
@@ -4967,7 +4988,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { data range = 0 .. count .. 1; return 2; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
                 parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_CHAINED_RANGE);
@@ -4991,7 +5012,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { for (data e = values[..]) return 1; return 2; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
                 parsed.first_diagnostic->expected == TOKEN_LEFT_BRACE);
@@ -5010,7 +5031,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { return * 1; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.first_diagnostic != 0);
         if (parsed.first_diagnostic)
@@ -5025,7 +5046,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code broken : fn[cc(c)] () s32 { return 1 + ; return 3; } code recovered : fn[cc(c)] () s32 { return 2; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         BUSTER_TEST(arguments, parsed.code_count == 2);
         BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.statement_count == 2);
@@ -5054,7 +5075,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         {
             String8 source = truncated_sources[i];
             TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-            ParserResult parsed = parser_parse(arena, source, tokenizer);
+            ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
             BUSTER_TEST(arguments, parsed.diagnostic_count > 0);
             arena->position = position;
         }
@@ -5063,7 +5084,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code main : fn () s32 { return 1 + 1__0; }");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
         AstStatement* statement = parsed.first_code ? parsed.first_code->body.first_statement : 0;
         BUSTER_TEST(arguments, statement != 0 && statement->return_statement.expression.count == 3);
@@ -5080,7 +5101,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8("code typed : fn (argument:count: s32, argv: &&u8, bytes: []u8, inferred: [_]u8) s32;");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         AstType* function = parsed.first_code ? parsed.first_code->type : 0;
         BUSTER_TEST(arguments, function != 0 && function->id == AST_TYPE_FUNCTION);
@@ -5155,7 +5176,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         memcpy(source_pointer + prefix.length + integer_cases[i].literal.length, suffix.pointer, suffix.length);
         String8 source = { source_pointer, source_length };
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == integer_cases[i].diagnostic_count);
         if (parsed.first_diagnostic)
         {
@@ -5210,11 +5231,46 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         }
         String8 expected = string_from_pointer_length(expected_pointer, expected_length);
 
-        AstExpression expression = parse_expression_snippet(arena, source);
+        AstExpression expression = parse_expression_snippet(arena, expression_arena, source);
         String8 actual = ast_expression_to_string(arena, expression);
         BUSTER_STRING_TEST(arguments, actual, expected);
 
         arena->position = deep_unary_position;
+    }
+
+    // The caller-owned expression arena is staging only: parser_parse()
+    // rewinds it for every run, while previously returned AST nodes remain
+    // valid because completed expressions live in the result arena.
+    {
+        u64 reuse_position = arena->position;
+        String8 first_source = S8("code first : fn () s32 { return 1 + 2; }");
+        TokenizerResult first_tokenizer = tokenize(arena, first_source.pointer, first_source.length);
+        ParserResult first = parser_parse(arena, expression_arena, first_source, first_tokenizer);
+        BUSTER_TEST(arguments, first.diagnostic_count == 0);
+        AstStatement* first_return = first.first_code ? first.first_code->body.first_statement : 0;
+        BUSTER_TEST(arguments, first_return != 0 && first_return->id == AST_STATEMENT_RETURN);
+
+        arena_allocate(expression_arena, AstNode, 128);
+        u64 polluted_expression_position = expression_arena->position;
+
+        String8 second_source = S8("code second : fn () s32 { return 7; }");
+        TokenizerResult second_tokenizer = tokenize(arena, second_source.pointer, second_source.length);
+        ParserResult second = parser_parse(arena, expression_arena, second_source, second_tokenizer);
+        BUSTER_TEST(arguments, second.diagnostic_count == 0);
+        BUSTER_TEST(arguments, expression_arena->position < polluted_expression_position);
+
+        if (first_return && first_return->id == AST_STATEMENT_RETURN)
+        {
+            AstExpression first_expression = first_return->return_statement.expression;
+            BUSTER_TEST(arguments, first_expression.count == 3);
+            BUSTER_TEST(arguments, first_expression.count == 3 &&
+                    first_expression.nodes[0].id == AST_NODE_CONSTANT_INTEGER &&
+                    first_expression.nodes[0].integer.value == 1 &&
+                    first_expression.nodes[1].id == AST_NODE_CONSTANT_INTEGER &&
+                    first_expression.nodes[1].integer.value == 2 &&
+                    first_expression.nodes[2].id == AST_NODE_BINARY_PLUS);
+        }
+        arena->position = reuse_position;
     }
 
     // Regression: parser_parse() must not crash when the caller hands it one
@@ -5225,12 +5281,14 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         TemporalArena caller_scratch = scratch_begin(0, 0);
         String8 source = S8("code main : fn[cc(c)] () s32 { return 1 + 2 * 3; }");
         TokenizerResult tokenizer = tokenize(caller_scratch.arena, source.pointer, source.length);
-        ParserResult parsed = parser_parse(caller_scratch.arena, source, tokenizer);
+        ParserResult parsed = parser_parse(caller_scratch.arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
         BUSTER_TEST(arguments, parsed.code_count == 1);
         scratch_end(caller_scratch);
     }
 
+    bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
+    BUSTER_CHECK(expression_arena_destroyed);
     return result;
 }
 
@@ -5238,6 +5296,8 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
+    Arena* expression_arena = arena_create((ArenaCreation){0});
+    BUSTER_CHECK(expression_arena);
 
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parser_file_test_cases); i += 1)
     {
@@ -5254,7 +5314,7 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, source.length));
             BUSTER_TEST(arguments, tokenizer.error_count == 0);
 
-            ParserResult parsed = parser_parse(arena, source, tokenizer);
+            ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
 
             if (parsed.diagnostic_count == 0)
             {
@@ -5317,6 +5377,8 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
         arena->position = position;
     }
 
+    bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
+    BUSTER_CHECK(expression_arena_destroyed);
     return result;
 }
 #endif

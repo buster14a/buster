@@ -463,7 +463,7 @@ struct LineAndColumn
 };
 
 BUSTER_F_DECL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length);
-BUSTER_F_DECL ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult tokenizer);
+BUSTER_F_DECL ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 source, TokenizerResult tokenizer);
 BUSTER_F_DECL String8 get_token_content(const char8* source, Token* restrict tokens, u32 lexer_token_index);
 
 #if BUSTER_INSTRUMENT
