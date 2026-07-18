@@ -28,6 +28,7 @@ typedef enum TokenIdEnum
     TOKEN_HEXADECIMAL_FLOAT_LITERAL,
     TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT,
     TOKEN_FLOAT_LITERAL,
+    TOKEN_CHARACTER_LITERAL,
     TOKEN_UNDERSCORE,
     TOKEN_LEFT_BRACKET,
     TOKEN_RIGHT_BRACKET,
@@ -146,6 +147,7 @@ typedef enum AstNodeId
 {
     AST_NODE_CONSTANT_INTEGER,
     AST_NODE_CONSTANT_FLOAT,
+    AST_NODE_CONSTANT_CHARACTER,
     AST_NODE_IDENTIFIER,
     AST_NODE_UNDEFINED,
     AST_NODE_ARRAY_LITERAL,
@@ -215,6 +217,24 @@ struct AstFloatLiteral
     u8 base;
     bool has_exponent;
     u8 reserved[6];
+};
+
+enum
+{
+    // Character literals infer to u8 unless their surrounding context supplies a type.
+    AST_CHARACTER_LITERAL_DEFAULT_BIT_WIDTH = 8,
+};
+
+typedef struct AstCharacterLiteral AstCharacterLiteral;
+struct AstCharacterLiteral
+{
+    String8 spelling;
+    u32 code_point;
+    u8 utf8[4];
+    u8 utf8_length;
+    bool escaped;
+    bool valid;
+    u8 reserved;
 };
 
 typedef struct AstArrayLiteral AstArrayLiteral;
@@ -300,6 +320,7 @@ struct AstNode
     {
         AstIntegerLiteral integer;
         AstFloatLiteral floating;
+        AstCharacterLiteral character;
         AstIdentifier identifier;
         AstArrayLiteral array_literal;
         AstArrayIndex array_index;
@@ -559,6 +580,7 @@ typedef enum ParserDiagnosticKind
     PARSER_DIAGNOSTIC_EXPECTED_TYPE_DECLARATION_KIND,
     PARSER_DIAGNOSTIC_CHAINED_RANGE,
     PARSER_DIAGNOSTIC_INVALID_INTEGER,
+    PARSER_DIAGNOSTIC_INVALID_CHARACTER,
     PARSER_DIAGNOSTIC_EXPRESSION_TOO_DEEP,
     PARSER_DIAGNOSTIC_COUNT,
 } ParserDiagnosticKind;
