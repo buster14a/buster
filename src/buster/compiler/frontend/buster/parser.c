@@ -252,6 +252,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     [TOKEN_KEYWORD_TYPE - first_keyword] = S8_INITIALIZER("type"),
                     [TOKEN_KEYWORD_STRUCT - first_keyword] = S8_INITIALIZER("struct"),
                     [TOKEN_KEYWORD_UNION - first_keyword] = S8_INITIALIZER("union"),
+                    [TOKEN_KEYWORD_ENUM - first_keyword] = S8_INITIALIZER("enum"),
                     [TOKEN_KEYWORD_UNDEFINED - first_keyword] = S8_INITIALIZER("undefined"),
                 };
 
@@ -616,6 +617,7 @@ typedef enum ParserStateId
     PARSER_STATE_AGGREGATE_LITERAL,
     PARSER_STATE_ARRAY_SUBSCRIPT,
     PARSER_STATE_MEMBER_ACCESS,
+    PARSER_STATE_ENUM_LITERAL,
     PARSER_STATE_CALL,
     PARSER_STATE_INTRINSIC_CALL,
     PARSER_STATE_EXPRESSION,
@@ -783,6 +785,9 @@ typedef enum TypeStatementStateId
     TYPE_STATEMENT_STATE_FIELD_COLON,
     TYPE_STATEMENT_STATE_FIELD_TYPE,
     TYPE_STATEMENT_STATE_FIELD_DELIMITER,
+    TYPE_STATEMENT_STATE_ENUM_MEMBER_EQUAL_OR_DELIMITER,
+    TYPE_STATEMENT_STATE_ENUM_MEMBER_VALUE,
+    TYPE_STATEMENT_STATE_ENUM_MEMBER_DELIMITER,
     TYPE_STATEMENT_STATE_COUNT,
 } TypeStatementStateId;
 
@@ -914,6 +919,7 @@ struct ParserState
             TypeStatementStateId state;
             AstTypeDeclaration* declaration;
             AstTypeField* field;
+            AstEnumMember* enum_member;
         } type_statement;
 
         struct
@@ -926,6 +932,8 @@ struct ParserState
             bool ends_at_array_delimiter;
             bool is_aggregate_field;
             bool ends_at_aggregate_delimiter;
+            bool is_enum_value;
+            bool ends_at_enum_delimiter;
             bool is_array_subscript_bound;
             bool is_array_subscript_end;
             bool ends_at_slice_operator;
@@ -976,6 +984,11 @@ struct ParserState
         {
             ParserSourceRange range;
         } member_access;
+
+        struct
+        {
+            ParserSourceRange range;
+        } enum_literal;
 
         struct
         {
@@ -1203,6 +1216,32 @@ BUSTER_GLOBAL_LOCAL AstTypeField* parser_type_field_push(
     return field;
 }
 
+BUSTER_GLOBAL_LOCAL AstEnumMember* parser_enum_member_push(
+        Parser* parser,
+        AstTypeDeclaration* declaration,
+        ExtendedToken token)
+{
+    AstEnumMember* member = arena_allocate(parser->result_arena, AstEnumMember, 1);
+    *member = (AstEnumMember){
+        .name = {
+            .text = get_string(parser->iterator.source, token),
+            .range = source_range_from_token(token),
+        },
+        .range = source_range_from_token(token),
+    };
+    if (declaration->last_enum_member)
+    {
+        declaration->last_enum_member->next = member;
+    }
+    else
+    {
+        declaration->first_enum_member = member;
+    }
+    declaration->last_enum_member = member;
+    declaration->enum_member_count += 1;
+    return member;
+}
+
 BUSTER_GLOBAL_LOCAL AstType* parser_type_push(Parser* parser, AstTypeId id, ExtendedToken token)
 {
     AstType* type = arena_allocate(parser->result_arena, AstType, 1);
@@ -1303,6 +1342,7 @@ BUSTER_GLOBAL_LOCAL void parser_unexpected(Parser* parser, ExtendedToken token, 
         state_id == PARSER_STATE_AGGREGATE_LITERAL ||
         state_id == PARSER_STATE_ARRAY_SUBSCRIPT ||
         state_id == PARSER_STATE_MEMBER_ACCESS ||
+        state_id == PARSER_STATE_ENUM_LITERAL ||
         state_id == PARSER_STATE_CALL ||
         state_id == PARSER_STATE_INTRINSIC_CALL ||
         state_id == PARSER_STATE_EXPRESSION || state_id == PARSER_STATE_UNARY_PREFIX)
@@ -1379,6 +1419,33 @@ BUSTER_GLOBAL_LOCAL void parser_expected_postfix_access(Parser* parser, Extended
             TOKEN_ERROR,
             S8("expected member name or '&' after '.'"));
     parser->recovery = PARSER_RECOVERY_STATEMENT;
+}
+
+BUSTER_GLOBAL_LOCAL void parser_expected_enum_delimiter(
+        Parser* parser,
+        ExtendedToken token,
+        bool has_explicit_value)
+{
+    parser_diagnostic_push(
+            parser,
+            PARSER_DIAGNOSTIC_EXPECTED_ENUM_DELIMITER,
+            token,
+            TOKEN_ERROR,
+            has_explicit_value ?
+                    S8("expected ',' or '}' after enum value") :
+                    S8("expected '=', ',' or '}' after enum member"));
+    parser->recovery = PARSER_RECOVERY_DECLARATION;
+}
+
+BUSTER_GLOBAL_LOCAL void parser_expected_type_declaration_kind(Parser* parser, ExtendedToken token)
+{
+    parser_diagnostic_push(
+            parser,
+            PARSER_DIAGNOSTIC_EXPECTED_TYPE_DECLARATION_KIND,
+            token,
+            TOKEN_ERROR,
+            S8("expected 'struct', 'union', or 'enum' after '='"));
+    parser->recovery = PARSER_RECOVERY_DECLARATION;
 }
 
 BUSTER_GLOBAL_LOCAL void parser_chained_range(Parser* parser, ExtendedToken token)
@@ -1804,6 +1871,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
         case AST_NODE_ARRAY_SLICE: return S8("ArraySlice");
         case AST_NODE_AGGREGATE_LITERAL: return S8("AggregateLiteral");
         case AST_NODE_MEMBER_ACCESS: return S8("MemberAccess");
+        case AST_NODE_ENUM_LITERAL: return S8("EnumLiteral");
         case AST_NODE_CALL: return S8("Call");
         case AST_NODE_INTRINSIC_CALL: return S8("IntrinsicCall");
         case AST_NODE_UNARY_MINUS: return S8("UnaryMinus");
@@ -1913,6 +1981,7 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
         case AST_NODE_ARRAY_SLICE:
         case AST_NODE_AGGREGATE_LITERAL:
         case AST_NODE_MEMBER_ACCESS:
+        case AST_NODE_ENUM_LITERAL:
         case AST_NODE_CALL:
         case AST_NODE_INTRINSIC_CALL:
         {
@@ -1931,6 +2000,7 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNode* node)
         case AST_NODE_CONSTANT_INTEGER:
         case AST_NODE_IDENTIFIER:
         case AST_NODE_UNDEFINED:
+        case AST_NODE_ENUM_LITERAL:
         {
             return 0;
         }
@@ -2029,6 +2099,7 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_ARRAY_SLICE:
         case AST_NODE_AGGREGATE_LITERAL:
         case AST_NODE_MEMBER_ACCESS:
+        case AST_NODE_ENUM_LITERAL:
         case AST_NODE_CALL:
         case AST_NODE_INTRINSIC_CALL:
         case AST_NODE_COUNT:
@@ -2180,11 +2251,28 @@ BUSTER_GLOBAL_LOCAL void parse_aggregate_field_value(Parser* restrict parser)
     value->expression.ends_at_aggregate_delimiter = true;
 }
 
+BUSTER_GLOBAL_LOCAL void parse_enum_member_value(Parser* restrict parser)
+{
+    ParserState* value = state_push(&parser->state);
+    value->id = PARSER_STATE_EXPRESSION;
+    value->expression.state = EXPRESSION_STATE_PREFIX;
+    value->expression.end_token = TOKEN_ERROR;
+    value->expression.is_enum_value = true;
+    value->expression.ends_at_enum_delimiter = true;
+}
+
 BUSTER_GLOBAL_LOCAL void parse_member_access(Parser* restrict parser, ExtendedToken dot)
 {
     ParserState* member = state_push(&parser->state);
     member->id = PARSER_STATE_MEMBER_ACCESS;
     member->member_access.range = source_range_from_token(dot);
+}
+
+BUSTER_GLOBAL_LOCAL void parse_enum_literal(Parser* restrict parser, ExtendedToken dot)
+{
+    ParserState* literal = state_push(&parser->state);
+    literal->id = PARSER_STATE_ENUM_LITERAL;
+    literal->enum_literal.range = source_range_from_token(dot);
 }
 
 BUSTER_GLOBAL_LOCAL void parse_array_subscript_bound(Parser* restrict parser, bool is_end)
@@ -2249,6 +2337,26 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
     BUSTER_CHECK(expression_state->id == PARSER_STATE_EXPRESSION);
     u32 output_count = expression_state->expression.output_count;
     BUSTER_CHECK(output_count);
+
+    if (expression_state->expression.is_enum_value)
+    {
+        AstNode* output = arena_allocate(parser->result_arena, AstNode, output_count);
+        memcpy(output, expression_state->expression.output_base, sizeof(*output) * output_count);
+        AstExpression expression = { .nodes = output, .count = output_count };
+        state_pop(&parser->state);
+
+        ParserState* type_statement = state(parser);
+        BUSTER_CHECK(type_statement->id == PARSER_STATE_TYPE_STATEMENT);
+        BUSTER_CHECK(type_statement->type_statement.state == TYPE_STATEMENT_STATE_ENUM_MEMBER_VALUE);
+        BUSTER_CHECK(type_statement->type_statement.enum_member);
+        type_statement->type_statement.enum_member->value = expression;
+        type_statement->type_statement.enum_member->has_explicit_value = true;
+        parser_source_range_set_end(
+                &type_statement->type_statement.enum_member->range,
+                peek(parser).offset);
+        type_statement->type_statement.state = TYPE_STATEMENT_STATE_ENUM_MEMBER_DELIMITER;
+        return;
+    }
 
     if (expression_state->expression.argument_kind != EXPRESSION_ARGUMENT_NONE)
     {
@@ -2535,6 +2643,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_KEYWORD_TYPE: return S8("Keyword_Type");
         break; case TOKEN_KEYWORD_STRUCT: return S8("Keyword_Struct");
         break; case TOKEN_KEYWORD_UNION: return S8("Keyword_Union");
+        break; case TOKEN_KEYWORD_ENUM: return S8("Keyword_Enum");
         break; case TOKEN_KEYWORD_UNDEFINED: return S8("Keyword_Undefined");
         break; case TOKEN_COUNT: return S8("Token_Count(Error)");
     }
@@ -2599,6 +2708,11 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
             intrinsic->intrinsic_call.range = source_range_from_token(token);
             intrinsic->intrinsic_call.state = INTRINSIC_CALL_STATE_NAME;
             intrinsic->intrinsic_call.argument_count = 0;
+        }
+        break; case TOKEN_DOT:
+        {
+            consume(&parser->iterator);
+            parse_enum_literal(parser, token);
         }
         break; case TOKEN_LEFT_BRACKET:
         {
@@ -2707,13 +2821,15 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
         }
         break; default:
         {
+            ParserState* owner = expression_owner(parser);
             parser_diagnostic_push(
                     parser,
                     PARSER_DIAGNOSTIC_EXPECTED_EXPRESSION,
                     token,
                     TOKEN_ERROR,
                     S8("expected expression"));
-            parser->recovery = PARSER_RECOVERY_STATEMENT;
+            parser->recovery = owner->expression.is_enum_value ?
+                    PARSER_RECOVERY_DECLARATION : PARSER_RECOVERY_STATEMENT;
         }
     }
 }
@@ -2811,6 +2927,26 @@ BUSTER_GLOBAL_LOCAL void finish_pointer_dereference(Parser* restrict parser, Ext
     ParserState* owner = expression_owner(parser);
     AstNode* node = expression_emit(parser, owner, AST_NODE_DEREFERENCE);
     node->pointer_operator.range = range;
+    expression_finish_operand(parser, owner);
+}
+
+BUSTER_GLOBAL_LOCAL void finish_enum_literal(Parser* restrict parser, ExtendedToken name)
+{
+    ParserState literal = state_pop(&parser->state);
+    BUSTER_CHECK(literal.id == PARSER_STATE_ENUM_LITERAL);
+
+    ParserSourceRange range = literal.enum_literal.range;
+    parser_source_range_set_end(&range, name.offset + name.length);
+
+    ParserState* owner = expression_owner(parser);
+    AstNode* node = expression_emit(parser, owner, AST_NODE_ENUM_LITERAL);
+    node->enum_literal = (AstEnumLiteral){
+        .member = {
+            .text = get_string(parser->iterator.source, name),
+            .range = source_range_from_token(name),
+        },
+        .range = range,
+    };
     expression_finish_operand(parser, owner);
 }
 
@@ -4140,6 +4276,17 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                     parser_expected_postfix_access(&parser, token);
                 }
             }
+            break; case PARSER_STATE_ENUM_LITERAL:
+            {
+                ExtendedToken token = peek(&parser);
+                if (token.id != TOKEN_IDENTIFIER)
+                {
+                    parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
+                    continue;
+                }
+                consume(&parser.iterator);
+                finish_enum_literal(&parser, token);
+            }
             break; case PARSER_STATE_CALL:
             {
                 ParserState* call = state(&parser);
@@ -4260,6 +4407,8 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                       (st->expression.ends_at_array_delimiter &&
                                        (token.id == TOKEN_COMMA || token.id == TOKEN_RIGHT_BRACKET)) ||
                                       (st->expression.ends_at_aggregate_delimiter &&
+                                       (token.id == TOKEN_COMMA || token.id == TOKEN_RIGHT_BRACE)) ||
+                                      (st->expression.ends_at_enum_delimiter &&
                                        (token.id == TOKEN_COMMA || token.id == TOKEN_RIGHT_BRACE)) ||
                                       (st->expression.ends_at_slice_operator && token.id == TOKEN_DOUBLE_DOT) ||
                                       (st->expression.argument_kind != EXPRESSION_ARGUMENT_NONE &&
@@ -4392,6 +4541,10 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                     {
                                         parser_expected_aggregate_delimiter(&parser, token);
                                     }
+                                    else if (st->expression.ends_at_enum_delimiter)
+                                    {
+                                        parser_expected_enum_delimiter(&parser, token, true);
+                                    }
                                     else if (st->expression.argument_kind != EXPRESSION_ARGUMENT_NONE)
                                     {
                                         parser_expected_call_delimiter(&parser, token);
@@ -4480,9 +4633,13 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         {
                             declaration->kind = AST_TYPE_DECLARATION_UNION;
                         }
+                        else if (token.id == TOKEN_KEYWORD_ENUM)
+                        {
+                            declaration->kind = AST_TYPE_DECLARATION_ENUM;
+                        }
                         else
                         {
-                            parser_unexpected(&parser, token, TOKEN_KEYWORD_STRUCT);
+                            parser_expected_type_declaration_kind(&parser, token);
                             continue;
                         }
                         consume(&parser.iterator);
@@ -4509,9 +4666,19 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         else if (token.id == TOKEN_IDENTIFIER)
                         {
                             consume(&parser.iterator);
-                            type_statement->type_statement.field =
-                                    parser_type_field_push(&parser, declaration, token);
-                            type_statement->type_statement.state = TYPE_STATEMENT_STATE_FIELD_COLON;
+                            if (declaration->kind == AST_TYPE_DECLARATION_ENUM)
+                            {
+                                type_statement->type_statement.enum_member =
+                                        parser_enum_member_push(&parser, declaration, token);
+                                type_statement->type_statement.state =
+                                        TYPE_STATEMENT_STATE_ENUM_MEMBER_EQUAL_OR_DELIMITER;
+                            }
+                            else
+                            {
+                                type_statement->type_statement.field =
+                                        parser_type_field_push(&parser, declaration, token);
+                                type_statement->type_statement.state = TYPE_STATEMENT_STATE_FIELD_COLON;
+                            }
                         }
                         else
                         {
@@ -4557,6 +4724,51 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         else
                         {
                             parser_expected_type_field_delimiter(&parser, token);
+                        }
+                    }
+                    break; case TYPE_STATEMENT_STATE_ENUM_MEMBER_EQUAL_OR_DELIMITER:
+                    {
+                        if (token.id == TOKEN_EQUAL)
+                        {
+                            consume(&parser.iterator);
+                            type_statement->type_statement.state = TYPE_STATEMENT_STATE_ENUM_MEMBER_VALUE;
+                        }
+                        else if (token.id == TOKEN_COMMA)
+                        {
+                            consume(&parser.iterator);
+                            type_statement->type_statement.state = TYPE_STATEMENT_STATE_FIELD_OR_CLOSE;
+                        }
+                        else if (token.id == TOKEN_RIGHT_BRACE)
+                        {
+                            consume(&parser.iterator);
+                            parser_source_range_set_end(&declaration->range, token.offset + token.length);
+                            state_pop(&parser.state);
+                        }
+                        else
+                        {
+                            parser_expected_enum_delimiter(&parser, token, false);
+                        }
+                    }
+                    break; case TYPE_STATEMENT_STATE_ENUM_MEMBER_VALUE:
+                    {
+                        parse_enum_member_value(&parser);
+                    }
+                    break; case TYPE_STATEMENT_STATE_ENUM_MEMBER_DELIMITER:
+                    {
+                        if (token.id == TOKEN_COMMA)
+                        {
+                            consume(&parser.iterator);
+                            type_statement->type_statement.state = TYPE_STATEMENT_STATE_FIELD_OR_CLOSE;
+                        }
+                        else if (token.id == TOKEN_RIGHT_BRACE)
+                        {
+                            consume(&parser.iterator);
+                            parser_source_range_set_end(&declaration->range, token.offset + token.length);
+                            state_pop(&parser.state);
+                        }
+                        else
+                        {
+                            parser_expected_enum_delimiter(&parser, token, true);
                         }
                     }
                     break; case TYPE_STATEMENT_STATE_COUNT: BUSTER_UNREACHABLE();
@@ -4716,6 +4928,10 @@ BUSTER_GLOBAL_LOCAL String8 ast_expression_to_string(Arena* arena, AstExpression
                     break; case AST_NODE_UNDEFINED:
                     {
                         formatted = S8("undefined");
+                    }
+                    break; case AST_NODE_ENUM_LITERAL:
+                    {
+                        formatted = string_format(arena, S8(".{S8}"), node->enum_literal.member.text);
                     }
                     break; default: BUSTER_TODO();
                 }
@@ -4888,6 +5104,13 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
         .expression_code_name = S8_INITIALIZER("main"),
         .expected_code_count = 1,
         .expected_type_declaration_count = 1,
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_enum.bbb"),
+        .expected_expression = S8_INITIALIZER("result"),
+        .expression_code_name = S8_INITIALIZER("main"),
+        .expected_code_count = 1,
+        .expected_type_declaration_count = 2,
     },
     {
         .path = S8_INITIALIZER("tests/array_slices.bbb"),
@@ -5319,6 +5542,9 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
         { S8("pointer.&[0]"),        S8("(index pointer.& 0)") },
         { S8("pointer.&(value)"),    S8("(call pointer.& value)") },
         { S8("&value & mask"),       S8("(& (& value) mask)") },
+        { S8(".ready"),              S8(".ready") },
+        { S8("@cast(.ready)"),       S8("(@cast .ready)") },
+        { S8(".ready.field"),        S8(".ready.field") },
     };
 
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
@@ -5440,6 +5666,109 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
             BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
                     recovered->return_statement.expression.nodes[0].integer.value == 3);
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "type Implicit = enum { a, b, c, }\n"
+            "type Explicit = enum { a = 0, b = 1 + 2, c = 4, }\n"
+            "code main : fn () s32 { data value: Explicit = .b; return value; }\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.type_declaration_count == 2);
+
+        AstTypeDeclaration* implicit = parsed.first_type_declaration;
+        AstTypeDeclaration* explicit = implicit ? implicit->next : 0;
+        BUSTER_TEST(arguments, implicit != 0 && implicit->kind == AST_TYPE_DECLARATION_ENUM);
+        BUSTER_TEST(arguments, explicit != 0 && explicit->kind == AST_TYPE_DECLARATION_ENUM);
+        if (implicit && explicit)
+        {
+            BUSTER_STRING_TEST(arguments, implicit->name.text, S8("Implicit"));
+            BUSTER_TEST(arguments, implicit->enum_member_count == 3);
+            AstEnumMember* implicit_a = implicit->first_enum_member;
+            AstEnumMember* implicit_b = implicit_a ? implicit_a->next : 0;
+            AstEnumMember* implicit_c = implicit_b ? implicit_b->next : 0;
+            BUSTER_TEST(arguments, implicit_a != 0 && implicit_b != 0 &&
+                    implicit_c != 0 && implicit_c == implicit->last_enum_member);
+            if (implicit_a && implicit_b && implicit_c)
+            {
+                BUSTER_STRING_TEST(arguments, implicit_a->name.text, S8("a"));
+                BUSTER_STRING_TEST(arguments, implicit_b->name.text, S8("b"));
+                BUSTER_STRING_TEST(arguments, implicit_c->name.text, S8("c"));
+                BUSTER_TEST(arguments, !implicit_a->has_explicit_value);
+                BUSTER_TEST(arguments, !implicit_b->has_explicit_value);
+                BUSTER_TEST(arguments, !implicit_c->has_explicit_value);
+            }
+
+            BUSTER_STRING_TEST(arguments, explicit->name.text, S8("Explicit"));
+            BUSTER_TEST(arguments, explicit->enum_member_count == 3);
+            AstEnumMember* explicit_a = explicit->first_enum_member;
+            AstEnumMember* explicit_b = explicit_a ? explicit_a->next : 0;
+            AstEnumMember* explicit_c = explicit_b ? explicit_b->next : 0;
+            BUSTER_TEST(arguments, explicit_a != 0 && explicit_b != 0 &&
+                    explicit_c != 0 && explicit_c == explicit->last_enum_member);
+            if (explicit_a && explicit_b && explicit_c)
+            {
+                BUSTER_TEST(arguments, explicit_a->has_explicit_value);
+                BUSTER_TEST(arguments, explicit_b->has_explicit_value);
+                BUSTER_TEST(arguments, explicit_c->has_explicit_value);
+                BUSTER_TEST(arguments, explicit_a->value.count == 1 &&
+                        explicit_a->value.nodes[0].integer.value == 0);
+                BUSTER_TEST(arguments, explicit_b->value.count == 3 &&
+                        explicit_b->value.nodes[2].id == AST_NODE_BINARY_PLUS);
+                BUSTER_TEST(arguments, explicit_c->value.count == 1 &&
+                        explicit_c->value.nodes[0].integer.value == 4);
+                BUSTER_STRING_TEST(arguments,
+                        ((String8){ source.pointer + explicit_a->range.offset, explicit_a->range.length }),
+                        S8("a = 0"));
+            }
+            BUSTER_STRING_TEST(arguments,
+                    ((String8){ source.pointer + implicit->range.offset, implicit->range.length }),
+                    S8("type Implicit = enum { a, b, c, }"));
+        }
+
+        AstStatement* data = parsed.first_code ? parsed.first_code->body.first_statement : 0;
+        BUSTER_TEST(arguments, data != 0 && data->id == AST_STATEMENT_DATA);
+        if (data && data->id == AST_STATEMENT_DATA)
+        {
+            AstExpression initializer = data->data_statement.initializer;
+            BUSTER_TEST(arguments, initializer.count == 1 &&
+                    initializer.nodes[0].id == AST_NODE_ENUM_LITERAL);
+            if (initializer.count == 1 && initializer.nodes[0].id == AST_NODE_ENUM_LITERAL)
+            {
+                AstEnumLiteral literal = initializer.nodes[0].enum_literal;
+                BUSTER_STRING_TEST(arguments, literal.member.text, S8("b"));
+                BUSTER_STRING_TEST(arguments,
+                        ((String8){ source.pointer + literal.range.offset, literal.range.length }),
+                        S8(".b"));
+            }
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "type Broken = enum { a = 0 b = 1, }\n"
+            "code main : fn () s32 { return 7; }\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_EXPECTED_ENUM_DELIMITER);
+        if (parsed.first_diagnostic)
+        {
+            BUSTER_TEST(arguments, parsed.first_diagnostic->found == TOKEN_IDENTIFIER);
+            BUSTER_STRING_TEST(arguments, parsed.first_diagnostic->message,
+                    S8("expected ',' or '}' after enum value"));
+        }
+        BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.last_statement != 0);
+        if (parsed.first_code && parsed.first_code->body.last_statement)
+        {
+            AstExpression expression = parsed.first_code->body.last_statement->return_statement.expression;
+            BUSTER_TEST(arguments, expression.count == 1 && expression.nodes[0].integer.value == 7);
         }
         arena->position = position;
     }

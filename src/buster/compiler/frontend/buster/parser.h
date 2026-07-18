@@ -83,6 +83,7 @@ typedef enum TokenIdEnum
     TOKEN_KEYWORD_TYPE,
     TOKEN_KEYWORD_STRUCT,
     TOKEN_KEYWORD_UNION,
+    TOKEN_KEYWORD_ENUM,
     TOKEN_KEYWORD_UNDEFINED,
     TOKEN_COUNT,
 } TokenIdEnum;
@@ -147,6 +148,7 @@ typedef enum AstNodeId
     AST_NODE_ARRAY_SLICE,
     AST_NODE_AGGREGATE_LITERAL,
     AST_NODE_MEMBER_ACCESS,
+    AST_NODE_ENUM_LITERAL,
     AST_NODE_CALL,
     AST_NODE_INTRINSIC_CALL,
 
@@ -249,6 +251,13 @@ struct AstPointerOperator
     ParserSourceRange range;
 };
 
+typedef struct AstEnumLiteral AstEnumLiteral;
+struct AstEnumLiteral
+{
+    AstIdentifier member;
+    ParserSourceRange range;
+};
+
 typedef struct AstCall AstCall;
 struct AstCall
 {
@@ -279,6 +288,7 @@ struct AstNode
         AstAggregateLiteral aggregate_literal;
         AstMemberAccess member_access;
         AstPointerOperator pointer_operator;
+        AstEnumLiteral enum_literal;
         AstCall call;
         AstIntrinsicCall intrinsic_call;
     };
@@ -462,6 +472,7 @@ typedef enum AstTypeDeclarationKind
 {
     AST_TYPE_DECLARATION_STRUCT,
     AST_TYPE_DECLARATION_UNION,
+    AST_TYPE_DECLARATION_ENUM,
     AST_TYPE_DECLARATION_COUNT,
 } AstTypeDeclarationKind;
 
@@ -474,16 +485,31 @@ struct AstTypeField
     ParserSourceRange range;
 };
 
+typedef struct AstEnumMember AstEnumMember;
+struct AstEnumMember
+{
+    AstEnumMember* next;
+    AstIdentifier name;
+    AstExpression value;
+    ParserSourceRange range;
+    bool has_explicit_value;
+    u8 reserved[3];
+};
+
 typedef struct AstTypeDeclaration AstTypeDeclaration;
 struct AstTypeDeclaration
 {
     AstTypeDeclaration* next;
     AstTypeField* first_field;
     AstTypeField* last_field;
+    AstEnumMember* first_enum_member;
+    AstEnumMember* last_enum_member;
     AstIdentifier name;
     ParserSourceRange range;
     AstTypeDeclarationKind kind;
     u32 field_count;
+    u32 enum_member_count;
+    u32 reserved;
 };
 
 typedef struct AstCode AstCode;
@@ -510,6 +536,8 @@ typedef enum ParserDiagnosticKind
     PARSER_DIAGNOSTIC_EXPECTED_TYPE_FIELD_DELIMITER,
     PARSER_DIAGNOSTIC_EXPECTED_AGGREGATE_DELIMITER,
     PARSER_DIAGNOSTIC_EXPECTED_POSTFIX_ACCESS,
+    PARSER_DIAGNOSTIC_EXPECTED_ENUM_DELIMITER,
+    PARSER_DIAGNOSTIC_EXPECTED_TYPE_DECLARATION_KIND,
     PARSER_DIAGNOSTIC_CHAINED_RANGE,
     PARSER_DIAGNOSTIC_INVALID_INTEGER,
     PARSER_DIAGNOSTIC_EXPRESSION_TOO_DEEP,
