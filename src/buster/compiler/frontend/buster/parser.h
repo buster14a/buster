@@ -145,6 +145,7 @@ struct ParserSourceRange
 typedef enum AstNodeId
 {
     AST_NODE_CONSTANT_INTEGER,
+    AST_NODE_CONSTANT_FLOAT,
     AST_NODE_IDENTIFIER,
     AST_NODE_UNDEFINED,
     AST_NODE_ARRAY_LITERAL,
@@ -204,6 +205,15 @@ struct AstIntegerLiteral
     u64 value;
     u8 base;
     bool fits_u64;
+    u8 reserved[6];
+};
+
+typedef struct AstFloatLiteral AstFloatLiteral;
+struct AstFloatLiteral
+{
+    String8 spelling;
+    u8 base;
+    bool has_exponent;
     u8 reserved[6];
 };
 
@@ -289,6 +299,7 @@ struct AstNode
     union
     {
         AstIntegerLiteral integer;
+        AstFloatLiteral floating;
         AstIdentifier identifier;
         AstArrayLiteral array_literal;
         AstArrayIndex array_index;

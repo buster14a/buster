@@ -1877,6 +1877,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
     switch (id)
     {
         case AST_NODE_CONSTANT_INTEGER: return S8("ConstantInteger");
+        case AST_NODE_CONSTANT_FLOAT: return S8("ConstantFloat");
         case AST_NODE_UNDEFINED: return S8("Undefined");
         case AST_NODE_ARRAY_LITERAL: return S8("ArrayLiteral");
         case AST_NODE_ARRAY_INDEX: return S8("ArrayIndex");
@@ -2000,6 +2001,7 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
         case AST_NODE_ADDRESS_OF:
         case AST_NODE_DEREFERENCE:
         case AST_NODE_CONSTANT_INTEGER:
+        case AST_NODE_CONSTANT_FLOAT:
         case AST_NODE_IDENTIFIER:
         case AST_NODE_UNDEFINED:
         case AST_NODE_ARRAY_LITERAL:
@@ -2024,6 +2026,7 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNode* node)
     switch (node->id)
     {
         case AST_NODE_CONSTANT_INTEGER:
+        case AST_NODE_CONSTANT_FLOAT:
         case AST_NODE_IDENTIFIER:
         case AST_NODE_UNDEFINED:
         case AST_NODE_ENUM_LITERAL:
@@ -2127,6 +2130,7 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_ARRAY_INDEX: return S8("index");
 
         case AST_NODE_CONSTANT_INTEGER:
+        case AST_NODE_CONSTANT_FLOAT:
         case AST_NODE_IDENTIFIER:
         case AST_NODE_UNDEFINED:
         case AST_NODE_ARRAY_LITERAL:
@@ -2830,6 +2834,26 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
                 .value = number_parsing.value,
                 .base = number_parsing.base,
                 .fits_u64 = number_parsing.fits_u64,
+            };
+
+            expression_finish_operand(parser, owner);
+        }
+        break;
+        case TOKEN_DECIMAL_FLOAT_LITERAL:
+        case TOKEN_DECIMAL_FLOAT_LITERAL_EXPONENT:
+        case TOKEN_HEXADECIMAL_FLOAT_LITERAL:
+        case TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT:
+        {
+            consume(&parser->iterator);
+
+            ParserState* owner = expression_owner(parser);
+            AstNode* leaf = expression_emit(parser, owner, AST_NODE_CONSTANT_FLOAT);
+            leaf->floating = (AstFloatLiteral){
+                .spelling = get_string(parser->iterator.source, token),
+                .base = (token.id == TOKEN_HEXADECIMAL_FLOAT_LITERAL ||
+                         token.id == TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT) ? 16 : 10,
+                .has_exponent = token.id == TOKEN_DECIMAL_FLOAT_LITERAL_EXPONENT ||
+                                token.id == TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT,
             };
 
             expression_finish_operand(parser, owner);
@@ -4967,6 +4991,10 @@ BUSTER_GLOBAL_LOCAL String8 ast_expression_to_string(Arena* arena, AstExpression
                     {
                         formatted = node->integer.fits_u64 ? string_format(arena, S8("{u64}"), node->integer.value) : node->integer.spelling;
                     }
+                    break; case AST_NODE_CONSTANT_FLOAT:
+                    {
+                        formatted = node->floating.spelling;
+                    }
                     break; case AST_NODE_IDENTIFIER:
                     {
                         formatted = node->identifier.text;
@@ -5038,6 +5066,10 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
     {
         .path = S8_INITIALIZER("tests/basic_binary_literal.bbb"),
         .expected_expression = S8_INITIALIZER("0")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_float.bbb"),
+        .expected_expression = S8_INITIALIZER("(@cast f)")
     },
     {
         .path = S8_INITIALIZER("tests/basic_unary_minus.bbb"),
@@ -5358,6 +5390,32 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
     }
 
     {
+        String8 spellings[] = {
+            S8("0.0"),
+            S8("1.0e+3"),
+            S8("0x1.f"),
+            S8("0x1.fp-2"),
+        };
+        TokenId tokens[] = {
+            TOKEN_DECIMAL_FLOAT_LITERAL,
+            TOKEN_DECIMAL_FLOAT_LITERAL_EXPONENT,
+            TOKEN_HEXADECIMAL_FLOAT_LITERAL,
+            TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT,
+        };
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(spellings) == BUSTER_ARRAY_LENGTH(tokens));
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
+        {
+            TokenizerResult tokenizer = tokenize(arena, spellings[i].pointer, spellings[i].length);
+            BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, spellings[i].length));
+            BUSTER_TEST(arguments, tokenizer.error_count == 0);
+            BUSTER_TEST(arguments, tokenizer.token_count == 2);
+            BUSTER_TEST(arguments, tokenizer.tokens[0].id == tokens[i]);
+            BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[0]) == spellings[i].length);
+            arena->position = position;
+        }
+    }
+
+    {
         char8 source[] = { '1', '+', '2' };
         TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
         BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source)));
@@ -5544,6 +5602,11 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
     BUSTER_CHECK(expression_arena);
 
     struct { String8 source; String8 expected; } cases[] = {
+        { S8("0.0"),                 S8("0.0") },
+        { S8("1.5 + 2.25"),          S8("(+ 1.5 2.25)") },
+        { S8("1.0e-3"),              S8("1.0e-3") },
+        { S8("0x1.fp+3"),            S8("0x1.fp+3") },
+        { S8("-0.5"),                S8("(neg 0.5)") },
         { S8("1 + 2 * 3"),           S8("(+ 1 (* 2 3))") },
         { S8("1+2"),                 S8("(+ 1 2)") },
         { S8("1 * 2 + 3"),           S8("(+ (* 1 2) 3)") },
@@ -5661,6 +5724,54 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     Arena* expression_arena = arena_create((ArenaCreation){0});
     BUSTER_CHECK(expression_arena);
     u64 position = arena->position;
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 {\n"
+            "    data decimal = 1.25;\n"
+            "    data scientific = 1.0e-3;\n"
+            "    data hexadecimal = 0x1.fp+2;\n"
+            "    return decimal;\n"
+            "}\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.statement_count == 4);
+
+        AstStatement* decimal = parsed.first_code ? parsed.first_code->body.first_statement : 0;
+        AstStatement* scientific = decimal ? decimal->next : 0;
+        AstStatement* hexadecimal = scientific ? scientific->next : 0;
+        BUSTER_TEST(arguments, decimal != 0 && decimal->id == AST_STATEMENT_DATA);
+        BUSTER_TEST(arguments, scientific != 0 && scientific->id == AST_STATEMENT_DATA);
+        BUSTER_TEST(arguments, hexadecimal != 0 && hexadecimal->id == AST_STATEMENT_DATA);
+        if (decimal && scientific && hexadecimal)
+        {
+            AstExpression decimal_value = decimal->data_statement.initializer;
+            AstExpression scientific_value = scientific->data_statement.initializer;
+            AstExpression hexadecimal_value = hexadecimal->data_statement.initializer;
+            BUSTER_TEST(arguments, decimal_value.count == 1 &&
+                    decimal_value.nodes[0].id == AST_NODE_CONSTANT_FLOAT);
+            BUSTER_TEST(arguments, scientific_value.count == 1 &&
+                    scientific_value.nodes[0].id == AST_NODE_CONSTANT_FLOAT);
+            BUSTER_TEST(arguments, hexadecimal_value.count == 1 &&
+                    hexadecimal_value.nodes[0].id == AST_NODE_CONSTANT_FLOAT);
+            if (decimal_value.count == 1 && scientific_value.count == 1 &&
+                hexadecimal_value.count == 1)
+            {
+                AstFloatLiteral decimal_literal = decimal_value.nodes[0].floating;
+                AstFloatLiteral scientific_literal = scientific_value.nodes[0].floating;
+                AstFloatLiteral hexadecimal_literal = hexadecimal_value.nodes[0].floating;
+                BUSTER_STRING_TEST(arguments, decimal_literal.spelling, S8("1.25"));
+                BUSTER_STRING_TEST(arguments, scientific_literal.spelling, S8("1.0e-3"));
+                BUSTER_STRING_TEST(arguments, hexadecimal_literal.spelling, S8("0x1.fp+2"));
+                BUSTER_TEST(arguments, decimal_literal.base == 10 && !decimal_literal.has_exponent);
+                BUSTER_TEST(arguments, scientific_literal.base == 10 && scientific_literal.has_exponent);
+                BUSTER_TEST(arguments, hexadecimal_literal.base == 16 && hexadecimal_literal.has_exponent);
+            }
+        }
+        arena->position = position;
+    }
 
     {
         String8 source = S8(
