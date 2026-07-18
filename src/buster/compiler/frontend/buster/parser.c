@@ -238,6 +238,12 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                 }
 
                 String8 identifier = string_from_pointer_length(start, (u64)(it - start));
+                if (it < top && *it == '?' &&
+                    (string_equal(identifier, S8("and")) || string_equal(identifier, S8("or"))))
+                {
+                    it += 1;
+                    identifier.length += 1;
+                }
 
                 BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
                     [TOKEN_KEYWORD_FUNCTION - first_keyword] = S8_INITIALIZER("fn"),
@@ -253,6 +259,10 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     [TOKEN_KEYWORD_STRUCT - first_keyword] = S8_INITIALIZER("struct"),
                     [TOKEN_KEYWORD_UNION - first_keyword] = S8_INITIALIZER("union"),
                     [TOKEN_KEYWORD_ENUM - first_keyword] = S8_INITIALIZER("enum"),
+                    [TOKEN_KEYWORD_AND - first_keyword] = S8_INITIALIZER("and"),
+                    [TOKEN_KEYWORD_OR - first_keyword] = S8_INITIALIZER("or"),
+                    [TOKEN_KEYWORD_AND_SHORT_CIRCUIT - first_keyword] = S8_INITIALIZER("and?"),
+                    [TOKEN_KEYWORD_OR_SHORT_CIRCUIT - first_keyword] = S8_INITIALIZER("or?"),
                     [TOKEN_KEYWORD_UNDEFINED - first_keyword] = S8_INITIALIZER("undefined"),
                 };
 
@@ -851,6 +861,8 @@ typedef enum ExpressionArgumentKind
 typedef enum BindingPower
 {
     BINDING_POWER_RANGE,
+    BINDING_POWER_BOOLEAN_OR,
+    BINDING_POWER_BOOLEAN_AND,
     BINDING_POWER_BITWISE,
     BINDING_POWER_EQUALITY,
     BINDING_POWER_RELATIONAL,
@@ -1896,6 +1908,10 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
         case AST_NODE_BINARY_AMPERSAND: return S8("BinaryAmpersand");
         case AST_NODE_BINARY_BAR: return S8("BinaryBar");
         case AST_NODE_BINARY_CARET: return S8("BinaryCaret");
+        case AST_NODE_BINARY_BOOLEAN_AND: return S8("BinaryBooleanAnd");
+        case AST_NODE_BINARY_BOOLEAN_OR: return S8("BinaryBooleanOr");
+        case AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT: return S8("BinaryBooleanAndShortCircuit");
+        case AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT: return S8("BinaryBooleanOrShortCircuit");
         case AST_NODE_BINARY_RANGE: return S8("BinaryRange");
         case AST_NODE_IDENTIFIER: return S8("Identifier");
         case AST_NODE_COUNT: {}
@@ -1931,6 +1947,16 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
         case AST_NODE_BINARY_RANGE:
         {
             return BINDING_POWER_RANGE;
+        }
+        case AST_NODE_BINARY_BOOLEAN_OR:
+        case AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT:
+        {
+            return BINDING_POWER_BOOLEAN_OR;
+        }
+        case AST_NODE_BINARY_BOOLEAN_AND:
+        case AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT:
+        {
+            return BINDING_POWER_BOOLEAN_AND;
         }
         case AST_NODE_BINARY_AMPERSAND:
         case AST_NODE_BINARY_BAR:
@@ -2050,6 +2076,10 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNode* node)
         case AST_NODE_BINARY_AMPERSAND:
         case AST_NODE_BINARY_BAR:
         case AST_NODE_BINARY_CARET:
+        case AST_NODE_BINARY_BOOLEAN_AND:
+        case AST_NODE_BINARY_BOOLEAN_OR:
+        case AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT:
+        case AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT:
         case AST_NODE_BINARY_RANGE:
         case AST_NODE_ARRAY_INDEX:
         {
@@ -2089,6 +2119,10 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_BINARY_AMPERSAND: return S8("&");
         case AST_NODE_BINARY_BAR: return S8("|");
         case AST_NODE_BINARY_CARET: return S8("^");
+        case AST_NODE_BINARY_BOOLEAN_AND: return S8("and");
+        case AST_NODE_BINARY_BOOLEAN_OR: return S8("or");
+        case AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT: return S8("and?");
+        case AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT: return S8("or?");
         case AST_NODE_BINARY_RANGE: return S8("range");
         case AST_NODE_ARRAY_INDEX: return S8("index");
 
@@ -2644,6 +2678,10 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_KEYWORD_STRUCT: return S8("Keyword_Struct");
         break; case TOKEN_KEYWORD_UNION: return S8("Keyword_Union");
         break; case TOKEN_KEYWORD_ENUM: return S8("Keyword_Enum");
+        break; case TOKEN_KEYWORD_AND: return S8("Keyword_And");
+        break; case TOKEN_KEYWORD_OR: return S8("Keyword_Or");
+        break; case TOKEN_KEYWORD_AND_SHORT_CIRCUIT: return S8("Keyword_AndShortCircuit");
+        break; case TOKEN_KEYWORD_OR_SHORT_CIRCUIT: return S8("Keyword_OrShortCircuit");
         break; case TOKEN_KEYWORD_UNDEFINED: return S8("Keyword_Undefined");
         break; case TOKEN_COUNT: return S8("Token_Count(Error)");
     }
@@ -4445,6 +4483,10 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                 case TOKEN_BAR:
                                 case TOKEN_AMPERSAND:
                                 case TOKEN_CARET:
+                                case TOKEN_KEYWORD_AND:
+                                case TOKEN_KEYWORD_OR:
+                                case TOKEN_KEYWORD_AND_SHORT_CIRCUIT:
+                                case TOKEN_KEYWORD_OR_SHORT_CIRCUIT:
                                 case TOKEN_DOUBLE_DOT:
                                 {
                                     if (token.id == TOKEN_DOUBLE_DOT &&
@@ -4491,6 +4533,10 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                         break; case TOKEN_AMPERSAND: binary_node_id = AST_NODE_BINARY_AMPERSAND;
                                         break; case TOKEN_BAR: binary_node_id = AST_NODE_BINARY_BAR;
                                         break; case TOKEN_CARET: binary_node_id = AST_NODE_BINARY_CARET;
+                                        break; case TOKEN_KEYWORD_AND: binary_node_id = AST_NODE_BINARY_BOOLEAN_AND;
+                                        break; case TOKEN_KEYWORD_OR: binary_node_id = AST_NODE_BINARY_BOOLEAN_OR;
+                                        break; case TOKEN_KEYWORD_AND_SHORT_CIRCUIT: binary_node_id = AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT;
+                                        break; case TOKEN_KEYWORD_OR_SHORT_CIRCUIT: binary_node_id = AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT;
                                         break; case TOKEN_DOUBLE_DOT: binary_node_id = AST_NODE_BINARY_RANGE;
                                         break; default: BUSTER_TODO_TOKEN(token.id);
                                     }
@@ -5042,6 +5088,10 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
         .expected_expression = S8_INITIALIZER("(^ 1 1)")
     },
     {
+        .path = S8_INITIALIZER("tests/basic_boolean_operators.bbb"),
+        .expected_expression = S8_INITIALIZER("(or? (or (and (== 0 0) (< 1 2)) (and? (== 2 2) (!= 3 4))) (<= 4 5))")
+    },
+    {
         .path = S8_INITIALIZER("tests/basic_integer_literal_compare.bbb"),
         .expected_expression = S8_INITIALIZER("(!= (== (< 1 2) 3) (> (>= (<= 4 5) 6) 7))")
     },
@@ -5331,6 +5381,40 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
         arena->position = position;
     }
 
+    {
+        String8 spellings[] = { S8("and"), S8("or"), S8("and?"), S8("or?") };
+        TokenId tokens[] = {
+            TOKEN_KEYWORD_AND,
+            TOKEN_KEYWORD_OR,
+            TOKEN_KEYWORD_AND_SHORT_CIRCUIT,
+            TOKEN_KEYWORD_OR_SHORT_CIRCUIT,
+        };
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(spellings) == BUSTER_ARRAY_LENGTH(tokens));
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
+        {
+            TokenizerResult tokenizer = tokenize(arena, spellings[i].pointer, spellings[i].length);
+            BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, spellings[i].length));
+            BUSTER_TEST(arguments, tokenizer.error_count == 0);
+            BUSTER_TEST(arguments, tokenizer.token_count == 2);
+            BUSTER_TEST(arguments, tokenizer.tokens[0].id == tokens[i]);
+            BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[0]) == spellings[i].length);
+            arena->position = position;
+        }
+    }
+
+    {
+        String8 source = S8("android orderly candy oracle");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, source.length));
+        BUSTER_TEST(arguments, tokenizer.error_count == 0);
+        BUSTER_TEST(arguments, tokenizer.token_count == 8);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_IDENTIFIER);
+        BUSTER_TEST(arguments, tokenizer.tokens[2].id == TOKEN_IDENTIFIER);
+        BUSTER_TEST(arguments, tokenizer.tokens[4].id == TOKEN_IDENTIFIER);
+        BUSTER_TEST(arguments, tokenizer.tokens[6].id == TOKEN_IDENTIFIER);
+        arena->position = position;
+    }
+
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(assignment_operator_test_cases); i += 1)
     {
         AssignmentOperatorTestCase test_case = assignment_operator_test_cases[i];
@@ -5488,6 +5572,15 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
         { S8("value + 1 < limit << 2"), S8("(< (+ value 1) (<< limit 2))") },
         { S8("flags & mask == 3"),   S8("(& flags (== mask 3))") },
         { S8("a | b ^ 1"),           S8("(^ (| a b) 1)") },
+        { S8("a and b"),             S8("(and a b)") },
+        { S8("a or b"),              S8("(or a b)") },
+        { S8("a and? b"),            S8("(and? a b)") },
+        { S8("a or? b"),             S8("(or? a b)") },
+        { S8("a or b and c"),        S8("(or a (and b c))") },
+        { S8("a or? b and? c"),      S8("(or? a (and? b c))") },
+        { S8("a and b & c == d"),    S8("(and a (& b (== c d)))") },
+        { S8("a and b or? c or d and? e"), S8("(or (or? (and a b) c) (and? d e))") },
+        { S8("a .. b or c"),         S8("(range a (or b c))") },
         { S8("(value + 2) * count"), S8("(* (+ value 2) count)") },
         { S8("value * (count + 3)"), S8("(* value (+ count 3))") },
         { S8("(a + b) * (c - 2)"),   S8("(* (+ a b) (- c 2))") },
@@ -5568,6 +5661,31 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     Arena* expression_arena = arena_create((ArenaCreation){0});
     BUSTER_CHECK(expression_arena);
     u64 position = arena->position;
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 {\n"
+            "    data invalid = left and?;\n"
+            "    return 3;\n"
+            "}\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_EXPECTED_EXPRESSION);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->found == TOKEN_SEMICOLON);
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.last_statement != 0);
+        if (parsed.first_code && parsed.first_code->body.last_statement)
+        {
+            AstStatement* recovered = parsed.first_code->body.last_statement;
+            BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
+            BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
+                    recovered->return_statement.expression.nodes[0].integer.value == 3);
+        }
+        arena->position = position;
+    }
 
     {
         String8 source = S8(
