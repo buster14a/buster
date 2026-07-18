@@ -155,6 +155,8 @@ typedef enum AstNodeId
     AST_NODE_UNARY_PLUS,
     AST_NODE_UNARY_LOGICAL_NOT,
     AST_NODE_UNARY_BITWISE_NOT,
+    AST_NODE_ADDRESS_OF,
+    AST_NODE_DEREFERENCE,
 
     // Binary operations
     AST_NODE_BINARY_PLUS,
@@ -241,6 +243,12 @@ struct AstMemberAccess
     ParserSourceRange range;
 };
 
+typedef struct AstPointerOperator AstPointerOperator;
+struct AstPointerOperator
+{
+    ParserSourceRange range;
+};
+
 typedef struct AstCall AstCall;
 struct AstCall
 {
@@ -270,6 +278,7 @@ struct AstNode
         AstArraySlice array_slice;
         AstAggregateLiteral aggregate_literal;
         AstMemberAccess member_access;
+        AstPointerOperator pointer_operator;
         AstCall call;
         AstIntrinsicCall intrinsic_call;
     };
@@ -500,6 +509,7 @@ typedef enum ParserDiagnosticKind
     PARSER_DIAGNOSTIC_EXPECTED_CALL_DELIMITER,
     PARSER_DIAGNOSTIC_EXPECTED_TYPE_FIELD_DELIMITER,
     PARSER_DIAGNOSTIC_EXPECTED_AGGREGATE_DELIMITER,
+    PARSER_DIAGNOSTIC_EXPECTED_POSTFIX_ACCESS,
     PARSER_DIAGNOSTIC_CHAINED_RANGE,
     PARSER_DIAGNOSTIC_INVALID_INTEGER,
     PARSER_DIAGNOSTIC_EXPRESSION_TOO_DEEP,

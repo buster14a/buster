@@ -992,13 +992,14 @@ struct ParserState
             u32 argument_count;
         } intrinsic_call;
 
-        // One pending prefix unary operator (`-`, `+`, `!`, `~`). A run of
+        // One pending prefix unary operator (`-`, `+`, `!`, `~`, `&`). A run of
         // prefix operators is a run of these frames on the state stack, popped
         // innermost-first once the operand has been emitted. The id is an
         // AstNodeId stored as u8 because that enum is declared later.
         struct
         {
             u8 id;
+            ParserSourceRange range;
         } unary_prefix;
     };
 };
@@ -1366,6 +1367,17 @@ BUSTER_GLOBAL_LOCAL void parser_expected_aggregate_delimiter(Parser* parser, Ext
             token,
             TOKEN_ERROR,
             S8("expected ',' or '}' after aggregate field"));
+    parser->recovery = PARSER_RECOVERY_STATEMENT;
+}
+
+BUSTER_GLOBAL_LOCAL void parser_expected_postfix_access(Parser* parser, ExtendedToken token)
+{
+    parser_diagnostic_push(
+            parser,
+            PARSER_DIAGNOSTIC_EXPECTED_POSTFIX_ACCESS,
+            token,
+            TOKEN_ERROR,
+            S8("expected member name or '&' after '.'"));
     parser->recovery = PARSER_RECOVERY_STATEMENT;
 }
 
@@ -1798,6 +1810,8 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
         case AST_NODE_UNARY_PLUS: return S8("UnaryPlus");
         case AST_NODE_UNARY_LOGICAL_NOT: return S8("UnaryLogicalNot");
         case AST_NODE_UNARY_BITWISE_NOT: return S8("UnaryBitwiseNot");
+        case AST_NODE_ADDRESS_OF: return S8("AddressOf");
+        case AST_NODE_DEREFERENCE: return S8("Dereference");
         case AST_NODE_BINARY_PLUS: return S8("BinaryPlus");
         case AST_NODE_BINARY_MINUS: return S8("BinaryMinus");
         case AST_NODE_BINARY_ASTERISK: return S8("BinaryAsterisk");
@@ -1889,6 +1903,8 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
         case AST_NODE_UNARY_PLUS:
         case AST_NODE_UNARY_LOGICAL_NOT:
         case AST_NODE_UNARY_BITWISE_NOT:
+        case AST_NODE_ADDRESS_OF:
+        case AST_NODE_DEREFERENCE:
         case AST_NODE_CONSTANT_INTEGER:
         case AST_NODE_IDENTIFIER:
         case AST_NODE_UNDEFINED:
@@ -1942,6 +1958,8 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNode* node)
         case AST_NODE_UNARY_PLUS:
         case AST_NODE_UNARY_LOGICAL_NOT:
         case AST_NODE_UNARY_BITWISE_NOT:
+        case AST_NODE_ADDRESS_OF:
+        case AST_NODE_DEREFERENCE:
         case AST_NODE_MEMBER_ACCESS:
         {
             return 1;
@@ -1983,6 +2001,8 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_UNARY_PLUS: return S8("pos");
         case AST_NODE_UNARY_LOGICAL_NOT: return S8("not");
         case AST_NODE_UNARY_BITWISE_NOT: return S8("bit_not");
+        case AST_NODE_ADDRESS_OF: return S8("&");
+        case AST_NODE_DEREFERENCE: return S8("deref");
         case AST_NODE_BINARY_PLUS: return S8("+");
         case AST_NODE_BINARY_MINUS: return S8("-");
         case AST_NODE_BINARY_ASTERISK: return S8("*");
@@ -2552,7 +2572,12 @@ BUSTER_GLOBAL_LOCAL void expression_finish_prefix_unaries(Parser* restrict parse
     while (state(parser)->id == PARSER_STATE_UNARY_PREFIX)
     {
         ParserState unary_frame = state_pop(&parser->state);
-        expression_emit(parser, owner, (AstNodeId)unary_frame.unary_prefix.id);
+        AstNodeId id = (AstNodeId)unary_frame.unary_prefix.id;
+        AstNode* node = expression_emit(parser, owner, id);
+        if (id == AST_NODE_ADDRESS_OF)
+        {
+            node->pointer_operator.range = unary_frame.unary_prefix.range;
+        }
     }
     BUSTER_CHECK(state(parser) == owner);
 }
@@ -2662,6 +2687,7 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
         case TOKEN_PLUS:
         case TOKEN_BANG:
         case TOKEN_TILDE:
+        case TOKEN_AMPERSAND:
         {
             consume(&parser->iterator);
             AstNodeId unary_id;
@@ -2671,11 +2697,13 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
                 break; case TOKEN_PLUS: unary_id = AST_NODE_UNARY_PLUS;
                 break; case TOKEN_BANG: unary_id = AST_NODE_UNARY_LOGICAL_NOT;
                 break; case TOKEN_TILDE: unary_id = AST_NODE_UNARY_BITWISE_NOT;
+                break; case TOKEN_AMPERSAND: unary_id = AST_NODE_ADDRESS_OF;
                 break; default: BUSTER_TODO_TOKEN(token.id);
             }
             ParserState* unary_state = state_push(&parser->state);
             unary_state->id = PARSER_STATE_UNARY_PREFIX;
             unary_state->unary_prefix.id = (u8)unary_id;
+            unary_state->unary_prefix.range = source_range_from_token(token);
         }
         break; default:
         {
@@ -2769,6 +2797,20 @@ BUSTER_GLOBAL_LOCAL void finish_member_access(Parser* restrict parser, ExtendedT
         },
         .range = range,
     };
+    expression_finish_operand(parser, owner);
+}
+
+BUSTER_GLOBAL_LOCAL void finish_pointer_dereference(Parser* restrict parser, ExtendedToken ampersand)
+{
+    ParserState member = state_pop(&parser->state);
+    BUSTER_CHECK(member.id == PARSER_STATE_MEMBER_ACCESS);
+
+    ParserSourceRange range = member.member_access.range;
+    parser_source_range_set_end(&range, ampersand.offset + ampersand.length);
+
+    ParserState* owner = expression_owner(parser);
+    AstNode* node = expression_emit(parser, owner, AST_NODE_DEREFERENCE);
+    node->pointer_operator.range = range;
     expression_finish_operand(parser, owner);
 }
 
@@ -4083,13 +4125,20 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
             break; case PARSER_STATE_MEMBER_ACCESS:
             {
                 ExtendedToken token = peek(&parser);
-                if (token.id != TOKEN_IDENTIFIER)
+                if (token.id == TOKEN_AMPERSAND)
                 {
-                    parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
-                    continue;
+                    consume(&parser.iterator);
+                    finish_pointer_dereference(&parser, token);
                 }
-                consume(&parser.iterator);
-                finish_member_access(&parser, token);
+                else if (token.id == TOKEN_IDENTIFIER)
+                {
+                    consume(&parser.iterator);
+                    finish_member_access(&parser, token);
+                }
+                else
+                {
+                    parser_expected_postfix_access(&parser, token);
+                }
             }
             break; case PARSER_STATE_CALL:
             {
@@ -4611,6 +4660,13 @@ BUSTER_GLOBAL_LOCAL String8 ast_expression_to_string(Arena* arena, AstExpression
             top -= 1;
             formatted = string_format(arena, S8("{S8}.{S8}"), operand, node->member_access.member.text);
         }
+        else if (node->id == AST_NODE_DEREFERENCE)
+        {
+            BUSTER_CHECK(top >= 1);
+            String8 operand = stack[top - 1];
+            top -= 1;
+            formatted = string_format(arena, S8("{S8}.&"), operand);
+        }
         else if (node->id == AST_NODE_ARRAY_LITERAL)
         {
             BUSTER_CHECK(top >= arity);
@@ -4796,6 +4852,10 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
     {
         .path = S8_INITIALIZER("tests/basic_assignment.bbb"),
         .expected_expression = S8_INITIALIZER("result")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_pointer.bbb"),
+        .expected_expression = S8_INITIALIZER("p.&")
     },
     {
         .path = S8_INITIALIZER("tests/basic_if_else.bbb"),
@@ -5251,6 +5311,14 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
         { S8("values[0].field"),     S8("(index values 0).field") },
         { S8("object.method(1)"),    S8("(call object.method 1)") },
         { S8("{ .value = 1 }.value"), S8("{.value = 1}.value") },
+        { S8("&value"),              S8("(& value)") },
+        { S8("pointer.&"),           S8("pointer.&") },
+        { S8("pointer.&.&"),         S8("pointer.&.&") },
+        { S8("&pointer.&"),          S8("(& pointer.&)") },
+        { S8("pointer.&.field"),     S8("pointer.&.field") },
+        { S8("pointer.&[0]"),        S8("(index pointer.& 0)") },
+        { S8("pointer.&(value)"),    S8("(call pointer.& value)") },
+        { S8("&value & mask"),       S8("(& (& value) mask)") },
     };
 
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
@@ -5274,6 +5342,107 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     Arena* expression_arena = arena_create((ArenaCreation){0});
     BUSTER_CHECK(expression_arena);
     u64 position = arena->position;
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 {\n"
+            "    data number: s32 = 1;\n"
+            "    data p: &s32 = &number;\n"
+            "    p.& = 0;\n"
+            "    return p.&;\n"
+            "}\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.statement_count == 4);
+
+        AstStatement* number = parsed.first_code ? parsed.first_code->body.first_statement : 0;
+        AstStatement* pointer = number ? number->next : 0;
+        AstStatement* assignment = pointer ? pointer->next : 0;
+        AstStatement* return_statement = assignment ? assignment->next : 0;
+        BUSTER_TEST(arguments, number != 0 && number->id == AST_STATEMENT_DATA);
+        BUSTER_TEST(arguments, pointer != 0 && pointer->id == AST_STATEMENT_DATA);
+        BUSTER_TEST(arguments, assignment != 0 && assignment->id == AST_STATEMENT_ASSIGNMENT);
+        BUSTER_TEST(arguments, return_statement != 0 && return_statement->id == AST_STATEMENT_RETURN);
+
+        if (pointer && pointer->id == AST_STATEMENT_DATA)
+        {
+            AstType* pointer_type = pointer->data_statement.type;
+            BUSTER_TEST(arguments, pointer_type != 0 && pointer_type->id == AST_TYPE_POINTER);
+            if (pointer_type && pointer_type->id == AST_TYPE_POINTER)
+            {
+                BUSTER_STRING_TEST(arguments,
+                        ((String8){ source.pointer + pointer_type->range.offset, pointer_type->range.length }),
+                        S8("&s32"));
+                BUSTER_TEST(arguments, pointer_type->element_type != 0 &&
+                        pointer_type->element_type->id == AST_TYPE_NAMED);
+            }
+
+            AstExpression initializer = pointer->data_statement.initializer;
+            BUSTER_TEST(arguments, initializer.count == 2);
+            if (initializer.count == 2)
+            {
+                BUSTER_TEST(arguments, initializer.nodes[0].id == AST_NODE_IDENTIFIER);
+                BUSTER_TEST(arguments, initializer.nodes[1].id == AST_NODE_ADDRESS_OF);
+                BUSTER_STRING_TEST(arguments, initializer.nodes[0].identifier.text, S8("number"));
+                BUSTER_STRING_TEST(arguments,
+                        ((String8){ source.pointer + initializer.nodes[1].pointer_operator.range.offset,
+                                   initializer.nodes[1].pointer_operator.range.length }),
+                        S8("&"));
+            }
+        }
+
+        if (assignment && assignment->id == AST_STATEMENT_ASSIGNMENT)
+        {
+            AstExpression target = assignment->assignment_statement.target;
+            BUSTER_TEST(arguments, target.count == 2);
+            if (target.count == 2)
+            {
+                BUSTER_TEST(arguments, target.nodes[0].id == AST_NODE_IDENTIFIER);
+                BUSTER_TEST(arguments, target.nodes[1].id == AST_NODE_DEREFERENCE);
+                BUSTER_STRING_TEST(arguments,
+                        ((String8){ source.pointer + target.nodes[1].pointer_operator.range.offset,
+                                   target.nodes[1].pointer_operator.range.length }),
+                        S8(".&"));
+            }
+        }
+
+        if (return_statement && return_statement->id == AST_STATEMENT_RETURN)
+        {
+            AstExpression expression = return_statement->return_statement.expression;
+            BUSTER_TEST(arguments, expression.count == 2);
+            if (expression.count == 2)
+            {
+                BUSTER_TEST(arguments, expression.nodes[0].id == AST_NODE_IDENTIFIER);
+                BUSTER_TEST(arguments, expression.nodes[1].id == AST_NODE_DEREFERENCE);
+            }
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8("code main : fn () s32 { data value = pointer.; return 3; }");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_EXPECTED_POSTFIX_ACCESS);
+        if (parsed.first_diagnostic)
+        {
+            BUSTER_TEST(arguments, parsed.first_diagnostic->found == TOKEN_SEMICOLON);
+            BUSTER_STRING_TEST(arguments, parsed.first_diagnostic->message,
+                    S8("expected member name or '&' after '.'"));
+        }
+        BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.last_statement != 0);
+        if (parsed.first_code && parsed.first_code->body.last_statement)
+        {
+            AstStatement* recovered = parsed.first_code->body.last_statement;
+            BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
+            BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
+                    recovered->return_statement.expression.nodes[0].integer.value == 3);
+        }
+        arena->position = position;
+    }
 
     {
         String8 source = S8(
