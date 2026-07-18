@@ -70,12 +70,14 @@ typedef enum TokenIdEnum
     TOKEN_CARET,
     TOKEN_CARET_EQUAL,
     TOKEN_TILDE,
+    TOKEN_AT,
     TOKEN_KEYWORD_RETURN,
     TOKEN_KEYWORD_IF,
     TOKEN_KEYWORD_ELSE,
     TOKEN_KEYWORD_FUNCTION,
     TOKEN_KEYWORD_FOR,
     TOKEN_KEYWORD_WHILE,
+    TOKEN_KEYWORD_LOOP,
     TOKEN_KEYWORD_CODE,
     TOKEN_KEYWORD_DATA,
     TOKEN_KEYWORD_TYPE,
@@ -143,6 +145,7 @@ typedef enum AstNodeId
     AST_NODE_ARRAY_LITERAL,
     AST_NODE_ARRAY_INDEX,
     AST_NODE_ARRAY_SLICE,
+    AST_NODE_INTRINSIC_CALL,
 
     // Unary operations
     AST_NODE_UNARY_MINUS,
@@ -167,6 +170,7 @@ typedef enum AstNodeId
     AST_NODE_BINARY_AMPERSAND,
     AST_NODE_BINARY_BAR,
     AST_NODE_BINARY_CARET,
+    AST_NODE_BINARY_RANGE,
 
     AST_NODE_COUNT,
 } AstNodeId;
@@ -210,6 +214,14 @@ struct AstArraySlice
     u8 reserved[2];
 };
 
+typedef struct AstIntrinsicCall AstIntrinsicCall;
+struct AstIntrinsicCall
+{
+    AstIdentifier name;
+    ParserSourceRange range;
+    u32 argument_count;
+};
+
 typedef struct AstType AstType;
 typedef struct AstNode AstNode;
 
@@ -223,6 +235,7 @@ struct AstNode
         AstArrayLiteral array_literal;
         AstArrayIndex array_index;
         AstArraySlice array_slice;
+        AstIntrinsicCall intrinsic_call;
     };
 };
 
@@ -252,6 +265,7 @@ typedef enum AstStatementId
     AST_STATEMENT_ASSIGNMENT,
     AST_STATEMENT_IF,
     AST_STATEMENT_FOR,
+    AST_STATEMENT_LOOP,
     AST_STATEMENT_COUNT,
 } AstStatementId;
 
@@ -312,6 +326,15 @@ struct AstForStatement
     AstBlock body;
 };
 
+typedef struct AstLoopStatement AstLoopStatement;
+struct AstLoopStatement
+{
+    AstExpression condition;
+    AstBlock body;
+    bool has_condition;
+    u8 reserved[7];
+};
+
 struct AstStatement
 {
     AstStatement* next;
@@ -324,6 +347,7 @@ struct AstStatement
         AstAssignmentStatement assignment_statement;
         AstIfStatement if_statement;
         AstForStatement for_statement;
+        AstLoopStatement loop_statement;
     };
 };
 
@@ -401,6 +425,7 @@ typedef enum ParserDiagnosticKind
     PARSER_DIAGNOSTIC_EXPECTED_EXPRESSION,
     PARSER_DIAGNOSTIC_EXPECTED_ASSIGNMENT_OPERATOR,
     PARSER_DIAGNOSTIC_EXPECTED_ARRAY_DELIMITER,
+    PARSER_DIAGNOSTIC_CHAINED_RANGE,
     PARSER_DIAGNOSTIC_INVALID_INTEGER,
     PARSER_DIAGNOSTIC_EXPRESSION_TOO_DEEP,
     PARSER_DIAGNOSTIC_COUNT,

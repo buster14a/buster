@@ -1,16 +1,15 @@
 code main[export] : fn [cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32
 {
-    data values: [2]s32 = [ 1, 2 ];
     data total: s32 = 0;
 
-    for (data value = values[..])
+    for (data i = 0 .. 2)
     {
-        total += value;
+        total += i;
     }
 
-    for (data value: s32 = values[..])
+    for (data i: s32 = @reverse(0 .. 2))
     {
-        total += value;
+        total += i;
     }
 
     return total;

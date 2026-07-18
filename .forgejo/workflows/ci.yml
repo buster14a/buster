@@ -141,8 +141,13 @@ jobs:
             $genEnd = Get-Date
 
             $buildStart = Get-Date
-            $benchOutput = ./build.ps1 build --build-dir $buildDir --config $config -t bench_all
+            ./build.ps1 build --build-dir $buildDir --config $config -t ide
             $buildEnd = Get-Date
+
+            # Keep benchmark execution outside the compile timer. bench_all
+            # depends on the already up-to-date ide target, so corpus growth
+            # cannot be misreported as a compile-time regression.
+            $benchOutput = ./build.ps1 build --build-dir $buildDir --config $config -t bench_all
             $benchOutput | ForEach-Object { Write-Output $_ }
 
             $benchLine = ($benchOutput | Select-String '^BENCH ' | Select-Object -Last 1).Line

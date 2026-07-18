@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # For each of Debug and Release (sanitize/fuzz off): a clean instrumented +
-# time-traced build, `ide bench`, two diagnostic reports of where compile
-# time went (ninja_log_summary, time_trace_summary -- printed to the CI log
-# only, not recorded), then hands the numbers to record_perf.sh.
+# time-traced `ide` build, a separately run `ide bench`, two diagnostic
+# reports of where compile time went (ninja_log_summary, time_trace_summary
+# -- printed to the CI log only, not recorded), then hands the numbers to
+# record_perf.sh.
 #
 # Used by the Linux and macOS Perf CI steps. Windows drives the same
 # build.ps1 -> record_perf.sh handoff inline in its own PowerShell step
@@ -39,17 +40,13 @@ for config in Debug Release; do
     { time {
         ./build.sh generate --build-dir "$build_dir" --config "$config" \
             --no-sanitize --no-fuzz --instrument --time-trace 2>&3
-        ./build.sh build --build-dir "$build_dir" --config "$config" -t bench_all \
-            2>&3 | tee "$build_dir/bench_output.log"
+        ./build.sh build --build-dir "$build_dir" --config "$config" -t ide 2>&3
     }; } 3>&2 2>"$timing_file"
 
     export CONFIG="$config"
     export COMPILE_MILLISECONDS
     COMPILE_MILLISECONDS=$(awk '{ printf "%.0f\n", $1 * 1000 }' "$timing_file")
     rm -f "$timing_file"
-    export BENCH_LINE=$(grep '^BENCH ' "$build_dir/bench_output.log" | tail -n1)
-    export BENCH_PHASE_LINES=$(grep '^BENCH_PHASE ' "$build_dir/bench_output.log" || true)
-    export BENCH_FILE_LINES=$(grep '^BENCH_FILE ' "$build_dir/bench_output.log" || true)
 
     echo "--- Where compile time went ($config) ---"
     ./build.sh ninja_log_summary "$build_dir" --limit 15 || true
@@ -58,6 +55,17 @@ for config in Debug Release; do
     if [[ -n "$json_files" ]]; then
         ./build.sh time_trace_summary $json_files --limit 15 || true
     fi
+
+    # Keep benchmark execution outside the compile timer and after the build
+    # diagnostics. `bench_all` depends on the already up-to-date `ide`, so this
+    # invocation only runs the benchmark, does not inflate compile time, and
+    # does not appear among the compile edges printed above.
+    ./build.sh build --build-dir "$build_dir" --config "$config" -t bench_all \
+        2>&1 | tee "$build_dir/bench_output.log"
+
+    export BENCH_LINE=$(grep '^BENCH ' "$build_dir/bench_output.log" | tail -n1)
+    export BENCH_PHASE_LINES=$(grep '^BENCH_PHASE ' "$build_dir/bench_output.log" || true)
+    export BENCH_FILE_LINES=$(grep '^BENCH_FILE ' "$build_dir/bench_output.log" || true)
 
     if ! ./.forgejo/scripts/record_perf.sh; then
         overall_result=1

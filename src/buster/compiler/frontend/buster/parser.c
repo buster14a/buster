@@ -246,6 +246,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     [TOKEN_KEYWORD_RETURN - first_keyword] = S8_INITIALIZER("return"),
                     [TOKEN_KEYWORD_FOR - first_keyword] = S8_INITIALIZER("for"),
                     [TOKEN_KEYWORD_WHILE - first_keyword] = S8_INITIALIZER("while"),
+                    [TOKEN_KEYWORD_LOOP - first_keyword] = S8_INITIALIZER("loop"),
                     [TOKEN_KEYWORD_CODE - first_keyword] = S8_INITIALIZER("code"),
                     [TOKEN_KEYWORD_DATA - first_keyword] = S8_INITIALIZER("data"),
                     [TOKEN_KEYWORD_TYPE - first_keyword] = S8_INITIALIZER("type"),
@@ -519,6 +520,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                 it += has_equal ? 2 : 1;
             }
             break; case '~': { id = TOKEN_TILDE; it += 1; }
+            break; case '@': { id = TOKEN_AT; it += 1; }
             break; case '/':
             {
                 if (it + 1 < top && it[1] == '/')
@@ -608,9 +610,11 @@ typedef enum ParserStateId
     PARSER_STATE_ASSIGNMENT_STATEMENT,
     PARSER_STATE_IF_STATEMENT,
     PARSER_STATE_FOR_STATEMENT,
+    PARSER_STATE_LOOP_STATEMENT,
     PARSER_STATE_TYPE_STATEMENT,
     PARSER_STATE_ARRAY_LITERAL,
     PARSER_STATE_ARRAY_SUBSCRIPT,
+    PARSER_STATE_INTRINSIC_CALL,
     PARSER_STATE_EXPRESSION,
     PARSER_STATE_UNARY_PREFIX,
     PARSER_STATE_COUNT,
@@ -751,6 +755,21 @@ struct ForStatementState
     ForStatementStateId id;
 };
 
+typedef enum LoopStatementStateId
+{
+    LOOP_STATEMENT_STATE_CONDITION_OR_BODY,
+    LOOP_STATEMENT_STATE_CONDITION,
+    LOOP_STATEMENT_STATE_CLOSE_CONDITION,
+    LOOP_STATEMENT_STATE_BODY,
+    LOOP_STATEMENT_STATE_COUNT,
+} LoopStatementStateId;
+
+typedef struct LoopStatementState LoopStatementState;
+struct LoopStatementState
+{
+    LoopStatementStateId id;
+};
+
 typedef enum ArrayLiteralStateId
 {
     ARRAY_LITERAL_STATE_ELEMENT_OR_END,
@@ -767,6 +786,15 @@ typedef enum ArraySubscriptStateId
     ARRAY_SUBSCRIPT_STATE_COUNT,
 } ArraySubscriptStateId;
 
+typedef enum IntrinsicCallStateId
+{
+    INTRINSIC_CALL_STATE_NAME,
+    INTRINSIC_CALL_STATE_OPEN,
+    INTRINSIC_CALL_STATE_ARGUMENT_OR_CLOSE,
+    INTRINSIC_CALL_STATE_DELIMITER,
+    INTRINSIC_CALL_STATE_COUNT,
+} IntrinsicCallStateId;
+
 typedef enum ExpressionState
 {
     EXPRESSION_STATE_PREFIX,
@@ -776,6 +804,7 @@ typedef enum ExpressionState
 
 typedef enum BindingPower
 {
+    BINDING_POWER_RANGE,
     BINDING_POWER_BITWISE,
     BINDING_POWER_EQUALITY,
     BINDING_POWER_RELATIONAL,
@@ -833,6 +862,7 @@ struct ParserState
                 AssignmentStatementState assignment_state;
                 IfStatementState if_state;
                 ForStatementState for_state;
+                LoopStatementState loop_state;
             };
             AstStatement* pointer;
             TokenId end_token;
@@ -849,6 +879,8 @@ struct ParserState
             bool is_array_subscript_bound;
             bool is_array_subscript_end;
             bool ends_at_slice_operator;
+            bool is_intrinsic_argument;
+            bool ends_at_intrinsic_delimiter;
             // Postorder (RPN) output stream this expression emits into. The tree
             // is implicit in this ordering plus each node's arity, so no child
             // links are stored. `output_base` is the first emitted node.
@@ -881,6 +913,14 @@ struct ParserState
             bool has_start;
             bool has_end;
         } array_subscript;
+
+        struct
+        {
+            AstIdentifier name;
+            ParserSourceRange range;
+            IntrinsicCallStateId state;
+            u32 argument_count;
+        } intrinsic_call;
 
         // One pending prefix unary operator (`-`, `+`, `!`, `~`). A run of
         // prefix operators is a run of these frames on the state stack, popped
@@ -1143,8 +1183,10 @@ BUSTER_GLOBAL_LOCAL void parser_unexpected(Parser* parser, ExtendedToken token, 
     if (state_id == PARSER_STATE_STATEMENT || state_id == PARSER_STATE_RETURN_STATEMENT ||
         state_id == PARSER_STATE_DATA_STATEMENT || state_id == PARSER_STATE_ASSIGNMENT_STATEMENT ||
         state_id == PARSER_STATE_IF_STATEMENT || state_id == PARSER_STATE_FOR_STATEMENT ||
+        state_id == PARSER_STATE_LOOP_STATEMENT ||
         state_id == PARSER_STATE_ARRAY_LITERAL ||
         state_id == PARSER_STATE_ARRAY_SUBSCRIPT ||
+        state_id == PARSER_STATE_INTRINSIC_CALL ||
         state_id == PARSER_STATE_EXPRESSION || state_id == PARSER_STATE_UNARY_PREFIX)
     {
         parser->recovery = PARSER_RECOVERY_STATEMENT;
@@ -1177,6 +1219,17 @@ BUSTER_GLOBAL_LOCAL void parser_expected_array_delimiter(Parser* parser, Extende
     parser->recovery = PARSER_RECOVERY_STATEMENT;
 }
 
+BUSTER_GLOBAL_LOCAL void parser_chained_range(Parser* parser, ExtendedToken token)
+{
+    parser_diagnostic_push(
+            parser,
+            PARSER_DIAGNOSTIC_CHAINED_RANGE,
+            token,
+            TOKEN_ERROR,
+            S8("range operator '..' is not associative"));
+    parser->recovery = PARSER_RECOVERY_STATEMENT;
+}
+
 BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
 {
     if (parser->recovery == PARSER_RECOVERY_STATEMENT)
@@ -1188,7 +1241,7 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
             if (popped.id == PARSER_STATE_STATEMENT) { statement = popped.statement.pointer; }
             else if (popped.id == PARSER_STATE_RETURN_STATEMENT || popped.id == PARSER_STATE_DATA_STATEMENT ||
                      popped.id == PARSER_STATE_ASSIGNMENT_STATEMENT || popped.id == PARSER_STATE_IF_STATEMENT ||
-                     popped.id == PARSER_STATE_FOR_STATEMENT)
+                     popped.id == PARSER_STATE_FOR_STATEMENT || popped.id == PARSER_STATE_LOOP_STATEMENT)
             {
                 statement = popped.statement.pointer;
             }
@@ -1557,6 +1610,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
         case AST_NODE_ARRAY_LITERAL: return S8("ArrayLiteral");
         case AST_NODE_ARRAY_INDEX: return S8("ArrayIndex");
         case AST_NODE_ARRAY_SLICE: return S8("ArraySlice");
+        case AST_NODE_INTRINSIC_CALL: return S8("IntrinsicCall");
         case AST_NODE_UNARY_MINUS: return S8("UnaryMinus");
         case AST_NODE_UNARY_PLUS: return S8("UnaryPlus");
         case AST_NODE_UNARY_LOGICAL_NOT: return S8("UnaryLogicalNot");
@@ -1577,6 +1631,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
         case AST_NODE_BINARY_AMPERSAND: return S8("BinaryAmpersand");
         case AST_NODE_BINARY_BAR: return S8("BinaryBar");
         case AST_NODE_BINARY_CARET: return S8("BinaryCaret");
+        case AST_NODE_BINARY_RANGE: return S8("BinaryRange");
         case AST_NODE_IDENTIFIER: return S8("Identifier");
         case AST_NODE_COUNT: {}
     }
@@ -1607,6 +1662,10 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
 {
     switch (id)
     {
+        case AST_NODE_BINARY_RANGE:
+        {
+            return BINDING_POWER_RANGE;
+        }
         case AST_NODE_BINARY_AMPERSAND:
         case AST_NODE_BINARY_BAR:
         case AST_NODE_BINARY_CARET:
@@ -1652,6 +1711,7 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
         case AST_NODE_ARRAY_LITERAL:
         case AST_NODE_ARRAY_INDEX:
         case AST_NODE_ARRAY_SLICE:
+        case AST_NODE_INTRINSIC_CALL:
         {
         }
     }
@@ -1679,6 +1739,10 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNode* node)
         {
             return 1 + (u32)node->array_slice.has_start + (u32)node->array_slice.has_end;
         }
+        case AST_NODE_INTRINSIC_CALL:
+        {
+            return node->intrinsic_call.argument_count;
+        }
         case AST_NODE_UNARY_MINUS:
         case AST_NODE_UNARY_PLUS:
         case AST_NODE_UNARY_LOGICAL_NOT:
@@ -1702,6 +1766,7 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNode* node)
         case AST_NODE_BINARY_AMPERSAND:
         case AST_NODE_BINARY_BAR:
         case AST_NODE_BINARY_CARET:
+        case AST_NODE_BINARY_RANGE:
         case AST_NODE_ARRAY_INDEX:
         {
             return 2;
@@ -1738,6 +1803,7 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_BINARY_AMPERSAND: return S8("&");
         case AST_NODE_BINARY_BAR: return S8("|");
         case AST_NODE_BINARY_CARET: return S8("^");
+        case AST_NODE_BINARY_RANGE: return S8("range");
         case AST_NODE_ARRAY_INDEX: return S8("index");
 
         case AST_NODE_CONSTANT_INTEGER:
@@ -1745,6 +1811,7 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_UNDEFINED:
         case AST_NODE_ARRAY_LITERAL:
         case AST_NODE_ARRAY_SLICE:
+        case AST_NODE_INTRINSIC_CALL:
         case AST_NODE_COUNT:
         {
         }
@@ -1834,6 +1901,8 @@ BUSTER_GLOBAL_LOCAL void parse_expression(Parser* restrict parser, TokenId end_o
     state->expression.is_array_subscript_bound = false;
     state->expression.is_array_subscript_end = false;
     state->expression.ends_at_slice_operator = false;
+    state->expression.is_intrinsic_argument = false;
+    state->expression.ends_at_intrinsic_delimiter = false;
 }
 
 BUSTER_GLOBAL_LOCAL void parse_assignment_target(Parser* restrict parser)
@@ -1853,6 +1922,8 @@ BUSTER_GLOBAL_LOCAL void parse_array_element(Parser* restrict parser)
     element->expression.is_array_subscript_bound = false;
     element->expression.is_array_subscript_end = false;
     element->expression.ends_at_slice_operator = false;
+    element->expression.is_intrinsic_argument = false;
+    element->expression.ends_at_intrinsic_delimiter = false;
 }
 
 BUSTER_GLOBAL_LOCAL void parse_array_subscript(Parser* restrict parser, ExtendedToken opening_bracket)
@@ -1878,6 +1949,25 @@ BUSTER_GLOBAL_LOCAL void parse_array_subscript_bound(Parser* restrict parser, bo
     bound->expression.is_array_subscript_bound = true;
     bound->expression.is_array_subscript_end = is_end;
     bound->expression.ends_at_slice_operator = !is_end;
+    bound->expression.is_intrinsic_argument = false;
+    bound->expression.ends_at_intrinsic_delimiter = false;
+}
+
+BUSTER_GLOBAL_LOCAL void parse_intrinsic_argument(Parser* restrict parser)
+{
+    ParserState* argument = state_push(&parser->state);
+    argument->id = PARSER_STATE_EXPRESSION;
+    argument->expression.state = EXPRESSION_STATE_PREFIX;
+    argument->expression.end_token = TOKEN_ERROR;
+    argument->expression.is_group = false;
+    argument->expression.ends_at_assignment = false;
+    argument->expression.is_array_element = false;
+    argument->expression.ends_at_array_delimiter = false;
+    argument->expression.is_array_subscript_bound = false;
+    argument->expression.is_array_subscript_end = false;
+    argument->expression.ends_at_slice_operator = false;
+    argument->expression.is_intrinsic_argument = true;
+    argument->expression.ends_at_intrinsic_delimiter = true;
 }
 
 BUSTER_GLOBAL_LOCAL ParserState* expression_owner(Parser* restrict parser);
@@ -1889,6 +1979,29 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
     BUSTER_CHECK(expression_state->id == PARSER_STATE_EXPRESSION);
     u32 output_count = expression_state->expression.output_count;
     BUSTER_CHECK(output_count);
+
+    if (expression_state->expression.is_intrinsic_argument)
+    {
+        AstNode* output_base = expression_state->expression.output_base;
+        state_pop(&parser->state);
+
+        ParserState* intrinsic = state(parser);
+        BUSTER_CHECK(intrinsic->id == PARSER_STATE_INTRINSIC_CALL);
+        ParserState* owner = intrinsic - 1;
+        while (owner->id == PARSER_STATE_UNARY_PREFIX)
+        {
+            owner -= 1;
+        }
+        BUSTER_CHECK(owner->id == PARSER_STATE_EXPRESSION);
+        if (owner->expression.output_count == 0)
+        {
+            owner->expression.output_base = output_base;
+        }
+        owner->expression.output_count += output_count;
+        intrinsic->intrinsic_call.argument_count += 1;
+        intrinsic->intrinsic_call.state = INTRINSIC_CALL_STATE_DELIMITER;
+        return;
+    }
 
     if (expression_state->expression.is_array_subscript_bound)
     {
@@ -2013,6 +2126,13 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
             resume_state->statement.pointer->for_statement.iterable = expression;
             resume_state->statement.for_state.id = FOR_STATEMENT_STATE_CLOSE;
         }
+        break; case PARSER_STATE_LOOP_STATEMENT:
+        {
+            BUSTER_CHECK(resume_state->statement.loop_state.id == LOOP_STATEMENT_STATE_CONDITION);
+            resume_state->statement.pointer->loop_statement.condition = expression;
+            resume_state->statement.pointer->loop_statement.has_condition = true;
+            resume_state->statement.loop_state.id = LOOP_STATEMENT_STATE_CLOSE_CONDITION;
+        }
         break; default: BUSTER_TODO();
     }
 }
@@ -2080,12 +2200,14 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_CARET: return S8("Caret");
         break; case TOKEN_CARET_EQUAL: return S8("CaretEqual");
         break; case TOKEN_TILDE: return S8("Tilde");
+        break; case TOKEN_AT: return S8("At");
         break; case TOKEN_KEYWORD_RETURN: return S8("Keyword_Return");
         break; case TOKEN_KEYWORD_IF: return S8("Keyword_If");
         break; case TOKEN_KEYWORD_ELSE: return S8("Keyword_Else");
         break; case TOKEN_KEYWORD_FUNCTION: return S8("Keyword_Function");
         break; case TOKEN_KEYWORD_FOR: return S8("Keyword_For");
         break; case TOKEN_KEYWORD_WHILE: return S8("Keyword_While");
+        break; case TOKEN_KEYWORD_LOOP: return S8("Keyword_Loop");
         break; case TOKEN_KEYWORD_CODE: return S8("Keyword_Code");
         break; case TOKEN_KEYWORD_DATA: return S8("Keyword_Data");
         break; case TOKEN_KEYWORD_TYPE: return S8("Keyword_Type");
@@ -2142,6 +2264,15 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
 
     switch (token.id)
     {
+        break; case TOKEN_AT:
+        {
+            consume(&parser->iterator);
+            ParserState* intrinsic = state_push(&parser->state);
+            intrinsic->id = PARSER_STATE_INTRINSIC_CALL;
+            intrinsic->intrinsic_call.range = source_range_from_token(token);
+            intrinsic->intrinsic_call.state = INTRINSIC_CALL_STATE_NAME;
+            intrinsic->intrinsic_call.argument_count = 0;
+        }
         break; case TOKEN_LEFT_BRACKET:
         {
             consume(&parser->iterator);
@@ -2166,6 +2297,8 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
             group_state->expression.is_array_subscript_bound = false;
             group_state->expression.is_array_subscript_end = false;
             group_state->expression.ends_at_slice_operator = false;
+            group_state->expression.is_intrinsic_argument = false;
+            group_state->expression.ends_at_intrinsic_delimiter = false;
         }
         break; case TOKEN_IDENTIFIER:
         {
@@ -2289,6 +2422,24 @@ BUSTER_GLOBAL_LOCAL void finish_array_subscript(Parser* restrict parser, Extende
         AstNode* node = expression_emit(parser, owner, AST_NODE_ARRAY_INDEX);
         node->array_index.range = range;
     }
+    expression_finish_operand(parser, owner);
+}
+
+BUSTER_GLOBAL_LOCAL void finish_intrinsic_call(Parser* restrict parser, ExtendedToken closing_parenthesis)
+{
+    ParserState intrinsic = state_pop(&parser->state);
+    BUSTER_CHECK(intrinsic.id == PARSER_STATE_INTRINSIC_CALL);
+
+    ParserSourceRange range = intrinsic.intrinsic_call.range;
+    parser_source_range_set_end(&range, closing_parenthesis.offset + closing_parenthesis.length);
+
+    ParserState* owner = expression_owner(parser);
+    AstNode* node = expression_emit(parser, owner, AST_NODE_INTRINSIC_CALL);
+    node->intrinsic_call = (AstIntrinsicCall){
+        .name = intrinsic.intrinsic_call.name,
+        .range = range,
+        .argument_count = intrinsic.intrinsic_call.argument_count,
+    };
     expression_finish_operand(parser, owner);
 }
 
@@ -2915,6 +3066,19 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                                 state->statement.pointer = statement;
                                 state->statement.end_token = TOKEN_ERROR;
                             }
+                            break; case TOKEN_KEYWORD_LOOP:
+                            {
+                                consume(&parser.iterator);
+                                AstStatement* statement = parser_statement_push(&parser, block_state->block.block, AST_STATEMENT_LOOP, token);
+                                statement_state->statement.pointer = statement;
+                                statement_state->statement.end_token = TOKEN_ERROR;
+
+                                ParserState* state = state_push(&parser.state);
+                                state->id = PARSER_STATE_LOOP_STATEMENT;
+                                state->statement.loop_state.id = LOOP_STATEMENT_STATE_CONDITION_OR_BODY;
+                                state->statement.pointer = statement;
+                                state->statement.end_token = TOKEN_ERROR;
+                            }
                             break;
                             case TOKEN_IDENTIFIER:
                             case TOKEN_LEFT_PARENTHESIS:
@@ -3295,6 +3459,64 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; case FOR_STATEMENT_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
+            break; case PARSER_STATE_LOOP_STATEMENT:
+            {
+                ParserState* loop_state = state(&parser);
+                ExtendedToken token = peek(&parser);
+                AstStatement* statement = loop_state->statement.pointer;
+
+                switch (loop_state->statement.loop_state.id)
+                {
+                    break; case LOOP_STATEMENT_STATE_CONDITION_OR_BODY:
+                    {
+                        if (token.id == TOKEN_LEFT_PARENTHESIS)
+                        {
+                            consume(&parser.iterator);
+                            loop_state->statement.loop_state.id = LOOP_STATEMENT_STATE_CONDITION;
+                        }
+                        else if (token.id == TOKEN_LEFT_BRACE)
+                        {
+                            consume(&parser.iterator);
+                            loop_state->statement.loop_state.id = LOOP_STATEMENT_STATE_BODY;
+                            parse_block(&parser, &statement->loop_statement.body, token);
+                        }
+                        else
+                        {
+                            parser_unexpected(&parser, token, TOKEN_LEFT_BRACE);
+                        }
+                    }
+                    break; case LOOP_STATEMENT_STATE_CONDITION:
+                    {
+                        parse_expression(&parser, TOKEN_RIGHT_PARENTHESIS);
+                    }
+                    break; case LOOP_STATEMENT_STATE_CLOSE_CONDITION:
+                    {
+                        if (token.id != TOKEN_RIGHT_PARENTHESIS)
+                        {
+                            parser_unexpected(&parser, token, TOKEN_RIGHT_PARENTHESIS);
+                            continue;
+                        }
+                        consume(&parser.iterator);
+
+                        ExtendedToken opening_brace = peek(&parser);
+                        if (opening_brace.id != TOKEN_LEFT_BRACE)
+                        {
+                            parser_unexpected(&parser, opening_brace, TOKEN_LEFT_BRACE);
+                            continue;
+                        }
+                        consume(&parser.iterator);
+                        loop_state->statement.loop_state.id = LOOP_STATEMENT_STATE_BODY;
+                        parse_block(&parser, &statement->loop_statement.body, opening_brace);
+                    }
+                    break; case LOOP_STATEMENT_STATE_BODY:
+                    {
+                        AstBlock* body = &statement->loop_statement.body;
+                        statement->range.length = body->range.offset + body->range.length - statement->range.offset;
+                        state_pop(&parser.state);
+                    }
+                    break; case LOOP_STATEMENT_STATE_COUNT: BUSTER_UNREACHABLE();
+                }
+            }
             break; case PARSER_STATE_ARRAY_LITERAL:
             {
                 ParserState* array_state = state(&parser);
@@ -3388,6 +3610,69 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                     break; case ARRAY_SUBSCRIPT_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
+            break; case PARSER_STATE_INTRINSIC_CALL:
+            {
+                ParserState* intrinsic = state(&parser);
+                ExtendedToken token = peek(&parser);
+
+                switch (intrinsic->intrinsic_call.state)
+                {
+                    break; case INTRINSIC_CALL_STATE_NAME:
+                    {
+                        if (token.id != TOKEN_IDENTIFIER)
+                        {
+                            parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
+                            continue;
+                        }
+                        consume(&parser.iterator);
+                        intrinsic->intrinsic_call.name = (AstIdentifier){
+                            .text = get_string(parser.iterator.source, token),
+                            .range = source_range_from_token(token),
+                        };
+                        intrinsic->intrinsic_call.state = INTRINSIC_CALL_STATE_OPEN;
+                    }
+                    break; case INTRINSIC_CALL_STATE_OPEN:
+                    {
+                        if (token.id != TOKEN_LEFT_PARENTHESIS)
+                        {
+                            parser_unexpected(&parser, token, TOKEN_LEFT_PARENTHESIS);
+                            continue;
+                        }
+                        consume(&parser.iterator);
+                        intrinsic->intrinsic_call.state = INTRINSIC_CALL_STATE_ARGUMENT_OR_CLOSE;
+                    }
+                    break; case INTRINSIC_CALL_STATE_ARGUMENT_OR_CLOSE:
+                    {
+                        if (token.id == TOKEN_RIGHT_PARENTHESIS)
+                        {
+                            consume(&parser.iterator);
+                            finish_intrinsic_call(&parser, token);
+                        }
+                        else
+                        {
+                            parse_intrinsic_argument(&parser);
+                        }
+                    }
+                    break; case INTRINSIC_CALL_STATE_DELIMITER:
+                    {
+                        if (token.id == TOKEN_COMMA)
+                        {
+                            consume(&parser.iterator);
+                            intrinsic->intrinsic_call.state = INTRINSIC_CALL_STATE_ARGUMENT_OR_CLOSE;
+                        }
+                        else if (token.id == TOKEN_RIGHT_PARENTHESIS)
+                        {
+                            consume(&parser.iterator);
+                            finish_intrinsic_call(&parser, token);
+                        }
+                        else
+                        {
+                            parser_unexpected(&parser, token, TOKEN_RIGHT_PARENTHESIS);
+                        }
+                    }
+                    break; case INTRINSIC_CALL_STATE_COUNT: BUSTER_UNREACHABLE();
+                }
+            }
             break; case PARSER_STATE_EXPRESSION:
             {
                 ParserState* st = state(&parser);
@@ -3405,7 +3690,9 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                                       (st->expression.ends_at_assignment && token_is_assignment_operator(token.id)) ||
                                       (st->expression.ends_at_array_delimiter &&
                                        (token.id == TOKEN_COMMA || token.id == TOKEN_RIGHT_BRACKET)) ||
-                                      (st->expression.ends_at_slice_operator && token.id == TOKEN_DOUBLE_DOT);
+                                      (st->expression.ends_at_slice_operator && token.id == TOKEN_DOUBLE_DOT) ||
+                                      (st->expression.ends_at_intrinsic_delimiter &&
+                                       (token.id == TOKEN_COMMA || token.id == TOKEN_RIGHT_PARENTHESIS));
                         if (at_end)
                         {
                             // Emit any operators still held on the stack (tightest-binding
@@ -3438,7 +3725,30 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                                 case TOKEN_BAR:
                                 case TOKEN_AMPERSAND:
                                 case TOKEN_CARET:
+                                case TOKEN_DOUBLE_DOT:
                                 {
+                                    if (token.id == TOKEN_DOUBLE_DOT &&
+                                        st->expression.is_array_subscript_bound &&
+                                        st->expression.is_array_subscript_end)
+                                    {
+                                        parser_unexpected(&parser, token, TOKEN_RIGHT_BRACKET);
+                                        continue;
+                                    }
+                                    if (token.id == TOKEN_DOUBLE_DOT)
+                                    {
+                                        for (u16 operator_i = 0; operator_i < st->expression.operator_count; operator_i += 1)
+                                        {
+                                            if ((AstNodeId)st->expression.operator_stack[operator_i] == AST_NODE_BINARY_RANGE)
+                                            {
+                                                parser_chained_range(&parser, token);
+                                                break;
+                                            }
+                                        }
+                                        if (parser.recovery != PARSER_RECOVERY_NONE)
+                                        {
+                                            continue;
+                                        }
+                                    }
                                     consume(&parser.iterator);
 
                                     AstNodeId binary_node_id;
@@ -3461,6 +3771,7 @@ ParserResult parser_parse(Arena* result_arena, String8 source, TokenizerResult t
                                         break; case TOKEN_AMPERSAND: binary_node_id = AST_NODE_BINARY_AMPERSAND;
                                         break; case TOKEN_BAR: binary_node_id = AST_NODE_BINARY_BAR;
                                         break; case TOKEN_CARET: binary_node_id = AST_NODE_BINARY_CARET;
+                                        break; case TOKEN_DOUBLE_DOT: binary_node_id = AST_NODE_BINARY_RANGE;
                                         break; default: BUSTER_TODO_TOKEN(token.id);
                                     }
 
@@ -3577,7 +3888,19 @@ BUSTER_GLOBAL_LOCAL String8 ast_expression_to_string(Arena* arena, AstExpression
         String8 formatted;
 
         u32 arity = ast_node_arity(node);
-        if (node->id == AST_NODE_ARRAY_LITERAL)
+        if (node->id == AST_NODE_INTRINSIC_CALL)
+        {
+            BUSTER_CHECK(top >= arity);
+            u32 first = top - arity;
+            formatted = string_format(arena, S8("(@{S8}"), node->intrinsic_call.name.text);
+            for (u32 argument_i = first; argument_i < top; argument_i += 1)
+            {
+                formatted = string_format(arena, S8("{S8} {S8}"), formatted, stack[argument_i]);
+            }
+            formatted = string_format(arena, S8("{S8})"), formatted);
+            top -= arity;
+        }
+        else if (node->id == AST_NODE_ARRAY_LITERAL)
         {
             BUSTER_CHECK(top >= arity);
             u32 first = top - arity;
@@ -3768,7 +4091,14 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
         .path = S8_INITIALIZER("tests/basic_for.bbb"),
         .expected_expression = S8_INITIALIZER("total")
     },
-    // { S8_INITIALIZER("tests/array_slices.bbb"), S8_INITIALIZER("") },
+    {
+        .path = S8_INITIALIZER("tests/basic_loop.bbb"),
+        .expected_expression = S8_INITIALIZER("value")
+    },
+    {
+        .path = S8_INITIALIZER("tests/array_slices.bbb"),
+        .expected_expression = S8_INITIALIZER("(- total_a total_b)")
+    },
 };
 
 BUSTER_GLOBAL_LOCAL int parser_bench_u64_compare(const void* a, const void* b)
@@ -3965,6 +4295,19 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
         arena->position = position;
     }
 
+    {
+        String8 source = S8("@reverse loop");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, source.length));
+        BUSTER_TEST(arguments, tokenizer.error_count == 0);
+        BUSTER_TEST(arguments, tokenizer.token_count == 5);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_AT);
+        BUSTER_TEST(arguments, tokenizer.tokens[1].id == TOKEN_IDENTIFIER);
+        BUSTER_TEST(arguments, tokenizer.tokens[2].id == TOKEN_SPACE);
+        BUSTER_TEST(arguments, tokenizer.tokens[3].id == TOKEN_KEYWORD_LOOP);
+        arena->position = position;
+    }
+
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(assignment_operator_test_cases); i += 1)
     {
         AssignmentOperatorTestCase test_case = assignment_operator_test_cases[i];
@@ -4145,6 +4488,11 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
         { S8("values[1..3][0]"),     S8("(index values[1..3] 0)") },
         { S8("-values[..]"),         S8("(neg values[..])") },
         { S8("[1, 2][..]"),          S8("[1, 2][..]") },
+        { S8("0 .. n"),              S8("(range 0 n)") },
+        { S8("1 + 2 .. n * 2"),      S8("(range (+ 1 2) (* n 2))") },
+        { S8("@reverse(0 .. n)"),     S8("(@reverse (range 0 n))") },
+        { S8("@intrinsic()"),         S8("(@intrinsic)") },
+        { S8("@intrinsic(1, 2 + 3)"), S8("(@intrinsic 1 (+ 2 3))") },
     };
 
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
@@ -4517,8 +4865,8 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     {
         String8 source = S8(
             "code main : fn () s32 {\n"
-            "    for (data outer = values[..]) {\n"
-            "        for (data inner: s32 = values[1..]) { total += inner; }\n"
+            "    for (data outer = 0 .. count) {\n"
+            "        for (data inner: s32 = @reverse(0 .. count)) { total += inner; }\n"
             "    }\n"
             "    return total;\n"
             "}\n");
@@ -4532,9 +4880,9 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         {
             BUSTER_STRING_TEST(arguments, outer->for_statement.name.text, S8("outer"));
             BUSTER_TEST(arguments, outer->for_statement.type == 0);
-            BUSTER_TEST(arguments, outer->for_statement.iterable.count == 2);
-            BUSTER_TEST(arguments, outer->for_statement.iterable.count == 2 &&
-                    outer->for_statement.iterable.nodes[1].id == AST_NODE_ARRAY_SLICE);
+            BUSTER_TEST(arguments, outer->for_statement.iterable.count == 3);
+            BUSTER_TEST(arguments, outer->for_statement.iterable.count == 3 &&
+                    outer->for_statement.iterable.nodes[2].id == AST_NODE_BINARY_RANGE);
             BUSTER_TEST(arguments, outer->for_statement.body.statement_count == 1);
 
             AstStatement* inner = outer->for_statement.body.first_statement;
@@ -4548,11 +4896,94 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
                 {
                     BUSTER_STRING_TEST(arguments, type->name, S8("s32"));
                 }
-                BUSTER_TEST(arguments, inner->for_statement.iterable.count == 3);
-                BUSTER_TEST(arguments, inner->for_statement.iterable.count == 3 &&
-                        inner->for_statement.iterable.nodes[2].id == AST_NODE_ARRAY_SLICE);
+                BUSTER_TEST(arguments, inner->for_statement.iterable.count == 4);
+                BUSTER_TEST(arguments, inner->for_statement.iterable.count == 4 &&
+                        inner->for_statement.iterable.nodes[2].id == AST_NODE_BINARY_RANGE);
+                BUSTER_TEST(arguments, inner->for_statement.iterable.count == 4 &&
+                        inner->for_statement.iterable.nodes[3].id == AST_NODE_INTRINSIC_CALL);
+                if (inner->for_statement.iterable.count == 4)
+                {
+                    AstIntrinsicCall* call = &inner->for_statement.iterable.nodes[3].intrinsic_call;
+                    BUSTER_STRING_TEST(arguments, call->name.text, S8("reverse"));
+                    BUSTER_TEST(arguments, call->argument_count == 1);
+                }
                 BUSTER_TEST(arguments, inner->for_statement.body.statement_count == 1);
             }
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 {\n"
+            "    loop (value < limit) {\n"
+            "        loop { value += 1; }\n"
+            "    }\n"
+            "    return value;\n"
+            "}\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.statement_count == 2);
+        AstStatement* conditional = parsed.first_code ? parsed.first_code->body.first_statement : 0;
+        BUSTER_TEST(arguments, conditional != 0 && conditional->id == AST_STATEMENT_LOOP);
+        if (conditional && conditional->id == AST_STATEMENT_LOOP)
+        {
+            BUSTER_TEST(arguments, conditional->loop_statement.has_condition);
+            BUSTER_TEST(arguments, conditional->loop_statement.condition.count == 3);
+            BUSTER_TEST(arguments, conditional->loop_statement.condition.count == 3 &&
+                    conditional->loop_statement.condition.nodes[2].id == AST_NODE_BINARY_LESS);
+            BUSTER_TEST(arguments, conditional->loop_statement.body.statement_count == 1);
+            AstStatement* unconditional = conditional->loop_statement.body.first_statement;
+            BUSTER_TEST(arguments, unconditional != 0 && unconditional->id == AST_STATEMENT_LOOP);
+            if (unconditional && unconditional->id == AST_STATEMENT_LOOP)
+            {
+                BUSTER_TEST(arguments, !unconditional->loop_statement.has_condition);
+                BUSTER_TEST(arguments, unconditional->loop_statement.condition.count == 0);
+                BUSTER_TEST(arguments, unconditional->loop_statement.body.statement_count == 1);
+            }
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8("code main : fn () s32 { loop (value) return 1; return 2; }");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->expected == TOKEN_LEFT_BRACE);
+        BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.last_statement != 0);
+        if (parsed.first_code && parsed.first_code->body.last_statement)
+        {
+            AstStatement* recovered = parsed.first_code->body.last_statement;
+            BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
+            BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
+                    recovered->return_statement.expression.nodes[0].integer.value == 2);
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8("code main : fn () s32 { data range = 0 .. count .. 1; return 2; }");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_CHAINED_RANGE);
+        if (parsed.first_diagnostic)
+        {
+            BUSTER_TEST(arguments, parsed.first_diagnostic->found == TOKEN_DOUBLE_DOT);
+            BUSTER_STRING_TEST(arguments, parsed.first_diagnostic->message,
+                    S8("range operator '..' is not associative"));
+        }
+        BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.last_statement != 0);
+        if (parsed.first_code && parsed.first_code->body.last_statement)
+        {
+            AstStatement* recovered = parsed.first_code->body.last_statement;
+            BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
+            BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
+                    recovered->return_statement.expression.nodes[0].integer.value == 2);
         }
         arena->position = position;
     }
