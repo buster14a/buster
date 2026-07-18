@@ -145,6 +145,7 @@ typedef enum AstNodeId
     AST_NODE_ARRAY_LITERAL,
     AST_NODE_ARRAY_INDEX,
     AST_NODE_ARRAY_SLICE,
+    AST_NODE_CALL,
     AST_NODE_INTRINSIC_CALL,
 
     // Unary operations
@@ -215,6 +216,13 @@ struct AstArraySlice
 };
 
 typedef struct AstIntrinsicCall AstIntrinsicCall;
+typedef struct AstCall AstCall;
+struct AstCall
+{
+    ParserSourceRange range;
+    u32 argument_count;
+};
+
 struct AstIntrinsicCall
 {
     AstIdentifier name;
@@ -235,6 +243,7 @@ struct AstNode
         AstArrayLiteral array_literal;
         AstArrayIndex array_index;
         AstArraySlice array_slice;
+        AstCall call;
         AstIntrinsicCall intrinsic_call;
     };
 };
@@ -262,6 +271,7 @@ typedef enum AstStatementId
 {
     AST_STATEMENT_RETURN,
     AST_STATEMENT_DATA,
+    AST_STATEMENT_EXPRESSION,
     AST_STATEMENT_ASSIGNMENT,
     AST_STATEMENT_IF,
     AST_STATEMENT_FOR,
@@ -284,6 +294,12 @@ struct AstDataStatement
 };
 
 typedef struct AstAssignmentStatement AstAssignmentStatement;
+typedef struct AstExpressionStatement AstExpressionStatement;
+struct AstExpressionStatement
+{
+    AstExpression expression;
+};
+
 typedef enum AstAssignmentOperator
 {
     AST_ASSIGNMENT_EQUAL,
@@ -344,6 +360,7 @@ struct AstStatement
     {
         AstReturnStatement return_statement;
         AstDataStatement data_statement;
+        AstExpressionStatement expression_statement;
         AstAssignmentStatement assignment_statement;
         AstIfStatement if_statement;
         AstForStatement for_statement;
@@ -425,6 +442,7 @@ typedef enum ParserDiagnosticKind
     PARSER_DIAGNOSTIC_EXPECTED_EXPRESSION,
     PARSER_DIAGNOSTIC_EXPECTED_ASSIGNMENT_OPERATOR,
     PARSER_DIAGNOSTIC_EXPECTED_ARRAY_DELIMITER,
+    PARSER_DIAGNOSTIC_EXPECTED_CALL_DELIMITER,
     PARSER_DIAGNOSTIC_CHAINED_RANGE,
     PARSER_DIAGNOSTIC_INVALID_INTEGER,
     PARSER_DIAGNOSTIC_EXPRESSION_TOO_DEEP,

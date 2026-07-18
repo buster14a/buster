@@ -614,6 +614,7 @@ typedef enum ParserStateId
     PARSER_STATE_TYPE_STATEMENT,
     PARSER_STATE_ARRAY_LITERAL,
     PARSER_STATE_ARRAY_SUBSCRIPT,
+    PARSER_STATE_CALL,
     PARSER_STATE_INTRINSIC_CALL,
     PARSER_STATE_EXPRESSION,
     PARSER_STATE_UNARY_PREFIX,
@@ -795,12 +796,27 @@ typedef enum IntrinsicCallStateId
     INTRINSIC_CALL_STATE_COUNT,
 } IntrinsicCallStateId;
 
+typedef enum CallStateId
+{
+    CALL_STATE_ARGUMENT_OR_CLOSE,
+    CALL_STATE_DELIMITER,
+    CALL_STATE_COUNT,
+} CallStateId;
+
 typedef enum ExpressionState
 {
     EXPRESSION_STATE_PREFIX,
     EXPRESSION_STATE_TAIL,
     EXPRESSION_STATE_COUNT,
 } ExpressionState;
+
+typedef enum ExpressionArgumentKind
+{
+    EXPRESSION_ARGUMENT_NONE,
+    EXPRESSION_ARGUMENT_CALL,
+    EXPRESSION_ARGUMENT_INTRINSIC,
+    EXPRESSION_ARGUMENT_COUNT,
+} ExpressionArgumentKind;
 
 typedef enum BindingPower
 {
@@ -879,8 +895,7 @@ struct ParserState
             bool is_array_subscript_bound;
             bool is_array_subscript_end;
             bool ends_at_slice_operator;
-            bool is_intrinsic_argument;
-            bool ends_at_intrinsic_delimiter;
+            u8 argument_kind;
             // Postorder (RPN) output stream this expression emits into. The tree
             // is implicit in this ordering plus each node's arity, so no child
             // links are stored. `output_base` is the first emitted node.
@@ -913,6 +928,13 @@ struct ParserState
             bool has_start;
             bool has_end;
         } array_subscript;
+
+        struct
+        {
+            ParserSourceRange range;
+            CallStateId state;
+            u32 argument_count;
+        } call;
 
         struct
         {
@@ -1186,6 +1208,7 @@ BUSTER_GLOBAL_LOCAL void parser_unexpected(Parser* parser, ExtendedToken token, 
         state_id == PARSER_STATE_LOOP_STATEMENT ||
         state_id == PARSER_STATE_ARRAY_LITERAL ||
         state_id == PARSER_STATE_ARRAY_SUBSCRIPT ||
+        state_id == PARSER_STATE_CALL ||
         state_id == PARSER_STATE_INTRINSIC_CALL ||
         state_id == PARSER_STATE_EXPRESSION || state_id == PARSER_STATE_UNARY_PREFIX)
     {
@@ -1216,6 +1239,17 @@ BUSTER_GLOBAL_LOCAL void parser_expected_array_delimiter(Parser* parser, Extende
             token,
             TOKEN_ERROR,
             S8("expected ',' or ']' after array element"));
+    parser->recovery = PARSER_RECOVERY_STATEMENT;
+}
+
+BUSTER_GLOBAL_LOCAL void parser_expected_call_delimiter(Parser* parser, ExtendedToken token)
+{
+    parser_diagnostic_push(
+            parser,
+            PARSER_DIAGNOSTIC_EXPECTED_CALL_DELIMITER,
+            token,
+            TOKEN_ERROR,
+            S8("expected ',' or ')' after call argument"));
     parser->recovery = PARSER_RECOVERY_STATEMENT;
 }
 
@@ -1610,6 +1644,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
         case AST_NODE_ARRAY_LITERAL: return S8("ArrayLiteral");
         case AST_NODE_ARRAY_INDEX: return S8("ArrayIndex");
         case AST_NODE_ARRAY_SLICE: return S8("ArraySlice");
+        case AST_NODE_CALL: return S8("Call");
         case AST_NODE_INTRINSIC_CALL: return S8("IntrinsicCall");
         case AST_NODE_UNARY_MINUS: return S8("UnaryMinus");
         case AST_NODE_UNARY_PLUS: return S8("UnaryPlus");
@@ -1653,7 +1688,8 @@ BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(code_attributes_names) == CODE_ATTRIBUTE_COU
 
 // A node in the flattened, postorder expression stream. The tree is *implicit*:
 // a node's operands are the subtrees emitted immediately before it, and its
-// arity is fixed by its kind (see ast_node_arity), so no child links are stored.
+// arity is encoded by its kind and payload (see ast_node_arity), so no child
+// links are stored.
 // Because the whole expression is one contiguous array in evaluation order,
 // analysis and typechecking stream through it front-to-back with a small operand
 // stack — sequential access, branch-predictable, no pointer chasing.
@@ -1711,6 +1747,7 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
         case AST_NODE_ARRAY_LITERAL:
         case AST_NODE_ARRAY_INDEX:
         case AST_NODE_ARRAY_SLICE:
+        case AST_NODE_CALL:
         case AST_NODE_INTRINSIC_CALL:
         {
         }
@@ -1742,6 +1779,10 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNode* node)
         case AST_NODE_INTRINSIC_CALL:
         {
             return node->intrinsic_call.argument_count;
+        }
+        case AST_NODE_CALL:
+        {
+            return 1 + node->call.argument_count;
         }
         case AST_NODE_UNARY_MINUS:
         case AST_NODE_UNARY_PLUS:
@@ -1811,6 +1852,7 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_UNDEFINED:
         case AST_NODE_ARRAY_LITERAL:
         case AST_NODE_ARRAY_SLICE:
+        case AST_NODE_CALL:
         case AST_NODE_INTRINSIC_CALL:
         case AST_NODE_COUNT:
         {
@@ -1901,13 +1943,17 @@ BUSTER_GLOBAL_LOCAL void parse_expression(Parser* restrict parser, TokenId end_o
     state->expression.is_array_subscript_bound = false;
     state->expression.is_array_subscript_end = false;
     state->expression.ends_at_slice_operator = false;
-    state->expression.is_intrinsic_argument = false;
-    state->expression.ends_at_intrinsic_delimiter = false;
+    state->expression.argument_kind = EXPRESSION_ARGUMENT_NONE;
 }
 
 BUSTER_GLOBAL_LOCAL void parse_assignment_target(Parser* restrict parser)
 {
-    parse_expression(parser, TOKEN_ERROR);
+    // A statement that starts with an expression is ambiguous until either an
+    // assignment operator or the statement terminator appears. Calls may end
+    // at the terminator and become expression statements; other roots retain
+    // the more useful "expected assignment operator" diagnostic.
+    TokenId end_token = state(parser)->statement.end_token;
+    parse_expression(parser, end_token);
     state(parser)->expression.ends_at_assignment = true;
 }
 
@@ -1922,8 +1968,7 @@ BUSTER_GLOBAL_LOCAL void parse_array_element(Parser* restrict parser)
     element->expression.is_array_subscript_bound = false;
     element->expression.is_array_subscript_end = false;
     element->expression.ends_at_slice_operator = false;
-    element->expression.is_intrinsic_argument = false;
-    element->expression.ends_at_intrinsic_delimiter = false;
+    element->expression.argument_kind = EXPRESSION_ARGUMENT_NONE;
 }
 
 BUSTER_GLOBAL_LOCAL void parse_array_subscript(Parser* restrict parser, ExtendedToken opening_bracket)
@@ -1949,8 +1994,24 @@ BUSTER_GLOBAL_LOCAL void parse_array_subscript_bound(Parser* restrict parser, bo
     bound->expression.is_array_subscript_bound = true;
     bound->expression.is_array_subscript_end = is_end;
     bound->expression.ends_at_slice_operator = !is_end;
-    bound->expression.is_intrinsic_argument = false;
-    bound->expression.ends_at_intrinsic_delimiter = false;
+    bound->expression.argument_kind = EXPRESSION_ARGUMENT_NONE;
+}
+
+BUSTER_GLOBAL_LOCAL void parse_call(Parser* restrict parser, ExtendedToken opening_parenthesis)
+{
+    ParserState* call = state_push(&parser->state);
+    call->id = PARSER_STATE_CALL;
+    call->call.range = source_range_from_token(opening_parenthesis);
+    call->call.state = CALL_STATE_ARGUMENT_OR_CLOSE;
+}
+
+BUSTER_GLOBAL_LOCAL void parse_call_argument(Parser* restrict parser)
+{
+    ParserState* argument = state_push(&parser->state);
+    argument->id = PARSER_STATE_EXPRESSION;
+    argument->expression.state = EXPRESSION_STATE_PREFIX;
+    argument->expression.end_token = TOKEN_ERROR;
+    argument->expression.argument_kind = EXPRESSION_ARGUMENT_CALL;
 }
 
 BUSTER_GLOBAL_LOCAL void parse_intrinsic_argument(Parser* restrict parser)
@@ -1966,8 +2027,7 @@ BUSTER_GLOBAL_LOCAL void parse_intrinsic_argument(Parser* restrict parser)
     argument->expression.is_array_subscript_bound = false;
     argument->expression.is_array_subscript_end = false;
     argument->expression.ends_at_slice_operator = false;
-    argument->expression.is_intrinsic_argument = true;
-    argument->expression.ends_at_intrinsic_delimiter = true;
+    argument->expression.argument_kind = EXPRESSION_ARGUMENT_INTRINSIC;
 }
 
 BUSTER_GLOBAL_LOCAL ParserState* expression_owner(Parser* restrict parser);
@@ -1980,14 +2040,15 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
     u32 output_count = expression_state->expression.output_count;
     BUSTER_CHECK(output_count);
 
-    if (expression_state->expression.is_intrinsic_argument)
+    if (expression_state->expression.argument_kind != EXPRESSION_ARGUMENT_NONE)
     {
+        ExpressionArgumentKind argument_kind =
+                (ExpressionArgumentKind)expression_state->expression.argument_kind;
         AstNode* output_base = expression_state->expression.output_base;
         state_pop(&parser->state);
 
-        ParserState* intrinsic = state(parser);
-        BUSTER_CHECK(intrinsic->id == PARSER_STATE_INTRINSIC_CALL);
-        ParserState* owner = intrinsic - 1;
+        ParserState* argument_list = state(parser);
+        ParserState* owner = argument_list - 1;
         while (owner->id == PARSER_STATE_UNARY_PREFIX)
         {
             owner -= 1;
@@ -1998,8 +2059,19 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
             owner->expression.output_base = output_base;
         }
         owner->expression.output_count += output_count;
-        intrinsic->intrinsic_call.argument_count += 1;
-        intrinsic->intrinsic_call.state = INTRINSIC_CALL_STATE_DELIMITER;
+        if (argument_kind == EXPRESSION_ARGUMENT_CALL)
+        {
+            BUSTER_CHECK(argument_list->id == PARSER_STATE_CALL);
+            argument_list->call.argument_count += 1;
+            argument_list->call.state = CALL_STATE_DELIMITER;
+        }
+        else
+        {
+            BUSTER_CHECK(argument_kind == EXPRESSION_ARGUMENT_INTRINSIC);
+            BUSTER_CHECK(argument_list->id == PARSER_STATE_INTRINSIC_CALL);
+            argument_list->intrinsic_call.argument_count += 1;
+            argument_list->intrinsic_call.state = INTRINSIC_CALL_STATE_DELIMITER;
+        }
         return;
     }
 
@@ -2103,8 +2175,25 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
             {
                 break; case ASSIGNMENT_STATEMENT_STATE_TARGET:
                 {
-                    resume_state->statement.pointer->assignment_statement.target = expression;
-                    resume_state->statement.assignment_state.id = ASSIGNMENT_STATEMENT_STATE_OPERATOR;
+                    ExtendedToken token = peek(parser);
+                    if (token_is_assignment_operator(token.id))
+                    {
+                        resume_state->statement.pointer->assignment_statement.target = expression;
+                        resume_state->statement.assignment_state.id = ASSIGNMENT_STATEMENT_STATE_OPERATOR;
+                    }
+                    else
+                    {
+                        AstNodeId root_id = expression.nodes[expression.count - 1].id;
+                        if (root_id != AST_NODE_CALL && root_id != AST_NODE_INTRINSIC_CALL)
+                        {
+                            parser_expected_assignment_operator(parser, token);
+                            return;
+                        }
+
+                        resume_state->statement.pointer->id = AST_STATEMENT_EXPRESSION;
+                        resume_state->statement.pointer->expression_statement.expression = expression;
+                        resume_state->statement.assignment_state.id = ASSIGNMENT_STATEMENT_STATE_END;
+                    }
                 }
                 break; case ASSIGNMENT_STATEMENT_STATE_VALUE:
                 {
@@ -2297,8 +2386,7 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
             group_state->expression.is_array_subscript_bound = false;
             group_state->expression.is_array_subscript_end = false;
             group_state->expression.ends_at_slice_operator = false;
-            group_state->expression.is_intrinsic_argument = false;
-            group_state->expression.ends_at_intrinsic_delimiter = false;
+            group_state->expression.argument_kind = EXPRESSION_ARGUMENT_NONE;
         }
         break; case TOKEN_IDENTIFIER:
         {
@@ -2439,6 +2527,23 @@ BUSTER_GLOBAL_LOCAL void finish_intrinsic_call(Parser* restrict parser, Extended
         .name = intrinsic.intrinsic_call.name,
         .range = range,
         .argument_count = intrinsic.intrinsic_call.argument_count,
+    };
+    expression_finish_operand(parser, owner);
+}
+
+BUSTER_GLOBAL_LOCAL void finish_call(Parser* restrict parser, ExtendedToken closing_parenthesis)
+{
+    ParserState call = state_pop(&parser->state);
+    BUSTER_CHECK(call.id == PARSER_STATE_CALL);
+
+    ParserSourceRange range = call.call.range;
+    parser_source_range_set_end(&range, closing_parenthesis.offset + closing_parenthesis.length);
+
+    ParserState* owner = expression_owner(parser);
+    AstNode* node = expression_emit(parser, owner, AST_NODE_CALL);
+    node->call = (AstCall){
+        .range = range,
+        .argument_count = call.call.argument_count,
     };
     expression_finish_operand(parser, owner);
 }
@@ -3091,6 +3196,8 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                             }
                             break;
                             case TOKEN_IDENTIFIER:
+                            case TOKEN_AT:
+                            case TOKEN_LEFT_BRACKET:
                             case TOKEN_LEFT_PARENTHESIS:
                             case TOKEN_HEXADECIMAL_INTEGER_LITERAL:
                             case TOKEN_DECIMAL_INTEGER_LITERAL:
@@ -3620,6 +3727,45 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                     break; case ARRAY_SUBSCRIPT_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
+            break; case PARSER_STATE_CALL:
+            {
+                ParserState* call = state(&parser);
+                ExtendedToken token = peek(&parser);
+
+                switch (call->call.state)
+                {
+                    break; case CALL_STATE_ARGUMENT_OR_CLOSE:
+                    {
+                        if (token.id == TOKEN_RIGHT_PARENTHESIS)
+                        {
+                            consume(&parser.iterator);
+                            finish_call(&parser, token);
+                        }
+                        else
+                        {
+                            parse_call_argument(&parser);
+                        }
+                    }
+                    break; case CALL_STATE_DELIMITER:
+                    {
+                        if (token.id == TOKEN_COMMA)
+                        {
+                            consume(&parser.iterator);
+                            call->call.state = CALL_STATE_ARGUMENT_OR_CLOSE;
+                        }
+                        else if (token.id == TOKEN_RIGHT_PARENTHESIS)
+                        {
+                            consume(&parser.iterator);
+                            finish_call(&parser, token);
+                        }
+                        else
+                        {
+                            parser_expected_call_delimiter(&parser, token);
+                        }
+                    }
+                    break; case CALL_STATE_COUNT: BUSTER_UNREACHABLE();
+                }
+            }
             break; case PARSER_STATE_INTRINSIC_CALL:
             {
                 ParserState* intrinsic = state(&parser);
@@ -3677,7 +3823,7 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         }
                         else
                         {
-                            parser_unexpected(&parser, token, TOKEN_RIGHT_PARENTHESIS);
+                            parser_expected_call_delimiter(&parser, token);
                         }
                     }
                     break; case INTRINSIC_CALL_STATE_COUNT: BUSTER_UNREACHABLE();
@@ -3701,7 +3847,7 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                       (st->expression.ends_at_array_delimiter &&
                                        (token.id == TOKEN_COMMA || token.id == TOKEN_RIGHT_BRACKET)) ||
                                       (st->expression.ends_at_slice_operator && token.id == TOKEN_DOUBLE_DOT) ||
-                                      (st->expression.ends_at_intrinsic_delimiter &&
+                                      (st->expression.argument_kind != EXPRESSION_ARGUMENT_NONE &&
                                        (token.id == TOKEN_COMMA || token.id == TOKEN_RIGHT_PARENTHESIS));
                         if (at_end)
                         {
@@ -3807,6 +3953,11 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                     consume(&parser.iterator);
                                     parse_array_subscript(&parser, token);
                                 }
+                                break; case TOKEN_LEFT_PARENTHESIS:
+                                {
+                                    consume(&parser.iterator);
+                                    parse_call(&parser, token);
+                                }
                                 break; default:
                                 {
                                     if (st->expression.ends_at_assignment)
@@ -3816,6 +3967,10 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                     else if (st->expression.ends_at_array_delimiter)
                                     {
                                         parser_expected_array_delimiter(&parser, token);
+                                    }
+                                    else if (st->expression.argument_kind != EXPRESSION_ARGUMENT_NONE)
+                                    {
+                                        parser_expected_call_delimiter(&parser, token);
                                     }
                                     else
                                     {
@@ -3842,6 +3997,11 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                     {
                         consume(&parser.iterator);
                         parse_array_subscript(&parser, token);
+                    }
+                    else if (token.id == TOKEN_LEFT_PARENTHESIS)
+                    {
+                        consume(&parser.iterator);
+                        parse_call(&parser, token);
                     }
                     else
                     {
@@ -3903,6 +4063,18 @@ BUSTER_GLOBAL_LOCAL String8 ast_expression_to_string(Arena* arena, AstExpression
             u32 first = top - arity;
             formatted = string_format(arena, S8("(@{S8}"), node->intrinsic_call.name.text);
             for (u32 argument_i = first; argument_i < top; argument_i += 1)
+            {
+                formatted = string_format(arena, S8("{S8} {S8}"), formatted, stack[argument_i]);
+            }
+            formatted = string_format(arena, S8("{S8})"), formatted);
+            top -= arity;
+        }
+        else if (node->id == AST_NODE_CALL)
+        {
+            BUSTER_CHECK(top >= arity);
+            u32 first = top - arity;
+            formatted = string_format(arena, S8("(call {S8}"), stack[first]);
+            for (u32 argument_i = first + 1; argument_i < top; argument_i += 1)
             {
                 formatted = string_format(arena, S8("{S8} {S8}"), formatted, stack[argument_i]);
             }
@@ -3992,6 +4164,8 @@ struct ParserFileTestCase
 {
     String8 path;
     String8 expected_expression;
+    String8 expression_code_name;
+    u32 expected_code_count;
 };
 
 BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
@@ -4103,6 +4277,12 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
     {
         .path = S8_INITIALIZER("tests/basic_loop.bbb"),
         .expected_expression = S8_INITIALIZER("value")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_function_call.bbb"),
+        .expected_expression = S8_INITIALIZER("(call final_result value)"),
+        .expression_code_name = S8_INITIALIZER("main"),
+        .expected_code_count = 4,
     },
     {
         .path = S8_INITIALIZER("tests/array_slices.bbb"),
@@ -4510,6 +4690,14 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
         { S8("@reverse(0 .. n)"),     S8("(@reverse (range 0 n))") },
         { S8("@intrinsic()"),         S8("(@intrinsic)") },
         { S8("@intrinsic(1, 2 + 3)"), S8("(@intrinsic 1 (+ 2 3))") },
+        { S8("calculate()"),          S8("(call calculate)") },
+        { S8("calculate(1, 2 + 3,)"), S8("(call calculate 1 (+ 2 3))") },
+        { S8("outer(inner(1), 2)"),   S8("(call outer (call inner 1) 2)") },
+        { S8("factory()(value)"),     S8("(call (call factory) value)") },
+        { S8("(select + fallback)(value)"), S8("(call (+ select fallback) value)") },
+        { S8("get_values()[0]"),      S8("(index (call get_values) 0)") },
+        { S8("values[0](value)"),     S8("(call (index values 0) value)") },
+        { S8("-factory()(value)[0]"), S8("(neg (index (call (call factory) value) 0))") },
     };
 
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
@@ -4600,6 +4788,82 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, target.nodes[2].id == AST_NODE_BINARY_PLUS);
             }
             BUSTER_TEST(arguments, assignment_statement->assignment_statement.value.count == 3);
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8("code main : fn () s32 { consume(value); return 0; }");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.statement_count == 2);
+        AstStatement* statement = parsed.first_code ? parsed.first_code->body.first_statement : 0;
+        BUSTER_TEST(arguments, statement != 0 && statement->id == AST_STATEMENT_EXPRESSION);
+        if (statement && statement->id == AST_STATEMENT_EXPRESSION)
+        {
+            AstExpression expression = statement->expression_statement.expression;
+            BUSTER_TEST(arguments, expression.count == 3);
+            if (expression.count == 3)
+            {
+                BUSTER_TEST(arguments, expression.nodes[2].id == AST_NODE_CALL);
+                BUSTER_TEST(arguments, expression.nodes[2].call.argument_count == 1);
+                BUSTER_STRING_TEST(arguments,
+                        ((String8){ source.pointer + expression.nodes[2].call.range.offset,
+                                   expression.nodes[2].call.range.length }),
+                        S8("(value)"));
+            }
+            BUSTER_STRING_TEST(arguments,
+                    ((String8){ source.pointer + statement->range.offset, statement->range.length }),
+                    S8("consume(value);"));
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8("code main : fn () s32 { consume(1 2); return 3; }");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_EXPECTED_CALL_DELIMITER);
+        if (parsed.first_diagnostic)
+        {
+            BUSTER_TEST(arguments, parsed.first_diagnostic->found == TOKEN_DECIMAL_INTEGER_LITERAL);
+            BUSTER_STRING_TEST(arguments, parsed.first_diagnostic->message,
+                    S8("expected ',' or ')' after call argument"));
+        }
+        BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.last_statement != 0);
+        if (parsed.first_code && parsed.first_code->body.last_statement)
+        {
+            AstStatement* recovered = parsed.first_code->body.last_statement;
+            BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
+            BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
+                    recovered->return_statement.expression.nodes[0].integer.value == 3);
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8("code main : fn () s32 { consume(1; return 4; }");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_EXPECTED_CALL_DELIMITER);
+        if (parsed.first_diagnostic)
+        {
+            BUSTER_TEST(arguments, parsed.first_diagnostic->found == TOKEN_SEMICOLON);
+            BUSTER_STRING_TEST(arguments, parsed.first_diagnostic->message,
+                    S8("expected ',' or ')' after call argument"));
+        }
+        BUSTER_TEST(arguments, parsed.first_code != 0 && parsed.first_code->body.last_statement != 0);
+        if (parsed.first_code && parsed.first_code->body.last_statement)
+        {
+            AstStatement* recovered = parsed.first_code->body.last_statement;
+            BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
+            BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
+                    recovered->return_statement.expression.nodes[0].integer.value == 4);
         }
         arena->position = position;
     }
@@ -5318,13 +5582,23 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
 
             if (parsed.diagnostic_count == 0)
             {
-                BUSTER_TEST(arguments, parsed.code_count == 1);
+                u32 expected_code_count = test_case.expected_code_count ? test_case.expected_code_count : 1;
+                BUSTER_TEST(arguments, parsed.code_count == expected_code_count);
 
                 AstExpression expression = {0};
-
-                if (parsed.first_code)
+                AstCode* expression_code = parsed.first_code;
+                if (test_case.expression_code_name.length)
                 {
-                    AstStatement* last_statement = parsed.first_code->body.last_statement;
+                    while (expression_code && !string_equal(expression_code->name, test_case.expression_code_name))
+                    {
+                        expression_code = expression_code->next;
+                    }
+                    BUSTER_TEST(arguments, expression_code != 0);
+                }
+
+                if (expression_code)
+                {
+                    AstStatement* last_statement = expression_code->body.last_statement;
                     if (last_statement)
                     {
                         switch (last_statement->id)
