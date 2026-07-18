@@ -197,11 +197,23 @@ struct AstExpression
     u32 reserved;
 };
 
+typedef struct AstStatement AstStatement;
+typedef struct AstBlock AstBlock;
+struct AstBlock
+{
+    AstStatement* first_statement;
+    AstStatement* last_statement;
+    ParserSourceRange range;
+    u32 statement_count;
+    u32 reserved;
+};
+
 typedef enum AstStatementId
 {
     AST_STATEMENT_RETURN,
     AST_STATEMENT_DATA,
     AST_STATEMENT_ASSIGNMENT,
+    AST_STATEMENT_IF,
     AST_STATEMENT_COUNT,
 } AstStatementId;
 
@@ -226,7 +238,16 @@ struct AstAssignmentStatement
     AstExpression value;
 };
 
-typedef struct AstStatement AstStatement;
+typedef struct AstIfStatement AstIfStatement;
+struct AstIfStatement
+{
+    AstExpression condition;
+    AstBlock then_block;
+    AstBlock else_block;
+    bool has_else;
+    u8 reserved[7];
+};
+
 struct AstStatement
 {
     AstStatement* next;
@@ -237,17 +258,8 @@ struct AstStatement
         AstReturnStatement return_statement;
         AstDataStatement data_statement;
         AstAssignmentStatement assignment_statement;
+        AstIfStatement if_statement;
     };
-};
-
-typedef struct AstBlock AstBlock;
-struct AstBlock
-{
-    AstStatement* first_statement;
-    AstStatement* last_statement;
-    ParserSourceRange range;
-    u32 statement_count;
-    u32 reserved;
 };
 
 typedef enum AstCallingConvention
