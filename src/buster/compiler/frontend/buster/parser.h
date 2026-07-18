@@ -72,6 +72,7 @@ typedef enum TokenIdEnum
     TOKEN_KEYWORD_TYPE,
     TOKEN_KEYWORD_STRUCT,
     TOKEN_KEYWORD_UNION,
+    TOKEN_KEYWORD_UNDEFINED,
     TOKEN_COUNT,
 } TokenIdEnum;
 
@@ -129,6 +130,7 @@ typedef enum AstNodeId
 {
     AST_NODE_CONSTANT_INTEGER,
     AST_NODE_IDENTIFIER,
+    AST_NODE_UNDEFINED,
 
     // Unary operations
     AST_NODE_UNARY_MINUS,
@@ -199,6 +201,7 @@ typedef enum AstStatementId
 {
     AST_STATEMENT_RETURN,
     AST_STATEMENT_DATA,
+    AST_STATEMENT_ASSIGNMENT,
     AST_STATEMENT_COUNT,
 } AstStatementId;
 
@@ -216,6 +219,13 @@ struct AstDataStatement
     AstExpression initializer;
 };
 
+typedef struct AstAssignmentStatement AstAssignmentStatement;
+struct AstAssignmentStatement
+{
+    AstExpression target;
+    AstExpression value;
+};
+
 typedef struct AstStatement AstStatement;
 struct AstStatement
 {
@@ -226,6 +236,7 @@ struct AstStatement
     {
         AstReturnStatement return_statement;
         AstDataStatement data_statement;
+        AstAssignmentStatement assignment_statement;
     };
 };
 
@@ -304,6 +315,7 @@ struct AstCode
 typedef enum ParserDiagnosticKind
 {
     PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN,
+    PARSER_DIAGNOSTIC_EXPECTED_EXPRESSION,
     PARSER_DIAGNOSTIC_INVALID_INTEGER,
     PARSER_DIAGNOSTIC_EXPRESSION_TOO_DEEP,
     PARSER_DIAGNOSTIC_COUNT,

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Records one CI run's compile-time/run-time numbers into the `perf-history`
-# orphan branch, and fails (exit 1) if compile time or the aggregate parse
-# time regresses past PERF_REGRESSION_THRESHOLD relative to that runner's
-# own recent median for the same config.
+# orphan branch, and fails (exit 1) if compile time or parse time per corpus
+# file regresses past PERF_REGRESSION_THRESHOLD relative to that runner's own
+# recent median for the same config. Gating the aggregate parse time would make
+# every legitimate corpus addition look like a performance regression.
 #
 # History is kept as one row per metric, not one wide line per run: phase
 # (tokenize/parse) and per-file breakdown (from BUSTER_INSTRUMENT builds)
@@ -66,11 +67,15 @@ field_of() {
 
 bench_median_ns=$(field_of "$BENCH_LINE" "median_ns")
 bench_min_ns=$(field_of "$BENCH_LINE" "min_ns")
+bench_file_count=$(field_of "$BENCH_LINE" "files")
 
-if [[ -z "$bench_median_ns" || -z "$bench_min_ns" ]]; then
-    echo "record_perf.sh: could not parse median_ns/min_ns out of BENCH_LINE: $BENCH_LINE" >&2
+if [[ -z "$bench_median_ns" || -z "$bench_min_ns" || -z "$bench_file_count" || "$bench_file_count" == "0" ]]; then
+    echo "record_perf.sh: could not parse nonzero files and median_ns/min_ns out of BENCH_LINE: $BENCH_LINE" >&2
     exit 1
 fi
+
+bench_median_ns_per_file=$(awk -v median="$bench_median_ns" -v files="$bench_file_count" \
+    'BEGIN { printf "%.0f\n", median / files }')
 
 # Rows to append this run, built up as we parse the inputs: each entry is
 # "metric=<m> value=<v>[ file=<f>]", ready to be prefixed with ts/runner/
@@ -79,6 +84,8 @@ new_rows=()
 new_rows+=("metric=compile_milliseconds value=$COMPILE_MILLISECONDS")
 new_rows+=("metric=bench_median_ns value=$bench_median_ns")
 new_rows+=("metric=bench_min_ns value=$bench_min_ns")
+new_rows+=("metric=bench_file_count value=$bench_file_count")
+new_rows+=("metric=bench_median_ns_per_file value=$bench_median_ns_per_file")
 
 if [[ -n "$BENCH_PHASE_LINES" ]]; then
     while IFS= read -r line; do
@@ -163,8 +170,8 @@ check_regression() {
 
 regressed=0
 
-for gated_metric in compile_milliseconds bench_median_ns; do
-    gated_value=$([[ "$gated_metric" == "compile_milliseconds" ]] && echo "$COMPILE_MILLISECONDS" || echo "$bench_median_ns")
+for gated_metric in compile_milliseconds bench_median_ns_per_file; do
+    gated_value=$([[ "$gated_metric" == "compile_milliseconds" ]] && echo "$COMPILE_MILLISECONDS" || echo "$bench_median_ns_per_file")
     if baseline=$(median_of "$gated_metric"); then
         check_regression "$gated_metric" "$gated_value" "$baseline" || regressed=1
     else
