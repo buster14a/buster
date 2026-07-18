@@ -443,6 +443,39 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     }
                 }
             }
+            break; case '"':
+            {
+                id = TOKEN_STRING_LITERAL;
+                const char8* recovery = 0;
+                bool terminated = false;
+                it += 1;
+                while (it < top && *it != '\n' && *it != '\r')
+                {
+                    if (*it == '"')
+                    {
+                        it += 1;
+                        terminated = true;
+                        break;
+                    }
+                    if (*it == '\\')
+                    {
+                        it += 1;
+                        if (it == top || *it == '\n' || *it == '\r')
+                        {
+                            break;
+                        }
+                    }
+                    else if (*it == ';' && !recovery)
+                    {
+                        recovery = it;
+                    }
+                    it += tokenizer_utf8_sequence_length(it, top);
+                }
+                if (!terminated && recovery)
+                {
+                    it = recovery;
+                }
+            }
             break; case '[': { id = TOKEN_LEFT_BRACKET; it += 1; }
             break; case ']': { id = TOKEN_RIGHT_BRACKET; it += 1; }
             break; case '{': { id = TOKEN_LEFT_BRACE; it += 1; }
@@ -1746,6 +1779,173 @@ BUSTER_GLOBAL_LOCAL CharacterLiteralParsing parse_character_literal(String8 spel
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool parser_hexadecimal_digit(u8 ch, u32* value)
+{
+    bool valid = true;
+    if (ch >= '0' && ch <= '9') { *value = (u32)(ch - '0'); }
+    else if (ch >= 'A' && ch <= 'F') { *value = (u32)(ch - 'A') + 10; }
+    else if (ch >= 'a' && ch <= 'f') { *value = (u32)(ch - 'a') + 10; }
+    else { valid = false; }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u8 parser_utf8_encode(u32 code_point, u8 output[4])
+{
+    u8 length;
+    if (code_point <= 0x7Fu)
+    {
+        output[0] = (u8)code_point;
+        length = 1;
+    }
+    else if (code_point <= 0x7FFu)
+    {
+        output[0] = (u8)(0xC0u | (code_point >> 6));
+        output[1] = (u8)(0x80u | (code_point & 0x3Fu));
+        length = 2;
+    }
+    else if (code_point <= 0xFFFFu)
+    {
+        output[0] = (u8)(0xE0u | (code_point >> 12));
+        output[1] = (u8)(0x80u | ((code_point >> 6) & 0x3Fu));
+        output[2] = (u8)(0x80u | (code_point & 0x3Fu));
+        length = 3;
+    }
+    else
+    {
+        output[0] = (u8)(0xF0u | (code_point >> 18));
+        output[1] = (u8)(0x80u | ((code_point >> 12) & 0x3Fu));
+        output[2] = (u8)(0x80u | ((code_point >> 6) & 0x3Fu));
+        output[3] = (u8)(0x80u | (code_point & 0x3Fu));
+        length = 4;
+    }
+    return length;
+}
+
+typedef struct StringLiteralParsing StringLiteralParsing;
+struct StringLiteralParsing
+{
+    String8 value;
+    bool valid;
+};
+
+BUSTER_GLOBAL_LOCAL StringLiteralParsing parse_string_literal(Arena* arena, String8 spelling)
+{
+    char8* decoded = arena_allocate(arena, char8, spelling.length + 1);
+    u64 write = 0;
+    bool valid = spelling.length >= 2 && spelling.pointer[0] == '"' &&
+                 spelling.pointer[spelling.length - 1] == '"';
+    u64 end = valid ? spelling.length - 1 : spelling.length;
+
+    for (u64 read = valid ? 1 : 0; valid && read < end;)
+    {
+        u8 ch = (u8)spelling.pointer[read];
+        if (ch != '\\')
+        {
+            u64 length = tokenizer_utf8_sequence_length(
+                    spelling.pointer + read,
+                    spelling.pointer + end);
+            if ((ch >= 0x80u && length == 1) || read + length > end)
+            {
+                valid = false;
+                break;
+            }
+            for (u64 i = 0; i < length; i += 1)
+            {
+                decoded[write] = spelling.pointer[read + i];
+                write += 1;
+            }
+            read += length;
+            continue;
+        }
+
+        read += 1;
+        if (read >= end)
+        {
+            valid = false;
+            break;
+        }
+
+        u8 escaped = (u8)spelling.pointer[read];
+        switch (escaped)
+        {
+            break; case 'n': decoded[write] = '\n'; write += 1; read += 1;
+            break; case 'r': decoded[write] = '\r'; write += 1; read += 1;
+            break; case 't': decoded[write] = '\t'; write += 1; read += 1;
+            break; case '\\': decoded[write] = '\\'; write += 1; read += 1;
+            break; case '\'': decoded[write] = '\''; write += 1; read += 1;
+            break; case '"': decoded[write] = '"'; write += 1; read += 1;
+            break; case 'x':
+            {
+                if (read + 2 >= end)
+                {
+                    valid = false;
+                    break;
+                }
+                u32 high = 0;
+                u32 low = 0;
+                valid = parser_hexadecimal_digit((u8)spelling.pointer[read + 1], &high) &&
+                        parser_hexadecimal_digit((u8)spelling.pointer[read + 2], &low);
+                if (valid)
+                {
+                    decoded[write] = (char8)((high << 4) | low);
+                    write += 1;
+                    read += 3;
+                }
+            }
+            break; case 'u':
+            {
+                if (read + 1 >= end || spelling.pointer[read + 1] != '{')
+                {
+                    valid = false;
+                    break;
+                }
+
+                u64 digit = read + 2;
+                u32 code_point = 0;
+                u32 digit_count = 0;
+                while (digit < end && spelling.pointer[digit] != '}')
+                {
+                    u32 value = 0;
+                    if (digit_count == 6 ||
+                        !parser_hexadecimal_digit((u8)spelling.pointer[digit], &value))
+                    {
+                        valid = false;
+                        break;
+                    }
+                    code_point = (code_point << 4) | value;
+                    digit_count += 1;
+                    digit += 1;
+                }
+                valid = valid && digit_count > 0 && digit < end &&
+                        spelling.pointer[digit] == '}' &&
+                        code_point <= 0x10FFFFu &&
+                        !(code_point >= 0xD800u && code_point <= 0xDFFFu);
+                if (valid)
+                {
+                    u8 encoded[4];
+                    u8 encoded_length = parser_utf8_encode(code_point, encoded);
+                    for (u8 i = 0; i < encoded_length; i += 1)
+                    {
+                        decoded[write] = (char8)encoded[i];
+                        write += 1;
+                    }
+                    read = digit + 1;
+                }
+            }
+            break; default:
+            {
+                valid = false;
+            }
+        }
+    }
+
+    decoded[write] = 0;
+    return (StringLiteralParsing){
+        .value = { decoded, write },
+        .valid = valid,
+    };
+}
+
 BUSTER_GLOBAL_LOCAL void consume_token(TokenIterator* restrict iterator, Token* restrict token)
 {
     if (token->id == TOKEN_EOF)
@@ -2013,6 +2213,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
         case AST_NODE_CONSTANT_INTEGER: return S8("ConstantInteger");
         case AST_NODE_CONSTANT_FLOAT: return S8("ConstantFloat");
         case AST_NODE_CONSTANT_CHARACTER: return S8("ConstantCharacter");
+        case AST_NODE_CONSTANT_STRING: return S8("ConstantString");
         case AST_NODE_UNDEFINED: return S8("Undefined");
         case AST_NODE_ARRAY_LITERAL: return S8("ArrayLiteral");
         case AST_NODE_ARRAY_INDEX: return S8("ArrayIndex");
@@ -2138,6 +2339,7 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
         case AST_NODE_CONSTANT_INTEGER:
         case AST_NODE_CONSTANT_FLOAT:
         case AST_NODE_CONSTANT_CHARACTER:
+        case AST_NODE_CONSTANT_STRING:
         case AST_NODE_IDENTIFIER:
         case AST_NODE_UNDEFINED:
         case AST_NODE_ARRAY_LITERAL:
@@ -2164,6 +2366,7 @@ BUSTER_GLOBAL_LOCAL u32 ast_node_arity(AstNode* node)
         case AST_NODE_CONSTANT_INTEGER:
         case AST_NODE_CONSTANT_FLOAT:
         case AST_NODE_CONSTANT_CHARACTER:
+        case AST_NODE_CONSTANT_STRING:
         case AST_NODE_IDENTIFIER:
         case AST_NODE_UNDEFINED:
         case AST_NODE_ENUM_LITERAL:
@@ -2269,6 +2472,7 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
         case AST_NODE_CONSTANT_INTEGER:
         case AST_NODE_CONSTANT_FLOAT:
         case AST_NODE_CONSTANT_CHARACTER:
+        case AST_NODE_CONSTANT_STRING:
         case AST_NODE_IDENTIFIER:
         case AST_NODE_UNDEFINED:
         case AST_NODE_ARRAY_LITERAL:
@@ -2765,6 +2969,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT: return S8("HexadecimalFloatLiteralExponent");
         break; case TOKEN_FLOAT_LITERAL: return S8("FloatLiteral");
         break; case TOKEN_CHARACTER_LITERAL: return S8("CharacterLiteral");
+        break; case TOKEN_STRING_LITERAL: return S8("StringLiteral");
         break; case TOKEN_UNDERSCORE: return S8("Underscore");
         break; case TOKEN_LEFT_BRACKET: return S8("LeftBracket");
         break; case TOKEN_RIGHT_BRACKET: return S8("RightBracket");
@@ -3008,6 +3213,33 @@ BUSTER_GLOBAL_LOCAL void expression_parse_prefix(Parser* restrict parser)
                 .utf8_length = character.utf8_length,
                 .escaped = character.escaped,
                 .valid = character.valid,
+            };
+
+            expression_finish_operand(parser, owner);
+        }
+        break;
+        case TOKEN_STRING_LITERAL:
+        {
+            consume(&parser->iterator);
+
+            String8 spelling = get_string(parser->iterator.source, token);
+            StringLiteralParsing string = parse_string_literal(parser->result_arena, spelling);
+            if (!string.valid)
+            {
+                parser_diagnostic_push(
+                        parser,
+                        PARSER_DIAGNOSTIC_INVALID_STRING,
+                        token,
+                        TOKEN_ERROR,
+                        S8("invalid string literal"));
+            }
+
+            ParserState* owner = expression_owner(parser);
+            AstNode* leaf = expression_emit(parser, owner, AST_NODE_CONSTANT_STRING);
+            leaf->string = (AstStringLiteral){
+                .spelling = spelling,
+                .value = string.value,
+                .valid = string.valid,
             };
 
             expression_finish_operand(parser, owner);
@@ -5173,6 +5405,10 @@ BUSTER_GLOBAL_LOCAL String8 ast_expression_to_string(Arena* arena, AstExpression
                     {
                         formatted = node->character.spelling;
                     }
+                    break; case AST_NODE_CONSTANT_STRING:
+                    {
+                        formatted = node->string.spelling;
+                    }
                     break; case AST_NODE_IDENTIFIER:
                     {
                         formatted = node->identifier.text;
@@ -5252,6 +5488,10 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
     {
         .path = S8_INITIALIZER("tests/basic_character_literal.bbb"),
         .expected_expression = S8_INITIALIZER("(@cast character)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_string_literal.bbb"),
+        .expected_expression = S8_INITIALIZER("(@cast (- (index greeting 0) 'h'))")
     },
     {
         .path = S8_INITIALIZER("tests/basic_unary_minus.bbb"),
@@ -5629,6 +5869,37 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
     }
 
     {
+        String8 spellings[] = {
+            S8("\"hello\""),
+            S8("\"line\\n\""),
+            S8("\"quote: \\\"\""),
+            S8("\"hex: \\x41\""),
+            S8("\"unicode: \\u{1F600}\""),
+        };
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
+        {
+            TokenizerResult tokenizer = tokenize(arena, spellings[i].pointer, spellings[i].length);
+            BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, spellings[i].length));
+            BUSTER_TEST(arguments, tokenizer.error_count == 0);
+            BUSTER_TEST(arguments, tokenizer.token_count == 2);
+            BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_STRING_LITERAL);
+            BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[0]) == spellings[i].length);
+            arena->position = position;
+        }
+    }
+
+    {
+        char8 source[] = { '"', (char8)0xC3u, (char8)0xA9u, '"' };
+        TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source)));
+        BUSTER_TEST(arguments, tokenizer.error_count == 0);
+        BUSTER_TEST(arguments, tokenizer.token_count == 2);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_STRING_LITERAL);
+        BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[0]) == BUSTER_ARRAY_LENGTH(source));
+        arena->position = position;
+    }
+
+    {
         char8 source[] = { '1', '+', '2' };
         TokenizerResult tokenizer = tokenize(arena, source, BUSTER_ARRAY_LENGTH(source));
         BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, BUSTER_ARRAY_LENGTH(source)));
@@ -5818,6 +6089,10 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
         { S8("'a'"),                 S8("'a'") },
         { S8("'\\n'"),               S8("'\\n'") },
         { S8("'a' == 'b'"),          S8("(== 'a' 'b')") },
+        { S8("\"\""),                  S8("\"\"") },
+        { S8("\"hello\""),             S8("\"hello\"") },
+        { S8("\"a\\n\""),              S8("\"a\\n\"") },
+        { S8("\"abc\"[1]"),           S8("(index \"abc\" 1)") },
         { S8("0.0"),                 S8("0.0") },
         { S8("1.5 + 2.25"),          S8("(+ 1.5 2.25)") },
         { S8("1.0e-3"),              S8("1.0e-3") },
@@ -5946,6 +6221,26 @@ UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
         arena->position = position;
     }
 
+    {
+        char8 source_bytes[] = { '"', (char8)0xC3u, (char8)0xA9u, '"' };
+        String8 source = { source_bytes, BUSTER_ARRAY_LENGTH(source_bytes) };
+        u64 position = arena->position;
+        AstExpression expression = parse_expression_snippet(arena, expression_arena, source);
+        BUSTER_TEST(arguments, expression.count == 1);
+        BUSTER_TEST(arguments, expression.nodes[0].id == AST_NODE_CONSTANT_STRING);
+        if (expression.count == 1 && expression.nodes[0].id == AST_NODE_CONSTANT_STRING)
+        {
+            AstStringLiteral string = expression.nodes[0].string;
+            BUSTER_TEST(arguments, string.valid);
+            BUSTER_TEST(arguments, string.value.length == 2);
+            BUSTER_TEST(arguments,
+                    (u8)string.value.pointer[0] == 0xC3u &&
+                    (u8)string.value.pointer[1] == 0xA9u &&
+                    string.value.pointer[2] == 0);
+        }
+        arena->position = position;
+    }
+
     bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
     BUSTER_CHECK(expression_arena_destroyed);
     return result;
@@ -5958,6 +6253,128 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     Arena* expression_arena = arena_create((ArenaCreation){0});
     BUSTER_CHECK(expression_arena);
     u64 position = arena->position;
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 {\n"
+            "    data plain = \"hello\";\n"
+            "    data escaped = \"\\x00\\n\\r\\t\\\\\\'\\\"A\\u{1F600}\";\n"
+            "    return 0;\n"
+            "}\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.statement_count == 3);
+
+        AstStatement* plain = parsed.first_code ? parsed.first_code->body.first_statement : 0;
+        AstStatement* escaped = plain ? plain->next : 0;
+        BUSTER_TEST(arguments, plain != 0 && plain->id == AST_STATEMENT_DATA);
+        BUSTER_TEST(arguments, escaped != 0 && escaped->id == AST_STATEMENT_DATA);
+        if (plain && escaped)
+        {
+            AstExpression plain_value = plain->data_statement.initializer;
+            AstExpression escaped_value = escaped->data_statement.initializer;
+            BUSTER_TEST(arguments, plain_value.count == 1 &&
+                    plain_value.nodes[0].id == AST_NODE_CONSTANT_STRING);
+            BUSTER_TEST(arguments, escaped_value.count == 1 &&
+                    escaped_value.nodes[0].id == AST_NODE_CONSTANT_STRING);
+            if (plain_value.count == 1 && escaped_value.count == 1)
+            {
+                AstStringLiteral plain_string = plain_value.nodes[0].string;
+                AstStringLiteral escaped_string = escaped_value.nodes[0].string;
+                char8 escaped_bytes[] = {
+                    0, '\n', '\r', '\t', '\\', '\'', '"', 'A',
+                    (char8)0xF0u, (char8)0x9Fu, (char8)0x98u, (char8)0x80u,
+                };
+                BUSTER_TEST(arguments, plain_string.valid);
+                BUSTER_STRING_TEST(arguments, plain_string.spelling, S8("\"hello\""));
+                BUSTER_STRING_TEST(arguments, plain_string.value, S8("hello"));
+                BUSTER_TEST(arguments, plain_string.value.pointer[plain_string.value.length] == 0);
+                BUSTER_TEST(arguments, escaped_string.valid);
+                BUSTER_STRING_TEST(arguments,
+                        escaped_string.value,
+                        ((String8){ escaped_bytes, BUSTER_ARRAY_LENGTH(escaped_bytes) }));
+                BUSTER_TEST(arguments, escaped_string.value.pointer[escaped_string.value.length] == 0);
+                BUSTER_TEST(arguments, AST_STRING_LITERAL_DEFAULT_ELEMENT_BIT_WIDTH == 8);
+            }
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 invalid_spellings[] = {
+            S8("\"\\0\""),
+            S8("\"\\x0\""),
+            S8("\"\\xGG\""),
+            S8("\"\\u{}\""),
+            S8("\"\\u{D800}\""),
+            S8("\"\\u{110000}\""),
+            S8("\"\\u{1234567}\""),
+        };
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(invalid_spellings); i += 1)
+        {
+            StringLiteralParsing string = parse_string_literal(arena, invalid_spellings[i]);
+            BUSTER_TEST(arguments, !string.valid);
+            BUSTER_TEST(arguments, string.value.pointer[string.value.length] == 0);
+            arena->position = position;
+        }
+    }
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 {\n"
+            "    data invalid = \"bad\\q\";\n"
+            "    return 3;\n"
+            "}\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_INVALID_STRING);
+        if (parsed.first_diagnostic)
+        {
+            BUSTER_STRING_TEST(arguments,
+                    parsed.first_diagnostic->message,
+                    S8("invalid string literal"));
+            BUSTER_TEST(arguments, parsed.first_diagnostic->found == TOKEN_STRING_LITERAL);
+        }
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.last_statement != 0);
+        if (parsed.first_code && parsed.first_code->body.last_statement)
+        {
+            AstStatement* recovered = parsed.first_code->body.last_statement;
+            BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
+            BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
+                    recovered->return_statement.expression.nodes[0].integer.value == 3);
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 {\n"
+            "    data invalid = \"missing quote;\n"
+            "    return 4;\n"
+            "}\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_INVALID_STRING);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->found == TOKEN_STRING_LITERAL);
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.last_statement != 0);
+        if (parsed.first_code && parsed.first_code->body.last_statement)
+        {
+            AstStatement* recovered = parsed.first_code->body.last_statement;
+            BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
+            BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
+                    recovered->return_statement.expression.nodes[0].integer.value == 4);
+        }
+        arena->position = position;
+    }
 
     {
         String8 source = S8(
