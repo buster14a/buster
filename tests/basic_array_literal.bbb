@@ -1,5 +1,6 @@
 code main[export] : fn [cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32
 {
-    data result: [1]s32 = [ 0 ];
-    return result;
+    data result: [1]s32 = [ 1 ];
+    result[0] -= 1;
+    return result[0];
 }

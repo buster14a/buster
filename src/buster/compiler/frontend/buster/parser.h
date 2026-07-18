@@ -140,6 +140,8 @@ typedef enum AstNodeId
     AST_NODE_CONSTANT_INTEGER,
     AST_NODE_IDENTIFIER,
     AST_NODE_UNDEFINED,
+    AST_NODE_ARRAY_LITERAL,
+    AST_NODE_ARRAY_INDEX,
 
     // Unary operations
     AST_NODE_UNARY_MINUS,
@@ -185,6 +187,19 @@ struct AstIntegerLiteral
     u8 reserved[6];
 };
 
+typedef struct AstArrayLiteral AstArrayLiteral;
+struct AstArrayLiteral
+{
+    ParserSourceRange range;
+    u32 element_count;
+};
+
+typedef struct AstArrayIndex AstArrayIndex;
+struct AstArrayIndex
+{
+    ParserSourceRange range;
+};
+
 typedef struct AstType AstType;
 typedef struct AstNode AstNode;
 
@@ -195,6 +210,8 @@ struct AstNode
     {
         AstIntegerLiteral integer;
         AstIdentifier identifier;
+        AstArrayLiteral array_literal;
+        AstArrayIndex array_index;
     };
 };
 
@@ -302,6 +319,7 @@ typedef enum AstTypeId
     AST_TYPE_POINTER,
     AST_TYPE_SLICE,
     AST_TYPE_INFERRED_ARRAY,
+    AST_TYPE_ARRAY,
     AST_TYPE_FUNCTION,
     AST_TYPE_COUNT,
 } AstTypeId;
@@ -325,6 +343,11 @@ struct AstType
     {
         String8 name;
         AstType* element_type;
+        struct
+        {
+            AstType* element_type;
+            AstIntegerLiteral count;
+        } array;
         struct
         {
             AstTypeArgument* first_argument;
@@ -355,6 +378,7 @@ typedef enum ParserDiagnosticKind
     PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN,
     PARSER_DIAGNOSTIC_EXPECTED_EXPRESSION,
     PARSER_DIAGNOSTIC_EXPECTED_ASSIGNMENT_OPERATOR,
+    PARSER_DIAGNOSTIC_EXPECTED_ARRAY_DELIMITER,
     PARSER_DIAGNOSTIC_INVALID_INTEGER,
     PARSER_DIAGNOSTIC_EXPRESSION_TOO_DEEP,
     PARSER_DIAGNOSTIC_COUNT,
