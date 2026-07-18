@@ -145,6 +145,8 @@ typedef enum AstNodeId
     AST_NODE_ARRAY_LITERAL,
     AST_NODE_ARRAY_INDEX,
     AST_NODE_ARRAY_SLICE,
+    AST_NODE_AGGREGATE_LITERAL,
+    AST_NODE_MEMBER_ACCESS,
     AST_NODE_CALL,
     AST_NODE_INTRINSIC_CALL,
 
@@ -216,6 +218,29 @@ struct AstArraySlice
 };
 
 typedef struct AstIntrinsicCall AstIntrinsicCall;
+typedef struct AstAggregateLiteralField AstAggregateLiteralField;
+struct AstAggregateLiteralField
+{
+    AstAggregateLiteralField* next;
+    AstIdentifier name;
+};
+
+typedef struct AstAggregateLiteral AstAggregateLiteral;
+struct AstAggregateLiteral
+{
+    AstAggregateLiteralField* first_field;
+    AstAggregateLiteralField* last_field;
+    ParserSourceRange range;
+    u32 field_count;
+};
+
+typedef struct AstMemberAccess AstMemberAccess;
+struct AstMemberAccess
+{
+    AstIdentifier member;
+    ParserSourceRange range;
+};
+
 typedef struct AstCall AstCall;
 struct AstCall
 {
@@ -243,6 +268,8 @@ struct AstNode
         AstArrayLiteral array_literal;
         AstArrayIndex array_index;
         AstArraySlice array_slice;
+        AstAggregateLiteral aggregate_literal;
+        AstMemberAccess member_access;
         AstCall call;
         AstIntrinsicCall intrinsic_call;
     };
@@ -422,6 +449,34 @@ struct AstType
     };
 };
 
+typedef enum AstTypeDeclarationKind
+{
+    AST_TYPE_DECLARATION_STRUCT,
+    AST_TYPE_DECLARATION_UNION,
+    AST_TYPE_DECLARATION_COUNT,
+} AstTypeDeclarationKind;
+
+typedef struct AstTypeField AstTypeField;
+struct AstTypeField
+{
+    AstTypeField* next;
+    AstIdentifier name;
+    AstType* type;
+    ParserSourceRange range;
+};
+
+typedef struct AstTypeDeclaration AstTypeDeclaration;
+struct AstTypeDeclaration
+{
+    AstTypeDeclaration* next;
+    AstTypeField* first_field;
+    AstTypeField* last_field;
+    AstIdentifier name;
+    ParserSourceRange range;
+    AstTypeDeclarationKind kind;
+    u32 field_count;
+};
+
 typedef struct AstCode AstCode;
 struct AstCode
 {
@@ -443,6 +498,8 @@ typedef enum ParserDiagnosticKind
     PARSER_DIAGNOSTIC_EXPECTED_ASSIGNMENT_OPERATOR,
     PARSER_DIAGNOSTIC_EXPECTED_ARRAY_DELIMITER,
     PARSER_DIAGNOSTIC_EXPECTED_CALL_DELIMITER,
+    PARSER_DIAGNOSTIC_EXPECTED_TYPE_FIELD_DELIMITER,
+    PARSER_DIAGNOSTIC_EXPECTED_AGGREGATE_DELIMITER,
     PARSER_DIAGNOSTIC_CHAINED_RANGE,
     PARSER_DIAGNOSTIC_INVALID_INTEGER,
     PARSER_DIAGNOSTIC_EXPRESSION_TOO_DEEP,
@@ -467,9 +524,12 @@ struct ParserResult
     String8 source;
     AstCode* first_code;
     AstCode* last_code;
+    AstTypeDeclaration* first_type_declaration;
+    AstTypeDeclaration* last_type_declaration;
     ParserDiagnostic* first_diagnostic;
     ParserDiagnostic* last_diagnostic;
     u32 code_count;
+    u32 type_declaration_count;
     u32 diagnostic_count;
 };
 
