@@ -6,13 +6,13 @@ code main[export] : fn [cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32
     data slice_b: []s32 = array_b[..];
 
     data total_a: s32 = 0;
-    for (data a: slice_a)
+    for (data a = slice_a)
     {
         total_a += a;
     }
 
     data total_b: s32 = 0;
-    for (data b: slice_b)
+    for (data b = slice_b)
     {
         total_b += b;
     }

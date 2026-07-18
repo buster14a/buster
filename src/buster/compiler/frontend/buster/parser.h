@@ -142,6 +142,7 @@ typedef enum AstNodeId
     AST_NODE_UNDEFINED,
     AST_NODE_ARRAY_LITERAL,
     AST_NODE_ARRAY_INDEX,
+    AST_NODE_ARRAY_SLICE,
 
     // Unary operations
     AST_NODE_UNARY_MINUS,
@@ -200,6 +201,15 @@ struct AstArrayIndex
     ParserSourceRange range;
 };
 
+typedef struct AstArraySlice AstArraySlice;
+struct AstArraySlice
+{
+    ParserSourceRange range;
+    bool has_start;
+    bool has_end;
+    u8 reserved[2];
+};
+
 typedef struct AstType AstType;
 typedef struct AstNode AstNode;
 
@@ -212,6 +222,7 @@ struct AstNode
         AstIdentifier identifier;
         AstArrayLiteral array_literal;
         AstArrayIndex array_index;
+        AstArraySlice array_slice;
     };
 };
 
@@ -240,6 +251,7 @@ typedef enum AstStatementId
     AST_STATEMENT_DATA,
     AST_STATEMENT_ASSIGNMENT,
     AST_STATEMENT_IF,
+    AST_STATEMENT_FOR,
     AST_STATEMENT_COUNT,
 } AstStatementId;
 
@@ -291,6 +303,15 @@ struct AstIfStatement
     u8 reserved[7];
 };
 
+typedef struct AstForStatement AstForStatement;
+struct AstForStatement
+{
+    AstIdentifier name;
+    AstType* type;
+    AstExpression iterable;
+    AstBlock body;
+};
+
 struct AstStatement
 {
     AstStatement* next;
@@ -302,6 +323,7 @@ struct AstStatement
         AstDataStatement data_statement;
         AstAssignmentStatement assignment_statement;
         AstIfStatement if_statement;
+        AstForStatement for_statement;
     };
 };
 

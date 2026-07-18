@@ -1,0 +1,17 @@
+code main[export] : fn [cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+{
+    data values: [2]s32 = [ 1, 2 ];
+    data total: s32 = 0;
+
+    for (data value = values[..])
+    {
+        total += value;
+    }
+
+    for (data value: s32 = values[..])
+    {
+        total += value;
+    }
+
+    return total;
+}
