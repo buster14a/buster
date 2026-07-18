@@ -158,12 +158,13 @@ check_regression() {
     awk -v new="$new_value" -v base="$baseline" -v thresh="$PERF_REGRESSION_THRESHOLD" -v label="$label" '
         BEGIN {
             limit = base * (1 + thresh)
+            delta = new - base
+            pct = (base != 0) ? (delta / base) * 100 : 0
             if (new > limit) {
-                pct = ((new / base) - 1) * 100
-                printf "REGRESSION: %s = %s exceeds baseline median %s by %.1f%% (threshold %.0f%%)\n", label, new, base, pct, thresh * 100 > "/dev/stderr"
+                printf "REGRESSION: %s = %s exceeds baseline median %s by %+g (%+.1f%%, threshold %.0f%%)\n", label, new, base, delta, pct, thresh * 100 > "/dev/stderr"
                 exit 1
             }
-            printf "OK: %s = %s (baseline median %s)\n", label, new, base
+            printf "OK: %s = %s (baseline median %s, delta %+g, %+.1f%%)\n", label, new, base, delta, pct
         }
     '
 }
