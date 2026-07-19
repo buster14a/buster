@@ -6191,13 +6191,98 @@ BUSTER_GLOBAL_LOCAL String8 ast_expression_to_string(Arena* arena, AstExpression
 }
 
 typedef struct ParserFileTestCase ParserFileTestCase;
+typedef struct ParserFileExpectedDiagnostic ParserFileExpectedDiagnostic;
+struct ParserFileExpectedDiagnostic
+{
+    String8 message;
+    ParserDiagnosticKind kind;
+    TokenId found;
+    TokenId expected;
+    u32 line;
+    u32 column;
+    u32 length;
+};
+
 struct ParserFileTestCase
 {
     String8 path;
     String8 expected_expression;
     String8 expression_code_name;
+    ParserFileExpectedDiagnostic* expected_diagnostics;
     u32 expected_code_count;
     u32 expected_type_declaration_count;
+    u32 expected_diagnostic_count;
+    bool expected_code_count_is_set;
+};
+
+BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic missing_array_delimiter_diagnostics[] =
+{
+    {
+        .message = S8_INITIALIZER("expected ',' or ']' after array element"),
+        .kind = PARSER_DIAGNOSTIC_EXPECTED_ARRAY_DELIMITER,
+        .found = TOKEN_IDENTIFIER,
+        .expected = TOKEN_ERROR,
+        .line = 3,
+        .column = 22,
+        .length = 7,
+    },
+};
+
+BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic unexpected_top_level_diagnostics[] =
+{
+    {
+        .message = S8_INITIALIZER("unexpected token"),
+        .kind = PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN,
+        .found = TOKEN_AT,
+        .expected = TOKEN_KEYWORD_CODE,
+        .line = 1,
+        .column = 1,
+        .length = 1,
+    },
+};
+
+BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic missing_call_delimiter_diagnostics[] =
+{
+    {
+        .message = S8_INITIALIZER("expected ',' or ')' after call argument"),
+        .kind = PARSER_DIAGNOSTIC_EXPECTED_CALL_DELIMITER,
+        .found = TOKEN_IDENTIFIER,
+        .expected = TOKEN_ERROR,
+        .line = 3,
+        .column = 15,
+        .length = 7,
+    },
+};
+
+BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic malformed_type_items_diagnostics[] =
+{
+    {
+        .message = S8_INITIALIZER("unexpected token"),
+        .kind = PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN,
+        .found = TOKEN_AT,
+        .expected = TOKEN_IDENTIFIER,
+        .line = 3,
+        .column = 5,
+        .length = 1,
+    },
+    {
+        .message = S8_INITIALIZER("unexpected token"),
+        .kind = PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN,
+        .found = TOKEN_COMMA,
+        .expected = TOKEN_IDENTIFIER,
+        .line = 5,
+        .column = 10,
+        .length = 1,
+    },
+    {
+        .message = S8_INITIALIZER("expected expression"),
+        .kind = PARSER_DIAGNOSTIC_EXPECTED_EXPRESSION,
+        .found = TOKEN_COMMA,
+        .expected = TOKEN_ERROR,
+        .line = 12,
+        .column = 11,
+        .length = 1,
+    },
 };
 
 BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
@@ -6379,6 +6464,33 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
     {
         .path = S8_INITIALIZER("tests/array_slices.bbb"),
         .expected_expression = S8_INITIALIZER("(- total_a total_b)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/errors/missing_array_delimiter.bbb"),
+        .expected_expression = S8_INITIALIZER("11"),
+        .expected_diagnostics = missing_array_delimiter_diagnostics,
+        .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(missing_array_delimiter_diagnostics),
+    },
+    {
+        .path = S8_INITIALIZER("tests/errors/missing_call_delimiter.bbb"),
+        .expected_expression = S8_INITIALIZER("12"),
+        .expected_diagnostics = missing_call_delimiter_diagnostics,
+        .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(missing_call_delimiter_diagnostics),
+    },
+    {
+        .path = S8_INITIALIZER("tests/errors/malformed_type_items.bbb"),
+        .expected_expression = S8_INITIALIZER("13"),
+        .expected_diagnostics = malformed_type_items_diagnostics,
+        .expected_code_count = 1,
+        .expected_type_declaration_count = 2,
+        .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(malformed_type_items_diagnostics),
+    },
+    {
+        .path = S8_INITIALIZER("tests/errors/unexpected_top_level.bbb"),
+        .expected_diagnostics = unexpected_top_level_diagnostics,
+        .expected_code_count = 0,
+        .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(unexpected_top_level_diagnostics),
+        .expected_code_count_is_set = true,
     },
 };
 
@@ -9052,45 +9164,11 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, tokenizer.error_count == 0);
 
             ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
-
-            if (parsed.diagnostic_count == 0)
+            if (parsed.diagnostic_count != test_case.expected_diagnostic_count)
             {
-                u32 expected_code_count = test_case.expected_code_count ? test_case.expected_code_count : 1;
-                BUSTER_TEST(arguments, parsed.code_count == expected_code_count);
-                BUSTER_TEST(arguments,
-                        parsed.type_declaration_count == test_case.expected_type_declaration_count);
-
-                AstExpression expression = {0};
-                AstCode* expression_code = parsed.first_code;
-                if (test_case.expression_code_name.length)
-                {
-                    while (expression_code && !string_equal(expression_code->name, test_case.expression_code_name))
-                    {
-                        expression_code = expression_code->next;
-                    }
-                    BUSTER_TEST(arguments, expression_code != 0);
-                }
-
-                if (expression_code)
-                {
-                    AstStatement* last_statement = expression_code->body.last_statement;
-                    if (last_statement)
-                    {
-                        switch (last_statement->id)
-                        {
-                            break; case AST_STATEMENT_RETURN: expression = last_statement->return_statement.expression;
-                            break; case AST_STATEMENT_SWITCH: expression = last_statement->switch_statement.expression;
-                            break; default: os_fail();
-                        }
-                    }
-                }
-
-                String8 actual = ast_expression_to_string(arena, expression);
-                BUSTER_STRING_TEST(arguments, actual, test_case.expected_expression);
-            }
-            else
-            {
-                for (ParserDiagnostic* diagnostic = parsed.first_diagnostic; diagnostic; diagnostic = diagnostic->next)
+                for (ParserDiagnostic* diagnostic = parsed.first_diagnostic;
+                     diagnostic;
+                     diagnostic = diagnostic->next)
                 {
                     String8 found = string_from_token_id((TokenIdEnum)diagnostic->found);
                     u32 line = diagnostic->range.line + 1;
@@ -9120,7 +9198,96 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
                                 expected);
                     }
                 }
-                BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+            }
+            BUSTER_TEST(arguments,
+                    parsed.diagnostic_count == test_case.expected_diagnostic_count);
+
+            ParserDiagnostic* diagnostic = parsed.first_diagnostic;
+            for (u32 diagnostic_index = 0;
+                 diagnostic_index < test_case.expected_diagnostic_count;
+                 diagnostic_index += 1)
+            {
+                ParserFileExpectedDiagnostic expected =
+                        test_case.expected_diagnostics[diagnostic_index];
+                BUSTER_TEST(arguments, diagnostic != 0);
+                if (diagnostic)
+                {
+                    bool matches =
+                            diagnostic->kind == expected.kind &&
+                            diagnostic->found == expected.found &&
+                            diagnostic->expected == expected.expected &&
+                            string_equal(diagnostic->message, expected.message) &&
+                            diagnostic->range.line + 1 == expected.line &&
+                            diagnostic->range.column + 1 == expected.column &&
+                            diagnostic->range.length == expected.length;
+                    if (!matches)
+                    {
+                        arguments->show(
+                                arguments,
+                                S8("{S8}: diagnostic {u32} mismatch: actual {u32}:{u32} length {u32}, expected {u32}:{u32} length {u32}\n"),
+                                test_case.path,
+                                diagnostic_index,
+                                diagnostic->range.line + 1,
+                                diagnostic->range.column + 1,
+                                diagnostic->range.length,
+                                expected.line,
+                                expected.column,
+                                expected.length);
+                    }
+                    BUSTER_TEST(arguments, diagnostic->kind == expected.kind);
+                    BUSTER_TEST(arguments, diagnostic->found == expected.found);
+                    BUSTER_TEST(arguments, diagnostic->expected == expected.expected);
+                    BUSTER_STRING_TEST(arguments, diagnostic->message, expected.message);
+                    BUSTER_TEST(arguments, diagnostic->range.line + 1 == expected.line);
+                    BUSTER_TEST(arguments, diagnostic->range.column + 1 == expected.column);
+                    BUSTER_TEST(arguments, diagnostic->range.length == expected.length);
+                    diagnostic = diagnostic->next;
+                }
+            }
+
+            u32 expected_code_count =
+                    test_case.expected_code_count || test_case.expected_code_count_is_set ?
+                    test_case.expected_code_count : 1;
+            BUSTER_TEST(arguments, parsed.code_count == expected_code_count);
+            BUSTER_TEST(arguments,
+                    parsed.type_declaration_count == test_case.expected_type_declaration_count);
+
+            if (test_case.expected_expression.length)
+            {
+                AstExpression expression = {0};
+                AstCode* expression_code = parsed.first_code;
+                if (test_case.expression_code_name.length)
+                {
+                    while (expression_code &&
+                           !string_equal(expression_code->name, test_case.expression_code_name))
+                    {
+                        expression_code = expression_code->next;
+                    }
+                    BUSTER_TEST(arguments, expression_code != 0);
+                }
+
+                if (expression_code)
+                {
+                    AstStatement* last_statement = expression_code->body.last_statement;
+                    if (last_statement)
+                    {
+                        switch (last_statement->id)
+                        {
+                            break; case AST_STATEMENT_RETURN:
+                            {
+                                expression = last_statement->return_statement.expression;
+                            }
+                            break; case AST_STATEMENT_SWITCH:
+                            {
+                                expression = last_statement->switch_statement.expression;
+                            }
+                            break; default: os_fail();
+                        }
+                    }
+                }
+
+                String8 actual = ast_expression_to_string(arena, expression);
+                BUSTER_STRING_TEST(arguments, actual, test_case.expected_expression);
             }
         }
 

@@ -1,0 +1,5 @@
+code main : fn () s32
+{
+    consume(1 missing(2, 3), 4);
+    return 12;
+}

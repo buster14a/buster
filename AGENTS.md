@@ -54,7 +54,9 @@ Vulkan or Slang shader compilation is enabled.
 - To add a language test: drop a `.bbb` file in `tests/` **and** append it to
   the hardcoded `parser_file_test_cases` list in
   `src/buster/compiler/frontend/buster/parser.c` (covered by
-  `parser_file_tests()`). Commented-out entries there are known-failing/WIP.
+  `parser_file_tests()`). Invalid-syntax fixtures live in `tests/errors/` and
+  use the same list with exact expected diagnostics plus an expected recovered
+  AST expression. Commented-out entries there are known-failing/WIP.
 - CI (`.forgejo/workflows/ci.yml`, Forgejo not GitHub) runs
   `./build.sh test_all_combinations_ci` on Linux/macOS/Windows plus
   Debug+Release on an Android emulator and the iOS simulator, on every push.
