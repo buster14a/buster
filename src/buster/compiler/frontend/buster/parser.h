@@ -571,6 +571,7 @@ struct AstType
 
 typedef enum AstTypeDeclarationKind
 {
+    AST_TYPE_DECLARATION_ALIAS,
     AST_TYPE_DECLARATION_STRUCT,
     AST_TYPE_DECLARATION_UNION,
     AST_TYPE_DECLARATION_ENUM,
@@ -601,6 +602,7 @@ typedef struct AstTypeDeclaration AstTypeDeclaration;
 struct AstTypeDeclaration
 {
     AstTypeDeclaration* next;
+    AstType* alias_type;
     AstTypeField* first_field;
     AstTypeField* last_field;
     AstEnumMember* first_enum_member;

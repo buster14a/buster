@@ -892,6 +892,7 @@ typedef enum TypeStatementStateId
     TYPE_STATEMENT_STATE_NAME,
     TYPE_STATEMENT_STATE_EQUAL,
     TYPE_STATEMENT_STATE_KIND,
+    TYPE_STATEMENT_STATE_ALIAS_TYPE,
     TYPE_STATEMENT_STATE_OPEN,
     TYPE_STATEMENT_STATE_FIELD_OR_CLOSE,
     TYPE_STATEMENT_STATE_FIELD_COLON,
@@ -1725,7 +1726,7 @@ BUSTER_GLOBAL_LOCAL void parser_expected_type_declaration_kind(Parser* parser, E
             PARSER_DIAGNOSTIC_EXPECTED_TYPE_DECLARATION_KIND,
             token,
             TOKEN_ERROR,
-            S8("expected 'struct', 'union', or 'enum' after '='"));
+            S8("expected type, 'struct', 'union', or 'enum' after '='"));
     parser->recovery = PARSER_RECOVERY_DECLARATION;
 }
 
@@ -2669,10 +2670,20 @@ BUSTER_GLOBAL_LOCAL void finish_type_reference(Parser* parser, u32 end_offset)
         }
         break; case PARSER_STATE_TYPE_STATEMENT:
         {
-            BUSTER_CHECK(resume_state->type_statement.state == TYPE_STATEMENT_STATE_FIELD_TYPE);
-            BUSTER_CHECK(resume_state->type_statement.field);
-            parser_source_range_set_end(&resume_state->type_statement.field->range, end_offset);
-            resume_state->type_statement.state = TYPE_STATEMENT_STATE_FIELD_DELIMITER;
+            if (resume_state->type_statement.state == TYPE_STATEMENT_STATE_ALIAS_TYPE)
+            {
+                parser_source_range_set_end(
+                        &resume_state->type_statement.declaration->range,
+                        end_offset);
+                state_pop(&parser->state);
+            }
+            else
+            {
+                BUSTER_CHECK(resume_state->type_statement.state == TYPE_STATEMENT_STATE_FIELD_TYPE);
+                BUSTER_CHECK(resume_state->type_statement.field);
+                parser_source_range_set_end(&resume_state->type_statement.field->range, end_offset);
+                resume_state->type_statement.state = TYPE_STATEMENT_STATE_FIELD_DELIMITER;
+            }
         }
         break; default:
         {
@@ -5854,6 +5865,17 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         {
                             declaration->kind = AST_TYPE_DECLARATION_ENUM;
                         }
+                        else if (token_begins_type(token.id))
+                        {
+                            declaration->kind = AST_TYPE_DECLARATION_ALIAS;
+                            type_statement->type_statement.state = TYPE_STATEMENT_STATE_ALIAS_TYPE;
+
+                            ParserState* alias_type = state_push(&parser.state);
+                            alias_type->id = PARSER_STATE_TYPE_REFERENCE;
+                            alias_type->type.current_state = TYPE_STATE_PREFIX_OR_BASE;
+                            alias_type->type.destination = &declaration->alias_type;
+                            break;
+                        }
                         else
                         {
                             parser_expected_type_declaration_kind(&parser, token);
@@ -5861,6 +5883,10 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         }
                         consume(&parser.iterator);
                         type_statement->type_statement.state = TYPE_STATEMENT_STATE_OPEN;
+                    }
+                    break; case TYPE_STATEMENT_STATE_ALIAS_TYPE:
+                    {
+                        BUSTER_UNREACHABLE();
                     }
                     break; case TYPE_STATEMENT_STATE_OPEN:
                     {
@@ -6285,6 +6311,32 @@ BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic malformed_type_items_diagnostic
     },
 };
 
+BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic missing_alias_type_diagnostics[] =
+{
+    {
+        .message = S8_INITIALIZER("expected type, 'struct', 'union', or 'enum' after '='"),
+        .kind = PARSER_DIAGNOSTIC_EXPECTED_TYPE_DECLARATION_KIND,
+        .found = TOKEN_KEYWORD_CODE,
+        .expected = TOKEN_ERROR,
+        .line = 2,
+        .column = 1,
+        .length = 4,
+    },
+};
+
+BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic malformed_function_alias_diagnostics[] =
+{
+    {
+        .message = S8_INITIALIZER("unexpected token"),
+        .kind = PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN,
+        .found = TOKEN_AMPERSAND,
+        .expected = TOKEN_COLON,
+        .line = 1,
+        .column = 29,
+        .length = 1,
+    },
+};
+
 BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
 {
     {
@@ -6462,6 +6514,12 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
         .expected_type_declaration_count = 2,
     },
     {
+        .path = S8_INITIALIZER("tests/basic_type_alias.bbb"),
+        .expected_expression = S8_INITIALIZER("0"),
+        .expected_code_count = 1,
+        .expected_type_declaration_count = 5,
+    },
+    {
         .path = S8_INITIALIZER("tests/array_slices.bbb"),
         .expected_expression = S8_INITIALIZER("(- total_a total_b)")
     },
@@ -6491,6 +6549,22 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
         .expected_code_count = 0,
         .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(unexpected_top_level_diagnostics),
         .expected_code_count_is_set = true,
+    },
+    {
+        .path = S8_INITIALIZER("tests/errors/missing_alias_type.bbb"),
+        .expected_expression = S8_INITIALIZER("21"),
+        .expected_diagnostics = missing_alias_type_diagnostics,
+        .expected_code_count = 1,
+        .expected_type_declaration_count = 1,
+        .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(missing_alias_type_diagnostics),
+    },
+    {
+        .path = S8_INITIALIZER("tests/errors/malformed_function_alias.bbb"),
+        .expected_expression = S8_INITIALIZER("22"),
+        .expected_diagnostics = malformed_function_alias_diagnostics,
+        .expected_code_count = 1,
+        .expected_type_declaration_count = 1,
+        .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(malformed_function_alias_diagnostics),
     },
 };
 
@@ -7675,7 +7749,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
 
     {
         String8 source = S8(
-            "code first[export] : fn[cc(systemv)] () s32 { return 1; }\n"
+            "code[inline] first[export] : fn[cc(systemv)] () s32 { return 1; }\n"
             "code second : fn[cc(win64)] () s32 { return 2; }\n");
         TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
         ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
@@ -7687,6 +7761,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             BUSTER_STRING_TEST(arguments, parsed.first_code->name, S8("first"));
             BUSTER_STRING_TEST(arguments, parsed.last_code->name, S8("second"));
             BUSTER_TEST(arguments, parsed.first_code->exported);
+            BUSTER_TEST(arguments, parsed.first_code->inline_hint);
             BUSTER_TEST(arguments, parsed.first_code->type != 0 && parsed.first_code->type->id == AST_TYPE_FUNCTION);
             BUSTER_TEST(arguments, parsed.last_code->type != 0 && parsed.last_code->type->id == AST_TYPE_FUNCTION);
             if (parsed.first_code->type && parsed.last_code->type)
@@ -7702,6 +7777,126 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, parsed.first_code->body.first_statement->return_statement.expression.nodes[0].integer.value == 1);
                 BUSTER_TEST(arguments, parsed.last_code->body.first_statement->return_statement.expression.nodes[0].integer.value == 2);
             }
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "type Index = u32\n"
+            "type Bytes = []u8\n"
+            "type Callback = fn (value: s32) s32\n"
+            "type Pointer = &s32\n"
+            "type Handler = &fn[cc(systemv)] (input: []u8, next: &fn (value: s32) bool) &fn (result: s32) u32\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.code_count == 0);
+        BUSTER_TEST(arguments, parsed.type_declaration_count == 5);
+
+        AstTypeDeclaration* index = parsed.first_type_declaration;
+        AstTypeDeclaration* bytes = index ? index->next : 0;
+        AstTypeDeclaration* callback = bytes ? bytes->next : 0;
+        AstTypeDeclaration* pointer = callback ? callback->next : 0;
+        AstTypeDeclaration* handler = pointer ? pointer->next : 0;
+        BUSTER_TEST(arguments, index != 0 && index->kind == AST_TYPE_DECLARATION_ALIAS);
+        BUSTER_TEST(arguments, bytes != 0 && bytes->kind == AST_TYPE_DECLARATION_ALIAS);
+        BUSTER_TEST(arguments, callback != 0 && callback->kind == AST_TYPE_DECLARATION_ALIAS);
+        BUSTER_TEST(arguments, pointer != 0 && pointer->kind == AST_TYPE_DECLARATION_ALIAS);
+        BUSTER_TEST(arguments, handler != 0 && handler->kind == AST_TYPE_DECLARATION_ALIAS);
+        BUSTER_TEST(arguments, handler == parsed.last_type_declaration);
+
+        if (index && bytes && callback && pointer && handler)
+        {
+            BUSTER_TEST(arguments,
+                    index->alias_type != 0 && index->alias_type->id == AST_TYPE_NAMED);
+            if (index->alias_type)
+            {
+                BUSTER_STRING_TEST(arguments, index->alias_type->name, S8("u32"));
+            }
+
+            BUSTER_TEST(arguments,
+                    bytes->alias_type != 0 && bytes->alias_type->id == AST_TYPE_SLICE);
+            AstType* bytes_element = bytes->alias_type ? bytes->alias_type->element_type : 0;
+            BUSTER_TEST(arguments,
+                    bytes_element != 0 && bytes_element->id == AST_TYPE_NAMED);
+            if (bytes_element)
+            {
+                BUSTER_STRING_TEST(arguments, bytes_element->name, S8("u8"));
+            }
+
+            AstType* callback_function = callback->alias_type;
+            BUSTER_TEST(arguments,
+                    callback_function != 0 && callback_function->id == AST_TYPE_FUNCTION);
+            if (callback_function && callback_function->id == AST_TYPE_FUNCTION)
+            {
+                BUSTER_TEST(arguments, callback_function->function.argument_count == 1);
+                AstTypeArgument* value = callback_function->function.first_argument;
+                BUSTER_TEST(arguments, value != 0);
+                if (value)
+                {
+                    BUSTER_STRING_TEST(arguments, value->name, S8("value"));
+                    BUSTER_TEST(arguments, value->type != 0 && value->type->id == AST_TYPE_NAMED);
+                }
+                BUSTER_TEST(arguments,
+                        callback_function->function.return_type != 0 &&
+                        callback_function->function.return_type->id == AST_TYPE_NAMED);
+            }
+
+            BUSTER_TEST(arguments,
+                    pointer->alias_type != 0 && pointer->alias_type->id == AST_TYPE_POINTER);
+            BUSTER_TEST(arguments,
+                    pointer->alias_type != 0 && pointer->alias_type->element_type != 0 &&
+                    pointer->alias_type->element_type->id == AST_TYPE_NAMED);
+
+            AstType* handler_pointer = handler->alias_type;
+            AstType* handler_function = handler_pointer ? handler_pointer->element_type : 0;
+            BUSTER_TEST(arguments,
+                    handler_pointer != 0 && handler_pointer->id == AST_TYPE_POINTER);
+            BUSTER_TEST(arguments,
+                    handler_function != 0 && handler_function->id == AST_TYPE_FUNCTION);
+            if (handler_function && handler_function->id == AST_TYPE_FUNCTION)
+            {
+                BUSTER_TEST(arguments,
+                        handler_function->function.calling_convention ==
+                        AST_CALLING_CONVENTION_SYSTEMV);
+                BUSTER_TEST(arguments, handler_function->function.argument_count == 2);
+                AstTypeArgument* input = handler_function->function.first_argument;
+                AstTypeArgument* next = input ? input->next : 0;
+                BUSTER_TEST(arguments,
+                        input != 0 && input->type != 0 && input->type->id == AST_TYPE_SLICE);
+                BUSTER_TEST(arguments,
+                        next != 0 && next->type != 0 && next->type->id == AST_TYPE_POINTER);
+                AstType* next_function = next && next->type ? next->type->element_type : 0;
+                BUSTER_TEST(arguments,
+                        next_function != 0 && next_function->id == AST_TYPE_FUNCTION);
+                if (next_function && next_function->id == AST_TYPE_FUNCTION)
+                {
+                    BUSTER_TEST(arguments, next_function->function.argument_count == 1);
+                    BUSTER_TEST(arguments,
+                            next_function->function.return_type != 0 &&
+                            next_function->function.return_type->id == AST_TYPE_NAMED);
+                }
+
+                AstType* return_pointer = handler_function->function.return_type;
+                AstType* return_function =
+                        return_pointer ? return_pointer->element_type : 0;
+                BUSTER_TEST(arguments,
+                        return_pointer != 0 && return_pointer->id == AST_TYPE_POINTER);
+                BUSTER_TEST(arguments,
+                        return_function != 0 && return_function->id == AST_TYPE_FUNCTION);
+                if (return_function && return_function->id == AST_TYPE_FUNCTION)
+                {
+                    BUSTER_TEST(arguments, return_function->function.argument_count == 1);
+                    BUSTER_TEST(arguments,
+                            return_function->function.return_type != 0 &&
+                            return_function->function.return_type->id == AST_TYPE_NAMED);
+                }
+            }
+
+            BUSTER_STRING_TEST(arguments,
+                    ((String8){ source.pointer + handler->range.offset, handler->range.length }),
+                    S8("type Handler = &fn[cc(systemv)] (input: []u8, next: &fn (value: s32) bool) &fn (result: s32) u32"));
         }
         arena->position = position;
     }

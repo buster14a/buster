@@ -1,0 +1,2 @@
+type Broken = &fn (callback &fn (value: s32) s32) s32
+code main : fn () s32 { return 22; }
