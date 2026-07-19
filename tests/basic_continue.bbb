@@ -1,0 +1,15 @@
+code main[export] : fn[cc(c)] () s32
+{
+    data total: s32 = 0;
+
+    for (data i = 0 .. 3)
+    {
+        if (i == 1)
+        {
+            continue;
+        }
+        total += i;
+    }
+
+    return total;
+}

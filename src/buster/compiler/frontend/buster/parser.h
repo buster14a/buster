@@ -74,6 +74,8 @@ typedef enum TokenIdEnum
     TOKEN_TILDE,
     TOKEN_AT,
     TOKEN_KEYWORD_RETURN,
+    TOKEN_KEYWORD_BREAK,
+    TOKEN_KEYWORD_CONTINUE,
     TOKEN_KEYWORD_IF,
     TOKEN_KEYWORD_ELSE,
     TOKEN_KEYWORD_FUNCTION,
@@ -381,6 +383,8 @@ typedef enum AstStatementId
     AST_STATEMENT_IF,
     AST_STATEMENT_FOR,
     AST_STATEMENT_LOOP,
+    AST_STATEMENT_BREAK,
+    AST_STATEMENT_CONTINUE,
     AST_STATEMENT_COUNT,
 } AstStatementId;
 
@@ -429,13 +433,25 @@ struct AstAssignmentStatement
 };
 
 typedef struct AstIfStatement AstIfStatement;
+typedef enum AstIfAlternativeId
+{
+    AST_IF_ALTERNATIVE_NONE,
+    AST_IF_ALTERNATIVE_BLOCK,
+    AST_IF_ALTERNATIVE_IF,
+    AST_IF_ALTERNATIVE_COUNT,
+} AstIfAlternativeId;
+
 struct AstIfStatement
 {
     AstExpression condition;
     AstBlock then_block;
-    AstBlock else_block;
-    bool has_else;
-    u8 reserved[7];
+    union
+    {
+        AstBlock else_block;
+        AstStatement* else_if;
+    };
+    AstIfAlternativeId alternative;
+    u32 reserved;
 };
 
 typedef struct AstForStatement AstForStatement;
@@ -595,6 +611,7 @@ typedef enum ParserDiagnosticKind
     PARSER_DIAGNOSTIC_EXPECTED_TYPE_FIELD_DELIMITER,
     PARSER_DIAGNOSTIC_EXPECTED_AGGREGATE_DELIMITER,
     PARSER_DIAGNOSTIC_EXPECTED_POSTFIX_ACCESS,
+    PARSER_DIAGNOSTIC_EXPECTED_ELSE_BODY,
     PARSER_DIAGNOSTIC_EXPECTED_ENUM_DELIMITER,
     PARSER_DIAGNOSTIC_EXPECTED_TYPE_DECLARATION_KIND,
     PARSER_DIAGNOSTIC_CHAINED_RANGE,

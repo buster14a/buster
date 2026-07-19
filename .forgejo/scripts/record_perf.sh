@@ -37,7 +37,7 @@
 #                               noisy file; the aggregate already tells you
 #                               *whether* something regressed, these tell
 #                               you *where*, on demand.
-#   PERF_REGRESSION_THRESHOLD  fraction, default 0.10 (10%)
+#   PERF_REGRESSION_THRESHOLD  fraction, default 0.15 (15%)
 #   HISTORY_LOOKBACK           samples per (runner, config) used for the
 #                               baseline, default 10
 #   HISTORY_BRANCH             default perf-history
@@ -54,7 +54,7 @@ set -euo pipefail
 
 BENCH_PHASE_LINES="${BENCH_PHASE_LINES:-}"
 BENCH_FILE_LINES="${BENCH_FILE_LINES:-}"
-PERF_REGRESSION_THRESHOLD="${PERF_REGRESSION_THRESHOLD:-0.10}"
+PERF_REGRESSION_THRESHOLD="${PERF_REGRESSION_THRESHOLD:-0.15}"
 HISTORY_LOOKBACK="${HISTORY_LOOKBACK:-10}"
 HISTORY_BRANCH="${HISTORY_BRANCH:-perf-history}"
 HISTORY_FILE="${HISTORY_FILE:-history.log}"

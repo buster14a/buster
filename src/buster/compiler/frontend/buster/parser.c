@@ -250,6 +250,8 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     [TOKEN_KEYWORD_IF - first_keyword] = S8_INITIALIZER("if"),
                     [TOKEN_KEYWORD_ELSE - first_keyword] = S8_INITIALIZER("else"),
                     [TOKEN_KEYWORD_RETURN - first_keyword] = S8_INITIALIZER("return"),
+                    [TOKEN_KEYWORD_BREAK - first_keyword] = S8_INITIALIZER("break"),
+                    [TOKEN_KEYWORD_CONTINUE - first_keyword] = S8_INITIALIZER("continue"),
                     [TOKEN_KEYWORD_FOR - first_keyword] = S8_INITIALIZER("for"),
                     [TOKEN_KEYWORD_WHILE - first_keyword] = S8_INITIALIZER("while"),
                     [TOKEN_KEYWORD_LOOP - first_keyword] = S8_INITIALIZER("loop"),
@@ -809,6 +811,7 @@ typedef enum IfStatementStateId
     IF_STATEMENT_STATE_THEN_BLOCK,
     IF_STATEMENT_STATE_ELSE_OR_END,
     IF_STATEMENT_STATE_ELSE_BLOCK,
+    IF_STATEMENT_STATE_ELSE_IF,
     IF_STATEMENT_STATE_COUNT,
 } IfStatementStateId;
 
@@ -1367,13 +1370,19 @@ BUSTER_GLOBAL_LOCAL AstTypeArgument* parser_type_argument_push(Parser* parser, A
     return argument;
 }
 
-BUSTER_GLOBAL_LOCAL AstStatement* parser_statement_push(Parser* parser, AstBlock* block, AstStatementId id, ExtendedToken token)
+BUSTER_GLOBAL_LOCAL AstStatement* parser_statement_create(Parser* parser, AstStatementId id, ExtendedToken token)
 {
     AstStatement* statement = arena_allocate(parser->result_arena, AstStatement, 1);
     *statement = (AstStatement){
         .range = source_range_from_token(token),
         .id = id,
     };
+    return statement;
+}
+
+BUSTER_GLOBAL_LOCAL AstStatement* parser_statement_push(Parser* parser, AstBlock* block, AstStatementId id, ExtendedToken token)
+{
+    AstStatement* statement = parser_statement_create(parser, id, token);
     if (block->last_statement)
     {
         block->last_statement->next = statement;
@@ -1498,6 +1507,17 @@ BUSTER_GLOBAL_LOCAL void parser_expected_postfix_access(Parser* parser, Extended
             token,
             TOKEN_ERROR,
             S8("expected member name or '&' after '.'"));
+    parser->recovery = PARSER_RECOVERY_STATEMENT;
+}
+
+BUSTER_GLOBAL_LOCAL void parser_expected_else_body(Parser* parser, ExtendedToken token)
+{
+    parser_diagnostic_push(
+            parser,
+            PARSER_DIAGNOSTIC_EXPECTED_ELSE_BODY,
+            token,
+            TOKEN_ERROR,
+            S8("expected 'if' or '{' after 'else'"));
     parser->recovery = PARSER_RECOVERY_STATEMENT;
 }
 
@@ -3014,6 +3034,8 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_TILDE: return S8("Tilde");
         break; case TOKEN_AT: return S8("At");
         break; case TOKEN_KEYWORD_RETURN: return S8("Keyword_Return");
+        break; case TOKEN_KEYWORD_BREAK: return S8("Keyword_Break");
+        break; case TOKEN_KEYWORD_CONTINUE: return S8("Keyword_Continue");
         break; case TOKEN_KEYWORD_IF: return S8("Keyword_If");
         break; case TOKEN_KEYWORD_ELSE: return S8("Keyword_Else");
         break; case TOKEN_KEYWORD_FUNCTION: return S8("Keyword_Function");
@@ -4067,6 +4089,26 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                 state->statement.pointer = statement;
                                 state->statement.end_token = statement_state->statement.end_token;
                             }
+                            break; case TOKEN_KEYWORD_BREAK:
+                            {
+                                consume(&parser.iterator);
+                                AstStatement* statement = parser_statement_push(
+                                        &parser,
+                                        block_state->block.block,
+                                        AST_STATEMENT_BREAK,
+                                        token);
+                                statement_state->statement.pointer = statement;
+                            }
+                            break; case TOKEN_KEYWORD_CONTINUE:
+                            {
+                                consume(&parser.iterator);
+                                AstStatement* statement = parser_statement_push(
+                                        &parser,
+                                        block_state->block.block,
+                                        AST_STATEMENT_CONTINUE,
+                                        token);
+                                statement_state->statement.pointer = statement;
+                            }
                             break; case TOKEN_KEYWORD_IF:
                             {
                                 consume(&parser.iterator);
@@ -4355,17 +4397,41 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         {
                             consume(&parser.iterator);
 
-                            ExtendedToken opening_brace = peek(&parser);
-                            if (opening_brace.id != TOKEN_LEFT_BRACE)
+                            ExtendedToken alternative = peek(&parser);
+                            if (alternative.id == TOKEN_KEYWORD_IF)
                             {
-                                parser_unexpected(&parser, opening_brace, TOKEN_LEFT_BRACE);
+                                consume(&parser.iterator);
+
+                                AstStatement* nested_if = parser_statement_create(
+                                        &parser,
+                                        AST_STATEMENT_IF,
+                                        alternative);
+                                statement->if_statement.alternative = AST_IF_ALTERNATIVE_IF;
+                                statement->if_statement.else_if = nested_if;
+                                if_state->statement.if_state.id = IF_STATEMENT_STATE_ELSE_IF;
+
+                                ParserState* nested_state = state_push(&parser.state);
+                                nested_state->id = PARSER_STATE_IF_STATEMENT;
+                                nested_state->statement.if_state.id = IF_STATEMENT_STATE_OPEN_CONDITION;
+                                nested_state->statement.pointer = nested_if;
+                                nested_state->statement.end_token = TOKEN_ERROR;
+                            }
+                            else if (alternative.id == TOKEN_LEFT_BRACE)
+                            {
+                                consume(&parser.iterator);
+
+                                statement->if_statement.alternative = AST_IF_ALTERNATIVE_BLOCK;
+                                if_state->statement.if_state.id = IF_STATEMENT_STATE_ELSE_BLOCK;
+                                parse_block(
+                                        &parser,
+                                        &statement->if_statement.else_block,
+                                        alternative);
+                            }
+                            else
+                            {
+                                parser_expected_else_body(&parser, alternative);
                                 continue;
                             }
-                            consume(&parser.iterator);
-
-                            statement->if_statement.has_else = true;
-                            if_state->statement.if_state.id = IF_STATEMENT_STATE_ELSE_BLOCK;
-                            parse_block(&parser, &statement->if_statement.else_block, opening_brace);
                         }
                         else
                         {
@@ -4378,6 +4444,14 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                     {
                         AstBlock* else_block = &statement->if_statement.else_block;
                         statement->range.length = else_block->range.offset + else_block->range.length - statement->range.offset;
+                        state_pop(&parser.state);
+                    }
+                    break; case IF_STATEMENT_STATE_ELSE_IF:
+                    {
+                        AstStatement* nested_if = statement->if_statement.else_if;
+                        BUSTER_CHECK(nested_if && nested_if->id == AST_STATEMENT_IF);
+                        statement->range.length =
+                                nested_if->range.offset + nested_if->range.length - statement->range.offset;
                         state_pop(&parser.state);
                     }
                     break; case IF_STATEMENT_STATE_COUNT: BUSTER_UNREACHABLE();
@@ -5582,11 +5656,23 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
         .expected_expression = S8_INITIALIZER("(+ a b)")
     },
     {
+        .path = S8_INITIALIZER("tests/basic_else_if.bbb"),
+        .expected_expression = S8_INITIALIZER("value")
+    },
+    {
         .path = S8_INITIALIZER("tests/basic_for.bbb"),
         .expected_expression = S8_INITIALIZER("total")
     },
     {
+        .path = S8_INITIALIZER("tests/basic_continue.bbb"),
+        .expected_expression = S8_INITIALIZER("total")
+    },
+    {
         .path = S8_INITIALIZER("tests/basic_loop.bbb"),
+        .expected_expression = S8_INITIALIZER("value")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_break.bbb"),
         .expected_expression = S8_INITIALIZER("value")
     },
     {
@@ -5920,6 +6006,32 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, tokenizer.tokens[1].id == TOKEN_IDENTIFIER);
         BUSTER_TEST(arguments, tokenizer.tokens[2].id == TOKEN_SPACE);
         BUSTER_TEST(arguments, tokenizer.tokens[3].id == TOKEN_KEYWORD_LOOP);
+        arena->position = position;
+    }
+
+    {
+        String8 spellings[] = { S8("break"), S8("continue") };
+        TokenId tokens[] = { TOKEN_KEYWORD_BREAK, TOKEN_KEYWORD_CONTINUE };
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(spellings) == BUSTER_ARRAY_LENGTH(tokens));
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
+        {
+            TokenizerResult tokenizer = tokenize(arena, spellings[i].pointer, spellings[i].length);
+            BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, spellings[i].length));
+            BUSTER_TEST(arguments, tokenizer.error_count == 0);
+            BUSTER_TEST(arguments, tokenizer.token_count == 2);
+            BUSTER_TEST(arguments, tokenizer.tokens[0].id == tokens[i]);
+            BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[0]) == spellings[i].length);
+            arena->position = position;
+        }
+    }
+
+    {
+        String8 source = S8("breakfast continuer");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, source.length));
+        BUSTER_TEST(arguments, tokenizer.error_count == 0);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_IDENTIFIER);
+        BUSTER_TEST(arguments, tokenizer.tokens[2].id == TOKEN_IDENTIFIER);
         arena->position = position;
     }
 
@@ -7279,7 +7391,7 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             AstIfStatement* if_data = &if_statement->if_statement;
             BUSTER_TEST(arguments, if_data->condition.count == 3);
             BUSTER_TEST(arguments, if_data->condition.count == 3 && if_data->condition.nodes[2].id == AST_NODE_BINARY_GREATER);
-            BUSTER_TEST(arguments, if_data->has_else);
+            BUSTER_TEST(arguments, if_data->alternative == AST_IF_ALTERNATIVE_BLOCK);
             BUSTER_TEST(arguments, if_data->then_block.statement_count == 1);
             BUSTER_TEST(arguments, if_data->else_block.statement_count == 1);
 
@@ -7288,9 +7400,95 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             if (nested_if && nested_if->id == AST_STATEMENT_IF)
             {
                 BUSTER_TEST(arguments, nested_if->if_statement.condition.count == 1);
-                BUSTER_TEST(arguments, !nested_if->if_statement.has_else);
+                BUSTER_TEST(arguments,
+                        nested_if->if_statement.alternative == AST_IF_ALTERNATIVE_NONE);
                 BUSTER_TEST(arguments, nested_if->if_statement.then_block.statement_count == 1);
             }
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 {\n"
+            "    if (a) { a = 1; }\n"
+            "    else if (b) { a = 2; }\n"
+            "    else if (c) { a = 3; }\n"
+            "    else { a = 4; }\n"
+            "    return a;\n"
+            "}\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.statement_count == 2);
+
+        AstStatement* outer = parsed.first_code ? parsed.first_code->body.first_statement : 0;
+        BUSTER_TEST(arguments, outer != 0 && outer->id == AST_STATEMENT_IF);
+        if (outer && outer->id == AST_STATEMENT_IF)
+        {
+            BUSTER_TEST(arguments, outer->if_statement.condition.count == 1);
+            BUSTER_TEST(arguments, outer->if_statement.then_block.statement_count == 1);
+            BUSTER_TEST(arguments,
+                    outer->if_statement.alternative == AST_IF_ALTERNATIVE_IF);
+
+            AstStatement* first_else_if = outer->if_statement.else_if;
+            BUSTER_TEST(arguments,
+                    first_else_if != 0 && first_else_if->id == AST_STATEMENT_IF);
+            if (first_else_if && first_else_if->id == AST_STATEMENT_IF)
+            {
+                BUSTER_TEST(arguments, first_else_if->next == 0);
+                BUSTER_TEST(arguments, first_else_if->if_statement.condition.count == 1);
+                BUSTER_TEST(arguments,
+                        first_else_if->if_statement.alternative == AST_IF_ALTERNATIVE_IF);
+
+                AstStatement* second_else_if = first_else_if->if_statement.else_if;
+                BUSTER_TEST(arguments,
+                        second_else_if != 0 && second_else_if->id == AST_STATEMENT_IF);
+                if (second_else_if && second_else_if->id == AST_STATEMENT_IF)
+                {
+                    BUSTER_TEST(arguments, second_else_if->next == 0);
+                    BUSTER_TEST(arguments, second_else_if->if_statement.condition.count == 1);
+                    BUSTER_TEST(arguments,
+                            second_else_if->if_statement.alternative == AST_IF_ALTERNATIVE_BLOCK);
+                    BUSTER_TEST(arguments,
+                            second_else_if->if_statement.else_block.statement_count == 1);
+                    BUSTER_TEST(arguments,
+                            outer->range.offset + outer->range.length ==
+                            second_else_if->if_statement.else_block.range.offset +
+                            second_else_if->if_statement.else_block.range.length);
+                }
+            }
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 {\n"
+            "    if (value) { value = 1; } else value = 2;\n"
+            "    return 3;\n"
+            "}\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_EXPECTED_ELSE_BODY);
+        if (parsed.first_diagnostic)
+        {
+            BUSTER_STRING_TEST(arguments,
+                    parsed.first_diagnostic->message,
+                    S8("expected 'if' or '{' after 'else'"));
+            BUSTER_TEST(arguments, parsed.first_diagnostic->found == TOKEN_IDENTIFIER);
+        }
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.last_statement != 0);
+        if (parsed.first_code && parsed.first_code->body.last_statement)
+        {
+            AstStatement* recovered = parsed.first_code->body.last_statement;
+            BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
+            BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
+                    recovered->return_statement.expression.nodes[0].integer.value == 3);
         }
         arena->position = position;
     }
@@ -7395,6 +7593,104 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
             }
         }
         arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 {\n"
+            "    loop {\n"
+            "        break;\n"
+            "        continue;\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.statement_count == 2);
+
+        AstStatement* loop = parsed.first_code ? parsed.first_code->body.first_statement : 0;
+        BUSTER_TEST(arguments, loop != 0 && loop->id == AST_STATEMENT_LOOP);
+        if (loop && loop->id == AST_STATEMENT_LOOP)
+        {
+            AstBlock* body = &loop->loop_statement.body;
+            BUSTER_TEST(arguments, body->statement_count == 2);
+            AstStatement* break_statement = body->first_statement;
+            AstStatement* continue_statement = break_statement ? break_statement->next : 0;
+            BUSTER_TEST(arguments,
+                    break_statement != 0 && break_statement->id == AST_STATEMENT_BREAK);
+            BUSTER_TEST(arguments,
+                    continue_statement != 0 &&
+                    continue_statement->id == AST_STATEMENT_CONTINUE);
+            BUSTER_TEST(arguments, continue_statement != 0 && continue_statement->next == 0);
+            if (break_statement && continue_statement)
+            {
+                BUSTER_STRING_TEST(arguments,
+                        ((String8){ source.pointer + break_statement->range.offset,
+                                   break_statement->range.length }),
+                        S8("break;"));
+                BUSTER_STRING_TEST(arguments,
+                        ((String8){ source.pointer + continue_statement->range.offset,
+                                   continue_statement->range.length }),
+                        S8("continue;"));
+            }
+        }
+        arena->position = position;
+    }
+
+    {
+        struct
+        {
+            String8 source;
+            AstStatementId id;
+        } cases[] = {
+            {
+                S8("code main : fn () s32 { loop { break value; } return 7; }"),
+                AST_STATEMENT_BREAK,
+            },
+            {
+                S8("code main : fn () s32 { loop { continue value; } return 7; }"),
+                AST_STATEMENT_CONTINUE,
+            },
+        };
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+        {
+            TokenizerResult tokenizer = tokenize(
+                    arena,
+                    cases[i].source.pointer,
+                    cases[i].source.length);
+            ParserResult parsed = parser_parse(
+                    arena,
+                    expression_arena,
+                    cases[i].source,
+                    tokenizer);
+            BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+            BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                    parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN);
+            BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                    parsed.first_diagnostic->found == TOKEN_IDENTIFIER);
+            BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                    parsed.first_diagnostic->expected == TOKEN_SEMICOLON);
+            AstStatement* loop = parsed.first_code ? parsed.first_code->body.first_statement : 0;
+            BUSTER_TEST(arguments, loop != 0 && loop->id == AST_STATEMENT_LOOP);
+            if (loop && loop->id == AST_STATEMENT_LOOP)
+            {
+                BUSTER_TEST(arguments,
+                        loop->loop_statement.body.first_statement != 0 &&
+                        loop->loop_statement.body.first_statement->id == cases[i].id);
+            }
+            BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                    parsed.first_code->body.last_statement != 0);
+            if (parsed.first_code && parsed.first_code->body.last_statement)
+            {
+                AstStatement* recovered = parsed.first_code->body.last_statement;
+                BUSTER_TEST(arguments, recovered->id == AST_STATEMENT_RETURN);
+                BUSTER_TEST(arguments, recovered->return_statement.expression.count == 1 &&
+                        recovered->return_statement.expression.nodes[0].integer.value == 7);
+            }
+            arena->position = position;
+        }
     }
 
     {

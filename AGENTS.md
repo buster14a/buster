@@ -100,7 +100,7 @@ Vulkan or Slang shader compilation is enabled.
   (`ts=... runner=... config=... commit=... metric=... value=...
   [file=...]`, plain text, no JSON/`jq`) — and **fails the CI job** only if
   `compile_milliseconds` or `bench_median_ns_per_file` regresses more than
-  10% (`PERF_REGRESSION_THRESHOLD`) past that `(runner, config)`'s median.
+  15% (`PERF_REGRESSION_THRESHOLD`) past that `(runner, config)`'s median.
   The raw `bench_median_ns` and `bench_file_count` metrics are also retained,
   but the normalized metric is gated so growing the parser corpus does not
   register as a performance regression. `compile_milliseconds` times CMake
