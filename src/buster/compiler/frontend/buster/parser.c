@@ -249,6 +249,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     [TOKEN_KEYWORD_FUNCTION - first_keyword] = S8_INITIALIZER("fn"),
                     [TOKEN_KEYWORD_IF - first_keyword] = S8_INITIALIZER("if"),
                     [TOKEN_KEYWORD_ELSE - first_keyword] = S8_INITIALIZER("else"),
+                    [TOKEN_KEYWORD_SWITCH - first_keyword] = S8_INITIALIZER("switch"),
                     [TOKEN_KEYWORD_RETURN - first_keyword] = S8_INITIALIZER("return"),
                     [TOKEN_KEYWORD_BREAK - first_keyword] = S8_INITIALIZER("break"),
                     [TOKEN_KEYWORD_CONTINUE - first_keyword] = S8_INITIALIZER("continue"),
@@ -549,7 +550,12 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
             }
             break; case '=':
             {
-                if (it + 1 < top && it[1] == '=')
+                if (it + 1 < top && it[1] == '>')
+                {
+                    id = TOKEN_FAT_ARROW;
+                    it += 2;
+                }
+                else if (it + 1 < top && it[1] == '=')
                 {
                     id = TOKEN_EQUAL_EQUAL;
                     it += 2;
@@ -690,6 +696,7 @@ typedef enum ParserStateId
     PARSER_STATE_DATA_STATEMENT,
     PARSER_STATE_ASSIGNMENT_STATEMENT,
     PARSER_STATE_IF_STATEMENT,
+    PARSER_STATE_SWITCH_STATEMENT,
     PARSER_STATE_FOR_STATEMENT,
     PARSER_STATE_LOOP_STATEMENT,
     PARSER_STATE_TYPE_STATEMENT,
@@ -819,6 +826,25 @@ typedef struct IfStatementState IfStatementState;
 struct IfStatementState
 {
     IfStatementStateId id;
+};
+
+typedef enum SwitchStatementStateId
+{
+    SWITCH_STATEMENT_STATE_OPEN_EXPRESSION,
+    SWITCH_STATEMENT_STATE_EXPRESSION,
+    SWITCH_STATEMENT_STATE_CLOSE_EXPRESSION,
+    SWITCH_STATEMENT_STATE_CASE_OR_END,
+    SWITCH_STATEMENT_STATE_CASE_EXPRESSION,
+    SWITCH_STATEMENT_STATE_CASE_ARROW,
+    SWITCH_STATEMENT_STATE_CASE_BODY,
+    SWITCH_STATEMENT_STATE_CASE_DELIMITER,
+    SWITCH_STATEMENT_STATE_COUNT,
+} SwitchStatementStateId;
+
+typedef struct SwitchStatementState SwitchStatementState;
+struct SwitchStatementState
+{
+    SwitchStatementStateId id;
 };
 
 typedef enum ForStatementStateId
@@ -990,6 +1016,7 @@ struct ParserState
                 DataStatementState data_state;
                 AssignmentStatementState assignment_state;
                 IfStatementState if_state;
+                SwitchStatementState switch_state;
                 ForStatementState for_state;
                 LoopStatementState loop_state;
             };
@@ -1207,6 +1234,7 @@ typedef struct Parser Parser;
 typedef enum ParserRecoveryKind
 {
     PARSER_RECOVERY_NONE,
+    PARSER_RECOVERY_SWITCH_CASE,
     PARSER_RECOVERY_STATEMENT,
     PARSER_RECOVERY_DECLARATION,
 } ParserRecoveryKind;
@@ -1396,6 +1424,26 @@ BUSTER_GLOBAL_LOCAL AstStatement* parser_statement_push(Parser* parser, AstBlock
     return statement;
 }
 
+BUSTER_GLOBAL_LOCAL AstSwitchCase* parser_switch_case_push(
+        Parser* parser,
+        AstSwitchStatement* switch_statement,
+        ExtendedToken token)
+{
+    AstSwitchCase* switch_case = arena_allocate(parser->result_arena, AstSwitchCase, 1);
+    *switch_case = (AstSwitchCase){ .range = source_range_from_token(token) };
+    if (switch_statement->last_case)
+    {
+        switch_statement->last_case->next = switch_case;
+    }
+    else
+    {
+        switch_statement->first_case = switch_case;
+    }
+    switch_statement->last_case = switch_case;
+    switch_statement->case_count += 1;
+    return switch_case;
+}
+
 BUSTER_GLOBAL_LOCAL ParserDiagnostic* parser_diagnostic_push(Parser* parser, ParserDiagnosticKind kind, ExtendedToken token, TokenId expected, String8 message)
 {
     ParserDiagnostic* diagnostic = arena_allocate(parser->result_arena, ParserDiagnostic, 1);
@@ -1423,24 +1471,42 @@ BUSTER_GLOBAL_LOCAL void parser_unexpected(Parser* parser, ExtendedToken token, 
 {
     parser_diagnostic_push(parser, PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN, token, expected, S8("unexpected token"));
     ParserStateId state_id = state(parser)->id;
-    if (state_id == PARSER_STATE_STATEMENT || state_id == PARSER_STATE_RETURN_STATEMENT ||
-        state_id == PARSER_STATE_DATA_STATEMENT || state_id == PARSER_STATE_ASSIGNMENT_STATEMENT ||
-        state_id == PARSER_STATE_IF_STATEMENT || state_id == PARSER_STATE_FOR_STATEMENT ||
-        state_id == PARSER_STATE_LOOP_STATEMENT ||
-        state_id == PARSER_STATE_ARRAY_LITERAL ||
-        state_id == PARSER_STATE_AGGREGATE_LITERAL ||
-        state_id == PARSER_STATE_ARRAY_SUBSCRIPT ||
-        state_id == PARSER_STATE_MEMBER_ACCESS ||
-        state_id == PARSER_STATE_ENUM_LITERAL ||
-        state_id == PARSER_STATE_CALL ||
-        state_id == PARSER_STATE_INTRINSIC_CALL ||
-        state_id == PARSER_STATE_EXPRESSION || state_id == PARSER_STATE_UNARY_PREFIX)
+    switch (state_id)
     {
-        parser->recovery = PARSER_RECOVERY_STATEMENT;
-    }
-    else
-    {
-        parser->recovery = PARSER_RECOVERY_DECLARATION;
+        case PARSER_STATE_STATEMENT:
+        case PARSER_STATE_RETURN_STATEMENT:
+        case PARSER_STATE_DATA_STATEMENT:
+        case PARSER_STATE_ASSIGNMENT_STATEMENT:
+        case PARSER_STATE_IF_STATEMENT:
+        case PARSER_STATE_SWITCH_STATEMENT:
+        case PARSER_STATE_FOR_STATEMENT:
+        case PARSER_STATE_LOOP_STATEMENT:
+        case PARSER_STATE_ARRAY_LITERAL:
+        case PARSER_STATE_AGGREGATE_LITERAL:
+        case PARSER_STATE_ARRAY_SUBSCRIPT:
+        case PARSER_STATE_MEMBER_ACCESS:
+        case PARSER_STATE_ENUM_LITERAL:
+        case PARSER_STATE_CALL:
+        case PARSER_STATE_INTRINSIC_CALL:
+        {
+            parser->recovery = PARSER_RECOVERY_STATEMENT;
+        }
+        break; case PARSER_STATE_EXPRESSION:
+        case PARSER_STATE_UNARY_PREFIX:
+        {
+            ParserState* expression_state = state(parser);
+            while (expression_state->id == PARSER_STATE_UNARY_PREFIX)
+            {
+                expression_state -= 1;
+            }
+            BUSTER_CHECK(expression_state->id == PARSER_STATE_EXPRESSION);
+            parser->recovery = expression_state->expression.end_token == TOKEN_FAT_ARROW ?
+                    PARSER_RECOVERY_SWITCH_CASE : PARSER_RECOVERY_STATEMENT;
+        }
+        break; default:
+        {
+            parser->recovery = PARSER_RECOVERY_DECLARATION;
+        }
     }
 }
 
@@ -1521,6 +1587,28 @@ BUSTER_GLOBAL_LOCAL void parser_expected_else_body(Parser* parser, ExtendedToken
     parser->recovery = PARSER_RECOVERY_STATEMENT;
 }
 
+BUSTER_GLOBAL_LOCAL void parser_expected_switch_case_delimiter(Parser* parser, ExtendedToken token)
+{
+    parser_diagnostic_push(
+            parser,
+            PARSER_DIAGNOSTIC_EXPECTED_SWITCH_CASE_DELIMITER,
+            token,
+            TOKEN_ERROR,
+            S8("expected ',' or '}' after switch case"));
+    parser->recovery = PARSER_RECOVERY_SWITCH_CASE;
+}
+
+BUSTER_GLOBAL_LOCAL void parser_duplicate_switch_else(Parser* parser, ExtendedToken token)
+{
+    parser_diagnostic_push(
+            parser,
+            PARSER_DIAGNOSTIC_DUPLICATE_SWITCH_ELSE,
+            token,
+            TOKEN_ERROR,
+            S8("switch may only have one 'else' case"));
+    parser->recovery = PARSER_RECOVERY_SWITCH_CASE;
+}
+
 BUSTER_GLOBAL_LOCAL void parser_expected_enum_delimiter(
         Parser* parser,
         ExtendedToken token,
@@ -1561,6 +1649,54 @@ BUSTER_GLOBAL_LOCAL void parser_chained_range(Parser* parser, ExtendedToken toke
 
 BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
 {
+    if (parser->recovery == PARSER_RECOVERY_SWITCH_CASE)
+    {
+        while (state(parser)->id != PARSER_STATE_SWITCH_STATEMENT &&
+               state(parser)->id != PARSER_STATE_ROOT)
+        {
+            state_pop(&parser->state);
+        }
+
+        if (state(parser)->id == PARSER_STATE_SWITCH_STATEMENT)
+        {
+            ParserState* switch_state = state(parser);
+            AstStatement* statement = switch_state->statement.pointer;
+            u32 brace_depth = 0;
+            ExtendedToken token = peek(parser);
+            while (token.id != TOKEN_EOF)
+            {
+                if (token.id == TOKEN_COMMA && brace_depth == 0)
+                {
+                    consume(&parser->iterator);
+                    switch_state->statement.switch_state.id =
+                            SWITCH_STATEMENT_STATE_CASE_OR_END;
+                    parser->recovery = PARSER_RECOVERY_NONE;
+                    return;
+                }
+                if (token.id == TOKEN_RIGHT_BRACE)
+                {
+                    if (brace_depth == 0)
+                    {
+                        consume(&parser->iterator);
+                        statement->range.length =
+                                token.offset + token.length - statement->range.offset;
+                        state_pop(&parser->state);
+                        parser->recovery = PARSER_RECOVERY_NONE;
+                        return;
+                    }
+                    brace_depth -= 1;
+                }
+                else if (token.id == TOKEN_LEFT_BRACE)
+                {
+                    brace_depth += 1;
+                }
+                consume(&parser->iterator);
+                token = peek(parser);
+            }
+        }
+        parser->recovery = PARSER_RECOVERY_STATEMENT;
+    }
+
     if (parser->recovery == PARSER_RECOVERY_STATEMENT)
     {
         AstStatement* statement = 0;
@@ -1572,7 +1708,8 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
             else if (popped.id == PARSER_STATE_AGGREGATE_LITERAL) { aggregate_brace_depth += 1; }
             else if (popped.id == PARSER_STATE_RETURN_STATEMENT || popped.id == PARSER_STATE_DATA_STATEMENT ||
                      popped.id == PARSER_STATE_ASSIGNMENT_STATEMENT || popped.id == PARSER_STATE_IF_STATEMENT ||
-                     popped.id == PARSER_STATE_FOR_STATEMENT || popped.id == PARSER_STATE_LOOP_STATEMENT)
+                     popped.id == PARSER_STATE_FOR_STATEMENT || popped.id == PARSER_STATE_LOOP_STATEMENT ||
+                     popped.id == PARSER_STATE_SWITCH_STATEMENT)
             {
                 statement = popped.statement.pointer;
             }
@@ -2950,6 +3087,25 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
             resume_state->statement.pointer->if_statement.condition = expression;
             resume_state->statement.if_state.id = IF_STATEMENT_STATE_CLOSE_CONDITION;
         }
+        break; case PARSER_STATE_SWITCH_STATEMENT:
+        {
+            AstSwitchStatement* switch_statement =
+                    &resume_state->statement.pointer->switch_statement;
+            if (resume_state->statement.switch_state.id == SWITCH_STATEMENT_STATE_EXPRESSION)
+            {
+                switch_statement->expression = expression;
+                resume_state->statement.switch_state.id = SWITCH_STATEMENT_STATE_CLOSE_EXPRESSION;
+            }
+            else
+            {
+                BUSTER_CHECK(
+                        resume_state->statement.switch_state.id ==
+                        SWITCH_STATEMENT_STATE_CASE_EXPRESSION);
+                BUSTER_CHECK(switch_statement->last_case);
+                switch_statement->last_case->expression = expression;
+                resume_state->statement.switch_state.id = SWITCH_STATEMENT_STATE_CASE_ARROW;
+            }
+        }
         break; case PARSER_STATE_FOR_STATEMENT:
         {
             BUSTER_CHECK(resume_state->statement.for_state.id == FOR_STATEMENT_STATE_ITERABLE);
@@ -2998,6 +3154,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_LEFT_PARENTHESIS: return S8("LeftParenthesis");
         break; case TOKEN_RIGHT_PARENTHESIS: return S8("RightParenthesis");
         break; case TOKEN_EQUAL: return S8("Equal");
+        break; case TOKEN_FAT_ARROW: return S8("FatArrow");
         break; case TOKEN_EQUAL_EQUAL: return S8("EqualEqual");
         break; case TOKEN_BANG: return S8("Bang");
         break; case TOKEN_BANG_EQUAL: return S8("BangEqual");
@@ -3038,6 +3195,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_KEYWORD_CONTINUE: return S8("Keyword_Continue");
         break; case TOKEN_KEYWORD_IF: return S8("Keyword_If");
         break; case TOKEN_KEYWORD_ELSE: return S8("Keyword_Else");
+        break; case TOKEN_KEYWORD_SWITCH: return S8("Keyword_Switch");
         break; case TOKEN_KEYWORD_FUNCTION: return S8("Keyword_Function");
         break; case TOKEN_KEYWORD_FOR: return S8("Keyword_For");
         break; case TOKEN_KEYWORD_WHILE: return S8("Keyword_While");
@@ -4122,6 +4280,24 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                 state->statement.pointer = statement;
                                 state->statement.end_token = TOKEN_ERROR;
                             }
+                            break; case TOKEN_KEYWORD_SWITCH:
+                            {
+                                consume(&parser.iterator);
+                                AstStatement* statement = parser_statement_push(
+                                        &parser,
+                                        block_state->block.block,
+                                        AST_STATEMENT_SWITCH,
+                                        token);
+                                statement_state->statement.pointer = statement;
+                                statement_state->statement.end_token = TOKEN_ERROR;
+
+                                ParserState* state = state_push(&parser.state);
+                                state->id = PARSER_STATE_SWITCH_STATEMENT;
+                                state->statement.switch_state.id =
+                                        SWITCH_STATEMENT_STATE_OPEN_EXPRESSION;
+                                state->statement.pointer = statement;
+                                state->statement.end_token = TOKEN_ERROR;
+                            }
                             break; case TOKEN_KEYWORD_FOR:
                             {
                                 consume(&parser.iterator);
@@ -4455,6 +4631,144 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         state_pop(&parser.state);
                     }
                     break; case IF_STATEMENT_STATE_COUNT: BUSTER_UNREACHABLE();
+                }
+            }
+            break; case PARSER_STATE_SWITCH_STATEMENT:
+            {
+                ParserState* switch_state = state(&parser);
+                ExtendedToken token = peek(&parser);
+                AstStatement* statement = switch_state->statement.pointer;
+                AstSwitchStatement* switch_statement = &statement->switch_statement;
+
+                switch (switch_state->statement.switch_state.id)
+                {
+                    break; case SWITCH_STATEMENT_STATE_OPEN_EXPRESSION:
+                    {
+                        if (token.id != TOKEN_LEFT_PARENTHESIS)
+                        {
+                            parser_unexpected(&parser, token, TOKEN_LEFT_PARENTHESIS);
+                            continue;
+                        }
+                        consume(&parser.iterator);
+                        switch_state->statement.switch_state.id =
+                                SWITCH_STATEMENT_STATE_EXPRESSION;
+                    }
+                    break; case SWITCH_STATEMENT_STATE_EXPRESSION:
+                    {
+                        parse_expression(&parser, TOKEN_RIGHT_PARENTHESIS);
+                    }
+                    break; case SWITCH_STATEMENT_STATE_CLOSE_EXPRESSION:
+                    {
+                        if (token.id != TOKEN_RIGHT_PARENTHESIS)
+                        {
+                            parser_unexpected(&parser, token, TOKEN_RIGHT_PARENTHESIS);
+                            continue;
+                        }
+                        consume(&parser.iterator);
+
+                        ExtendedToken opening_brace = peek(&parser);
+                        if (opening_brace.id != TOKEN_LEFT_BRACE)
+                        {
+                            parser_unexpected(&parser, opening_brace, TOKEN_LEFT_BRACE);
+                            continue;
+                        }
+                        consume(&parser.iterator);
+                        switch_state->statement.switch_state.id =
+                                SWITCH_STATEMENT_STATE_CASE_OR_END;
+                    }
+                    break; case SWITCH_STATEMENT_STATE_CASE_OR_END:
+                    {
+                        if (token.id == TOKEN_RIGHT_BRACE)
+                        {
+                            consume(&parser.iterator);
+                            statement->range.length =
+                                    token.offset + token.length - statement->range.offset;
+                            state_pop(&parser.state);
+                        }
+                        else if (token.id == TOKEN_KEYWORD_ELSE)
+                        {
+                            if (switch_statement->else_case)
+                            {
+                                parser_duplicate_switch_else(&parser, token);
+                                continue;
+                            }
+
+                            consume(&parser.iterator);
+                            AstSwitchCase* switch_case = parser_switch_case_push(
+                                    &parser,
+                                    switch_statement,
+                                    token);
+                            switch_case->is_else = true;
+                            switch_statement->else_case = switch_case;
+                            switch_state->statement.switch_state.id =
+                                    SWITCH_STATEMENT_STATE_CASE_ARROW;
+                        }
+                        else
+                        {
+                            parser_switch_case_push(&parser, switch_statement, token);
+                            switch_state->statement.switch_state.id =
+                                    SWITCH_STATEMENT_STATE_CASE_EXPRESSION;
+                        }
+                    }
+                    break; case SWITCH_STATEMENT_STATE_CASE_EXPRESSION:
+                    {
+                        parse_expression(&parser, TOKEN_FAT_ARROW);
+                    }
+                    break; case SWITCH_STATEMENT_STATE_CASE_ARROW:
+                    {
+                        if (token.id != TOKEN_FAT_ARROW)
+                        {
+                            parser_unexpected(&parser, token, TOKEN_FAT_ARROW);
+                            parser.recovery = PARSER_RECOVERY_SWITCH_CASE;
+                            continue;
+                        }
+                        consume(&parser.iterator);
+
+                        ExtendedToken opening_brace = peek(&parser);
+                        if (opening_brace.id != TOKEN_LEFT_BRACE)
+                        {
+                            parser_unexpected(&parser, opening_brace, TOKEN_LEFT_BRACE);
+                            parser.recovery = PARSER_RECOVERY_SWITCH_CASE;
+                            continue;
+                        }
+                        consume(&parser.iterator);
+                        switch_state->statement.switch_state.id =
+                                SWITCH_STATEMENT_STATE_CASE_BODY;
+                        BUSTER_CHECK(switch_statement->last_case);
+                        parse_block(&parser, &switch_statement->last_case->body, opening_brace);
+                    }
+                    break; case SWITCH_STATEMENT_STATE_CASE_BODY:
+                    {
+                        AstSwitchCase* switch_case = switch_statement->last_case;
+                        BUSTER_CHECK(switch_case);
+                        switch_case->range.length =
+                                switch_case->body.range.offset + switch_case->body.range.length -
+                                switch_case->range.offset;
+                        switch_state->statement.switch_state.id =
+                                SWITCH_STATEMENT_STATE_CASE_DELIMITER;
+                    }
+                    break; case SWITCH_STATEMENT_STATE_CASE_DELIMITER:
+                    {
+                        if (token.id == TOKEN_COMMA)
+                        {
+                            consume(&parser.iterator);
+                            switch_state->statement.switch_state.id =
+                                    SWITCH_STATEMENT_STATE_CASE_OR_END;
+                        }
+                        else if (token.id == TOKEN_RIGHT_BRACE)
+                        {
+                            consume(&parser.iterator);
+                            statement->range.length =
+                                    token.offset + token.length - statement->range.offset;
+                            state_pop(&parser.state);
+                        }
+                        else
+                        {
+                            parser_expected_switch_case_delimiter(&parser, token);
+                            continue;
+                        }
+                    }
+                    break; case SWITCH_STATEMENT_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
             break; case PARSER_STATE_FOR_STATEMENT:
@@ -5660,6 +5974,13 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
         .expected_expression = S8_INITIALIZER("value")
     },
     {
+        .path = S8_INITIALIZER("tests/basic_switch.bbb"),
+        .expected_expression = S8_INITIALIZER("e"),
+        .expression_code_name = S8_INITIALIZER("main"),
+        .expected_code_count = 1,
+        .expected_type_declaration_count = 1,
+    },
+    {
         .path = S8_INITIALIZER("tests/basic_for.bbb"),
         .expected_expression = S8_INITIALIZER("total")
     },
@@ -6032,6 +6353,19 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, tokenizer.error_count == 0);
         BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_IDENTIFIER);
         BUSTER_TEST(arguments, tokenizer.tokens[2].id == TOKEN_IDENTIFIER);
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8("switch => switcher");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        BUSTER_TEST(arguments, tokenizer_stream_covers_source(tokenizer, source.length));
+        BUSTER_TEST(arguments, tokenizer.error_count == 0);
+        BUSTER_TEST(arguments, tokenizer.token_count == 6);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_KEYWORD_SWITCH);
+        BUSTER_TEST(arguments, tokenizer.tokens[2].id == TOKEN_FAT_ARROW);
+        BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[2]) == 2);
+        BUSTER_TEST(arguments, tokenizer.tokens[4].id == TOKEN_IDENTIFIER);
         arena->position = position;
     }
 
@@ -7513,6 +7847,133 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
 
     {
         String8 source = S8(
+            "code main : fn () s32 { "
+            "switch (value + 1) { .a => { return 0; }, 2 => { return 2; }, "
+            "else => { return 3; } } return 4; }");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.statement_count == 2);
+
+        AstStatement* statement = parsed.first_code ?
+                parsed.first_code->body.first_statement : 0;
+        BUSTER_TEST(arguments, statement != 0 && statement->id == AST_STATEMENT_SWITCH);
+        if (statement && statement->id == AST_STATEMENT_SWITCH)
+        {
+            AstSwitchStatement* switch_statement = &statement->switch_statement;
+            BUSTER_TEST(arguments, switch_statement->expression.count == 3);
+            BUSTER_TEST(arguments, switch_statement->expression.count == 3 &&
+                    switch_statement->expression.nodes[2].id == AST_NODE_BINARY_PLUS);
+            BUSTER_TEST(arguments, switch_statement->case_count == 3);
+
+            AstSwitchCase* first = switch_statement->first_case;
+            AstSwitchCase* second = first ? first->next : 0;
+            AstSwitchCase* otherwise = second ? second->next : 0;
+            BUSTER_TEST(arguments, first != 0 && !first->is_else);
+            BUSTER_TEST(arguments, first != 0 && first->expression.count == 1 &&
+                    first->expression.nodes[0].id == AST_NODE_ENUM_LITERAL);
+            BUSTER_TEST(arguments, first != 0 && first->body.statement_count == 1);
+            BUSTER_TEST(arguments, second != 0 && !second->is_else);
+            BUSTER_TEST(arguments, second != 0 && second->expression.count == 1 &&
+                    second->expression.nodes[0].id == AST_NODE_CONSTANT_INTEGER &&
+                    second->expression.nodes[0].integer.value == 2);
+            BUSTER_TEST(arguments, otherwise != 0 && otherwise->is_else);
+            BUSTER_TEST(arguments, otherwise != 0 && otherwise->expression.count == 0);
+            BUSTER_TEST(arguments, otherwise != 0 && otherwise->next == 0);
+            BUSTER_TEST(arguments, switch_statement->last_case == otherwise);
+            BUSTER_TEST(arguments, switch_statement->else_case == otherwise);
+            if (first && otherwise)
+            {
+                BUSTER_STRING_TEST(arguments,
+                        ((String8){ source.pointer + first->range.offset, first->range.length }),
+                        S8(".a => { return 0; }"));
+                BUSTER_STRING_TEST(arguments,
+                        ((String8){ source.pointer + otherwise->range.offset,
+                                   otherwise->range.length }),
+                        S8("else => { return 3; }"));
+            }
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 { "
+            "switch (value) { 0 { return 1; }, else => { return 2; }, } "
+            "return 3; }");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->found == TOKEN_LEFT_BRACE);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->expected == TOKEN_FAT_ARROW);
+        AstStatement* switch_statement = parsed.first_code ?
+                parsed.first_code->body.first_statement : 0;
+        BUSTER_TEST(arguments, switch_statement != 0 &&
+                switch_statement->id == AST_STATEMENT_SWITCH);
+        BUSTER_TEST(arguments, switch_statement != 0 &&
+                switch_statement->switch_statement.else_case != 0);
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.last_statement != 0 &&
+                parsed.first_code->body.last_statement->id == AST_STATEMENT_RETURN);
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 { "
+            "switch (value) { 0 => { } 1 => { }, else => { }, } return 3; }");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind ==
+                PARSER_DIAGNOSTIC_EXPECTED_SWITCH_CASE_DELIMITER);
+        if (parsed.first_diagnostic)
+        {
+            BUSTER_STRING_TEST(arguments,
+                    parsed.first_diagnostic->message,
+                    S8("expected ',' or '}' after switch case"));
+        }
+        AstStatement* switch_statement = parsed.first_code ?
+                parsed.first_code->body.first_statement : 0;
+        BUSTER_TEST(arguments, switch_statement != 0 &&
+                switch_statement->id == AST_STATEMENT_SWITCH);
+        BUSTER_TEST(arguments, switch_statement != 0 &&
+                switch_statement->switch_statement.case_count == 2);
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.last_statement != 0 &&
+                parsed.first_code->body.last_statement->id == AST_STATEMENT_RETURN);
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "code main : fn () s32 { "
+            "switch (value) { else => { }, else => { }, } return 3; }");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_DUPLICATE_SWITCH_ELSE);
+        if (parsed.first_diagnostic)
+        {
+            BUSTER_STRING_TEST(arguments,
+                    parsed.first_diagnostic->message,
+                    S8("switch may only have one 'else' case"));
+        }
+        BUSTER_TEST(arguments, parsed.first_code != 0 &&
+                parsed.first_code->body.last_statement != 0 &&
+                parsed.first_code->body.last_statement->id == AST_STATEMENT_RETURN);
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
             "code main : fn () s32 {\n"
             "    for (data outer = 0 .. count) {\n"
             "        for (data inner: s32 = @reverse(0 .. count)) { total += inner; }\n"
@@ -8068,6 +8529,7 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
                         switch (last_statement->id)
                         {
                             break; case AST_STATEMENT_RETURN: expression = last_statement->return_statement.expression;
+                            break; case AST_STATEMENT_SWITCH: expression = last_statement->switch_statement.expression;
                             break; default: os_fail();
                         }
                     }

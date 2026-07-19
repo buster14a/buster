@@ -38,6 +38,7 @@ typedef enum TokenIdEnum
     TOKEN_LEFT_PARENTHESIS,
     TOKEN_RIGHT_PARENTHESIS,
     TOKEN_EQUAL,
+    TOKEN_FAT_ARROW,
     TOKEN_EQUAL_EQUAL,
     TOKEN_BANG,
     TOKEN_BANG_EQUAL,
@@ -78,6 +79,7 @@ typedef enum TokenIdEnum
     TOKEN_KEYWORD_CONTINUE,
     TOKEN_KEYWORD_IF,
     TOKEN_KEYWORD_ELSE,
+    TOKEN_KEYWORD_SWITCH,
     TOKEN_KEYWORD_FUNCTION,
     TOKEN_KEYWORD_FOR,
     TOKEN_KEYWORD_WHILE,
@@ -381,6 +383,7 @@ typedef enum AstStatementId
     AST_STATEMENT_EXPRESSION,
     AST_STATEMENT_ASSIGNMENT,
     AST_STATEMENT_IF,
+    AST_STATEMENT_SWITCH,
     AST_STATEMENT_FOR,
     AST_STATEMENT_LOOP,
     AST_STATEMENT_BREAK,
@@ -454,6 +457,28 @@ struct AstIfStatement
     u32 reserved;
 };
 
+typedef struct AstSwitchCase AstSwitchCase;
+struct AstSwitchCase
+{
+    AstSwitchCase* next;
+    AstExpression expression;
+    AstBlock body;
+    ParserSourceRange range;
+    bool is_else;
+    u8 reserved[7];
+};
+
+typedef struct AstSwitchStatement AstSwitchStatement;
+struct AstSwitchStatement
+{
+    AstExpression expression;
+    AstSwitchCase* first_case;
+    AstSwitchCase* last_case;
+    AstSwitchCase* else_case;
+    u32 case_count;
+    u32 reserved;
+};
+
 typedef struct AstForStatement AstForStatement;
 struct AstForStatement
 {
@@ -484,6 +509,7 @@ struct AstStatement
         AstExpressionStatement expression_statement;
         AstAssignmentStatement assignment_statement;
         AstIfStatement if_statement;
+        AstSwitchStatement switch_statement;
         AstForStatement for_statement;
         AstLoopStatement loop_statement;
     };
@@ -612,6 +638,8 @@ typedef enum ParserDiagnosticKind
     PARSER_DIAGNOSTIC_EXPECTED_AGGREGATE_DELIMITER,
     PARSER_DIAGNOSTIC_EXPECTED_POSTFIX_ACCESS,
     PARSER_DIAGNOSTIC_EXPECTED_ELSE_BODY,
+    PARSER_DIAGNOSTIC_EXPECTED_SWITCH_CASE_DELIMITER,
+    PARSER_DIAGNOSTIC_DUPLICATE_SWITCH_ELSE,
     PARSER_DIAGNOSTIC_EXPECTED_ENUM_DELIMITER,
     PARSER_DIAGNOSTIC_EXPECTED_TYPE_DECLARATION_KIND,
     PARSER_DIAGNOSTIC_CHAINED_RANGE,

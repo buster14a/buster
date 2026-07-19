@@ -1,0 +1,16 @@
+type E = enum
+{
+    a,
+    b,
+    c,
+}
+
+code main[export] : fn [cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+{
+    data e : E = .a;
+    switch (e)
+    {
+        .a => { return 0; },
+        else => { return 1; },
+    }
+}
