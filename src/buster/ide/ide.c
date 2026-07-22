@@ -10,6 +10,7 @@
 #include <buster/ui_builder.h>
 #include <buster/arena.h>
 #include <buster/compiler/frontend/buster/parser.h>
+#include <buster/compiler/frontend/buster/analysis.h>
 #include <buster/integer.h>
 #include <buster/string.h>
 
@@ -34,6 +35,7 @@
 #include <buster/time.c>
 #include <buster/float.c>
 #include <buster/compiler/frontend/buster/parser.c>
+#include <buster/compiler/frontend/buster/analysis.c>
 #include <buster/hash.c>
 #endif
 
