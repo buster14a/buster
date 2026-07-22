@@ -741,6 +741,7 @@ buster_register_module(float "${BUSTER_SOURCE_DIR}/float${COMMON_EXTENSION}")
 buster_register_module(file "${BUSTER_SOURCE_DIR}/file${COMMON_EXTENSION}")
 buster_register_module(compiler_parser "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/parser${COMMON_EXTENSION}")
 buster_register_module(compiler_analysis "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/analysis${COMMON_EXTENSION}")
+buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
 buster_register_module(x86_64 "${BUSTER_SOURCE_DIR}/x86_64${COMMON_EXTENSION}")
@@ -1485,6 +1486,7 @@ buster_add_executable(ide src/buster/ide/ide.c
     float
     compiler_parser
     compiler_analysis
+    compiler_ir
     simd
     file
     target

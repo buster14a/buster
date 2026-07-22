@@ -2,6 +2,7 @@
 
 #include <buster/arena.h>
 #include <buster/compiler/frontend/buster/parser.h>
+#include <buster/target.h>
 
 typedef u32 AnalysisIdUnderlying;
 
@@ -29,11 +30,25 @@ struct AnalysisEntityIndex
     AnalysisIdUnderlying value;
 };
 
+typedef struct AnalysisLocalId AnalysisLocalId;
+struct AnalysisLocalId
+{
+    AnalysisIdUnderlying value;
+};
+
+typedef struct AnalysisJobId AnalysisJobId;
+struct AnalysisJobId
+{
+    AnalysisIdUnderlying value;
+};
+
 #define ANALYSIS_ID_UNDERLYING_INVALID UINT32_MAX
 #define ANALYSIS_MODULE_ID_INVALID ((AnalysisModuleId){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
 #define ANALYSIS_SOURCE_ID_INVALID ((AnalysisSourceId){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
 #define ANALYSIS_TYPE_ID_INVALID ((AnalysisTypeId){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
 #define ANALYSIS_ENTITY_INDEX_INVALID ((AnalysisEntityIndex){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
+#define ANALYSIS_LOCAL_ID_INVALID ((AnalysisLocalId){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
+#define ANALYSIS_JOB_ID_INVALID ((AnalysisJobId){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
 #define ANALYSIS_ENTITY_ID_INVALID ((AnalysisEntityId){ \
     .module = ANALYSIS_MODULE_ID_INVALID, \
     .index = ANALYSIS_ENTITY_INDEX_INVALID, \
@@ -43,6 +58,8 @@ BUSTER_CT_CHECK(sizeof(AnalysisModuleId) == sizeof(AnalysisIdUnderlying));
 BUSTER_CT_CHECK(sizeof(AnalysisSourceId) == sizeof(AnalysisIdUnderlying));
 BUSTER_CT_CHECK(sizeof(AnalysisTypeId) == sizeof(AnalysisIdUnderlying));
 BUSTER_CT_CHECK(sizeof(AnalysisEntityIndex) == sizeof(AnalysisIdUnderlying));
+BUSTER_CT_CHECK(sizeof(AnalysisLocalId) == sizeof(AnalysisIdUnderlying));
+BUSTER_CT_CHECK(sizeof(AnalysisJobId) == sizeof(AnalysisIdUnderlying));
 
 typedef struct AnalysisEntityId AnalysisEntityId;
 struct AnalysisEntityId
@@ -87,6 +104,8 @@ typedef enum AnalysisTypeKind
     ANALYSIS_TYPE_INFERRED_ARRAY,
     ANALYSIS_TYPE_ARRAY,
     ANALYSIS_TYPE_FUNCTION,
+    // Internal iterable type produced by the range operator.
+    ANALYSIS_TYPE_RANGE,
     ANALYSIS_TYPE_STRUCT,
     ANALYSIS_TYPE_UNION,
     ANALYSIS_TYPE_ENUM,
@@ -94,11 +113,41 @@ typedef enum AnalysisTypeKind
 } AnalysisTypeKind;
 
 typedef struct AnalysisType AnalysisType;
+typedef enum AnalysisAbiClass
+{
+    ANALYSIS_ABI_CLASS_NONE,
+    ANALYSIS_ABI_CLASS_INTEGER,
+    ANALYSIS_ABI_CLASS_FLOAT,
+    ANALYSIS_ABI_CLASS_POINTER,
+    ANALYSIS_ABI_CLASS_AGGREGATE,
+    ANALYSIS_ABI_CLASS_MEMORY,
+    ANALYSIS_ABI_CLASS_COUNT,
+} AnalysisAbiClass;
+
+typedef enum AnalysisLayoutState
+{
+    ANALYSIS_LAYOUT_UNRESOLVED,
+    ANALYSIS_LAYOUT_RESOLVING,
+    ANALYSIS_LAYOUT_RESOLVED,
+    ANALYSIS_LAYOUT_ERROR,
+    ANALYSIS_LAYOUT_COUNT,
+} AnalysisLayoutState;
+
+typedef struct AnalysisTypeLayout AnalysisTypeLayout;
+struct AnalysisTypeLayout
+{
+    u64 size;
+    u32 alignment;
+    AnalysisAbiClass abi_class;
+    AnalysisLayoutState state;
+};
+
 struct AnalysisType
 {
     String8 name;
     AnalysisTypeId id;
     AnalysisTypeKind kind;
+    AnalysisTypeLayout layout;
     union
     {
         struct
@@ -158,15 +207,145 @@ struct AnalysisField
     String8 name;
     ParserSourceRange range;
     AnalysisTypeId type;
+    u64 offset;
+};
+
+typedef struct AnalysisEnumMember AnalysisEnumMember;
+struct AnalysisEnumMember
+{
+    String8 name;
+    ParserSourceRange range;
+    u64 value;
 };
 
 typedef struct AnalysisEntitySemantic AnalysisEntitySemantic;
 struct AnalysisEntitySemantic
 {
     AnalysisField* fields;
+    AnalysisEnumMember* enum_members;
     AnalysisTypeId type;
     AnalysisResolutionState state;
     u32 field_count;
+    u32 enum_member_count;
+};
+
+typedef enum AnalysisValueCategory
+{
+    ANALYSIS_VALUE_CATEGORY_VALUE,
+    ANALYSIS_VALUE_CATEGORY_TEMPORARY,
+    ANALYSIS_VALUE_CATEGORY_IMMUTABLE_PLACE,
+    ANALYSIS_VALUE_CATEGORY_MUTABLE_PLACE,
+    ANALYSIS_VALUE_CATEGORY_COUNT,
+} AnalysisValueCategory;
+
+typedef enum AnalysisConversionKind
+{
+    ANALYSIS_CONVERSION_NONE,
+    ANALYSIS_CONVERSION_LITERAL,
+    ANALYSIS_CONVERSION_INTEGER_WIDEN,
+    ANALYSIS_CONVERSION_INTEGER_NARROW,
+    ANALYSIS_CONVERSION_FLOAT_WIDEN,
+    ANALYSIS_CONVERSION_FLOAT_NARROW,
+    ANALYSIS_CONVERSION_POINTER,
+    ANALYSIS_CONVERSION_EXPLICIT,
+    ANALYSIS_CONVERSION_UNDEFINED,
+    ANALYSIS_CONVERSION_COUNT,
+} AnalysisConversionKind;
+
+typedef enum AnalysisLocalKind
+{
+    ANALYSIS_LOCAL_ARGUMENT,
+    ANALYSIS_LOCAL_DATA,
+    ANALYSIS_LOCAL_FOR,
+    ANALYSIS_LOCAL_COUNT,
+} AnalysisLocalKind;
+
+typedef struct AnalysisLocal AnalysisLocal;
+struct AnalysisLocal
+{
+    String8 name;
+    ParserSourceRange range;
+    AnalysisTypeId type;
+    AnalysisLocalId id;
+    AnalysisLocalKind kind;
+    u32 scope_depth;
+    bool is_mutable;
+    bool is_initialized;
+    bool address_taken;
+    bool requires_storage;
+};
+
+typedef struct AnalysisTypedNode AnalysisTypedNode;
+typedef enum AnalysisConstantKind
+{
+    ANALYSIS_CONSTANT_NONE,
+    ANALYSIS_CONSTANT_INTEGER,
+    ANALYSIS_CONSTANT_BOOLEAN,
+    ANALYSIS_CONSTANT_ENUM,
+    ANALYSIS_CONSTANT_FLOAT,
+    ANALYSIS_CONSTANT_ARRAY,
+    ANALYSIS_CONSTANT_AGGREGATE,
+    ANALYSIS_CONSTANT_COUNT,
+} AnalysisConstantKind;
+
+typedef struct AnalysisConstant AnalysisConstant;
+struct AnalysisConstant
+{
+    union
+    {
+        u64 integer;
+        f64 floating;
+        struct
+        {
+            AnalysisConstant* elements;
+            u32 element_count;
+        } aggregate;
+    };
+    AnalysisConstantKind kind;
+    bool is_negative;
+    u8 reserved[3];
+};
+
+struct AnalysisTypedNode
+{
+    AnalysisTypeId type;
+    AnalysisValueCategory category;
+    AnalysisLocalId local;
+    AnalysisEntityId entity;
+    AnalysisConstant constant;
+    // Inclusive node index where this node's flattened postorder subtree starts.
+    u32 subtree_start;
+    AnalysisConversionKind conversion;
+    bool is_addressable;
+    u8 reserved[3];
+};
+
+typedef struct AnalysisTypedExpression AnalysisTypedExpression;
+struct AnalysisTypedExpression
+{
+    AnalysisTypedExpression* next;
+    AstExpression ast;
+    AnalysisTypedNode* nodes;
+    AnalysisTypeId expected_type;
+    AnalysisTypeId type;
+};
+
+typedef struct AnalysisBody AnalysisBody;
+struct AnalysisBody
+{
+    AnalysisLocal* locals;
+    AnalysisTypedExpression* first_expression;
+    AnalysisTypedExpression* last_expression;
+    u32 local_count;
+    u32 local_capacity;
+    u32 expression_count;
+    AnalysisEntityId* dependencies;
+    u32 dependency_count;
+    u32 dependency_capacity;
+    bool analyzed;
+    bool can_fall_through;
+    bool has_unreachable;
+    u8 reserved;
 };
 
 // Parser results and their source storage are borrowed. They must outlive the
@@ -211,6 +390,7 @@ struct AnalysisModuleInterface
     AnalysisSource* sources;
     AnalysisEntity* entities;
     AnalysisEntitySemantic* semantics;
+    AnalysisBody* bodies;
     AnalysisModuleId id;
     u32 source_count;
     u32 entity_count;
@@ -223,20 +403,159 @@ typedef enum AnalysisDiagnosticKind
     ANALYSIS_DIAGNOSTIC_DUPLICATE_DECLARATION,
     ANALYSIS_DIAGNOSTIC_UNKNOWN_TYPE,
     ANALYSIS_DIAGNOSTIC_TYPE_ALIAS_CYCLE,
+    ANALYSIS_DIAGNOSTIC_UNKNOWN_IDENTIFIER,
+    ANALYSIS_DIAGNOSTIC_USE_BEFORE_INITIALIZATION,
+    ANALYSIS_DIAGNOSTIC_DUPLICATE_LOCAL,
+    ANALYSIS_DIAGNOSTIC_TYPE_MISMATCH,
+    ANALYSIS_DIAGNOSTIC_EXPECTED_PLACE,
+    ANALYSIS_DIAGNOSTIC_NOT_CALLABLE,
+    ANALYSIS_DIAGNOSTIC_ARGUMENT_COUNT,
+    ANALYSIS_DIAGNOSTIC_UNKNOWN_MEMBER,
+    ANALYSIS_DIAGNOSTIC_INVALID_OPERAND,
+    ANALYSIS_DIAGNOSTIC_EXPECTED_CONTEXTUAL_TYPE,
+    ANALYSIS_DIAGNOSTIC_INVALID_CONTROL_FLOW,
+    ANALYSIS_DIAGNOSTIC_DUPLICATE_FIELD,
+    ANALYSIS_DIAGNOSTIC_DUPLICATE_ENUM_MEMBER,
+    ANALYSIS_DIAGNOSTIC_DUPLICATE_AGGREGATE_FIELD,
+    ANALYSIS_DIAGNOSTIC_MISSING_AGGREGATE_FIELD,
+    ANALYSIS_DIAGNOSTIC_INVALID_CONSTANT,
+    ANALYSIS_DIAGNOSTIC_MISSING_RETURN,
+    ANALYSIS_DIAGNOSTIC_UNREACHABLE_STATEMENT,
+    ANALYSIS_DIAGNOSTIC_DUPLICATE_SWITCH_CASE,
+    ANALYSIS_DIAGNOSTIC_NONEXHAUSTIVE_SWITCH,
     ANALYSIS_DIAGNOSTIC_COUNT,
 } AnalysisDiagnosticKind;
 
 typedef struct AnalysisDiagnostic AnalysisDiagnostic;
+typedef struct AnalysisDiagnosticNote AnalysisDiagnosticNote;
+struct AnalysisDiagnosticNote
+{
+    AnalysisDiagnosticNote* next;
+    String8 message;
+    ParserSourceRange range;
+    AnalysisEntityId entity;
+    AnalysisSourceId source;
+};
+
 struct AnalysisDiagnostic
 {
     AnalysisDiagnostic* next;
+    AnalysisDiagnosticNote* first_note;
+    AnalysisDiagnosticNote* last_note;
     String8 message;
+    String8 expected_type_name;
+    String8 actual_type_name;
+    String8 explanation;
     ParserSourceRange range;
     AnalysisEntityId entity;
     AnalysisEntityId previous_entity;
     AnalysisSourceId source;
     AnalysisDiagnosticKind kind;
     String8 subject;
+    AnalysisTypeId expected_type;
+    AnalysisTypeId actual_type;
+    u32 argument_index;
+    bool has_argument_index;
+    u8 reserved[3];
+};
+
+typedef enum AnalysisJobKind
+{
+    ANALYSIS_JOB_INTERFACE,
+    ANALYSIS_JOB_BODY,
+    ANALYSIS_JOB_LAYOUT,
+    ANALYSIS_JOB_COUNT,
+} AnalysisJobKind;
+
+typedef enum AnalysisDependencyKind
+{
+    ANALYSIS_DEPENDENCY_INTERFACE,
+    ANALYSIS_DEPENDENCY_CONSTANT,
+    ANALYSIS_DEPENDENCY_LAYOUT,
+    ANALYSIS_DEPENDENCY_BODY,
+    ANALYSIS_DEPENDENCY_COUNT,
+} AnalysisDependencyKind;
+
+typedef struct AnalysisJob AnalysisJob;
+struct AnalysisJob
+{
+    AnalysisJobId* dependencies;
+    AnalysisDependencyKind* dependency_kinds;
+    AnalysisEntityId entity;
+    AnalysisJobId id;
+    AnalysisJobKind kind;
+    u32 dependency_count;
+};
+
+typedef void AnalysisJobCallback(AnalysisJob* job, u32 worker_index, void* user_data);
+
+typedef struct AnalysisScheduleResult AnalysisScheduleResult;
+struct AnalysisScheduleResult
+{
+    AnalysisJobId* execution_order;
+    u32 execution_count;
+    u32 wave_count;
+    bool has_cycle;
+    u8 reserved[3];
+};
+
+typedef struct AnalysisLayoutOptions AnalysisLayoutOptions;
+struct AnalysisLayoutOptions
+{
+    u32 pointer_size;
+    u32 pointer_alignment;
+};
+
+typedef enum AnalysisAbiConvention
+{
+    ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64,
+    ANALYSIS_ABI_CONVENTION_WIN64_X86_64,
+    ANALYSIS_ABI_CONVENTION_AAPCS64,
+    ANALYSIS_ABI_CONVENTION_APPLE_AARCH64,
+    ANALYSIS_ABI_CONVENTION_COUNT,
+} AnalysisAbiConvention;
+
+typedef enum AnalysisAbiLocationKind
+{
+    ANALYSIS_ABI_LOCATION_NONE,
+    ANALYSIS_ABI_LOCATION_REGISTER,
+    ANALYSIS_ABI_LOCATION_STACK,
+    ANALYSIS_ABI_LOCATION_INDIRECT,
+    ANALYSIS_ABI_LOCATION_COUNT,
+} AnalysisAbiLocationKind;
+
+typedef struct AnalysisAbiPart AnalysisAbiPart;
+struct AnalysisAbiPart
+{
+    AnalysisAbiClass abi_class;
+    AnalysisAbiLocationKind location;
+    u32 register_index;
+    u32 stack_offset;
+    u32 size;
+};
+
+enum
+{
+    ANALYSIS_ABI_MAX_PARTS = 4,
+};
+
+typedef struct AnalysisAbiValue AnalysisAbiValue;
+struct AnalysisAbiValue
+{
+    AnalysisAbiPart parts[ANALYSIS_ABI_MAX_PARTS];
+    u32 part_count;
+    bool indirect;
+    u8 reserved[3];
+};
+
+typedef struct AnalysisFunctionAbi AnalysisFunctionAbi;
+struct AnalysisFunctionAbi
+{
+    AnalysisAbiValue* arguments;
+    AnalysisAbiValue result;
+    AnalysisAbiConvention convention;
+    u32 argument_count;
+    u32 stack_size;
 };
 
 typedef struct AnalysisResult AnalysisResult;
@@ -246,7 +565,9 @@ struct AnalysisResult
     AnalysisTypeTable types;
     AnalysisDiagnostic* first_diagnostic;
     AnalysisDiagnostic* last_diagnostic;
+    AnalysisJob* jobs;
     u32 diagnostic_count;
+    u32 job_count;
 };
 
 // Builds the immutable declaration interface which later type-resolution and
@@ -264,6 +585,33 @@ BUSTER_F_DECL AnalysisResult analysis_index_module(
 // published before dependency-aware resolution jobs are scheduled.
 BUSTER_F_DECL void analysis_resolve_module_interfaces(Arena* result_arena, AnalysisResult* result);
 BUSTER_F_DECL AnalysisType* analysis_type_from_id(AnalysisResult* result, AnalysisTypeId id);
+// Resolves lexical bindings and annotates every node in each flattened body
+// expression. Interfaces must have been resolved first.
+typedef void AnalysisBodyConsumer(
+    Arena* result_arena,
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    u32 entity_index,
+    void* user_data);
+BUSTER_F_DECL void analysis_analyze_bodies(Arena* result_arena, AnalysisResult* result);
+BUSTER_F_DECL void analysis_analyze_bodies_with_consumer(
+    Arena* result_arena,
+    AnalysisResult* result,
+    AnalysisBodyConsumer* consumer,
+    void* user_data);
+BUSTER_F_DECL void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions options);
+BUSTER_F_DECL AnalysisFunctionAbi analysis_classify_function_abi(
+    Arena* result_arena,
+    AnalysisResult* result,
+    AnalysisTypeId function_type,
+    Target target);
+BUSTER_F_DECL void analysis_build_jobs(Arena* result_arena, AnalysisResult* result);
+BUSTER_F_DECL AnalysisScheduleResult analysis_execute_jobs(
+    Arena* result_arena,
+    AnalysisResult* result,
+    u32 worker_count,
+    AnalysisJobCallback* callback,
+    void* user_data);
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>

@@ -54,9 +54,12 @@ Vulkan or Slang shader compilation is enabled.
 - To add a language test: drop a `.bbb` file in `tests/` **and** append it to
   the hardcoded `parser_file_test_cases` list in
   `src/buster/compiler/frontend/buster/parser.c` (covered by
-  `parser_file_tests()`). Invalid-syntax fixtures live in `tests/errors/` and
-  use the same list with exact expected diagnostics plus an expected recovered
-  AST expression. Commented-out entries there are known-failing/WIP.
+  `parser_file_tests()`). Valid fixtures must also be appended to
+  `analysis_fixture_tests` in `analysis.c` with their exact semantic diagnostic
+  count and to `ir_fixture_tests` in `ir.c`; this keeps the complete frontend
+  pipeline covered. Invalid-syntax fixtures live in `tests/errors/` and use the
+  parser list with exact expected diagnostics plus an expected recovered AST
+  expression. Commented-out entries there are known-failing/WIP.
 - CI (`.forgejo/workflows/ci.yml`, Forgejo not GitHub) runs
   `./build.sh test_all_combinations_ci` on Linux/macOS/Windows plus
   Debug+Release on an Android emulator and the iOS simulator, on every push.
@@ -122,6 +125,11 @@ Vulkan or Slang shader compilation is enabled.
   `-funsigned-char`.
 - **No third-party code.** External code was deliberately removed from the
   tree. Do not add dependencies or vendor libraries.
+- **Recursion is forbidden unless it is trivial and statically bounded.**
+  Recursive algorithms must represent recursion in data, using an explicit
+  stack, queue, or worklist rather than the C call stack. Never use recursive
+  calls when the depth depends on source input, runtime data, or another
+  unbounded structure.
 - **Warnings are errors** under a very large warning set (see
   `GNU_FAMILY_WARNINGS` in `CMakeLists.txt`), and code must stay clean under
   clang, gcc, tcc, zig cc, and MSVC. Avoid compiler-specific extensions
@@ -182,6 +190,19 @@ has hard design constraints:
 - Expression precedence may use binding-power concepts, but the
   implementation must remain state-machine based.
 
+## Semantic analysis and IR rules
+
+- Every valid parser fixture in `tests/*.bbb` must also be run through semantic
+  analysis and IR generation. Functions with semantic diagnostics must not
+  publish IR; tests must still verify that lowering was attempted and rejected
+  for the diagnosed function rather than silently skipping the fixture.
+- New semantic or IR behavior needs focused unit coverage in addition to the
+  fixture-wide pipeline test. IR tests must validate structural invariants, not
+  merely check that generation returned a non-null pointer.
+- Semantic analysis and IR lowering follow the repository-wide recursion rule:
+  nested expressions, statements, types, and control flow use arena-backed
+  explicit stacks or worklists.
+
 ## Repository map
 
 Top level:
@@ -228,7 +249,7 @@ Compiler:
 | `compiler/frontend/buster/parser.{c,h}` | Lexer + state-machine parser; owns `parser_file_tests()` and the `.bbb` test list. `main.c` there is a scratch main, not built. |
 | `compiler/frontend/asm/asm_main.c` | Assembly frontend prototype; not wired into the build. |
 | `compiler/frontend/buster/analysis.{c,h}` | Semantic analysis. |
-| `compiler/ir/ir.{c,h}` | Intermediate representation and lowering. |
+| `compiler/ir/ir.{c,h}` | Typed control-flow IR, semantic lowering, validation, printing, and fixture-wide IR tests. |
 | `compiler/link/` | `elf.{c,h}`, `jit.{c,h}`, `link.{c,h}` — ELF writer, in-memory execution, linker driver. Not registered as CMake modules yet. |
 | `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/ABI descriptions and per-arch instruction encoders. |
 
