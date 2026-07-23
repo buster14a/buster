@@ -201,6 +201,15 @@ struct IrModule
     u32 rejected_function_count;
 };
 
+typedef struct IrProgram IrProgram;
+struct IrProgram
+{
+    IrModule* modules;
+    u32 module_count;
+    u32 lowered_function_count;
+    u32 rejected_function_count;
+};
+
 typedef enum IrValidationError
 {
     IR_VALIDATION_NONE,
@@ -226,6 +235,9 @@ struct IrValidationResult
 
 BUSTER_F_DECL IrModule ir_generate_module(Arena* result_arena, AnalysisResult* analysis);
 BUSTER_F_DECL IrModule ir_analyze_and_generate_module(Arena* result_arena, AnalysisResult* analysis);
+BUSTER_F_DECL IrProgram ir_generate_program(
+    Arena* result_arena,
+    AnalysisProgram* analysis);
 BUSTER_F_DECL IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module);
 BUSTER_F_DECL String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module);
 

@@ -946,7 +946,28 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
             {
                 AnalysisTypedNode* base_typed =
                         expression->nodes + roots[0];
-                if (base_typed->is_namespace)
+                if (base_typed->is_namespace &&
+                    typed->constant.kind != ANALYSIS_CONSTANT_NONE)
+                {
+                    instruction = ir_emit(
+                        builder,
+                        IR_OPCODE_CONSTANT_INTEGER,
+                        typed->type,
+                        IR_VALUE_VALUE,
+                        node->member_access.range,
+                        0,
+                        0,
+                        true);
+                    instruction->immediates = arena_allocate(
+                        builder->result_arena,
+                        u64,
+                        1);
+                    instruction->immediates[0] = typed->constant.integer;
+                    instruction->immediate_count = 1;
+                    instruction->immediate_is_negative =
+                        typed->constant.is_negative;
+                }
+                else if (base_typed->is_namespace)
                 {
                     instruction = ir_emit(
                             builder,
@@ -2009,6 +2030,37 @@ IrModule ir_analyze_and_generate_module(Arena* result_arena, AnalysisResult* ana
     return module;
 }
 
+IrProgram ir_generate_program(
+    Arena* result_arena,
+    AnalysisProgram* analysis)
+{
+    IrProgram program = {
+        .module_count = analysis->module_count,
+    };
+    program.modules = arena_allocate(
+        result_arena,
+        IrModule,
+        program.module_count);
+    for (u32 module_index = 0;
+        module_index < program.module_count;
+        module_index += 1)
+    {
+        AnalysisResult* module = analysis->module_results[module_index];
+        if (!module)
+        {
+            continue;
+        }
+        program.modules[module_index] = ir_generate_module(
+            result_arena,
+            module);
+        program.lowered_function_count +=
+            program.modules[module_index].lowered_function_count;
+        program.rejected_function_count +=
+            program.modules[module_index].rejected_function_count;
+    }
+    return program;
+}
+
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(
     IrValidationError error,
     IrFunction* function,
@@ -2362,6 +2414,9 @@ BUSTER_GLOBAL_LOCAL IrFixtureTest ir_fixture_tests[] =
     { S8_INITIALIZER("tests/basic_break.bbb") },
     { S8_INITIALIZER("tests/basic_character_literal.bbb") },
     { S8_INITIALIZER("tests/basic_comment.bbb") },
+    { S8_INITIALIZER("tests/basic_compile_time.bbb") },
+    { S8_INITIALIZER("tests/modules/core/math.bbb") },
+    { S8_INITIALIZER("tests/modules/system/platform.bbb") },
     { S8_INITIALIZER("tests/basic_continue.bbb") },
     { S8_INITIALIZER("tests/basic_else_if.bbb") },
     { S8_INITIALIZER("tests/basic_enum.bbb") },
@@ -2783,6 +2838,38 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, printed.length > 0);
         BUSTER_TEST(arguments, string_starts_with_sequence(printed, S8("module ir-fixture")));
         arena_set_position(fixture_temporary.arena, fixture_temporary.position);
+    }
+
+    AnalysisProgram loaded_program = analysis_program_load(
+        arguments->arena,
+        expression_arena,
+        (AnalysisProgramOptions){
+            .root_path = S8("tests/basic_import.bbb"),
+            .root_module_name = S8("app"),
+            .module_root = S8("tests/modules"),
+            .pointer_size = 8,
+            .pointer_alignment = 8,
+        });
+    BUSTER_TEST(arguments, !loaded_program.load_failed);
+    BUSTER_TEST(arguments, loaded_program.analysis_diagnostic_count == 0);
+    IrProgram generated_program = ir_generate_program(
+        arguments->arena,
+        &loaded_program);
+    BUSTER_TEST(arguments, generated_program.module_count == 3);
+    BUSTER_TEST(arguments, generated_program.lowered_function_count == 3);
+    BUSTER_TEST(arguments, generated_program.rejected_function_count == 0);
+    for (u32 module_index = 0;
+        module_index < loaded_program.module_count;
+        module_index += 1)
+    {
+        AnalysisResult* analysis = loaded_program.module_results[module_index];
+        if (analysis)
+        {
+            IrValidationResult validation = ir_validate_module(
+                analysis,
+                generated_program.modules + module_index);
+            BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
+        }
     }
     BUSTER_CHECK(arena_destroy(expression_arena, 1));
     arena_set_position(temporary.arena, temporary.position);

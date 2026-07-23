@@ -72,6 +72,7 @@ typedef enum AnalysisEntityKind
 {
     ANALYSIS_ENTITY_TYPE,
     ANALYSIS_ENTITY_CODE,
+    ANALYSIS_ENTITY_DATA,
     ANALYSIS_ENTITY_COUNT,
 } AnalysisEntityKind;
 
@@ -99,6 +100,7 @@ typedef enum AnalysisTypeKind
     ANALYSIS_TYPE_BOOL,
     ANALYSIS_TYPE_INTEGER,
     ANALYSIS_TYPE_FLOAT,
+    ANALYSIS_TYPE_COMPILE_TIME_PARAMETER,
     ANALYSIS_TYPE_POINTER,
     ANALYSIS_TYPE_SLICE,
     ANALYSIS_TYPE_INFERRED_ARRAY,
@@ -219,11 +221,13 @@ struct AnalysisEnumMember
 };
 
 typedef struct AnalysisEntitySemantic AnalysisEntitySemantic;
+typedef struct AnalysisConstant AnalysisConstant;
 struct AnalysisEntitySemantic
 {
     AnalysisField* fields;
     AnalysisEnumMember* enum_members;
     AnalysisTypeId type;
+    AnalysisConstant* constant;
     AnalysisResolutionState state;
     u32 field_count;
     u32 enum_member_count;
@@ -260,21 +264,6 @@ typedef enum AnalysisLocalKind
     ANALYSIS_LOCAL_COUNT,
 } AnalysisLocalKind;
 
-typedef struct AnalysisLocal AnalysisLocal;
-struct AnalysisLocal
-{
-    String8 name;
-    ParserSourceRange range;
-    AnalysisTypeId type;
-    AnalysisLocalId id;
-    AnalysisLocalKind kind;
-    u32 scope_depth;
-    bool is_mutable;
-    bool is_initialized;
-    bool address_taken;
-    bool requires_storage;
-};
-
 typedef struct AnalysisTypedNode AnalysisTypedNode;
 typedef enum AnalysisConstantKind
 {
@@ -288,7 +277,6 @@ typedef enum AnalysisConstantKind
     ANALYSIS_CONSTANT_COUNT,
 } AnalysisConstantKind;
 
-typedef struct AnalysisConstant AnalysisConstant;
 struct AnalysisConstant
 {
     union
@@ -303,6 +291,24 @@ struct AnalysisConstant
     };
     AnalysisConstantKind kind;
     bool is_negative;
+    u8 reserved[3];
+};
+
+typedef struct AnalysisLocal AnalysisLocal;
+struct AnalysisLocal
+{
+    String8 name;
+    ParserSourceRange range;
+    AnalysisTypeId type;
+    AnalysisLocalId id;
+    AnalysisConstant constant;
+    AnalysisLocalKind kind;
+    u32 scope_depth;
+    bool is_mutable;
+    bool is_initialized;
+    bool address_taken;
+    bool requires_storage;
+    bool is_compile_time;
     u8 reserved[3];
 };
 
@@ -406,6 +412,7 @@ struct AnalysisEntity
     {
         AstTypeDeclaration* type_declaration;
         AstCode* code;
+        AstDataDeclaration* data;
     } ast;
 };
 
@@ -424,6 +431,7 @@ struct AnalysisModuleInterface
     u32 entity_count;
     u32 type_count;
     u32 code_count;
+    u32 data_count;
 };
 
 typedef enum AnalysisDiagnosticKind
@@ -531,6 +539,85 @@ struct AnalysisScheduleResult
     u8 reserved[3];
 };
 
+typedef struct AnalysisInterfaceSummary AnalysisInterfaceSummary;
+struct AnalysisInterfaceSummary
+{
+    String8 bytes;
+    u64 hash;
+};
+
+typedef struct AnalysisInterfaceCacheEntry AnalysisInterfaceCacheEntry;
+struct AnalysisInterfaceCacheEntry
+{
+    AnalysisInterfaceCacheEntry* next;
+    String8 module_name;
+    AnalysisInterfaceSummary summary;
+};
+
+typedef struct AnalysisInterfaceCache AnalysisInterfaceCache;
+struct AnalysisInterfaceCache
+{
+    AnalysisInterfaceCacheEntry* first;
+    AnalysisInterfaceCacheEntry* last;
+    u32 count;
+};
+
+typedef struct AnalysisProgramModule AnalysisProgramModule;
+struct AnalysisProgramModule
+{
+    String8 name;
+    String8 path;
+    String8 source;
+    ParserResult parser;
+    AnalysisResult* analysis;
+};
+
+typedef struct AnalysisProgram AnalysisProgram;
+struct AnalysisProgram
+{
+    AnalysisProgramModule* modules;
+    AnalysisResult** module_results;
+    AnalysisProgramModule* root;
+    u32 module_count;
+    u32 parser_diagnostic_count;
+    u32 analysis_diagnostic_count;
+    bool load_failed;
+    u8 reserved[3];
+};
+
+typedef struct AnalysisProgramJob AnalysisProgramJob;
+struct AnalysisProgramJob
+{
+    AnalysisModuleId module;
+    AnalysisJobId job;
+};
+
+typedef void AnalysisProgramJobCallback(
+    AnalysisResult* module,
+    AnalysisJob* job,
+    u32 worker_index,
+    void* user_data);
+
+typedef struct AnalysisProgramScheduleResult AnalysisProgramScheduleResult;
+struct AnalysisProgramScheduleResult
+{
+    AnalysisProgramJob* execution_order;
+    u32 execution_count;
+    u32 wave_count;
+    bool has_cycle;
+    u8 reserved[3];
+};
+
+typedef struct AnalysisProgramOptions AnalysisProgramOptions;
+struct AnalysisProgramOptions
+{
+    String8 root_path;
+    String8 root_module_name;
+    String8 module_root;
+    u32 pointer_size;
+    u32 pointer_alignment;
+};
+
 typedef struct AnalysisLayoutOptions AnalysisLayoutOptions;
 struct AnalysisLayoutOptions
 {
@@ -628,6 +715,25 @@ BUSTER_F_DECL AnalysisEntity* analysis_find_qualified_entity(
 BUSTER_F_DECL String8 analysis_serialize_module_interface(
     Arena* arena,
     AnalysisResult* result);
+BUSTER_F_DECL AnalysisInterfaceSummary analysis_module_interface_summary(
+    Arena* arena,
+    AnalysisResult* result);
+BUSTER_F_DECL AnalysisInterfaceCacheEntry* analysis_interface_cache_find(
+    AnalysisInterfaceCache* cache,
+    String8 module_name);
+BUSTER_F_DECL bool analysis_interface_cache_store(
+    Arena* arena,
+    AnalysisInterfaceCache* cache,
+    String8 module_name,
+    AnalysisInterfaceSummary summary);
+BUSTER_F_DECL String8 analysis_source_path(
+    AnalysisResult* result,
+    AnalysisModuleId module,
+    AnalysisSourceId source);
+BUSTER_F_DECL String8 analysis_format_diagnostic(
+    Arena* arena,
+    AnalysisResult* result,
+    AnalysisDiagnostic* diagnostic);
 
 // Resolves all top-level declared types, aggregate fields, and code signatures.
 // This stage is deliberately separate from indexing so module indexes can be
@@ -660,6 +766,16 @@ BUSTER_F_DECL AnalysisScheduleResult analysis_execute_jobs(
     AnalysisResult* result,
     u32 worker_count,
     AnalysisJobCallback* callback,
+    void* user_data);
+BUSTER_F_DECL AnalysisProgram analysis_program_load(
+    Arena* result_arena,
+    Arena* expression_arena,
+    AnalysisProgramOptions options);
+BUSTER_F_DECL AnalysisProgramScheduleResult analysis_execute_program_jobs(
+    Arena* result_arena,
+    AnalysisProgram* program,
+    u32 worker_count,
+    AnalysisProgramJobCallback* callback,
     void* user_data);
 
 #if BUSTER_INCLUDE_TESTS

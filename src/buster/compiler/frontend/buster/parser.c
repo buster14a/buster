@@ -618,6 +618,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
             }
             break; case '~': { id = TOKEN_TILDE; it += 1; }
             break; case '@': { id = TOKEN_AT; it += 1; }
+            break; case '$': { id = TOKEN_DOLLAR; it += 1; }
             break; case '/':
             {
                 if (it + 1 < top && it[1] == '/')
@@ -694,6 +695,7 @@ typedef enum ParserStateId
 {
     PARSER_STATE_ROOT,
     PARSER_STATE_IMPORT,
+    PARSER_STATE_DATA_DECLARATION,
     PARSER_STATE_CODE,
     PARSER_STATE_TYPE_REFERENCE,
     PARSER_STATE_ATTRIBUTE_LIST,
@@ -1001,6 +1003,12 @@ struct ParserState
 
         struct
         {
+            AstDataDeclaration* declaration;
+            DataStatementState state;
+        } data_declaration;
+
+        struct
+        {
             CodeState current_state;
             AstCode* code;
         } code;
@@ -1016,6 +1024,8 @@ struct ParserState
             AstTypeArgument* argument;
             ParserSourceRange name_range;
             ParserSourceRange prefix_range;
+            bool compile_time_prefix;
+            bool argument_is_compile_time;
         } type;
 
         struct
@@ -1328,6 +1338,30 @@ BUSTER_GLOBAL_LOCAL AstImport* parser_import_push(Parser* parser, ExtendedToken 
     return import;
 }
 
+BUSTER_GLOBAL_LOCAL AstDataDeclaration* parser_data_declaration_push(
+    Parser* parser,
+    ExtendedToken token)
+{
+    AstDataDeclaration* declaration = arena_allocate(
+        parser->result_arena,
+        AstDataDeclaration,
+        1);
+    *declaration = (AstDataDeclaration){
+        .range = source_range_from_token(token),
+    };
+    if (parser->result->last_data_declaration)
+    {
+        parser->result->last_data_declaration->next = declaration;
+    }
+    else
+    {
+        parser->result->first_data_declaration = declaration;
+    }
+    parser->result->last_data_declaration = declaration;
+    parser->result->data_declaration_count += 1;
+    return declaration;
+}
+
 BUSTER_GLOBAL_LOCAL AstTypeDeclaration* parser_type_declaration_push(Parser* parser, ExtendedToken token)
 {
     AstTypeDeclaration* declaration = arena_allocate(parser->result_arena, AstTypeDeclaration, 1);
@@ -1416,6 +1450,8 @@ BUSTER_GLOBAL_LOCAL AstType* parser_type_attach(Parser* parser, ParserState* typ
     BUSTER_CHECK(type_state->id == PARSER_STATE_TYPE_REFERENCE);
     BUSTER_CHECK(type_state->type.destination);
     AstType* type = parser_type_push(parser, id, token);
+    type->is_compile_time = type_state->type.compile_time_prefix;
+    type_state->type.compile_time_prefix = false;
     *type_state->type.destination = type;
     if (!type_state->type.root)
     {
@@ -1605,6 +1641,7 @@ BUSTER_GLOBAL_LOCAL void parser_unexpected(Parser* parser, ExtendedToken token, 
                     PARSER_RECOVERY_EXPRESSION_DELIMITER : PARSER_RECOVERY_STATEMENT;
         }
         break; case PARSER_STATE_TYPE_STATEMENT:
+        case PARSER_STATE_DATA_DECLARATION:
         case PARSER_STATE_TYPE_REFERENCE:
         {
             parser->recovery = parser_type_declaration_container(parser) ?
@@ -2022,6 +2059,7 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
                 if (at_declaration_depth &&
                     (token.id == TOKEN_KEYWORD_CODE ||
                      token.id == TOKEN_KEYWORD_TYPE ||
+                     token.id == TOKEN_KEYWORD_DATA ||
                      token.id == TOKEN_KEYWORD_IMPORT))
                 {
                     break;
@@ -2127,6 +2165,7 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
             if (aggregate_brace_depth == 0 &&
                 (token.id == TOKEN_KEYWORD_CODE ||
                  token.id == TOKEN_KEYWORD_TYPE ||
+                 token.id == TOKEN_KEYWORD_DATA ||
                  token.id == TOKEN_KEYWORD_IMPORT))
             {
                 break;
@@ -2160,6 +2199,7 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
         }
         else if (token.id == TOKEN_KEYWORD_CODE ||
                  token.id == TOKEN_KEYWORD_TYPE ||
+                 token.id == TOKEN_KEYWORD_DATA ||
                  token.id == TOKEN_KEYWORD_IMPORT ||
                  token.id == TOKEN_EOF)
         {
@@ -2180,6 +2220,7 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
         ExtendedToken token = peek(parser);
         while (token.id != TOKEN_KEYWORD_CODE &&
                token.id != TOKEN_KEYWORD_TYPE &&
+               token.id != TOKEN_KEYWORD_DATA &&
                token.id != TOKEN_KEYWORD_IMPORT &&
                token.id != TOKEN_EOF)
         {
@@ -2625,6 +2666,7 @@ BUSTER_GLOBAL_LOCAL bool token_begins_type(TokenId id)
 {
     bool result =
         id == TOKEN_IDENTIFIER ||
+        id == TOKEN_DOLLAR ||
         id == pointer_token ||
         id == array_slice_token_start ||
         id == TOKEN_KEYWORD_FUNCTION;
@@ -2713,6 +2755,12 @@ BUSTER_GLOBAL_LOCAL void finish_type_reference(Parser* parser, u32 end_offset)
         {
             BUSTER_CHECK(resume_state->statement.for_state.id == FOR_STATEMENT_STATE_TYPE);
             resume_state->statement.for_state.id = FOR_STATEMENT_STATE_EQUAL;
+        }
+        break; case PARSER_STATE_DATA_DECLARATION:
+        {
+            BUSTER_CHECK(
+                resume_state->data_declaration.state.id ==
+                DATA_STATEMENT_STATE_AFTER_TYPE);
         }
         break; case PARSER_STATE_TYPE_STATEMENT:
         {
@@ -3453,6 +3501,11 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
             resume_state->statement.pointer->data_statement.initializer = expression;
             resume_state->statement.data_state.id = DATA_STATEMENT_STATE_END;
         }
+        break; case PARSER_STATE_DATA_DECLARATION:
+        {
+            resume_state->data_declaration.declaration->initializer = expression;
+            resume_state->data_declaration.state.id = DATA_STATEMENT_STATE_END;
+        }
         break; case PARSER_STATE_ASSIGNMENT_STATEMENT:
         {
             switch (resume_state->statement.assignment_state.id)
@@ -3596,6 +3649,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_CARET_EQUAL: return S8("CaretEqual");
         break; case TOKEN_TILDE: return S8("Tilde");
         break; case TOKEN_AT: return S8("At");
+        break; case TOKEN_DOLLAR: return S8("Dollar");
         break; case TOKEN_KEYWORD_RETURN: return S8("Keyword_Return");
         break; case TOKEN_KEYWORD_BREAK: return S8("Keyword_Break");
         break; case TOKEN_KEYWORD_CONTINUE: return S8("Keyword_Continue");
@@ -4113,11 +4167,102 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         import_state->import.state = IMPORT_STATE_NAMESPACE;
                         import_state->import.import = parser_import_push(&parser, token);
                     }
+                    break; case TOKEN_KEYWORD_DATA:
+                    {
+                        ParserState* data_state = state_push(&parser.state);
+                        data_state->id = PARSER_STATE_DATA_DECLARATION;
+                        data_state->data_declaration.state.id =
+                            DATA_STATEMENT_STATE_NAME;
+                        data_state->data_declaration.declaration =
+                            parser_data_declaration_push(&parser, token);
+                    }
                     break; case TOKEN_EOF:
                     {
                         is_running = false;
                     }
                     break; default: parser_unexpected(&parser, token, TOKEN_KEYWORD_CODE);
+                }
+            }
+            break; case PARSER_STATE_DATA_DECLARATION:
+            {
+                ParserState* data_state = state(&parser);
+                AstDataDeclaration* data = data_state->data_declaration.declaration;
+                ExtendedToken token = peek(&parser);
+                switch (data_state->data_declaration.state.id)
+                {
+                    break; case DATA_STATEMENT_STATE_NAME:
+                    {
+                        if (token.id == TOKEN_DOLLAR)
+                        {
+                            consume(&parser.iterator);
+                            data->is_compile_time = true;
+                        }
+                        else if (token.id == TOKEN_IDENTIFIER)
+                        {
+                            if (!data->is_compile_time)
+                            {
+                                parser_unexpected(&parser, token, TOKEN_DOLLAR);
+                                break;
+                            }
+                            consume(&parser.iterator);
+                            data->name = (AstIdentifier){
+                                .text = get_string(parser.iterator.source, token),
+                                .range = source_range_from_token(token),
+                            };
+                            data_state->data_declaration.state.id =
+                                DATA_STATEMENT_STATE_AFTER_NAME;
+                        }
+                        else
+                        {
+                            parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
+                        }
+                    }
+                    break; case DATA_STATEMENT_STATE_AFTER_NAME:
+                    {
+                        if (token.id == TOKEN_COLON)
+                        {
+                            consume(&parser.iterator);
+                            ParserState* type_state = state_push(&parser.state);
+                            type_state->id = PARSER_STATE_TYPE_REFERENCE;
+                            type_state->type.current_state = TYPE_STATE_PREFIX_OR_BASE;
+                            type_state->type.destination = &data->type;
+                        }
+                        data_state->data_declaration.state.id =
+                            DATA_STATEMENT_STATE_AFTER_TYPE;
+                    }
+                    break; case DATA_STATEMENT_STATE_AFTER_TYPE:
+                    {
+                        if (token.id == TOKEN_EQUAL)
+                        {
+                            consume(&parser.iterator);
+                            data_state->data_declaration.state.id =
+                                DATA_STATEMENT_STATE_INITIALIZER;
+                        }
+                        else
+                        {
+                            parser_unexpected(&parser, token, TOKEN_EQUAL);
+                        }
+                    }
+                    break; case DATA_STATEMENT_STATE_INITIALIZER:
+                    {
+                        parse_expression(&parser, TOKEN_SEMICOLON);
+                    }
+                    break; case DATA_STATEMENT_STATE_END:
+                    {
+                        if (token.id == TOKEN_SEMICOLON)
+                        {
+                            consume(&parser.iterator);
+                            parser_source_range_set_end(
+                                &data->range,
+                                token.offset + token.length);
+                            state_pop(&parser.state);
+                        }
+                        else
+                        {
+                            parser_unexpected(&parser, token, TOKEN_SEMICOLON);
+                        }
+                    }
+                    break; case DATA_STATEMENT_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
             break; case PARSER_STATE_IMPORT:
@@ -4323,6 +4468,18 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                     {
                         switch (token.id)
                         {
+                            break; case TOKEN_DOLLAR:
+                            {
+                                consume(&parser.iterator);
+                                if (type_state->type.compile_time_prefix)
+                                {
+                                    parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
+                                }
+                                else
+                                {
+                                    type_state->type.compile_time_prefix = true;
+                                }
+                            }
                             break; case pointer_token:
                             {
                                 consume(&parser.iterator);
@@ -4505,10 +4662,25 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                 consume(&parser.iterator);
                                 type_state->type.current_state = TYPE_STATE_FUNCTION_RETURN_TYPE;
                             }
+                            break; case TOKEN_DOLLAR:
+                            {
+                                consume(&parser.iterator);
+                                if (type_state->type.argument_is_compile_time)
+                                {
+                                    parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
+                                }
+                                else
+                                {
+                                    type_state->type.argument_is_compile_time = true;
+                                }
+                            }
                             break; case TOKEN_IDENTIFIER:
                             {
                                 consume(&parser.iterator);
                                 type_state->type.argument = parser_type_argument_push(&parser, type_state->type.type, token);
+                                type_state->type.argument->is_compile_time =
+                                    type_state->type.argument_is_compile_time;
+                                type_state->type.argument_is_compile_time = false;
                                 type_state->type.name_range = source_range_from_token(token);
                                 type_state->type.current_state = TYPE_STATE_FUNCTION_ARGUMENT_AFTER_NAME_SEGMENT;
                             }
@@ -4966,6 +5138,20 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                     {
                         switch (start_token_id)
                         {
+                            break; case TOKEN_DOLLAR:
+                            {
+                                consume(&parser.iterator);
+                                AstDataStatement* data =
+                                    &data_statement_state->statement.pointer->data_statement;
+                                if (data->is_compile_time)
+                                {
+                                    parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
+                                }
+                                else
+                                {
+                                    data->is_compile_time = true;
+                                }
+                            }
                             break; case TOKEN_IDENTIFIER:
                             {
                                 consume(&parser.iterator);
@@ -6531,6 +6717,19 @@ BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic malformed_function_alias_diagno
     },
 };
 
+BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic missing_compile_time_marker_diagnostics[] =
+{
+    {
+        .message = S8_INITIALIZER("unexpected token"),
+        .kind = PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN,
+        .found = TOKEN_IDENTIFIER,
+        .expected = TOKEN_DOLLAR,
+        .line = 1,
+        .column = 6,
+        .length = 5,
+    },
+};
+
 BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
 {
     {
@@ -6544,6 +6743,20 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
     },
     {
         .path = S8_INITIALIZER("tests/basic_comment.bbb"),
+        .expected_expression = S8_INITIALIZER("0")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_compile_time.bbb"),
+        .expected_expression = S8_INITIALIZER("(@cast (+ local this_is_a_constant))"),
+        .expression_code_name = S8_INITIALIZER("main"),
+        .expected_code_count = 3,
+    },
+    {
+        .path = S8_INITIALIZER("tests/modules/core/math.bbb"),
+        .expected_expression = S8_INITIALIZER("(+ (+ a b) bias)")
+    },
+    {
+        .path = S8_INITIALIZER("tests/modules/system/platform.bbb"),
         .expected_expression = S8_INITIALIZER("0")
     },
     {
@@ -6771,6 +6984,14 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
         .expected_code_count = 1,
         .expected_type_declaration_count = 1,
         .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(malformed_function_alias_diagnostics),
+    },
+    {
+        .path = S8_INITIALIZER("tests/errors/missing_compile_time_marker.bbb"),
+        .expected_expression = S8_INITIALIZER("0"),
+        .expected_diagnostics = missing_compile_time_marker_diagnostics,
+        .expected_code_count = 1,
+        .expected_diagnostic_count =
+            BUSTER_ARRAY_LENGTH(missing_compile_time_marker_diagnostics),
     },
 };
 
@@ -9784,6 +10005,33 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
 
                 String8 actual = ast_expression_to_string(arena, expression);
                 BUSTER_STRING_TEST(arguments, actual, test_case.expected_expression);
+            }
+            if (string_equal(
+                    test_case.path,
+                    S8("tests/basic_compile_time.bbb")))
+            {
+                BUSTER_TEST(arguments, parsed.data_declaration_count == 1);
+                BUSTER_TEST(arguments,
+                    parsed.first_data_declaration &&
+                    parsed.first_data_declaration->is_compile_time);
+                AstCode* compile_time_value = parsed.first_code;
+                AstCode* compile_time_type =
+                    compile_time_value ? compile_time_value->next : 0;
+                BUSTER_TEST(arguments,
+                    compile_time_value &&
+                    compile_time_value->type->function.first_argument &&
+                    compile_time_value->type->function.first_argument->
+                        is_compile_time);
+                BUSTER_TEST(arguments,
+                    compile_time_type &&
+                    compile_time_type->type->function.first_argument &&
+                    compile_time_type->type->function.first_argument->
+                        is_compile_time);
+                BUSTER_TEST(arguments,
+                    compile_time_type &&
+                    compile_time_type->type->function.first_argument &&
+                    compile_time_type->type->function.first_argument->type->
+                        is_compile_time);
             }
         }
 

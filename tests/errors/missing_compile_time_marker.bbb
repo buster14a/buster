@@ -1,0 +1,6 @@
+data value: u64 = 5;
+
+code main : fn () s32
+{
+    return 0;
+}

@@ -1,0 +1,4 @@
+code platform_id : fn () s32
+{
+    return 0;
+}

@@ -74,6 +74,7 @@ typedef enum TokenIdEnum
     TOKEN_CARET_EQUAL,
     TOKEN_TILDE,
     TOKEN_AT,
+    TOKEN_DOLLAR,
     TOKEN_KEYWORD_RETURN,
     TOKEN_KEYWORD_BREAK,
     TOKEN_KEYWORD_CONTINUE,
@@ -404,6 +405,8 @@ struct AstDataStatement
     AstIdentifier name;
     AstType* type;
     AstExpression initializer;
+    bool is_compile_time;
+    u8 reserved[7];
 };
 
 typedef struct AstAssignmentStatement AstAssignmentStatement;
@@ -544,13 +547,16 @@ struct AstTypeArgument
     String8 name;
     AstType* type;
     ParserSourceRange range;
+    bool is_compile_time;
+    u8 reserved[7];
 };
 
 struct AstType
 {
     ParserSourceRange range;
     AstTypeId id;
-    u32 reserved;
+    bool is_compile_time;
+    u8 reserved[3];
     union
     {
         String8 name;
@@ -632,6 +638,18 @@ struct AstImport
     ParserSourceRange range;
 };
 
+typedef struct AstDataDeclaration AstDataDeclaration;
+struct AstDataDeclaration
+{
+    AstDataDeclaration* next;
+    AstIdentifier name;
+    AstType* type;
+    AstExpression initializer;
+    ParserSourceRange range;
+    bool is_compile_time;
+    u8 reserved[7];
+};
+
 typedef struct AstCode AstCode;
 struct AstCode
 {
@@ -687,6 +705,8 @@ struct ParserResult
     String8 source;
     AstImport* first_import;
     AstImport* last_import;
+    AstDataDeclaration* first_data_declaration;
+    AstDataDeclaration* last_data_declaration;
     AstCode* first_code;
     AstCode* last_code;
     AstTypeDeclaration* first_type_declaration;
@@ -696,6 +716,7 @@ struct ParserResult
     u32 code_count;
     u32 type_declaration_count;
     u32 import_count;
+    u32 data_declaration_count;
     u32 diagnostic_count;
 };
 

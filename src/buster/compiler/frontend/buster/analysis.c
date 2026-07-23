@@ -3,6 +3,75 @@
 #include <buster/file.h>
 #include <buster/string.h>
 
+typedef struct AnalysisProgramDiscovery AnalysisProgramDiscovery;
+struct AnalysisProgramDiscovery
+{
+    AnalysisProgramDiscovery* next;
+    String8 name;
+    String8 path;
+    String8 source;
+    ParserResult parser;
+};
+
+BUSTER_GLOBAL_LOCAL s32 analysis_string_compare(String8 left, String8 right);
+
+BUSTER_GLOBAL_LOCAL bool analysis_path_has_suffix(String8 path, String8 suffix)
+{
+    return path.length >= suffix.length &&
+        string_equal(
+            string_slice(path, path.length - suffix.length, path.length),
+            suffix);
+}
+
+BUSTER_GLOBAL_LOCAL String8 analysis_module_path(
+    Arena* arena,
+    String8 module_root,
+    String8 module_name)
+{
+    bool root_has_separator = module_root.length &&
+        (module_root.pointer[module_root.length - 1] == '/' ||
+         module_root.pointer[module_root.length - 1] == '\\');
+    bool has_extension = analysis_path_has_suffix(module_name, S8(".bbb"));
+    if (!module_root.length)
+    {
+        return has_extension ?
+            string_duplicate_arena(arena, module_name, true) :
+            string_duplicate_arena(
+                arena,
+                string_format(arena, S8("{S8}.bbb"), module_name),
+                true);
+    }
+    String8 formatted = string_format(
+        arena,
+        root_has_separator ?
+            (has_extension ? S8("{S8}{S8}") : S8("{S8}{S8}.bbb")) :
+            (has_extension ? S8("{S8}/{S8}") : S8("{S8}/{S8}.bbb")),
+        module_root,
+        module_name);
+    return string_duplicate_arena(arena, formatted, true);
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisProgramDiscovery* analysis_program_discovery_find(
+    AnalysisProgramDiscovery* first,
+    String8 name)
+{
+    for (AnalysisProgramDiscovery* it = first; it; it = it->next)
+    {
+        if (string_equal(it->name, name))
+        {
+            return it;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool analysis_program_module_after(
+    AnalysisProgramModule left,
+    AnalysisProgramModule right)
+{
+    return analysis_string_compare(left.name, right.name) > 0;
+}
+
 BUSTER_GLOBAL_LOCAL s32 analysis_string_compare(String8 left, String8 right)
 {
     u64 common_length = BUSTER_MIN(left.length, right.length);
@@ -202,6 +271,7 @@ AnalysisResult analysis_index_module(
             import_count += input->parser->import_count;
             entity_count += input->parser->type_declaration_count;
             entity_count += input->parser->code_count;
+            entity_count += input->parser->data_declaration_count;
         }
     }
 
@@ -276,6 +346,21 @@ AnalysisResult analysis_index_module(
             };
             entity_index += 1;
             result.module.code_count += 1;
+        }
+        for (AstDataDeclaration* data = source->parser->first_data_declaration;
+            data;
+            data = data->next)
+        {
+            result.module.entities[entity_index] = (AnalysisEntity){
+                .name = data->name.text,
+                .range = data->range,
+                .source = source->id,
+                .kind = ANALYSIS_ENTITY_DATA,
+                .name_space = ANALYSIS_NAMESPACE_VALUE,
+                .ast.data = data,
+            };
+            entity_index += 1;
+            result.module.data_count += 1;
         }
     }
 
@@ -618,9 +703,19 @@ AnalysisEntity* analysis_find_qualified_entity(
 
 String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result)
 {
+    u32 function_argument_count = 0;
+    for (u32 type_index = 0; type_index < result->types.count; type_index += 1)
+    {
+        AnalysisType* type = result->types.types + type_index;
+        if (type->kind == ANALYSIS_TYPE_FUNCTION)
+        {
+            function_argument_count += type->as.function.argument_count;
+        }
+    }
     u32 part_capacity =
             1 + result->module.source_count +
-            result->module.import_count + result->module.entity_count;
+            result->module.import_count + result->module.entity_count +
+            result->types.count + function_argument_count;
     String8* parts = arena_allocate(arena, String8, part_capacity);
     u32 part_count = 0;
     parts[part_count++] = string_format(
@@ -659,21 +754,365 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
     {
         AnalysisEntity* entity = result->module.entities + entity_index;
         AnalysisEntitySemantic* semantic = result->module.semantics + entity_index;
+        AnalysisConstant constant = semantic->constant ?
+            *semantic->constant : (AnalysisConstant){0};
         parts[part_count++] = string_format(
                 arena,
-                S8("entity {u32} source={u32} kind={u32} namespace={u32} name={S8} type={u32}\n"),
+                S8("entity {u32} source={u32} kind={u32} namespace={u32} name={S8} type={u32} constant_kind={u32} constant_value={u64} constant_negative={u32}\n"),
                 entity->id.index.value,
                 entity->source.value,
                 (u32)entity->kind,
                 (u32)entity->name_space,
                 entity->name,
-                semantic->type.value);
+                semantic->type.value,
+                (u32)constant.kind,
+                constant.kind == ANALYSIS_CONSTANT_INTEGER ||
+                    constant.kind == ANALYSIS_CONSTANT_BOOLEAN ||
+                    constant.kind == ANALYSIS_CONSTANT_ENUM ?
+                    constant.integer : 0,
+                (u32)constant.is_negative);
+    }
+    for (u32 type_index = 0; type_index < result->types.count; type_index += 1)
+    {
+        AnalysisType* type = result->types.types + type_index;
+        AnalysisTypeId element = ANALYSIS_TYPE_ID_INVALID;
+        u64 array_count = 0;
+        AnalysisTypeId return_type = ANALYSIS_TYPE_ID_INVALID;
+        AnalysisEntityId declaration = ANALYSIS_ENTITY_ID_INVALID;
+        u32 argument_count = 0;
+        u32 calling_convention = 0;
+        if (type->kind == ANALYSIS_TYPE_POINTER ||
+            type->kind == ANALYSIS_TYPE_SLICE ||
+            type->kind == ANALYSIS_TYPE_INFERRED_ARRAY ||
+            type->kind == ANALYSIS_TYPE_RANGE)
+        {
+            element = type->as.element_type;
+        }
+        else if (type->kind == ANALYSIS_TYPE_ARRAY)
+        {
+            element = type->as.array.element_type;
+            array_count = type->as.array.count;
+        }
+        else if (type->kind == ANALYSIS_TYPE_FUNCTION)
+        {
+            return_type = type->as.function.return_type;
+            argument_count = type->as.function.argument_count;
+            calling_convention = (u32)type->as.function.calling_convention;
+        }
+        else if (type->kind == ANALYSIS_TYPE_STRUCT ||
+            type->kind == ANALYSIS_TYPE_UNION ||
+            type->kind == ANALYSIS_TYPE_ENUM)
+        {
+            declaration = type->as.declaration;
+        }
+        parts[part_count++] = string_format(
+            arena,
+            S8("type {u32} kind={u32} name={S8} element={u32} count={u64} return={u32} arguments={u32} cc={u32} declaration={u32}:{u32}\n"),
+            type->id.value,
+            (u32)type->kind,
+            type->name.pointer ? type->name : S8(""),
+            element.value,
+            array_count,
+            return_type.value,
+            argument_count,
+            calling_convention,
+            declaration.module.value,
+            declaration.index.value);
+        for (u32 argument_index = 0;
+            argument_index < argument_count;
+            argument_index += 1)
+        {
+            parts[part_count++] = string_format(
+                arena,
+                S8("type_argument type={u32} index={u32} value={u32}\n"),
+                type->id.value,
+                argument_index,
+                type->as.function.argument_types[argument_index].value);
+        }
     }
     BUSTER_CHECK(part_count == part_capacity);
     return string_join_arena(
             arena,
             (SliceString8){ .pointer = parts, .length = part_count },
             false);
+}
+
+AnalysisInterfaceSummary analysis_module_interface_summary(
+    Arena* arena,
+    AnalysisResult* result)
+{
+    AnalysisInterfaceSummary summary = {
+        .bytes = analysis_serialize_module_interface(arena, result),
+        .hash = UINT64_C(1469598103934665603),
+    };
+    for (u64 index = 0; index < summary.bytes.length; index += 1)
+    {
+        summary.hash ^= (u8)summary.bytes.pointer[index];
+        summary.hash *= UINT64_C(1099511628211);
+    }
+    return summary;
+}
+
+AnalysisInterfaceCacheEntry* analysis_interface_cache_find(
+    AnalysisInterfaceCache* cache,
+    String8 module_name)
+{
+    for (AnalysisInterfaceCacheEntry* entry = cache->first;
+        entry;
+        entry = entry->next)
+    {
+        if (string_equal(entry->module_name, module_name))
+        {
+            return entry;
+        }
+    }
+    return 0;
+}
+
+bool analysis_interface_cache_store(
+    Arena* arena,
+    AnalysisInterfaceCache* cache,
+    String8 module_name,
+    AnalysisInterfaceSummary summary)
+{
+    AnalysisInterfaceCacheEntry* entry = analysis_interface_cache_find(
+        cache,
+        module_name);
+    bool changed = !entry ||
+        entry->summary.hash != summary.hash ||
+        !string_equal(entry->summary.bytes, summary.bytes);
+    if (!entry)
+    {
+        entry = arena_allocate(arena, AnalysisInterfaceCacheEntry, 1);
+        *entry = (AnalysisInterfaceCacheEntry){
+            .module_name = string_duplicate_arena(arena, module_name, false),
+        };
+        if (cache->last)
+        {
+            cache->last->next = entry;
+        }
+        else
+        {
+            cache->first = entry;
+        }
+        cache->last = entry;
+        cache->count += 1;
+    }
+    if (changed)
+    {
+        entry->summary = (AnalysisInterfaceSummary){
+            .bytes = string_duplicate_arena(arena, summary.bytes, false),
+            .hash = summary.hash,
+        };
+    }
+    return changed;
+}
+
+BUSTER_GLOBAL_LOCAL String8 analysis_root_module_name(
+    Arena* arena,
+    AnalysisProgramOptions options)
+{
+    if (options.root_module_name.length)
+    {
+        return string_duplicate_arena(arena, options.root_module_name, false);
+    }
+
+    u64 start = 0;
+    for (u64 index = 0; index < options.root_path.length; index += 1)
+    {
+        if (options.root_path.pointer[index] == '/' ||
+            options.root_path.pointer[index] == '\\')
+        {
+            start = index + 1;
+        }
+    }
+    u64 end = options.root_path.length;
+    if (end >= start + 4 &&
+        string_equal(string_slice(options.root_path, end - 4, end), S8(".bbb")))
+    {
+        end -= 4;
+    }
+    return string_duplicate_arena(
+        arena,
+        string_slice(options.root_path, start, end),
+        false);
+}
+
+AnalysisProgram analysis_program_load(
+    Arena* result_arena,
+    Arena* expression_arena,
+    AnalysisProgramOptions options)
+{
+    BUSTER_CHECK(result_arena);
+    BUSTER_CHECK(expression_arena);
+    BUSTER_CHECK(result_arena != expression_arena);
+
+    AnalysisProgram program = {0};
+    String8 root_name = analysis_root_module_name(result_arena, options);
+    if (!root_name.length || !options.root_path.length)
+    {
+        program.load_failed = true;
+        return program;
+    }
+
+    AnalysisProgramDiscovery* first = arena_allocate(
+        result_arena,
+        AnalysisProgramDiscovery,
+        1);
+    *first = (AnalysisProgramDiscovery){
+        .name = root_name,
+        .path = string_duplicate_arena(result_arena, options.root_path, true),
+    };
+    AnalysisProgramDiscovery* last = first;
+    u32 discovery_count = 1;
+
+    for (AnalysisProgramDiscovery* discovery = first;
+        discovery;
+        discovery = discovery->next)
+    {
+        ByteSlice bytes = file_read(
+            result_arena,
+            discovery->path,
+            (FileReadOptions){0});
+        if (!bytes.pointer)
+        {
+            program.load_failed = true;
+            continue;
+        }
+        discovery->source = BYTE_SLICE_TO_STRING(8, bytes);
+        TokenizerResult tokenizer = tokenize(
+            result_arena,
+            discovery->source.pointer,
+            discovery->source.length);
+        discovery->parser = parser_parse(
+            result_arena,
+            expression_arena,
+            discovery->source,
+            tokenizer);
+        program.parser_diagnostic_count +=
+            tokenizer.error_count + discovery->parser.diagnostic_count;
+
+        for (AstImport* import = discovery->parser.first_import;
+            import;
+            import = import->next)
+        {
+            if (analysis_program_discovery_find(first, import->path))
+            {
+                continue;
+            }
+            AnalysisProgramDiscovery* appended = arena_allocate(
+                result_arena,
+                AnalysisProgramDiscovery,
+                1);
+            *appended = (AnalysisProgramDiscovery){
+                .name = string_duplicate_arena(
+                    result_arena,
+                    import->path,
+                    false),
+                .path = analysis_module_path(
+                    result_arena,
+                    options.module_root,
+                    import->path),
+            };
+            last->next = appended;
+            last = appended;
+            discovery_count += 1;
+        }
+    }
+
+    program.module_count = discovery_count;
+    program.modules = arena_allocate(
+        result_arena,
+        AnalysisProgramModule,
+        discovery_count);
+    u32 module_index = 0;
+    for (AnalysisProgramDiscovery* discovery = first;
+        discovery;
+        discovery = discovery->next)
+    {
+        program.modules[module_index] = (AnalysisProgramModule){
+            .name = discovery->name,
+            .path = discovery->path,
+            .source = discovery->source,
+            .parser = discovery->parser,
+        };
+        module_index += 1;
+    }
+    BUSTER_CHECK(module_index == discovery_count);
+
+    for (u32 index = 1; index < discovery_count; index += 1)
+    {
+        AnalysisProgramModule value = program.modules[index];
+        u32 insertion = index;
+        while (insertion &&
+            analysis_program_module_after(program.modules[insertion - 1], value))
+        {
+            program.modules[insertion] = program.modules[insertion - 1];
+            insertion -= 1;
+        }
+        program.modules[insertion] = value;
+    }
+
+    program.module_results = arena_allocate(
+        result_arena,
+        AnalysisResult*,
+        discovery_count);
+    for (u32 index = 0; index < discovery_count; index += 1)
+    {
+        AnalysisProgramModule* module = program.modules + index;
+        if (!module->source.pointer)
+        {
+            program.module_results[index] = 0;
+            continue;
+        }
+        AnalysisSourceInput input = {
+            .path = module->path,
+            .parser = &module->parser,
+        };
+        module->analysis = arena_allocate(result_arena, AnalysisResult, 1);
+        *module->analysis = analysis_index_module(
+            result_arena,
+            (AnalysisModuleId){ .value = index },
+            module->name,
+            &input,
+            1);
+        program.module_results[index] = module->analysis;
+        if (string_equal(module->name, root_name))
+        {
+            program.root = module;
+        }
+    }
+    BUSTER_CHECK(program.root);
+
+    analysis_resolve_program_interfaces(
+        result_arena,
+        program.module_results,
+        discovery_count);
+    AnalysisLayoutOptions layout = {
+        .pointer_size = options.pointer_size,
+        .pointer_alignment = options.pointer_alignment,
+    };
+    if (!layout.pointer_size)
+    {
+        layout.pointer_size = 8;
+    }
+    if (!layout.pointer_alignment)
+    {
+        layout.pointer_alignment = layout.pointer_size;
+    }
+    for (u32 index = 0; index < discovery_count; index += 1)
+    {
+        AnalysisResult* analysis = program.module_results[index];
+        if (!analysis)
+        {
+            continue;
+        }
+        analysis_analyze_bodies(result_arena, analysis);
+        analysis_compute_layouts(analysis, layout);
+        analysis_build_jobs(result_arena, analysis);
+        program.analysis_diagnostic_count += analysis->diagnostic_count;
+    }
+    return program;
 }
 
 typedef struct AnalysisAstTypeLink AnalysisAstTypeLink;
@@ -731,6 +1170,14 @@ BUSTER_GLOBAL_LOCAL u32 analysis_ast_type_count(Arena* scratch_arena, AnalysisRe
                 scratch_arena,
                 &statement_top,
                 entity->ast.code->body.first_statement);
+            continue;
+        }
+        if (entity->kind == ANALYSIS_ENTITY_DATA)
+        {
+            analysis_ast_type_link_push(
+                scratch_arena,
+                &top,
+                entity->ast.data->type);
             continue;
         }
 
@@ -1051,6 +1498,10 @@ BUSTER_GLOBAL_LOCAL bool analysis_type_matches(AnalysisType* existing, AnalysisT
             }
             return true;
         }
+        case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
+        {
+            return string_equal(existing->name, candidate->name);
+        }
         case ANALYSIS_TYPE_STRUCT:
         case ANALYSIS_TYPE_UNION:
         case ANALYSIS_TYPE_ENUM:
@@ -1117,6 +1568,76 @@ BUSTER_GLOBAL_LOCAL AnalysisResult* analysis_program_module_from_id(
         }
     }
     return 0;
+}
+
+String8 analysis_source_path(
+    AnalysisResult* result,
+    AnalysisModuleId module,
+    AnalysisSourceId source)
+{
+    AnalysisResult* owner = analysis_program_module_from_id(result, module);
+    if (!owner || source.value >= owner->module.source_count)
+    {
+        return (String8){0};
+    }
+    return owner->module.sources[source.value].path;
+}
+
+String8 analysis_format_diagnostic(
+    Arena* arena,
+    AnalysisResult* result,
+    AnalysisDiagnostic* diagnostic)
+{
+    u32 note_count = 0;
+    for (AnalysisDiagnosticNote* note = diagnostic->first_note;
+        note;
+        note = note->next)
+    {
+        note_count += 1;
+    }
+    String8* parts = arena_allocate(arena, String8, 1 + note_count);
+    AnalysisModuleId diagnostic_module = diagnostic->entity.module;
+    if (diagnostic_module.value == ANALYSIS_ID_UNDERLYING_INVALID)
+    {
+        diagnostic_module = result->module.id;
+    }
+    String8 path = analysis_source_path(
+        result,
+        diagnostic_module,
+        diagnostic->source);
+    parts[0] = string_format(
+        arena,
+        diagnostic->subject.length ?
+            S8("{S8}:{u32}:{u32}: error: {S8}: {S8}\n") :
+            S8("{S8}:{u32}:{u32}: error: {S8}{S8}\n"),
+        path,
+        diagnostic->range.line + 1,
+        diagnostic->range.column + 1,
+        diagnostic->message,
+        diagnostic->subject);
+    u32 part_index = 1;
+    for (AnalysisDiagnosticNote* note = diagnostic->first_note;
+        note;
+        note = note->next)
+    {
+        AnalysisModuleId note_module = note->entity.module;
+        if (note_module.value == ANALYSIS_ID_UNDERLYING_INVALID)
+        {
+            note_module = diagnostic_module;
+        }
+        parts[part_index] = string_format(
+            arena,
+            S8("{S8}:{u32}:{u32}: note: {S8}\n"),
+            analysis_source_path(result, note_module, note->source),
+            note->range.line + 1,
+            note->range.column + 1,
+            note->message);
+        part_index += 1;
+    }
+    return string_join_arena(
+        arena,
+        (SliceString8){ .pointer = parts, .length = part_index },
+        false);
 }
 
 BUSTER_GLOBAL_LOCAL AnalysisEntitySemantic* analysis_declaration_semantic(
@@ -1228,6 +1749,16 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_import(
                     *task->destination =
                             builtin.value == ANALYSIS_ID_UNDERLYING_INVALID ?
                             destination->types.builtin.poison : builtin;
+                } break;
+                case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
+                {
+                    *task->destination = analysis_type_intern(
+                        result_arena,
+                        &destination->types,
+                        (AnalysisType){
+                            .name = type->name,
+                            .kind = ANALYSIS_TYPE_COMPILE_TIME_PARAMETER,
+                        });
                 } break;
                 case ANALYSIS_TYPE_STRUCT:
                 case ANALYSIS_TYPE_UNION:
@@ -1547,6 +2078,17 @@ BUSTER_GLOBAL_LOCAL void analysis_resolve_ast_task(
     {
         case AST_TYPE_NAMED:
         {
+            if (ast->is_compile_time)
+            {
+                *task->destination = analysis_type_intern(
+                    context->result_arena,
+                    &context->result->types,
+                    (AnalysisType){
+                        .name = ast->name,
+                        .kind = ANALYSIS_TYPE_COMPILE_TIME_PARAMETER,
+                    });
+                return;
+            }
             AnalysisTypeId builtin = analysis_builtin_type_find(&context->result->types, ast->name);
             if (builtin.value != ANALYSIS_ID_UNDERLYING_INVALID)
             {
@@ -1762,6 +2304,27 @@ BUSTER_GLOBAL_LOCAL void analysis_resolve_entity_task(
             context,
             entity,
             entity->ast.code->type,
+            &finish->as.finish_entity.resolved_type);
+        return;
+    }
+    if (entity->kind == ANALYSIS_ENTITY_DATA)
+    {
+        AnalysisTypeTask* finish = analysis_type_task_push(
+            context,
+            (AnalysisTypeTask){
+                .owner = entity,
+                .destination = task->destination,
+                .use_range = entity->range,
+                .kind = ANALYSIS_TYPE_TASK_FINISH_ENTITY,
+                .as.finish_entity = {
+                    .entity = entity,
+                    .resolved_type = poison,
+                },
+            });
+        analysis_type_task_ast_push(
+            context,
+            entity,
+            entity->ast.data->type,
             &finish->as.finish_entity.resolved_type);
         return;
     }
@@ -2282,13 +2845,16 @@ BUSTER_GLOBAL_LOCAL String8 analysis_diagnostic_message(AnalysisDiagnosticKind k
         case ANALYSIS_DIAGNOSTIC_UNREACHABLE_STATEMENT: return S8("unreachable statement");
         case ANALYSIS_DIAGNOSTIC_DUPLICATE_SWITCH_CASE: return S8("duplicate switch case");
         case ANALYSIS_DIAGNOSTIC_NONEXHAUSTIVE_SWITCH: return S8("switch does not cover every enum member");
-        case ANALYSIS_DIAGNOSTIC_DUPLICATE_DECLARATION:
+        case ANALYSIS_DIAGNOSTIC_DUPLICATE_DECLARATION: return S8("duplicate declaration");
         case ANALYSIS_DIAGNOSTIC_DUPLICATE_IMPORT_NAMESPACE:
+            return S8("duplicate import namespace");
         case ANALYSIS_DIAGNOSTIC_MISSING_IMPORTED_MODULE:
+            return S8("imported module was not found");
         case ANALYSIS_DIAGNOSTIC_AMBIGUOUS_IMPORTED_MODULE:
-        case ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE:
-        case ANALYSIS_DIAGNOSTIC_UNKNOWN_TYPE:
-        case ANALYSIS_DIAGNOSTIC_TYPE_ALIAS_CYCLE:
+            return S8("imported module name is ambiguous");
+        case ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE: return S8("module import cycle");
+        case ANALYSIS_DIAGNOSTIC_UNKNOWN_TYPE: return S8("unknown type");
+        case ANALYSIS_DIAGNOSTIC_TYPE_ALIAS_CYCLE: return S8("type alias cycle");
         case ANALYSIS_DIAGNOSTIC_COUNT: break;
     }
     return S8("semantic error");
@@ -2483,7 +3049,8 @@ BUSTER_GLOBAL_LOCAL AnalysisLocal* analysis_local_add(
     AstIdentifier identifier,
     AnalysisTypeId type,
     AnalysisLocalKind kind,
-    u32 scope_depth)
+    u32 scope_depth,
+    bool is_compile_time)
 {
     for (AnalysisBinding* binding = *bindings;
         binding && binding->scope_depth == scope_depth;
@@ -2512,8 +3079,9 @@ BUSTER_GLOBAL_LOCAL AnalysisLocal* analysis_local_add(
         .id = id,
         .kind = kind,
         .scope_depth = scope_depth,
-        .is_mutable = true,
+        .is_mutable = !is_compile_time,
         .is_initialized = true,
+        .is_compile_time = is_compile_time,
     };
     context->body->local_count += 1;
     AnalysisBinding* binding = arena_allocate(context->scratch_arena, AnalysisBinding, 1);
@@ -3369,7 +3937,8 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
                     typed.category = local->is_mutable ?
                         ANALYSIS_VALUE_CATEGORY_MUTABLE_PLACE : ANALYSIS_VALUE_CATEGORY_IMMUTABLE_PLACE;
                     typed.local = local->id;
-                    typed.is_addressable = true;
+                    typed.is_addressable = !local->is_compile_time;
+                    typed.constant = local->constant;
                 }
                 else if (string_equal(node->identifier.text, S8("true")) ||
                     string_equal(node->identifier.text, S8("false")))
@@ -3385,9 +3954,16 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
                     AnalysisEntity* entity = analysis_value_entity_find(context->result, node->identifier.text);
                     if (entity)
                     {
-                        typed.type = context->result->module.semantics[entity->id.index.value].type;
+                        AnalysisEntitySemantic* semantic =
+                            context->result->module.semantics + entity->id.index.value;
+                        typed.type = semantic->type;
                         typed.entity = entity->id;
                         typed.category = ANALYSIS_VALUE_CATEGORY_VALUE;
+                        if (entity->kind == ANALYSIS_ENTITY_DATA &&
+                            semantic->constant)
+                        {
+                            typed.constant = *semantic->constant;
+                        }
                         analysis_body_dependency_add(context, entity->id);
                     }
                     else
@@ -3578,6 +4154,11 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
                                     semantic->type);
                             typed.entity = entity->id;
                             typed.category = ANALYSIS_VALUE_CATEGORY_VALUE;
+                            if (entity->kind == ANALYSIS_ENTITY_DATA &&
+                                semantic->constant)
+                            {
+                                typed.constant = *semantic->constant;
+                            }
                             analysis_body_dependency_add(context, entity->id);
                         }
                     }
@@ -4111,9 +4692,23 @@ BUSTER_GLOBAL_LOCAL void analysis_body_statement(
                 data->name,
                 type,
                 ANALYSIS_LOCAL_DATA,
-                task->scope_depth);
+                task->scope_depth,
+                data->is_compile_time);
             local->is_initialized = !(data->initializer.count == 1 &&
                 data->initializer.nodes[0].id == AST_NODE_UNDEFINED);
+            if (data->is_compile_time && data->initializer.count)
+            {
+                local->constant =
+                    initializer->nodes[data->initializer.count - 1].constant;
+                if (local->constant.kind == ANALYSIS_CONSTANT_NONE)
+                {
+                    analysis_body_diagnostic_push(
+                        context,
+                        data->name.range,
+                        ANALYSIS_DIAGNOSTIC_INVALID_CONSTANT,
+                        data->name.text);
+                }
+            }
             analysis_body_task_continue(context, top, task, bindings);
         } break;
         case AST_STATEMENT_EXPRESSION:
@@ -4335,7 +4930,8 @@ BUSTER_GLOBAL_LOCAL void analysis_body_statement(
                 for_statement->name,
                 declared,
                 ANALYSIS_LOCAL_FOR,
-                task->scope_depth + 1);
+                task->scope_depth + 1,
+                false);
             analysis_body_task_continue(context, top, task, bindings);
             analysis_body_task_push(
                 context,
@@ -5365,6 +5961,72 @@ BUSTER_GLOBAL_LOCAL void analysis_definite_initialization(AnalysisBodyContext* c
     }
 }
 
+BUSTER_GLOBAL_LOCAL void analysis_analyze_module_constants(
+    Arena* result_arena,
+    Arena* scratch_arena,
+    AnalysisResult* result)
+{
+    for (u32 entity_index = 0;
+        entity_index < result->module.entity_count;
+        entity_index += 1)
+    {
+        AnalysisEntity* entity = result->module.entities + entity_index;
+        if (entity->kind != ANALYSIS_ENTITY_DATA)
+        {
+            continue;
+        }
+        AnalysisEntitySemantic* semantic =
+            result->module.semantics + entity_index;
+        if (semantic->constant)
+        {
+            continue;
+        }
+        AnalysisBody* body = result->module.bodies + entity_index;
+        body->dependency_capacity = entity->ast.data->initializer.count;
+        body->dependencies = arena_allocate(
+            result_arena,
+            AnalysisEntityId,
+            body->dependency_capacity);
+        AnalysisBodyContext context = {
+            .result_arena = result_arena,
+            .scratch_arena = scratch_arena,
+            .result = result,
+            .owner = entity,
+            .body = body,
+        };
+        context.resolution = (AnalysisResolutionContext){
+            .result_arena = result_arena,
+            .scratch_arena = scratch_arena,
+            .result = result,
+        };
+        AnalysisTypedExpression* expression = analysis_expression(
+            &context,
+            0,
+            entity->ast.data->initializer,
+            semantic->type);
+        semantic->constant = arena_allocate(
+            result_arena,
+            AnalysisConstant,
+            1);
+        if (expression->ast.count)
+        {
+            *semantic->constant =
+                expression->nodes[expression->ast.count - 1].constant;
+        }
+        if (semantic->constant->kind == ANALYSIS_CONSTANT_NONE)
+        {
+            analysis_entity_diagnostic_push(
+                result_arena,
+                result,
+                entity,
+                entity->ast.data->range,
+                ANALYSIS_DIAGNOSTIC_INVALID_CONSTANT,
+                entity->name,
+                S8("compile-time data initializer is not a constant"));
+        }
+    }
+}
+
 void analysis_analyze_bodies_with_consumer(
     Arena* result_arena,
     AnalysisResult* result,
@@ -5374,6 +6036,7 @@ void analysis_analyze_bodies_with_consumer(
     BUSTER_CHECK(result->types.types != 0);
     Arena* conflicts[] = { result_arena };
     TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+    analysis_analyze_module_constants(result_arena, scratch.arena, result);
     for (u32 entity_index = 0; entity_index < result->module.entity_count; entity_index += 1)
     {
         AnalysisEntity* entity = result->module.entities + entity_index;
@@ -5433,7 +6096,8 @@ void analysis_analyze_bodies_with_consumer(
                 identifier,
                 function->as.function.argument_types[argument_index],
                 ANALYSIS_LOCAL_ARGUMENT,
-                0);
+                0,
+                argument->is_compile_time);
             argument_index += 1;
         }
         BUSTER_CHECK(argument_index == function->as.function.argument_count);
@@ -5501,6 +6165,7 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
             switch (type->kind)
             {
                 case ANALYSIS_TYPE_POISON:
+                case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
                 {
                     layout.state = ANALYSIS_LAYOUT_ERROR;
                 } break;
@@ -6194,6 +6859,274 @@ AnalysisScheduleResult analysis_execute_jobs(
     return schedule;
 }
 
+typedef struct AnalysisProgramScheduleWorker AnalysisProgramScheduleWorker;
+struct AnalysisProgramScheduleWorker
+{
+    AnalysisProgram* program;
+    AnalysisProgramJob* ready;
+    AnalysisProgramJobCallback* callback;
+    void* user_data;
+    u32 ready_count;
+    u32 worker_index;
+    u32 worker_count;
+};
+
+BUSTER_GLOBAL_LOCAL void analysis_program_schedule_worker(void* raw_worker)
+{
+    AnalysisProgramScheduleWorker* worker =
+        (AnalysisProgramScheduleWorker*)raw_worker;
+    for (u32 index = worker->worker_index;
+        index < worker->ready_count;
+        index += worker->worker_count)
+    {
+        AnalysisProgramJob ready = worker->ready[index];
+        AnalysisResult* module = 0;
+        for (u32 module_index = 0;
+            module_index < worker->program->module_count;
+            module_index += 1)
+        {
+            AnalysisResult* candidate =
+                worker->program->module_results[module_index];
+            if (candidate &&
+                candidate->module.id.value == ready.module.value)
+            {
+                module = candidate;
+                break;
+            }
+        }
+        BUSTER_CHECK(module && ready.job.value < module->job_count);
+        worker->callback(
+            module,
+            module->jobs + ready.job.value,
+            worker->worker_index,
+            worker->user_data);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 analysis_program_module_index(
+    AnalysisProgram* program,
+    AnalysisModuleId id)
+{
+    for (u32 index = 0; index < program->module_count; index += 1)
+    {
+        AnalysisResult* candidate = program->module_results[index];
+        if (candidate && candidate->module.id.value == id.value)
+        {
+            return index;
+        }
+    }
+    return UINT32_MAX;
+}
+
+AnalysisProgramScheduleResult analysis_execute_program_jobs(
+    Arena* result_arena,
+    AnalysisProgram* program,
+    u32 worker_count,
+    AnalysisProgramJobCallback* callback,
+    void* user_data)
+{
+    AnalysisProgramScheduleResult schedule = {0};
+    u32* offsets = arena_allocate(
+        result_arena,
+        u32,
+        program->module_count + 1);
+    offsets[0] = 0;
+    for (u32 module_index = 0;
+        module_index < program->module_count;
+        module_index += 1)
+    {
+        AnalysisResult* module = program->module_results[module_index];
+        offsets[module_index + 1] = offsets[module_index] +
+            (module ? module->job_count : 0);
+    }
+    u32 total = offsets[program->module_count];
+    schedule.execution_order = arena_allocate(
+        result_arena,
+        AnalysisProgramJob,
+        total);
+    bool* complete = arena_allocate(result_arena, bool, total);
+    memset(complete, 0, sizeof(*complete) * total);
+    AnalysisProgramJob* ready = arena_allocate(
+        result_arena,
+        AnalysisProgramJob,
+        total);
+    worker_count = BUSTER_MAX(worker_count, 1);
+
+    while (schedule.execution_count < total)
+    {
+        u32 ready_count = 0;
+        for (u32 module_index = 0;
+            module_index < program->module_count;
+            module_index += 1)
+        {
+            AnalysisResult* module = program->module_results[module_index];
+            if (!module)
+            {
+                continue;
+            }
+            for (u32 job_index = 0; job_index < module->job_count; job_index += 1)
+            {
+                u32 flat = offsets[module_index] + job_index;
+                if (complete[flat])
+                {
+                    continue;
+                }
+                AnalysisJob* job = module->jobs + job_index;
+                bool dependencies_complete = true;
+                for (u32 dependency_index = 0;
+                    dependency_index < job->dependency_count;
+                    dependency_index += 1)
+                {
+                    AnalysisJobId dependency = job->dependencies[dependency_index];
+                    dependencies_complete &=
+                        dependency.value < module->job_count &&
+                        complete[offsets[module_index] + dependency.value];
+                }
+
+                if (job->kind == ANALYSIS_JOB_INTERFACE)
+                {
+                    for (u32 import_index = 0;
+                        dependencies_complete &&
+                        import_index < module->module.import_count;
+                        import_index += 1)
+                    {
+                        AnalysisImport* import =
+                            module->module.imports + import_index;
+                        if (import->state != ANALYSIS_IMPORT_RESOLVED ||
+                            !import->target)
+                        {
+                            continue;
+                        }
+                        u32 target_index = analysis_program_module_index(
+                            program,
+                            import->target_id);
+                        BUSTER_CHECK(target_index != UINT32_MAX);
+                        for (u32 target_job = 0;
+                            target_job < import->target->job_count;
+                            target_job += 1)
+                        {
+                            if (import->target->jobs[target_job].kind ==
+                                ANALYSIS_JOB_INTERFACE)
+                            {
+                                dependencies_complete &=
+                                    complete[offsets[target_index] + target_job];
+                            }
+                        }
+                    }
+                }
+                else if (job->kind == ANALYSIS_JOB_BODY &&
+                    job->entity.index.value < module->module.entity_count)
+                {
+                    AnalysisBody* body =
+                        module->module.bodies + job->entity.index.value;
+                    for (u32 dependency_index = 0;
+                        dependencies_complete &&
+                        dependency_index < body->dependency_count;
+                        dependency_index += 1)
+                    {
+                        AnalysisEntityId dependency =
+                            body->dependencies[dependency_index];
+                        if (dependency.module.value == module->module.id.value)
+                        {
+                            continue;
+                        }
+                        u32 target_index = analysis_program_module_index(
+                            program,
+                            dependency.module);
+                        if (target_index == UINT32_MAX)
+                        {
+                            dependencies_complete = false;
+                            break;
+                        }
+                        AnalysisResult* target =
+                            program->module_results[target_index];
+                        dependencies_complete &=
+                            dependency.index.value < target->module.entity_count &&
+                            complete[
+                                offsets[target_index] +
+                                dependency.index.value];
+                    }
+                }
+                if (dependencies_complete)
+                {
+                    ready[ready_count++] = (AnalysisProgramJob){
+                        .module = module->module.id,
+                        .job = job->id,
+                    };
+                }
+            }
+        }
+        if (!ready_count)
+        {
+            schedule.has_cycle = true;
+            break;
+        }
+
+        u32 active_workers = BUSTER_MIN(worker_count, ready_count);
+        if (callback && active_workers > 1)
+        {
+            AnalysisProgramScheduleWorker* workers = arena_allocate(
+                result_arena,
+                AnalysisProgramScheduleWorker,
+                active_workers);
+            OsThreadHandle** handles = arena_allocate(
+                result_arena,
+                OsThreadHandle*,
+                active_workers);
+            for (u32 worker_index = 0;
+                worker_index < active_workers;
+                worker_index += 1)
+            {
+                workers[worker_index] = (AnalysisProgramScheduleWorker){
+                    .program = program,
+                    .ready = ready,
+                    .callback = callback,
+                    .user_data = user_data,
+                    .ready_count = ready_count,
+                    .worker_index = worker_index,
+                    .worker_count = active_workers,
+                };
+                handles[worker_index] = os_thread_create(
+                    (ThreadCreateOptions){
+                        .callback = analysis_program_schedule_worker,
+                        .argument = workers + worker_index,
+                    });
+            }
+            for (u32 worker_index = 0;
+                worker_index < active_workers;
+                worker_index += 1)
+            {
+                BUSTER_CHECK(os_thread_join(handles[worker_index]));
+            }
+        }
+        else if (callback)
+        {
+            AnalysisProgramScheduleWorker worker = {
+                .program = program,
+                .ready = ready,
+                .callback = callback,
+                .user_data = user_data,
+                .ready_count = ready_count,
+                .worker_count = 1,
+            };
+            analysis_program_schedule_worker(&worker);
+        }
+
+        for (u32 ready_index = 0; ready_index < ready_count; ready_index += 1)
+        {
+            AnalysisProgramJob item = ready[ready_index];
+            u32 module_index = analysis_program_module_index(
+                program,
+                item.module);
+            BUSTER_CHECK(module_index != UINT32_MAX);
+            complete[offsets[module_index] + item.job.value] = true;
+            schedule.execution_order[schedule.execution_count++] = item;
+        }
+        schedule.wave_count += 1;
+    }
+    return schedule;
+}
+
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL ParserSourceRange analysis_test_range(u32 offset)
 {
@@ -6234,6 +7167,9 @@ BUSTER_GLOBAL_LOCAL AnalysisFixtureTest analysis_fixture_tests[] =
     { S8_INITIALIZER("tests/basic_break.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_character_literal.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_comment.bbb"), 0 },
+    { S8_INITIALIZER("tests/basic_compile_time.bbb"), 0 },
+    { S8_INITIALIZER("tests/modules/core/math.bbb"), 0 },
+    { S8_INITIALIZER("tests/modules/system/platform.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_continue.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_else_if.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_enum.bbb"), 0 },
@@ -7070,6 +8006,29 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
             (AnalysisLayoutOptions){ .pointer_size = 8, .pointer_alignment = 8 });
     BUSTER_TEST(arguments, namespace_math.diagnostic_count == 0);
     BUSTER_TEST(arguments, namespace_app.diagnostic_count == 0);
+    analysis_build_jobs(arguments->arena, &namespace_math);
+    analysis_build_jobs(arguments->arena, &namespace_app);
+    AnalysisResult* scheduled_modules[] = {
+        &namespace_math,
+        &namespace_app,
+    };
+    AnalysisProgram scheduled_program = {
+        .module_results = scheduled_modules,
+        .module_count = BUSTER_ARRAY_LENGTH(scheduled_modules),
+    };
+    AnalysisProgramScheduleResult program_schedule =
+        analysis_execute_program_jobs(
+            arguments->arena,
+            &scheduled_program,
+            4,
+            0,
+            0);
+    BUSTER_TEST(arguments, !program_schedule.has_cycle);
+    BUSTER_TEST(
+        arguments,
+        program_schedule.execution_count ==
+            namespace_math.job_count + namespace_app.job_count);
+    BUSTER_TEST(arguments, program_schedule.wave_count >= 2);
     AnalysisEntity* namespace_use =
             analysis_value_entity_find(&namespace_app, S8("use"));
     BUSTER_TEST(arguments, namespace_use != 0);
@@ -7166,6 +8125,20 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
         arguments,
         analysis_test_has_diagnostic(&rule_result, ANALYSIS_DIAGNOSTIC_NONEXHAUSTIVE_SWITCH));
     BUSTER_TEST(arguments, analysis_test_has_diagnostic(&rule_result, ANALYSIS_DIAGNOSTIC_MISSING_RETURN));
+    BUSTER_TEST(arguments, rule_result.first_diagnostic != 0);
+    if (rule_result.first_diagnostic)
+    {
+        String8 formatted = analysis_format_diagnostic(
+            arguments->arena,
+            &rule_result,
+            rule_result.first_diagnostic);
+        BUSTER_TEST(arguments,
+            string_first_sequence(formatted, S8("semantic-rules.bbb")) !=
+                BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments,
+            string_first_sequence(formatted, S8(": error: ")) !=
+                BUSTER_STRING_NO_MATCH);
+    }
 
     for (u32 fixture_index = 0;
         fixture_index < BUSTER_ARRAY_LENGTH(analysis_fixture_tests);
@@ -7201,6 +8174,48 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
         BUSTER_TEST(
             arguments,
             fixture_result.diagnostic_count == fixture.expected_diagnostic_count);
+        if (string_equal(
+                fixture.path,
+                S8("tests/basic_compile_time.bbb")))
+        {
+            AnalysisEntity* constant = analysis_value_entity_find(
+                &fixture_result,
+                S8("this_is_a_constant"));
+            BUSTER_TEST(arguments,
+                constant && constant->kind == ANALYSIS_ENTITY_DATA);
+            if (constant)
+            {
+                AnalysisEntitySemantic* semantic =
+                    fixture_result.module.semantics +
+                    constant->id.index.value;
+                BUSTER_TEST(arguments,
+                    semantic->constant &&
+                    semantic->constant->kind ==
+                        ANALYSIS_CONSTANT_INTEGER);
+                BUSTER_TEST(arguments,
+                    semantic->constant &&
+                    semantic->constant->integer == 5);
+            }
+            AnalysisEntity* generic = analysis_value_entity_find(
+                &fixture_result,
+                S8("b"));
+            BUSTER_TEST(arguments, generic != 0);
+            if (generic)
+            {
+                AnalysisType* generic_function = analysis_type_from_id(
+                    &fixture_result,
+                    fixture_result.module.semantics[
+                        generic->id.index.value].type);
+                BUSTER_TEST(arguments,
+                    generic_function->kind == ANALYSIS_TYPE_FUNCTION);
+                BUSTER_TEST(arguments,
+                    generic_function->kind != ANALYSIS_TYPE_FUNCTION ||
+                    analysis_type_from_id(
+                        &fixture_result,
+                        generic_function->as.function.return_type)->kind ==
+                        ANALYSIS_TYPE_COMPILE_TIME_PARAMETER);
+            }
+        }
         for (u32 entity_index = 0;
             entity_index < fixture_result.module.entity_count;
             entity_index += 1)
@@ -7212,6 +8227,62 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
             }
         }
         arena_set_position(fixture_temporary.arena, fixture_temporary.position);
+    }
+
+    AnalysisProgram loaded = analysis_program_load(
+        arguments->arena,
+        fixture_expression_arena,
+        (AnalysisProgramOptions){
+            .root_path = S8("tests/basic_import.bbb"),
+            .root_module_name = S8("app"),
+            .module_root = S8("tests/modules"),
+            .pointer_size = 8,
+            .pointer_alignment = 8,
+        });
+    BUSTER_TEST(arguments, !loaded.load_failed);
+    BUSTER_TEST(arguments, loaded.module_count == 3);
+    BUSTER_TEST(arguments, loaded.root != 0);
+    BUSTER_TEST(arguments, loaded.parser_diagnostic_count == 0);
+    BUSTER_TEST(arguments, loaded.analysis_diagnostic_count == 0);
+    if (loaded.root)
+    {
+        BUSTER_STRING_TEST(arguments, loaded.root->name, S8("app"));
+        BUSTER_TEST(arguments, loaded.root->analysis->module.id.value == 0);
+        BUSTER_TEST(arguments, loaded.root->analysis->module.import_count == 2);
+        String8 first_summary = analysis_serialize_module_interface(
+            arguments->arena,
+            loaded.root->analysis);
+        String8 second_summary = analysis_serialize_module_interface(
+            arguments->arena,
+            loaded.root->analysis);
+        BUSTER_STRING_TEST(arguments, first_summary, second_summary);
+        AnalysisInterfaceSummary hashed =
+            analysis_module_interface_summary(
+                arguments->arena,
+                loaded.root->analysis);
+        AnalysisInterfaceCache cache = {0};
+        BUSTER_TEST(arguments,
+            analysis_interface_cache_store(
+                arguments->arena,
+                &cache,
+                loaded.root->name,
+                hashed));
+        BUSTER_TEST(arguments,
+            !analysis_interface_cache_store(
+                arguments->arena,
+                &cache,
+                loaded.root->name,
+                hashed));
+        BUSTER_TEST(arguments, cache.count == 1);
+        AnalysisProgramScheduleResult loaded_schedule =
+            analysis_execute_program_jobs(
+                arguments->arena,
+                &loaded,
+                4,
+                0,
+                0);
+        BUSTER_TEST(arguments, !loaded_schedule.has_cycle);
+        BUSTER_TEST(arguments, loaded_schedule.execution_count != 0);
     }
     BUSTER_CHECK(arena_destroy(fixture_expression_arena, 1));
 
