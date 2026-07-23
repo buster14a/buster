@@ -268,6 +268,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     [TOKEN_KEYWORD_CODE - first_keyword] = S8_INITIALIZER("code"),
                     [TOKEN_KEYWORD_DATA - first_keyword] = S8_INITIALIZER("data"),
                     [TOKEN_KEYWORD_TYPE - first_keyword] = S8_INITIALIZER("type"),
+                    [TOKEN_KEYWORD_IMPORT - first_keyword] = S8_INITIALIZER("import"),
                     [TOKEN_KEYWORD_STRUCT - first_keyword] = S8_INITIALIZER("struct"),
                     [TOKEN_KEYWORD_UNION - first_keyword] = S8_INITIALIZER("union"),
                     [TOKEN_KEYWORD_ENUM - first_keyword] = S8_INITIALIZER("enum"),
@@ -692,6 +693,7 @@ String8 get_token_content(const char8* source, Token* restrict tokens, u32 lexer
 typedef enum ParserStateId
 {
     PARSER_STATE_ROOT,
+    PARSER_STATE_IMPORT,
     PARSER_STATE_CODE,
     PARSER_STATE_TYPE_REFERENCE,
     PARSER_STATE_ATTRIBUTE_LIST,
@@ -717,6 +719,15 @@ typedef enum ParserStateId
     PARSER_STATE_COUNT,
 }ParserStateId;
 
+typedef enum ImportState
+{
+    IMPORT_STATE_NAMESPACE,
+    IMPORT_STATE_EQUAL,
+    IMPORT_STATE_PATH,
+    IMPORT_STATE_SEMICOLON,
+    IMPORT_STATE_COUNT,
+} ImportState;
+
 typedef enum CodeState
 {
     CODE_STATE_BEFORE_NAME,
@@ -731,6 +742,7 @@ typedef enum CodeState
 typedef enum TypeState
 {
     TYPE_STATE_PREFIX_OR_BASE,
+    TYPE_STATE_QUALIFIED_NAME,
     TYPE_STATE_AFTER_ARRAY_SLICE_START,
     TYPE_STATE_AFTER_ARRAY_COUNT,
     TYPE_STATE_AFTER_ARRAY_INFER_MARKER,
@@ -983,6 +995,12 @@ struct ParserState
     {
         struct
         {
+            AstImport* import;
+            ImportState state;
+        } import;
+
+        struct
+        {
             CodeState current_state;
             AstCode* code;
         } code;
@@ -994,6 +1012,7 @@ struct ParserState
             AstType** destination;
             AstType* root;
             AstType* type;
+            AstType* qualified;
             AstTypeArgument* argument;
             ParserSourceRange name_range;
             ParserSourceRange prefix_range;
@@ -1290,6 +1309,23 @@ BUSTER_GLOBAL_LOCAL AstCode* parser_code_push(Parser* parser, ExtendedToken toke
     parser->result->last_code = code;
     parser->result->code_count += 1;
     return code;
+}
+
+BUSTER_GLOBAL_LOCAL AstImport* parser_import_push(Parser* parser, ExtendedToken token)
+{
+    AstImport* import = arena_allocate(parser->result_arena, AstImport, 1);
+    *import = (AstImport){ .range = source_range_from_token(token) };
+    if (parser->result->last_import)
+    {
+        parser->result->last_import->next = import;
+    }
+    else
+    {
+        parser->result->first_import = import;
+    }
+    parser->result->last_import = import;
+    parser->result->import_count += 1;
+    return import;
 }
 
 BUSTER_GLOBAL_LOCAL AstTypeDeclaration* parser_type_declaration_push(Parser* parser, ExtendedToken token)
@@ -1984,7 +2020,9 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
                     return;
                 }
                 if (at_declaration_depth &&
-                    (token.id == TOKEN_KEYWORD_CODE || token.id == TOKEN_KEYWORD_TYPE))
+                    (token.id == TOKEN_KEYWORD_CODE ||
+                     token.id == TOKEN_KEYWORD_TYPE ||
+                     token.id == TOKEN_KEYWORD_IMPORT))
                 {
                     break;
                 }
@@ -2087,7 +2125,9 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
         while (token.id != TOKEN_EOF)
         {
             if (aggregate_brace_depth == 0 &&
-                (token.id == TOKEN_KEYWORD_CODE || token.id == TOKEN_KEYWORD_TYPE))
+                (token.id == TOKEN_KEYWORD_CODE ||
+                 token.id == TOKEN_KEYWORD_TYPE ||
+                 token.id == TOKEN_KEYWORD_IMPORT))
             {
                 break;
             }
@@ -2118,7 +2158,10 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
                 statement->range.length = token.offset + token.length - statement->range.offset;
             }
         }
-        else if (token.id == TOKEN_KEYWORD_CODE || token.id == TOKEN_KEYWORD_TYPE || token.id == TOKEN_EOF)
+        else if (token.id == TOKEN_KEYWORD_CODE ||
+                 token.id == TOKEN_KEYWORD_TYPE ||
+                 token.id == TOKEN_KEYWORD_IMPORT ||
+                 token.id == TOKEN_EOF)
         {
             parser->recovery = PARSER_RECOVERY_DECLARATION;
         }
@@ -2135,7 +2178,10 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
         state_push(&parser->state);
 
         ExtendedToken token = peek(parser);
-        while (token.id != TOKEN_KEYWORD_CODE && token.id != TOKEN_KEYWORD_TYPE && token.id != TOKEN_EOF)
+        while (token.id != TOKEN_KEYWORD_CODE &&
+               token.id != TOKEN_KEYWORD_TYPE &&
+               token.id != TOKEN_KEYWORD_IMPORT &&
+               token.id != TOKEN_EOF)
         {
             consume(&parser->iterator);
             token = peek(parser);
@@ -3563,6 +3609,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_KEYWORD_CODE: return S8("Keyword_Code");
         break; case TOKEN_KEYWORD_DATA: return S8("Keyword_Data");
         break; case TOKEN_KEYWORD_TYPE: return S8("Keyword_Type");
+        break; case TOKEN_KEYWORD_IMPORT: return S8("Keyword_Import");
         break; case TOKEN_KEYWORD_STRUCT: return S8("Keyword_Struct");
         break; case TOKEN_KEYWORD_UNION: return S8("Keyword_Union");
         break; case TOKEN_KEYWORD_ENUM: return S8("Keyword_Enum");
@@ -4059,11 +4106,98 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         type_statement->type_statement.state = TYPE_STATEMENT_STATE_NAME;
                         type_statement->type_statement.declaration = parser_type_declaration_push(&parser, token);
                     }
+                    break; case TOKEN_KEYWORD_IMPORT:
+                    {
+                        ParserState* import_state = state_push(&parser.state);
+                        import_state->id = PARSER_STATE_IMPORT;
+                        import_state->import.state = IMPORT_STATE_NAMESPACE;
+                        import_state->import.import = parser_import_push(&parser, token);
+                    }
                     break; case TOKEN_EOF:
                     {
                         is_running = false;
                     }
                     break; default: parser_unexpected(&parser, token, TOKEN_KEYWORD_CODE);
+                }
+            }
+            break; case PARSER_STATE_IMPORT:
+            {
+                ParserState* import_state = state(&parser);
+                AstImport* import = import_state->import.import;
+                ExtendedToken token = peek(&parser);
+
+                switch (import_state->import.state)
+                {
+                    break; case IMPORT_STATE_NAMESPACE:
+                    {
+                        if (token.id == TOKEN_IDENTIFIER)
+                        {
+                            consume(&parser.iterator);
+                            import->name_space = (AstIdentifier){
+                                .text = get_string(parser.iterator.source, token),
+                                .range = source_range_from_token(token),
+                            };
+                            import_state->import.state = IMPORT_STATE_EQUAL;
+                        }
+                        else
+                        {
+                            parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
+                        }
+                    }
+                    break; case IMPORT_STATE_EQUAL:
+                    {
+                        if (token.id == TOKEN_EQUAL)
+                        {
+                            consume(&parser.iterator);
+                            import_state->import.state = IMPORT_STATE_PATH;
+                        }
+                        else
+                        {
+                            parser_unexpected(&parser, token, TOKEN_EQUAL);
+                        }
+                    }
+                    break; case IMPORT_STATE_PATH:
+                    {
+                        if (token.id == TOKEN_STRING_LITERAL)
+                        {
+                            consume(&parser.iterator);
+                            String8 spelling = get_string(parser.iterator.source, token);
+                            StringLiteralParsing string =
+                                    parse_string_literal(parser.result_arena, spelling);
+                            if (!string.valid)
+                            {
+                                parser_diagnostic_push(
+                                        &parser,
+                                        PARSER_DIAGNOSTIC_INVALID_STRING,
+                                        token,
+                                        TOKEN_ERROR,
+                                        S8("invalid string literal"));
+                            }
+                            import->path = string.value;
+                            import->path_range = source_range_from_token(token);
+                            import_state->import.state = IMPORT_STATE_SEMICOLON;
+                        }
+                        else
+                        {
+                            parser_unexpected(&parser, token, TOKEN_STRING_LITERAL);
+                        }
+                    }
+                    break; case IMPORT_STATE_SEMICOLON:
+                    {
+                        if (token.id == TOKEN_SEMICOLON)
+                        {
+                            consume(&parser.iterator);
+                            parser_source_range_set_end(
+                                    &import->range,
+                                    token.offset + token.length);
+                            state_pop(&parser.state);
+                        }
+                        else
+                        {
+                            parser_unexpected(&parser, token, TOKEN_SEMICOLON);
+                        }
+                    }
+                    break; case IMPORT_STATE_COUNT: BUSTER_UNREACHABLE();
                 }
             }
             break; case PARSER_STATE_CODE:
@@ -4204,9 +4338,35 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                             break; case TOKEN_IDENTIFIER:
                             {
                                 consume(&parser.iterator);
-                                AstType* named = parser_type_attach(&parser, type_state, AST_TYPE_NAMED, token);
-                                named->name = get_string(parser.iterator.source, token);
-                                finish_type_reference(&parser, token.offset + token.length);
+                                ExtendedToken next = peek(&parser);
+                                if (next.id == TOKEN_DOT)
+                                {
+                                    consume(&parser.iterator);
+                                    AstType* qualified = parser_type_attach(
+                                            &parser,
+                                            type_state,
+                                            AST_TYPE_QUALIFIED_NAMED,
+                                            token);
+                                    qualified->qualified.name_space = (AstIdentifier){
+                                        .text = get_string(parser.iterator.source, token),
+                                        .range = source_range_from_token(token),
+                                    };
+                                    type_state->type.qualified = qualified;
+                                    type_state->type.current_state =
+                                            TYPE_STATE_QUALIFIED_NAME;
+                                }
+                                else
+                                {
+                                    AstType* named = parser_type_attach(
+                                            &parser,
+                                            type_state,
+                                            AST_TYPE_NAMED,
+                                            token);
+                                    named->name = get_string(parser.iterator.source, token);
+                                    finish_type_reference(
+                                            &parser,
+                                            token.offset + token.length);
+                                }
                             }
                             break; case TOKEN_KEYWORD_FUNCTION:
                             {
@@ -4215,6 +4375,26 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                 type_state->type.current_state = TYPE_STATE_AFTER_FUNCTION_KEYWORD;
                             }
                             break; default: parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
+                        }
+                    }
+                    break; case TYPE_STATE_QUALIFIED_NAME:
+                    {
+                        if (token.id == TOKEN_IDENTIFIER)
+                        {
+                            consume(&parser.iterator);
+                            AstType* qualified = type_state->type.qualified;
+                            BUSTER_CHECK(qualified->id == AST_TYPE_QUALIFIED_NAMED);
+                            qualified->qualified.name = (AstIdentifier){
+                                .text = get_string(parser.iterator.source, token),
+                                .range = source_range_from_token(token),
+                            };
+                            finish_type_reference(
+                                    &parser,
+                                    token.offset + token.length);
+                        }
+                        else
+                        {
+                            parser_unexpected(&parser, token, TOKEN_IDENTIFIER);
                         }
                     }
                     break; case TYPE_STATE_AFTER_ARRAY_SLICE_START:
@@ -6237,6 +6417,7 @@ struct ParserFileTestCase
     ParserFileExpectedDiagnostic* expected_diagnostics;
     u32 expected_code_count;
     u32 expected_type_declaration_count;
+    u32 expected_import_count;
     u32 expected_diagnostic_count;
     bool expected_code_count_is_set;
 };
@@ -6263,6 +6444,19 @@ BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic unexpected_top_level_diagnostic
         .expected = TOKEN_KEYWORD_CODE,
         .line = 1,
         .column = 1,
+        .length = 1,
+    },
+};
+
+BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic malformed_import_diagnostics[] =
+{
+    {
+        .message = S8_INITIALIZER("unexpected token"),
+        .kind = PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN,
+        .found = TOKEN_EQUAL,
+        .expected = TOKEN_IDENTIFIER,
+        .line = 1,
+        .column = 8,
         .length = 1,
     },
 };
@@ -6342,6 +6536,11 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
     {
         .path = S8_INITIALIZER("tests/basic_minimal.bbb"),
         .expected_expression = S8_INITIALIZER("0")
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_import.bbb"),
+        .expected_expression = S8_INITIALIZER("0"),
+        .expected_import_count = 2,
     },
     {
         .path = S8_INITIALIZER("tests/basic_comment.bbb"),
@@ -6528,6 +6727,13 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
         .expected_expression = S8_INITIALIZER("11"),
         .expected_diagnostics = missing_array_delimiter_diagnostics,
         .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(missing_array_delimiter_diagnostics),
+    },
+    {
+        .path = S8_INITIALIZER("tests/errors/malformed_import.bbb"),
+        .expected_expression = S8_INITIALIZER("31"),
+        .expected_diagnostics = malformed_import_diagnostics,
+        .expected_import_count = 1,
+        .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(malformed_import_diagnostics),
     },
     {
         .path = S8_INITIALIZER("tests/errors/missing_call_delimiter.bbb"),
@@ -7249,6 +7455,100 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
     Arena* expression_arena = arena_create((ArenaCreation){0});
     BUSTER_CHECK(expression_arena);
     u64 position = arena->position;
+
+    {
+        String8 source = S8(
+            "import math = \"core/math\";\n"
+            "import platform = \"system/platform\";\n"
+            "code identity : fn (value: math.Vector) math.Vector;\n");
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        AstImport* math = parsed.first_import;
+        AstImport* platform = math ? math->next : 0;
+
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.import_count == 2);
+        BUSTER_TEST(arguments, parsed.code_count == 1);
+        BUSTER_TEST(arguments, math != 0 && platform != 0 && platform->next == 0);
+        if (math && platform)
+        {
+            BUSTER_STRING_TEST(arguments, math->name_space.text, S8("math"));
+            BUSTER_STRING_TEST(arguments, math->path, S8("core/math"));
+            BUSTER_TEST(arguments, math->name_space.range.line == 0);
+            BUSTER_TEST(arguments, math->name_space.range.column == 7);
+            BUSTER_TEST(arguments, math->path_range.line == 0);
+            BUSTER_TEST(arguments, math->path_range.column == 14);
+            BUSTER_TEST(arguments, math->range.offset == 0);
+            BUSTER_TEST(arguments, math->range.length == 26);
+            BUSTER_STRING_TEST(arguments, platform->name_space.text, S8("platform"));
+            BUSTER_STRING_TEST(arguments, platform->path, S8("system/platform"));
+            BUSTER_TEST(arguments, platform->range.line == 1);
+        }
+        AstType* function = parsed.first_code ? parsed.first_code->type : 0;
+        AstTypeArgument* argument = function && function->id == AST_TYPE_FUNCTION ?
+                function->function.first_argument : 0;
+        BUSTER_TEST(arguments, argument != 0 &&
+                argument->type != 0 &&
+                argument->type->id == AST_TYPE_QUALIFIED_NAMED);
+        BUSTER_TEST(arguments, function != 0 &&
+                function->function.return_type != 0 &&
+                function->function.return_type->id ==
+                        AST_TYPE_QUALIFIED_NAMED);
+        if (argument &&
+            argument->type &&
+            argument->type->id == AST_TYPE_QUALIFIED_NAMED)
+        {
+            BUSTER_STRING_TEST(
+                    arguments,
+                    argument->type->qualified.name_space.text,
+                    S8("math"));
+            BUSTER_STRING_TEST(
+                    arguments,
+                    argument->type->qualified.name.text,
+                    S8("Vector"));
+        }
+        arena->position = position;
+    }
+
+    {
+        String8 source = S8(
+            "import math = \"core/math\";\n"
+            "code broken : fn (value: math.) void;\n"
+            "code recovered : fn () s32 { return 37; }\n");
+        TokenizerResult tokenizer = tokenize(
+                arena,
+                source.pointer,
+                source.length);
+        ParserResult parsed = parser_parse(
+                arena,
+                expression_arena,
+                source,
+                tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->kind ==
+                        PARSER_DIAGNOSTIC_UNEXPECTED_TOKEN);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->found ==
+                        TOKEN_RIGHT_PARENTHESIS);
+        BUSTER_TEST(arguments, parsed.first_diagnostic != 0 &&
+                parsed.first_diagnostic->expected == TOKEN_IDENTIFIER);
+        BUSTER_TEST(arguments, parsed.last_code != 0 &&
+                string_equal(parsed.last_code->name, S8("recovered")));
+        if (parsed.last_code && parsed.last_code->body.last_statement)
+        {
+            AstExpression recovered =
+                    parsed.last_code->body.last_statement->
+                            return_statement.expression;
+            BUSTER_TEST(arguments, recovered.count == 1);
+            BUSTER_TEST(arguments,
+                    recovered.nodes[0].id ==
+                            AST_NODE_CONSTANT_INTEGER);
+            BUSTER_TEST(arguments,
+                    recovered.nodes[0].integer.value == 37);
+        }
+        arena->position = position;
+    }
 
     {
         String8 source = S8(
@@ -9446,6 +9746,7 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, parsed.code_count == expected_code_count);
             BUSTER_TEST(arguments,
                     parsed.type_declaration_count == test_case.expected_type_declaration_count);
+            BUSTER_TEST(arguments, parsed.import_count == test_case.expected_import_count);
 
             if (test_case.expected_expression.length)
             {

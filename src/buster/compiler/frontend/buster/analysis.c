@@ -87,6 +87,42 @@ BUSTER_GLOBAL_LOCAL void analysis_duplicate_diagnostic_push(
     analysis_diagnostic_append(result, diagnostic);
 }
 
+BUSTER_GLOBAL_LOCAL void analysis_import_diagnostic_push(
+    Arena* arena,
+    AnalysisResult* result,
+    AnalysisImport* import,
+    AnalysisDiagnosticKind kind,
+    String8 message,
+    AnalysisImport* previous)
+{
+    AnalysisDiagnostic* diagnostic = arena_allocate(arena, AnalysisDiagnostic, 1);
+    *diagnostic = (AnalysisDiagnostic){
+        .message = message,
+        .range = import->range,
+        .entity = ANALYSIS_ENTITY_ID_INVALID,
+        .previous_entity = ANALYSIS_ENTITY_ID_INVALID,
+        .source = import->source,
+        .kind = kind,
+        .subject = kind == ANALYSIS_DIAGNOSTIC_DUPLICATE_IMPORT_NAMESPACE ?
+                import->name_space : import->path,
+        .expected_type = ANALYSIS_TYPE_ID_INVALID,
+        .actual_type = ANALYSIS_TYPE_ID_INVALID,
+    };
+    if (previous)
+    {
+        AnalysisDiagnosticNote* note = arena_allocate(arena, AnalysisDiagnosticNote, 1);
+        *note = (AnalysisDiagnosticNote){
+            .message = S8("previous import namespace is here"),
+            .range = previous->range,
+            .entity = ANALYSIS_ENTITY_ID_INVALID,
+            .source = previous->source,
+        };
+        diagnostic->first_note = note;
+        diagnostic->last_note = note;
+    }
+    analysis_diagnostic_append(result, diagnostic);
+}
+
 BUSTER_GLOBAL_LOCAL void analysis_type_diagnostic_push(
     Arena* arena,
     AnalysisResult* result,
@@ -151,6 +187,7 @@ AnalysisResult analysis_index_module(
     result.module.sources = arena_allocate(result_arena, AnalysisSource, input_count);
 
     u32 entity_count = 0;
+    u32 import_count = 0;
     for (u32 input_index = 0; input_index < input_count; input_index += 1)
     {
         AnalysisSourceInput* input = inputs + input_index;
@@ -162,6 +199,7 @@ AnalysisResult analysis_index_module(
         };
         if (input->parser)
         {
+            import_count += input->parser->import_count;
             entity_count += input->parser->type_declaration_count;
             entity_count += input->parser->code_count;
         }
@@ -179,10 +217,13 @@ AnalysisResult analysis_index_module(
         result.module.sources[insertion] = value;
     }
 
+    result.module.import_count = import_count;
+    result.module.imports = arena_allocate(result_arena, AnalysisImport, import_count);
     result.module.entity_count = entity_count;
     result.module.entities = arena_allocate(result_arena, AnalysisEntity, entity_count);
     result.module.semantics = arena_allocate(result_arena, AnalysisEntitySemantic, entity_count);
     result.module.bodies = arena_allocate(result_arena, AnalysisBody, entity_count);
+    u32 import_index = 0;
     u32 entity_index = 0;
     for (u32 source_index = 0; source_index < input_count; source_index += 1)
     {
@@ -191,6 +232,23 @@ AnalysisResult analysis_index_module(
         if (!source->parser)
         {
             continue;
+        }
+
+        for (AstImport* import = source->parser->first_import; import; import = import->next)
+        {
+            result.module.imports[import_index] = (AnalysisImport){
+                .name_space = string_duplicate_arena(
+                        result_arena,
+                        import->name_space.text,
+                        false),
+                .path = string_duplicate_arena(result_arena, import->path, false),
+                .range = import->range,
+                .path_range = import->path_range,
+                .source = source->id,
+                .target_id = ANALYSIS_MODULE_ID_INVALID,
+                .state = ANALYSIS_IMPORT_UNRESOLVED,
+            };
+            import_index += 1;
         }
 
         for (AstTypeDeclaration* type = source->parser->first_type_declaration; type; type = type->next)
@@ -221,7 +279,27 @@ AnalysisResult analysis_index_module(
         }
     }
 
+    BUSTER_CHECK(import_index == import_count);
     BUSTER_CHECK(entity_index == entity_count);
+    for (u32 index = 0; index < import_count; index += 1)
+    {
+        AnalysisImport* import = result.module.imports + index;
+        for (u32 previous_index = 0; previous_index < index; previous_index += 1)
+        {
+            AnalysisImport* previous = result.module.imports + previous_index;
+            if (string_equal(import->name_space, previous->name_space))
+            {
+                analysis_import_diagnostic_push(
+                        result_arena,
+                        &result,
+                        import,
+                        ANALYSIS_DIAGNOSTIC_DUPLICATE_IMPORT_NAMESPACE,
+                        S8("duplicate import namespace"),
+                        previous);
+                break;
+            }
+        }
+    }
     for (u32 index = 1; index < entity_count; index += 1)
     {
         AnalysisEntity value = result.module.entities[index];
@@ -258,6 +336,344 @@ AnalysisResult analysis_index_module(
     }
 
     return result;
+}
+
+typedef struct AnalysisImportTraversalFrame AnalysisImportTraversalFrame;
+struct AnalysisImportTraversalFrame
+{
+    u32 module_index;
+    u32 next_import;
+};
+
+void analysis_resolve_imports(
+    Arena* result_arena,
+    AnalysisResult** modules,
+    u32 module_count)
+{
+    AnalysisResult** program_modules =
+            arena_allocate(result_arena, AnalysisResult*, module_count);
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        program_modules[module_index] = modules[module_index];
+    }
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        AnalysisResult* module = modules[module_index];
+        if (!module)
+        {
+            continue;
+        }
+        module->program_modules = program_modules;
+        module->program_module_count = module_count;
+
+        for (u32 import_index = 0;
+             import_index < module->module.import_count;
+             import_index += 1)
+        {
+            AnalysisImport* import = module->module.imports + import_index;
+            import->target = 0;
+            import->target_id = ANALYSIS_MODULE_ID_INVALID;
+            import->state = ANALYSIS_IMPORT_UNRESOLVED;
+            u32 match_count = 0;
+            for (u32 candidate_index = 0;
+                 candidate_index < module_count;
+                 candidate_index += 1)
+            {
+                AnalysisResult* candidate = modules[candidate_index];
+                if (candidate && string_equal(candidate->module.name, import->path))
+                {
+                    import->target = candidate;
+                    import->target_id = candidate->module.id;
+                    match_count += 1;
+                }
+            }
+
+            if (match_count == 0)
+            {
+                import->state = ANALYSIS_IMPORT_MISSING;
+                analysis_import_diagnostic_push(
+                        result_arena,
+                        module,
+                        import,
+                        ANALYSIS_DIAGNOSTIC_MISSING_IMPORTED_MODULE,
+                        S8("imported module was not found"),
+                        0);
+            }
+            else if (match_count > 1)
+            {
+                import->target = 0;
+                import->target_id = ANALYSIS_MODULE_ID_INVALID;
+                import->state = ANALYSIS_IMPORT_AMBIGUOUS;
+                analysis_import_diagnostic_push(
+                        result_arena,
+                        module,
+                        import,
+                        ANALYSIS_DIAGNOSTIC_AMBIGUOUS_IMPORTED_MODULE,
+                        S8("imported module name is ambiguous"),
+                        0);
+            }
+            else
+            {
+                import->state = ANALYSIS_IMPORT_RESOLVED;
+            }
+        }
+    }
+
+    Arena* conflicts[] = { result_arena };
+    TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+    u8* colors = arena_allocate(scratch.arena, u8, module_count);
+    AnalysisImportTraversalFrame* frames =
+            arena_allocate(scratch.arena, AnalysisImportTraversalFrame, module_count);
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        colors[module_index] = 0;
+    }
+
+    for (u32 root = 0; root < module_count; root += 1)
+    {
+        if (!modules[root] || colors[root])
+        {
+            continue;
+        }
+
+        u32 frame_count = 1;
+        frames[0] = (AnalysisImportTraversalFrame){ .module_index = root };
+        colors[root] = 1;
+        while (frame_count)
+        {
+            AnalysisImportTraversalFrame* frame = frames + frame_count - 1;
+            AnalysisResult* module = modules[frame->module_index];
+            if (frame->next_import >= module->module.import_count)
+            {
+                colors[frame->module_index] = 2;
+                frame_count -= 1;
+                continue;
+            }
+
+            AnalysisImport* import = module->module.imports + frame->next_import;
+            frame->next_import += 1;
+            if (import->state != ANALYSIS_IMPORT_RESOLVED)
+            {
+                continue;
+            }
+
+            u32 target_index = module_count;
+            for (u32 candidate_index = 0;
+                 candidate_index < module_count;
+                 candidate_index += 1)
+            {
+                if (modules[candidate_index] == import->target)
+                {
+                    target_index = candidate_index;
+                    break;
+                }
+            }
+            BUSTER_CHECK(target_index < module_count);
+
+            if (colors[target_index] == 1)
+            {
+                import->state = ANALYSIS_IMPORT_CYCLE;
+                analysis_import_diagnostic_push(
+                        result_arena,
+                        module,
+                        import,
+                        ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE,
+                        S8("module import cycle"),
+                        0);
+            }
+            else if (colors[target_index] == 0)
+            {
+                BUSTER_CHECK(frame_count < module_count);
+                frames[frame_count] = (AnalysisImportTraversalFrame){
+                    .module_index = target_index,
+                };
+                frame_count += 1;
+                colors[target_index] = 1;
+            }
+        }
+    }
+    scratch_end(scratch);
+}
+
+void analysis_resolve_program_interfaces(
+    Arena* result_arena,
+    AnalysisResult** modules,
+    u32 module_count)
+{
+    analysis_resolve_imports(result_arena, modules, module_count);
+    Arena* conflicts[] = { result_arena };
+    TemporalArena scratch = scratch_begin(
+            conflicts,
+            BUSTER_ARRAY_LENGTH(conflicts));
+    bool* resolved = arena_allocate(scratch.arena, bool, module_count);
+    u32 resolved_count = 0;
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        resolved[module_index] = false;
+        if (!modules[module_index])
+        {
+            resolved[module_index] = true;
+            resolved_count += 1;
+        }
+    }
+    while (resolved_count < module_count)
+    {
+        bool progressed = false;
+        for (u32 module_index = 0;
+             module_index < module_count;
+             module_index += 1)
+        {
+            AnalysisResult* module = modules[module_index];
+            if (!module || resolved[module_index])
+            {
+                continue;
+            }
+
+            bool ready = true;
+            for (u32 import_index = 0;
+                 import_index < module->module.import_count;
+                 import_index += 1)
+            {
+                AnalysisImport* import = module->module.imports + import_index;
+                if (import->state == ANALYSIS_IMPORT_RESOLVED &&
+                    import->target &&
+                    !import->target->types.types)
+                {
+                    ready = false;
+                    break;
+                }
+            }
+            if (!ready)
+            {
+                continue;
+            }
+
+            if (!module->types.types)
+            {
+                analysis_resolve_module_interfaces(result_arena, module);
+            }
+            resolved[module_index] = true;
+            resolved_count += 1;
+            progressed = true;
+        }
+        if (!progressed)
+        {
+            for (u32 module_index = 0;
+                 module_index < module_count;
+                 module_index += 1)
+            {
+                AnalysisResult* module = modules[module_index];
+                if (module && !resolved[module_index])
+                {
+                    analysis_resolve_module_interfaces(result_arena, module);
+                    resolved[module_index] = true;
+                    resolved_count += 1;
+                }
+            }
+        }
+    }
+    scratch_end(scratch);
+}
+
+AnalysisEntity* analysis_find_qualified_entity(
+    AnalysisResult* module,
+    String8 import_name_space,
+    String8 entity_name,
+    AnalysisNamespace name_space)
+{
+    AnalysisResult* target = 0;
+    for (u32 import_index = 0;
+         import_index < module->module.import_count;
+         import_index += 1)
+    {
+        AnalysisImport* import = module->module.imports + import_index;
+        if (import->state == ANALYSIS_IMPORT_RESOLVED &&
+            string_equal(import->name_space, import_name_space))
+        {
+            if (target)
+            {
+                return 0;
+            }
+            target = import->target;
+        }
+    }
+    if (!target)
+    {
+        return 0;
+    }
+
+    for (u32 entity_index = 0;
+         entity_index < target->module.entity_count;
+         entity_index += 1)
+    {
+        AnalysisEntity* entity = target->module.entities + entity_index;
+        if (entity->name_space == name_space &&
+            string_equal(entity->name, entity_name))
+        {
+            return entity;
+        }
+    }
+    return 0;
+}
+
+String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result)
+{
+    u32 part_capacity =
+            1 + result->module.source_count +
+            result->module.import_count + result->module.entity_count;
+    String8* parts = arena_allocate(arena, String8, part_capacity);
+    u32 part_count = 0;
+    parts[part_count++] = string_format(
+            arena,
+            S8("module {S8} id={u32}\n"),
+            result->module.name,
+            result->module.id.value);
+    for (u32 source_index = 0;
+         source_index < result->module.source_count;
+         source_index += 1)
+    {
+        AnalysisSource* source = result->module.sources + source_index;
+        parts[part_count++] = string_format(
+                arena,
+                S8("source {u32} {S8}\n"),
+                source->id.value,
+                source->path);
+    }
+    for (u32 import_index = 0;
+         import_index < result->module.import_count;
+         import_index += 1)
+    {
+        AnalysisImport* import = result->module.imports + import_index;
+        parts[part_count++] = string_format(
+                arena,
+                S8("import {S8}={S8} source={u32} state={u32} target={u32}\n"),
+                import->name_space,
+                import->path,
+                import->source.value,
+                (u32)import->state,
+                import->target_id.value);
+    }
+    for (u32 entity_index = 0;
+         entity_index < result->module.entity_count;
+         entity_index += 1)
+    {
+        AnalysisEntity* entity = result->module.entities + entity_index;
+        AnalysisEntitySemantic* semantic = result->module.semantics + entity_index;
+        parts[part_count++] = string_format(
+                arena,
+                S8("entity {u32} source={u32} kind={u32} namespace={u32} name={S8} type={u32}\n"),
+                entity->id.index.value,
+                entity->source.value,
+                (u32)entity->kind,
+                (u32)entity->name_space,
+                entity->name,
+                semantic->type.value);
+    }
+    BUSTER_CHECK(part_count == part_capacity);
+    return string_join_arena(
+            arena,
+            (SliceString8){ .pointer = parts, .length = part_count },
+            false);
 }
 
 typedef struct AnalysisAstTypeLink AnalysisAstTypeLink;
@@ -407,7 +823,8 @@ BUSTER_GLOBAL_LOCAL u32 analysis_ast_type_count(Arena* scratch_arena, AnalysisRe
         count += 1;
         switch (type->id)
         {
-            case AST_TYPE_NAMED: break;
+            case AST_TYPE_NAMED:
+            case AST_TYPE_QUALIFIED_NAMED: break;
             case AST_TYPE_POINTER:
             case AST_TYPE_SLICE:
             case AST_TYPE_INFERRED_ARRAY:
@@ -634,14 +1051,21 @@ BUSTER_GLOBAL_LOCAL bool analysis_type_matches(AnalysisType* existing, AnalysisT
             }
             return true;
         }
+        case ANALYSIS_TYPE_STRUCT:
+        case ANALYSIS_TYPE_UNION:
+        case ANALYSIS_TYPE_ENUM:
+        {
+            return
+                existing->as.declaration.module.value ==
+                    candidate->as.declaration.module.value &&
+                existing->as.declaration.index.value ==
+                    candidate->as.declaration.index.value;
+        }
         case ANALYSIS_TYPE_POISON:
         case ANALYSIS_TYPE_VOID:
         case ANALYSIS_TYPE_BOOL:
         case ANALYSIS_TYPE_INTEGER:
         case ANALYSIS_TYPE_FLOAT:
-        case ANALYSIS_TYPE_STRUCT:
-        case ANALYSIS_TYPE_UNION:
-        case ANALYSIS_TYPE_ENUM:
         case ANALYSIS_TYPE_COUNT: break;
     }
     return false;
@@ -672,6 +1096,291 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_intern(
     return analysis_type_add(table, candidate);
 }
 
+BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_builtin_type_find(
+    AnalysisTypeTable* table,
+    String8 name);
+
+BUSTER_GLOBAL_LOCAL AnalysisResult* analysis_program_module_from_id(
+    AnalysisResult* result,
+    AnalysisModuleId id)
+{
+    if (result->module.id.value == id.value)
+    {
+        return result;
+    }
+    for (u32 index = 0; index < result->program_module_count; index += 1)
+    {
+        AnalysisResult* candidate = result->program_modules[index];
+        if (candidate && candidate->module.id.value == id.value)
+        {
+            return candidate;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisEntitySemantic* analysis_declaration_semantic(
+    AnalysisResult* result,
+    AnalysisEntityId declaration,
+    AnalysisResult** declaration_module)
+{
+    AnalysisResult* module =
+            analysis_program_module_from_id(result, declaration.module);
+    if (!module || declaration.index.value >= module->module.entity_count)
+    {
+        return 0;
+    }
+    if (declaration_module)
+    {
+        *declaration_module = module;
+    }
+    return module->module.semantics + declaration.index.value;
+}
+
+typedef enum AnalysisImportTypeTaskKind
+{
+    ANALYSIS_IMPORT_TYPE_VISIT,
+    ANALYSIS_IMPORT_TYPE_FINISH_ELEMENT,
+    ANALYSIS_IMPORT_TYPE_FINISH_ARRAY,
+    ANALYSIS_IMPORT_TYPE_FINISH_FUNCTION,
+} AnalysisImportTypeTaskKind;
+
+typedef struct AnalysisImportTypeTask AnalysisImportTypeTask;
+struct AnalysisImportTypeTask
+{
+    AnalysisImportTypeTask* previous;
+    AnalysisTypeId* destination;
+    AnalysisImportTypeTaskKind kind;
+    union
+    {
+        AnalysisTypeId source;
+        struct
+        {
+            AnalysisTypeKind kind;
+            AnalysisTypeId element;
+        } element;
+        struct
+        {
+            AnalysisTypeId element;
+            u64 count;
+        } array;
+        struct
+        {
+            AnalysisTypeId* arguments;
+            AnalysisTypeId return_type;
+            AstCallingConvention calling_convention;
+            u32 argument_count;
+        } function;
+    } as;
+};
+
+BUSTER_GLOBAL_LOCAL void analysis_import_type_task_push(
+    Arena* scratch_arena,
+    AnalysisImportTypeTask** top,
+    AnalysisImportTypeTask task)
+{
+    AnalysisImportTypeTask* pushed =
+            arena_allocate(scratch_arena, AnalysisImportTypeTask, 1);
+    task.previous = *top;
+    *pushed = task;
+    *top = pushed;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_import(
+    Arena* result_arena,
+    Arena* scratch_arena,
+    AnalysisResult* destination,
+    AnalysisResult* source,
+    AnalysisTypeId source_id)
+{
+    if (source == destination)
+    {
+        return source_id;
+    }
+
+    AnalysisTypeId result = destination->types.builtin.poison;
+    AnalysisImportTypeTask* top = 0;
+    analysis_import_type_task_push(
+        scratch_arena,
+        &top,
+        (AnalysisImportTypeTask){
+            .destination = &result,
+            .kind = ANALYSIS_IMPORT_TYPE_VISIT,
+            .as.source = source_id,
+        });
+    while (top)
+    {
+        AnalysisImportTypeTask* task = top;
+        top = task->previous;
+        if (task->kind == ANALYSIS_IMPORT_TYPE_VISIT)
+        {
+            AnalysisType* type = analysis_type_from_id(source, task->as.source);
+            switch (type->kind)
+            {
+                case ANALYSIS_TYPE_POISON:
+                case ANALYSIS_TYPE_VOID:
+                case ANALYSIS_TYPE_BOOL:
+                case ANALYSIS_TYPE_INTEGER:
+                case ANALYSIS_TYPE_FLOAT:
+                {
+                    AnalysisTypeId builtin =
+                            analysis_builtin_type_find(&destination->types, type->name);
+                    *task->destination =
+                            builtin.value == ANALYSIS_ID_UNDERLYING_INVALID ?
+                            destination->types.builtin.poison : builtin;
+                } break;
+                case ANALYSIS_TYPE_STRUCT:
+                case ANALYSIS_TYPE_UNION:
+                case ANALYSIS_TYPE_ENUM:
+                {
+                    *task->destination = analysis_type_intern(
+                            result_arena,
+                            &destination->types,
+                            (AnalysisType){
+                                .name = type->name,
+                                .kind = type->kind,
+                                .as.declaration = type->as.declaration,
+                            });
+                } break;
+                case ANALYSIS_TYPE_POINTER:
+                case ANALYSIS_TYPE_SLICE:
+                case ANALYSIS_TYPE_INFERRED_ARRAY:
+                case ANALYSIS_TYPE_RANGE:
+                {
+                    AnalysisImportTypeTask* finish =
+                            arena_allocate(scratch_arena, AnalysisImportTypeTask, 1);
+                    *finish = (AnalysisImportTypeTask){
+                        .previous = top,
+                        .destination = task->destination,
+                        .kind = ANALYSIS_IMPORT_TYPE_FINISH_ELEMENT,
+                        .as.element = {
+                            .kind = type->kind,
+                            .element = destination->types.builtin.poison,
+                        },
+                    };
+                    top = finish;
+                    analysis_import_type_task_push(
+                            scratch_arena,
+                            &top,
+                            (AnalysisImportTypeTask){
+                                .destination = &finish->as.element.element,
+                                .kind = ANALYSIS_IMPORT_TYPE_VISIT,
+                                .as.source = type->as.element_type,
+                            });
+                } break;
+                case ANALYSIS_TYPE_ARRAY:
+                {
+                    AnalysisImportTypeTask* finish =
+                            arena_allocate(scratch_arena, AnalysisImportTypeTask, 1);
+                    *finish = (AnalysisImportTypeTask){
+                        .previous = top,
+                        .destination = task->destination,
+                        .kind = ANALYSIS_IMPORT_TYPE_FINISH_ARRAY,
+                        .as.array = {
+                            .element = destination->types.builtin.poison,
+                            .count = type->as.array.count,
+                        },
+                    };
+                    top = finish;
+                    analysis_import_type_task_push(
+                            scratch_arena,
+                            &top,
+                            (AnalysisImportTypeTask){
+                                .destination = &finish->as.array.element,
+                                .kind = ANALYSIS_IMPORT_TYPE_VISIT,
+                                .as.source = type->as.array.element_type,
+                            });
+                } break;
+                case ANALYSIS_TYPE_FUNCTION:
+                {
+                    u32 count = type->as.function.argument_count;
+                    AnalysisTypeId* arguments =
+                            arena_allocate(scratch_arena, AnalysisTypeId, count);
+                    AnalysisImportTypeTask* finish =
+                            arena_allocate(scratch_arena, AnalysisImportTypeTask, 1);
+                    *finish = (AnalysisImportTypeTask){
+                        .previous = top,
+                        .destination = task->destination,
+                        .kind = ANALYSIS_IMPORT_TYPE_FINISH_FUNCTION,
+                        .as.function = {
+                            .arguments = arguments,
+                            .return_type = destination->types.builtin.poison,
+                            .calling_convention =
+                                    type->as.function.calling_convention,
+                            .argument_count = count,
+                        },
+                    };
+                    top = finish;
+                    analysis_import_type_task_push(
+                            scratch_arena,
+                            &top,
+                            (AnalysisImportTypeTask){
+                                .destination = &finish->as.function.return_type,
+                                .kind = ANALYSIS_IMPORT_TYPE_VISIT,
+                                .as.source = type->as.function.return_type,
+                            });
+                    for (u32 index = count; index > 0; index -= 1)
+                    {
+                        analysis_import_type_task_push(
+                                scratch_arena,
+                                &top,
+                                (AnalysisImportTypeTask){
+                                    .destination = arguments + index - 1,
+                                    .kind = ANALYSIS_IMPORT_TYPE_VISIT,
+                                    .as.source =
+                                            type->as.function.argument_types[index - 1],
+                                });
+                    }
+                } break;
+                case ANALYSIS_TYPE_COUNT: BUSTER_UNREACHABLE();
+            }
+            continue;
+        }
+
+        if (task->kind == ANALYSIS_IMPORT_TYPE_FINISH_ELEMENT)
+        {
+            *task->destination = analysis_type_intern(
+                    result_arena,
+                    &destination->types,
+                    (AnalysisType){
+                        .kind = task->as.element.kind,
+                        .as.element_type = task->as.element.element,
+                    });
+        }
+        else if (task->kind == ANALYSIS_IMPORT_TYPE_FINISH_ARRAY)
+        {
+            *task->destination = analysis_type_intern(
+                    result_arena,
+                    &destination->types,
+                    (AnalysisType){
+                        .kind = ANALYSIS_TYPE_ARRAY,
+                        .as.array = {
+                            .element_type = task->as.array.element,
+                            .count = task->as.array.count,
+                        },
+                    });
+        }
+        else
+        {
+            BUSTER_CHECK(task->kind == ANALYSIS_IMPORT_TYPE_FINISH_FUNCTION);
+            *task->destination = analysis_type_intern(
+                    result_arena,
+                    &destination->types,
+                    (AnalysisType){
+                        .kind = ANALYSIS_TYPE_FUNCTION,
+                        .as.function = {
+                            .argument_types = task->as.function.arguments,
+                            .return_type = task->as.function.return_type,
+                            .calling_convention =
+                                    task->as.function.calling_convention,
+                            .argument_count = task->as.function.argument_count,
+                        },
+                    });
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_builtin_type_find(AnalysisTypeTable* table, String8 name)
 {
     for (u32 index = 0; index < table->count; index += 1)
@@ -696,6 +1405,26 @@ BUSTER_GLOBAL_LOCAL AnalysisEntity* analysis_named_type_find(AnalysisResult* res
         }
     }
     return 0;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisImport* analysis_import_find(
+    AnalysisResult* result,
+    String8 name_space)
+{
+    AnalysisImport* found = 0;
+    for (u32 index = 0; index < result->module.import_count; index += 1)
+    {
+        AnalysisImport* import = result->module.imports + index;
+        if (string_equal(import->name_space, name_space))
+        {
+            if (found)
+            {
+                return 0;
+            }
+            found = import;
+        }
+    }
+    return found;
 }
 
 typedef enum AnalysisTypeTaskKind
@@ -848,6 +1577,56 @@ BUSTER_GLOBAL_LOCAL void analysis_resolve_ast_task(
                 return;
             }
             analysis_type_task_entity_push(context, task->owner, entity, ast->range, task->destination);
+        } break;
+        case AST_TYPE_QUALIFIED_NAMED:
+        {
+            AnalysisImport* import = analysis_import_find(
+                    context->result,
+                    ast->qualified.name_space.text);
+            if (import && import->state != ANALYSIS_IMPORT_RESOLVED)
+            {
+                *task->destination = poison;
+                return;
+            }
+            AnalysisEntity* entity = import ?
+                    analysis_find_qualified_entity(
+                        context->result,
+                        ast->qualified.name_space.text,
+                        ast->qualified.name.text,
+                        ANALYSIS_NAMESPACE_TYPE) : 0;
+            if (!entity || !import->target->types.types)
+            {
+                analysis_type_diagnostic_push(
+                        context->result_arena,
+                        context->result,
+                        task->owner,
+                        ast->range,
+                        ANALYSIS_DIAGNOSTIC_UNKNOWN_TYPE,
+                        ast->qualified.name.text);
+                *task->destination = poison;
+                return;
+            }
+
+            AnalysisEntitySemantic* semantic =
+                    import->target->module.semantics + entity->id.index.value;
+            if (semantic->state != ANALYSIS_RESOLUTION_RESOLVED)
+            {
+                analysis_type_diagnostic_push(
+                        context->result_arena,
+                        context->result,
+                        task->owner,
+                        ast->range,
+                        ANALYSIS_DIAGNOSTIC_UNKNOWN_TYPE,
+                        ast->qualified.name.text);
+                *task->destination = poison;
+                return;
+            }
+            *task->destination = analysis_type_import(
+                    context->result_arena,
+                    context->scratch_arena,
+                    context->result,
+                    import->target,
+                    semantic->type);
         } break;
         case AST_TYPE_POINTER:
         case AST_TYPE_SLICE:
@@ -1373,6 +2152,21 @@ void analysis_resolve_module_interfaces(Arena* result_arena, AnalysisResult* res
     u32 builtin_count = 13;
     result->types.capacity =
         builtin_count + result->module.type_count + ast_type_count + body_expression_node_count;
+    for (u32 import_index = 0;
+         import_index < result->module.import_count;
+         import_index += 1)
+    {
+        AnalysisImport* import = result->module.imports + import_index;
+        if (import->state == ANALYSIS_IMPORT_RESOLVED &&
+            import->target &&
+            import->target->types.types)
+        {
+            BUSTER_CHECK(
+                    result->types.capacity <=
+                    UINT32_MAX - import->target->types.count);
+            result->types.capacity += import->target->types.count;
+        }
+    }
     result->types.types = arena_allocate(result_arena, AnalysisType, result->types.capacity);
     analysis_builtin_types_initialize(&result->types);
 
@@ -1489,6 +2283,10 @@ BUSTER_GLOBAL_LOCAL String8 analysis_diagnostic_message(AnalysisDiagnosticKind k
         case ANALYSIS_DIAGNOSTIC_DUPLICATE_SWITCH_CASE: return S8("duplicate switch case");
         case ANALYSIS_DIAGNOSTIC_NONEXHAUSTIVE_SWITCH: return S8("switch does not cover every enum member");
         case ANALYSIS_DIAGNOSTIC_DUPLICATE_DECLARATION:
+        case ANALYSIS_DIAGNOSTIC_DUPLICATE_IMPORT_NAMESPACE:
+        case ANALYSIS_DIAGNOSTIC_MISSING_IMPORTED_MODULE:
+        case ANALYSIS_DIAGNOSTIC_AMBIGUOUS_IMPORTED_MODULE:
+        case ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE:
         case ANALYSIS_DIAGNOSTIC_UNKNOWN_TYPE:
         case ANALYSIS_DIAGNOSTIC_TYPE_ALIAS_CYCLE:
         case ANALYSIS_DIAGNOSTIC_COUNT: break;
@@ -2249,8 +3047,11 @@ BUSTER_GLOBAL_LOCAL void analysis_expression_expect(
             }
             current->type = current_expected;
             AnalysisType* enum_type = analysis_type_from_id(context->result, current_expected);
-            AnalysisEntitySemantic* semantic = context->result->module.semantics +
-                enum_type->as.declaration.index.value;
+            AnalysisEntitySemantic* semantic = analysis_declaration_semantic(
+                    context->result,
+                    enum_type->as.declaration,
+                    0);
+            BUSTER_CHECK(semantic);
             bool found = false;
             for (u32 member_index = 0; member_index < semantic->enum_member_count; member_index += 1)
             {
@@ -2283,8 +3084,12 @@ BUSTER_GLOBAL_LOCAL void analysis_expression_expect(
                 continue;
             }
             current->type = current_expected;
-            AnalysisEntitySemantic* semantic = context->result->module.semantics +
-                aggregate->as.declaration.index.value;
+            AnalysisResult* declaration_module = 0;
+            AnalysisEntitySemantic* semantic = analysis_declaration_semantic(
+                    context->result,
+                    aggregate->as.declaration,
+                    &declaration_module);
+            BUSTER_CHECK(semantic);
             bool* seen = arena_allocate(context->scratch_arena, bool, semantic->field_count);
             for (u32 field_index = 0; field_index < semantic->field_count; field_index += 1)
             {
@@ -2334,9 +3139,15 @@ BUSTER_GLOBAL_LOCAL void analysis_expression_expect(
                             literal_field->name.text);
                     }
                     seen[found_index] = true;
+                    AnalysisTypeId field_type = analysis_type_import(
+                            context->result_arena,
+                            context->scratch_arena,
+                            context->result,
+                            declaration_module,
+                            field->type);
                     BUSTER_CHECK(count < expression->ast.count);
                     top[count] = (AnalysisExpectation){
-                        .type = field->type,
+                        .type = field_type,
                         .node_index = roots[child],
                     };
                     count += 1;
@@ -2476,6 +3287,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
             .category = ANALYSIS_VALUE_CATEGORY_TEMPORARY,
             .local = ANALYSIS_LOCAL_ID_INVALID,
             .entity = ANALYSIS_ENTITY_ID_INVALID,
+            .namespace_module = ANALYSIS_MODULE_ID_INVALID,
             .subtree_start = arity ? expression->nodes[operands[first_operand]].subtree_start : index,
         };
         switch (node->id)
@@ -2580,11 +3392,23 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
                     }
                     else
                     {
-                        analysis_body_diagnostic_push(
-                            context,
-                            node->identifier.range,
-                            ANALYSIS_DIAGNOSTIC_UNKNOWN_IDENTIFIER,
-                            node->identifier.text);
+                        AnalysisImport* import = analysis_import_find(
+                                context->result,
+                                node->identifier.text);
+                        if (import)
+                        {
+                            typed.is_namespace = true;
+                            typed.namespace_module = import->target_id;
+                            typed.category = ANALYSIS_VALUE_CATEGORY_VALUE;
+                        }
+                        else
+                        {
+                            analysis_body_diagnostic_push(
+                                context,
+                                node->identifier.range,
+                                ANALYSIS_DIAGNOSTIC_UNKNOWN_IDENTIFIER,
+                                node->identifier.text);
+                        }
                     }
                 }
             } break;
@@ -2731,16 +3555,61 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
             case AST_NODE_MEMBER_ACCESS:
             {
                 AnalysisTypedNode* base = expression->nodes + operands[first_operand];
+                if (base->is_namespace)
+                {
+                    AnalysisResult* target = analysis_program_module_from_id(
+                            context->result,
+                            base->namespace_module);
+                    AnalysisEntity* entity = target ?
+                            analysis_value_entity_find(
+                                    target,
+                                    node->member_access.member.text) : 0;
+                    if (entity)
+                    {
+                        AnalysisEntitySemantic* semantic =
+                                target->module.semantics + entity->id.index.value;
+                        if (semantic->state == ANALYSIS_RESOLUTION_RESOLVED)
+                        {
+                            typed.type = analysis_type_import(
+                                    context->result_arena,
+                                    context->scratch_arena,
+                                    context->result,
+                                    target,
+                                    semantic->type);
+                            typed.entity = entity->id;
+                            typed.category = ANALYSIS_VALUE_CATEGORY_VALUE;
+                            analysis_body_dependency_add(context, entity->id);
+                        }
+                    }
+                    if (!entity && target)
+                    {
+                        analysis_body_diagnostic_push(
+                                context,
+                                node->member_access.member.range,
+                                ANALYSIS_DIAGNOSTIC_UNKNOWN_MEMBER,
+                                node->member_access.member.text);
+                    }
+                    break;
+                }
                 AnalysisType* base_type = analysis_type_from_id(context->result, base->type);
                 if (base_type->kind == ANALYSIS_TYPE_STRUCT || base_type->kind == ANALYSIS_TYPE_UNION)
                 {
-                    AnalysisEntitySemantic* semantic = context->result->module.semantics +
-                        base_type->as.declaration.index.value;
+                    AnalysisResult* declaration_module = 0;
+                    AnalysisEntitySemantic* semantic = analysis_declaration_semantic(
+                            context->result,
+                            base_type->as.declaration,
+                            &declaration_module);
+                    BUSTER_CHECK(semantic);
                     for (u32 field_index = 0; field_index < semantic->field_count; field_index += 1)
                     {
                         if (string_equal(semantic->fields[field_index].name, node->member_access.member.text))
                         {
-                            typed.type = semantic->fields[field_index].type;
+                            typed.type = analysis_type_import(
+                                    context->result_arena,
+                                    context->scratch_arena,
+                                    context->result,
+                                    declaration_module,
+                                    semantic->fields[field_index].type);
                             typed.category = base->category;
                             typed.local = base->local;
                             typed.is_addressable = base->is_addressable;
@@ -3395,8 +4264,12 @@ BUSTER_GLOBAL_LOCAL void analysis_body_statement(
             AnalysisType* switched_type = analysis_type_from_id(context->result, switched->type);
             if (switched_type->kind == ANALYSIS_TYPE_ENUM && !switch_statement->else_case)
             {
-                AnalysisEntitySemantic* enum_semantic = context->result->module.semantics +
-                    switched_type->as.declaration.index.value;
+                AnalysisEntitySemantic* enum_semantic =
+                        analysis_declaration_semantic(
+                                context->result,
+                                switched_type->as.declaration,
+                                0);
+                BUSTER_CHECK(enum_semantic);
                 if (constant_count < enum_semantic->enum_member_count)
                 {
                     analysis_body_diagnostic_push(
@@ -3570,8 +4443,11 @@ BUSTER_GLOBAL_LOCAL bool analysis_switch_is_exhaustive(
     {
         return false;
     }
-    AnalysisEntitySemantic* semantic = context->result->module.semantics +
-        type->as.declaration.index.value;
+    AnalysisEntitySemantic* semantic = analysis_declaration_semantic(
+            context->result,
+            type->as.declaration,
+            0);
+    BUSTER_CHECK(semantic);
     bool* covered = arena_allocate(context->scratch_arena, bool, semantic->enum_member_count);
     for (u32 index = 0; index < semantic->enum_member_count; index += 1)
     {
@@ -4708,8 +5584,30 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
                 case ANALYSIS_TYPE_STRUCT:
                 case ANALYSIS_TYPE_UNION:
                 {
-                    AnalysisEntitySemantic* semantic = result->module.semantics +
-                        type->as.declaration.index.value;
+                    AnalysisResult* declaration_module = 0;
+                    AnalysisEntitySemantic* semantic =
+                            analysis_declaration_semantic(
+                                    result,
+                                    type->as.declaration,
+                                    &declaration_module);
+                    BUSTER_CHECK(semantic);
+                    if (declaration_module != result)
+                    {
+                        AnalysisTypeLayout imported_layout =
+                                analysis_type_from_id(
+                                        declaration_module,
+                                        semantic->type)->layout;
+                        if (imported_layout.state == ANALYSIS_LAYOUT_RESOLVED ||
+                            imported_layout.state == ANALYSIS_LAYOUT_ERROR)
+                        {
+                            layout = imported_layout;
+                        }
+                        else
+                        {
+                            ready = false;
+                        }
+                        break;
+                    }
                     u64 size = 0;
                     u32 alignment = 1;
                     for (u32 field_index = 0; field_index < semantic->field_count; field_index += 1)
@@ -4818,20 +5716,33 @@ BUSTER_GLOBAL_LOCAL bool analysis_abi_homogeneous_float(
     }
     else if (type->kind == ANALYSIS_TYPE_STRUCT)
     {
-        AnalysisEntitySemantic* semantic = result->module.semantics + type->as.declaration.index.value;
+        AnalysisResult* declaration_module = 0;
+        AnalysisEntitySemantic* semantic = analysis_declaration_semantic(
+                result,
+                type->as.declaration,
+                &declaration_module);
+        BUSTER_CHECK(semantic);
         if (!semantic->field_count || semantic->field_count > 4)
         {
             return false;
         }
         for (u32 field_index = 0; field_index < semantic->field_count; field_index += 1)
         {
-            AnalysisType* field = analysis_type_from_id(result, semantic->fields[field_index].type);
+            AnalysisType* field = analysis_type_from_id(
+                    declaration_module,
+                    semantic->fields[field_index].type);
             if (field->kind != ANALYSIS_TYPE_FLOAT ||
-                (count && field->id.value != element.value))
+                (count && !string_equal(
+                        field->name,
+                        analysis_type_from_id(result, element)->name)))
             {
                 return false;
             }
-            element = field->id;
+            element = analysis_builtin_type_find(&result->types, field->name);
+            if (element.value == ANALYSIS_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
             count += 1;
         }
     }
@@ -5345,6 +6256,7 @@ BUSTER_GLOBAL_LOCAL AnalysisFixtureTest analysis_fixture_tests[] =
     { S8_INITIALIZER("tests/basic_integer_literal_xor.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_logical_not.bbb"), 2 },
     { S8_INITIALIZER("tests/basic_loop.bbb"), 1 },
+    { S8_INITIALIZER("tests/basic_import.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_minimal.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_octal_literal.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_pointer.bbb"), 0 },
@@ -5446,6 +6358,134 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
         BUSTER_TEST(
             arguments,
             forward.module.entities[index].source.value == indexed.module.entities[index].source.value);
+    }
+    String8 indexed_summary =
+            analysis_serialize_module_interface(arguments->arena, &indexed);
+    String8 forward_summary =
+            analysis_serialize_module_interface(arguments->arena, &forward);
+    BUSTER_STRING_TEST(arguments, indexed_summary, forward_summary);
+
+    AstImport app_missing_import = {
+        .name_space = { .text = S8("missing"), .range = analysis_test_range(10) },
+        .path = S8("does/not/exist"),
+        .range = analysis_test_range(10),
+        .path_range = analysis_test_range(20),
+    };
+    AstImport app_math_import = {
+        .next = &app_missing_import,
+        .name_space = { .text = S8("math"), .range = analysis_test_range(0) },
+        .path = S8("core/math"),
+        .range = analysis_test_range(0),
+        .path_range = analysis_test_range(5),
+    };
+    ParserResult app_parser = {
+        .first_import = &app_math_import,
+        .last_import = &app_missing_import,
+        .import_count = 2,
+    };
+    AstCode sum_code = {
+        .name = S8("sum"),
+        .range = analysis_test_range(0),
+    };
+    ParserResult math_parser = {
+        .first_code = &sum_code,
+        .last_code = &sum_code,
+        .code_count = 1,
+    };
+    AstImport a_import = {
+        .name_space = { .text = S8("b"), .range = analysis_test_range(0) },
+        .path = S8("cycle/b"),
+        .range = analysis_test_range(0),
+    };
+    AstImport b_import = {
+        .name_space = { .text = S8("a"), .range = analysis_test_range(0) },
+        .path = S8("cycle/a"),
+        .range = analysis_test_range(0),
+    };
+    ParserResult a_parser = {
+        .first_import = &a_import,
+        .last_import = &a_import,
+        .import_count = 1,
+    };
+    ParserResult b_parser = {
+        .first_import = &b_import,
+        .last_import = &b_import,
+        .import_count = 1,
+    };
+    AnalysisSourceInput app_input = { .path = S8("app.bbb"), .parser = &app_parser };
+    AnalysisSourceInput math_input = { .path = S8("math.bbb"), .parser = &math_parser };
+    AnalysisSourceInput a_input = { .path = S8("a.bbb"), .parser = &a_parser };
+    AnalysisSourceInput b_input = { .path = S8("b.bbb"), .parser = &b_parser };
+    AnalysisResult app_module = analysis_index_module(
+        arguments->arena, (AnalysisModuleId){ .value = 20 }, S8("app"), &app_input, 1);
+    AnalysisResult math_module = analysis_index_module(
+        arguments->arena, (AnalysisModuleId){ .value = 21 }, S8("core/math"), &math_input, 1);
+    AnalysisResult a_module = analysis_index_module(
+        arguments->arena, (AnalysisModuleId){ .value = 22 }, S8("cycle/a"), &a_input, 1);
+    AnalysisResult b_module = analysis_index_module(
+        arguments->arena, (AnalysisModuleId){ .value = 23 }, S8("cycle/b"), &b_input, 1);
+    AnalysisResult* import_modules[] = {
+        &app_module,
+        &math_module,
+        &a_module,
+        &b_module,
+    };
+    analysis_resolve_imports(
+        arguments->arena,
+        import_modules,
+        BUSTER_ARRAY_LENGTH(import_modules));
+    BUSTER_TEST(arguments, app_module.module.import_count == 2);
+    BUSTER_TEST(arguments, app_module.module.imports[0].state == ANALYSIS_IMPORT_RESOLVED);
+    BUSTER_TEST(arguments, app_module.module.imports[0].target == &math_module);
+    BUSTER_TEST(arguments, app_module.module.imports[1].state == ANALYSIS_IMPORT_MISSING);
+    BUSTER_TEST(arguments, app_module.diagnostic_count == 1);
+    BUSTER_TEST(arguments, app_module.first_diagnostic != 0 &&
+            app_module.first_diagnostic->kind ==
+                    ANALYSIS_DIAGNOSTIC_MISSING_IMPORTED_MODULE);
+    AnalysisEntity* qualified_sum = analysis_find_qualified_entity(
+        &app_module,
+        S8("math"),
+        S8("sum"),
+        ANALYSIS_NAMESPACE_VALUE);
+    BUSTER_TEST(arguments, qualified_sum == math_module.module.entities);
+    BUSTER_TEST(arguments, b_module.module.imports[0].state == ANALYSIS_IMPORT_CYCLE);
+    BUSTER_TEST(arguments, b_module.diagnostic_count == 1);
+    BUSTER_TEST(arguments, b_module.first_diagnostic != 0 &&
+            b_module.first_diagnostic->kind == ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE);
+
+    AstImport duplicate_second = {
+        .name_space = { .text = S8("same"), .range = analysis_test_range(10) },
+        .path = S8("two"),
+        .range = analysis_test_range(10),
+    };
+    AstImport duplicate_first = {
+        .next = &duplicate_second,
+        .name_space = { .text = S8("same"), .range = analysis_test_range(0) },
+        .path = S8("one"),
+        .range = analysis_test_range(0),
+    };
+    ParserResult duplicate_import_parser = {
+        .first_import = &duplicate_first,
+        .last_import = &duplicate_second,
+        .import_count = 2,
+    };
+    AnalysisSourceInput duplicate_import_input = {
+        .path = S8("duplicate-import.bbb"),
+        .parser = &duplicate_import_parser,
+    };
+    AnalysisResult duplicate_import_module = analysis_index_module(
+        arguments->arena,
+        (AnalysisModuleId){ .value = 24 },
+        S8("duplicate-import"),
+        &duplicate_import_input,
+        1);
+    BUSTER_TEST(arguments, duplicate_import_module.diagnostic_count == 1);
+    BUSTER_TEST(arguments, duplicate_import_module.first_diagnostic != 0 &&
+            duplicate_import_module.first_diagnostic->kind ==
+                    ANALYSIS_DIAGNOSTIC_DUPLICATE_IMPORT_NAMESPACE);
+    if (duplicate_import_module.first_diagnostic)
+    {
+        BUSTER_TEST(arguments, duplicate_import_module.first_diagnostic->first_note != 0);
     }
 
     AstType named_b = {
@@ -5958,6 +6998,117 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
         diagnostic = diagnostic->next;
     }
     BUSTER_TEST(arguments, diagnostic == 0);
+
+    String8 namespace_math_source = S8(
+        "type Vector = struct { x: s32, y: s32, }\n"
+        "code add : fn (a: s32, b: s32) s32\n"
+        "{\n"
+        "    return a + b;\n"
+        "}\n");
+    String8 namespace_app_source = S8(
+        "import math = \"core/math\";\n"
+        "code use : fn (value: math.Vector) s32\n"
+        "{\n"
+        "    data copy: math.Vector = value;\n"
+        "    return math.add(copy.x, copy.y);\n"
+        "}\n");
+    TokenizerResult namespace_math_tokens = tokenize(
+            arguments->arena,
+            namespace_math_source.pointer,
+            namespace_math_source.length);
+    ParserResult namespace_math_parser = parser_parse(
+            arguments->arena,
+            expression_arena,
+            namespace_math_source,
+            namespace_math_tokens);
+    TokenizerResult namespace_app_tokens = tokenize(
+            arguments->arena,
+            namespace_app_source.pointer,
+            namespace_app_source.length);
+    ParserResult namespace_app_parser = parser_parse(
+            arguments->arena,
+            expression_arena,
+            namespace_app_source,
+            namespace_app_tokens);
+    BUSTER_TEST(arguments, namespace_math_parser.diagnostic_count == 0);
+    BUSTER_TEST(arguments, namespace_app_parser.diagnostic_count == 0);
+    AnalysisSourceInput namespace_math_input = {
+        .path = S8("math.bbb"),
+        .parser = &namespace_math_parser,
+    };
+    AnalysisSourceInput namespace_app_input = {
+        .path = S8("app.bbb"),
+        .parser = &namespace_app_parser,
+    };
+    AnalysisResult namespace_math = analysis_index_module(
+            arguments->arena,
+            (AnalysisModuleId){ .value = 40 },
+            S8("core/math"),
+            &namespace_math_input,
+            1);
+    AnalysisResult namespace_app = analysis_index_module(
+            arguments->arena,
+            (AnalysisModuleId){ .value = 41 },
+            S8("app"),
+            &namespace_app_input,
+            1);
+    AnalysisResult* namespace_modules[] = {
+        &namespace_math,
+        &namespace_app,
+    };
+    analysis_resolve_program_interfaces(
+            arguments->arena,
+            namespace_modules,
+            BUSTER_ARRAY_LENGTH(namespace_modules));
+    analysis_analyze_bodies(arguments->arena, &namespace_math);
+    analysis_analyze_bodies(arguments->arena, &namespace_app);
+    analysis_compute_layouts(
+            &namespace_math,
+            (AnalysisLayoutOptions){ .pointer_size = 8, .pointer_alignment = 8 });
+    analysis_compute_layouts(
+            &namespace_app,
+            (AnalysisLayoutOptions){ .pointer_size = 8, .pointer_alignment = 8 });
+    BUSTER_TEST(arguments, namespace_math.diagnostic_count == 0);
+    BUSTER_TEST(arguments, namespace_app.diagnostic_count == 0);
+    AnalysisEntity* namespace_use =
+            analysis_value_entity_find(&namespace_app, S8("use"));
+    BUSTER_TEST(arguments, namespace_use != 0);
+    if (namespace_use)
+    {
+        AnalysisType* namespace_function = analysis_type_from_id(
+                &namespace_app,
+                namespace_app.module.semantics[
+                        namespace_use->id.index.value].type);
+        BUSTER_TEST(arguments,
+                namespace_function->kind ==
+                        ANALYSIS_TYPE_FUNCTION);
+        BUSTER_TEST(arguments,
+                namespace_function->kind != ANALYSIS_TYPE_FUNCTION ||
+                namespace_function->as.function.argument_count == 1);
+        if (namespace_function->kind == ANALYSIS_TYPE_FUNCTION &&
+            namespace_function->as.function.argument_count == 1)
+        {
+            AnalysisType* namespace_vector = analysis_type_from_id(
+                    &namespace_app,
+                    namespace_function->as.function.argument_types[0]);
+            BUSTER_TEST(arguments,
+                    namespace_vector->kind == ANALYSIS_TYPE_STRUCT);
+            BUSTER_TEST(arguments,
+                    namespace_vector->as.declaration.module.value == 40);
+            BUSTER_TEST(arguments,
+                    namespace_vector->layout.state ==
+                            ANALYSIS_LAYOUT_RESOLVED);
+            BUSTER_TEST(arguments, namespace_vector->layout.size == 8);
+            BUSTER_TEST(arguments, namespace_vector->layout.alignment == 4);
+        }
+        AnalysisBody* namespace_body =
+                namespace_app.module.bodies +
+                namespace_use->id.index.value;
+        BUSTER_TEST(arguments, namespace_body->analyzed);
+        BUSTER_TEST(arguments, namespace_body->dependency_count == 1);
+        BUSTER_TEST(arguments,
+                namespace_body->dependencies[0].module.value == 40);
+    }
     BUSTER_CHECK(arena_destroy(expression_arena, 1));
 
     Arena* fixture_expression_arena = arena_create((ArenaCreation){0});

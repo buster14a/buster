@@ -87,6 +87,7 @@ typedef enum TokenIdEnum
     TOKEN_KEYWORD_CODE,
     TOKEN_KEYWORD_DATA,
     TOKEN_KEYWORD_TYPE,
+    TOKEN_KEYWORD_IMPORT,
     TOKEN_KEYWORD_STRUCT,
     TOKEN_KEYWORD_UNION,
     TOKEN_KEYWORD_ENUM,
@@ -526,6 +527,7 @@ typedef enum AstCallingConvention
 typedef enum AstTypeId
 {
     AST_TYPE_NAMED,
+    AST_TYPE_QUALIFIED_NAMED,
     AST_TYPE_POINTER,
     AST_TYPE_SLICE,
     AST_TYPE_INFERRED_ARRAY,
@@ -552,6 +554,11 @@ struct AstType
     union
     {
         String8 name;
+        struct
+        {
+            AstIdentifier name_space;
+            AstIdentifier name;
+        } qualified;
         AstType* element_type;
         struct
         {
@@ -615,6 +622,16 @@ struct AstTypeDeclaration
     u32 reserved;
 };
 
+typedef struct AstImport AstImport;
+struct AstImport
+{
+    AstImport* next;
+    AstIdentifier name_space;
+    String8 path;
+    ParserSourceRange path_range;
+    ParserSourceRange range;
+};
+
 typedef struct AstCode AstCode;
 struct AstCode
 {
@@ -668,6 +685,8 @@ typedef struct ParserResult ParserResult;
 struct ParserResult
 {
     String8 source;
+    AstImport* first_import;
+    AstImport* last_import;
     AstCode* first_code;
     AstCode* last_code;
     AstTypeDeclaration* first_type_declaration;
@@ -676,6 +695,7 @@ struct ParserResult
     ParserDiagnostic* last_diagnostic;
     u32 code_count;
     u32 type_declaration_count;
+    u32 import_count;
     u32 diagnostic_count;
 };
 

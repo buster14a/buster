@@ -312,12 +312,14 @@ struct AnalysisTypedNode
     AnalysisValueCategory category;
     AnalysisLocalId local;
     AnalysisEntityId entity;
+    AnalysisModuleId namespace_module;
     AnalysisConstant constant;
     // Inclusive node index where this node's flattened postorder subtree starts.
     u32 subtree_start;
     AnalysisConversionKind conversion;
     bool is_addressable;
-    u8 reserved[3];
+    bool is_namespace;
+    u8 reserved[2];
 };
 
 typedef struct AnalysisTypedExpression AnalysisTypedExpression;
@@ -367,6 +369,30 @@ struct AnalysisSource
     u32 original_input_index;
 };
 
+typedef struct AnalysisResult AnalysisResult;
+typedef enum AnalysisImportResolutionState
+{
+    ANALYSIS_IMPORT_UNRESOLVED,
+    ANALYSIS_IMPORT_RESOLVED,
+    ANALYSIS_IMPORT_MISSING,
+    ANALYSIS_IMPORT_AMBIGUOUS,
+    ANALYSIS_IMPORT_CYCLE,
+    ANALYSIS_IMPORT_COUNT,
+} AnalysisImportResolutionState;
+
+typedef struct AnalysisImport AnalysisImport;
+struct AnalysisImport
+{
+    String8 name_space;
+    String8 path;
+    ParserSourceRange range;
+    ParserSourceRange path_range;
+    AnalysisSourceId source;
+    AnalysisModuleId target_id;
+    AnalysisResult* target;
+    AnalysisImportResolutionState state;
+};
+
 typedef struct AnalysisEntity AnalysisEntity;
 struct AnalysisEntity
 {
@@ -388,11 +414,13 @@ struct AnalysisModuleInterface
 {
     String8 name;
     AnalysisSource* sources;
+    AnalysisImport* imports;
     AnalysisEntity* entities;
     AnalysisEntitySemantic* semantics;
     AnalysisBody* bodies;
     AnalysisModuleId id;
     u32 source_count;
+    u32 import_count;
     u32 entity_count;
     u32 type_count;
     u32 code_count;
@@ -401,6 +429,10 @@ struct AnalysisModuleInterface
 typedef enum AnalysisDiagnosticKind
 {
     ANALYSIS_DIAGNOSTIC_DUPLICATE_DECLARATION,
+    ANALYSIS_DIAGNOSTIC_DUPLICATE_IMPORT_NAMESPACE,
+    ANALYSIS_DIAGNOSTIC_MISSING_IMPORTED_MODULE,
+    ANALYSIS_DIAGNOSTIC_AMBIGUOUS_IMPORTED_MODULE,
+    ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE,
     ANALYSIS_DIAGNOSTIC_UNKNOWN_TYPE,
     ANALYSIS_DIAGNOSTIC_TYPE_ALIAS_CYCLE,
     ANALYSIS_DIAGNOSTIC_UNKNOWN_IDENTIFIER,
@@ -558,7 +590,6 @@ struct AnalysisFunctionAbi
     u32 stack_size;
 };
 
-typedef struct AnalysisResult AnalysisResult;
 struct AnalysisResult
 {
     AnalysisModuleInterface module;
@@ -566,8 +597,10 @@ struct AnalysisResult
     AnalysisDiagnostic* first_diagnostic;
     AnalysisDiagnostic* last_diagnostic;
     AnalysisJob* jobs;
+    AnalysisResult** program_modules;
     u32 diagnostic_count;
     u32 job_count;
+    u32 program_module_count;
 };
 
 // Builds the immutable declaration interface which later type-resolution and
@@ -579,6 +612,22 @@ BUSTER_F_DECL AnalysisResult analysis_index_module(
     String8 module_name,
     AnalysisSourceInput* inputs,
     u32 input_count);
+BUSTER_F_DECL void analysis_resolve_imports(
+    Arena* result_arena,
+    AnalysisResult** modules,
+    u32 module_count);
+BUSTER_F_DECL void analysis_resolve_program_interfaces(
+    Arena* result_arena,
+    AnalysisResult** modules,
+    u32 module_count);
+BUSTER_F_DECL AnalysisEntity* analysis_find_qualified_entity(
+    AnalysisResult* module,
+    String8 import_name_space,
+    String8 entity_name,
+    AnalysisNamespace name_space);
+BUSTER_F_DECL String8 analysis_serialize_module_interface(
+    Arena* arena,
+    AnalysisResult* result);
 
 // Resolves all top-level declared types, aggregate fields, and code signatures.
 // This stage is deliberately separate from indexing so module indexes can be

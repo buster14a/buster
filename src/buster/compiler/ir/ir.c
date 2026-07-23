@@ -511,8 +511,34 @@ BUSTER_GLOBAL_LOCAL u32 ir_field_index(
     AnalysisType* type = analysis_type_from_id(analysis, aggregate_type);
     if (type->kind == ANALYSIS_TYPE_STRUCT || type->kind == ANALYSIS_TYPE_UNION)
     {
-        AnalysisEntitySemantic* semantic = analysis->module.semantics +
-            type->as.declaration.index.value;
+        AnalysisResult* declaration_module = 0;
+        if (analysis->module.id.value == type->as.declaration.module.value)
+        {
+            declaration_module = analysis;
+        }
+        else
+        {
+            for (u32 index = 0; index < analysis->program_module_count; index += 1)
+            {
+                AnalysisResult* candidate = analysis->program_modules[index];
+                if (candidate &&
+                    candidate->module.id.value ==
+                            type->as.declaration.module.value)
+                {
+                    declaration_module = candidate;
+                    break;
+                }
+            }
+        }
+        if (!declaration_module ||
+            type->as.declaration.index.value >=
+                    declaration_module->module.entity_count)
+        {
+            return UINT32_MAX;
+        }
+        AnalysisEntitySemantic* semantic =
+                declaration_module->module.semantics +
+                type->as.declaration.index.value;
         for (u32 index = 0; index < semantic->field_count; index += 1)
         {
             if (string_equal(semantic->fields[index].name, name))
@@ -767,7 +793,12 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
             } break;
             case AST_NODE_IDENTIFIER:
             {
-                if (typed->local.value != ANALYSIS_ID_UNDERLYING_INVALID)
+                if (typed->is_namespace)
+                {
+                    lowered.value = IR_VALUE_ID_INVALID;
+                    lowered.category = IR_VALUE_VALUE;
+                }
+                else if (typed->local.value != ANALYSIS_ID_UNDERLYING_INVALID)
                 {
                     if (builder->function->local_uses_memory[typed->local.value])
                     {
@@ -913,22 +944,40 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
             } break;
             case AST_NODE_MEMBER_ACCESS:
             {
-                IrValueId operand = results[roots[0]].value;
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_FIELD,
-                    typed->type,
-                    lowered.category,
-                    node->member_access.range,
-                    &operand,
-                    1,
-                    true);
-                instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
-                instruction->immediates[0] = ir_field_index(
-                    builder->analysis,
-                    results[roots[0]].type,
-                    node->member_access.member.text);
-                instruction->immediate_count = 1;
+                AnalysisTypedNode* base_typed =
+                        expression->nodes + roots[0];
+                if (base_typed->is_namespace)
+                {
+                    instruction = ir_emit(
+                            builder,
+                            IR_OPCODE_FUNCTION,
+                            typed->type,
+                            IR_VALUE_VALUE,
+                            node->member_access.range,
+                            0,
+                            0,
+                            true);
+                    instruction->entity = typed->entity;
+                }
+                else
+                {
+                    IrValueId operand = results[roots[0]].value;
+                    instruction = ir_emit(
+                        builder,
+                        IR_OPCODE_FIELD,
+                        typed->type,
+                        lowered.category,
+                        node->member_access.range,
+                        &operand,
+                        1,
+                        true);
+                    instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
+                    instruction->immediates[0] = ir_field_index(
+                        builder->analysis,
+                        results[roots[0]].type,
+                        node->member_access.member.text);
+                    instruction->immediate_count = 1;
+                }
             } break;
             case AST_NODE_CALL:
             {
@@ -2335,6 +2384,7 @@ BUSTER_GLOBAL_LOCAL IrFixtureTest ir_fixture_tests[] =
     { S8_INITIALIZER("tests/basic_integer_literal_xor.bbb") },
     { S8_INITIALIZER("tests/basic_logical_not.bbb") },
     { S8_INITIALIZER("tests/basic_loop.bbb") },
+    { S8_INITIALIZER("tests/basic_import.bbb") },
     { S8_INITIALIZER("tests/basic_minimal.bbb") },
     { S8_INITIALIZER("tests/basic_octal_literal.bbb") },
     { S8_INITIALIZER("tests/basic_pointer.bbb") },
@@ -2562,6 +2612,94 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         &conversion_analysis,
         &conversion_module);
     BUSTER_TEST(arguments, conversion_validation.error == IR_VALIDATION_NONE);
+
+    String8 namespace_math_source = S8(
+        "code add : fn (a: s32, b: s32) s32\n"
+        "{\n"
+        "    return a + b;\n"
+        "}\n");
+    String8 namespace_app_source = S8(
+        "import math = \"core/math\";\n"
+        "code use : fn () s32\n"
+        "{\n"
+        "    return math.add(2, 3);\n"
+        "}\n");
+    TokenizerResult namespace_math_tokens = tokenize(
+            arguments->arena,
+            namespace_math_source.pointer,
+            namespace_math_source.length);
+    ParserResult namespace_math_parser = parser_parse(
+            arguments->arena,
+            expression_arena,
+            namespace_math_source,
+            namespace_math_tokens);
+    TokenizerResult namespace_app_tokens = tokenize(
+            arguments->arena,
+            namespace_app_source.pointer,
+            namespace_app_source.length);
+    ParserResult namespace_app_parser = parser_parse(
+            arguments->arena,
+            expression_arena,
+            namespace_app_source,
+            namespace_app_tokens);
+    AnalysisSourceInput namespace_math_input = {
+        .path = S8("math.bbb"),
+        .parser = &namespace_math_parser,
+    };
+    AnalysisSourceInput namespace_app_input = {
+        .path = S8("app.bbb"),
+        .parser = &namespace_app_parser,
+    };
+    AnalysisResult namespace_math = analysis_index_module(
+            arguments->arena,
+            (AnalysisModuleId){ .value = 910 },
+            S8("core/math"),
+            &namespace_math_input,
+            1);
+    AnalysisResult namespace_app = analysis_index_module(
+            arguments->arena,
+            (AnalysisModuleId){ .value = 911 },
+            S8("app"),
+            &namespace_app_input,
+            1);
+    AnalysisResult* namespace_modules[] = {
+        &namespace_math,
+        &namespace_app,
+    };
+    analysis_resolve_program_interfaces(
+            arguments->arena,
+            namespace_modules,
+            BUSTER_ARRAY_LENGTH(namespace_modules));
+    IrModule namespace_module = ir_analyze_and_generate_module(
+            arguments->arena,
+            &namespace_app);
+    BUSTER_TEST(arguments, namespace_app.diagnostic_count == 0);
+    BUSTER_TEST(arguments, namespace_module.lowered_function_count == 1);
+    BUSTER_TEST(arguments, namespace_module.function_count == 1);
+    IrFunction* namespace_use = namespace_module.functions;
+    BUSTER_TEST(arguments,
+            ir_test_opcode_count(namespace_use, IR_OPCODE_FUNCTION) == 1);
+    BUSTER_TEST(arguments,
+            ir_test_opcode_count(namespace_use, IR_OPCODE_CALL) == 1);
+    bool found_external_reference = false;
+    for (u32 instruction_index = 0;
+         instruction_index < namespace_use->instruction_count;
+         instruction_index += 1)
+    {
+        IrInstruction* instruction =
+                namespace_use->instructions + instruction_index;
+        if (instruction->opcode == IR_OPCODE_FUNCTION)
+        {
+            found_external_reference =
+                    instruction->entity.module.value == 910 &&
+                    instruction->entity.index.value == 0;
+        }
+    }
+    BUSTER_TEST(arguments, found_external_reference);
+    IrValidationResult namespace_validation = ir_validate_module(
+            &namespace_app,
+            &namespace_module);
+    BUSTER_TEST(arguments, namespace_validation.error == IR_VALIDATION_NONE);
 
     for (u32 fixture_index = 0;
         fixture_index < BUSTER_ARRAY_LENGTH(ir_fixture_tests);

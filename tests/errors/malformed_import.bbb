@@ -1,0 +1,6 @@
+import = "core/math";
+
+code main : fn () s32
+{
+    return 31;
+}
