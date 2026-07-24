@@ -304,9 +304,9 @@ Compiler:
 | `compiler/frontend/asm/asm_main.c` | Assembly frontend prototype; not wired into the build. |
 | `compiler/frontend/buster/analysis.{c,h}` | Semantic analysis. |
 | `compiler/ir/ir.{c,h}` | Typed control-flow IR, semantic lowering, validation, printing, and fixture-wide IR tests. |
+| `compiler/object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers; in-memory object linking. |
 | `compiler/codegen/codegen.{c,h}` | Direct-IR ABI classification, native instruction emission, executable-memory support, and interpreter/native differential tests. |
 | `compiler/ir/interpreter.{c,h}` | Bounded, explicit-stack runtime IR interpreter and end-to-end execution tests. |
-| `compiler/link/` | `elf.{c,h}`, `jit.{c,h}`, `link.{c,h}` — ELF writer, in-memory execution, linker driver. Not registered as CMake modules yet. |
 | `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/ABI descriptions and per-arch instruction encoders. |
 
 Applications and standalone tools:

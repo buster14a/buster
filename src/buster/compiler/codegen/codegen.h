@@ -76,6 +76,22 @@ struct CodegenAbiSignature
 
 typedef struct CodegenFunction CodegenFunction;
 typedef struct CodegenCallRelocation CodegenCallRelocation;
+typedef enum CodegenDataRelocationKind
+{
+    CODEGEN_DATA_RELOCATION_X86_64_PC32,
+    CODEGEN_DATA_RELOCATION_ABSOLUTE64,
+    CODEGEN_DATA_RELOCATION_COUNT,
+} CodegenDataRelocationKind;
+
+typedef struct CodegenDataRelocation CodegenDataRelocation;
+struct CodegenDataRelocation
+{
+    CodegenDataRelocation* next;
+    u32 code_offset;
+    u32 data_offset;
+    CodegenDataRelocationKind kind;
+};
+
 struct CodegenCallRelocation
 {
     CodegenCallRelocation* next;
@@ -83,13 +99,16 @@ struct CodegenCallRelocation
     AnalysisInstantiationId instantiation;
     u32 displacement_offset;
     bool aarch64;
-    u8 reserved[3];
+    bool absolute;
+    u8 reserved[2];
 };
 
 struct CodegenFunction
 {
     ByteSlice code;
+    ByteSlice read_only_data;
     CodegenCallRelocation* first_call_relocation;
+    CodegenDataRelocation* first_data_relocation;
     CodegenError error;
     CodegenAbi abi;
     u32 stack_frame_size;
@@ -107,14 +126,39 @@ struct CodegenModuleEntry
     u32 offset;
 };
 
+typedef struct CodegenModuleRelocation CodegenModuleRelocation;
+struct CodegenModuleRelocation
+{
+    AnalysisEntityId entity;
+    AnalysisInstantiationId instantiation;
+    u32 offset;
+    bool aarch64;
+    bool absolute;
+    u8 reserved[2];
+};
+
+typedef struct CodegenModuleDataRelocation
+    CodegenModuleDataRelocation;
+struct CodegenModuleDataRelocation
+{
+    u32 code_offset;
+    u32 data_offset;
+    CodegenDataRelocationKind kind;
+};
+
 typedef struct CodegenModule CodegenModule;
 struct CodegenModule
 {
     ByteSlice code;
+    ByteSlice read_only_data;
     CodegenModuleEntry* entries;
+    CodegenModuleRelocation* relocations;
+    CodegenModuleDataRelocation* data_relocations;
     CodegenError error;
     CodegenAbi abi;
     u32 entry_count;
+    u32 relocation_count;
+    u32 data_relocation_count;
 };
 
 typedef struct CodegenExecutable CodegenExecutable;

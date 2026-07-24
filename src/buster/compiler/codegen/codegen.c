@@ -1,6 +1,7 @@
 #include <buster/compiler/codegen/codegen.h>
 
 #include <buster/compiler/ir/interpreter.h>
+#include <buster/compiler/object/object.h>
 #include <buster/os.h>
 #include <buster/string.h>
 
@@ -64,6 +65,9 @@ struct X64Builder
     CodegenAbiSignature signature;
     CodegenAbi abi;
     Target target;
+    CodegenBuffer read_only_data;
+    CodegenDataRelocation* first_data_relocation;
+    CodegenDataRelocation* last_data_relocation;
     u32 native_vector_operation_count;
     u32 split_vector_operation_count;
 };
@@ -3172,6 +3176,94 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                 instruction->immediates[0]);
             x64_emit_store_result(builder, instruction);
         } break;
+        case IR_OPCODE_CONSTANT_STRING:
+        {
+            AnalysisType* type = analysis_type_from_id(
+                builder->analysis,
+                instruction->type);
+            if (type->kind != ANALYSIS_TYPE_ARRAY ||
+                type->as.array.count !=
+                    instruction->literal.length)
+            {
+                return false;
+            }
+            u32 data_offset =
+                (u32)builder->read_only_data.count;
+            if (instruction->literal.length >
+                builder->read_only_data.capacity -
+                    builder->read_only_data.count)
+            {
+                return false;
+            }
+            memcpy(
+                builder->read_only_data.bytes +
+                    builder->read_only_data.count,
+                instruction->literal.pointer,
+                instruction->literal.length);
+            builder->read_only_data.count +=
+                instruction->literal.length;
+            codegen_emit_u8(&builder->buffer, 0x48);
+            codegen_emit_u8(&builder->buffer, 0x8d);
+            codegen_emit_u8(&builder->buffer, 0x05);
+            CodegenDataRelocation* relocation =
+                arena_allocate(
+                    builder->arena,
+                    CodegenDataRelocation,
+                    1);
+            *relocation = (CodegenDataRelocation){
+                .code_offset =
+                    (u32)builder->buffer.count,
+                .data_offset = data_offset,
+                .kind =
+                    CODEGEN_DATA_RELOCATION_X86_64_PC32,
+            };
+            if (builder->last_data_relocation)
+            {
+                builder->last_data_relocation->next =
+                    relocation;
+            }
+            else
+            {
+                builder->first_data_relocation =
+                    relocation;
+            }
+            builder->last_data_relocation = relocation;
+            codegen_emit_u32(&builder->buffer, 0);
+            x64_emit_store(
+                builder,
+                X64_REGISTER_RAX,
+                x64_value_displacement_component(
+                    instruction->result,
+                    0));
+            codegen_emit_u8(&builder->buffer, 0x48);
+            codegen_emit_u8(&builder->buffer, 0xb8);
+            codegen_emit_u64(
+                &builder->buffer,
+                instruction->literal.length);
+            x64_emit_store(
+                builder,
+                X64_REGISTER_RAX,
+                x64_value_displacement_component(
+                    instruction->result,
+                    1));
+            codegen_emit_u8(&builder->buffer, 0x48);
+            codegen_emit_u8(&builder->buffer, 0xb8);
+            codegen_emit_u64(&builder->buffer, 1);
+            x64_emit_store(
+                builder,
+                X64_REGISTER_RAX,
+                x64_value_displacement_component(
+                    instruction->result,
+                    2));
+            codegen_emit_u8(&builder->buffer, 0x31);
+            codegen_emit_u8(&builder->buffer, 0xc0);
+            x64_emit_store(
+                builder,
+                X64_REGISTER_RAX,
+                x64_value_displacement_component(
+                    instruction->result,
+                    3));
+        } break;
         case IR_OPCODE_UNDEFINED:
         {
             codegen_emit_u8(&builder->buffer, 0x31);
@@ -3261,8 +3353,12 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
         }
         case IR_OPCODE_FUNCTION:
         {
-            codegen_emit_u8(&builder->buffer, 0x31);
-            codegen_emit_u8(&builder->buffer, 0xc0);
+            codegen_emit_u8(&builder->buffer, 0x48);
+            codegen_emit_u8(&builder->buffer, 0x8d);
+            codegen_emit_u8(&builder->buffer, 0x05);
+            x64_call_relocation_add(
+                builder,
+                instruction);
             x64_emit_store_result(builder, instruction);
         } break;
         case IR_OPCODE_CALL:
@@ -5317,6 +5413,20 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
     u32 frame_size = codegen_align_u32(frame_cursor, 16);
     u64 capacity = (u64)function->instruction_count * 256 +
         (u64)function->block_count * 128 + 128;
+    u64 read_only_data_capacity = 0;
+    for (u32 instruction_index = 0;
+        instruction_index < function->instruction_count;
+        instruction_index += 1)
+    {
+        IrInstruction* instruction =
+            function->instructions + instruction_index;
+        if (instruction->opcode ==
+            IR_OPCODE_CONSTANT_STRING)
+        {
+            read_only_data_capacity +=
+                instruction->literal.length;
+        }
+    }
     CodegenRegisterAllocation allocation =
         codegen_allocate_registers(
             arena,
@@ -5338,6 +5448,13 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
         .buffer = {
             .bytes = arena_allocate(arena, u8, capacity),
             .capacity = capacity,
+        },
+        .read_only_data = {
+            .bytes = arena_allocate(
+                arena,
+                u8,
+                read_only_data_capacity),
+            .capacity = read_only_data_capacity,
         },
         .block_offsets = arena_allocate(
             arena,
@@ -5485,6 +5602,12 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
     result.stack_frame_size = frame_size;
     result.first_call_relocation =
         builder.first_call_relocation;
+    result.read_only_data = (ByteSlice){
+        .pointer = builder.read_only_data.bytes,
+        .length = builder.read_only_data.count,
+    };
+    result.first_data_relocation =
+        builder.first_data_relocation;
     result.register_value_count =
         allocation.allocated_count +
         vector_allocation.allocated_count;
@@ -6597,8 +6720,15 @@ BUSTER_GLOBAL_LOCAL void a64_call_relocation_add(
     CodegenBuffer* buffer,
     CodegenCallRelocation** first,
     CodegenCallRelocation** last,
-    IrInstruction* instruction)
+    IrInstruction* instruction,
+    bool absolute)
 {
+    if (absolute && (buffer->count & 7))
+    {
+        a64_emit_instruction_word(
+            buffer,
+            0xd503201f);
+    }
     CodegenCallRelocation* relocation = arena_allocate(
         arena,
         CodegenCallRelocation,
@@ -6606,8 +6736,10 @@ BUSTER_GLOBAL_LOCAL void a64_call_relocation_add(
     *relocation = (CodegenCallRelocation){
         .entity = instruction->entity,
         .instantiation = instruction->instantiation,
-        .displacement_offset = (u32)buffer->count,
+        .displacement_offset = (u32)buffer->count +
+            (absolute ? 8 : 0),
         .aarch64 = true,
+        .absolute = absolute,
     };
     if (*last)
     {
@@ -6618,7 +6750,16 @@ BUSTER_GLOBAL_LOCAL void a64_call_relocation_add(
         *first = relocation;
     }
     *last = relocation;
-    a64_emit_instruction_word(buffer, 0x94000000);
+    if (absolute)
+    {
+        a64_emit_instruction_word(buffer, 0x58000040);
+        a64_emit_instruction_word(buffer, 0x14000003);
+        codegen_emit_u64(buffer, 0);
+    }
+    else
+    {
+        a64_emit_instruction_word(buffer, 0x94000000);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
@@ -6781,11 +6922,32 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
     u64 capacity =
         (u64)function->instruction_count * 256 +
         (u64)function->block_count * 192 + 192;
+    u64 read_only_data_capacity = 0;
+    for (u32 instruction_index = 0;
+        instruction_index < function->instruction_count;
+        instruction_index += 1)
+    {
+        IrInstruction* instruction =
+            function->instructions + instruction_index;
+        if (instruction->opcode ==
+            IR_OPCODE_CONSTANT_STRING)
+        {
+            read_only_data_capacity +=
+                instruction->literal.length;
+        }
+    }
     CodegenBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
         .value_registers = allocation.registers,
         .allocated_register_base = 9,
+    };
+    CodegenBuffer read_only_data = {
+        .bytes = arena_allocate(
+            arena,
+            u8,
+            read_only_data_capacity),
+        .capacity = read_only_data_capacity,
     };
     u32* block_offsets = arena_allocate(
         arena,
@@ -6795,6 +6957,8 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
     A64Relocation* last_relocation = 0;
     CodegenCallRelocation* first_call_relocation = 0;
     CodegenCallRelocation* last_call_relocation = 0;
+    CodegenDataRelocation* first_data_relocation = 0;
+    CodegenDataRelocation* last_data_relocation = 0;
     a64_emit_instruction_word(&buffer, 0xa9bf7bfd);
     a64_emit_instruction_word(&buffer, 0x910003fd);
     if (frame_size)
@@ -7183,6 +7347,96 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                         0,
                         instruction->result);
                 } break;
+                case IR_OPCODE_CONSTANT_STRING:
+                {
+                    AnalysisType* type =
+                        analysis_type_from_id(
+                            analysis,
+                            instruction->type);
+                    if (type->kind != ANALYSIS_TYPE_ARRAY ||
+                        type->as.array.count !=
+                            instruction->literal.length ||
+                        instruction->literal.length >
+                            read_only_data.capacity -
+                                read_only_data.count)
+                    {
+                        buffer.error =
+                            CODEGEN_ERROR_INVALID_IR;
+                        break;
+                    }
+                    u32 data_offset =
+                        (u32)read_only_data.count;
+                    memcpy(
+                        read_only_data.bytes +
+                            read_only_data.count,
+                        instruction->literal.pointer,
+                        instruction->literal.length);
+                    read_only_data.count +=
+                        instruction->literal.length;
+                    if (buffer.count & 7)
+                    {
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0xd503201f);
+                    }
+                    a64_emit_instruction_word(
+                        &buffer,
+                        0x58000040);
+                    a64_emit_instruction_word(
+                        &buffer,
+                        0x14000003);
+                    CodegenDataRelocation* relocation =
+                        arena_allocate(
+                            arena,
+                            CodegenDataRelocation,
+                            1);
+                    *relocation =
+                        (CodegenDataRelocation){
+                            .code_offset =
+                                (u32)buffer.count,
+                            .data_offset = data_offset,
+                            .kind =
+                                CODEGEN_DATA_RELOCATION_ABSOLUTE64,
+                        };
+                    if (last_data_relocation)
+                    {
+                        last_data_relocation->next =
+                            relocation;
+                    }
+                    else
+                    {
+                        first_data_relocation =
+                            relocation;
+                    }
+                    last_data_relocation = relocation;
+                    codegen_emit_u64(&buffer, 0);
+                    a64_emit_store_value_component(
+                        &buffer,
+                        0,
+                        instruction->result,
+                        0);
+                    a64_emit_constant(
+                        &buffer,
+                        0,
+                        instruction->literal.length);
+                    a64_emit_store_value_component(
+                        &buffer,
+                        0,
+                        instruction->result,
+                        1);
+                    a64_emit_constant(&buffer, 0, 1);
+                    a64_emit_store_value_component(
+                        &buffer,
+                        0,
+                        instruction->result,
+                        2);
+                    a64_emit_constant(&buffer, 0, 0);
+                    a64_emit_store_value_component(
+                        &buffer,
+                        0,
+                        instruction->result,
+                        3);
+                } break;
                 case IR_OPCODE_UNDEFINED:
                     a64_emit_constant(&buffer, 0, 0);
                     a64_emit_store_value(
@@ -7366,7 +7620,13 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                     }
                 } break;
                 case IR_OPCODE_FUNCTION:
-                    a64_emit_constant(&buffer, 0, 0);
+                    a64_call_relocation_add(
+                        arena,
+                        &buffer,
+                        &first_call_relocation,
+                        &last_call_relocation,
+                        instruction,
+                        true);
                     a64_emit_store_value(
                         &buffer,
                         0,
@@ -7673,12 +7933,13 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                     {
                         break;
                     }
-                    a64_call_relocation_add(
+                        a64_call_relocation_add(
                         arena,
                         &buffer,
                         &first_call_relocation,
                         &last_call_relocation,
-                        instruction);
+                            instruction,
+                            false);
                     if (signature.stack_size)
                     {
                         a64_emit_instruction_word(
@@ -9675,6 +9936,12 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
     result.stack_frame_size = frame_size;
     result.first_call_relocation =
         first_call_relocation;
+    result.read_only_data = (ByteSlice){
+        .pointer = read_only_data.bytes,
+        .length = read_only_data.count,
+    };
+    result.first_data_relocation =
+        first_data_relocation;
     result.register_value_count =
         allocation.allocated_count +
         vector_allocation.allocated_count;
@@ -9773,6 +10040,9 @@ CodegenModule codegen_generate_module(
         CodegenModuleEntry,
         module->function_count);
     u64 total_size = 0;
+    u64 total_read_only_data_size = 0;
+    u32 relocation_capacity = 0;
+    u32 data_relocation_capacity = 0;
     for (u32 index = 0;
         index < module->function_count;
         index += 1)
@@ -9804,6 +10074,25 @@ CodegenModule codegen_generate_module(
             result.error = generated[index].error;
             return result;
         }
+        for (CodegenCallRelocation* relocation =
+                generated[index].first_call_relocation;
+            relocation;
+            relocation = relocation->next)
+        {
+            relocation_capacity += 1;
+        }
+        total_read_only_data_size = codegen_align_u32(
+            (u32)total_read_only_data_size,
+            16);
+        total_read_only_data_size +=
+            generated[index].read_only_data.length;
+        for (CodegenDataRelocation* relocation =
+                generated[index].first_data_relocation;
+            relocation;
+            relocation = relocation->next)
+        {
+            data_relocation_capacity += 1;
+        }
         total_size = codegen_align_u32(
             (u32)total_size,
             16);
@@ -9824,6 +10113,21 @@ CodegenModule codegen_generate_module(
         .bytes = arena_allocate(arena, u8, total_size),
         .capacity = total_size,
     };
+    result.relocations = arena_allocate(
+        arena,
+        CodegenModuleRelocation,
+        relocation_capacity);
+    result.data_relocations = arena_allocate(
+        arena,
+        CodegenModuleDataRelocation,
+        data_relocation_capacity);
+    CodegenBuffer read_only_data_buffer = {
+        .bytes = arena_allocate(
+            arena,
+            u8,
+            total_read_only_data_size),
+        .capacity = total_read_only_data_size,
+    };
     u32 entry_index = 0;
     for (u32 function_index = 0;
         function_index < module->function_count;
@@ -9841,6 +10145,24 @@ CodegenModule codegen_generate_module(
             codegen_emit_u8(&buffer, 0x90);
         }
         u32 function_offset = (u32)buffer.count;
+        while (read_only_data_buffer.count & 15)
+        {
+            codegen_emit_u8(
+                &read_only_data_buffer,
+                0);
+        }
+        u32 function_data_offset =
+            (u32)read_only_data_buffer.count;
+        for (u64 byte_index = 0;
+            byte_index <
+                function->read_only_data.length;
+            byte_index += 1)
+        {
+            codegen_emit_u8(
+                &read_only_data_buffer,
+                function->read_only_data.pointer[
+                    byte_index]);
+        }
         for (u64 byte_index = 0;
             byte_index < function->code.length;
             byte_index += 1)
@@ -9854,6 +10176,16 @@ CodegenModule codegen_generate_module(
             relocation;
             relocation = relocation->next)
         {
+            result.relocations[result.relocation_count++] =
+                (CodegenModuleRelocation){
+                    .entity = relocation->entity,
+                    .instantiation =
+                        relocation->instantiation,
+                    .offset = function_offset +
+                        relocation->displacement_offset,
+                    .aarch64 = relocation->aarch64,
+                    .absolute = relocation->absolute,
+                };
             CodegenModuleEntry* target_entry = 0;
             for (u32 target_index = 0;
                 target_index < result.entry_count;
@@ -9874,9 +10206,7 @@ CodegenModule codegen_generate_module(
             }
             if (!target_entry)
             {
-                result.error =
-                    CODEGEN_ERROR_INVALID_IR;
-                return result;
+                continue;
             }
             u32 displacement_offset = function_offset +
                 relocation->displacement_offset;
@@ -9884,7 +10214,14 @@ CodegenModule codegen_generate_module(
                 (s64)(relocation->aarch64 ?
                     displacement_offset :
                     displacement_offset + 4);
-            if (relocation->aarch64)
+            if (relocation->absolute)
+            {
+                memset(
+                    buffer.bytes + displacement_offset,
+                    0,
+                    8);
+            }
+            else if (relocation->aarch64)
             {
                 s64 instruction_delta = displacement / 4;
                 if (displacement % 4 ||
@@ -9917,11 +10254,31 @@ CodegenModule codegen_generate_module(
                     sizeof(displacement_32));
             }
         }
+        for (CodegenDataRelocation* relocation =
+                function->first_data_relocation;
+            relocation;
+            relocation = relocation->next)
+        {
+            result.data_relocations[
+                result.data_relocation_count++] =
+                (CodegenModuleDataRelocation){
+                    .code_offset = function_offset +
+                        relocation->code_offset,
+                    .data_offset =
+                        function_data_offset +
+                        relocation->data_offset,
+                    .kind = relocation->kind,
+                };
+        }
         entry_index += 1;
     }
     result.code = (ByteSlice){
         .pointer = buffer.bytes,
         .length = buffer.count,
+    };
+    result.read_only_data = (ByteSlice){
+        .pointer = read_only_data_buffer.bytes,
+        .length = read_only_data_buffer.count,
     };
     result.error = buffer.error;
     return result;
@@ -9939,8 +10296,12 @@ CodegenExecutable codegen_make_executable(CodegenFunction function)
         return result;
     }
     u64 page_size = os_get_page_size();
+    u64 data_offset =
+        (function.code.length + 15) & ~(u64)15;
+    u64 image_size =
+        data_offset + function.read_only_data.length;
     u64 allocation_size =
-        (function.code.length + page_size - 1) &
+        (image_size + page_size - 1) &
         ~(page_size - 1);
     void* address = os_reserve(
         0,
@@ -9953,6 +10314,51 @@ CodegenExecutable codegen_make_executable(CodegenFunction function)
         return result;
     }
     memcpy(address, function.code.pointer, function.code.length);
+    memcpy(
+        (u8*)address + data_offset,
+        function.read_only_data.pointer,
+        function.read_only_data.length);
+    for (CodegenDataRelocation* relocation =
+            function.first_data_relocation;
+        relocation;
+        relocation = relocation->next)
+    {
+        u8* patch =
+            (u8*)address + relocation->code_offset;
+        u8* target =
+            (u8*)address + data_offset +
+            relocation->data_offset;
+        if (relocation->kind ==
+            CODEGEN_DATA_RELOCATION_X86_64_PC32)
+        {
+            s64 displacement = target - (patch + 4);
+            if (displacement < INT32_MIN ||
+                displacement > INT32_MAX)
+            {
+                os_unreserve(address, allocation_size);
+                result.error = CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
+            s32 displacement_32 = (s32)displacement;
+            memcpy(
+                patch,
+                &displacement_32,
+                sizeof(displacement_32));
+        }
+        else if (relocation->kind ==
+            CODEGEN_DATA_RELOCATION_ABSOLUTE64)
+        {
+            u64 value = (u64)(uintptr_t)target;
+            memcpy(patch, &value, sizeof(value));
+        }
+        else
+        {
+            os_unreserve(address, allocation_size);
+            result.error =
+                CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+            return result;
+        }
+    }
     if (!os_commit(
             address,
             allocation_size,
@@ -9965,7 +10371,7 @@ CodegenExecutable codegen_make_executable(CodegenFunction function)
     }
     if (!os_flush_instruction_cache(
             address,
-            function.code.length))
+            image_size))
     {
         os_unreserve(address, allocation_size);
         result.error = CODEGEN_ERROR_EXECUTABLE_MEMORY;
@@ -10151,6 +10557,11 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "code vector_identity : fn (value: vector[4]f32) vector[4]f32\n"
         "{\n"
         "    return value;\n"
+        "}\n"
+        "code string_literal_value[export] : fn () s32\n"
+        "{\n"
+        "    data greeting = \"hello\";\n"
+        "    return @cast(greeting[1]);\n"
         "}\n"
         "code vector_integer_arithmetic : fn () s32\n"
         "{\n"
@@ -11847,6 +12258,93 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         }
 #endif
     }
+    AnalysisEntity* string_literal_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("string_literal_value"));
+    IrFunction* string_literal_function =
+        string_literal_entity ?
+            codegen_test_function_find(
+                &module,
+                string_literal_entity->id) :
+            0;
+    BUSTER_TEST(arguments,
+        string_literal_function != 0);
+    CodegenFunction string_literal_generated =
+        string_literal_function ?
+            codegen_generate_function(
+                arguments->arena,
+                &analysis,
+                string_literal_function,
+                target) :
+            (CodegenFunction){
+                .error = CODEGEN_ERROR_INVALID_IR,
+            };
+    CodegenFunction aarch64_string_literal_generated =
+        string_literal_function ?
+            codegen_generate_function(
+                arguments->arena,
+                &analysis,
+                string_literal_function,
+                aarch64_target) :
+            (CodegenFunction){
+                .error = CODEGEN_ERROR_INVALID_IR,
+            };
+    BUSTER_TEST(arguments,
+        string_literal_generated.error ==
+            CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        string_literal_generated.read_only_data.length ==
+            5);
+    BUSTER_TEST(arguments,
+        string_literal_generated.first_data_relocation !=
+            0);
+    BUSTER_TEST(arguments,
+        aarch64_string_literal_generated.error ==
+            CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        aarch64_string_literal_generated
+            .read_only_data.length == 5);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+    CodegenExecutable string_literal_executable =
+        codegen_make_executable(
+            string_literal_generated);
+    BUSTER_TEST(arguments,
+        string_literal_executable.error ==
+            CODEGEN_ERROR_NONE);
+    if (string_literal_executable.address)
+    {
+        CodegenTestFunction0* native_string_literal = 0;
+        memcpy(
+            &native_string_literal,
+            &string_literal_executable.address,
+            sizeof(native_string_literal));
+        BUSTER_TEST(arguments,
+            native_string_literal() == 'e');
+        codegen_release_executable(
+            string_literal_executable);
+    }
+#endif
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_SANITIZE
+    CodegenExecutable string_literal_executable =
+        codegen_make_executable(
+            aarch64_string_literal_generated);
+    BUSTER_TEST(arguments,
+        string_literal_executable.error ==
+            CODEGEN_ERROR_NONE);
+    if (string_literal_executable.address)
+    {
+        CodegenTestFunction0* native_string_literal = 0;
+        memcpy(
+            &native_string_literal,
+            &string_literal_executable.address,
+            sizeof(native_string_literal));
+        BUSTER_TEST(arguments,
+            native_string_literal() == 'e');
+        codegen_release_executable(
+            string_literal_executable);
+    }
+#endif
     String8 wide_vector_names[] =
     {
         S8_INITIALIZER("vector_256_arithmetic"),
@@ -12056,6 +12554,88 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(
         arguments,
         generated_module.error == CODEGEN_ERROR_NONE);
+    ObjectFile generated_object =
+        object_from_codegen_module(
+            arguments->arena,
+            &analysis,
+            &generated_module,
+            target);
+    BUSTER_TEST(arguments,
+        generated_object.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        generated_object.sections[
+            OBJECT_SECTION_READ_ONLY_DATA]
+            .data.length >= 5);
+    BUSTER_TEST(arguments,
+        generated_object.relocation_count >
+            generated_module.relocation_count);
+    bool found_exported_string_symbol = false;
+    for (u32 symbol_index = 0;
+        symbol_index < generated_object.symbol_count;
+        symbol_index += 1)
+    {
+        ObjectSymbol* symbol =
+            &generated_object.symbols[symbol_index];
+        if (symbol->global &&
+            string_equal(
+                symbol->name,
+                S8("string_literal_value")))
+        {
+            found_exported_string_symbol = true;
+            break;
+        }
+    }
+    BUSTER_TEST(arguments, found_exported_string_symbol);
+    ObjectFormat object_formats[] = {
+        OBJECT_FORMAT_ELF64,
+        OBJECT_FORMAT_COFF,
+        OBJECT_FORMAT_MACH_O64,
+    };
+    for (u32 object_format_index = 0;
+        object_format_index <
+            BUSTER_ARRAY_LENGTH(object_formats);
+        object_format_index += 1)
+    {
+        ObjectArtifact artifact = object_write(
+            arguments->arena,
+            &generated_object,
+            object_formats[object_format_index]);
+        BUSTER_TEST(arguments,
+            artifact.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments,
+            artifact.bytes.length >
+                generated_module.code.length);
+    }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+    ObjectExecutable generated_object_executable =
+        object_link_executable(&generated_object);
+    BUSTER_TEST(arguments,
+        generated_object_executable.error ==
+            OBJECT_ERROR_NONE);
+    CodegenModuleEntry* string_object_entry =
+        string_literal_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                string_literal_entity->id) :
+            0;
+    BUSTER_TEST(arguments, string_object_entry != 0);
+    if (generated_object_executable.address &&
+        string_object_entry)
+    {
+        void* entry_address =
+            (u8*)generated_object_executable.address +
+            string_object_entry->offset;
+        CodegenTestFunction0* native_string_object = 0;
+        memcpy(
+            &native_string_object,
+            &entry_address,
+            sizeof(native_string_object));
+        BUSTER_TEST(arguments,
+            native_string_object() == 'e');
+        object_release_executable(
+            generated_object_executable);
+    }
+#endif
     Target windows_target = target;
     windows_target.os = OPERATING_SYSTEM_WINDOWS;
     CodegenModule windows_abi_module =
@@ -12076,6 +12656,46 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(
         arguments,
         aapcs64_abi_module.error == CODEGEN_ERROR_NONE);
+    ObjectFile aapcs64_object =
+        object_from_codegen_module(
+            arguments->arena,
+            &analysis,
+            &aapcs64_abi_module,
+            aarch64_target);
+    BUSTER_TEST(arguments,
+        aapcs64_object.error == OBJECT_ERROR_NONE);
+    bool found_aarch64_call_relocation = false;
+    bool found_aarch64_absolute_relocation = false;
+    for (u32 relocation_index = 0;
+        relocation_index < aapcs64_object.relocation_count;
+        relocation_index += 1)
+    {
+        ObjectRelocationKind kind =
+            aapcs64_object.relocations[
+                relocation_index].kind;
+        found_aarch64_call_relocation |=
+            kind == OBJECT_RELOCATION_AARCH64_CALL26;
+        found_aarch64_absolute_relocation |=
+            kind == OBJECT_RELOCATION_ABSOLUTE64;
+    }
+    BUSTER_TEST(arguments, found_aarch64_call_relocation);
+    BUSTER_TEST(arguments,
+        found_aarch64_absolute_relocation);
+    for (u32 object_format_index = 0;
+        object_format_index <
+            BUSTER_ARRAY_LENGTH(object_formats);
+        object_format_index += 1)
+    {
+        ObjectArtifact artifact = object_write(
+            arguments->arena,
+            &aapcs64_object,
+            object_formats[object_format_index]);
+        BUSTER_TEST(arguments,
+            artifact.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments,
+            artifact.bytes.length >
+                aapcs64_abi_module.code.length);
+    }
     Target darwin_target = aarch64_target;
     darwin_target.os = OPERATING_SYSTEM_MACOS;
     CodegenModule darwin_abi_module =
