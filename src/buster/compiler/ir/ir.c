@@ -838,6 +838,33 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                     0,
                     true);
                 instruction->literal = node->floating.spelling;
+                instruction->immediates = arena_allocate(
+                    builder->result_arena,
+                    u64,
+                    1);
+                AnalysisType* float_type = analysis_type_from_id(
+                    builder->analysis,
+                    typed->type);
+                BUSTER_CHECK(
+                    typed->constant.kind == ANALYSIS_CONSTANT_FLOAT &&
+                    float_type->kind == ANALYSIS_TYPE_FLOAT);
+                if (float_type->as.float_bit_width == 32)
+                {
+                    f32 value = (f32)typed->constant.floating;
+                    u32 bits = 0;
+                    memcpy(&bits, &value, sizeof(bits));
+                    instruction->immediates[0] = bits;
+                }
+                else
+                {
+                    f64 value = typed->constant.floating;
+                    BUSTER_CHECK(float_type->as.float_bit_width == 64);
+                    memcpy(
+                        instruction->immediates,
+                        &value,
+                        sizeof(value));
+                }
+                instruction->immediate_count = 1;
             } break;
             case AST_NODE_CONSTANT_STRING:
             {

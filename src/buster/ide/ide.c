@@ -12,6 +12,7 @@
 #include <buster/compiler/frontend/buster/parser.h>
 #include <buster/compiler/frontend/buster/analysis.h>
 #include <buster/compiler/ir/ir.h>
+#include <buster/compiler/ir/interpreter.h>
 #include <buster/integer.h>
 #include <buster/string.h>
 
@@ -38,6 +39,7 @@
 #include <buster/compiler/frontend/buster/parser.c>
 #include <buster/compiler/frontend/buster/analysis.c>
 #include <buster/compiler/ir/ir.c>
+#include <buster/compiler/ir/interpreter.c>
 #include <buster/hash.c>
 #endif
 

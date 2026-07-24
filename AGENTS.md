@@ -202,6 +202,10 @@ has hard design constraints:
 - Semantic analysis and IR lowering follow the repository-wide recursion rule:
   nested expressions, statements, types, and control flow use arena-backed
   explicit stacks or worklists.
+- Runtime IR interpretation follows the same rule: language calls use an
+  explicit bounded frame stack, and every execution has explicit instruction
+  and call-depth limits. The interpreter is a runtime correctness oracle; it
+  must not silently acquire compile-time execution semantics.
 - `$` function parameters and `$T` types are compile-time generic inputs.
   Semantic analysis interns concrete instantiations by a canonical key made
   from the declaration identity, normalized type bindings, and normalized
@@ -259,6 +263,7 @@ Compiler:
 | `compiler/frontend/asm/asm_main.c` | Assembly frontend prototype; not wired into the build. |
 | `compiler/frontend/buster/analysis.{c,h}` | Semantic analysis. |
 | `compiler/ir/ir.{c,h}` | Typed control-flow IR, semantic lowering, validation, printing, and fixture-wide IR tests. |
+| `compiler/ir/interpreter.{c,h}` | Bounded, explicit-stack runtime IR interpreter and end-to-end execution tests. |
 | `compiler/link/` | `elf.{c,h}`, `jit.{c,h}`, `link.{c,h}` — ELF writer, in-memory execution, linker driver. Not registered as CMake modules yet. |
 | `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/ABI descriptions and per-arch instruction encoders. |
 

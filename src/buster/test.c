@@ -8,6 +8,7 @@
 #include <buster/compiler/frontend/buster/parser.h>
 #include <buster/compiler/frontend/buster/analysis.h>
 #include <buster/compiler/ir/ir.h>
+#include <buster/compiler/ir/interpreter.h>
 
 bool unit_test_succeeded(UnitTestResult result)
 {
@@ -93,6 +94,7 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &parser_file_tests,
     &analysis_tests,
     &ir_tests,
+    &ir_interpreter_tests,
 };
 
 BatchTestResult library_tests(UnitTestArguments* arguments)
