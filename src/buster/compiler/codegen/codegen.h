@@ -34,12 +34,29 @@ typedef enum CodegenAbiLocationKind
 } CodegenAbiLocationKind;
 
 typedef struct CodegenAbiLocation CodegenAbiLocation;
-struct CodegenAbiLocation
+typedef struct CodegenAbiPart CodegenAbiPart;
+struct CodegenAbiPart
 {
     u32 index;
     u32 stack_offset;
+    u32 size;
     CodegenAbiLocationKind kind;
-    u32 reserved;
+};
+
+enum
+{
+    CODEGEN_ABI_MAX_PARTS = ANALYSIS_ABI_MAX_PARTS,
+};
+
+struct CodegenAbiLocation
+{
+    CodegenAbiPart parts[CODEGEN_ABI_MAX_PARTS];
+    u32 index;
+    u32 stack_offset;
+    CodegenAbiLocationKind kind;
+    u32 part_count;
+    bool indirect;
+    u8 reserved[3];
 };
 
 typedef struct CodegenAbiSignature CodegenAbiSignature;
@@ -52,12 +69,42 @@ struct CodegenAbiSignature
 };
 
 typedef struct CodegenFunction CodegenFunction;
+typedef struct CodegenCallRelocation CodegenCallRelocation;
+struct CodegenCallRelocation
+{
+    CodegenCallRelocation* next;
+    AnalysisEntityId entity;
+    AnalysisInstantiationId instantiation;
+    u32 displacement_offset;
+    bool aarch64;
+    u8 reserved[3];
+};
+
 struct CodegenFunction
 {
     ByteSlice code;
+    CodegenCallRelocation* first_call_relocation;
     CodegenError error;
     CodegenAbi abi;
     u32 stack_frame_size;
+};
+
+typedef struct CodegenModuleEntry CodegenModuleEntry;
+struct CodegenModuleEntry
+{
+    AnalysisEntityId entity;
+    AnalysisInstantiationId instantiation;
+    u32 offset;
+};
+
+typedef struct CodegenModule CodegenModule;
+struct CodegenModule
+{
+    ByteSlice code;
+    CodegenModuleEntry* entries;
+    CodegenError error;
+    CodegenAbi abi;
+    u32 entry_count;
 };
 
 typedef struct CodegenExecutable CodegenExecutable;
@@ -78,6 +125,11 @@ BUSTER_F_DECL CodegenFunction codegen_generate_function(
     Arena* arena,
     AnalysisResult* analysis,
     IrFunction* function,
+    Target target);
+BUSTER_F_DECL CodegenModule codegen_generate_module(
+    Arena* arena,
+    AnalysisResult* analysis,
+    IrModule* module,
     Target target);
 BUSTER_F_DECL CodegenExecutable codegen_make_executable(
     CodegenFunction function);

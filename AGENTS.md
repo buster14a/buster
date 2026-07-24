@@ -216,6 +216,17 @@ has hard design constraints:
   resolves block parameters with parallel edge copies before later register
   allocation. Executable tests use writable memory only while copying code,
   then switch it to read/execute before calling it.
+- Standalone code generation must compute target layouts before allocating
+  locals or aggregate backing storage. ABI decisions come from
+  `analysis_classify_function_abi`; backends translate that canonical
+  multi-part classification rather than maintaining a second classifier.
+- Module code generation emits all lowered functions into one image and
+  resolves direct-call relocations by `(entity, instantiation)`. Aggregate
+  values use frame-owned backing storage while array/slice/range descriptors
+  remain ordinary typed IR values; aggregate assignment is a value copy, not
+  descriptor aliasing. The x86-64 and AArch64 baselines share this value
+  representation even though their stack addressing and instruction emission
+  are backend-specific.
 - Semantic analysis and IR lowering follow the repository-wide recursion rule:
   nested expressions, statements, types, and control flow use arena-backed
   explicit stacks or worklists.
