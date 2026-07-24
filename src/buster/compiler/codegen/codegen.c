@@ -8319,18 +8319,30 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         codegen_release_executable(executable);
     }
 #endif
-    CodegenAbiSignature system_v = codegen_classify_signature(
-        arguments->arena,
-        &analysis,
-        function->type,
-        CODEGEN_ABI_X86_64_SYSTEM_V);
-    BUSTER_TEST(arguments, system_v.argument_count == 2);
-    BUSTER_TEST(
-        arguments,
-        system_v.arguments[0].kind ==
-            CODEGEN_ABI_LOCATION_INTEGER_REGISTER);
-    BUSTER_TEST(arguments, system_v.arguments[0].index == 0);
-    BUSTER_TEST(arguments, system_v.arguments[1].index == 1);
+    if (function)
+    {
+        CodegenAbiSignature system_v =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                function->type,
+                CODEGEN_ABI_X86_64_SYSTEM_V);
+        BUSTER_TEST(arguments, system_v.argument_count == 2);
+        BUSTER_TEST(arguments, system_v.arguments != 0);
+        if (system_v.arguments && system_v.argument_count >= 2)
+        {
+            BUSTER_TEST(
+                arguments,
+                system_v.arguments[0].kind ==
+                    CODEGEN_ABI_LOCATION_INTEGER_REGISTER);
+            BUSTER_TEST(
+                arguments,
+                system_v.arguments[0].index == 0);
+            BUSTER_TEST(
+                arguments,
+                system_v.arguments[1].index == 1);
+        }
+    }
     AnalysisEntity* pair_sum_abi_entity =
         codegen_test_entity_find(&analysis, S8("abi_pair_sum"));
     AnalysisEntity* mixed_sum_abi_entity =
@@ -8407,14 +8419,28 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 mixed_sum_abi_function->type,
                 CODEGEN_ABI_X86_64_SYSTEM_V);
         BUSTER_TEST(arguments, mixed_system_v.valid);
-        BUSTER_TEST(
-            arguments,
-            mixed_system_v.arguments[0].parts[0].kind ==
-                CODEGEN_ABI_LOCATION_FLOAT_REGISTER);
-        BUSTER_TEST(
-            arguments,
-            mixed_system_v.arguments[0].parts[1].kind ==
-                CODEGEN_ABI_LOCATION_INTEGER_REGISTER);
+        BUSTER_TEST(arguments, mixed_system_v.argument_count == 1);
+        BUSTER_TEST(arguments, mixed_system_v.arguments != 0);
+        if (mixed_system_v.arguments &&
+            mixed_system_v.argument_count >= 1)
+        {
+            BUSTER_TEST(
+                arguments,
+                mixed_system_v.arguments[0].part_count == 2);
+        }
+        if (mixed_system_v.arguments &&
+            mixed_system_v.argument_count >= 1 &&
+            mixed_system_v.arguments[0].part_count >= 2)
+        {
+            BUSTER_TEST(
+                arguments,
+                mixed_system_v.arguments[0].parts[0].kind ==
+                    CODEGEN_ABI_LOCATION_FLOAT_REGISTER);
+            BUSTER_TEST(
+                arguments,
+                mixed_system_v.arguments[0].parts[1].kind ==
+                    CODEGEN_ABI_LOCATION_INTEGER_REGISTER);
+        }
         CodegenAbiSignature large_system_v =
             codegen_classify_signature(
                 arguments->arena,

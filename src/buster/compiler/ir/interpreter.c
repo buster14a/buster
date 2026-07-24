@@ -634,6 +634,11 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_frame_prepare(
     u32 argument_count,
     IrValueId caller_result)
 {
+    if (!scratch_arena || !frame || !target.analysis ||
+        !target.function || (argument_count && !arguments))
+    {
+        return false;
+    }
     AnalysisType* function_type = analysis_type_from_id(
         target.analysis,
         target.function->type);
@@ -646,24 +651,38 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_frame_prepare(
     {
         return false;
     }
-    if (frame->value_capacity < target.function->value_count)
+    u32 required_value_capacity =
+        target.function->value_count ?
+            target.function->value_count : 1;
+    if (!frame->values || !frame->transition_values ||
+        frame->value_capacity < required_value_capacity)
     {
         frame->values = arena_allocate(
             scratch_arena,
             IrRuntimeValue,
-            target.function->value_count);
+            required_value_capacity);
         frame->transition_values = arena_allocate(
             scratch_arena,
             IrRuntimeValue,
-            target.function->value_count);
-        frame->value_capacity = target.function->value_count;
+            required_value_capacity);
+        if (!frame->values || !frame->transition_values)
+        {
+            return false;
+        }
+        frame->value_capacity = required_value_capacity;
     }
-    if (frame->argument_capacity < argument_count)
+    if (argument_count &&
+        (!frame->arguments ||
+            frame->argument_capacity < argument_count))
     {
         frame->arguments = arena_allocate(
             scratch_arena,
             IrRuntimeValue,
             argument_count);
+        if (!frame->arguments)
+        {
+            return false;
+        }
         frame->argument_capacity = argument_count;
     }
     for (u32 value_index = 0;
