@@ -59,6 +59,7 @@ typedef enum IrOpcode
     IR_OPCODE_FUNCTION,
     IR_OPCODE_ARRAY,
     IR_OPCODE_AGGREGATE,
+    IR_OPCODE_LENGTH,
     IR_OPCODE_INDEX,
     IR_OPCODE_SLICE,
     IR_OPCODE_FIELD,
@@ -70,9 +71,6 @@ typedef enum IrOpcode
     IR_OPCODE_UNARY,
     IR_OPCODE_BINARY,
     IR_OPCODE_REVERSE,
-    IR_OPCODE_ITERATOR_BEGIN,
-    IR_OPCODE_ITERATOR_NEXT,
-    IR_OPCODE_ITERATOR_VALUE,
     IR_OPCODE_BRANCH,
     IR_OPCODE_BRANCH_IF,
     IR_OPCODE_SWITCH,
@@ -80,6 +78,25 @@ typedef enum IrOpcode
     IR_OPCODE_UNREACHABLE,
     IR_OPCODE_COUNT,
 } IrOpcode;
+
+typedef enum IrConversionOperation
+{
+    IR_CONVERSION_IDENTITY,
+    IR_CONVERSION_INTEGER_SIGN_EXTEND,
+    IR_CONVERSION_INTEGER_ZERO_EXTEND,
+    IR_CONVERSION_INTEGER_TRUNCATE,
+    IR_CONVERSION_INTEGER_REINTERPRET,
+    IR_CONVERSION_FLOAT_EXTEND,
+    IR_CONVERSION_FLOAT_TRUNCATE,
+    IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT,
+    IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT,
+    IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER,
+    IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER,
+    IR_CONVERSION_POINTER_REINTERPRET,
+    IR_CONVERSION_POINTER_TO_INTEGER,
+    IR_CONVERSION_INTEGER_TO_POINTER,
+    IR_CONVERSION_COUNT,
+} IrConversionOperation;
 
 typedef enum IrUnaryOperation
 {
@@ -186,8 +203,8 @@ struct IrInstruction
     IrInstructionId id;
     IrInstructionId next;
     IrValueId result;
-    AnalysisConversionKind conversion;
     IrOpcode opcode;
+    IrConversionOperation conversion_operation;
     IrUnaryOperation unary_operation;
     IrBinaryOperation binary_operation;
     u32 operand_count;

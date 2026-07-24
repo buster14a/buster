@@ -95,6 +95,7 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &analysis_tests,
     &ir_tests,
     &ir_interpreter_tests,
+    &codegen_tests,
 };
 
 BatchTestResult library_tests(UnitTestArguments* arguments)

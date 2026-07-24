@@ -403,6 +403,7 @@ BUSTER_GLOBAL_LOCAL IrInstruction* ir_emit(
         .result = IR_VALUE_ID_INVALID,
         .source = source,
         .opcode = opcode,
+        .conversion_operation = IR_CONVERSION_COUNT,
         .unary_operation = IR_UNARY_COUNT,
         .binary_operation = IR_BINARY_COUNT,
         .operand_count = operand_count,
@@ -641,6 +642,97 @@ BUSTER_GLOBAL_LOCAL bool ir_type_is_signed_integer(
     AnalysisType* resolved = analysis_type_from_id(analysis, type);
     return resolved->kind == ANALYSIS_TYPE_INTEGER &&
         resolved->as.integer.is_signed;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_type_is_integer_domain(
+    AnalysisResult* analysis,
+    AnalysisTypeId type)
+{
+    AnalysisTypeKind kind = analysis_type_from_id(analysis, type)->kind;
+    return kind == ANALYSIS_TYPE_BOOL ||
+        kind == ANALYSIS_TYPE_INTEGER ||
+        kind == ANALYSIS_TYPE_ENUM;
+}
+
+BUSTER_GLOBAL_LOCAL u32 ir_type_bit_width(
+    AnalysisResult* analysis,
+    AnalysisTypeId type_id)
+{
+    AnalysisType* type = analysis_type_from_id(analysis, type_id);
+    switch (type->kind)
+    {
+        case ANALYSIS_TYPE_BOOL: return 1;
+        case ANALYSIS_TYPE_INTEGER: return type->as.integer.bit_width;
+        case ANALYSIS_TYPE_FLOAT: return type->as.float_bit_width;
+        case ANALYSIS_TYPE_ENUM:
+            return type->layout.size ? (u32)(type->layout.size * 8) : 32;
+        case ANALYSIS_TYPE_POINTER:
+            return (u32)(type->layout.size * 8);
+        default: break;
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL IrConversionOperation ir_conversion_operation(
+    AnalysisResult* analysis,
+    AnalysisTypeId source_id,
+    AnalysisTypeId target_id)
+{
+    if (ir_type_id_equal(source_id, target_id))
+    {
+        return IR_CONVERSION_IDENTITY;
+    }
+    AnalysisType* source = analysis_type_from_id(analysis, source_id);
+    AnalysisType* target = analysis_type_from_id(analysis, target_id);
+    bool source_integer = ir_type_is_integer_domain(analysis, source_id);
+    bool target_integer = ir_type_is_integer_domain(analysis, target_id);
+    if (source_integer && target_integer)
+    {
+        u32 source_width = ir_type_bit_width(analysis, source_id);
+        u32 target_width = ir_type_bit_width(analysis, target_id);
+        if (source_width < target_width)
+        {
+            return ir_type_is_signed_integer(analysis, source_id) ?
+                IR_CONVERSION_INTEGER_SIGN_EXTEND :
+                IR_CONVERSION_INTEGER_ZERO_EXTEND;
+        }
+        return source_width > target_width ?
+            IR_CONVERSION_INTEGER_TRUNCATE :
+            IR_CONVERSION_INTEGER_REINTERPRET;
+    }
+    if (source->kind == ANALYSIS_TYPE_FLOAT &&
+        target->kind == ANALYSIS_TYPE_FLOAT)
+    {
+        return source->as.float_bit_width < target->as.float_bit_width ?
+            IR_CONVERSION_FLOAT_EXTEND :
+            IR_CONVERSION_FLOAT_TRUNCATE;
+    }
+    if (source_integer && target->kind == ANALYSIS_TYPE_FLOAT)
+    {
+        return ir_type_is_signed_integer(analysis, source_id) ?
+            IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT :
+            IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT;
+    }
+    if (source->kind == ANALYSIS_TYPE_FLOAT && target_integer)
+    {
+        return ir_type_is_signed_integer(analysis, target_id) ?
+            IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER :
+            IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER;
+    }
+    if (source->kind == ANALYSIS_TYPE_POINTER &&
+        target->kind == ANALYSIS_TYPE_POINTER)
+    {
+        return IR_CONVERSION_POINTER_REINTERPRET;
+    }
+    if (source->kind == ANALYSIS_TYPE_POINTER && target_integer)
+    {
+        return IR_CONVERSION_POINTER_TO_INTEGER;
+    }
+    if (source_integer && target->kind == ANALYSIS_TYPE_POINTER)
+    {
+        return IR_CONVERSION_INTEGER_TO_POINTER;
+    }
+    return IR_CONVERSION_COUNT;
 }
 
 BUSTER_GLOBAL_LOCAL IrUnaryOperation ir_unary_operation(
@@ -1338,6 +1430,15 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                     operands,
                     arity,
                     true);
+                if (opcode == IR_OPCODE_CAST)
+                {
+                    BUSTER_CHECK(arity == 1);
+                    instruction->conversion_operation =
+                        ir_conversion_operation(
+                            builder->analysis,
+                            expression->nodes[roots[0]].type,
+                            typed->type);
+                }
             } break;
             case AST_NODE_ADDRESS_OF:
             {
@@ -1432,7 +1533,6 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
         }
         if (instruction)
         {
-            instruction->conversion = typed->conversion;
             lowered.value = instruction->result;
             lowered.category = instruction->result.value == IR_ID_UNDERLYING_INVALID ?
                 IR_VALUE_VALUE : builder->function->values[instruction->result.value].category;
@@ -1813,49 +1913,121 @@ BUSTER_GLOBAL_LOCAL void ir_lower_statement_task(
             AstForStatement* for_statement = &statement->for_statement;
             IrLowered iterable = ir_lower_expression(builder, for_statement->iterable);
             IrValueId iterable_value = ir_materialize(builder, iterable, statement->range);
-            IrInstruction* iterator = ir_emit(
+            IrInstruction* length = ir_emit(
                 builder,
-                IR_OPCODE_ITERATOR_BEGIN,
-                iterable.type,
+                IR_OPCODE_LENGTH,
+                builder->analysis->types.builtin.u64_type,
                 IR_VALUE_VALUE,
                 statement->range,
                 &iterable_value,
                 1,
                 true);
+            IrInstruction* zero = ir_emit(
+                builder,
+                IR_OPCODE_CONSTANT_INTEGER,
+                builder->analysis->types.builtin.u64_type,
+                IR_VALUE_VALUE,
+                statement->range,
+                0,
+                0,
+                true);
+            zero->immediates = arena_allocate(
+                builder->result_arena,
+                u64,
+                1);
+            zero->immediates[0] = 0;
+            zero->immediate_count = 1;
+            IrBlockId initial = builder->current;
             IrBlockId header = ir_block_create(builder);
             IrBlockId body_block = ir_block_create(builder);
+            IrBlockId latch = ir_block_create(builder);
             IrBlockId exit = ir_block_create(builder);
             ir_branch(builder, header, statement->range);
             builder->current = header;
-            IrInstruction* next = ir_emit(
+            IrBlockParameter* index = ir_block_parameter_create(
                 builder,
-                IR_OPCODE_ITERATOR_NEXT,
+                header,
+                ANALYSIS_LOCAL_ID_INVALID,
+                builder->analysis->types.builtin.u64_type);
+            ir_block_parameter_incoming_add(
+                builder,
+                index,
+                initial,
+                zero->result);
+            IrValueId comparison_operands[2] = {
+                index->value,
+                length->result,
+            };
+            IrInstruction* condition = ir_emit(
+                builder,
+                IR_OPCODE_BINARY,
                 builder->analysis->types.builtin.bool_type,
                 IR_VALUE_VALUE,
                 statement->range,
-                &iterator->result,
-                1,
+                comparison_operands,
+                2,
                 true);
+            condition->binary_operation = IR_BINARY_UNSIGNED_LESS;
             IrBlockId targets[2] = { body_block, exit };
             ir_terminate(
                 builder,
                 IR_OPCODE_BRANCH_IF,
                 statement->range,
-                &next->result,
+                &condition->result,
                 1,
                 targets,
                 2);
+            builder->current = latch;
+            IrInstruction* one = ir_emit(
+                builder,
+                IR_OPCODE_CONSTANT_INTEGER,
+                builder->analysis->types.builtin.u64_type,
+                IR_VALUE_VALUE,
+                statement->range,
+                0,
+                0,
+                true);
+            one->immediates = arena_allocate(
+                builder->result_arena,
+                u64,
+                1);
+            one->immediates[0] = 1;
+            one->immediate_count = 1;
+            IrValueId increment_operands[2] = {
+                index->value,
+                one->result,
+            };
+            IrInstruction* increment = ir_emit(
+                builder,
+                IR_OPCODE_BINARY,
+                builder->analysis->types.builtin.u64_type,
+                IR_VALUE_VALUE,
+                statement->range,
+                increment_operands,
+                2,
+                true);
+            increment->binary_operation = IR_BINARY_INTEGER_ADD;
+            ir_branch(builder, header, statement->range);
+            ir_block_parameter_incoming_add(
+                builder,
+                index,
+                latch,
+                increment->result);
             builder->current = body_block;
             AnalysisLocal* local = ir_local_find(builder->body, for_statement->name);
             BUSTER_CHECK(local);
+            IrValueId element_operands[2] = {
+                iterable_value,
+                index->value,
+            };
             IrInstruction* element = ir_emit(
                 builder,
-                IR_OPCODE_ITERATOR_VALUE,
+                IR_OPCODE_INDEX,
                 local->type,
                 IR_VALUE_VALUE,
                 statement->range,
-                &iterator->result,
-                1,
+                element_operands,
+                2,
                 true);
             IrValueId store_operands[2] = {
                 builder->function->local_places[local->id.value],
@@ -1891,9 +2063,9 @@ BUSTER_GLOBAL_LOCAL void ir_lower_statement_task(
                 top,
                 for_statement->body.first_statement,
                 body_block,
-                header,
+                latch,
                 exit,
-                header);
+                latch);
         } break;
         case AST_STATEMENT_LOOP:
         {
@@ -2056,7 +2228,7 @@ BUSTER_GLOBAL_LOCAL void ir_function_measure(
             } break;
             case AST_STATEMENT_FOR:
             {
-                control_block_count += 3;
+                control_block_count += 4;
                 ir_measure_task_push(
                     scratch_arena,
                     &top,
@@ -2469,6 +2641,81 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(
     IrFunction* function,
     IrInstruction* instruction)
 {
+    if (instruction->opcode == IR_OPCODE_LENGTH ||
+        instruction->opcode == IR_OPCODE_REVERSE)
+    {
+        if (instruction->operand_count != 1 ||
+            instruction->conversion_operation != IR_CONVERSION_COUNT ||
+            instruction->unary_operation != IR_UNARY_COUNT ||
+            instruction->binary_operation != IR_BINARY_COUNT)
+        {
+            return false;
+        }
+        AnalysisTypeId operand_type =
+            function->values[instruction->operands[0].value].type;
+        AnalysisTypeKind kind =
+            analysis_type_from_id(analysis, operand_type)->kind;
+        bool iterable = kind == ANALYSIS_TYPE_RANGE ||
+            kind == ANALYSIS_TYPE_SLICE ||
+            kind == ANALYSIS_TYPE_ARRAY ||
+            kind == ANALYSIS_TYPE_INFERRED_ARRAY;
+        return iterable &&
+            (instruction->opcode == IR_OPCODE_LENGTH ?
+                ir_type_id_equal(
+                    instruction->type,
+                    analysis->types.builtin.u64_type) :
+                ir_type_id_equal(instruction->type, operand_type));
+    }
+    if (instruction->opcode == IR_OPCODE_INDEX)
+    {
+        if (instruction->operand_count != 2 ||
+            instruction->conversion_operation != IR_CONVERSION_COUNT ||
+            instruction->unary_operation != IR_UNARY_COUNT ||
+            instruction->binary_operation != IR_BINARY_COUNT)
+        {
+            return false;
+        }
+        AnalysisTypeId base_type =
+            function->values[instruction->operands[0].value].type;
+        AnalysisTypeId index_type =
+            function->values[instruction->operands[1].value].type;
+        AnalysisType* base = analysis_type_from_id(analysis, base_type);
+        AnalysisTypeId element = ANALYSIS_TYPE_ID_INVALID;
+        if (base->kind == ANALYSIS_TYPE_ARRAY)
+        {
+            element = base->as.array.element_type;
+        }
+        else if (base->kind == ANALYSIS_TYPE_RANGE ||
+            base->kind == ANALYSIS_TYPE_SLICE ||
+            base->kind == ANALYSIS_TYPE_INFERRED_ARRAY)
+        {
+            element = base->as.element_type;
+        }
+        return element.value != ANALYSIS_ID_UNDERLYING_INVALID &&
+            ir_type_is_integer_domain(analysis, index_type) &&
+            ir_type_id_equal(instruction->type, element);
+    }
+    if (instruction->opcode == IR_OPCODE_CAST)
+    {
+        if (instruction->operand_count != 1 ||
+            instruction->conversion_operation >= IR_CONVERSION_COUNT ||
+            instruction->unary_operation != IR_UNARY_COUNT ||
+            instruction->binary_operation != IR_BINARY_COUNT)
+        {
+            return false;
+        }
+        AnalysisTypeId source =
+            function->values[instruction->operands[0].value].type;
+        return instruction->conversion_operation ==
+            ir_conversion_operation(
+                analysis,
+                source,
+                instruction->type);
+    }
+    if (instruction->conversion_operation != IR_CONVERSION_COUNT)
+    {
+        return false;
+    }
     if (instruction->opcode == IR_OPCODE_UNARY)
     {
         if (instruction->operand_count != 1 ||
@@ -2571,7 +2818,12 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(
         bool result_matches = comparison ?
             result_kind == ANALYSIS_TYPE_BOOL :
             range ?
-                result_kind == ANALYSIS_TYPE_RANGE :
+                result_kind == ANALYSIS_TYPE_RANGE &&
+                    ir_type_id_equal(
+                        analysis_type_from_id(
+                            analysis,
+                            instruction->type)->as.element_type,
+                        left_type) :
                 ir_type_id_equal(instruction->type, left_type);
         return domain_matches && signedness_matches && result_matches;
     }
@@ -2684,17 +2936,6 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
                         block->id,
                         instruction_id);
                 }
-                if (!ir_instruction_operation_valid(
-                        analysis,
-                        function,
-                        instruction))
-                {
-                    return ir_validation_error(
-                        IR_VALIDATION_OPERATION,
-                        function,
-                        block->id,
-                        instruction_id);
-                }
                 for (u32 operand_index = 0;
                     operand_index < instruction->operand_count;
                     operand_index += 1)
@@ -2705,8 +2946,19 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
                             IR_VALIDATION_INVALID_ID,
                             function,
                             block->id,
-                            instruction_id);
+                        instruction_id);
                     }
+                }
+                if (!ir_instruction_operation_valid(
+                        analysis,
+                        function,
+                        instruction))
+                {
+                    return ir_validation_error(
+                        IR_VALIDATION_OPERATION,
+                        function,
+                        block->id,
+                        instruction_id);
                 }
                 for (u32 target_index = 0;
                     target_index < instruction->target_count;
@@ -2955,6 +3207,7 @@ BUSTER_GLOBAL_LOCAL String8 ir_opcode_name(IrOpcode opcode)
         case IR_OPCODE_FUNCTION: return S8("function_reference");
         case IR_OPCODE_ARRAY: return S8("array");
         case IR_OPCODE_AGGREGATE: return S8("aggregate");
+        case IR_OPCODE_LENGTH: return S8("length");
         case IR_OPCODE_INDEX: return S8("index");
         case IR_OPCODE_SLICE: return S8("slice");
         case IR_OPCODE_FIELD: return S8("field");
@@ -2966,15 +3219,36 @@ BUSTER_GLOBAL_LOCAL String8 ir_opcode_name(IrOpcode opcode)
         case IR_OPCODE_UNARY: return S8("unary");
         case IR_OPCODE_BINARY: return S8("binary");
         case IR_OPCODE_REVERSE: return S8("reverse");
-        case IR_OPCODE_ITERATOR_BEGIN: return S8("iterator_begin");
-        case IR_OPCODE_ITERATOR_NEXT: return S8("iterator_next");
-        case IR_OPCODE_ITERATOR_VALUE: return S8("iterator_value");
         case IR_OPCODE_BRANCH: return S8("branch");
         case IR_OPCODE_BRANCH_IF: return S8("branch_if");
         case IR_OPCODE_SWITCH: return S8("switch");
         case IR_OPCODE_RETURN: return S8("return");
         case IR_OPCODE_UNREACHABLE: return S8("unreachable");
         case IR_OPCODE_COUNT: break;
+    }
+    return S8("invalid");
+}
+
+BUSTER_GLOBAL_LOCAL String8 ir_conversion_operation_name(
+    IrConversionOperation operation)
+{
+    switch (operation)
+    {
+        case IR_CONVERSION_IDENTITY: return S8("identity");
+        case IR_CONVERSION_INTEGER_SIGN_EXTEND: return S8("integer_sign_extend");
+        case IR_CONVERSION_INTEGER_ZERO_EXTEND: return S8("integer_zero_extend");
+        case IR_CONVERSION_INTEGER_TRUNCATE: return S8("integer_truncate");
+        case IR_CONVERSION_INTEGER_REINTERPRET: return S8("integer_reinterpret");
+        case IR_CONVERSION_FLOAT_EXTEND: return S8("float_extend");
+        case IR_CONVERSION_FLOAT_TRUNCATE: return S8("float_truncate");
+        case IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT: return S8("signed_integer_to_float");
+        case IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT: return S8("unsigned_integer_to_float");
+        case IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER: return S8("float_to_signed_integer");
+        case IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER: return S8("float_to_unsigned_integer");
+        case IR_CONVERSION_POINTER_REINTERPRET: return S8("pointer_reinterpret");
+        case IR_CONVERSION_POINTER_TO_INTEGER: return S8("pointer_to_integer");
+        case IR_CONVERSION_INTEGER_TO_POINTER: return S8("integer_to_pointer");
+        case IR_CONVERSION_COUNT: break;
     }
     return S8("invalid");
 }
@@ -3090,8 +3364,11 @@ String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module
                 id = function->instructions[id.value].next)
             {
                 IrInstruction* instruction = function->instructions + id.value;
-                String8 operation = instruction->opcode == IR_OPCODE_UNARY ?
-                    ir_unary_operation_name(instruction->unary_operation) :
+                String8 operation = instruction->opcode == IR_OPCODE_CAST ?
+                    ir_conversion_operation_name(
+                        instruction->conversion_operation) :
+                    instruction->opcode == IR_OPCODE_UNARY ?
+                        ir_unary_operation_name(instruction->unary_operation) :
                     instruction->opcode == IR_OPCODE_BINARY ?
                         ir_binary_operation_name(instruction->binary_operation) :
                         S8("");
@@ -3229,7 +3506,7 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_parameter_count(IrFunction* function)
 
 BUSTER_GLOBAL_LOCAL u32 ir_test_conversion_count(
     IrModule* module,
-    AnalysisConversionKind conversion)
+    IrConversionOperation operation)
 {
     u32 count = 0;
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
@@ -3239,7 +3516,10 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_conversion_count(
             instruction_index < function->instruction_count;
             instruction_index += 1)
         {
-            count += function->instructions[instruction_index].conversion == conversion;
+            IrInstruction* instruction =
+                function->instructions + instruction_index;
+            count += instruction->opcode == IR_OPCODE_CAST &&
+                instruction->conversion_operation == operation;
         }
     }
     return count;
@@ -3510,7 +3790,15 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     String8 conversion_source = S8(
         "code literal : fn () u8 { return 1; }\n"
         "code widen : fn (value: u8) s32 { return @cast(value); }\n"
+        "code sign_widen : fn (value: s8) s32 { return @cast(value); }\n"
         "code narrow : fn (value: s32) u8 { return @cast(value); }\n"
+        "code reinterpret : fn (value: s32) u32 { return @cast(value); }\n"
+        "code float_widen : fn (value: f32) f64 { return @cast(value); }\n"
+        "code float_narrow : fn (value: f64) f32 { return @cast(value); }\n"
+        "code signed_float : fn (value: s32) f64 { return @cast(value); }\n"
+        "code unsigned_float : fn (value: u32) f64 { return @cast(value); }\n"
+        "code float_signed : fn (value: f64) s32 { return @cast(value); }\n"
+        "code float_unsigned : fn (value: f64) u32 { return @cast(value); }\n"
         "code pointer : fn (value: &s32) &u8 { return @cast(value); }\n");
     TokenizerResult conversion_tokens = tokenize(
         arguments->arena,
@@ -3538,23 +3826,187 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         arguments->arena,
         &conversion_analysis);
     BUSTER_TEST(arguments, conversion_analysis.diagnostic_count == 0);
-    BUSTER_TEST(arguments, conversion_module.lowered_function_count == 4);
+    BUSTER_TEST(arguments, conversion_module.lowered_function_count == 12);
     BUSTER_TEST(
         arguments,
-        ir_test_conversion_count(&conversion_module, ANALYSIS_CONVERSION_LITERAL) == 1);
+        ir_test_opcode_count(
+            conversion_module.functions,
+            IR_OPCODE_CAST) == 0);
     BUSTER_TEST(
         arguments,
-        ir_test_conversion_count(&conversion_module, ANALYSIS_CONVERSION_INTEGER_WIDEN) == 1);
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_INTEGER_ZERO_EXTEND) == 1);
     BUSTER_TEST(
         arguments,
-        ir_test_conversion_count(&conversion_module, ANALYSIS_CONVERSION_INTEGER_NARROW) == 1);
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_INTEGER_SIGN_EXTEND) == 1);
     BUSTER_TEST(
         arguments,
-        ir_test_conversion_count(&conversion_module, ANALYSIS_CONVERSION_POINTER) == 1);
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_INTEGER_TRUNCATE) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_INTEGER_REINTERPRET) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_FLOAT_EXTEND) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_FLOAT_TRUNCATE) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_conversion_count(
+            &conversion_module,
+            IR_CONVERSION_POINTER_REINTERPRET) == 1);
     IrValidationResult conversion_validation = ir_validate_module(
         &conversion_analysis,
         &conversion_module);
     BUSTER_TEST(arguments, conversion_validation.error == IR_VALIDATION_NONE);
+    IrInstruction* sign_extension = 0;
+    for (u32 function_index = 0;
+        function_index < conversion_module.function_count &&
+            !sign_extension;
+        function_index += 1)
+    {
+        IrFunction* function =
+            conversion_module.functions + function_index;
+        for (u32 instruction_index = 0;
+            instruction_index < function->instruction_count;
+            instruction_index += 1)
+        {
+            IrInstruction* candidate =
+                function->instructions + instruction_index;
+            if (candidate->opcode == IR_OPCODE_CAST &&
+                candidate->conversion_operation ==
+                    IR_CONVERSION_INTEGER_SIGN_EXTEND)
+            {
+                sign_extension = candidate;
+                break;
+            }
+        }
+    }
+    BUSTER_TEST(arguments, sign_extension != 0);
+    if (sign_extension)
+    {
+        sign_extension->conversion_operation =
+            IR_CONVERSION_INTEGER_ZERO_EXTEND;
+        IrValidationResult wrong_conversion = ir_validate_module(
+            &conversion_analysis,
+            &conversion_module);
+        BUSTER_TEST(
+            arguments,
+            wrong_conversion.error == IR_VALIDATION_OPERATION);
+        sign_extension->conversion_operation =
+            IR_CONVERSION_INTEGER_SIGN_EXTEND;
+        IrValidationResult restored_conversion = ir_validate_module(
+            &conversion_analysis,
+            &conversion_module);
+        BUSTER_TEST(
+            arguments,
+            restored_conversion.error == IR_VALIDATION_NONE);
+    }
+
+    String8 loop_lowering_source = S8(
+        "code sum : fn () s32\n"
+        "{\n"
+        "    data total: s32 = 0;\n"
+        "    for (data value = 0 .. 3)\n"
+        "    {\n"
+        "        total += value;\n"
+        "    }\n"
+        "    for (data value = @reverse(0 .. 3))\n"
+        "    {\n"
+        "        total += value;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n");
+    TokenizerResult loop_lowering_tokens = tokenize(
+        arguments->arena,
+        loop_lowering_source.pointer,
+        loop_lowering_source.length);
+    ParserResult loop_lowering_parser = parser_parse(
+        arguments->arena,
+        expression_arena,
+        loop_lowering_source,
+        loop_lowering_tokens);
+    BUSTER_TEST(arguments, loop_lowering_tokens.error_count == 0);
+    BUSTER_TEST(arguments, loop_lowering_parser.diagnostic_count == 0);
+    AnalysisSourceInput loop_lowering_input = {
+        .path = S8("loop-lowering-ir.bbb"),
+        .parser = &loop_lowering_parser,
+    };
+    AnalysisResult loop_lowering_analysis = analysis_index_module(
+        arguments->arena,
+        (AnalysisModuleId){ .value = 907 },
+        S8("loop-lowering-ir"),
+        &loop_lowering_input,
+        1);
+    analysis_resolve_module_interfaces(
+        arguments->arena,
+        &loop_lowering_analysis);
+    IrModule loop_lowering_module = ir_analyze_and_generate_module(
+        arguments->arena,
+        &loop_lowering_analysis);
+    BUSTER_TEST(arguments, loop_lowering_analysis.diagnostic_count == 0);
+    BUSTER_TEST(arguments, loop_lowering_module.lowered_function_count == 1);
+    IrFunction* loop_lowering_function =
+        loop_lowering_module.functions;
+    BUSTER_TEST(arguments, loop_lowering_function->block_count == 10);
+    BUSTER_TEST(
+        arguments,
+        ir_test_opcode_count(
+            loop_lowering_function,
+            IR_OPCODE_LENGTH) == 2);
+    BUSTER_TEST(
+        arguments,
+        ir_test_opcode_count(
+            loop_lowering_function,
+            IR_OPCODE_INDEX) == 2);
+    BUSTER_TEST(
+        arguments,
+        ir_test_opcode_count(
+            loop_lowering_function,
+            IR_OPCODE_REVERSE) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_binary_operation_count(
+            loop_lowering_function,
+            IR_BINARY_UNSIGNED_LESS) == 2);
+    IrValidationResult loop_lowering_validation = ir_validate_module(
+        &loop_lowering_analysis,
+        &loop_lowering_module);
+    BUSTER_TEST(
+        arguments,
+        loop_lowering_validation.error == IR_VALIDATION_NONE);
 
     String8 namespace_math_source = S8(
         "code add : fn (a: s32, b: s32) s32\n"

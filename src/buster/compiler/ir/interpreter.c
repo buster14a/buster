@@ -11,13 +11,11 @@ typedef enum IrRuntimeValueKind
     IR_RUNTIME_VALUE_ADDRESS,
     IR_RUNTIME_VALUE_SLICE,
     IR_RUNTIME_VALUE_RANGE,
-    IR_RUNTIME_VALUE_ITERATOR,
     IR_RUNTIME_VALUE_KIND_COUNT,
 } IrRuntimeValueKind;
 
 typedef struct IrRuntimeObject IrRuntimeObject;
 typedef struct IrRuntimeStoredValue IrRuntimeStoredValue;
-typedef struct IrRuntimeIterator IrRuntimeIterator;
 typedef struct IrRuntimeValue IrRuntimeValue;
 struct IrRuntimeValue
 {
@@ -26,7 +24,6 @@ struct IrRuntimeValue
     AnalysisModuleId type_module;
     AnalysisTypeId type;
     IrRuntimeObject* object;
-    IrRuntimeIterator* iterator;
     u64 bits;
     u64 offset;
     u64 length;
@@ -51,15 +48,6 @@ struct IrRuntimeStoredValue
     IrRuntimeValue value;
     u64 offset;
     u64 size;
-};
-
-struct IrRuntimeIterator
-{
-    IrRuntimeValue iterable;
-    IrRuntimeValue current;
-    u64 index;
-    bool has_current;
-    u8 reserved[7];
 };
 
 typedef struct IrExecutionFrame IrExecutionFrame;
@@ -989,88 +977,97 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_cast(
         frame->analysis,
         instruction->type);
     u64 bits = frame->values[operand_id.value].bits;
-    bool source_integer =
-        source->kind == ANALYSIS_TYPE_BOOL ||
-        source->kind == ANALYSIS_TYPE_INTEGER ||
-        source->kind == ANALYSIS_TYPE_ENUM;
-    bool target_integer =
-        target->kind == ANALYSIS_TYPE_BOOL ||
-        target->kind == ANALYSIS_TYPE_INTEGER ||
-        target->kind == ANALYSIS_TYPE_ENUM;
-    if (source_integer && target_integer)
+    switch (instruction->conversion_operation)
     {
-        u32 source_width = ir_interpreter_type_width(
-            frame->analysis,
-            source->id);
-        u32 target_width = ir_interpreter_type_width(
-            frame->analysis,
-            target->id);
-        bits &= ir_interpreter_mask(source_width);
-        if (source->kind == ANALYSIS_TYPE_INTEGER &&
-            source->as.integer.is_signed &&
-            target_width > source_width &&
-            ir_interpreter_integer_negative(bits, source_width))
+        case IR_CONVERSION_IDENTITY:
+            *bits_out = bits;
+            return true;
+        case IR_CONVERSION_INTEGER_SIGN_EXTEND:
         {
-            bits |= ~ir_interpreter_mask(source_width);
+            u32 source_width = ir_interpreter_type_width(
+                frame->analysis,
+                source->id);
+            u32 target_width = ir_interpreter_type_width(
+                frame->analysis,
+                target->id);
+            bits &= ir_interpreter_mask(source_width);
+            if (ir_interpreter_integer_negative(bits, source_width))
+            {
+                bits |= ~ir_interpreter_mask(source_width);
+            }
+            *bits_out = bits & ir_interpreter_mask(target_width);
+            return true;
         }
-        *bits_out = bits & ir_interpreter_mask(target_width);
-        return true;
-    }
-    if (source->kind == ANALYSIS_TYPE_FLOAT &&
-        target->kind == ANALYSIS_TYPE_FLOAT)
-    {
-        *bits_out = ir_interpreter_float_write(
-            ir_interpreter_float_read(
+        case IR_CONVERSION_INTEGER_ZERO_EXTEND:
+        case IR_CONVERSION_INTEGER_TRUNCATE:
+        case IR_CONVERSION_INTEGER_REINTERPRET:
+        {
+            *bits_out = bits & ir_interpreter_mask(
+                ir_interpreter_type_width(
+                    frame->analysis,
+                    target->id));
+            return true;
+        }
+        case IR_CONVERSION_FLOAT_EXTEND:
+        case IR_CONVERSION_FLOAT_TRUNCATE:
+        {
+            *bits_out = ir_interpreter_float_write(
+                ir_interpreter_float_read(
+                    bits,
+                    source->as.float_bit_width),
+                target->as.float_bit_width);
+            return true;
+        }
+        case IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT:
+        case IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT:
+        {
+            u32 source_width = ir_interpreter_type_width(
+                frame->analysis,
+                source->id);
+            bits &= ir_interpreter_mask(source_width);
+            f64 value = (f64)bits;
+            if (instruction->conversion_operation ==
+                    IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT &&
+                ir_interpreter_integer_negative(bits, source_width))
+            {
+                value = -(f64)ir_interpreter_integer_magnitude(
+                    bits,
+                    source_width);
+            }
+            *bits_out = ir_interpreter_float_write(
+                value,
+                target->as.float_bit_width);
+            return true;
+        }
+        case IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER:
+        case IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER:
+        {
+            f64 value = ir_interpreter_float_read(
                 bits,
-                source->as.float_bit_width),
-            target->as.float_bit_width);
-        return true;
-    }
-    if (source_integer && target->kind == ANALYSIS_TYPE_FLOAT)
-    {
-        u32 source_width = ir_interpreter_type_width(
-            frame->analysis,
-            source->id);
-        bits &= ir_interpreter_mask(source_width);
-        f64 value = 0.0;
-        if (source->kind == ANALYSIS_TYPE_INTEGER &&
-            source->as.integer.is_signed &&
-            ir_interpreter_integer_negative(bits, source_width))
-        {
-            value = -(f64)ir_interpreter_integer_magnitude(
-                bits,
-                source_width);
+                source->as.float_bit_width);
+            u32 target_width = ir_interpreter_type_width(
+                frame->analysis,
+                target->id);
+            if (instruction->conversion_operation ==
+                    IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER &&
+                value < 0.0)
+            {
+                u64 magnitude = (u64)(-value);
+                *bits_out = (0 - magnitude) &
+                    ir_interpreter_mask(target_width);
+            }
+            else
+            {
+                *bits_out = (u64)value &
+                    ir_interpreter_mask(target_width);
+            }
+            return true;
         }
-        else
-        {
-            value = (f64)bits;
-        }
-        *bits_out = ir_interpreter_float_write(
-            value,
-            target->as.float_bit_width);
-        return true;
-    }
-    if (source->kind == ANALYSIS_TYPE_FLOAT && target_integer)
-    {
-        f64 value = ir_interpreter_float_read(
-            bits,
-            source->as.float_bit_width);
-        u32 target_width = ir_interpreter_type_width(
-            frame->analysis,
-            target->id);
-        if (target->kind == ANALYSIS_TYPE_INTEGER &&
-            target->as.integer.is_signed && value < 0.0)
-        {
-            u64 magnitude = (u64)(-value);
-            *bits_out = (0 - magnitude) &
-                ir_interpreter_mask(target_width);
-        }
-        else
-        {
-            *bits_out = (u64)value &
-                ir_interpreter_mask(target_width);
-        }
-        return true;
+        case IR_CONVERSION_POINTER_REINTERPRET:
+        case IR_CONVERSION_POINTER_TO_INTEGER:
+        case IR_CONVERSION_INTEGER_TO_POINTER:
+        case IR_CONVERSION_COUNT:
+            break;
     }
     return false;
 }
@@ -1135,98 +1132,6 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_collection(
         return true;
     }
     return false;
-}
-
-BUSTER_GLOBAL_LOCAL bool ir_interpreter_iterator_next(
-    Arena* arena,
-    IrExecutionFrame* frame,
-    IrRuntimeIterator* iterator,
-    IrExecutionTrap* trap_out)
-{
-    IrRuntimeValue iterable = iterator->iterable;
-    AnalysisType* type = analysis_type_from_id(
-        frame->analysis,
-        iterable.type);
-    iterator->has_current = false;
-    if (type->kind == ANALYSIS_TYPE_RANGE &&
-        iterable.kind == IR_RUNTIME_VALUE_RANGE)
-    {
-        AnalysisTypeId element_type = type->as.element_type;
-        u32 width = ir_interpreter_type_width(
-            frame->analysis,
-            element_type);
-        u64 mask = ir_interpreter_mask(width);
-        u64 start = iterable.bits & mask;
-        u64 end = iterable.length & mask;
-        bool is_signed = ir_interpreter_type_signed(
-            frame->analysis,
-            element_type);
-        s32 order = is_signed ?
-            ir_interpreter_signed_compare(start, end, width) :
-            start < end ? -1 : start > end ? 1 : 0;
-        if (order > 0)
-        {
-            *trap_out = IR_EXECUTION_TRAP_INVALID_MEMORY;
-            return false;
-        }
-        u64 count = (end - start) & mask;
-        if (iterator->index >= count)
-        {
-            return true;
-        }
-        u64 element_index = iterable.reversed ?
-            count - iterator->index - 1 : iterator->index;
-        iterator->current = (IrRuntimeValue){
-            .type_module = frame->analysis->module.id,
-            .type = element_type,
-            .bits = (start + element_index) & mask,
-            .kind = IR_RUNTIME_VALUE_SCALAR,
-            .initialized = true,
-        };
-        iterator->index += 1;
-        iterator->has_current = true;
-        return true;
-    }
-
-    IrRuntimeObject* object = 0;
-    u64 offset = 0;
-    u64 count = 0;
-    u64 element_size = 0;
-    if (!ir_interpreter_collection(
-            frame,
-            iterable.type,
-            iterable,
-            &object,
-            &offset,
-            &count,
-            &element_size))
-    {
-        *trap_out = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
-        return false;
-    }
-    if (iterator->index >= count)
-    {
-        return true;
-    }
-    u64 element_index = iterable.reversed ?
-        count - iterator->index - 1 : iterator->index;
-    AnalysisTypeId element_type =
-        type->kind == ANALYSIS_TYPE_ARRAY ?
-            type->as.array.element_type : type->as.element_type;
-    if (!ir_interpreter_memory_read(
-            arena,
-            frame->analysis,
-            element_type,
-            object,
-            offset + element_index * element_size,
-            &iterator->current))
-    {
-        *trap_out = IR_EXECUTION_TRAP_UNINITIALIZED_VALUE;
-        return false;
-    }
-    iterator->index += 1;
-    iterator->has_current = true;
-    return true;
 }
 
 BUSTER_GLOBAL_LOCAL IrExecutionResult ir_interpreter_trap(
@@ -1637,12 +1542,97 @@ IrExecutionResult ir_execute(
                         IR_EXECUTION_TRAP_NONE,
                 };
             } break;
+            case IR_OPCODE_LENGTH:
+            {
+                IrValueId base_id = instruction->operands[0];
+                IrRuntimeValue base = frame->values[base_id.value];
+                AnalysisType* base_type = analysis_type_from_id(
+                    frame->analysis,
+                    frame->function->values[base_id.value].type);
+                if (base_type->kind == ANALYSIS_TYPE_RANGE &&
+                    base.kind == IR_RUNTIME_VALUE_RANGE)
+                {
+                    AnalysisTypeId element_type =
+                        base_type->as.element_type;
+                    u32 width = ir_interpreter_type_width(
+                        frame->analysis,
+                        element_type);
+                    u64 mask = ir_interpreter_mask(width);
+                    u64 start = base.bits & mask;
+                    u64 end = base.length & mask;
+                    bool is_signed = ir_interpreter_type_signed(
+                        frame->analysis,
+                        element_type);
+                    s32 order = is_signed ?
+                        ir_interpreter_signed_compare(
+                            start,
+                            end,
+                            width) :
+                        start < end ? -1 : start > end ? 1 : 0;
+                    if (order > 0)
+                    {
+                        operation_trap =
+                            IR_EXECUTION_TRAP_INVALID_MEMORY;
+                        break;
+                    }
+                    produced.bits = (end - start) & mask;
+                    break;
+                }
+                IrRuntimeObject* object = 0;
+                u64 offset = 0;
+                u64 count = 0;
+                u64 element_size = 0;
+                if (!ir_interpreter_collection(
+                        frame,
+                        frame->function->values[base_id.value].type,
+                        base,
+                        &object,
+                        &offset,
+                        &count,
+                        &element_size))
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    break;
+                }
+                BUSTER_UNUSED(object);
+                BUSTER_UNUSED(offset);
+                BUSTER_UNUSED(element_size);
+                produced.bits = count;
+            } break;
             case IR_OPCODE_INDEX:
             {
                 IrValueId base_id = instruction->operands[0];
                 IrRuntimeValue base = frame->values[base_id.value];
                 u64 index = frame->values[
                     instruction->operands[1].value].bits;
+                AnalysisType* base_type = analysis_type_from_id(
+                    frame->analysis,
+                    frame->function->values[base_id.value].type);
+                if (base_type->kind == ANALYSIS_TYPE_RANGE &&
+                    base.kind == IR_RUNTIME_VALUE_RANGE)
+                {
+                    AnalysisTypeId element_type =
+                        base_type->as.element_type;
+                    u32 width = ir_interpreter_type_width(
+                        frame->analysis,
+                        element_type);
+                    u64 mask = ir_interpreter_mask(width);
+                    u64 start = base.bits & mask;
+                    u64 end = base.length & mask;
+                    u64 count = (end - start) & mask;
+                    if (index >= count)
+                    {
+                        operation_trap =
+                            IR_EXECUTION_TRAP_OUT_OF_BOUNDS;
+                        break;
+                    }
+                    u64 element_index = base.reversed ?
+                        count - index - 1 :
+                        index;
+                    produced.bits = (start + element_index) & mask;
+                    break;
+                }
                 IrRuntimeObject* object = 0;
                 u64 offset = 0;
                 u64 count = 0;
@@ -1660,6 +1650,10 @@ IrExecutionResult ir_execute(
                     operation_trap =
                         IR_EXECUTION_TRAP_OUT_OF_BOUNDS;
                     break;
+                }
+                if (base.reversed)
+                {
+                    index = count - index - 1;
                 }
                 produced = (IrRuntimeValue){
                     .object = object,
@@ -1788,7 +1782,9 @@ IrExecutionResult ir_execute(
                     frame->analysis,
                     instruction->type);
                 if (operand.kind == IR_RUNTIME_VALUE_ADDRESS &&
-                    target_type->kind == ANALYSIS_TYPE_POINTER)
+                    target_type->kind == ANALYSIS_TYPE_POINTER &&
+                    instruction->conversion_operation ==
+                        IR_CONVERSION_POINTER_REINTERPRET)
                 {
                     produced = operand;
                 }
@@ -2022,61 +2018,6 @@ IrExecutionResult ir_execute(
                 }
                 produced.reversed = !produced.reversed;
             } break;
-            case IR_OPCODE_ITERATOR_BEGIN:
-            {
-                IrRuntimeIterator* iterator = arena_allocate(
-                    scratch.arena,
-                    IrRuntimeIterator,
-                    1);
-                *iterator = (IrRuntimeIterator){
-                    .iterable = frame->values[
-                        instruction->operands[0].value],
-                };
-                produced = (IrRuntimeValue){
-                    .iterator = iterator,
-                    .kind = IR_RUNTIME_VALUE_ITERATOR,
-                    .initialized = true,
-                };
-            } break;
-            case IR_OPCODE_ITERATOR_NEXT:
-            {
-                IrRuntimeValue iterator_value = frame->values[
-                    instruction->operands[0].value];
-                if (iterator_value.kind !=
-                        IR_RUNTIME_VALUE_ITERATOR ||
-                    !iterator_value.iterator ||
-                    !ir_interpreter_iterator_next(
-                        scratch.arena,
-                        frame,
-                        iterator_value.iterator,
-                        &operation_trap))
-                {
-                    if (operation_trap ==
-                        IR_EXECUTION_TRAP_NONE)
-                    {
-                        operation_trap =
-                            IR_EXECUTION_TRAP_INVALID_MEMORY;
-                    }
-                    break;
-                }
-                produced.bits =
-                    iterator_value.iterator->has_current;
-            } break;
-            case IR_OPCODE_ITERATOR_VALUE:
-            {
-                IrRuntimeValue iterator_value = frame->values[
-                    instruction->operands[0].value];
-                if (iterator_value.kind !=
-                        IR_RUNTIME_VALUE_ITERATOR ||
-                    !iterator_value.iterator ||
-                    !iterator_value.iterator->has_current)
-                {
-                    operation_trap =
-                        IR_EXECUTION_TRAP_INVALID_MEMORY;
-                    break;
-                }
-                produced = iterator_value.iterator->current;
-            } break;
             case IR_OPCODE_BRANCH:
             {
                 IrBlockId predecessor = frame->block;
@@ -2294,6 +2235,13 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
         "code float_value : fn () f64\n"
         "{\n"
         "    return 1.5 * 2.0;\n"
+        "}\n"
+        "code conversion_value : fn () s32\n"
+        "{\n"
+        "    data small: s8 = -2;\n"
+        "    data widened: s32 = @cast(small);\n"
+        "    data floating: f64 = @cast(widened);\n"
+        "    return @cast(floating);\n"
         "}\n"
         "code forever : fn () void\n"
         "{\n"
@@ -2543,6 +2491,30 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments,
             ir_interpreter_float_read(float_result.bits, 64) ==
                 3.0);
+    }
+
+    AnalysisEntity* conversion_entity =
+        ir_interpreter_test_entity_find(
+            &scalar_analysis,
+            S8("conversion_value"));
+    BUSTER_TEST(arguments, conversion_entity != 0);
+    if (conversion_entity)
+    {
+        IrExecutionResult conversion_result = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            conversion_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            0,
+            0,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(
+            arguments,
+            conversion_result.trap == IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(
+            arguments,
+            conversion_result.bits == (u64)UINT32_MAX - 1);
     }
 
     AnalysisEntity* forever_entity = ir_interpreter_test_entity_find(

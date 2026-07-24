@@ -209,6 +209,7 @@ BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);
 BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
 BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);
+BUSTER_F_DECL bool os_flush_instruction_cache(void* address, u64 size);
 
 BUSTER_F_DECL bool os_is_tty(OsFileDescriptor* file);
 BUSTER_F_DECL OsModuleHandle* os_dynamic_library_load(String8 library);

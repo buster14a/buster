@@ -423,6 +423,25 @@ void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
     return address;
 }
 
+bool os_flush_instruction_cache(void* address, u64 size)
+{
+#if defined(_WIN32)
+    return FlushInstructionCache(
+        GetCurrentProcess(),
+        address,
+        (SIZE_T)size) != 0;
+#elif defined(__GNUC__) || defined(__clang__)
+    __builtin___clear_cache(
+        (char*)address,
+        (char*)address + size);
+    return true;
+#else
+    BUSTER_UNUSED(address);
+    BUSTER_UNUSED(size);
+    return true;
+#endif
+}
+
 OsFileDescriptor* os_get_standard_stream(StandardStream stream)
 {
     OsFileDescriptor* result = {0};

@@ -203,6 +203,19 @@ has hard design constraints:
   Unary and binary instructions use IR-native operations that encode the
   semantic domain (integer, float, boolean, or pointer) and signed behavior;
   the IR value type supplies the width.
+- Conversions are explicit `IR_OPCODE_CAST` instructions with an IR-native
+  operation that records extension, truncation, reinterpretation, or numeric
+  domain conversion. Contextually typed literals are materialized directly at
+  their final type rather than carrying conversion metadata on their producer.
+- `for` loops lower to ordinary blocks, block parameters, comparisons,
+  indexing, and arithmetic. Range and reverse operations produce immutable
+  iterable values; stateful iterator begin/next/value instructions do not
+  belong in the IR.
+- Native code generation consumes the typed IR directly; do not introduce a
+  second machine IR. The baseline backend assigns IR values to stack slots and
+  resolves block parameters with parallel edge copies before later register
+  allocation. Executable tests use writable memory only while copying code,
+  then switch it to read/execute before calling it.
 - Semantic analysis and IR lowering follow the repository-wide recursion rule:
   nested expressions, statements, types, and control flow use arena-backed
   explicit stacks or worklists.
@@ -271,6 +284,7 @@ Compiler:
 | `compiler/frontend/asm/asm_main.c` | Assembly frontend prototype; not wired into the build. |
 | `compiler/frontend/buster/analysis.{c,h}` | Semantic analysis. |
 | `compiler/ir/ir.{c,h}` | Typed control-flow IR, semantic lowering, validation, printing, and fixture-wide IR tests. |
+| `compiler/codegen/codegen.{c,h}` | Direct-IR ABI classification, native instruction emission, executable-memory support, and interpreter/native differential tests. |
 | `compiler/ir/interpreter.{c,h}` | Bounded, explicit-stack runtime IR interpreter and end-to-end execution tests. |
 | `compiler/link/` | `elf.{c,h}`, `jit.{c,h}`, `link.{c,h}` — ELF writer, in-memory execution, linker driver. Not registered as CMake modules yet. |
 | `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/ABI descriptions and per-arch instruction encoders. |
