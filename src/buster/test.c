@@ -9,6 +9,9 @@
 #include <buster/compiler/frontend/buster/analysis.h>
 #include <buster/compiler/ir/ir.h>
 #include <buster/compiler/ir/interpreter.h>
+#if BUSTER_CPU_ARCH_X86_64
+#include <buster/x86_64.h>
+#endif
 
 bool unit_test_succeeded(UnitTestResult result)
 {
@@ -96,6 +99,9 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &ir_tests,
     &ir_interpreter_tests,
     &codegen_tests,
+#if BUSTER_CPU_ARCH_X86_64
+    &x86_64_tests,
+#endif
 };
 
 BatchTestResult library_tests(UnitTestArguments* arguments)

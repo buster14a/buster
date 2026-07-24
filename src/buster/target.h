@@ -179,6 +179,20 @@ typedef enum CpuModel
 
 typedef u64 TargetCpuFeatures;
 
+typedef enum TargetCpuFeature
+{
+    TARGET_CPU_FEATURE_X86_SSE2 = 1u << 0,
+    TARGET_CPU_FEATURE_X86_AVX = 1u << 1,
+    TARGET_CPU_FEATURE_X86_AVX2 = 1u << 2,
+    TARGET_CPU_FEATURE_X86_AVX512F = 1u << 3,
+    TARGET_CPU_FEATURE_X86_AVX512VL = 1u << 4,
+    TARGET_CPU_FEATURE_X86_AVX10_1 = 1u << 5,
+    TARGET_CPU_FEATURE_X86_AVX10_2 = 1u << 6,
+    TARGET_CPU_FEATURE_X86_AVX10_512 = 1u << 7,
+    TARGET_CPU_FEATURE_X86_APX = 1u << 8,
+    TARGET_CPU_FEATURE_AARCH64_NEON = 1u << 9,
+} TargetCpuFeature;
+
 typedef enum TargetStringComponents
 {
     TARGET_STRING_COMPONENT_CPU_ARCH,
@@ -193,8 +207,9 @@ struct Target
     CpuArch cpu_arch;
     CpuModel cpu_model;
     OperatingSystem os;
-    u8 reserved[5];
-    TargetCpuFeatures* cpu_features;
+    bool cpu_features_explicit;
+    u8 reserved[4];
+    TargetCpuFeatures cpu_features;
 };
 
 typedef struct TargetStringSplit TargetStringSplit;
@@ -207,6 +222,14 @@ BUSTER_V_DECL Target target_native;
 
 BUSTER_F_DECL bool cpu_is_native(CpuModel model);
 BUSTER_F_DECL CpuModel cpu_detect_model(void);
+BUSTER_F_DECL TargetCpuFeatures target_cpu_features_default(
+    CpuArch arch,
+    CpuModel model);
+BUSTER_F_DECL TargetCpuFeatures target_cpu_features_effective(Target target);
+BUSTER_F_DECL bool target_cpu_feature_has(
+    Target target,
+    TargetCpuFeature feature);
+BUSTER_F_DECL u32 target_vector_register_size(Target target);
 BUSTER_F_DECL TargetStringSplit target_to_split_string_os(Target target);
 BUSTER_F_DECL String8 target_to_string(Arena* arena, Target target);
 BUSTER_F_DECL String8 cpu_arch_to_string_os(CpuArch arch);

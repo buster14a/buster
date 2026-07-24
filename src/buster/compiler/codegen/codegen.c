@@ -58,10 +58,14 @@ struct X64Builder
     u32* value_storage_offsets;
     u32* local_storage_offsets;
     u8* value_registers;
+    u8* vector_registers;
     s32 hidden_result_displacement;
     s32 va_register_save_displacement;
     CodegenAbiSignature signature;
     CodegenAbi abi;
+    Target target;
+    u32 native_vector_operation_count;
+    u32 split_vector_operation_count;
 };
 
 #define X64_VALUE_SLOT_SIZE 32
@@ -74,20 +78,71 @@ BUSTER_GLOBAL_LOCAL u32 codegen_align_u32(u32 value, u32 alignment)
 
 CodegenAbi codegen_abi_for_target(Target target)
 {
-    if (target.cpu_arch == CPU_ARCH_X86_64)
+    switch (target.cpu_arch)
     {
-        return target.os == OPERATING_SYSTEM_WINDOWS ?
-            CODEGEN_ABI_X86_64_WINDOWS :
-            CODEGEN_ABI_X86_64_SYSTEM_V;
-    }
-    if (target.cpu_arch == CPU_ARCH_AARCH64)
-    {
-        return target.os == OPERATING_SYSTEM_MACOS ||
-            target.os == OPERATING_SYSTEM_IOS ?
-            CODEGEN_ABI_AARCH64_DARWIN :
-            CODEGEN_ABI_AARCH64_AAPCS64;
+        break; case CPU_ARCH_X86_64:
+        {
+            switch (target.os)
+            {
+                break; case OPERATING_SYSTEM_WINDOWS:
+                    return CODEGEN_ABI_X86_64_WINDOWS;
+                break; case OPERATING_SYSTEM_UEFI:
+                    return CODEGEN_ABI_X86_64_WINDOWS;
+                break; case OPERATING_SYSTEM_LINUX:
+                    return CODEGEN_ABI_X86_64_SYSTEM_V;
+                break; case OPERATING_SYSTEM_MACOS:
+                    return CODEGEN_ABI_X86_64_SYSTEM_V;
+                break; case OPERATING_SYSTEM_ANDROID:
+                    return CODEGEN_ABI_X86_64_SYSTEM_V;
+                break; case OPERATING_SYSTEM_IOS:
+                    return CODEGEN_ABI_X86_64_SYSTEM_V;
+                break; case OPERATING_SYSTEM_FREESTANDING:
+                    return CODEGEN_ABI_X86_64_SYSTEM_V;
+                break; case OPERATING_SYSTEM_COUNT:
+                    return CODEGEN_ABI_COUNT;
+            }
+        } break;
+        break; case CPU_ARCH_AARCH64:
+        {
+            switch (target.os)
+            {
+                break; case OPERATING_SYSTEM_WINDOWS:
+                    return CODEGEN_ABI_AARCH64_WINDOWS;
+                break; case OPERATING_SYSTEM_MACOS:
+                    return CODEGEN_ABI_AARCH64_DARWIN;
+                break; case OPERATING_SYSTEM_IOS:
+                    return CODEGEN_ABI_AARCH64_DARWIN;
+                break; case OPERATING_SYSTEM_LINUX:
+                    return CODEGEN_ABI_AARCH64_AAPCS64;
+                break; case OPERATING_SYSTEM_UEFI:
+                    return CODEGEN_ABI_AARCH64_AAPCS64;
+                break; case OPERATING_SYSTEM_ANDROID:
+                    return CODEGEN_ABI_AARCH64_AAPCS64;
+                break; case OPERATING_SYSTEM_FREESTANDING:
+                    return CODEGEN_ABI_AARCH64_AAPCS64;
+                break; case OPERATING_SYSTEM_COUNT:
+                    return CODEGEN_ABI_COUNT;
+            }
+        } break;
+        break; case CPU_ARCH_COUNT:
+            return CODEGEN_ABI_COUNT;
     }
     return CODEGEN_ABI_COUNT;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisAbiConvention
+codegen_analysis_abi_convention(CodegenAbi abi)
+{
+    return
+        abi == CODEGEN_ABI_X86_64_SYSTEM_V ?
+            ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 :
+        abi == CODEGEN_ABI_X86_64_WINDOWS ?
+            ANALYSIS_ABI_CONVENTION_WIN64_X86_64 :
+        abi == CODEGEN_ABI_AARCH64_DARWIN ?
+            ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 :
+        abi == CODEGEN_ABI_AARCH64_WINDOWS ?
+            ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64 :
+            ANALYSIS_ABI_CONVENTION_AAPCS64;
 }
 
 BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_with_arguments(
@@ -96,9 +151,10 @@ BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_with_argument
     AnalysisTypeId function_type_id,
     AnalysisTypeId* argument_types,
     u32 argument_count,
-    CodegenAbi abi)
+    Target target)
 {
     CodegenAbiSignature result = {0};
+    CodegenAbi abi = codegen_abi_for_target(target);
     AnalysisType* function_type =
         analysis_type_from_id(analysis, function_type_id);
     if (function_type->kind != ANALYSIS_TYPE_FUNCTION ||
@@ -106,19 +162,6 @@ BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_with_argument
     {
         return result;
     }
-    Target target = {
-        .cpu_arch =
-            abi == CODEGEN_ABI_X86_64_SYSTEM_V ||
-                abi == CODEGEN_ABI_X86_64_WINDOWS ?
-                CPU_ARCH_X86_64 :
-                CPU_ARCH_AARCH64,
-        .os =
-            abi == CODEGEN_ABI_X86_64_WINDOWS ?
-                OPERATING_SYSTEM_WINDOWS :
-            abi == CODEGEN_ABI_AARCH64_DARWIN ?
-                OPERATING_SYSTEM_MACOS :
-                OPERATING_SYSTEM_LINUX,
-    };
     analysis_compute_layouts(
         analysis,
         (AnalysisLayoutOptions){
@@ -145,6 +188,8 @@ BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_with_argument
             ANALYSIS_ABI_CONVENTION_WIN64_X86_64 :
         abi == CODEGEN_ABI_AARCH64_DARWIN ?
             ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 :
+        abi == CODEGEN_ABI_AARCH64_WINDOWS ?
+            ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64 :
             ANALYSIS_ABI_CONVENTION_AAPCS64;
     if (classified.convention != expected)
     {
@@ -223,7 +268,9 @@ BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_with_argument
                     ANALYSIS_ABI_LOCATION_STACK ?
                     CODEGEN_ABI_LOCATION_STACK :
                 source_part->abi_class ==
-                    ANALYSIS_ABI_CLASS_FLOAT ?
+                        ANALYSIS_ABI_CLASS_FLOAT ||
+                    source_part->abi_class ==
+                        ANALYSIS_ABI_CLASS_VECTOR ?
                     CODEGEN_ABI_LOCATION_FLOAT_REGISTER :
                     CODEGEN_ABI_LOCATION_INTEGER_REGISTER;
             if (destination_part->kind ==
@@ -273,6 +320,51 @@ BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_with_argument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL Target codegen_target_for_abi(CodegenAbi abi)
+{
+    bool x86 =
+        abi == CODEGEN_ABI_X86_64_SYSTEM_V ||
+        abi == CODEGEN_ABI_X86_64_WINDOWS;
+    Target result = {
+        .cpu_arch = x86 ?
+            CPU_ARCH_X86_64 :
+            CPU_ARCH_AARCH64,
+        .os =
+            abi == CODEGEN_ABI_X86_64_WINDOWS ?
+                OPERATING_SYSTEM_WINDOWS :
+            abi == CODEGEN_ABI_AARCH64_DARWIN ?
+                OPERATING_SYSTEM_MACOS :
+            abi == CODEGEN_ABI_AARCH64_WINDOWS ?
+                OPERATING_SYSTEM_WINDOWS :
+                OPERATING_SYSTEM_LINUX,
+        .cpu_features_explicit = true,
+        .cpu_features = x86 ?
+            TARGET_CPU_FEATURE_X86_SSE2 |
+                TARGET_CPU_FEATURE_X86_AVX |
+                TARGET_CPU_FEATURE_X86_AVX2 |
+                TARGET_CPU_FEATURE_X86_AVX512F |
+                TARGET_CPU_FEATURE_X86_AVX512VL :
+            TARGET_CPU_FEATURE_AARCH64_NEON,
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CodegenAbiSignature
+codegen_classify_signature_for_target(
+    Arena* arena,
+    AnalysisResult* analysis,
+    AnalysisTypeId function_type_id,
+    Target target)
+{
+    return codegen_classify_signature_with_arguments(
+        arena,
+        analysis,
+        function_type_id,
+        0,
+        0,
+        target);
+}
+
 CodegenAbiSignature codegen_classify_signature(
     Arena* arena,
     AnalysisResult* analysis,
@@ -285,7 +377,7 @@ CodegenAbiSignature codegen_classify_signature(
         function_type_id,
         0,
         0,
-        abi);
+        codegen_target_for_abi(abi));
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_emit_u8(
@@ -355,6 +447,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_type_is_indirect_value(
     AnalysisType* type)
 {
     return type->kind == ANALYSIS_TYPE_ARRAY ||
+        type->kind == ANALYSIS_TYPE_VECTOR ||
         type->kind == ANALYSIS_TYPE_INFERRED_ARRAY ||
         type->kind == ANALYSIS_TYPE_STRUCT ||
         type->kind == ANALYSIS_TYPE_UNION;
@@ -443,11 +536,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_register_type_eligible(
 }
 
 BUSTER_GLOBAL_LOCAL CodegenRegisterAllocation
-codegen_allocate_scalar_registers(
+codegen_allocate_registers(
     Arena* arena,
     AnalysisResult* analysis,
     IrFunction* function,
-    u32 register_count)
+    u32 register_count,
+    bool vectors)
 {
     CodegenRegisterAllocation result = {
         .registers = arena_allocate(
@@ -518,9 +612,17 @@ codegen_allocate_scalar_registers(
             AnalysisType* type = analysis_type_from_id(
                 analysis,
                 value->type);
+            bool eligible_type = vectors ?
+                type->kind == ANALYSIS_TYPE_VECTOR &&
+                    type->layout.size <= 16 :
+                codegen_register_type_eligible(type);
+            bool eligible_instruction = !vectors ||
+                instruction->opcode == IR_OPCODE_UNARY ||
+                instruction->opcode == IR_OPCODE_BINARY;
             candidates[value_id.value] =
                 value->category == IR_VALUE_VALUE &&
-                codegen_register_type_eligible(type);
+                eligible_type &&
+                eligible_instruction;
             eligible[value_id.value] =
                 candidates[value_id.value];
             starts[value_id.value] = id.value;
@@ -1055,8 +1157,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_collection_component(
     if (base_value->category == IR_VALUE_PLACE)
     {
         if (base_type->kind == ANALYSIS_TYPE_ARRAY ||
+            base_type->kind == ANALYSIS_TYPE_VECTOR ||
             base_type->kind == ANALYSIS_TYPE_INFERRED_ARRAY)
         {
+            bool vector = base_type->kind == ANALYSIS_TYPE_VECTOR;
             if (component == 0)
             {
                 x64_emit_load(
@@ -1069,13 +1173,17 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_collection_component(
                 x64_emit_constant_register(
                     builder,
                     target,
-                    base_type->as.array.count);
+                    vector ?
+                        base_type->as.vector.count :
+                        base_type->as.array.count);
             }
             else if (component == 2)
             {
                 AnalysisType* element = analysis_type_from_id(
                     builder->analysis,
-                    base_type->as.array.element_type);
+                    vector ?
+                        base_type->as.vector.element_type :
+                        base_type->as.array.element_type);
                 x64_emit_constant_register(
                     builder,
                     target,
@@ -1186,6 +1294,58 @@ BUSTER_GLOBAL_LOCAL void x64_emit_initialize_aggregate_result(
         x64_value_displacement_component(value, 0));
 }
 
+BUSTER_GLOBAL_LOCAL bool x64_emit_vector_abi_move(
+    X64Builder* builder,
+    bool store,
+    u32 vector_register,
+    X64Register base,
+    u32 offset,
+    u32 size)
+{
+    if (vector_register >= 8 ||
+        base >= X64_REGISTER_R8 ||
+        size > target_vector_register_size(builder->target) ||
+        (size != 8 && size != 16 &&
+            size != 32 && size != 64))
+    {
+        return false;
+    }
+    if (size == 64)
+    {
+        codegen_emit_u8(&builder->buffer, 0x62);
+        codegen_emit_u8(&builder->buffer, 0xf1);
+        codegen_emit_u8(&builder->buffer, 0x7c);
+        codegen_emit_u8(&builder->buffer, 0x48);
+    }
+    else if (size == 32)
+    {
+        codegen_emit_u8(&builder->buffer, 0xc5);
+        codegen_emit_u8(&builder->buffer, 0xfc);
+    }
+    else
+    {
+        if (size == 8)
+        {
+            codegen_emit_u8(
+                &builder->buffer,
+                store ? 0x66 : 0xf3);
+        }
+        codegen_emit_u8(&builder->buffer, 0x0f);
+    }
+    codegen_emit_u8(
+        &builder->buffer,
+        size == 8 ?
+            (store ? 0xd6 : 0x7e) :
+            (store ? 0x11 : 0x10));
+    codegen_emit_u8(
+        &builder->buffer,
+        (u8)(0x80 |
+            ((vector_register & 7) << 3) |
+            (base & 7)));
+    codegen_emit_u32(&builder->buffer, offset);
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL void x64_emit_load_abi_part(
     X64Builder* builder,
     IrValueId value,
@@ -1196,6 +1356,29 @@ BUSTER_GLOBAL_LOCAL void x64_emit_load_abi_part(
 {
     if (codegen_type_is_indirect_value(type))
     {
+        if (type->kind == ANALYSIS_TYPE_VECTOR &&
+            part->kind ==
+                CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+        {
+            x64_emit_load(
+                builder,
+                X64_REGISTER_RAX,
+                x64_value_displacement_component(
+                    value,
+                    0));
+            if (!x64_emit_vector_abi_move(
+                    builder,
+                    false,
+                    float_target,
+                    X64_REGISTER_RAX,
+                    part->value_offset,
+                    part->size))
+            {
+                builder->buffer.error =
+                    CODEGEN_ERROR_UNSUPPORTED_ABI;
+            }
+            return;
+        }
         x64_emit_load(
             builder,
             X64_REGISTER_R11,
@@ -1356,6 +1539,29 @@ BUSTER_GLOBAL_LOCAL void x64_emit_store_abi_part(
 {
     if (codegen_type_is_indirect_value(type))
     {
+        if (type->kind == ANALYSIS_TYPE_VECTOR &&
+            part->kind ==
+                CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+        {
+            x64_emit_load(
+                builder,
+                X64_REGISTER_RAX,
+                x64_value_displacement_component(
+                    value,
+                    0));
+            if (!x64_emit_vector_abi_move(
+                    builder,
+                    true,
+                    float_source,
+                    X64_REGISTER_RAX,
+                    part->value_offset,
+                    part->size))
+            {
+                builder->buffer.error =
+                    CODEGEN_ERROR_UNSUPPORTED_ABI;
+            }
+            return;
+        }
         x64_emit_load(
             builder,
             X64_REGISTER_R11,
@@ -1956,6 +2162,653 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_float_binary(
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL void x64_emit_vector_memory_operation(
+    X64Builder* builder,
+    u8 prefix,
+    u8 opcode,
+    u32 vector_register,
+    X64Register base)
+{
+    if (prefix)
+    {
+        codegen_emit_u8(&builder->buffer, prefix);
+    }
+    if (vector_register >= 8 || base >= X64_REGISTER_R8)
+    {
+        codegen_emit_u8(
+            &builder->buffer,
+            (u8)(0x40 |
+                (vector_register >= 8 ? 0x04 : 0) |
+                (base >= X64_REGISTER_R8 ? 0x01 : 0)));
+    }
+    codegen_emit_u8(&builder->buffer, 0x0f);
+    codegen_emit_u8(&builder->buffer, opcode);
+    codegen_emit_u8(
+        &builder->buffer,
+        (u8)(((vector_register & 7) << 3) | (base & 7)));
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_vector_native_memory(
+    X64Builder* builder,
+    bool store,
+    u32 size,
+    X64Register base)
+{
+    if (size == 64)
+    {
+        codegen_emit_u8(&builder->buffer, 0x62);
+        codegen_emit_u8(&builder->buffer, 0xf1);
+        codegen_emit_u8(&builder->buffer, 0x7c);
+        codegen_emit_u8(&builder->buffer, 0x48);
+    }
+    else
+    {
+        codegen_emit_u8(&builder->buffer, 0xc5);
+        codegen_emit_u8(&builder->buffer, 0xfc);
+    }
+    codegen_emit_u8(
+        &builder->buffer,
+        store ? 0x11 : 0x10);
+    codegen_emit_u8(
+        &builder->buffer,
+        (u8)(base & 7));
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_vector_native_binary_operation(
+    X64Builder* builder,
+    u8 prefix,
+    u8 opcode,
+    u32 size,
+    X64Register base)
+{
+    u8 packed_prefix = prefix == 0x66 ? 1 : 0;
+    if (size == 64)
+    {
+        codegen_emit_u8(&builder->buffer, 0x62);
+        codegen_emit_u8(&builder->buffer, 0xf1);
+        codegen_emit_u8(
+            &builder->buffer,
+            (u8)(0x7c | packed_prefix));
+        codegen_emit_u8(&builder->buffer, 0x48);
+    }
+    else
+    {
+        codegen_emit_u8(&builder->buffer, 0xc5);
+        codegen_emit_u8(
+            &builder->buffer,
+            (u8)(0xfc | packed_prefix));
+    }
+    codegen_emit_u8(&builder->buffer, opcode);
+    codegen_emit_u8(
+        &builder->buffer,
+        (u8)(base & 7));
+}
+
+BUSTER_GLOBAL_LOCAL bool x64_vector_comparison_condition(
+    IrBinaryOperation operation,
+    u8* condition_out,
+    bool* ordered_out,
+    bool* unordered_out)
+{
+    u8 condition = 0;
+    bool ordered = false;
+    bool unordered = false;
+    switch (operation)
+    {
+        case IR_BINARY_VECTOR_INTEGER_EQUAL:
+        case IR_BINARY_VECTOR_FLOAT_EQUAL:
+            condition = 0x94;
+            ordered = operation ==
+                IR_BINARY_VECTOR_FLOAT_EQUAL;
+            break;
+        case IR_BINARY_VECTOR_INTEGER_NOT_EQUAL:
+        case IR_BINARY_VECTOR_FLOAT_NOT_EQUAL:
+            condition = 0x95;
+            unordered = operation ==
+                IR_BINARY_VECTOR_FLOAT_NOT_EQUAL;
+            break;
+        case IR_BINARY_VECTOR_SIGNED_LESS:
+            condition = 0x9c;
+            break;
+        case IR_BINARY_VECTOR_SIGNED_LESS_EQUAL:
+            condition = 0x9e;
+            break;
+        case IR_BINARY_VECTOR_SIGNED_GREATER:
+            condition = 0x9f;
+            break;
+        case IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL:
+            condition = 0x9d;
+            break;
+        case IR_BINARY_VECTOR_UNSIGNED_LESS:
+        case IR_BINARY_VECTOR_FLOAT_LESS:
+            condition = 0x92;
+            ordered = operation ==
+                IR_BINARY_VECTOR_FLOAT_LESS;
+            break;
+        case IR_BINARY_VECTOR_UNSIGNED_LESS_EQUAL:
+        case IR_BINARY_VECTOR_FLOAT_LESS_EQUAL:
+            condition = 0x96;
+            ordered = operation ==
+                IR_BINARY_VECTOR_FLOAT_LESS_EQUAL;
+            break;
+        case IR_BINARY_VECTOR_UNSIGNED_GREATER:
+        case IR_BINARY_VECTOR_FLOAT_GREATER:
+            condition = 0x97;
+            break;
+        case IR_BINARY_VECTOR_UNSIGNED_GREATER_EQUAL:
+        case IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL:
+            condition = 0x93;
+            break;
+        default:
+            return false;
+    }
+    *condition_out = condition;
+    *ordered_out = ordered;
+    *unordered_out = unordered;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool x64_emit_vector_comparison(
+    X64Builder* builder,
+    IrInstruction* instruction,
+    AnalysisType* vector,
+    AnalysisType* element)
+{
+    u8 condition = 0;
+    bool ordered = false;
+    bool unordered = false;
+    if (!x64_vector_comparison_condition(
+            instruction->binary_operation,
+            &condition,
+            &ordered,
+            &unordered))
+    {
+        return false;
+    }
+    u32 width = element->kind == ANALYSIS_TYPE_FLOAT ?
+        element->as.float_bit_width :
+        element->kind == ANALYSIS_TYPE_INTEGER ?
+            element->as.integer.bit_width : 0;
+    u32 lane_size = width / 8;
+    if (!lane_size)
+    {
+        return false;
+    }
+    x64_emit_initialize_aggregate_result(
+        builder,
+        instruction->result);
+    x64_emit_load(
+        builder,
+        X64_REGISTER_R8,
+        x64_value_displacement_component(
+            instruction->operands[0],
+            0));
+    x64_emit_load(
+        builder,
+        X64_REGISTER_R9,
+        x64_value_displacement_component(
+            instruction->operands[1],
+            0));
+    x64_emit_load(
+        builder,
+        X64_REGISTER_R10,
+        x64_value_displacement_component(
+            instruction->result,
+            0));
+    for (u32 lane = 0;
+        lane < vector->as.vector.count;
+        lane += 1)
+    {
+        u32 offset = lane * lane_size;
+        if (element->kind == ANALYSIS_TYPE_FLOAT)
+        {
+            x64_emit_load_float_bits(
+                builder,
+                0,
+                X64_REGISTER_R8,
+                offset,
+                lane_size);
+            x64_emit_load_float_bits(
+                builder,
+                1,
+                X64_REGISTER_R9,
+                offset,
+                lane_size);
+            if (width == 64)
+            {
+                codegen_emit_u8(
+                    &builder->buffer,
+                    0x66);
+            }
+            codegen_emit_u8(&builder->buffer, 0x0f);
+            codegen_emit_u8(&builder->buffer, 0x2e);
+            codegen_emit_u8(&builder->buffer, 0xc1);
+        }
+        else
+        {
+            x64_emit_load_memory(
+                builder,
+                X64_REGISTER_RAX,
+                X64_REGISTER_R8,
+                offset,
+                lane_size);
+            x64_emit_load_memory(
+                builder,
+                X64_REGISTER_RCX,
+                X64_REGISTER_R9,
+                offset,
+                lane_size);
+            if (lane_size == 2)
+            {
+                codegen_emit_u8(
+                    &builder->buffer,
+                    0x66);
+            }
+            if (lane_size == 8)
+            {
+                codegen_emit_u8(
+                    &builder->buffer,
+                    0x48);
+            }
+            codegen_emit_u8(
+                &builder->buffer,
+                lane_size == 1 ? 0x38 : 0x39);
+            codegen_emit_u8(&builder->buffer, 0xc8);
+        }
+        codegen_emit_u8(&builder->buffer, 0x0f);
+        codegen_emit_u8(&builder->buffer, condition);
+        codegen_emit_u8(&builder->buffer, 0xc0);
+        if (ordered || unordered)
+        {
+            codegen_emit_u8(&builder->buffer, 0x0f);
+            codegen_emit_u8(
+                &builder->buffer,
+                unordered ? 0x9a : 0x9b);
+            codegen_emit_u8(&builder->buffer, 0xc2);
+            codegen_emit_u8(
+                &builder->buffer,
+                unordered ? 0x08 : 0x20);
+            codegen_emit_u8(&builder->buffer, 0xd0);
+        }
+        codegen_emit_u8(&builder->buffer, 0x0f);
+        codegen_emit_u8(&builder->buffer, 0xb6);
+        codegen_emit_u8(&builder->buffer, 0xc0);
+        codegen_emit_u8(&builder->buffer, 0x48);
+        codegen_emit_u8(&builder->buffer, 0xf7);
+        codegen_emit_u8(&builder->buffer, 0xd8);
+        x64_emit_store_memory(
+            builder,
+            X64_REGISTER_R10,
+            offset,
+            X64_REGISTER_RAX,
+            lane_size);
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool x64_emit_vector_binary(
+    X64Builder* builder,
+    IrInstruction* instruction)
+{
+    AnalysisType* vector = analysis_type_from_id(
+        builder->analysis,
+        builder->function->values[
+            instruction->operands[0].value].type);
+    if (vector->kind != ANALYSIS_TYPE_VECTOR)
+    {
+        return false;
+    }
+    AnalysisType* element = analysis_type_from_id(
+        builder->analysis,
+        vector->as.vector.element_type);
+    if (instruction->binary_operation >=
+            IR_BINARY_VECTOR_INTEGER_EQUAL &&
+        instruction->binary_operation <=
+            IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL)
+    {
+        return x64_emit_vector_comparison(
+            builder,
+            instruction,
+            vector,
+            element);
+    }
+    u32 width = element->kind == ANALYSIS_TYPE_FLOAT ?
+        element->as.float_bit_width :
+        element->kind == ANALYSIS_TYPE_INTEGER ?
+            element->as.integer.bit_width : 0;
+    if (!width || vector->layout.size > 64)
+    {
+        return false;
+    }
+    u8 opcode = 0;
+    u8 prefix = 0;
+    switch (instruction->binary_operation)
+    {
+        case IR_BINARY_VECTOR_FLOAT_ADD: opcode = 0x58; break;
+        case IR_BINARY_VECTOR_FLOAT_SUBTRACT: opcode = 0x5c; break;
+        case IR_BINARY_VECTOR_FLOAT_MULTIPLY: opcode = 0x59; break;
+        case IR_BINARY_VECTOR_FLOAT_DIVIDE: opcode = 0x5e; break;
+        case IR_BINARY_VECTOR_INTEGER_ADD:
+        {
+            prefix = 0x66;
+            opcode = width == 8 ? 0xfc :
+                width == 16 ? 0xfd :
+                width == 32 ? 0xfe :
+                width == 64 ? 0xd4 : 0;
+        } break;
+        case IR_BINARY_VECTOR_INTEGER_SUBTRACT:
+        {
+            prefix = 0x66;
+            opcode = width == 8 ? 0xf8 :
+                width == 16 ? 0xf9 :
+                width == 32 ? 0xfa :
+                width == 64 ? 0xfb : 0;
+        } break;
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_AND:
+            prefix = 0x66;
+            opcode = 0xdb;
+            break;
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_OR:
+            prefix = 0x66;
+            opcode = 0xeb;
+            break;
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_XOR:
+            prefix = 0x66;
+            opcode = 0xef;
+            break;
+        default: return false;
+    }
+    if (!opcode)
+    {
+        return false;
+    }
+    if (element->kind == ANALYSIS_TYPE_FLOAT &&
+        width == 64)
+    {
+        prefix = 0x66;
+    }
+    x64_emit_initialize_aggregate_result(
+        builder,
+        instruction->result);
+    x64_emit_load(
+        builder,
+        X64_REGISTER_RAX,
+        x64_value_displacement_component(
+            instruction->operands[0],
+            0));
+    x64_emit_load(
+        builder,
+        X64_REGISTER_RCX,
+        x64_value_displacement_component(
+            instruction->operands[1],
+            0));
+    x64_emit_load(
+        builder,
+        X64_REGISTER_RDX,
+        x64_value_displacement_component(
+            instruction->result,
+            0));
+    bool native_width =
+        vector->layout.size > 16 &&
+        vector->layout.size <=
+            target_vector_register_size(builder->target);
+    bool integer_operation =
+        element->kind == ANALYSIS_TYPE_INTEGER;
+    if (native_width && integer_operation &&
+        vector->layout.size == 32 &&
+        !target_cpu_feature_has(
+            builder->target,
+            TARGET_CPU_FEATURE_X86_AVX2))
+    {
+        native_width = false;
+    }
+    if (native_width)
+    {
+        builder->native_vector_operation_count += 1;
+        x64_emit_vector_native_memory(
+            builder,
+            false,
+            (u32)vector->layout.size,
+            X64_REGISTER_RAX);
+        x64_emit_vector_native_binary_operation(
+            builder,
+            prefix,
+            opcode,
+            (u32)vector->layout.size,
+            X64_REGISTER_RCX);
+        x64_emit_vector_native_memory(
+            builder,
+            true,
+            (u32)vector->layout.size,
+            X64_REGISTER_RDX);
+        return true;
+    }
+    u32 chunk_count = (u32)((vector->layout.size + 15) / 16);
+    if (vector->layout.size > 16)
+    {
+        builder->split_vector_operation_count += 1;
+    }
+    for (u32 chunk = 0; chunk < chunk_count; chunk += 1)
+    {
+        u32 offset = chunk * 16;
+        u32 target_register = 0;
+        if (vector->layout.size <= 16 &&
+            builder->vector_registers[
+                instruction->result.value] !=
+                    CODEGEN_REGISTER_UNALLOCATED)
+        {
+            target_register = 3 +
+                builder->vector_registers[
+                    instruction->result.value];
+        }
+        u8 load_prefix =
+            vector->layout.size - offset < 16 ?
+                0xf3 : 0;
+        u8 load_opcode =
+            vector->layout.size - offset < 16 ?
+                0x7e : 0x10;
+        x64_emit_vector_memory_operation(
+            builder,
+            load_prefix,
+            load_opcode,
+            target_register,
+            X64_REGISTER_RAX);
+        x64_emit_vector_memory_operation(
+            builder,
+            prefix,
+            opcode,
+            target_register,
+            X64_REGISTER_RCX);
+        u8 store_prefix =
+            vector->layout.size - offset < 16 ?
+                0x66 : 0;
+        u8 store_opcode =
+            vector->layout.size - offset < 16 ?
+                0xd6 : 0x11;
+        x64_emit_vector_memory_operation(
+            builder,
+            store_prefix,
+            store_opcode,
+            target_register,
+            X64_REGISTER_RDX);
+        if (chunk + 1 < chunk_count)
+        {
+            codegen_emit_u8(&builder->buffer, 0x48);
+            codegen_emit_u8(&builder->buffer, 0x83);
+            codegen_emit_u8(&builder->buffer, 0xc0);
+            codegen_emit_u8(&builder->buffer, 16);
+            codegen_emit_u8(&builder->buffer, 0x48);
+            codegen_emit_u8(&builder->buffer, 0x83);
+            codegen_emit_u8(&builder->buffer, 0xc1);
+            codegen_emit_u8(&builder->buffer, 16);
+            codegen_emit_u8(&builder->buffer, 0x48);
+            codegen_emit_u8(&builder->buffer, 0x83);
+            codegen_emit_u8(&builder->buffer, 0xc2);
+            codegen_emit_u8(&builder->buffer, 16);
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool x64_emit_vector_unary(
+    X64Builder* builder,
+    IrInstruction* instruction)
+{
+    AnalysisType* vector = analysis_type_from_id(
+        builder->analysis,
+        instruction->type);
+    AnalysisType* element = vector->kind ==
+            ANALYSIS_TYPE_VECTOR ?
+        analysis_type_from_id(
+            builder->analysis,
+            vector->as.vector.element_type) :
+        0;
+    u32 width = element &&
+            element->kind == ANALYSIS_TYPE_FLOAT ?
+        element->as.float_bit_width :
+        element &&
+            element->kind == ANALYSIS_TYPE_INTEGER ?
+        element->as.integer.bit_width : 0;
+    if (!width || vector->layout.size > 64)
+    {
+        return false;
+    }
+    x64_emit_initialize_aggregate_result(
+        builder,
+        instruction->result);
+    x64_emit_load(
+        builder,
+        X64_REGISTER_RAX,
+        x64_value_displacement_component(
+            instruction->operands[0],
+            0));
+    x64_emit_load(
+        builder,
+        X64_REGISTER_RDX,
+        x64_value_displacement_component(
+            instruction->result,
+            0));
+    u32 chunk_count =
+        (u32)((vector->layout.size + 15) / 16);
+    for (u32 chunk = 0;
+        chunk < chunk_count;
+        chunk += 1)
+    {
+        u32 target = 0;
+        if (vector->layout.size <= 16 &&
+            builder->vector_registers[
+                instruction->result.value] !=
+                    CODEGEN_REGISTER_UNALLOCATED)
+        {
+            target = 3 +
+                builder->vector_registers[
+                    instruction->result.value];
+        }
+        bool short_chunk =
+            vector->layout.size - chunk * 16 < 16;
+        x64_emit_vector_memory_operation(
+            builder,
+            short_chunk ? 0xf3 : 0,
+            short_chunk ? 0x7e : 0x10,
+            target,
+            X64_REGISTER_RAX);
+        if (instruction->unary_operation ==
+            IR_UNARY_VECTOR_FLOAT_NEGATE)
+        {
+            if (width != 32 && width != 64)
+            {
+                return false;
+            }
+            codegen_emit_u8(&builder->buffer, 0x66);
+            codegen_emit_u8(&builder->buffer, 0x0f);
+            codegen_emit_u8(&builder->buffer, 0x76);
+            codegen_emit_u8(&builder->buffer, 0xc9);
+            codegen_emit_u8(&builder->buffer, 0x66);
+            codegen_emit_u8(&builder->buffer, 0x0f);
+            codegen_emit_u8(
+                &builder->buffer,
+                width == 32 ? 0x72 : 0x73);
+            codegen_emit_u8(&builder->buffer, 0xf1);
+            codegen_emit_u8(
+                &builder->buffer,
+                width == 32 ? 31 : 63);
+            if (width == 64)
+            {
+                codegen_emit_u8(&builder->buffer, 0x66);
+            }
+            codegen_emit_u8(&builder->buffer, 0x0f);
+            codegen_emit_u8(&builder->buffer, 0x57);
+            codegen_emit_u8(
+                &builder->buffer,
+                (u8)(0xc1 | (target << 3)));
+        }
+        else if (instruction->unary_operation ==
+            IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)
+        {
+            codegen_emit_u8(&builder->buffer, 0x66);
+            codegen_emit_u8(&builder->buffer, 0x0f);
+            codegen_emit_u8(&builder->buffer, 0x76);
+            codegen_emit_u8(&builder->buffer, 0xc9);
+            codegen_emit_u8(&builder->buffer, 0x66);
+            codegen_emit_u8(&builder->buffer, 0x0f);
+            codegen_emit_u8(&builder->buffer, 0xef);
+            codegen_emit_u8(
+                &builder->buffer,
+                (u8)(0xc1 | (target << 3)));
+        }
+        else if (instruction->unary_operation ==
+            IR_UNARY_VECTOR_INTEGER_NEGATE)
+        {
+            u8 subtract = width == 8 ? 0xf8 :
+                width == 16 ? 0xf9 :
+                width == 32 ? 0xfa :
+                width == 64 ? 0xfb : 0;
+            if (!subtract)
+            {
+                return false;
+            }
+            codegen_emit_u8(&builder->buffer, 0x66);
+            codegen_emit_u8(&builder->buffer, 0x0f);
+            codegen_emit_u8(&builder->buffer, 0xef);
+            codegen_emit_u8(&builder->buffer, 0xc9);
+            codegen_emit_u8(&builder->buffer, 0x66);
+            codegen_emit_u8(&builder->buffer, 0x0f);
+            codegen_emit_u8(&builder->buffer, subtract);
+            codegen_emit_u8(
+                &builder->buffer,
+                (u8)(0xc8 | target));
+            codegen_emit_u8(&builder->buffer, 0x66);
+            codegen_emit_u8(&builder->buffer, 0x0f);
+            codegen_emit_u8(&builder->buffer, 0x6f);
+            codegen_emit_u8(
+                &builder->buffer,
+                (u8)(0xc1 | (target << 3)));
+        }
+        else
+        {
+            return false;
+        }
+        x64_emit_vector_memory_operation(
+            builder,
+            short_chunk ? 0x66 : 0,
+            short_chunk ? 0xd6 : 0x11,
+            target,
+            X64_REGISTER_RDX);
+        if (chunk + 1 < chunk_count)
+        {
+            codegen_emit_u8(&builder->buffer, 0x48);
+            codegen_emit_u8(&builder->buffer, 0x83);
+            codegen_emit_u8(&builder->buffer, 0xc0);
+            codegen_emit_u8(&builder->buffer, 16);
+            codegen_emit_u8(&builder->buffer, 0x48);
+            codegen_emit_u8(&builder->buffer, 0x83);
+            codegen_emit_u8(&builder->buffer, 0xc2);
+            codegen_emit_u8(&builder->buffer, 16);
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_binary_is_float(
     IrBinaryOperation operation)
 {
@@ -2102,11 +2955,11 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                 builder->analysis,
                 instruction->type);
             CodegenAbiSignature signature =
-                codegen_classify_signature(
+                codegen_classify_signature_for_target(
                     builder->arena,
                     builder->analysis,
                     builder->function->type,
-                    builder->abi);
+                    builder->target);
             if (argument >= signature.argument_count)
             {
                 return false;
@@ -2327,6 +3180,17 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
         } break;
         case IR_OPCODE_UNARY:
         {
+            AnalysisType* unary_type =
+                analysis_type_from_id(
+                    builder->analysis,
+                    instruction->type);
+            if (unary_type->kind ==
+                ANALYSIS_TYPE_VECTOR)
+            {
+                return x64_emit_vector_unary(
+                    builder,
+                    instruction);
+            }
             x64_emit_load_value(
                 builder,
                 X64_REGISTER_RAX,
@@ -2377,6 +3241,15 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
         } break;
         case IR_OPCODE_BINARY:
         {
+            AnalysisType* result_type = analysis_type_from_id(
+                builder->analysis,
+                instruction->type);
+            if (result_type->kind == ANALYSIS_TYPE_VECTOR)
+            {
+                return x64_emit_vector_binary(
+                    builder,
+                    instruction);
+            }
             if (codegen_binary_is_float(
                     instruction->binary_operation))
             {
@@ -2429,7 +3302,7 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                     function_type->as.function.is_variadic ?
                         call_argument_types : 0,
                     call_argument_count,
-                    builder->abi);
+                    builder->target);
             if (!signature.valid)
             {
                 return false;
@@ -2668,9 +3541,7 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                         operand_type->as.float_bit_width);
                     if (builder->abi ==
                             CODEGEN_ABI_X86_64_WINDOWS &&
-                        function_type->as.function.is_variadic &&
-                        index >=
-                            function_type->as.function.argument_count)
+                        function_type->as.function.is_variadic)
                     {
                         x64_emit_load_value(
                             builder,
@@ -3023,6 +3894,8 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             AnalysisTypeId element_type_id =
                 type->kind == ANALYSIS_TYPE_ARRAY ?
                     type->as.array.element_type :
+                type->kind == ANALYSIS_TYPE_VECTOR ?
+                    type->as.vector.element_type :
                     type->as.element_type;
             AnalysisType* element_type = analysis_type_from_id(
                 builder->analysis,
@@ -3400,14 +4273,326 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                     builder->analysis,
                     instruction->type);
             u32 size = codegen_type_storage_size(type);
-            if (!size || size > 8 ||
-                (type->kind != ANALYSIS_TYPE_INTEGER &&
-                 type->kind != ANALYSIS_TYPE_FLOAT &&
-                 type->kind != ANALYSIS_TYPE_BOOL &&
-                 type->kind != ANALYSIS_TYPE_POINTER &&
-                 type->kind != ANALYSIS_TYPE_ENUM))
+            bool aggregate = codegen_type_is_indirect_value(type);
+            bool scalar =
+                type->kind == ANALYSIS_TYPE_INTEGER ||
+                type->kind == ANALYSIS_TYPE_FLOAT ||
+                type->kind == ANALYSIS_TYPE_BOOL ||
+                type->kind == ANALYSIS_TYPE_POINTER ||
+                type->kind == ANALYSIS_TYPE_ENUM;
+            if (!size ||
+                (!aggregate && (!scalar || size > 8)))
             {
                 return false;
+            }
+            AnalysisAbiValue abi_value =
+                analysis_abi_value_classify(
+                    builder->arena,
+                    builder->analysis,
+                    instruction->type,
+                    codegen_analysis_abi_convention(
+                        builder->abi),
+                    false);
+            if (!abi_value.part_count)
+            {
+                return false;
+            }
+            if (aggregate)
+            {
+                x64_emit_initialize_aggregate_result(
+                    builder,
+                    instruction->result);
+                x64_emit_load_value(
+                    builder,
+                    X64_REGISTER_RAX,
+                    instruction->operands[0]);
+                if (builder->abi ==
+                    CODEGEN_ABI_X86_64_WINDOWS)
+                {
+                    x64_emit_load_memory(
+                        builder,
+                        X64_REGISTER_RDX,
+                        X64_REGISTER_RAX,
+                        0,
+                        8);
+                    codegen_emit_u8(&builder->buffer, 0x48);
+                    codegen_emit_u8(&builder->buffer, 0x83);
+                    codegen_emit_u8(&builder->buffer, 0xc2);
+                    codegen_emit_u8(&builder->buffer, 8);
+                    x64_emit_store_memory(
+                        builder,
+                        X64_REGISTER_RAX,
+                        0,
+                        X64_REGISTER_RDX,
+                        8);
+                    codegen_emit_u8(&builder->buffer, 0x48);
+                    codegen_emit_u8(&builder->buffer, 0x83);
+                    codegen_emit_u8(&builder->buffer, 0xea);
+                    codegen_emit_u8(&builder->buffer, 8);
+                    if (abi_value.indirect)
+                    {
+                        x64_emit_load_memory(
+                            builder,
+                            X64_REGISTER_RCX,
+                            X64_REGISTER_RDX,
+                            0,
+                            8);
+                    }
+                    else
+                    {
+                        x64_emit_move_register(
+                            builder,
+                            X64_REGISTER_RCX,
+                            X64_REGISTER_RDX);
+                    }
+                    x64_emit_load(
+                        builder,
+                        X64_REGISTER_RAX,
+                        x64_value_displacement_component(
+                            instruction->result,
+                            0));
+                    x64_emit_copy_memory(builder, size);
+                    break;
+                }
+
+                u32 integer_parts = 0;
+                u32 float_parts = 0;
+                bool register_value =
+                    abi_value.parts[0].location !=
+                        ANALYSIS_ABI_LOCATION_STACK;
+                for (u32 part = 0;
+                    part < abi_value.part_count;
+                    part += 1)
+                {
+                    if (abi_value.parts[part].abi_class ==
+                        ANALYSIS_ABI_CLASS_FLOAT)
+                    {
+                        float_parts += 1;
+                    }
+                    else if (abi_value.parts[part].abi_class ==
+                        ANALYSIS_ABI_CLASS_INTEGER ||
+                        abi_value.parts[part].abi_class ==
+                            ANALYSIS_ABI_CLASS_POINTER)
+                    {
+                        integer_parts += 1;
+                    }
+                    else
+                    {
+                        register_value = false;
+                    }
+                }
+                u32 overflow_patches[2] = {0};
+                u32 overflow_patch_count = 0;
+                if (register_value && integer_parts)
+                {
+                    x64_emit_load_memory(
+                        builder,
+                        X64_REGISTER_RCX,
+                        X64_REGISTER_RAX,
+                        0,
+                        4);
+                    codegen_emit_u8(&builder->buffer, 0x81);
+                    codegen_emit_u8(&builder->buffer, 0xf9);
+                    codegen_emit_u32(
+                        &builder->buffer,
+                        48 - integer_parts * 8);
+                    codegen_emit_u8(&builder->buffer, 0x0f);
+                    codegen_emit_u8(&builder->buffer, 0x87);
+                    overflow_patches[overflow_patch_count++] =
+                        (u32)builder->buffer.count;
+                    codegen_emit_u32(&builder->buffer, 0);
+                }
+                if (register_value && float_parts)
+                {
+                    x64_emit_load_memory(
+                        builder,
+                        X64_REGISTER_RCX,
+                        X64_REGISTER_RAX,
+                        4,
+                        4);
+                    codegen_emit_u8(&builder->buffer, 0x81);
+                    codegen_emit_u8(&builder->buffer, 0xf9);
+                    codegen_emit_u32(
+                        &builder->buffer,
+                        176 - float_parts * 16);
+                    codegen_emit_u8(&builder->buffer, 0x0f);
+                    codegen_emit_u8(&builder->buffer, 0x87);
+                    overflow_patches[overflow_patch_count++] =
+                        (u32)builder->buffer.count;
+                    codegen_emit_u32(&builder->buffer, 0);
+                }
+                if (register_value)
+                {
+                    for (u32 part = 0;
+                        part < abi_value.part_count;
+                        part += 1)
+                    {
+                        AnalysisAbiPart* abi_part =
+                            abi_value.parts + part;
+                        u32 offset =
+                            abi_part->abi_class ==
+                                    ANALYSIS_ABI_CLASS_FLOAT ?
+                                4 : 0;
+                        u32 increment =
+                            abi_part->abi_class ==
+                                    ANALYSIS_ABI_CLASS_FLOAT ?
+                                16 : 8;
+                        x64_emit_load_value(
+                            builder,
+                            X64_REGISTER_RAX,
+                            instruction->operands[0]);
+                        x64_emit_load_memory(
+                            builder,
+                            X64_REGISTER_RCX,
+                            X64_REGISTER_RAX,
+                            offset,
+                            4);
+                        x64_emit_load_memory(
+                            builder,
+                            X64_REGISTER_RDX,
+                            X64_REGISTER_RAX,
+                            16,
+                            8);
+                        codegen_emit_u8(
+                            &builder->buffer,
+                            0x48);
+                        codegen_emit_u8(
+                            &builder->buffer,
+                            0x01);
+                        codegen_emit_u8(
+                            &builder->buffer,
+                            0xca);
+                        x64_emit_load_memory(
+                            builder,
+                            X64_REGISTER_R8,
+                            X64_REGISTER_RDX,
+                            0,
+                            abi_part->size);
+                        x64_emit_load(
+                            builder,
+                            X64_REGISTER_R11,
+                            x64_value_displacement_component(
+                                instruction->result,
+                                0));
+                        x64_emit_store_memory(
+                            builder,
+                            X64_REGISTER_R11,
+                            abi_part->value_offset,
+                            X64_REGISTER_R8,
+                            abi_part->size);
+                        codegen_emit_u8(
+                            &builder->buffer,
+                            0x83);
+                        codegen_emit_u8(
+                            &builder->buffer,
+                            0x80);
+                        codegen_emit_u32(
+                            &builder->buffer,
+                            offset);
+                        codegen_emit_u8(
+                            &builder->buffer,
+                            (u8)increment);
+                    }
+                    codegen_emit_u8(&builder->buffer, 0xe9);
+                }
+                u32 end_patch = register_value ?
+                    (u32)builder->buffer.count : 0;
+                if (register_value)
+                {
+                    codegen_emit_u32(&builder->buffer, 0);
+                }
+                u32 overflow_offset =
+                    (u32)builder->buffer.count;
+                for (u32 patch = 0;
+                    patch < overflow_patch_count;
+                    patch += 1)
+                {
+                    s32 displacement = (s32)(
+                        overflow_offset -
+                        (overflow_patches[patch] + 4));
+                    memcpy(
+                        builder->buffer.bytes +
+                            overflow_patches[patch],
+                        &displacement,
+                        sizeof(displacement));
+                }
+                x64_emit_load_value(
+                    builder,
+                    X64_REGISTER_RAX,
+                    instruction->operands[0]);
+                x64_emit_load_memory(
+                    builder,
+                    X64_REGISTER_RDX,
+                    X64_REGISTER_RAX,
+                    8,
+                    8);
+                u32 alignment = (u32)BUSTER_MAX(
+                    type->layout.alignment,
+                    8);
+                if (alignment > 8)
+                {
+                    codegen_emit_u8(&builder->buffer, 0x48);
+                    codegen_emit_u8(&builder->buffer, 0x83);
+                    codegen_emit_u8(&builder->buffer, 0xc2);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        (u8)(alignment - 1));
+                    codegen_emit_u8(&builder->buffer, 0x48);
+                    codegen_emit_u8(&builder->buffer, 0x83);
+                    codegen_emit_u8(&builder->buffer, 0xe2);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        (u8)(0 - alignment));
+                }
+                x64_emit_move_register(
+                    builder,
+                    X64_REGISTER_RCX,
+                    X64_REGISTER_RDX);
+                u32 stack_size =
+                    codegen_align_u32(size, 8);
+                if (stack_size <= 127)
+                {
+                    codegen_emit_u8(&builder->buffer, 0x48);
+                    codegen_emit_u8(&builder->buffer, 0x83);
+                    codegen_emit_u8(&builder->buffer, 0xc2);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        (u8)stack_size);
+                }
+                else
+                {
+                    codegen_emit_u8(&builder->buffer, 0x48);
+                    codegen_emit_u8(&builder->buffer, 0x81);
+                    codegen_emit_u8(&builder->buffer, 0xc2);
+                    codegen_emit_u32(
+                        &builder->buffer,
+                        stack_size);
+                }
+                x64_emit_store_memory(
+                    builder,
+                    X64_REGISTER_RAX,
+                    8,
+                    X64_REGISTER_RDX,
+                    8);
+                x64_emit_load(
+                    builder,
+                    X64_REGISTER_RAX,
+                    x64_value_displacement_component(
+                        instruction->result,
+                        0));
+                x64_emit_copy_memory(builder, size);
+                if (register_value)
+                {
+                    u32 end_offset =
+                        (u32)builder->buffer.count;
+                    s32 displacement = (s32)(
+                        end_offset - (end_patch + 4));
+                    memcpy(
+                        builder->buffer.bytes + end_patch,
+                        &displacement,
+                        sizeof(displacement));
+                }
+                break;
             }
             x64_emit_load_value(
                 builder,
@@ -3448,9 +4633,9 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                     X64_REGISTER_RAX,
                     offset,
                     4);
-                codegen_emit_u8(&builder->buffer, 0x83);
+                codegen_emit_u8(&builder->buffer, 0x81);
                 codegen_emit_u8(&builder->buffer, 0xf9);
-                codegen_emit_u8(&builder->buffer, (u8)limit);
+                codegen_emit_u32(&builder->buffer, limit);
                 codegen_emit_u8(&builder->buffer, 0x0f);
                 codegen_emit_u8(&builder->buffer, 0x87);
                 u32 overflow_patch = (u32)builder->buffer.count;
@@ -4006,17 +5191,18 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
     Arena* arena,
     AnalysisResult* analysis,
     IrFunction* function,
-    CodegenAbi abi)
+    Target target)
 {
+    CodegenAbi abi = codegen_abi_for_target(target);
     CodegenFunction result = {
         .abi = abi,
     };
     CodegenAbiSignature signature =
-        codegen_classify_signature(
+        codegen_classify_signature_for_target(
             arena,
             analysis,
             function->type,
-            abi);
+            target);
     if (!signature.valid)
     {
         result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
@@ -4096,6 +5282,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
         }
         u32 size = codegen_type_storage_size(type);
         u32 alignment = BUSTER_MAX(type->layout.alignment, 1);
+        if (type->kind == ANALYSIS_TYPE_VECTOR)
+        {
+            alignment = BUSTER_MIN(alignment, 16);
+        }
         if (!size || alignment > 16)
         {
             result.error = CODEGEN_ERROR_CAPACITY;
@@ -4128,11 +5318,19 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
     u64 capacity = (u64)function->instruction_count * 256 +
         (u64)function->block_count * 128 + 128;
     CodegenRegisterAllocation allocation =
-        codegen_allocate_scalar_registers(
+        codegen_allocate_registers(
             arena,
             analysis,
             function,
-            1);
+            1,
+            false);
+    CodegenRegisterAllocation vector_allocation =
+        codegen_allocate_registers(
+            arena,
+            analysis,
+            function,
+            5,
+            true);
     X64Builder builder = {
         .arena = arena,
         .analysis = analysis,
@@ -4152,12 +5350,14 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
         .value_storage_offsets = value_storage_offsets,
         .local_storage_offsets = local_storage_offsets,
         .value_registers = allocation.registers,
+        .vector_registers = vector_allocation.registers,
         .hidden_result_displacement =
             hidden_result_displacement,
         .va_register_save_displacement =
             va_register_save_displacement,
         .signature = signature,
         .abi = abi,
+        .target = target,
     };
     codegen_emit_u8(&builder.buffer, 0x55);
     codegen_emit_u8(&builder.buffer, 0x48);
@@ -4286,9 +5486,15 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
     result.first_call_relocation =
         builder.first_call_relocation;
     result.register_value_count =
-        allocation.allocated_count;
+        allocation.allocated_count +
+        vector_allocation.allocated_count;
     result.spilled_value_count =
-        allocation.spilled_count;
+        allocation.spilled_count +
+        vector_allocation.spilled_count;
+    result.native_vector_operation_count =
+        builder.native_vector_operation_count;
+    result.split_vector_operation_count =
+        builder.split_vector_operation_count;
     return result;
 }
 
@@ -4738,6 +5944,248 @@ BUSTER_GLOBAL_LOCAL void a64_emit_initialize_aggregate_result(
     a64_emit_store_value_component(buffer, 0, value, 0);
 }
 
+BUSTER_GLOBAL_LOCAL bool a64_emit_vector_binary(
+    CodegenBuffer* buffer,
+    AnalysisResult* analysis,
+    Target target,
+    AnalysisTypeId operand_type_id,
+    u32* value_storage_offsets,
+    u8* vector_registers,
+    IrInstruction* instruction)
+{
+    if (!target_cpu_feature_has(
+            target,
+            TARGET_CPU_FEATURE_AARCH64_NEON))
+    {
+        return false;
+    }
+    AnalysisType* vector = analysis_type_from_id(
+        analysis,
+        operand_type_id);
+    if (vector->kind != ANALYSIS_TYPE_VECTOR ||
+        (vector->layout.size != 8 &&
+            vector->layout.size != 16 &&
+            vector->layout.size != 32 &&
+            vector->layout.size != 64))
+    {
+        return false;
+    }
+    AnalysisType* element = analysis_type_from_id(
+        analysis,
+        vector->as.vector.element_type);
+    u32 width = element->kind == ANALYSIS_TYPE_FLOAT ?
+        element->as.float_bit_width :
+        element->kind == ANALYSIS_TYPE_INTEGER ?
+            element->as.integer.bit_width : 0;
+    if (!width)
+    {
+        return false;
+    }
+    u32 operation = 0;
+    bool lane_sized = true;
+    bool comparison = false;
+    bool swap_operands = false;
+    bool invert_result = false;
+    switch (instruction->binary_operation)
+    {
+        case IR_BINARY_VECTOR_FLOAT_ADD: operation = 0x0e20d400; break;
+        case IR_BINARY_VECTOR_FLOAT_SUBTRACT: operation = 0x0ea0d400; break;
+        case IR_BINARY_VECTOR_FLOAT_MULTIPLY: operation = 0x2e20dc00; break;
+        case IR_BINARY_VECTOR_FLOAT_DIVIDE: operation = 0x2e20fc00; break;
+        case IR_BINARY_VECTOR_INTEGER_ADD: operation = 0x0e208400; break;
+        case IR_BINARY_VECTOR_INTEGER_SUBTRACT: operation = 0x2e208400; break;
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_AND:
+            operation = 0x0e201c00;
+            lane_sized = false;
+            break;
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_OR:
+            operation = 0x0ea01c00;
+            lane_sized = false;
+            break;
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_XOR:
+            operation = 0x2e201c00;
+            lane_sized = false;
+            break;
+        case IR_BINARY_VECTOR_INTEGER_EQUAL:
+            operation = 0x2e208c00;
+            comparison = true;
+            break;
+        case IR_BINARY_VECTOR_INTEGER_NOT_EQUAL:
+            operation = 0x2e208c00;
+            comparison = true;
+            invert_result = true;
+            break;
+        case IR_BINARY_VECTOR_SIGNED_LESS:
+            operation = 0x0e203400;
+            comparison = true;
+            swap_operands = true;
+            break;
+        case IR_BINARY_VECTOR_SIGNED_LESS_EQUAL:
+            operation = 0x0e203c00;
+            comparison = true;
+            swap_operands = true;
+            break;
+        case IR_BINARY_VECTOR_SIGNED_GREATER:
+            operation = 0x0e203400;
+            comparison = true;
+            break;
+        case IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL:
+            operation = 0x0e203c00;
+            comparison = true;
+            break;
+        case IR_BINARY_VECTOR_UNSIGNED_LESS:
+            operation = 0x2e203400;
+            comparison = true;
+            swap_operands = true;
+            break;
+        case IR_BINARY_VECTOR_UNSIGNED_LESS_EQUAL:
+            operation = 0x2e203c00;
+            comparison = true;
+            swap_operands = true;
+            break;
+        case IR_BINARY_VECTOR_UNSIGNED_GREATER:
+            operation = 0x2e203400;
+            comparison = true;
+            break;
+        case IR_BINARY_VECTOR_UNSIGNED_GREATER_EQUAL:
+            operation = 0x2e203c00;
+            comparison = true;
+            break;
+        case IR_BINARY_VECTOR_FLOAT_EQUAL:
+            operation = 0x0e20e400;
+            comparison = true;
+            break;
+        case IR_BINARY_VECTOR_FLOAT_NOT_EQUAL:
+            operation = 0x0e20e400;
+            comparison = true;
+            invert_result = true;
+            break;
+        case IR_BINARY_VECTOR_FLOAT_LESS:
+            operation = 0x2ea0e400;
+            comparison = true;
+            swap_operands = true;
+            break;
+        case IR_BINARY_VECTOR_FLOAT_LESS_EQUAL:
+            operation = 0x2e20e400;
+            comparison = true;
+            swap_operands = true;
+            break;
+        case IR_BINARY_VECTOR_FLOAT_GREATER:
+            operation = 0x2ea0e400;
+            comparison = true;
+            break;
+        case IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL:
+            operation = 0x2e20e400;
+            comparison = true;
+            break;
+        default: return false;
+    }
+    if (element->kind == ANALYSIS_TYPE_FLOAT)
+    {
+        if (width == 64)
+        {
+            operation |= 0x00400000;
+        }
+        else if (width != 32)
+        {
+            return false;
+        }
+    }
+    else if (lane_sized)
+    {
+        u32 size = width == 8 ? 0 :
+            width == 16 ? 1 :
+            width == 32 ? 2 :
+            width == 64 ? 3 : UINT32_MAX;
+        if (size == UINT32_MAX)
+        {
+            return false;
+        }
+        operation |= size << 22;
+    }
+    u32 target_register = 0;
+    if (vector->layout.size <= 16 &&
+        vector_registers[instruction->result.value] !=
+        CODEGEN_REGISTER_UNALLOCATED)
+    {
+        target_register = 2 +
+            vector_registers[instruction->result.value];
+    }
+    a64_emit_initialize_aggregate_result(
+        buffer,
+        value_storage_offsets,
+        instruction->result);
+    a64_emit_load_value_component(
+        buffer,
+        0,
+        instruction->operands[0],
+        0);
+    a64_emit_load_value_component(
+        buffer,
+        1,
+        instruction->operands[1],
+        0);
+    a64_emit_load_value_component(
+        buffer,
+        2,
+        instruction->result,
+        0);
+    u32 chunk_count =
+        (u32)((vector->layout.size + 15) / 16);
+    for (u32 chunk = 0; chunk < chunk_count; chunk += 1)
+    {
+        u32 chunk_size =
+            vector->layout.size - (u64)chunk * 16 >= 16 ?
+                16 : 8;
+        u32 load = chunk_size == 16 ?
+            0x3dc00000 : 0xfd400000;
+        u32 store = chunk_size == 16 ?
+            0x3d800000 : 0xfd000000;
+        u32 chunk_operation = operation |
+            (chunk_size == 16 ? 0x40000000 : 0);
+        a64_emit_instruction_word(
+            buffer,
+            load | (0 << 5) | target_register);
+        a64_emit_instruction_word(
+            buffer,
+            load | (1 << 5) | 1);
+        a64_emit_instruction_word(
+            buffer,
+            chunk_operation |
+                ((swap_operands ?
+                    target_register : 1) << 16) |
+                ((swap_operands ?
+                    1 : target_register) << 5) |
+                target_register);
+        if (comparison && invert_result)
+        {
+            a64_emit_instruction_word(
+                buffer,
+                0x2e205800 |
+                    (chunk_size == 16 ?
+                        0x40000000 : 0) |
+                    (target_register << 5) |
+                    target_register);
+        }
+        a64_emit_instruction_word(
+            buffer,
+            store | (2 << 5) | target_register);
+        if (chunk + 1 < chunk_count)
+        {
+            a64_emit_instruction_word(
+                buffer,
+                0x91004000);
+            a64_emit_instruction_word(
+                buffer,
+                0x91004021);
+            a64_emit_instruction_word(
+                buffer,
+                0x91004042);
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL void a64_emit_load_abi_part(
     CodegenBuffer* buffer,
     AnalysisResult* analysis,
@@ -4751,6 +6199,19 @@ BUSTER_GLOBAL_LOCAL void a64_emit_load_abi_part(
     if (codegen_type_is_indirect_value(type))
     {
         a64_emit_load_value_component(buffer, 16, value, 0);
+        if (type->kind == ANALYSIS_TYPE_VECTOR &&
+            part->kind ==
+                CODEGEN_ABI_LOCATION_FLOAT_REGISTER &&
+            (part->size == 8 || part->size == 16))
+        {
+            a64_emit_instruction_word(
+                buffer,
+                (part->size == 16 ?
+                    0x3dc00200 :
+                    0xfd400200) |
+                    float_target);
+            return;
+        }
         if (part->kind ==
             CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
         {
@@ -4864,6 +6325,19 @@ BUSTER_GLOBAL_LOCAL void a64_emit_store_abi_part(
     if (codegen_type_is_indirect_value(type))
     {
         a64_emit_load_value_component(buffer, 16, value, 0);
+        if (type->kind == ANALYSIS_TYPE_VECTOR &&
+            part->kind ==
+                CODEGEN_ABI_LOCATION_FLOAT_REGISTER &&
+            (part->size == 8 || part->size == 16))
+        {
+            a64_emit_instruction_word(
+                buffer,
+                (part->size == 16 ?
+                    0x3d800200 :
+                    0xfd000200) |
+                    float_source);
+            return;
+        }
         if (part->kind ==
             CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
         {
@@ -4970,8 +6444,10 @@ BUSTER_GLOBAL_LOCAL void a64_emit_collection_component(
         base_value->type);
     if (base_value->category == IR_VALUE_PLACE)
     {
-        if (base_type->kind == ANALYSIS_TYPE_ARRAY)
+        if (base_type->kind == ANALYSIS_TYPE_ARRAY ||
+            base_type->kind == ANALYSIS_TYPE_VECTOR)
         {
+            bool vector = base_type->kind == ANALYSIS_TYPE_VECTOR;
             if (component == 0)
             {
                 a64_emit_load_value(buffer, target, base_id);
@@ -4981,13 +6457,17 @@ BUSTER_GLOBAL_LOCAL void a64_emit_collection_component(
                 a64_emit_constant(
                     buffer,
                     target,
-                    base_type->as.array.count);
+                    vector ?
+                        base_type->as.vector.count :
+                        base_type->as.array.count);
             }
             else if (component == 2)
             {
                 AnalysisType* element = analysis_type_from_id(
                     analysis,
-                    base_type->as.array.element_type);
+                    vector ?
+                        base_type->as.vector.element_type :
+                        base_type->as.array.element_type);
                 a64_emit_constant(
                     buffer,
                     target,
@@ -5145,28 +6625,37 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
     Arena* arena,
     AnalysisResult* analysis,
     IrFunction* function,
-    CodegenAbi abi)
+    Target target)
 {
+    CodegenAbi abi = codegen_abi_for_target(target);
     CodegenFunction result = {
         .abi = abi,
     };
     CodegenAbiSignature function_signature =
-        codegen_classify_signature(
+        codegen_classify_signature_for_target(
             arena,
             analysis,
             function->type,
-            abi);
+            target);
     if (!function_signature.valid)
     {
         result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
         return result;
     }
     CodegenRegisterAllocation allocation =
-        codegen_allocate_scalar_registers(
+        codegen_allocate_registers(
             arena,
             analysis,
             function,
-            7);
+            7,
+            false);
+    CodegenRegisterAllocation vector_allocation =
+        codegen_allocate_registers(
+            arena,
+            analysis,
+            function,
+            6,
+            true);
     u32 maximum_parameters = 0;
     for (u32 block_index = 0;
         block_index < function->block_count;
@@ -5245,6 +6734,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
         u32 alignment = BUSTER_MAX(
             type->layout.alignment,
             1);
+        if (type->kind == ANALYSIS_TYPE_VECTOR)
+        {
+            alignment = BUSTER_MIN(alignment, 16);
+        }
         if (!size || alignment > 16)
         {
             result.error = CODEGEN_ERROR_CAPACITY;
@@ -5267,11 +6760,15 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
         analysis_type_from_id(analysis, function->type);
     u32 va_register_save_base = 0;
     if (generated_function_type->as.function.is_variadic &&
-        abi == CODEGEN_ABI_AARCH64_AAPCS64)
+        (abi == CODEGEN_ABI_AARCH64_AAPCS64 ||
+         abi == CODEGEN_ABI_AARCH64_WINDOWS))
     {
         frame_cursor = codegen_align_u32(frame_cursor, 16);
         va_register_save_base = frame_cursor;
-        frame_cursor += 192;
+        frame_cursor +=
+            abi == CODEGEN_ABI_AARCH64_AAPCS64 ?
+                192 :
+                64;
     }
     u32 frame_size = codegen_align_u32(
         frame_cursor,
@@ -5315,7 +6812,8 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
             hidden_result_offset);
     }
     if (generated_function_type->as.function.is_variadic &&
-        abi == CODEGEN_ABI_AARCH64_AAPCS64)
+        (abi == CODEGEN_ABI_AARCH64_AAPCS64 ||
+         abi == CODEGEN_ABI_AARCH64_WINDOWS))
     {
         for (u32 index = 0; index < 8; index += 1)
         {
@@ -5323,12 +6821,15 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                 &buffer,
                 index,
                 va_register_save_base + index * 8);
-            a64_emit_instruction_word(
-                &buffer,
-                0xfd0003e0 |
-                    (((va_register_save_base + 64 +
-                        index * 16) / 8) << 10) |
-                    index);
+            if (abi == CODEGEN_ABI_AARCH64_AAPCS64)
+            {
+                a64_emit_instruction_word(
+                    &buffer,
+                    0xfd0003e0 |
+                        (((va_register_save_base + 64 +
+                            index * 16) / 8) << 10) |
+                        index);
+            }
         }
     }
     for (u32 block_index = 0;
@@ -5477,11 +6978,11 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                     u32 argument =
                         (u32)instruction->immediates[0];
                     CodegenAbiSignature signature =
-                        codegen_classify_signature(
+                        codegen_classify_signature_for_target(
                             arena,
                             analysis,
                             function->type,
-                            abi);
+                            target);
                     if (argument >= signature.argument_count)
                     {
                         buffer.error =
@@ -5643,7 +7144,9 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                         }
                     }
                     else if (type->kind ==
-                        ANALYSIS_TYPE_FLOAT)
+                            ANALYSIS_TYPE_FLOAT &&
+                        location->kind ==
+                            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
                     {
                         a64_emit_float_store_value(
                             &buffer,
@@ -5695,6 +7198,8 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                     AnalysisTypeId element_type_id =
                         type->kind == ANALYSIS_TYPE_ARRAY ?
                             type->as.array.element_type :
+                        type->kind == ANALYSIS_TYPE_VECTOR ?
+                            type->as.vector.element_type :
                             type->as.element_type;
                     AnalysisType* element_type =
                         analysis_type_from_id(
@@ -5903,10 +7408,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                             arena,
                             analysis,
                             function_type_id,
-                            function_type->as.function.is_variadic ?
-                                call_argument_types : 0,
-                            call_argument_count,
-                            abi);
+                        function_type->as.function.is_variadic ?
+                            call_argument_types : 0,
+                        call_argument_count,
+                        target);
                     if (!signature.valid)
                     {
                         buffer.error =
@@ -6144,7 +7649,9 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                             }
                         }
                         else if (operand_type->kind ==
-                            ANALYSIS_TYPE_FLOAT)
+                                ANALYSIS_TYPE_FLOAT &&
+                            location->kind ==
+                                CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
                         {
                             a64_emit_float_load_value(
                                 &buffer,
@@ -6247,6 +7754,160 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                         analysis_type_from_id(
                             analysis,
                             instruction->type);
+                    if (unary_type->kind ==
+                        ANALYSIS_TYPE_VECTOR)
+                    {
+                        if (!target_cpu_feature_has(
+                                target,
+                                TARGET_CPU_FEATURE_AARCH64_NEON))
+                        {
+                            buffer.error =
+                                CODEGEN_ERROR_UNSUPPORTED_TARGET;
+                            break;
+                        }
+                        if (unary_type->layout.size != 8 &&
+                            unary_type->layout.size != 16 &&
+                            unary_type->layout.size != 32 &&
+                            unary_type->layout.size != 64)
+                        {
+                            buffer.error =
+                                CODEGEN_ERROR_UNSUPPORTED_TARGET;
+                            break;
+                        }
+                        AnalysisType* element =
+                            analysis_type_from_id(
+                                analysis,
+                                unary_type->
+                                    as.vector.element_type);
+                        u32 width =
+                            element->kind ==
+                                    ANALYSIS_TYPE_FLOAT ?
+                                element->
+                                    as.float_bit_width :
+                            element->kind ==
+                                    ANALYSIS_TYPE_INTEGER ?
+                                element->
+                                    as.integer.bit_width :
+                                0;
+                        u32 target_register = 0;
+                        if (unary_type->layout.size <= 16 &&
+                            vector_allocation.registers[
+                                instruction->result.value] !=
+                            CODEGEN_REGISTER_UNALLOCATED)
+                        {
+                            target_register = 2 +
+                                vector_allocation.registers[
+                                    instruction->result.value];
+                        }
+                        a64_emit_initialize_aggregate_result(
+                            &buffer,
+                            value_storage_offsets,
+                            instruction->result);
+                        a64_emit_load_value_component(
+                            &buffer,
+                            0,
+                            instruction->operands[0],
+                            0);
+                        a64_emit_load_value_component(
+                            &buffer,
+                            1,
+                            instruction->result,
+                            0);
+                        u32 encoded = 0;
+                        if (instruction->
+                                unary_operation ==
+                            IR_UNARY_VECTOR_FLOAT_NEGATE)
+                        {
+                            if (width != 32 &&
+                                width != 64)
+                            {
+                                buffer.error =
+                                    CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                break;
+                            }
+                            encoded = 0x2ea0f800 |
+                                (width == 64 ?
+                                    0x00400000 : 0);
+                        }
+                        else if (instruction->
+                                unary_operation ==
+                            IR_UNARY_VECTOR_INTEGER_NEGATE)
+                        {
+                            u32 size =
+                                width == 8 ? 0 :
+                                width == 16 ? 1 :
+                                width == 32 ? 2 :
+                                width == 64 ? 3 :
+                                UINT32_MAX;
+                            if (size == UINT32_MAX)
+                            {
+                                buffer.error =
+                                    CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                break;
+                            }
+                            encoded =
+                                0x2e20b800 |
+                                (size << 22);
+                        }
+                        else if (instruction->
+                                unary_operation ==
+                            IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)
+                        {
+                            encoded = 0x2e205800;
+                        }
+                        else
+                        {
+                            buffer.error =
+                                CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            break;
+                        }
+                        u32 chunk_count = (u32)(
+                            (unary_type->layout.size + 15) /
+                            16);
+                        for (u32 chunk = 0;
+                            chunk < chunk_count;
+                            chunk += 1)
+                        {
+                            u32 chunk_size =
+                                unary_type->layout.size -
+                                        (u64)chunk * 16 >=
+                                    16 ?
+                                    16 : 8;
+                            u32 load =
+                                chunk_size == 16 ?
+                                    0x3dc00000 :
+                                    0xfd400000;
+                            u32 store =
+                                chunk_size == 16 ?
+                                    0x3d800000 :
+                                    0xfd000000;
+                            a64_emit_instruction_word(
+                                &buffer,
+                                load | target_register);
+                            a64_emit_instruction_word(
+                                &buffer,
+                                encoded |
+                                    (chunk_size == 16 ?
+                                        0x40000000 : 0) |
+                                    (target_register << 5) |
+                                    target_register);
+                            a64_emit_instruction_word(
+                                &buffer,
+                                store |
+                                    (1 << 5) |
+                                    target_register);
+                            if (chunk + 1 < chunk_count)
+                            {
+                                a64_emit_instruction_word(
+                                    &buffer,
+                                    0x91004000);
+                                a64_emit_instruction_word(
+                                    &buffer,
+                                    0x91004021);
+                            }
+                        }
+                        break;
+                    }
                     if (instruction->unary_operation ==
                         IR_UNARY_FLOAT_NEGATE)
                     {
@@ -6307,6 +7968,29 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                 } break;
                 case IR_OPCODE_BINARY:
                 {
+                    AnalysisType* binary_type =
+                        analysis_type_from_id(
+                            analysis,
+                            instruction->type);
+                    if (binary_type->kind ==
+                        ANALYSIS_TYPE_VECTOR)
+                    {
+                        if (!a64_emit_vector_binary(
+                                &buffer,
+                                analysis,
+                                target,
+                                function->values[
+                                    instruction->operands[0]
+                                        .value].type,
+                                value_storage_offsets,
+                                vector_allocation.registers,
+                                instruction))
+                        {
+                            buffer.error =
+                                CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                        }
+                        break;
+                    }
                     if (codegen_binary_is_float(
                             instruction->binary_operation))
                     {
@@ -6700,7 +8384,8 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                         0,
                         instruction->result,
                         0);
-                    if (abi == CODEGEN_ABI_AARCH64_AAPCS64)
+                    if (abi == CODEGEN_ABI_AARCH64_AAPCS64 ||
+                        abi == CODEGEN_ABI_AARCH64_WINDOWS)
                     {
                         a64_emit_stack_address(
                             &buffer,
@@ -6711,10 +8396,17 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                             0,
                             instruction->result,
                             1);
-                        a64_emit_stack_address(
-                            &buffer,
-                            0,
-                            va_register_save_base + 192);
+                        if (abi == CODEGEN_ABI_AARCH64_AAPCS64)
+                        {
+                            a64_emit_stack_address(
+                                &buffer,
+                                0,
+                                va_register_save_base + 192);
+                        }
+                        else
+                        {
+                            a64_emit_constant(&buffer, 0, 0);
+                        }
                         a64_emit_store_value_component(
                             &buffer,
                             0,
@@ -6723,7 +8415,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                         s32 gr_offset =
                             -(s32)((8 - integer_register_count) * 8);
                         s32 vr_offset =
-                            -(s32)((8 - float_register_count) * 16);
+                            abi == CODEGEN_ABI_AARCH64_AAPCS64 ?
+                                -(s32)((8 -
+                                    float_register_count) * 16) :
+                                0;
                         u64 packed = (u32)gr_offset |
                             ((u64)(u32)vr_offset << 32);
                         a64_emit_constant(&buffer, 0, packed);
@@ -6792,15 +8487,354 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                             analysis,
                             instruction->type);
                     u32 size = codegen_type_storage_size(type);
-                    if (!size || size > 8 ||
-                        (type->kind != ANALYSIS_TYPE_INTEGER &&
-                         type->kind != ANALYSIS_TYPE_FLOAT &&
-                         type->kind != ANALYSIS_TYPE_BOOL &&
-                         type->kind != ANALYSIS_TYPE_POINTER &&
-                         type->kind != ANALYSIS_TYPE_ENUM))
+                    bool aggregate =
+                        codegen_type_is_indirect_value(type);
+                    bool scalar =
+                        type->kind == ANALYSIS_TYPE_INTEGER ||
+                        type->kind == ANALYSIS_TYPE_FLOAT ||
+                        type->kind == ANALYSIS_TYPE_BOOL ||
+                        type->kind == ANALYSIS_TYPE_POINTER ||
+                        type->kind == ANALYSIS_TYPE_ENUM;
+                    if (!size ||
+                        (!aggregate && (!scalar || size > 8)))
                     {
                         buffer.error =
                             CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                        break;
+                    }
+                    AnalysisAbiConvention convention =
+                        codegen_analysis_abi_convention(abi);
+                    AnalysisAbiValue abi_value =
+                        abi == CODEGEN_ABI_AARCH64_WINDOWS ?
+                            analysis_abi_value_classify_variadic_argument(
+                                arena,
+                                analysis,
+                                instruction->type,
+                                convention) :
+                            analysis_abi_value_classify(
+                                arena,
+                                analysis,
+                                instruction->type,
+                                convention,
+                                false);
+                    if (!abi_value.part_count)
+                    {
+                        buffer.error =
+                            CODEGEN_ERROR_UNSUPPORTED_ABI;
+                        break;
+                    }
+                    if (aggregate)
+                    {
+                        a64_emit_initialize_aggregate_result(
+                            &buffer,
+                            value_storage_offsets,
+                            instruction->result);
+                        bool register_value =
+                            (abi ==
+                                CODEGEN_ABI_AARCH64_AAPCS64 ||
+                             abi ==
+                                CODEGEN_ABI_AARCH64_WINDOWS) &&
+                            abi_value.parts[0].location !=
+                                ANALYSIS_ABI_LOCATION_STACK;
+                        u32 register_offset = 24;
+                        u32 register_top_offset = 8;
+                        u32 register_increment = 8;
+                        if (register_value &&
+                            abi_value.parts[0].abi_class ==
+                                ANALYSIS_ABI_CLASS_FLOAT)
+                        {
+                            register_offset = 28;
+                            register_top_offset = 16;
+                            register_increment = 16;
+                        }
+                        u32 overflow_patch = 0;
+                        if (register_value)
+                        {
+                            u32 required =
+                                abi_value.part_count *
+                                    register_increment;
+                            a64_emit_load_value(
+                                &buffer,
+                                0,
+                                instruction->operands[0]);
+                            a64_emit_load_pointer_offset(
+                                &buffer,
+                                1,
+                                0,
+                                register_offset,
+                                4);
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x11000023 |
+                                    (required << 10));
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x7100007f);
+                            overflow_patch =
+                                (u32)buffer.count;
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x5400000c);
+                            a64_emit_store_pointer_offset(
+                                &buffer,
+                                3,
+                                0,
+                                register_offset,
+                                4);
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x93407c21);
+                            a64_emit_load_pointer_offset(
+                                &buffer,
+                                2,
+                                0,
+                                register_top_offset,
+                                8);
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x8b010042);
+                            if (abi_value.indirect)
+                            {
+                                a64_emit_load_pointer(
+                                    &buffer,
+                                    1,
+                                    2,
+                                    8);
+                                a64_emit_load_value_component(
+                                    &buffer,
+                                    0,
+                                    instruction->result,
+                                    0);
+                                a64_emit_copy_memory(
+                                    &buffer,
+                                    size);
+                            }
+                            else
+                            {
+                                for (u32 part = 0;
+                                    part <
+                                        abi_value.part_count;
+                                    part += 1)
+                                {
+                                    AnalysisAbiPart* abi_part =
+                                        abi_value.parts + part;
+                                    a64_emit_load_pointer_offset(
+                                        &buffer,
+                                        3,
+                                        2,
+                                        part *
+                                            register_increment,
+                                        abi_part->size);
+                                    a64_emit_load_value_component(
+                                        &buffer,
+                                        0,
+                                        instruction->result,
+                                        0);
+                                    a64_emit_store_pointer_offset(
+                                        &buffer,
+                                        3,
+                                        0,
+                                        abi_part->value_offset,
+                                        abi_part->size);
+                                }
+                            }
+                            u32 end_branch =
+                                (u32)buffer.count;
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x14000000);
+                            u32 overflow_offset =
+                                (u32)buffer.count;
+                            u32 test_instruction =
+                                0x5400000c |
+                                (((overflow_offset -
+                                    overflow_patch) /
+                                    4) << 5);
+                            memcpy(
+                                buffer.bytes +
+                                    overflow_patch,
+                                &test_instruction,
+                                sizeof(test_instruction));
+
+                            a64_emit_load_value(
+                                &buffer,
+                                0,
+                                instruction->operands[0]);
+                            a64_emit_constant(
+                                &buffer,
+                                3,
+                                0);
+                            a64_emit_store_pointer_offset(
+                                &buffer,
+                                3,
+                                0,
+                                register_offset,
+                                4);
+                            a64_emit_load_pointer_offset(
+                                &buffer,
+                                1,
+                                0,
+                                0,
+                                8);
+                            u32 alignment =
+                                abi_value.indirect ?
+                                    8 :
+                                    (u32)BUSTER_MAX(
+                                        type->layout.alignment,
+                                        8);
+                            if (alignment > 8)
+                            {
+                                a64_emit_constant(
+                                    &buffer,
+                                    3,
+                                    alignment - 1);
+                                a64_emit_instruction_word(
+                                    &buffer,
+                                    0x8b030021);
+                                a64_emit_constant(
+                                    &buffer,
+                                    3,
+                                    ~(u64)(alignment - 1));
+                                a64_emit_instruction_word(
+                                    &buffer,
+                                    0x8a030021);
+                            }
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0xaa0103e2);
+                            u32 stack_size =
+                                codegen_align_u32(
+                                    abi_value.indirect ?
+                                        8 :
+                                        size,
+                                    8);
+                            while (stack_size)
+                            {
+                                u32 chunk =
+                                    BUSTER_MIN(
+                                        stack_size,
+                                        4095);
+                                a64_emit_instruction_word(
+                                    &buffer,
+                                    0x91000042 |
+                                        (chunk << 10));
+                                stack_size -= chunk;
+                            }
+                            a64_emit_store_pointer_offset(
+                                &buffer,
+                                2,
+                                0,
+                                0,
+                                8);
+                            if (abi_value.indirect)
+                            {
+                                a64_emit_load_pointer(
+                                    &buffer,
+                                    1,
+                                    1,
+                                    8);
+                            }
+                            a64_emit_load_value_component(
+                                &buffer,
+                                0,
+                                instruction->result,
+                                0);
+                            a64_emit_copy_memory(
+                                &buffer,
+                                size);
+                            u32 end_offset =
+                                (u32)buffer.count;
+                            u32 end_instruction =
+                                0x14000000 |
+                                ((end_offset -
+                                    end_branch) /
+                                    4);
+                            memcpy(
+                                buffer.bytes +
+                                    end_branch,
+                                &end_instruction,
+                                sizeof(end_instruction));
+                            break;
+                        }
+
+                        a64_emit_load_value(
+                            &buffer,
+                            0,
+                            instruction->operands[0]);
+                        a64_emit_load_pointer_offset(
+                            &buffer,
+                            1,
+                            0,
+                            0,
+                            8);
+                        u32 alignment =
+                            abi_value.indirect ?
+                                8 :
+                            abi ==
+                                    CODEGEN_ABI_AARCH64_DARWIN ?
+                                (u32)BUSTER_MAX(
+                                    type->layout.alignment,
+                                    1) :
+                                (u32)BUSTER_MAX(
+                                    type->layout.alignment,
+                                    8);
+                        if (alignment > 1)
+                        {
+                            a64_emit_constant(
+                                &buffer,
+                                3,
+                                alignment - 1);
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x8b030021);
+                            a64_emit_constant(
+                                &buffer,
+                                3,
+                                ~(u64)(alignment - 1));
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x8a030021);
+                        }
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0xaa0103e2);
+                        u32 stack_size = codegen_align_u32(
+                            abi_value.indirect ? 8 : size,
+                            abi ==
+                                    CODEGEN_ABI_AARCH64_DARWIN ?
+                                alignment : 8);
+                        while (stack_size)
+                        {
+                            u32 chunk =
+                                BUSTER_MIN(stack_size, 4095);
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x91000042 |
+                                    (chunk << 10));
+                            stack_size -= chunk;
+                        }
+                        a64_emit_store_pointer_offset(
+                            &buffer,
+                            2,
+                            0,
+                            0,
+                            8);
+                        if (abi_value.indirect)
+                        {
+                            a64_emit_load_pointer(
+                                &buffer,
+                                1,
+                                1,
+                                8);
+                        }
+                        a64_emit_load_value_component(
+                            &buffer,
+                            0,
+                            instruction->result,
+                            0);
+                        a64_emit_copy_memory(
+                            &buffer,
+                            size);
                         break;
                     }
                     a64_emit_load_value(
@@ -6815,9 +8849,37 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                             0,
                             0,
                             8);
+                        u32 alignment = (u32)BUSTER_MAX(
+                            type->layout.alignment,
+                            1);
+                        if (alignment > 1)
+                        {
+                            a64_emit_constant(
+                                &buffer,
+                                3,
+                                alignment - 1);
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x8b030021);
+                            a64_emit_constant(
+                                &buffer,
+                                3,
+                                ~(u64)(alignment - 1));
+                            a64_emit_instruction_word(
+                                &buffer,
+                                0x8a030021);
+                        }
                         a64_emit_instruction_word(
                             &buffer,
-                            0x91002022);
+                            0xaa0103e2);
+                        u32 stack_size =
+                            codegen_align_u32(
+                                size,
+                                alignment);
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0x91000042 |
+                                (stack_size << 10));
                         a64_emit_store_pointer_offset(
                             &buffer,
                             2,
@@ -6828,7 +8890,8 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                     else
                     {
                         bool floating =
-                            type->kind == ANALYSIS_TYPE_FLOAT;
+                            type->kind == ANALYSIS_TYPE_FLOAT &&
+                            abi != CODEGEN_ABI_AARCH64_WINDOWS;
                         u32 offset = floating ? 28 : 24;
                         u32 top_offset = floating ? 16 : 8;
                         u32 increment = floating ? 16 : 8;
@@ -7613,9 +9676,11 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
     result.first_call_relocation =
         first_call_relocation;
     result.register_value_count =
-        allocation.allocated_count;
+        allocation.allocated_count +
+        vector_allocation.allocated_count;
     result.spilled_value_count =
-        allocation.spilled_count;
+        allocation.spilled_count +
+        vector_allocation.spilled_count;
     return result;
 }
 
@@ -7658,7 +9723,7 @@ CodegenFunction codegen_generate_function(
             arena,
             analysis,
             function,
-            result.abi);
+            target);
     }
     if (target.cpu_arch == CPU_ARCH_AARCH64)
     {
@@ -7666,7 +9731,7 @@ CodegenFunction codegen_generate_function(
             arena,
             analysis,
             function,
-            result.abi);
+            target);
     }
     return result;
 }
@@ -7723,13 +9788,13 @@ CodegenModule codegen_generate_module(
                     arena,
                     analysis,
                     function,
-                    result.abi) :
+                    target) :
             target.cpu_arch == CPU_ARCH_AARCH64 ?
                 codegen_generate_aarch64(
                     arena,
                     analysis,
                     function,
-                    result.abi) :
+                    target) :
                 (CodegenFunction){
                     .error =
                         CODEGEN_ERROR_UNSUPPORTED_TARGET,
@@ -8023,7 +10088,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         arena_begin_temporal(arguments->arena);
     Arena* expression_arena = arena_create((ArenaCreation){0});
     BUSTER_CHECK(expression_arena);
-    String8 source = S8(
+    String8 source_parts[] = { S8(
         "type CodegenPair = struct\n"
         "{\n"
         "    left: s32,\n"
@@ -8055,6 +10120,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "    second: s64,\n"
         "    third: s64,\n"
         "}\n"
+        "type CodegenFloat8 = vector[8]f32\n"
+        "type CodegenFloat16 = vector[16]f32\n"
         "code arithmetic : fn (left: s64, right: s64) s64\n"
         "{\n"
         "    data value: s64 = left * 3;\n"
@@ -8072,6 +10139,64 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "{\n"
         "    return -left * 2.0 + right;\n"
         "}\n"
+    ), S8(
+        "code vector_arithmetic : fn () s32\n"
+        "{\n"
+        "    data left: vector[4]f32 = [ 1.0, 2.0, 3.0, 4.0 ];\n"
+        "    data right: vector[4]f32 = [ 4.0, 3.0, 2.0, 1.0 ];\n"
+        "    data sum: vector[4]f32 = left + right;\n"
+        "    data negated: vector[4]f32 = -sum;\n"
+        "    return @cast(negated[0]);\n"
+        "}\n"
+        "code vector_identity : fn (value: vector[4]f32) vector[4]f32\n"
+        "{\n"
+        "    return value;\n"
+        "}\n"
+        "code vector_integer_arithmetic : fn () s32\n"
+        "{\n"
+        "    data left: vector[4]s32 = [ 1, 2, 3, 4 ];\n"
+        "    data right: vector[4]s32 = [ 4, 3, 2, 1 ];\n"
+        "    data masked: vector[4]s32 = (left + right) & [ 7, 7, 7, 7 ];\n"
+        "    return masked[0];\n"
+        "}\n"
+    ), S8(
+        "code vector_float_comparison : fn () u32\n"
+        "{\n"
+        "    data left: vector[4]f32 = [ 1.0, 5.0, -3.0, 8.0 ];\n"
+        "    data right: vector[4]f32 = [ 2.0, 4.0, -3.0, 9.0 ];\n"
+        "    data mask: vector[4]u32 = left < right;\n"
+        "    return mask[0];\n"
+        "}\n"
+        "code vector_integer_comparison : fn () u32\n"
+        "{\n"
+        "    data left: vector[4]s32 = [ 1, 5, -3, 8 ];\n"
+        "    data right: vector[4]s32 = [ 2, 4, -3, 9 ];\n"
+        "    data mask: vector[4]u32 = left > right;\n"
+        "    return mask[1];\n"
+        "}\n"
+        "code vector_256_arithmetic : fn () s32\n"
+        "{\n"
+        "    data left: CodegenFloat8 = [ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0 ];\n"
+        "    data right: CodegenFloat8 = [ 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0 ];\n"
+        "    data sum: CodegenFloat8 = left + right;\n"
+        "    return @cast(sum[7]);\n"
+        "}\n"
+        "code vector_256_identity : fn (value: CodegenFloat8) CodegenFloat8\n"
+        "{\n"
+        "    return value;\n"
+        "}\n"
+        "code vector_512_arithmetic : fn () s32\n"
+        "{\n"
+        "    data left: vector[16]s32 = [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 ];\n"
+        "    data right: vector[16]s32 = [ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 ];\n"
+        "    data sum: vector[16]s32 = left + right;\n"
+        "    return sum[15];\n"
+        "}\n"
+        "code vector_512_identity : fn (value: CodegenFloat16) CodegenFloat16\n"
+        "{\n"
+        "    return value;\n"
+        "}\n"
+    ), S8(
         "code pointer_arithmetic : fn () s64\n"
         "{\n"
         "    data value: s64 = 4;\n"
@@ -8207,7 +10332,106 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "code variadic_call : fn () s64\n"
         "{\n"
         "    return variadic_sum(10, 20, 12);\n"
-        "}\n");
+        "}\n"), S8(
+        "code variadic_float : fn (first: s64, ...) f64\n"
+        "{\n"
+        "    data arguments = @va_start();\n"
+        "    data value: f64 = @va_arg(&arguments, f64);\n"
+        "    @va_end(&arguments);\n"
+        "    return value;\n"
+        "}\n"
+        "code variadic_float_call : fn () f64\n"
+        "{\n"
+        "    data value: f32 = 5.25;\n"
+        "    return variadic_float(0, value);\n"
+        "}\n"
+        "code variadic_promoted : fn (...) s64\n"
+        "{\n"
+        "    data arguments = @va_start();\n"
+        "    data value: s32 = @va_arg(&arguments, s32);\n"
+        "    @va_end(&arguments);\n"
+        "    return @cast(value);\n"
+        "}\n"
+        "code variadic_promoted_call : fn () s64\n"
+        "{\n"
+        "    data value: u8 = 42;\n"
+        "    return variadic_promoted(value);\n"
+        "}\n"
+        "code variadic_pair : fn (...) s64\n"
+        "{\n"
+        "    data arguments = @va_start();\n"
+        "    data value: CodegenAbiPair = @va_arg(&arguments, CodegenAbiPair);\n"
+        "    @va_end(&arguments);\n"
+        "    return value.left + value.right;\n"
+        "}\n"
+        "code variadic_pair_call : fn () s64\n"
+        "{\n"
+        "    data value: CodegenAbiPair = { .left = 19, .right = 23 };\n"
+        "    return variadic_pair(value);\n"
+        "}\n"
+        "code variadic_mixed : fn (...) f64\n"
+        "{\n"
+        "    data arguments = @va_start();\n"
+        "    data value: CodegenAbiMixed = @va_arg(&arguments, CodegenAbiMixed);\n"
+        "    @va_end(&arguments);\n"
+        "    return value.value + @cast(value.count);\n"
+        "}\n"
+        "code variadic_mixed_call : fn () f64\n"
+        "{\n"
+        "    data value: CodegenAbiMixed = { .value = 2.25, .count = 3 };\n"
+        "    return variadic_mixed(value);\n"
+        "}\n"
+        "code variadic_large : fn (...) s64\n"
+        "{\n"
+        "    data arguments = @va_start();\n"
+        "    data value: CodegenAbiLarge = @va_arg(&arguments, CodegenAbiLarge);\n"
+        "    @va_end(&arguments);\n"
+        "    return value.first + value.second + value.third;\n"
+        "}\n"
+        "code variadic_large_call : fn () s64\n"
+        "{\n"
+        "    data value: CodegenAbiLarge = { .first = 7, .second = 11, .third = 13 };\n"
+        "    return variadic_large(value);\n"
+        "}\n"), S8(
+        "type CodegenAbiHfa = struct\n"
+        "{\n"
+        "    first: f64,\n"
+        "    second: f64,\n"
+        "}\n"
+        "code abi_exhaust_float : fn (a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, pair: CodegenAbiHfa, tail: f64) f64\n"
+        "{\n"
+        "    return a + pair.first + tail;\n"
+        "}\n"
+        "code abi_exhaust_integer : fn (a: s64, b: s64, c: s64, d: s64, e: s64, f: s64, g: s64, pair: CodegenAbiPair, tail: s64) s64\n"
+        "{\n"
+        "    return a + pair.left + tail;\n"
+        "}\n"
+        "code variadic_fixed_float : fn (first: f64, ...) f64\n"
+        "{\n"
+        "    data arguments = @va_start();\n"
+        "    @va_end(&arguments);\n"
+        "    return first;\n"
+        "}\n"
+        "code variadic_fixed_float_call : fn () f64\n"
+        "{\n"
+        "    return variadic_fixed_float(3.5, 1);\n"
+        "}\n"
+        "code variadic_large_stack : fn (a: s64, b: s64, c: s64, d: s64, e: s64, f: s64, g: s64, h: s64, ...) s64\n"
+        "{\n"
+        "    data arguments = @va_start();\n"
+        "    data value: CodegenAbiLarge = @va_arg(&arguments, CodegenAbiLarge);\n"
+        "    @va_end(&arguments);\n"
+        "    return value.first + value.second + value.third;\n"
+        "}\n"
+        "code variadic_large_stack_call : fn () s64\n"
+        "{\n"
+        "    data value: CodegenAbiLarge = { .first = 7, .second = 11, .third = 13 };\n"
+        "    return variadic_large_stack(0, 1, 2, 3, 4, 5, 6, 7, value);\n"
+        "}\n") };
+    String8 source = string_join_arena(
+        arguments->arena,
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts),
+        false);
     TokenizerResult tokens = tokenize(
         arguments->arena,
         source.pointer,
@@ -8244,6 +10468,94 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, function != 0);
     Target target = target_native;
     target.cpu_arch = CPU_ARCH_X86_64;
+    Target baseline_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    Target avx2_target = baseline_target;
+    avx2_target.cpu_features_explicit = true;
+    avx2_target.cpu_features =
+        TARGET_CPU_FEATURE_X86_SSE2 |
+        TARGET_CPU_FEATURE_X86_AVX |
+        TARGET_CPU_FEATURE_X86_AVX2;
+    Target avx10_target = avx2_target;
+    avx10_target.cpu_features |=
+        TARGET_CPU_FEATURE_X86_AVX512F |
+        TARGET_CPU_FEATURE_X86_AVX512VL |
+        TARGET_CPU_FEATURE_X86_AVX10_1 |
+        TARGET_CPU_FEATURE_X86_AVX10_2 |
+        TARGET_CPU_FEATURE_X86_AVX10_512 |
+        TARGET_CPU_FEATURE_X86_APX;
+    BUSTER_TEST(arguments,
+        target_vector_register_size(
+            baseline_target) == 16);
+    BUSTER_TEST(arguments,
+        target_vector_register_size(
+            avx2_target) == 32);
+    BUSTER_TEST(arguments,
+        target_vector_register_size(
+            avx10_target) == 64);
+    BUSTER_TEST(arguments,
+        target_cpu_feature_has(
+            avx10_target,
+            TARGET_CPU_FEATURE_X86_APX));
+    BUSTER_TEST(arguments,
+        target_vector_register_size(
+            (Target){
+                .cpu_arch = CPU_ARCH_AARCH64,
+                .cpu_model = CPU_MODEL_BASELINE,
+            }) == 16);
+    typedef struct CodegenTargetAbiCase
+    {
+        CpuArch cpu_arch;
+        OperatingSystem os;
+        CodegenAbi abi;
+    } CodegenTargetAbiCase;
+    CodegenTargetAbiCase target_abi_cases[] = {
+        { CPU_ARCH_X86_64, OPERATING_SYSTEM_LINUX,
+            CODEGEN_ABI_X86_64_SYSTEM_V },
+        { CPU_ARCH_X86_64, OPERATING_SYSTEM_MACOS,
+            CODEGEN_ABI_X86_64_SYSTEM_V },
+        { CPU_ARCH_X86_64, OPERATING_SYSTEM_WINDOWS,
+            CODEGEN_ABI_X86_64_WINDOWS },
+        { CPU_ARCH_X86_64, OPERATING_SYSTEM_UEFI,
+            CODEGEN_ABI_X86_64_WINDOWS },
+        { CPU_ARCH_X86_64, OPERATING_SYSTEM_ANDROID,
+            CODEGEN_ABI_X86_64_SYSTEM_V },
+        { CPU_ARCH_X86_64, OPERATING_SYSTEM_IOS,
+            CODEGEN_ABI_X86_64_SYSTEM_V },
+        { CPU_ARCH_X86_64, OPERATING_SYSTEM_FREESTANDING,
+            CODEGEN_ABI_X86_64_SYSTEM_V },
+        { CPU_ARCH_AARCH64, OPERATING_SYSTEM_LINUX,
+            CODEGEN_ABI_AARCH64_AAPCS64 },
+        { CPU_ARCH_AARCH64, OPERATING_SYSTEM_MACOS,
+            CODEGEN_ABI_AARCH64_DARWIN },
+        { CPU_ARCH_AARCH64, OPERATING_SYSTEM_WINDOWS,
+            CODEGEN_ABI_AARCH64_WINDOWS },
+        { CPU_ARCH_AARCH64, OPERATING_SYSTEM_UEFI,
+            CODEGEN_ABI_AARCH64_AAPCS64 },
+        { CPU_ARCH_AARCH64, OPERATING_SYSTEM_ANDROID,
+            CODEGEN_ABI_AARCH64_AAPCS64 },
+        { CPU_ARCH_AARCH64, OPERATING_SYSTEM_IOS,
+            CODEGEN_ABI_AARCH64_DARWIN },
+        { CPU_ARCH_AARCH64, OPERATING_SYSTEM_FREESTANDING,
+            CODEGEN_ABI_AARCH64_AAPCS64 },
+    };
+    for (u32 index = 0;
+        index < BUSTER_ARRAY_LENGTH(target_abi_cases);
+        index += 1)
+    {
+        CodegenTargetAbiCase* test =
+            target_abi_cases + index;
+        BUSTER_TEST(
+            arguments,
+            codegen_abi_for_target(
+                (Target){
+                    .cpu_arch = test->cpu_arch,
+                    .os = test->os,
+                }) == test->abi);
+    }
     CodegenFunction generated = function ?
         codegen_generate_function(
             arguments->arena,
@@ -8392,6 +10704,12 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 &analysis,
                 pair_sum_abi_function->type,
                 CODEGEN_ABI_AARCH64_AAPCS64);
+        CodegenAbiSignature pair_windows_aarch64 =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                pair_sum_abi_function->type,
+                CODEGEN_ABI_AARCH64_WINDOWS);
         BUSTER_TEST(arguments, pair_system_v.valid);
         BUSTER_TEST(
             arguments,
@@ -8412,6 +10730,11 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(
             arguments,
             pair_aapcs.arguments[0].part_count == 2);
+        BUSTER_TEST(arguments, pair_windows_aarch64.valid);
+        BUSTER_TEST(
+            arguments,
+            pair_windows_aarch64.arguments[0]
+                .part_count == 2);
         CodegenAbiSignature mixed_system_v =
             codegen_classify_signature(
                 arguments->arena,
@@ -8480,6 +10803,276 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(
             arguments,
             large_aapcs.arguments[0].index == 0);
+    }
+
+    AnalysisEntity* exhaust_float_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("abi_exhaust_float"));
+    AnalysisEntity* exhaust_integer_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("abi_exhaust_integer"));
+    IrFunction* exhaust_float_function =
+        exhaust_float_entity ?
+            codegen_test_function_find(
+                &module,
+                exhaust_float_entity->id) :
+            0;
+    IrFunction* exhaust_integer_function =
+        exhaust_integer_entity ?
+            codegen_test_function_find(
+                &module,
+                exhaust_integer_entity->id) :
+            0;
+    BUSTER_TEST(arguments, exhaust_float_function != 0);
+    BUSTER_TEST(arguments, exhaust_integer_function != 0);
+    if (exhaust_float_function && exhaust_integer_function)
+    {
+        CodegenAbiSignature exhaust_float =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                exhaust_float_function->type,
+                CODEGEN_ABI_AARCH64_AAPCS64);
+        CodegenAbiSignature exhaust_integer =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                exhaust_integer_function->type,
+                CODEGEN_ABI_AARCH64_WINDOWS);
+        BUSTER_TEST(arguments, exhaust_float.valid);
+        BUSTER_TEST(arguments, exhaust_float.argument_count == 9);
+        BUSTER_TEST(
+            arguments,
+            exhaust_float.arguments[7].kind ==
+                CODEGEN_ABI_LOCATION_STACK);
+        BUSTER_TEST(
+            arguments,
+            exhaust_float.arguments[8].kind ==
+                CODEGEN_ABI_LOCATION_STACK);
+        BUSTER_TEST(arguments, exhaust_integer.valid);
+        BUSTER_TEST(
+            arguments,
+            exhaust_integer.arguments[7].kind ==
+                CODEGEN_ABI_LOCATION_STACK);
+        BUSTER_TEST(
+            arguments,
+            exhaust_integer.arguments[8].kind ==
+                CODEGEN_ABI_LOCATION_STACK);
+    }
+
+    AnalysisEntity* variadic_float_abi_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("variadic_float"));
+    IrFunction* variadic_float_abi_function =
+        variadic_float_abi_entity ?
+            codegen_test_function_find(
+                &module,
+                variadic_float_abi_entity->id) :
+            0;
+    BUSTER_TEST(arguments, variadic_float_abi_function != 0);
+    if (variadic_float_abi_function)
+    {
+        AnalysisTypeId variadic_argument_types[] = {
+            analysis.types.builtin.s64_type,
+            analysis.types.builtin.f64_type,
+        };
+        CodegenAbiSignature windows_aarch64_variadic =
+            codegen_classify_signature_with_arguments(
+                arguments->arena,
+                &analysis,
+                variadic_float_abi_function->type,
+                variadic_argument_types,
+                BUSTER_ARRAY_LENGTH(
+                    variadic_argument_types),
+                codegen_target_for_abi(
+                    CODEGEN_ABI_AARCH64_WINDOWS));
+        BUSTER_TEST(arguments, windows_aarch64_variadic.valid);
+        BUSTER_TEST(
+            arguments,
+            windows_aarch64_variadic.argument_count == 2);
+        BUSTER_TEST(
+            arguments,
+            windows_aarch64_variadic.arguments[0].kind ==
+                CODEGEN_ABI_LOCATION_INTEGER_REGISTER);
+        BUSTER_TEST(
+            arguments,
+            windows_aarch64_variadic.arguments[1].kind ==
+                CODEGEN_ABI_LOCATION_INTEGER_REGISTER);
+        BUSTER_TEST(
+            arguments,
+            windows_aarch64_variadic.arguments[1].index == 1);
+    }
+
+    AnalysisType* vector_128 = 0;
+    AnalysisType* vector_256 = 0;
+    AnalysisType* vector_512 = 0;
+    for (u32 type_index = 0;
+        type_index < analysis.types.count;
+        type_index += 1)
+    {
+        AnalysisType* candidate =
+            analysis.types.types + type_index;
+        if (candidate->kind != ANALYSIS_TYPE_VECTOR)
+        {
+            continue;
+        }
+        if (candidate->layout.size == 16)
+        {
+            vector_128 = candidate;
+        }
+        else if (candidate->layout.size == 32)
+        {
+            vector_256 = candidate;
+        }
+        else if (candidate->layout.size == 64)
+        {
+            vector_512 = candidate;
+        }
+    }
+    BUSTER_TEST(arguments, vector_128 != 0);
+    BUSTER_TEST(arguments, vector_256 != 0);
+    BUSTER_TEST(arguments, vector_512 != 0);
+    if (vector_128 && vector_256 && vector_512)
+    {
+        AnalysisAbiValue systemv_128 =
+            analysis_abi_value_classify(
+                arguments->arena,
+                &analysis,
+                vector_128->id,
+                ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64,
+                false);
+        AnalysisAbiValue systemv_256 =
+            analysis_abi_value_classify(
+                arguments->arena,
+                &analysis,
+                vector_256->id,
+                ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64,
+                false);
+        AnalysisAbiValue systemv_512 =
+            analysis_abi_value_classify(
+                arguments->arena,
+                &analysis,
+                vector_512->id,
+                ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64,
+                false);
+        BUSTER_TEST(arguments,
+            systemv_128.part_count == 1 &&
+            systemv_128.parts[0].abi_class ==
+                ANALYSIS_ABI_CLASS_VECTOR &&
+            systemv_128.parts[0].size == 16);
+        BUSTER_TEST(arguments,
+            systemv_256.part_count == 1 &&
+            systemv_256.parts[0].abi_class ==
+                ANALYSIS_ABI_CLASS_VECTOR &&
+            systemv_256.parts[0].size == 32);
+        BUSTER_TEST(arguments,
+            systemv_512.part_count == 1 &&
+            systemv_512.parts[0].abi_class ==
+                ANALYSIS_ABI_CLASS_VECTOR &&
+            systemv_512.parts[0].size == 64);
+        AnalysisAbiValue systemv_variadic_256 =
+            analysis_abi_value_classify_variadic_argument(
+                arguments->arena,
+                &analysis,
+                vector_256->id,
+                ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64);
+        BUSTER_TEST(arguments,
+            systemv_variadic_256.parts[0].location ==
+                ANALYSIS_ABI_LOCATION_STACK);
+        AnalysisAbiValue windows_128 =
+            analysis_abi_value_classify(
+                arguments->arena,
+                &analysis,
+                vector_128->id,
+                ANALYSIS_ABI_CONVENTION_WIN64_X86_64,
+                false);
+        BUSTER_TEST(arguments,
+            windows_128.indirect &&
+            windows_128.parts[0].abi_class ==
+                ANALYSIS_ABI_CLASS_POINTER);
+        AnalysisAbiValue aapcs_128 =
+            analysis_abi_value_classify(
+                arguments->arena,
+                &analysis,
+                vector_128->id,
+                ANALYSIS_ABI_CONVENTION_AAPCS64,
+                false);
+        BUSTER_TEST(arguments,
+            !aapcs_128.indirect &&
+            aapcs_128.parts[0].abi_class ==
+                ANALYSIS_ABI_CLASS_VECTOR);
+        AnalysisAbiValue aapcs_256 =
+            analysis_abi_value_classify(
+                arguments->arena,
+                &analysis,
+                vector_256->id,
+                ANALYSIS_ABI_CONVENTION_AAPCS64,
+                false);
+        BUSTER_TEST(arguments,
+            aapcs_256.indirect &&
+            aapcs_256.parts[0].abi_class ==
+                ANALYSIS_ABI_CLASS_POINTER);
+
+        String8 identity_names[] = {
+            S8_INITIALIZER("vector_256_identity"),
+            S8_INITIALIZER("vector_512_identity"),
+        };
+        Target identity_split_targets[] = {
+            baseline_target,
+            avx2_target,
+        };
+        Target identity_native_targets[] = {
+            avx2_target,
+            avx10_target,
+        };
+        for (u32 identity_index = 0;
+            identity_index <
+                BUSTER_ARRAY_LENGTH(identity_names);
+            identity_index += 1)
+        {
+            AnalysisEntity* identity_entity =
+                codegen_test_entity_find(
+                    &analysis,
+                    identity_names[identity_index]);
+            BUSTER_TEST(arguments, identity_entity != 0);
+            if (!identity_entity)
+            {
+                continue;
+            }
+            AnalysisTypeId identity_type =
+                analysis.module.semantics[
+                    identity_entity->id.index.value].type;
+            AnalysisFunctionAbi split_abi =
+                analysis_classify_function_abi(
+                    arguments->arena,
+                    &analysis,
+                    identity_type,
+                    identity_split_targets[
+                        identity_index]);
+            AnalysisFunctionAbi native_abi =
+                analysis_classify_function_abi(
+                    arguments->arena,
+                    &analysis,
+                    identity_type,
+                    identity_native_targets[
+                        identity_index]);
+            BUSTER_TEST(arguments,
+                split_abi.result.indirect);
+            BUSTER_TEST(arguments,
+                split_abi.arguments[0].parts[0].location ==
+                    ANALYSIS_ABI_LOCATION_STACK);
+            BUSTER_TEST(arguments,
+                !native_abi.result.indirect);
+            BUSTER_TEST(arguments,
+                native_abi.result.parts[0].abi_class ==
+                    ANALYSIS_ABI_CLASS_VECTOR);
+            BUSTER_TEST(arguments,
+                native_abi.arguments[0].parts[0].location ==
+                    ANALYSIS_ABI_LOCATION_REGISTER);
+        }
     }
 
     AnalysisEntity* float_entity =
@@ -8625,6 +11218,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, straight_function != 0);
     Target aarch64_target = target;
     aarch64_target.cpu_arch = CPU_ARCH_AARCH64;
+    aarch64_target.cpu_features_explicit = true;
+    aarch64_target.cpu_features =
+        TARGET_CPU_FEATURE_AARCH64_NEON;
     CodegenFunction aarch64_generated = straight_function ?
         codegen_generate_function(
             arguments->arena,
@@ -8976,6 +11572,403 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             aarch64_union_executable);
     }
 #endif
+    AnalysisEntity* vector_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("vector_arithmetic"));
+    IrFunction* vector_function = vector_entity ?
+        codegen_test_function_find(
+            &module,
+            vector_entity->id) :
+        0;
+    BUSTER_TEST(arguments, vector_function != 0);
+    CodegenFunction vector_generated =
+        vector_function ?
+            codegen_generate_function(
+                arguments->arena,
+                &analysis,
+                vector_function,
+                target) :
+            (CodegenFunction){
+                .error = CODEGEN_ERROR_INVALID_IR,
+            };
+    CodegenFunction aarch64_vector_generated =
+        vector_function ?
+            codegen_generate_function(
+                arguments->arena,
+                &analysis,
+                vector_function,
+                aarch64_target) :
+            (CodegenFunction){
+                .error = CODEGEN_ERROR_INVALID_IR,
+            };
+    Target aarch64_without_neon = aarch64_target;
+    aarch64_without_neon.cpu_features = 0;
+    CodegenFunction aarch64_without_neon_generated =
+        vector_function ?
+            codegen_generate_function(
+                arguments->arena,
+                &analysis,
+                vector_function,
+                aarch64_without_neon) :
+            (CodegenFunction){
+                .error = CODEGEN_ERROR_INVALID_IR,
+            };
+    BUSTER_TEST(
+        arguments,
+        vector_generated.error ==
+            CODEGEN_ERROR_NONE);
+    BUSTER_TEST(
+        arguments,
+        aarch64_vector_generated.error ==
+            CODEGEN_ERROR_NONE);
+    BUSTER_TEST(
+        arguments,
+        aarch64_without_neon_generated.error ==
+            CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+    BUSTER_TEST(
+        arguments,
+        vector_generated.register_value_count > 0);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+    CodegenExecutable vector_executable =
+        codegen_make_executable(vector_generated);
+    BUSTER_TEST(
+        arguments,
+        vector_executable.error == CODEGEN_ERROR_NONE);
+    if (vector_executable.address)
+    {
+        CodegenTestFunction0* native_vector = 0;
+        memcpy(
+            &native_vector,
+            &vector_executable.address,
+            sizeof(native_vector));
+        BUSTER_TEST(
+            arguments,
+            native_vector() == UINT64_MAX - 4);
+        codegen_release_executable(vector_executable);
+    }
+#endif
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_SANITIZE
+    CodegenExecutable aarch64_vector_executable =
+        codegen_make_executable(
+            aarch64_vector_generated);
+    BUSTER_TEST(
+        arguments,
+        aarch64_vector_executable.error ==
+            CODEGEN_ERROR_NONE);
+    if (aarch64_vector_executable.address)
+    {
+        CodegenTestFunction0* native_aarch64_vector = 0;
+        memcpy(
+            &native_aarch64_vector,
+            &aarch64_vector_executable.address,
+            sizeof(native_aarch64_vector));
+        BUSTER_TEST(
+            arguments,
+            native_aarch64_vector() ==
+                UINT64_MAX - 4);
+        codegen_release_executable(
+            aarch64_vector_executable);
+    }
+#endif
+    AnalysisEntity* vector_integer_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("vector_integer_arithmetic"));
+    IrFunction* vector_integer_function =
+        vector_integer_entity ?
+            codegen_test_function_find(
+                &module,
+                vector_integer_entity->id) :
+            0;
+    BUSTER_TEST(
+        arguments,
+        vector_integer_function != 0);
+    CodegenFunction vector_integer_generated =
+        vector_integer_function ?
+            codegen_generate_function(
+                arguments->arena,
+                &analysis,
+                vector_integer_function,
+                target) :
+            (CodegenFunction){
+                .error = CODEGEN_ERROR_INVALID_IR,
+            };
+    CodegenFunction aarch64_vector_integer_generated =
+        vector_integer_function ?
+            codegen_generate_function(
+                arguments->arena,
+                &analysis,
+                vector_integer_function,
+                aarch64_target) :
+            (CodegenFunction){
+                .error = CODEGEN_ERROR_INVALID_IR,
+            };
+    BUSTER_TEST(arguments,
+        vector_integer_generated.error ==
+            CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        aarch64_vector_integer_generated.error ==
+            CODEGEN_ERROR_NONE);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+    CodegenExecutable vector_integer_executable =
+        codegen_make_executable(
+            vector_integer_generated);
+    BUSTER_TEST(arguments,
+        vector_integer_executable.error ==
+            CODEGEN_ERROR_NONE);
+    if (vector_integer_executable.address)
+    {
+        CodegenTestFunction0* native_vector_integer = 0;
+        memcpy(
+            &native_vector_integer,
+            &vector_integer_executable.address,
+            sizeof(native_vector_integer));
+        BUSTER_TEST(
+            arguments,
+            native_vector_integer() == 5);
+        codegen_release_executable(
+            vector_integer_executable);
+    }
+#endif
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_SANITIZE
+    CodegenExecutable aarch64_vector_integer_executable =
+        codegen_make_executable(
+            aarch64_vector_integer_generated);
+    BUSTER_TEST(arguments,
+        aarch64_vector_integer_executable.error ==
+            CODEGEN_ERROR_NONE);
+    if (aarch64_vector_integer_executable.address)
+    {
+        CodegenTestFunction0*
+            native_aarch64_vector_integer = 0;
+        memcpy(
+            &native_aarch64_vector_integer,
+            &aarch64_vector_integer_executable.address,
+            sizeof(native_aarch64_vector_integer));
+        BUSTER_TEST(
+            arguments,
+            native_aarch64_vector_integer() == 5);
+        codegen_release_executable(
+            aarch64_vector_integer_executable);
+    }
+#endif
+    String8 vector_comparison_names[] =
+    {
+        S8_INITIALIZER("vector_float_comparison"),
+        S8_INITIALIZER("vector_integer_comparison"),
+    };
+    for (u32 comparison_index = 0;
+        comparison_index < 2;
+        comparison_index += 1)
+    {
+        AnalysisEntity* comparison_entity =
+            codegen_test_entity_find(
+                &analysis,
+                vector_comparison_names[
+                    comparison_index]);
+        IrFunction* comparison_function =
+            comparison_entity ?
+                codegen_test_function_find(
+                    &module,
+                    comparison_entity->id) :
+                0;
+        BUSTER_TEST(
+            arguments,
+            comparison_function != 0);
+        CodegenFunction comparison_generated =
+            comparison_function ?
+                codegen_generate_function(
+                    arguments->arena,
+                    &analysis,
+                    comparison_function,
+                    target) :
+                (CodegenFunction){
+                    .error = CODEGEN_ERROR_INVALID_IR,
+                };
+        CodegenFunction aarch64_comparison_generated =
+            comparison_function ?
+                codegen_generate_function(
+                    arguments->arena,
+                    &analysis,
+                    comparison_function,
+                    aarch64_target) :
+                (CodegenFunction){
+                    .error = CODEGEN_ERROR_INVALID_IR,
+                };
+        BUSTER_TEST(arguments,
+            comparison_generated.error ==
+                CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments,
+            aarch64_comparison_generated.error ==
+                CODEGEN_ERROR_NONE);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+        CodegenExecutable comparison_executable =
+            codegen_make_executable(
+                comparison_generated);
+        BUSTER_TEST(arguments,
+            comparison_executable.error ==
+                CODEGEN_ERROR_NONE);
+        if (comparison_executable.address)
+        {
+            CodegenTestFunction0* native_comparison = 0;
+            memcpy(
+                &native_comparison,
+                &comparison_executable.address,
+                sizeof(native_comparison));
+            BUSTER_TEST(
+                arguments,
+                native_comparison() == UINT32_MAX);
+            codegen_release_executable(
+                comparison_executable);
+        }
+#endif
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_SANITIZE
+        CodegenExecutable aarch64_comparison_executable =
+            codegen_make_executable(
+                aarch64_comparison_generated);
+        BUSTER_TEST(arguments,
+            aarch64_comparison_executable.error ==
+                CODEGEN_ERROR_NONE);
+        if (aarch64_comparison_executable.address)
+        {
+            CodegenTestFunction0*
+                native_aarch64_comparison = 0;
+            memcpy(
+                &native_aarch64_comparison,
+                &aarch64_comparison_executable.address,
+                sizeof(native_aarch64_comparison));
+            BUSTER_TEST(
+                arguments,
+                native_aarch64_comparison() ==
+                    UINT32_MAX);
+            codegen_release_executable(
+                aarch64_comparison_executable);
+        }
+#endif
+    }
+    String8 wide_vector_names[] =
+    {
+        S8_INITIALIZER("vector_256_arithmetic"),
+        S8_INITIALIZER("vector_512_arithmetic"),
+    };
+    u64 wide_vector_results[] = { 9, 17 };
+    for (u32 wide_index = 0;
+        wide_index < 2;
+        wide_index += 1)
+    {
+        AnalysisEntity* wide_entity =
+            codegen_test_entity_find(
+                &analysis,
+                wide_vector_names[wide_index]);
+        IrFunction* wide_function = wide_entity ?
+            codegen_test_function_find(
+                &module,
+                wide_entity->id) :
+            0;
+        BUSTER_TEST(arguments, wide_function != 0);
+        CodegenFunction wide_generated = wide_function ?
+            codegen_generate_function(
+                arguments->arena,
+                &analysis,
+                wide_function,
+                target) :
+            (CodegenFunction){
+                .error = CODEGEN_ERROR_INVALID_IR,
+            };
+        CodegenFunction aarch64_wide_generated =
+            wide_function ?
+                codegen_generate_function(
+                    arguments->arena,
+                    &analysis,
+                    wide_function,
+                    aarch64_target) :
+                (CodegenFunction){
+                    .error = CODEGEN_ERROR_INVALID_IR,
+                };
+        BUSTER_TEST(
+            arguments,
+            wide_generated.error ==
+                CODEGEN_ERROR_NONE);
+        BUSTER_TEST(
+            arguments,
+            aarch64_wide_generated.error ==
+                CODEGEN_ERROR_NONE);
+        Target split_target =
+            wide_index == 0 ?
+                baseline_target : avx2_target;
+        Target native_target =
+            wide_index == 0 ?
+                avx2_target : avx10_target;
+        CodegenFunction split_generated =
+            wide_function ?
+                codegen_generate_function(
+                    arguments->arena,
+                    &analysis,
+                    wide_function,
+                    split_target) :
+                (CodegenFunction){
+                    .error = CODEGEN_ERROR_INVALID_IR,
+                };
+        CodegenFunction native_generated =
+            wide_function ?
+                codegen_generate_function(
+                    arguments->arena,
+                    &analysis,
+                    wide_function,
+                    native_target) :
+                (CodegenFunction){
+                    .error = CODEGEN_ERROR_INVALID_IR,
+                };
+        BUSTER_TEST(
+            arguments,
+            split_generated.error ==
+                CODEGEN_ERROR_NONE);
+        BUSTER_TEST(
+            arguments,
+            split_generated.native_vector_operation_count ==
+                0);
+        BUSTER_TEST(
+            arguments,
+            split_generated.split_vector_operation_count >
+                0);
+        BUSTER_TEST(
+            arguments,
+            native_generated.error ==
+                CODEGEN_ERROR_NONE);
+        BUSTER_TEST(
+            arguments,
+            native_generated.native_vector_operation_count >
+                0);
+        BUSTER_TEST(
+            arguments,
+            native_generated.split_vector_operation_count ==
+                0);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+        CodegenExecutable wide_executable =
+            codegen_make_executable(wide_generated);
+        BUSTER_TEST(
+            arguments,
+            wide_executable.error ==
+                CODEGEN_ERROR_NONE);
+        if (wide_executable.address)
+        {
+            CodegenTestFunction0* native_wide = 0;
+            memcpy(
+                &native_wide,
+                &wide_executable.address,
+                sizeof(native_wide));
+            BUSTER_TEST(
+                arguments,
+                native_wide() ==
+                    wide_vector_results[wide_index]);
+            codegen_release_executable(
+                wide_executable);
+        }
+#else
+        BUSTER_UNUSED(wide_vector_results);
+#endif
+    }
     AnalysisEntity* collection_entity =
         codegen_test_entity_find(
             &analysis,
@@ -9094,6 +12087,18 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(
         arguments,
         darwin_abi_module.error == CODEGEN_ERROR_NONE);
+    Target windows_aarch64_target = aarch64_target;
+    windows_aarch64_target.os = OPERATING_SYSTEM_WINDOWS;
+    CodegenModule windows_aarch64_abi_module =
+        codegen_generate_module(
+            arguments->arena,
+            &analysis,
+            &module,
+            windows_aarch64_target);
+    BUSTER_TEST(
+        arguments,
+        windows_aarch64_abi_module.error ==
+            CODEGEN_ERROR_NONE);
     AnalysisEntity* caller_entity =
         codegen_test_entity_find(
             &analysis,
@@ -9107,6 +12112,26 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         codegen_test_entity_find(
             &analysis,
             S8("variadic_call"));
+    AnalysisEntity* variadic_float_call_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("variadic_float_call"));
+    AnalysisEntity* variadic_promoted_call_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("variadic_promoted_call"));
+    AnalysisEntity* variadic_pair_call_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("variadic_pair_call"));
+    AnalysisEntity* variadic_mixed_call_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("variadic_mixed_call"));
+    AnalysisEntity* variadic_large_call_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("variadic_large_call"));
     AnalysisEntity* add_one_entity =
         codegen_test_entity_find(
             &analysis,
@@ -9130,6 +12155,36 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             codegen_test_module_entry_find(
                 &generated_module,
                 variadic_call_entity->id) :
+            0;
+    CodegenModuleEntry* variadic_float_call_entry =
+        variadic_float_call_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                variadic_float_call_entity->id) :
+            0;
+    CodegenModuleEntry* variadic_promoted_call_entry =
+        variadic_promoted_call_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                variadic_promoted_call_entity->id) :
+            0;
+    CodegenModuleEntry* variadic_pair_call_entry =
+        variadic_pair_call_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                variadic_pair_call_entity->id) :
+            0;
+    CodegenModuleEntry* variadic_mixed_call_entry =
+        variadic_mixed_call_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                variadic_mixed_call_entity->id) :
+            0;
+    CodegenModuleEntry* variadic_large_call_entry =
+        variadic_large_call_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                variadic_large_call_entity->id) :
             0;
     if (caller_entity)
     {
@@ -9172,6 +12227,11 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, caller_entry != 0);
     BUSTER_TEST(arguments, call_many_entry != 0);
     BUSTER_TEST(arguments, variadic_call_entry != 0);
+    BUSTER_TEST(arguments, variadic_float_call_entry != 0);
+    BUSTER_TEST(arguments, variadic_promoted_call_entry != 0);
+    BUSTER_TEST(arguments, variadic_pair_call_entry != 0);
+    BUSTER_TEST(arguments, variadic_mixed_call_entry != 0);
+    BUSTER_TEST(arguments, variadic_large_call_entry != 0);
     AnalysisEntity* integer_to_float_entity =
         codegen_test_entity_find(
             &analysis,
@@ -9392,6 +12452,51 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(
                 arguments,
                 native_variadic_call() == 42);
+        }
+        if (variadic_float_call_entry)
+        {
+            void* address =
+                (u8*)module_executable.address +
+                variadic_float_call_entry->offset;
+            CodegenTestFloatFunction0* native = 0;
+            memcpy(&native, &address, sizeof(native));
+            BUSTER_TEST(arguments, native() == 5.25);
+        }
+        if (variadic_promoted_call_entry)
+        {
+            void* address =
+                (u8*)module_executable.address +
+                variadic_promoted_call_entry->offset;
+            CodegenTestFunction0* native = 0;
+            memcpy(&native, &address, sizeof(native));
+            BUSTER_TEST(arguments, native() == 42);
+        }
+        if (variadic_pair_call_entry)
+        {
+            void* address =
+                (u8*)module_executable.address +
+                variadic_pair_call_entry->offset;
+            CodegenTestFunction0* native = 0;
+            memcpy(&native, &address, sizeof(native));
+            BUSTER_TEST(arguments, native() == 42);
+        }
+        if (variadic_mixed_call_entry)
+        {
+            void* address =
+                (u8*)module_executable.address +
+                variadic_mixed_call_entry->offset;
+            CodegenTestFloatFunction0* native = 0;
+            memcpy(&native, &address, sizeof(native));
+            BUSTER_TEST(arguments, native() == 5.25);
+        }
+        if (variadic_large_call_entry)
+        {
+            void* address =
+                (u8*)module_executable.address +
+                variadic_large_call_entry->offset;
+            CodegenTestFunction0* native = 0;
+            memcpy(&native, &address, sizeof(native));
+            BUSTER_TEST(arguments, native() == 31);
         }
         if (integer_to_float_entry &&
             float_to_integer_entry)

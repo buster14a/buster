@@ -21,6 +21,140 @@ BUSTER_GLOBAL_LOCAL CpuId cpuid(u32 leaf, u32 subleaf)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u64 xgetbv(u32 index)
+{
+#if BUSTER_COMPILER_TCC
+    BUSTER_UNUSED(index);
+    return 0;
+#elif BUSTER_COMPILER_MSVC
+    return _xgetbv(index);
+#else
+    u32 low = 0;
+    u32 high = 0;
+    __asm__ volatile (
+        "xgetbv"
+        : "=a"(low), "=d"(high)
+        : "c"(index));
+    return (u64)low | ((u64)high << 32);
+#endif
+}
+
+X86_64EncodedInstruction x86_64_encode_register_operation(
+    X86_64RegisterOperation operation,
+    u32 target_register,
+    u32 source_register)
+{
+    X86_64EncodedInstruction result = {0};
+    if (operation >= X86_64_REGISTER_OPERATION_COUNT ||
+        target_register >= 32 ||
+        source_register >= 32)
+    {
+        return result;
+    }
+    u8 opcodes[] = {
+        0x89,
+        0x01,
+        0x29,
+        0x21,
+        0x09,
+        0x31,
+    };
+    if (target_register >= 16 ||
+        source_register >= 16)
+    {
+        result.bytes[result.length++] = 0xd5;
+        result.bytes[result.length++] = (u8)(
+            0x08 |
+            (source_register >= 16 ? 0x40 : 0) |
+            (target_register >= 16 ? 0x10 : 0) |
+            ((source_register >> 3) & 1) << 2 |
+            ((target_register >> 3) & 1));
+    }
+    else
+    {
+        result.bytes[result.length++] = (u8)(
+            0x48 |
+            ((source_register >> 3) & 1) << 2 |
+            ((target_register >> 3) & 1));
+    }
+    result.bytes[result.length++] = opcodes[operation];
+    result.bytes[result.length++] = (u8)(
+        0xc0 |
+        ((source_register & 7) << 3) |
+        (target_register & 7));
+    return result;
+}
+
+TargetCpuFeatures cpu_detect_features_x86_64(void)
+{
+    TargetCpuFeatures result =
+        TARGET_CPU_FEATURE_X86_SSE2;
+    CpuId maximum = cpuid(0, 0);
+    CpuId basic = cpuid(1, 0);
+    bool has_osxsave =
+        (basic.ecx & (1u << 27)) != 0;
+    bool has_avx_hardware =
+        (basic.ecx & (1u << 28)) != 0;
+    u64 xcr0 = has_osxsave ? xgetbv(0) : 0;
+    bool avx_state = (xcr0 & 0x6) == 0x6;
+    bool avx512_state =
+        avx_state && (xcr0 & 0xe0) == 0xe0;
+    if (has_avx_hardware && avx_state)
+    {
+        result |= TARGET_CPU_FEATURE_X86_AVX;
+    }
+    if (maximum.eax < 7)
+    {
+        return result;
+    }
+    CpuId leaf_7_0 = cpuid(7, 0);
+    if ((result & TARGET_CPU_FEATURE_X86_AVX) &&
+        (leaf_7_0.ebx & (1u << 5)))
+    {
+        result |= TARGET_CPU_FEATURE_X86_AVX2;
+    }
+    if (avx512_state &&
+        (leaf_7_0.ebx & (1u << 16)))
+    {
+        result |= TARGET_CPU_FEATURE_X86_AVX512F;
+        if (leaf_7_0.ebx & (1u << 31))
+        {
+            result |= TARGET_CPU_FEATURE_X86_AVX512VL;
+        }
+    }
+    if (leaf_7_0.eax < 1)
+    {
+        return result;
+    }
+    CpuId leaf_7_1 = cpuid(7, 1);
+    bool avx10 = (leaf_7_1.edx & (1u << 19)) != 0;
+    bool apx = (leaf_7_1.edx & (1u << 21)) != 0;
+    if (apx)
+    {
+        result |= TARGET_CPU_FEATURE_X86_APX;
+    }
+    if (!avx10 || maximum.eax < 0x24)
+    {
+        return result;
+    }
+    CpuId leaf_24 = cpuid(0x24, 0);
+    u32 avx10_version = leaf_24.ebx & 0xff;
+    if (avx10_version >= 1)
+    {
+        result |= TARGET_CPU_FEATURE_X86_AVX10_1;
+    }
+    if (avx10_version >= 2)
+    {
+        result |= TARGET_CPU_FEATURE_X86_AVX10_2;
+    }
+    if (avx512_state &&
+        (leaf_24.ebx & (1u << 18)))
+    {
+        result |= TARGET_CPU_FEATURE_X86_AVX10_512;
+    }
+    return result;
+}
+
 CpuModel cpu_detect_model_x86_64(void)
 {
     CpuId vendor_cpuid = cpuid(0, 0);
@@ -219,3 +353,85 @@ CpuModel cpu_detect_model_x86_64(void)
 
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+UnitTestResult x86_64_tests(UnitTestArguments* arguments)
+{
+    BUSTER_UNUSED(arguments);
+    UnitTestResult result = {0};
+    struct
+    {
+        X86_64RegisterOperation operation;
+        u32 target;
+        u32 source;
+        u8 bytes[4];
+        u8 length;
+    } cases[] = {
+        {
+            X86_64_REGISTER_OPERATION_MOVE,
+            0,
+            1,
+            { 0x48, 0x89, 0xc8 },
+            3,
+        },
+        {
+            X86_64_REGISTER_OPERATION_MOVE,
+            16,
+            0,
+            { 0xd5, 0x18, 0x89, 0xc0 },
+            4,
+        },
+        {
+            X86_64_REGISTER_OPERATION_MOVE,
+            0,
+            16,
+            { 0xd5, 0x48, 0x89, 0xc0 },
+            4,
+        },
+        {
+            X86_64_REGISTER_OPERATION_ADD,
+            16,
+            17,
+            { 0xd5, 0x58, 0x01, 0xc8 },
+            4,
+        },
+        {
+            X86_64_REGISTER_OPERATION_SUBTRACT,
+            31,
+            16,
+            { 0xd5, 0x59, 0x29, 0xc7 },
+            4,
+        },
+        {
+            X86_64_REGISTER_OPERATION_ADD,
+            24,
+            25,
+            { 0xd5, 0x5d, 0x01, 0xc8 },
+            4,
+        },
+    };
+    for (u32 index = 0;
+        index < BUSTER_ARRAY_LENGTH(cases);
+        index += 1)
+    {
+        X86_64EncodedInstruction instruction =
+            x86_64_encode_register_operation(
+                cases[index].operation,
+                cases[index].target,
+                cases[index].source);
+        BUSTER_TEST(arguments,
+            instruction.length == cases[index].length);
+        BUSTER_TEST(arguments,
+            memcmp(
+                instruction.bytes,
+                cases[index].bytes,
+                cases[index].length) == 0);
+    }
+    BUSTER_TEST(arguments,
+        x86_64_encode_register_operation(
+            X86_64_REGISTER_OPERATION_MOVE,
+            32,
+            0).length == 0);
+    return result;
+}
+#endif

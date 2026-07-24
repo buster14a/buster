@@ -115,6 +115,7 @@ typedef enum AnalysisTypeKind
     ANALYSIS_TYPE_SLICE,
     ANALYSIS_TYPE_INFERRED_ARRAY,
     ANALYSIS_TYPE_ARRAY,
+    ANALYSIS_TYPE_VECTOR,
     ANALYSIS_TYPE_FUNCTION,
     // Internal iterable type produced by the range operator.
     ANALYSIS_TYPE_RANGE,
@@ -130,6 +131,7 @@ typedef enum AnalysisAbiClass
     ANALYSIS_ABI_CLASS_NONE,
     ANALYSIS_ABI_CLASS_INTEGER,
     ANALYSIS_ABI_CLASS_FLOAT,
+    ANALYSIS_ABI_CLASS_VECTOR,
     ANALYSIS_ABI_CLASS_POINTER,
     ANALYSIS_ABI_CLASS_AGGREGATE,
     ANALYSIS_ABI_CLASS_MEMORY,
@@ -175,6 +177,11 @@ struct AnalysisType
             AnalysisTypeId element_type;
             u64 count;
         } array;
+        struct
+        {
+            AnalysisTypeId element_type;
+            u64 count;
+        } vector;
         struct
         {
             AnalysisTypeId* argument_types;
@@ -502,6 +509,7 @@ typedef enum AnalysisDiagnosticKind
     ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE,
     ANALYSIS_DIAGNOSTIC_UNKNOWN_TYPE,
     ANALYSIS_DIAGNOSTIC_TYPE_ALIAS_CYCLE,
+    ANALYSIS_DIAGNOSTIC_INVALID_VECTOR_TYPE,
     ANALYSIS_DIAGNOSTIC_UNKNOWN_IDENTIFIER,
     ANALYSIS_DIAGNOSTIC_USE_BEFORE_INITIALIZATION,
     ANALYSIS_DIAGNOSTIC_DUPLICATE_LOCAL,
@@ -692,6 +700,7 @@ typedef enum AnalysisAbiConvention
     ANALYSIS_ABI_CONVENTION_WIN64_X86_64,
     ANALYSIS_ABI_CONVENTION_AAPCS64,
     ANALYSIS_ABI_CONVENTION_APPLE_AARCH64,
+    ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64,
     ANALYSIS_ABI_CONVENTION_COUNT,
 } AnalysisAbiConvention;
 
@@ -829,6 +838,18 @@ BUSTER_F_DECL void analysis_analyze_bodies_with_consumer(
     AnalysisBodyConsumer* consumer,
     void* user_data);
 BUSTER_F_DECL void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions options);
+BUSTER_F_DECL AnalysisAbiValue analysis_abi_value_classify(
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisTypeId type,
+    AnalysisAbiConvention convention,
+    bool is_result);
+BUSTER_F_DECL AnalysisAbiValue
+analysis_abi_value_classify_variadic_argument(
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisTypeId type,
+    AnalysisAbiConvention convention);
 BUSTER_F_DECL AnalysisFunctionAbi analysis_classify_function_abi(
     Arena* result_arena,
     AnalysisResult* result,

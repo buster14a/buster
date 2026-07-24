@@ -21,6 +21,7 @@ typedef enum CodegenAbi
     CODEGEN_ABI_X86_64_WINDOWS,
     CODEGEN_ABI_AARCH64_AAPCS64,
     CODEGEN_ABI_AARCH64_DARWIN,
+    CODEGEN_ABI_AARCH64_WINDOWS,
     CODEGEN_ABI_COUNT,
 } CodegenAbi;
 
@@ -94,6 +95,8 @@ struct CodegenFunction
     u32 stack_frame_size;
     u32 register_value_count;
     u32 spilled_value_count;
+    u32 native_vector_operation_count;
+    u32 split_vector_operation_count;
 };
 
 typedef struct CodegenModuleEntry CodegenModuleEntry;

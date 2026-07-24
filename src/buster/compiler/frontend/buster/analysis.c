@@ -205,6 +205,10 @@ BUSTER_GLOBAL_LOCAL void analysis_type_diagnostic_push(
     {
         message = S8("type alias cycle");
     }
+    else if (kind == ANALYSIS_DIAGNOSTIC_INVALID_VECTOR_TYPE)
+    {
+        message = S8("vector type must contain 64, 128, 256, or 512 bits of integer or floating-point lanes");
+    }
     AnalysisDiagnostic* diagnostic = arena_allocate(arena, AnalysisDiagnostic, 1);
     *diagnostic = (AnalysisDiagnostic){
         .message = message,
@@ -928,6 +932,33 @@ BUSTER_GLOBAL_LOCAL String8 analysis_canonical_tasks_join(
                         .kind = ANALYSIS_CANONICAL_TASK_TYPE,
                     });
             } break;
+            case ANALYSIS_TYPE_VECTOR:
+            {
+                analysis_canonical_part_push(
+                    scratch_arena,
+                    &first,
+                    &last,
+                    &part_count,
+                    string_format(
+                        result_arena,
+                        S8("t{u32}:{u64}("),
+                        (u32)type->kind,
+                        type->as.vector.count));
+                analysis_canonical_task_push(
+                    scratch_arena,
+                    &top,
+                    (AnalysisCanonicalTask){
+                        .text = S8(")"),
+                        .kind = ANALYSIS_CANONICAL_TASK_TEXT,
+                    });
+                analysis_canonical_task_push(
+                    scratch_arena,
+                    &top,
+                    (AnalysisCanonicalTask){
+                        .type = type->as.vector.element_type,
+                        .kind = ANALYSIS_CANONICAL_TASK_TYPE,
+                    });
+            } break;
             case ANALYSIS_TYPE_FUNCTION:
             {
                 analysis_canonical_part_push(
@@ -1206,6 +1237,11 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
         {
             element = type->as.array.element_type;
             array_count = type->as.array.count;
+        }
+        else if (type->kind == ANALYSIS_TYPE_VECTOR)
+        {
+            element = type->as.vector.element_type;
+            array_count = type->as.vector.count;
         }
         else if (type->kind == ANALYSIS_TYPE_FUNCTION)
         {
@@ -1840,6 +1876,10 @@ BUSTER_GLOBAL_LOCAL u32 analysis_ast_type_count(Arena* scratch_arena, AnalysisRe
             {
                 analysis_ast_type_link_push(scratch_arena, &top, type->array.element_type);
             } break;
+            case AST_TYPE_VECTOR:
+            {
+                analysis_ast_type_link_push(scratch_arena, &top, type->vector.element_type);
+            } break;
             case AST_TYPE_FUNCTION:
             {
                 analysis_ast_type_link_push(scratch_arena, &top, type->function.return_type);
@@ -2041,6 +2081,12 @@ BUSTER_GLOBAL_LOCAL bool analysis_type_matches(AnalysisType* existing, AnalysisT
             return
                 analysis_type_id_equal(existing->as.array.element_type, candidate->as.array.element_type) &&
                 existing->as.array.count == candidate->as.array.count;
+        }
+        case ANALYSIS_TYPE_VECTOR:
+        {
+            return
+                analysis_type_id_equal(existing->as.vector.element_type, candidate->as.vector.element_type) &&
+                existing->as.vector.count == candidate->as.vector.count;
         }
         case ANALYSIS_TYPE_FUNCTION:
         {
@@ -2263,6 +2309,7 @@ struct AnalysisImportTypeTask
         } element;
         struct
         {
+            AnalysisTypeKind kind;
             AnalysisTypeId element;
             u64 count;
         } array;
@@ -2384,6 +2431,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_import(
                             });
                 } break;
                 case ANALYSIS_TYPE_ARRAY:
+                case ANALYSIS_TYPE_VECTOR:
                 {
                     AnalysisImportTypeTask* finish =
                             arena_allocate(scratch_arena, AnalysisImportTypeTask, 1);
@@ -2392,8 +2440,10 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_import(
                         .destination = task->destination,
                         .kind = ANALYSIS_IMPORT_TYPE_FINISH_ARRAY,
                         .as.array = {
+                            .kind = type->kind,
                             .element = destination->types.builtin.poison,
-                            .count = type->as.array.count,
+                            .count = type->kind == ANALYSIS_TYPE_ARRAY ?
+                                type->as.array.count : type->as.vector.count,
                         },
                     };
                     top = finish;
@@ -2403,7 +2453,9 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_import(
                             (AnalysisImportTypeTask){
                                 .destination = &finish->as.array.element,
                                 .kind = ANALYSIS_IMPORT_TYPE_VISIT,
-                                .as.source = type->as.array.element_type,
+                                .as.source = type->kind == ANALYSIS_TYPE_ARRAY ?
+                                    type->as.array.element_type :
+                                    type->as.vector.element_type,
                             });
                 } break;
                 case ANALYSIS_TYPE_FUNCTION:
@@ -2468,13 +2520,21 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_import(
             *task->destination = analysis_type_intern(
                     result_arena,
                     &destination->types,
-                    (AnalysisType){
-                        .kind = ANALYSIS_TYPE_ARRAY,
-                        .as.array = {
-                            .element_type = task->as.array.element,
-                            .count = task->as.array.count,
-                        },
-                    });
+                    task->as.array.kind == ANALYSIS_TYPE_ARRAY ?
+                        (AnalysisType){
+                            .kind = ANALYSIS_TYPE_ARRAY,
+                            .as.array = {
+                                .element_type = task->as.array.element,
+                                .count = task->as.array.count,
+                            },
+                        } :
+                        (AnalysisType){
+                            .kind = ANALYSIS_TYPE_VECTOR,
+                            .as.vector = {
+                                .element_type = task->as.array.element,
+                                .count = task->as.array.count,
+                            },
+                        });
         }
         else
         {
@@ -2522,6 +2582,7 @@ struct AnalysisSubstituteTask
         } element;
         struct
         {
+            AnalysisTypeKind kind;
             AnalysisTypeId element;
             u64 count;
         } array;
@@ -2628,6 +2689,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_substitute(
                         });
                 } break;
                 case ANALYSIS_TYPE_ARRAY:
+                case ANALYSIS_TYPE_VECTOR:
                 {
                     AnalysisSubstituteTask* finish =
                         arena_allocate(scratch_arena, AnalysisSubstituteTask, 1);
@@ -2636,8 +2698,10 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_substitute(
                         .destination = task->destination,
                         .kind = ANALYSIS_SUBSTITUTE_FINISH_ARRAY,
                         .as.array = {
+                            .kind = type->kind,
                             .element = result->types.builtin.poison,
-                            .count = type->as.array.count,
+                            .count = type->kind == ANALYSIS_TYPE_ARRAY ?
+                                type->as.array.count : type->as.vector.count,
                         },
                     };
                     top = finish;
@@ -2647,7 +2711,9 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_substitute(
                         (AnalysisSubstituteTask){
                             .destination = &finish->as.array.element,
                             .kind = ANALYSIS_SUBSTITUTE_VISIT,
-                            .as.source = type->as.array.element_type,
+                            .as.source = type->kind == ANALYSIS_TYPE_ARRAY ?
+                                type->as.array.element_type :
+                                type->as.vector.element_type,
                         });
                 } break;
                 case ANALYSIS_TYPE_FUNCTION:
@@ -2722,13 +2788,21 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_substitute(
             *task->destination = analysis_type_intern(
                 result_arena,
                 &result->types,
-                (AnalysisType){
-                    .kind = ANALYSIS_TYPE_ARRAY,
-                    .as.array = {
-                        .element_type = task->as.array.element,
-                        .count = task->as.array.count,
-                    },
-                });
+                task->as.array.kind == ANALYSIS_TYPE_ARRAY ?
+                    (AnalysisType){
+                        .kind = ANALYSIS_TYPE_ARRAY,
+                        .as.array = {
+                            .element_type = task->as.array.element,
+                            .count = task->as.array.count,
+                        },
+                    } :
+                    (AnalysisType){
+                        .kind = ANALYSIS_TYPE_VECTOR,
+                        .as.vector = {
+                            .element_type = task->as.array.element,
+                            .count = task->as.array.count,
+                        },
+                    });
         }
         else
         {
@@ -2803,6 +2877,7 @@ typedef enum AnalysisTypeTaskKind
     ANALYSIS_TYPE_TASK_ENTITY,
     ANALYSIS_TYPE_TASK_FINISH_ELEMENT,
     ANALYSIS_TYPE_TASK_FINISH_ARRAY,
+    ANALYSIS_TYPE_TASK_FINISH_VECTOR,
     ANALYSIS_TYPE_TASK_FINISH_FUNCTION,
     ANALYSIS_TYPE_TASK_FINISH_ENTITY,
     ANALYSIS_TYPE_TASK_FINISH_FIELDS,
@@ -3044,6 +3119,21 @@ BUSTER_GLOBAL_LOCAL void analysis_resolve_ast_task(
             });
             analysis_type_task_ast_push(context, task->owner, ast->array.element_type, &finish->as.array.element);
         } break;
+        case AST_TYPE_VECTOR:
+        {
+            AnalysisTypeTask* finish = analysis_type_task_push(context, (AnalysisTypeTask){
+                .owner = task->owner,
+                .destination = task->destination,
+                .use_range = ast->range,
+                .kind = ANALYSIS_TYPE_TASK_FINISH_VECTOR,
+                .as.array = { .element = poison, .count = ast->vector.count.value },
+            });
+            analysis_type_task_ast_push(
+                context,
+                task->owner,
+                ast->vector.element_type,
+                &finish->as.array.element);
+        } break;
         case AST_TYPE_FUNCTION:
         {
             u32 argument_count = 0;
@@ -3263,6 +3353,59 @@ BUSTER_GLOBAL_LOCAL void analysis_finish_type_task(
                 (AnalysisType){
                     .kind = ANALYSIS_TYPE_ARRAY,
                     .as.array = {
+                        .element_type = task->as.array.element,
+                        .count = task->as.array.count,
+                    },
+                });
+        } break;
+        case ANALYSIS_TYPE_TASK_FINISH_VECTOR:
+        {
+            if (analysis_type_is_poison(context, task->as.array.element))
+            {
+                *task->destination = poison;
+                return;
+            }
+            AnalysisType* element = analysis_type_from_id(
+                context->result,
+                task->as.array.element);
+            u64 element_bits =
+                element->kind == ANALYSIS_TYPE_INTEGER ?
+                    element->as.integer.bit_width :
+                element->kind == ANALYSIS_TYPE_FLOAT ?
+                    element->as.float_bit_width : 0;
+            u64 total_bits = 0;
+            bool overflow =
+                task->as.array.count &&
+                element_bits >
+                    UINT64_MAX / task->as.array.count;
+            if (!overflow)
+            {
+                total_bits =
+                    element_bits * task->as.array.count;
+            }
+            bool valid_size =
+                total_bits == 64 ||
+                total_bits == 128 ||
+                total_bits == 256 ||
+                total_bits == 512;
+            if (!element_bits || overflow || !valid_size)
+            {
+                analysis_type_diagnostic_push(
+                    context->result_arena,
+                    context->result,
+                    task->owner,
+                    task->use_range,
+                    ANALYSIS_DIAGNOSTIC_INVALID_VECTOR_TYPE,
+                    (String8){0});
+                *task->destination = poison;
+                return;
+            }
+            *task->destination = analysis_type_intern(
+                context->result_arena,
+                &context->result->types,
+                (AnalysisType){
+                    .kind = ANALYSIS_TYPE_VECTOR,
+                    .as.vector = {
                         .element_type = task->as.array.element,
                         .count = task->as.array.count,
                     },
@@ -3701,6 +3844,8 @@ BUSTER_GLOBAL_LOCAL String8 analysis_diagnostic_message(AnalysisDiagnosticKind k
         case ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE: return S8("module import cycle");
         case ANALYSIS_DIAGNOSTIC_UNKNOWN_TYPE: return S8("unknown type");
         case ANALYSIS_DIAGNOSTIC_TYPE_ALIAS_CYCLE: return S8("type alias cycle");
+        case ANALYSIS_DIAGNOSTIC_INVALID_VECTOR_TYPE:
+            return S8("vector type must contain 64, 128, 256, or 512 bits of integer or floating-point lanes");
         case ANALYSIS_DIAGNOSTIC_COUNT: break;
     }
     return S8("semantic error");
@@ -3848,13 +3993,58 @@ BUSTER_GLOBAL_LOCAL bool analysis_type_compatible(
 
 BUSTER_GLOBAL_LOCAL bool analysis_type_is_numeric(AnalysisResult* result, AnalysisTypeId id)
 {
-    AnalysisTypeKind kind = analysis_type_from_id(result, id)->kind;
-    return kind == ANALYSIS_TYPE_INTEGER || kind == ANALYSIS_TYPE_FLOAT;
+    AnalysisType* type = analysis_type_from_id(result, id);
+    if (type->kind == ANALYSIS_TYPE_VECTOR)
+    {
+        type = analysis_type_from_id(result, type->as.vector.element_type);
+    }
+    return type->kind == ANALYSIS_TYPE_INTEGER || type->kind == ANALYSIS_TYPE_FLOAT;
 }
 
 BUSTER_GLOBAL_LOCAL bool analysis_type_is_integer(AnalysisResult* result, AnalysisTypeId id)
 {
-    return analysis_type_from_id(result, id)->kind == ANALYSIS_TYPE_INTEGER;
+    AnalysisType* type = analysis_type_from_id(result, id);
+    if (type->kind == ANALYSIS_TYPE_VECTOR)
+    {
+        type = analysis_type_from_id(result, type->as.vector.element_type);
+    }
+    return type->kind == ANALYSIS_TYPE_INTEGER;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_vector_mask_type(
+    Arena* arena,
+    AnalysisResult* result,
+    AnalysisType* vector)
+{
+    AnalysisType* element = analysis_type_from_id(
+        result,
+        vector->as.vector.element_type);
+    u32 width = element->kind == ANALYSIS_TYPE_FLOAT ?
+        element->as.float_bit_width :
+        element->kind == ANALYSIS_TYPE_INTEGER ?
+            element->as.integer.bit_width : 0;
+    AnalysisTypeId mask_element =
+        width == 8 ? result->types.builtin.u8_type :
+        width == 16 ? result->types.builtin.u16_type :
+        width == 32 ? result->types.builtin.u32_type :
+        width == 64 ? result->types.builtin.u64_type :
+        result->types.builtin.poison;
+    if (analysis_type_id_equal(
+            mask_element,
+            result->types.builtin.poison))
+    {
+        return mask_element;
+    }
+    return analysis_type_intern(
+        arena,
+        &result->types,
+        (AnalysisType){
+            .kind = ANALYSIS_TYPE_VECTOR,
+            .as.vector = {
+                .element_type = mask_element,
+                .count = vector->as.vector.count,
+            },
+        });
 }
 
 BUSTER_GLOBAL_LOCAL bool analysis_type_has_compile_time_parameter(
@@ -3892,6 +4082,15 @@ BUSTER_GLOBAL_LOCAL bool analysis_type_has_compile_time_parameter(
         {
             AnalysisTypeLink* link = arena_allocate(scratch_arena, AnalysisTypeLink, 1);
             *link = (AnalysisTypeLink){ .previous = top, .type = type->as.array.element_type };
+            top = link;
+        }
+        else if (type->kind == ANALYSIS_TYPE_VECTOR)
+        {
+            AnalysisTypeLink* link = arena_allocate(scratch_arena, AnalysisTypeLink, 1);
+            *link = (AnalysisTypeLink){
+                .previous = top,
+                .type = type->as.vector.element_type,
+            };
             top = link;
         }
         else if (type->kind == ANALYSIS_TYPE_FUNCTION)
@@ -4014,6 +4213,27 @@ BUSTER_GLOBAL_LOCAL bool analysis_generic_type_infer(
                 .previous = top,
                 .pattern = pattern->as.array.element_type,
                 .actual = actual->as.array.element_type,
+            };
+            top = pushed;
+        }
+        else if (pattern->kind == ANALYSIS_TYPE_VECTOR)
+        {
+            if (pattern->as.vector.count !=
+                actual->as.vector.count)
+            {
+                return false;
+            }
+            AnalysisTypePair* pushed =
+                arena_allocate(
+                    scratch_arena,
+                    AnalysisTypePair,
+                    1);
+            *pushed = (AnalysisTypePair){
+                .previous = top,
+                .pattern =
+                    pattern->as.vector.element_type,
+                .actual =
+                    actual->as.vector.element_type,
             };
             top = pushed;
         }
@@ -4797,26 +5017,24 @@ BUSTER_GLOBAL_LOCAL void analysis_expression_expect(
             continue;
         }
         if (node->id == AST_NODE_ARRAY_LITERAL &&
-            (expected_kind == ANALYSIS_TYPE_ARRAY || expected_kind == ANALYSIS_TYPE_INFERRED_ARRAY))
+            (expected_kind == ANALYSIS_TYPE_ARRAY ||
+                expected_kind == ANALYSIS_TYPE_INFERRED_ARRAY ||
+                expected_kind == ANALYSIS_TYPE_VECTOR))
         {
             AnalysisType* array = analysis_type_from_id(context->result, current_expected);
             AnalysisTypeId element = expected_kind == ANALYSIS_TYPE_ARRAY ?
-                array->as.array.element_type : array->as.element_type;
-            if (expected_kind == ANALYSIS_TYPE_ARRAY &&
-                array->as.array.count != node->array_literal.element_count)
+                array->as.array.element_type :
+                expected_kind == ANALYSIS_TYPE_VECTOR ?
+                    array->as.vector.element_type : array->as.element_type;
+            u64 expected_count = expected_kind == ANALYSIS_TYPE_ARRAY ?
+                array->as.array.count :
+                expected_kind == ANALYSIS_TYPE_VECTOR ?
+                    array->as.vector.count : node->array_literal.element_count;
+            if (expected_count != node->array_literal.element_count)
             {
                 failed = true;
             }
-            current->type = analysis_type_intern(
-                context->result_arena,
-                &context->result->types,
-                (AnalysisType){
-                    .kind = ANALYSIS_TYPE_ARRAY,
-                    .as.array = {
-                        .element_type = element,
-                        .count = node->array_literal.element_count,
-                    },
-                });
+            current->type = current_expected;
             u32 cursor = current_index;
             for (u32 child = node->array_literal.element_count; child > 0; child -= 1)
             {
@@ -4831,10 +5049,12 @@ BUSTER_GLOBAL_LOCAL void analysis_expression_expect(
         bool numeric_unary = node->id == AST_NODE_UNARY_MINUS || node->id == AST_NODE_UNARY_PLUS;
         bool numeric_binary =
             (node->id >= AST_NODE_BINARY_PLUS && node->id <= AST_NODE_BINARY_PERCENT) ||
-            (expected_kind == ANALYSIS_TYPE_INTEGER &&
+            ((expected_kind == ANALYSIS_TYPE_INTEGER || expected_kind == ANALYSIS_TYPE_VECTOR) &&
                 ((node->id >= AST_NODE_BINARY_SHIFT_LEFT && node->id <= AST_NODE_BINARY_SHIFT_RIGHT) ||
                     (node->id >= AST_NODE_BINARY_AMPERSAND && node->id <= AST_NODE_BINARY_CARET)));
-        if ((expected_kind == ANALYSIS_TYPE_INTEGER || expected_kind == ANALYSIS_TYPE_FLOAT) &&
+        if ((expected_kind == ANALYSIS_TYPE_INTEGER ||
+                expected_kind == ANALYSIS_TYPE_FLOAT ||
+                expected_kind == ANALYSIS_TYPE_VECTOR) &&
             (numeric_unary || numeric_binary))
         {
             current->type = current_expected;
@@ -5569,6 +5789,17 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
                         context->body->locals[base->local.value].requires_storage = true;
                     }
                 }
+                else if (base_type->kind == ANALYSIS_TYPE_VECTOR)
+                {
+                    typed.type = base_type->as.vector.element_type;
+                    typed.category = base->category;
+                    typed.local = base->local;
+                    typed.is_addressable = base->is_addressable;
+                    if (base->local.value != ANALYSIS_ID_UNDERLYING_INVALID)
+                    {
+                        context->body->locals[base->local.value].requires_storage = true;
+                    }
+                }
                 else if (base_type->kind == ANALYSIS_TYPE_INFERRED_ARRAY || base_type->kind == ANALYSIS_TYPE_SLICE)
                 {
                     typed.type = base_type->as.element_type;
@@ -6096,6 +6327,38 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
                 bool valid = boolean ? analysis_type_id_equal(left, context->result->types.builtin.bool_type) :
                     bitwise || node->id == AST_NODE_BINARY_RANGE ? analysis_type_is_integer(context->result, left) :
                     equality ? equality_type : analysis_type_is_numeric(context->result, left);
+                if (left_kind == ANALYSIS_TYPE_VECTOR)
+                {
+                    AnalysisType* vector =
+                        analysis_type_from_id(
+                            context->result,
+                            left);
+                    AnalysisType* element =
+                        analysis_type_from_id(
+                            context->result,
+                            vector->as.vector.element_type);
+                    bool add_or_subtract =
+                        node->id == AST_NODE_BINARY_PLUS ||
+                        node->id == AST_NODE_BINARY_MINUS;
+                    bool float_arithmetic =
+                        element->kind == ANALYSIS_TYPE_FLOAT &&
+                        node->id >= AST_NODE_BINARY_PLUS &&
+                        node->id <= AST_NODE_BINARY_SLASH;
+                    bool integer_bitwise =
+                        element->kind == ANALYSIS_TYPE_INTEGER &&
+                        node->id >= AST_NODE_BINARY_AMPERSAND &&
+                        node->id <= AST_NODE_BINARY_CARET;
+                    bool vector_comparison =
+                        comparison &&
+                        (element->kind ==
+                            ANALYSIS_TYPE_INTEGER ||
+                         element->kind ==
+                            ANALYSIS_TYPE_FLOAT);
+                    valid = add_or_subtract ||
+                        float_arithmetic ||
+                        integer_bitwise ||
+                        vector_comparison;
+                }
                 if (!valid && !analysis_type_id_equal(left, poison))
                 {
                     analysis_body_diagnostic_push(
@@ -6113,7 +6376,23 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
                 }
                 else
                 {
-                    typed.type = comparison ? context->result->types.builtin.bool_type : left;
+                    if (comparison &&
+                        left_kind == ANALYSIS_TYPE_VECTOR)
+                    {
+                        typed.type =
+                            analysis_vector_mask_type(
+                                context->result_arena,
+                                context->result,
+                                analysis_type_from_id(
+                                    context->result,
+                                    left));
+                    }
+                    else
+                    {
+                        typed.type = comparison ?
+                            context->result->types.builtin.bool_type :
+                            left;
+                    }
                     if (boolean)
                     {
                         typed.type = context->result->types.builtin.bool_type;
@@ -7937,6 +8216,41 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
                         ready = false;
                     }
                 } break;
+                case ANALYSIS_TYPE_VECTOR:
+                {
+                    AnalysisType* element_type =
+                        analysis_type_from_id(result, type->as.vector.element_type);
+                    AnalysisTypeLayout element = element_type->layout;
+                    if (element.state == ANALYSIS_LAYOUT_RESOLVED)
+                    {
+                        layout.size = element.size * type->as.vector.count;
+                        bool valid_element =
+                            element_type->kind == ANALYSIS_TYPE_INTEGER ||
+                            element_type->kind == ANALYSIS_TYPE_FLOAT;
+                        bool valid_size =
+                            layout.size == 8 ||
+                            layout.size == 16 ||
+                            layout.size == 32 ||
+                            layout.size == 64;
+                        if (!valid_element || !valid_size)
+                        {
+                            layout.state = ANALYSIS_LAYOUT_ERROR;
+                        }
+                        else
+                        {
+                            layout.alignment = (u32)layout.size;
+                            layout.abi_class = ANALYSIS_ABI_CLASS_VECTOR;
+                        }
+                    }
+                    else if (element.state == ANALYSIS_LAYOUT_ERROR)
+                    {
+                        layout.state = ANALYSIS_LAYOUT_ERROR;
+                    }
+                    else
+                    {
+                        ready = false;
+                    }
+                } break;
                 case ANALYSIS_TYPE_RANGE:
                 {
                     AnalysisTypeLayout element = analysis_type_from_id(result, type->as.element_type)->layout;
@@ -8062,8 +8376,14 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiConvention analysis_abi_convention(
     }
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
-        return target.os == OPERATING_SYSTEM_WINDOWS ? ANALYSIS_ABI_CONVENTION_WIN64_X86_64 :
+        return target.os == OPERATING_SYSTEM_WINDOWS ||
+                target.os == OPERATING_SYSTEM_UEFI ?
+            ANALYSIS_ABI_CONVENTION_WIN64_X86_64 :
             ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64;
+    }
+    if (target.os == OPERATING_SYSTEM_WINDOWS)
+    {
+        return ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64;
     }
     return target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS ?
         ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 : ANALYSIS_ABI_CONVENTION_AAPCS64;
@@ -8342,12 +8662,14 @@ BUSTER_GLOBAL_LOCAL bool analysis_abi_systemv_classify(
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
+BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify_context(
     Arena* arena,
     AnalysisResult* result,
     AnalysisTypeId type_id,
     AnalysisAbiConvention convention,
-    bool is_result)
+    bool is_result,
+    bool variadic_argument,
+    u32 vector_register_size)
 {
     AnalysisAbiValue value = {0};
     AnalysisType* type = analysis_type_from_id(result, type_id);
@@ -8360,11 +8682,94 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
     {
         value.part_count = 1;
         value.parts[0] = (AnalysisAbiPart){
-            .abi_class = ANALYSIS_ABI_CLASS_FLOAT,
+            .abi_class =
+                convention ==
+                        ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64 &&
+                    variadic_argument ?
+                    ANALYSIS_ABI_CLASS_INTEGER :
+                    ANALYSIS_ABI_CLASS_FLOAT,
             .location = ANALYSIS_ABI_LOCATION_REGISTER,
             .size = (u32)layout.size,
             .value_offset = 0,
         };
+        return value;
+    }
+    if (type->kind == ANALYSIS_TYPE_VECTOR)
+    {
+        if (convention ==
+                ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 &&
+            layout.size > vector_register_size)
+        {
+            value.indirect = is_result;
+            value.part_count = 1;
+            value.parts[0] = (AnalysisAbiPart){
+                .abi_class = is_result ?
+                    ANALYSIS_ABI_CLASS_POINTER :
+                    ANALYSIS_ABI_CLASS_MEMORY,
+                .location = is_result ?
+                    ANALYSIS_ABI_LOCATION_INDIRECT :
+                    ANALYSIS_ABI_LOCATION_STACK,
+                .size = is_result ? 8 : (u32)layout.size,
+            };
+        }
+        else if (convention == ANALYSIS_ABI_CONVENTION_WIN64_X86_64)
+        {
+            value.indirect = true;
+            value.part_count = 1;
+            value.parts[0] = (AnalysisAbiPart){
+                .abi_class = ANALYSIS_ABI_CLASS_POINTER,
+                .location = ANALYSIS_ABI_LOCATION_INDIRECT,
+                .size = 8,
+            };
+        }
+        else if ((convention == ANALYSIS_ABI_CONVENTION_AAPCS64 ||
+                convention == ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ||
+                convention == ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64) &&
+            layout.size > 16)
+        {
+            value.indirect = true;
+            value.part_count = 1;
+            value.parts[0] = (AnalysisAbiPart){
+                .abi_class = ANALYSIS_ABI_CLASS_POINTER,
+                .location = ANALYSIS_ABI_LOCATION_INDIRECT,
+                .size = 8,
+            };
+        }
+        else if (convention == ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64 &&
+            variadic_argument)
+        {
+            value.part_count = (u32)((layout.size + 7) / 8);
+            for (u32 part = 0; part < value.part_count; part += 1)
+            {
+                value.parts[part] = (AnalysisAbiPart){
+                    .abi_class = ANALYSIS_ABI_CLASS_INTEGER,
+                    .location = ANALYSIS_ABI_LOCATION_REGISTER,
+                    .size = (u32)BUSTER_MIN(
+                        (u64)8,
+                        layout.size - (u64)part * 8),
+                    .value_offset = part * 8,
+                };
+            }
+        }
+        else if (convention == ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 &&
+            variadic_argument && layout.size > 16)
+        {
+            value.part_count = 1;
+            value.parts[0] = (AnalysisAbiPart){
+                .abi_class = ANALYSIS_ABI_CLASS_MEMORY,
+                .location = ANALYSIS_ABI_LOCATION_STACK,
+                .size = (u32)layout.size,
+            };
+        }
+        else
+        {
+            value.part_count = 1;
+            value.parts[0] = (AnalysisAbiPart){
+                .abi_class = ANALYSIS_ABI_CLASS_VECTOR,
+                .location = ANALYSIS_ABI_LOCATION_REGISTER,
+                .size = (u32)layout.size,
+            };
+        }
         return value;
     }
     bool scalar = type->kind == ANALYSIS_TYPE_BOOL || type->kind == ANALYSIS_TYPE_INTEGER ||
@@ -8408,11 +8813,15 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
         return value;
     }
     if (convention == ANALYSIS_ABI_CONVENTION_AAPCS64 ||
-        convention == ANALYSIS_ABI_CONVENTION_APPLE_AARCH64)
+        convention == ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ||
+        convention == ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64)
     {
         AnalysisTypeId homogeneous_type = ANALYSIS_TYPE_ID_INVALID;
         u32 homogeneous_count = 0;
-        if (analysis_abi_homogeneous_float(
+        if (!(convention ==
+                    ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64 &&
+                variadic_argument) &&
+            analysis_abi_homogeneous_float(
                 arena,
                 result,
                 type_id,
@@ -8506,6 +8915,43 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
     return value;
 }
 
+AnalysisAbiValue analysis_abi_value_classify(
+    Arena* arena,
+    AnalysisResult* result,
+    AnalysisTypeId type_id,
+    AnalysisAbiConvention convention,
+    bool is_result)
+{
+    return analysis_abi_value_classify_context(
+        arena,
+        result,
+        type_id,
+        convention,
+        is_result,
+        false,
+        convention ==
+                ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 ?
+            64 : 16);
+}
+
+AnalysisAbiValue analysis_abi_value_classify_variadic_argument(
+    Arena* arena,
+    AnalysisResult* result,
+    AnalysisTypeId type_id,
+    AnalysisAbiConvention convention)
+{
+    return analysis_abi_value_classify_context(
+        arena,
+        result,
+        type_id,
+        convention,
+        false,
+        true,
+        convention ==
+                ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 ?
+            64 : 16);
+}
+
 BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(
     Arena* result_arena,
     AnalysisResult* result,
@@ -8523,20 +8969,26 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(
         .fixed_argument_count = function->as.function.argument_count,
         .is_variadic = function->as.function.is_variadic,
     };
+    u32 vector_register_size =
+        target_vector_register_size(target);
     abi.arguments = arena_allocate(result_arena, AnalysisAbiValue, abi.argument_count);
-    abi.result = analysis_abi_value_classify(
+    abi.result = analysis_abi_value_classify_context(
         result_arena,
         result,
         function->as.function.return_type,
         abi.convention,
-        true);
+        true,
+        false,
+        vector_register_size);
     u32 result_integer_register = 0;
     u32 result_float_register = 0;
     for (u32 part = 0; part < abi.result.part_count; part += 1)
     {
         abi.result.parts[part].register_index =
             abi.result.parts[part].abi_class ==
-                    ANALYSIS_ABI_CLASS_FLOAT ?
+                    ANALYSIS_ABI_CLASS_FLOAT ||
+                abi.result.parts[part].abi_class ==
+                    ANALYSIS_ABI_CLASS_VECTOR ?
                 result_float_register++ :
                 result_integer_register++;
     }
@@ -8570,13 +9022,18 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(
     for (u32 argument = 0; argument < abi.argument_count; argument += 1)
     {
         AnalysisTypeId argument_type = argument_types[argument];
-        AnalysisTypeLayout layout = analysis_type_from_id(result, argument_type)->layout;
-        AnalysisAbiValue value = analysis_abi_value_classify(
+        AnalysisType* argument_semantic =
+            analysis_type_from_id(result, argument_type);
+        AnalysisTypeLayout layout = argument_semantic->layout;
+        AnalysisAbiValue value = analysis_abi_value_classify_context(
             result_arena,
             result,
             argument_type,
             abi.convention,
-            false);
+            false,
+            abi.is_variadic &&
+                argument >= abi.fixed_argument_count,
+            vector_register_size);
         if (abi.convention == ANALYSIS_ABI_CONVENTION_WIN64_X86_64)
         {
             AnalysisAbiPart* part = value.parts;
@@ -8594,12 +9051,32 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(
         }
         else
         {
+            bool aarch64_convention =
+                abi.convention ==
+                    ANALYSIS_ABI_CONVENTION_AAPCS64 ||
+                abi.convention ==
+                    ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ||
+                abi.convention ==
+                    ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64;
             u32 required_integer = 0;
             u32 required_float = 0;
             for (u32 part = 0; part < value.part_count; part += 1)
             {
-                required_float += value.parts[part].abi_class == ANALYSIS_ABI_CLASS_FLOAT;
-                required_integer += value.parts[part].abi_class != ANALYSIS_ABI_CLASS_FLOAT;
+                bool vector_register =
+                    value.parts[part].abi_class == ANALYSIS_ABI_CLASS_FLOAT ||
+                    value.parts[part].abi_class == ANALYSIS_ABI_CLASS_VECTOR;
+                required_float += vector_register;
+                required_integer += !vector_register;
+            }
+            if (aarch64_convention &&
+                required_integer > 1 &&
+                !value.indirect &&
+                layout.alignment >= 16)
+            {
+                integer_register =
+                    (u32)analysis_layout_align(
+                        integer_register,
+                        2);
             }
             bool registers_fit = integer_register + required_integer <= integer_limit &&
                 float_register + required_float <= float_limit &&
@@ -8611,7 +9088,8 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(
             {
                 for (u32 part = 0; part < value.part_count; part += 1)
                 {
-                    if (value.parts[part].abi_class == ANALYSIS_ABI_CLASS_FLOAT)
+                    if (value.parts[part].abi_class == ANALYSIS_ABI_CLASS_FLOAT ||
+                        value.parts[part].abi_class == ANALYSIS_ABI_CLASS_VECTOR)
                     {
                         value.parts[part].register_index = float_register++;
                     }
@@ -8623,12 +9101,33 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(
             }
             else
             {
-            u32 alignment =
-                abi.convention ==
-                    ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ?
-                    layout.alignment :
-                    BUSTER_MAX(layout.alignment, 8);
-            stack_offset = (u32)analysis_layout_align(stack_offset, alignment);
+                if (aarch64_convention &&
+                    value.parts[0].location !=
+                        ANALYSIS_ABI_LOCATION_STACK)
+                {
+                    if (required_float)
+                    {
+                        float_register = float_limit;
+                    }
+                    if (required_integer)
+                    {
+                        integer_register = integer_limit;
+                    }
+                }
+                u32 value_alignment = value.indirect ?
+                    8 :
+                    layout.alignment;
+                u64 value_size = value.indirect ?
+                    8 :
+                    layout.size;
+                u32 alignment =
+                    abi.convention ==
+                        ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ?
+                        value_alignment :
+                        BUSTER_MAX(value_alignment, 8);
+                stack_offset = (u32)analysis_layout_align(
+                    stack_offset,
+                    alignment);
                 for (u32 part = 0; part < value.part_count; part += 1)
                 {
                     value.parts[part].location = ANALYSIS_ABI_LOCATION_STACK;
@@ -8637,10 +9136,10 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(
                         value.parts[part].value_offset;
                 }
                 stack_offset += (u32)analysis_layout_align(
-                    layout.size,
+                    value_size,
                     abi.convention ==
                             ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ?
-                        BUSTER_MAX(layout.alignment, 1) :
+                        BUSTER_MAX(value_alignment, 1) :
                         8);
             }
         }
@@ -9312,6 +9811,8 @@ struct AnalysisFixtureTest
 
 BUSTER_GLOBAL_LOCAL AnalysisFixtureTest analysis_fixture_tests[] =
 {
+    { S8_INITIALIZER("tests/basic_vector.bbb"), 0 },
+    { S8_INITIALIZER("tests/basic_vector_error.bbb"), 1 },
     { S8_INITIALIZER("tests/basic_variadic.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_variadic_error.bbb"), 1 },
     { S8_INITIALIZER("tests/array_slices.bbb"), 0 },
@@ -9802,6 +10303,36 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
         (Target){ .cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX });
     BUSTER_TEST(arguments, aapcs_abi.convention == ANALYSIS_ABI_CONVENTION_AAPCS64);
     BUSTER_TEST(arguments, aapcs_abi.arguments[0].parts[0].register_index == 0);
+    AnalysisFunctionAbi windows_aarch64_abi =
+        analysis_classify_function_abi(
+            arguments->arena,
+            &resolved,
+            code_type->id,
+            (Target){
+                .cpu_arch = CPU_ARCH_AARCH64,
+                .os = OPERATING_SYSTEM_WINDOWS,
+            });
+    BUSTER_TEST(
+        arguments,
+        windows_aarch64_abi.convention ==
+            ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64);
+    BUSTER_TEST(
+        arguments,
+        windows_aarch64_abi.arguments[0]
+            .parts[0].register_index == 0);
+    AnalysisFunctionAbi uefi_x86_64_abi =
+        analysis_classify_function_abi(
+            arguments->arena,
+            &resolved,
+            code_type->id,
+            (Target){
+                .cpu_arch = CPU_ARCH_X86_64,
+                .os = OPERATING_SYSTEM_UEFI,
+            });
+    BUSTER_TEST(
+        arguments,
+        uefi_x86_64_abi.convention ==
+            ANALYSIS_ABI_CONVENTION_WIN64_X86_64);
     analysis_build_jobs(arguments->arena, &resolved);
     BUSTER_TEST(arguments, resolved.job_count == 16);
     BUSTER_TEST(arguments, resolved.jobs[0].kind == ANALYSIS_JOB_INTERFACE);
@@ -10551,6 +11082,85 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
         BUSTER_TEST(
             arguments,
             fixture_result.diagnostic_count == fixture.expected_diagnostic_count);
+        if (string_equal(
+                fixture.path,
+                S8("tests/basic_vector.bbb")))
+        {
+            AnalysisEntity* main_entity =
+                analysis_value_entity_find(
+                    &fixture_result,
+                    S8("main"));
+            BUSTER_TEST(arguments, main_entity != 0);
+            if (main_entity)
+            {
+                AnalysisBody* body =
+                    fixture_result.module.bodies +
+                    main_entity->id.index.value;
+                AnalysisLocal* sum = 0;
+                AnalysisLocal* less = 0;
+                for (u32 local_index = 0;
+                    local_index < body->local_count;
+                    local_index += 1)
+                {
+                    if (string_equal(
+                            body->locals[local_index].name,
+                            S8("sum")))
+                    {
+                        sum = body->locals + local_index;
+                    }
+                    if (string_equal(
+                            body->locals[local_index].name,
+                            S8("less")))
+                    {
+                        less = body->locals + local_index;
+                    }
+                }
+                BUSTER_TEST(arguments, sum != 0);
+                if (sum)
+                {
+                    AnalysisType* type =
+                        analysis_type_from_id(
+                            &fixture_result,
+                            sum->type);
+                    BUSTER_TEST(arguments,
+                        type->kind ==
+                            ANALYSIS_TYPE_VECTOR);
+                    BUSTER_TEST(arguments,
+                        type->as.vector.count == 4);
+                    BUSTER_TEST(arguments,
+                        type->layout.size == 16);
+                    BUSTER_TEST(arguments,
+                        type->layout.abi_class ==
+                            ANALYSIS_ABI_CLASS_VECTOR);
+                }
+                BUSTER_TEST(arguments, less != 0);
+                if (less)
+                {
+                    AnalysisType* mask =
+                        analysis_type_from_id(
+                            &fixture_result,
+                            less->type);
+                    AnalysisType* lane =
+                        mask->kind ==
+                                ANALYSIS_TYPE_VECTOR ?
+                            analysis_type_from_id(
+                                &fixture_result,
+                                mask->as.vector.element_type) :
+                            0;
+                    BUSTER_TEST(arguments,
+                        mask->kind ==
+                            ANALYSIS_TYPE_VECTOR);
+                    BUSTER_TEST(arguments,
+                        mask->as.vector.count == 4);
+                    BUSTER_TEST(arguments,
+                        lane &&
+                        lane->kind ==
+                            ANALYSIS_TYPE_INTEGER &&
+                        !lane->as.integer.is_signed &&
+                        lane->as.integer.bit_width == 32);
+                }
+            }
+        }
         if (string_equal(
                 fixture.path,
                 S8("tests/basic_compile_time.bbb")))

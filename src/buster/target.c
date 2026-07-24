@@ -52,13 +52,160 @@ CpuModel cpu_detect_model(void)
     CpuModel cpu_model = CPU_MODEL_ERROR;
 #if BUSTER_CPU_ARCH_X86_64
     cpu_model = cpu_detect_model_x86_64();
+    target_native.cpu_features =
+        cpu_detect_features_x86_64();
 #elif BUSTER_CPU_ARCH_AARCH64
     cpu_model = cpu_detect_model_aarch64();
+    target_native.cpu_features =
+        TARGET_CPU_FEATURE_AARCH64_NEON;
 #else
 #error TODO: implement CPU detection code for this architecture
 #endif
     target_native.cpu_model = cpu_model;
+    target_native.cpu_features_explicit = true;
     return cpu_model;
+}
+
+TargetCpuFeatures target_cpu_features_default(
+    CpuArch arch,
+    CpuModel model)
+{
+    if (arch == CPU_ARCH_AARCH64)
+    {
+        return TARGET_CPU_FEATURE_AARCH64_NEON;
+    }
+    if (arch != CPU_ARCH_X86_64)
+    {
+        return 0;
+    }
+    TargetCpuFeatures result =
+        TARGET_CPU_FEATURE_X86_SSE2;
+    switch (model)
+    {
+        case CPU_MODEL_AMD_ZEN_1:
+        case CPU_MODEL_AMD_ZEN_2:
+        case CPU_MODEL_AMD_ZEN_3:
+        case CPU_MODEL_INTEL_HASWELL:
+        case CPU_MODEL_INTEL_BROADWELL:
+        case CPU_MODEL_INTEL_SKYLAKE:
+        case CPU_MODEL_INTEL_ROCKETLAKE:
+        case CPU_MODEL_INTEL_ALDERLAKE:
+        case CPU_MODEL_INTEL_RAPTORLAKE:
+        case CPU_MODEL_INTEL_METEORLAKE:
+        case CPU_MODEL_INTEL_GRACEMONT:
+        case CPU_MODEL_INTEL_ARROWLAKE:
+        case CPU_MODEL_INTEL_ARROWLAKE_S:
+        case CPU_MODEL_INTEL_LUNARLAKE:
+        case CPU_MODEL_INTEL_PANTHERLAKE:
+            result |=
+                TARGET_CPU_FEATURE_X86_AVX |
+                TARGET_CPU_FEATURE_X86_AVX2;
+            break;
+        case CPU_MODEL_AMD_ZEN_4:
+        case CPU_MODEL_AMD_ZEN_5:
+        case CPU_MODEL_INTEL_SKYLAKE_AVX512:
+        case CPU_MODEL_INTEL_COOPERLAKE:
+        case CPU_MODEL_INTEL_CASCADELAKE:
+        case CPU_MODEL_INTEL_CANNONLAKE:
+        case CPU_MODEL_INTEL_ICELAKE_CLIENT:
+        case CPU_MODEL_INTEL_TIGERLAKE:
+        case CPU_MODEL_INTEL_ICELAKE_SERVER:
+        case CPU_MODEL_INTEL_EMERALD_RAPIDS:
+        case CPU_MODEL_INTEL_SAPPHIRE_RAPIDS:
+        case CPU_MODEL_INTEL_KNL:
+        case CPU_MODEL_INTEL_KNM:
+            result |=
+                TARGET_CPU_FEATURE_X86_AVX |
+                TARGET_CPU_FEATURE_X86_AVX2 |
+                TARGET_CPU_FEATURE_X86_AVX512F |
+                TARGET_CPU_FEATURE_X86_AVX512VL;
+            break;
+        case CPU_MODEL_INTEL_GRANITE_RAPIDS:
+        case CPU_MODEL_INTEL_GRANITE_RAPIDS_D:
+            result |=
+                TARGET_CPU_FEATURE_X86_AVX |
+                TARGET_CPU_FEATURE_X86_AVX2 |
+                TARGET_CPU_FEATURE_X86_AVX512F |
+                TARGET_CPU_FEATURE_X86_AVX512VL |
+                TARGET_CPU_FEATURE_X86_AVX10_1 |
+                TARGET_CPU_FEATURE_X86_AVX10_512;
+            break;
+        case CPU_MODEL_INTEL_DIAMOND_RAPIDS:
+            result |=
+                TARGET_CPU_FEATURE_X86_AVX |
+                TARGET_CPU_FEATURE_X86_AVX2 |
+                TARGET_CPU_FEATURE_X86_AVX512F |
+                TARGET_CPU_FEATURE_X86_AVX512VL |
+                TARGET_CPU_FEATURE_X86_AVX10_1 |
+                TARGET_CPU_FEATURE_X86_AVX10_2 |
+                TARGET_CPU_FEATURE_X86_AVX10_512 |
+                TARGET_CPU_FEATURE_X86_APX;
+            break;
+        case CPU_MODEL_INTEL_SANDY_BRIDGE:
+        case CPU_MODEL_INTEL_IVY_BRIDGE:
+            result |= TARGET_CPU_FEATURE_X86_AVX;
+            break;
+        default:
+            break;
+    }
+    return result;
+}
+
+TargetCpuFeatures target_cpu_features_effective(Target target)
+{
+    if (target.cpu_features_explicit)
+    {
+        return target.cpu_features;
+    }
+    if (target.cpu_model == CPU_MODEL_NATIVE &&
+        target.cpu_arch == target_native.cpu_arch &&
+        target_native.cpu_features_explicit)
+    {
+        return target_native.cpu_features;
+    }
+    return target_cpu_features_default(
+        target.cpu_arch,
+        target.cpu_model);
+}
+
+bool target_cpu_feature_has(
+    Target target,
+    TargetCpuFeature feature)
+{
+    return (target_cpu_features_effective(target) &
+        (TargetCpuFeatures)feature) != 0;
+}
+
+u32 target_vector_register_size(Target target)
+{
+    if (target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        return target_cpu_feature_has(
+                target,
+                TARGET_CPU_FEATURE_AARCH64_NEON) ?
+            16 : 0;
+    }
+    if (target.cpu_arch != CPU_ARCH_X86_64)
+    {
+        return 0;
+    }
+    TargetCpuFeatures features =
+        target_cpu_features_effective(target);
+    if (features &
+        (TARGET_CPU_FEATURE_X86_AVX512F |
+         TARGET_CPU_FEATURE_X86_AVX10_512))
+    {
+        return 64;
+    }
+    if (features &
+        (TARGET_CPU_FEATURE_X86_AVX |
+         TARGET_CPU_FEATURE_X86_AVX10_1 |
+         TARGET_CPU_FEATURE_X86_AVX10_2))
+    {
+        return 32;
+    }
+    return features & TARGET_CPU_FEATURE_X86_SSE2 ?
+        16 : 0;
 }
 
 TargetStringSplit target_to_split_string_os(Target target)

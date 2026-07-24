@@ -272,6 +272,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     [TOKEN_KEYWORD_STRUCT - first_keyword] = S8_INITIALIZER("struct"),
                     [TOKEN_KEYWORD_UNION - first_keyword] = S8_INITIALIZER("union"),
                     [TOKEN_KEYWORD_ENUM - first_keyword] = S8_INITIALIZER("enum"),
+                    [TOKEN_KEYWORD_VECTOR - first_keyword] = S8_INITIALIZER("vector"),
                     [TOKEN_KEYWORD_AND - first_keyword] = S8_INITIALIZER("and"),
                     [TOKEN_KEYWORD_OR - first_keyword] = S8_INITIALIZER("or"),
                     [TOKEN_KEYWORD_AND_SHORT_CIRCUIT - first_keyword] = S8_INITIALIZER("and?"),
@@ -748,6 +749,9 @@ typedef enum TypeState
     TYPE_STATE_AFTER_ARRAY_SLICE_START,
     TYPE_STATE_AFTER_ARRAY_COUNT,
     TYPE_STATE_AFTER_ARRAY_INFER_MARKER,
+    TYPE_STATE_AFTER_VECTOR_KEYWORD,
+    TYPE_STATE_AFTER_VECTOR_OPEN,
+    TYPE_STATE_AFTER_VECTOR_COUNT,
     TYPE_STATE_AFTER_FUNCTION_KEYWORD,
     TYPE_STATE_FUNCTION_ARGUMENT_NAME_OR_CLOSE,
     TYPE_STATE_FUNCTION_ARGUMENT_AFTER_NAME_SEGMENT,
@@ -2670,6 +2674,7 @@ BUSTER_GLOBAL_LOCAL bool token_begins_type(TokenId id)
         id == TOKEN_DOLLAR ||
         id == pointer_token ||
         id == array_slice_token_start ||
+        id == TOKEN_KEYWORD_VECTOR ||
         id == TOKEN_KEYWORD_FUNCTION;
     return result;
 }
@@ -2709,6 +2714,10 @@ BUSTER_GLOBAL_LOCAL void finish_type_ranges(AstType* type, u32 end_offset)
             break; case AST_TYPE_ARRAY:
             {
                 type = type->array.element_type;
+            }
+            break; case AST_TYPE_VECTOR:
+            {
+                type = type->vector.element_type;
             }
             break; default:
             {
@@ -3678,6 +3687,7 @@ BUSTER_GLOBAL_LOCAL String8 string_from_token_id(TokenIdEnum id)
         break; case TOKEN_KEYWORD_AND_SHORT_CIRCUIT: return S8("Keyword_AndShortCircuit");
         break; case TOKEN_KEYWORD_OR_SHORT_CIRCUIT: return S8("Keyword_OrShortCircuit");
         break; case TOKEN_KEYWORD_UNDEFINED: return S8("Keyword_Undefined");
+        break; case TOKEN_KEYWORD_VECTOR: return S8("Keyword_Vector");
         break; case TOKEN_COUNT: return S8("Token_Count(Error)");
     }
 
@@ -4500,6 +4510,12 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                 type_state->type.prefix_range = source_range_from_token(token);
                                 type_state->type.current_state = TYPE_STATE_AFTER_ARRAY_SLICE_START;
                             }
+                            break; case TOKEN_KEYWORD_VECTOR:
+                            {
+                                consume(&parser.iterator);
+                                type_state->type.prefix_range = source_range_from_token(token);
+                                type_state->type.current_state = TYPE_STATE_AFTER_VECTOR_KEYWORD;
+                            }
                             break; case TOKEN_IDENTIFIER:
                             {
                                 consume(&parser.iterator);
@@ -4628,6 +4644,79 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         type_state->type.current_state = TYPE_STATE_PREFIX_OR_BASE;
                     }
                     break; case TYPE_STATE_AFTER_ARRAY_INFER_MARKER:
+                    {
+                        if (token.id != TOKEN_RIGHT_BRACKET)
+                        {
+                            parser_unexpected(&parser, token, TOKEN_RIGHT_BRACKET);
+                            continue;
+                        }
+
+                        consume(&parser.iterator);
+                        type_state->type.current_state = TYPE_STATE_PREFIX_OR_BASE;
+                    }
+                    break; case TYPE_STATE_AFTER_VECTOR_KEYWORD:
+                    {
+                        if (token.id != TOKEN_LEFT_BRACKET)
+                        {
+                            parser_unexpected(&parser, token, TOKEN_LEFT_BRACKET);
+                            continue;
+                        }
+
+                        consume(&parser.iterator);
+                        type_state->type.current_state = TYPE_STATE_AFTER_VECTOR_OPEN;
+                    }
+                    break; case TYPE_STATE_AFTER_VECTOR_OPEN:
+                    {
+                        switch (token.id)
+                        {
+                            case TOKEN_HEXADECIMAL_INTEGER_LITERAL:
+                            case TOKEN_DECIMAL_INTEGER_LITERAL:
+                            case TOKEN_OCTAL_INTEGER_LITERAL:
+                            case TOKEN_BINARY_INTEGER_LITERAL:
+                            {
+                                consume(&parser.iterator);
+                                String8 count_string = get_string(parser.iterator.source, token);
+                                IntegerLiteralParsing count = parse_integer_literal(count_string, token.id);
+                                if (!count.valid)
+                                {
+                                    parser_diagnostic_push(
+                                        &parser,
+                                        PARSER_DIAGNOSTIC_INVALID_INTEGER,
+                                        token,
+                                        TOKEN_ERROR,
+                                        S8("invalid vector lane count"));
+                                }
+
+                                ParserSourceRange range = type_state->type.prefix_range;
+                                AstType* vector = parser_type_attach(
+                                    &parser,
+                                    type_state,
+                                    AST_TYPE_VECTOR,
+                                    (ExtendedToken){
+                                        .offset = range.offset,
+                                        .length = range.length,
+                                        .line = range.line,
+                                        .column = range.column,
+                                    });
+                                vector->vector.count = (AstIntegerLiteral){
+                                    .spelling = count_string,
+                                    .value = count.value,
+                                    .base = count.base,
+                                    .fits_u64 = count.fits_u64,
+                                };
+                                type_state->type.destination = &vector->vector.element_type;
+                                type_state->type.current_state = TYPE_STATE_AFTER_VECTOR_COUNT;
+                            }
+                            break; default:
+                            {
+                                parser_unexpected(
+                                    &parser,
+                                    token,
+                                    TOKEN_DECIMAL_INTEGER_LITERAL);
+                            }
+                        }
+                    }
+                    break; case TYPE_STATE_AFTER_VECTOR_COUNT:
                     {
                         if (token.id != TOKEN_RIGHT_BRACKET)
                         {
@@ -6768,10 +6857,22 @@ BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic missing_compile_time_marker_dia
 BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
 {
     {
-        .path = S8_INITIALIZER("tests/basic_variadic.bbb"),
-        .expected_expression = S8_INITIALIZER("(- (call first_two 1 2 100) 3)"),
+        .path = S8_INITIALIZER("tests/basic_vector.bbb"),
+        .expected_expression = S8_INITIALIZER("(@cast (index negated 0))"),
         .expression_code_name = S8_INITIALIZER("main"),
         .expected_code_count = 2,
+        .expected_type_declaration_count = 1,
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_vector_error.bbb"),
+        .expected_code_count = 1,
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_variadic.bbb"),
+        .expected_expression = S8_INITIALIZER("(- (+ (+ (+ (call first_two 1 small 100) (@cast (call take_float floating))) (@cast (call take_pair pair))) (@cast (call take_large large))) 81)"),
+        .expression_code_name = S8_INITIALIZER("main"),
+        .expected_code_count = 5,
+        .expected_type_declaration_count = 2,
     },
     {
         .path = S8_INITIALIZER("tests/basic_variadic_error.bbb"),

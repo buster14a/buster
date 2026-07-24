@@ -561,6 +561,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_read(
         return true;
     }
     if (type->kind == ANALYSIS_TYPE_ARRAY ||
+        type->kind == ANALYSIS_TYPE_VECTOR ||
         type->kind == ANALYSIS_TYPE_STRUCT ||
         type->kind == ANALYSIS_TYPE_UNION)
     {
@@ -1004,6 +1005,449 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_float_binary(
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_vector_unary(
+    Arena* arena,
+    IrExecutionFrame* frame,
+    IrInstruction* instruction,
+    IrRuntimeValue* value_out,
+    IrExecutionTrap* trap_out)
+{
+    AnalysisType* vector = analysis_type_from_id(
+        frame->analysis,
+        instruction->type);
+    AnalysisTypeId element_type_id =
+        vector->as.vector.element_type;
+    AnalysisType* element = analysis_type_from_id(
+        frame->analysis,
+        element_type_id);
+    u64 lane_size = ir_interpreter_type_size(
+        frame->analysis,
+        element_type_id);
+    IrRuntimeValue operand =
+        frame->values[instruction->operands[0].value];
+    if (operand.kind != IR_RUNTIME_VALUE_AGGREGATE ||
+        !operand.object || !lane_size)
+    {
+        *trap_out = IR_EXECUTION_TRAP_INVALID_MEMORY;
+        return false;
+    }
+    IrRuntimeObject* object =
+        ir_interpreter_object_create(
+            arena,
+            vector->layout.size);
+    for (u64 lane = 0;
+        lane < vector->as.vector.count;
+        lane += 1)
+    {
+        IrRuntimeValue source = {0};
+        if (!ir_interpreter_memory_read(
+                arena,
+                frame->analysis,
+                element_type_id,
+                operand.object,
+                operand.offset + lane * lane_size,
+                &source))
+        {
+            *trap_out =
+                IR_EXECUTION_TRAP_UNINITIALIZED_VALUE;
+            return false;
+        }
+        u64 bits = source.bits;
+        if (instruction->unary_operation ==
+            IR_UNARY_VECTOR_FLOAT_NEGATE)
+        {
+            bits = ir_interpreter_float_write(
+                -ir_interpreter_float_read(
+                    bits,
+                    element->as.float_bit_width),
+                element->as.float_bit_width);
+        }
+        else if (instruction->unary_operation ==
+            IR_UNARY_VECTOR_INTEGER_NEGATE)
+        {
+            bits = (0 - bits) &
+                ir_interpreter_mask(
+                    element->as.integer.bit_width);
+        }
+        else if (instruction->unary_operation ==
+            IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)
+        {
+            bits = ~bits &
+                ir_interpreter_mask(
+                    element->as.integer.bit_width);
+        }
+        else
+        {
+            *trap_out =
+                IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+            return false;
+        }
+        if (!ir_interpreter_memory_write(
+                arena,
+                object,
+                lane * lane_size,
+                lane_size,
+                (IrRuntimeValue){
+                    .bits = bits,
+                    .kind = IR_RUNTIME_VALUE_SCALAR,
+                    .initialized = true,
+                }))
+        {
+            *trap_out = IR_EXECUTION_TRAP_INVALID_MEMORY;
+            return false;
+        }
+    }
+    *value_out = (IrRuntimeValue){
+        .object = object,
+        .length = vector->layout.size,
+        .kind = IR_RUNTIME_VALUE_AGGREGATE,
+        .initialized = true,
+    };
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_vector_binary(
+    Arena* arena,
+    IrExecutionFrame* frame,
+    IrInstruction* instruction,
+    IrRuntimeValue* value_out,
+    IrExecutionTrap* trap_out)
+{
+    AnalysisTypeId operand_type_id =
+        frame->function->values[
+            instruction->operands[0].value].type;
+    AnalysisType* vector = analysis_type_from_id(
+        frame->analysis,
+        operand_type_id);
+    AnalysisTypeId element_type_id =
+        vector->as.vector.element_type;
+    AnalysisType* element = analysis_type_from_id(
+        frame->analysis,
+        element_type_id);
+    AnalysisType* result_vector = analysis_type_from_id(
+        frame->analysis,
+        instruction->type);
+    AnalysisTypeId result_element_type_id =
+        result_vector->as.vector.element_type;
+    u64 lane_size = ir_interpreter_type_size(
+        frame->analysis,
+        element_type_id);
+    IrRuntimeValue left =
+        frame->values[instruction->operands[0].value];
+    IrRuntimeValue right =
+        frame->values[instruction->operands[1].value];
+    if (left.kind != IR_RUNTIME_VALUE_AGGREGATE ||
+        right.kind != IR_RUNTIME_VALUE_AGGREGATE ||
+        !left.object || !right.object || !lane_size)
+    {
+        *trap_out = IR_EXECUTION_TRAP_INVALID_MEMORY;
+        return false;
+    }
+    IrRuntimeObject* object =
+        ir_interpreter_object_create(
+            arena,
+            result_vector->layout.size);
+    u32 width = element->kind == ANALYSIS_TYPE_FLOAT ?
+        element->as.float_bit_width :
+        element->as.integer.bit_width;
+    u64 mask = ir_interpreter_mask(width);
+    for (u64 lane = 0;
+        lane < vector->as.vector.count;
+        lane += 1)
+    {
+        IrRuntimeValue left_lane = {0};
+        IrRuntimeValue right_lane = {0};
+        if (!ir_interpreter_memory_read(
+                arena,
+                frame->analysis,
+                element_type_id,
+                left.object,
+                left.offset + lane * lane_size,
+                &left_lane) ||
+            !ir_interpreter_memory_read(
+                arena,
+                frame->analysis,
+                element_type_id,
+                right.object,
+                right.offset + lane * lane_size,
+                &right_lane))
+        {
+            *trap_out =
+                IR_EXECUTION_TRAP_UNINITIALIZED_VALUE;
+            return false;
+        }
+        u64 result_bits = 0;
+        bool comparison = false;
+        bool comparison_value = false;
+        IrBinaryOperation operation =
+            instruction->binary_operation;
+        if (element->kind == ANALYSIS_TYPE_FLOAT)
+        {
+            f64 left_value = ir_interpreter_float_read(
+                left_lane.bits,
+                width);
+            f64 right_value = ir_interpreter_float_read(
+                right_lane.bits,
+                width);
+            f64 result_value = 0.0;
+            switch (operation)
+            {
+                case IR_BINARY_VECTOR_FLOAT_ADD:
+                    result_value = left_value + right_value;
+                    break;
+                case IR_BINARY_VECTOR_FLOAT_SUBTRACT:
+                    result_value = left_value - right_value;
+                    break;
+                case IR_BINARY_VECTOR_FLOAT_MULTIPLY:
+                    result_value = left_value * right_value;
+                    break;
+                case IR_BINARY_VECTOR_FLOAT_DIVIDE:
+                    if (right_value == 0.0)
+                    {
+                        *trap_out =
+                            IR_EXECUTION_TRAP_DIVISION_BY_ZERO;
+                        return false;
+                    }
+                    result_value = left_value / right_value;
+                    break;
+                case IR_BINARY_VECTOR_FLOAT_EQUAL:
+                    comparison = true;
+                    comparison_value =
+                        left_value == right_value;
+                    break;
+                case IR_BINARY_VECTOR_FLOAT_NOT_EQUAL:
+                    comparison = true;
+                    comparison_value =
+                        left_value != right_value;
+                    break;
+                case IR_BINARY_VECTOR_FLOAT_LESS:
+                    comparison = true;
+                    comparison_value =
+                        left_value < right_value;
+                    break;
+                case IR_BINARY_VECTOR_FLOAT_LESS_EQUAL:
+                    comparison = true;
+                    comparison_value =
+                        left_value <= right_value;
+                    break;
+                case IR_BINARY_VECTOR_FLOAT_GREATER:
+                    comparison = true;
+                    comparison_value =
+                        left_value > right_value;
+                    break;
+                case IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL:
+                    comparison = true;
+                    comparison_value =
+                        left_value >= right_value;
+                    break;
+                default:
+                    *trap_out =
+                        IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                    return false;
+            }
+            result_bits = comparison ?
+                (comparison_value ? mask : 0) :
+                ir_interpreter_float_write(
+                    result_value,
+                    width);
+        }
+        else
+        {
+            u64 left_bits = left_lane.bits & mask;
+            u64 right_bits = right_lane.bits & mask;
+            switch (operation)
+            {
+                case IR_BINARY_VECTOR_INTEGER_ADD:
+                    result_bits = left_bits + right_bits;
+                    break;
+                case IR_BINARY_VECTOR_INTEGER_SUBTRACT:
+                    result_bits = left_bits - right_bits;
+                    break;
+                case IR_BINARY_VECTOR_INTEGER_MULTIPLY:
+                    result_bits = left_bits * right_bits;
+                    break;
+                case IR_BINARY_VECTOR_SIGNED_DIVIDE:
+                case IR_BINARY_VECTOR_UNSIGNED_DIVIDE:
+                case IR_BINARY_VECTOR_SIGNED_REMAINDER:
+                case IR_BINARY_VECTOR_UNSIGNED_REMAINDER:
+                {
+                    if (!right_bits)
+                    {
+                        *trap_out =
+                            IR_EXECUTION_TRAP_DIVISION_BY_ZERO;
+                        return false;
+                    }
+                    bool divide =
+                        operation ==
+                            IR_BINARY_VECTOR_SIGNED_DIVIDE ||
+                        operation ==
+                            IR_BINARY_VECTOR_UNSIGNED_DIVIDE;
+                    bool signed_operation =
+                        operation ==
+                            IR_BINARY_VECTOR_SIGNED_DIVIDE ||
+                        operation ==
+                            IR_BINARY_VECTOR_SIGNED_REMAINDER;
+                    if (signed_operation)
+                    {
+                        bool left_negative =
+                            ir_interpreter_integer_negative(
+                                left_bits,
+                                width);
+                        bool right_negative =
+                            ir_interpreter_integer_negative(
+                                right_bits,
+                                width);
+                        u64 left_magnitude =
+                            ir_interpreter_integer_magnitude(
+                                left_bits,
+                                width);
+                        u64 right_magnitude =
+                            ir_interpreter_integer_magnitude(
+                                right_bits,
+                                width);
+                        result_bits = divide ?
+                            left_magnitude /
+                                right_magnitude :
+                            left_magnitude %
+                                right_magnitude;
+                        if ((divide &&
+                                left_negative !=
+                                    right_negative) ||
+                            (!divide && left_negative))
+                        {
+                            result_bits = 0 - result_bits;
+                        }
+                    }
+                    else
+                    {
+                        result_bits = divide ?
+                            left_bits / right_bits :
+                            left_bits % right_bits;
+                    }
+                } break;
+                case IR_BINARY_VECTOR_SHIFT_LEFT:
+                case IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT:
+                case IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT:
+                    if (right_bits >= width)
+                    {
+                        *trap_out =
+                            IR_EXECUTION_TRAP_INVALID_SHIFT;
+                        return false;
+                    }
+                    if (operation ==
+                        IR_BINARY_VECTOR_SHIFT_LEFT)
+                    {
+                        result_bits =
+                            left_bits << (u32)right_bits;
+                    }
+                    else if (operation ==
+                            IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT &&
+                        ir_interpreter_integer_negative(
+                            left_bits,
+                            width) &&
+                        right_bits)
+                    {
+                        result_bits =
+                            (left_bits >> (u32)right_bits) |
+                            (mask ^
+                                (mask >> (u32)right_bits));
+                    }
+                    else
+                    {
+                        result_bits =
+                            left_bits >> (u32)right_bits;
+                    }
+                    break;
+                case IR_BINARY_VECTOR_INTEGER_BITWISE_AND:
+                    result_bits = left_bits & right_bits;
+                    break;
+                case IR_BINARY_VECTOR_INTEGER_BITWISE_OR:
+                    result_bits = left_bits | right_bits;
+                    break;
+                case IR_BINARY_VECTOR_INTEGER_BITWISE_XOR:
+                    result_bits = left_bits ^ right_bits;
+                    break;
+                case IR_BINARY_VECTOR_INTEGER_EQUAL:
+                    comparison = true;
+                    comparison_value =
+                        left_bits == right_bits;
+                    break;
+                case IR_BINARY_VECTOR_INTEGER_NOT_EQUAL:
+                    comparison = true;
+                    comparison_value =
+                        left_bits != right_bits;
+                    break;
+                case IR_BINARY_VECTOR_SIGNED_LESS:
+                case IR_BINARY_VECTOR_SIGNED_LESS_EQUAL:
+                case IR_BINARY_VECTOR_SIGNED_GREATER:
+                case IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL:
+                case IR_BINARY_VECTOR_UNSIGNED_LESS:
+                case IR_BINARY_VECTOR_UNSIGNED_LESS_EQUAL:
+                case IR_BINARY_VECTOR_UNSIGNED_GREATER:
+                case IR_BINARY_VECTOR_UNSIGNED_GREATER_EQUAL:
+                {
+                    comparison = true;
+                    bool signed_operation =
+                        operation >=
+                            IR_BINARY_VECTOR_SIGNED_LESS &&
+                        operation <=
+                            IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL;
+                    s32 order = signed_operation ?
+                        ir_interpreter_signed_compare(
+                            left_bits,
+                            right_bits,
+                            width) :
+                        left_bits < right_bits ? -1 :
+                        left_bits > right_bits ? 1 : 0;
+                    IrBinaryOperation first =
+                        signed_operation ?
+                            IR_BINARY_VECTOR_SIGNED_LESS :
+                            IR_BINARY_VECTOR_UNSIGNED_LESS;
+                    u32 relative =
+                        (u32)(operation - first);
+                    comparison_value =
+                        relative == 0 ? order < 0 :
+                        relative == 1 ? order <= 0 :
+                        relative == 2 ? order > 0 :
+                        order >= 0;
+                } break;
+                default:
+                    *trap_out =
+                        IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                    return false;
+            }
+            if (comparison)
+            {
+                result_bits =
+                    comparison_value ? mask : 0;
+            }
+            result_bits &= mask;
+        }
+        if (!ir_interpreter_memory_write(
+                arena,
+                object,
+                lane * lane_size,
+                lane_size,
+                (IrRuntimeValue){
+                    .bits = result_bits,
+                    .kind = IR_RUNTIME_VALUE_SCALAR,
+                    .initialized = true,
+                }))
+        {
+            *trap_out = IR_EXECUTION_TRAP_INVALID_MEMORY;
+            return false;
+        }
+    }
+    BUSTER_UNUSED(result_element_type_id);
+    *value_out = (IrRuntimeValue){
+        .object = object,
+        .length = result_vector->layout.size,
+        .kind = IR_RUNTIME_VALUE_AGGREGATE,
+        .initialized = true,
+    };
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_cast(
     IrExecutionFrame* frame,
     IrInstruction* instruction,
@@ -1150,15 +1594,24 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_collection(
         return true;
     }
     if (type->kind == ANALYSIS_TYPE_ARRAY ||
+        type->kind == ANALYSIS_TYPE_VECTOR ||
         type->kind == ANALYSIS_TYPE_INFERRED_ARRAY)
     {
-        AnalysisTypeId element = type->kind == ANALYSIS_TYPE_ARRAY ?
-            type->as.array.element_type : type->as.element_type;
+        AnalysisTypeId element =
+            type->kind == ANALYSIS_TYPE_ARRAY ?
+                type->as.array.element_type :
+            type->kind == ANALYSIS_TYPE_VECTOR ?
+                type->as.vector.element_type :
+                type->as.element_type;
         u64 element_size = ir_interpreter_type_size(
             frame->analysis,
             element);
-        u64 count = type->kind == ANALYSIS_TYPE_ARRAY ?
-            type->as.array.count : value.length;
+        u64 count =
+            type->kind == ANALYSIS_TYPE_ARRAY ?
+                type->as.array.count :
+            type->kind == ANALYSIS_TYPE_VECTOR ?
+                type->as.vector.count :
+                value.length;
         if ((value.kind != IR_RUNTIME_VALUE_AGGREGATE &&
              value.kind != IR_RUNTIME_VALUE_PLACE) ||
             !value.object || !element_size)
@@ -1497,6 +1950,8 @@ IrExecutionResult ir_execute(
                 AnalysisTypeId element_type =
                     array_type->kind == ANALYSIS_TYPE_ARRAY ?
                         array_type->as.array.element_type :
+                    array_type->kind == ANALYSIS_TYPE_VECTOR ?
+                        array_type->as.vector.element_type :
                         array_type->as.element_type;
                 u64 element_size = ir_interpreter_type_size(
                     frame->analysis,
@@ -1842,6 +2297,19 @@ IrExecutionResult ir_execute(
             } break;
             case IR_OPCODE_UNARY:
             {
+                if (instruction->unary_operation >=
+                        IR_UNARY_VECTOR_INTEGER_NEGATE &&
+                    instruction->unary_operation <=
+                        IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)
+                {
+                    ir_interpreter_vector_unary(
+                        scratch.arena,
+                        frame,
+                        instruction,
+                        &produced,
+                        &operation_trap);
+                    break;
+                }
                 IrValueId operand_id = instruction->operands[0];
                 u64 operand = frame->values[operand_id.value].bits;
                 switch (instruction->unary_operation)
@@ -1867,6 +2335,9 @@ IrExecutionResult ir_execute(
                     case IR_UNARY_INTEGER_BITWISE_NOT:
                         produced.bits = ~operand;
                         break;
+                    case IR_UNARY_VECTOR_INTEGER_NEGATE:
+                    case IR_UNARY_VECTOR_FLOAT_NEGATE:
+                    case IR_UNARY_VECTOR_INTEGER_BITWISE_NOT:
                     case IR_UNARY_COUNT:
                     {
                         operation_trap =
@@ -1888,6 +2359,21 @@ IrExecutionResult ir_execute(
                     instruction->operands[0].value];
                 IrRuntimeValue right_value = frame->values[
                     instruction->operands[1].value];
+                AnalysisType* operand_type = analysis_type_from_id(
+                    frame->analysis,
+                    frame->function->values[
+                        instruction->operands[0].value].type);
+                if (operand_type->kind ==
+                    ANALYSIS_TYPE_VECTOR)
+                {
+                    ir_interpreter_vector_binary(
+                        scratch.arena,
+                        frame,
+                        instruction,
+                        &produced,
+                        &operation_trap);
+                    break;
+                }
                 if (left_value.kind == IR_RUNTIME_VALUE_ADDRESS ||
                     right_value.kind == IR_RUNTIME_VALUE_ADDRESS)
                 {
@@ -1922,10 +2408,6 @@ IrExecutionResult ir_execute(
                     }
                     break;
                 }
-                AnalysisType* operand_type = analysis_type_from_id(
-                    frame->analysis,
-                    frame->function->values[
-                        instruction->operands[0].value].type);
                 if (instruction->binary_operation == IR_BINARY_RANGE)
                 {
                     produced = (IrRuntimeValue){
@@ -2400,6 +2882,15 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
         "    }\n"
         "    return total;\n"
         "}\n"
+        "code vector_value : fn () s32\n"
+        "{\n"
+        "    data left: vector[4]s32 = [ 1, 5, -3, 8 ];\n"
+        "    data right: vector[4]s32 = [ 2, 4, -3, 9 ];\n"
+        "    data sum: vector[4]s32 = left + right;\n"
+        "    data negated: vector[4]s32 = -sum;\n"
+        "    data mask: vector[4]u32 = left < right;\n"
+        "    return negated[1] + @cast(mask[0]);\n"
+        "}\n"
         "code array_total : fn () s32\n"
         "{\n"
         "    data values: [3]s32 = [ 1, 2, 3 ];\n"
@@ -2750,6 +3241,30 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments,
             array_result.trap == IR_EXECUTION_TRAP_NONE);
         BUSTER_TEST(arguments, array_result.bits == 6);
+    }
+
+    AnalysisEntity* vector_entity =
+        ir_interpreter_test_entity_find(
+            &scalar_analysis,
+            S8("vector_value"));
+    BUSTER_TEST(arguments, vector_entity != 0);
+    if (vector_entity)
+    {
+        IrExecutionResult vector_result = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            vector_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            0,
+            0,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(arguments,
+            vector_result.trap ==
+                IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments,
+            vector_result.bits ==
+                (u64)(u32)-10);
     }
 
     AnalysisEntity* aggregate_copy_entity =

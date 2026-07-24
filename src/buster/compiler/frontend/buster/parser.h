@@ -92,6 +92,7 @@ typedef enum TokenIdEnum
     TOKEN_KEYWORD_STRUCT,
     TOKEN_KEYWORD_UNION,
     TOKEN_KEYWORD_ENUM,
+    TOKEN_KEYWORD_VECTOR,
     TOKEN_KEYWORD_AND,
     TOKEN_KEYWORD_OR,
     TOKEN_KEYWORD_AND_SHORT_CIRCUIT,
@@ -537,6 +538,7 @@ typedef enum AstTypeId
     AST_TYPE_SLICE,
     AST_TYPE_INFERRED_ARRAY,
     AST_TYPE_ARRAY,
+    AST_TYPE_VECTOR,
     AST_TYPE_FUNCTION,
     AST_TYPE_COUNT,
 } AstTypeId;
@@ -573,6 +575,11 @@ struct AstType
             AstType* element_type;
             AstIntegerLiteral count;
         } array;
+        struct
+        {
+            AstType* element_type;
+            AstIntegerLiteral count;
+        } vector;
         struct
         {
             AstTypeArgument* first_argument;
