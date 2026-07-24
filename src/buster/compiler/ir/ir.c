@@ -403,7 +403,8 @@ BUSTER_GLOBAL_LOCAL IrInstruction* ir_emit(
         .result = IR_VALUE_ID_INVALID,
         .source = source,
         .opcode = opcode,
-        .ast_operation = AST_NODE_COUNT,
+        .unary_operation = IR_UNARY_COUNT,
+        .binary_operation = IR_BINARY_COUNT,
         .operand_count = operand_count,
     };
     if (operand_count)
@@ -631,6 +632,140 @@ BUSTER_GLOBAL_LOCAL bool ir_call_argument_is_compile_time(
         argument = argument->next;
     }
     return argument && argument->is_compile_time;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_type_is_signed_integer(
+    AnalysisResult* analysis,
+    AnalysisTypeId type)
+{
+    AnalysisType* resolved = analysis_type_from_id(analysis, type);
+    return resolved->kind == ANALYSIS_TYPE_INTEGER &&
+        resolved->as.integer.is_signed;
+}
+
+BUSTER_GLOBAL_LOCAL IrUnaryOperation ir_unary_operation(
+    AnalysisResult* analysis,
+    AstNodeId operation,
+    AnalysisTypeId operand_type)
+{
+    AnalysisTypeKind kind =
+        analysis_type_from_id(analysis, operand_type)->kind;
+    switch (operation)
+    {
+        case AST_NODE_UNARY_MINUS:
+        {
+            return kind == ANALYSIS_TYPE_FLOAT ?
+                IR_UNARY_FLOAT_NEGATE :
+                IR_UNARY_INTEGER_NEGATE;
+        }
+        case AST_NODE_UNARY_LOGICAL_NOT:
+            return IR_UNARY_BOOLEAN_NOT;
+        case AST_NODE_UNARY_BITWISE_NOT:
+            return IR_UNARY_INTEGER_BITWISE_NOT;
+        default: break;
+    }
+    return IR_UNARY_COUNT;
+}
+
+BUSTER_GLOBAL_LOCAL IrBinaryOperation ir_equality_operation(
+    AnalysisResult* analysis,
+    AstNodeId operation,
+    AnalysisTypeId operand_type)
+{
+    AnalysisTypeKind kind =
+        analysis_type_from_id(analysis, operand_type)->kind;
+    bool equal = operation == AST_NODE_BINARY_EQUAL;
+    switch (kind)
+    {
+        case ANALYSIS_TYPE_FLOAT:
+            return equal ? IR_BINARY_FLOAT_EQUAL : IR_BINARY_FLOAT_NOT_EQUAL;
+        case ANALYSIS_TYPE_POINTER:
+            return equal ? IR_BINARY_POINTER_EQUAL : IR_BINARY_POINTER_NOT_EQUAL;
+        case ANALYSIS_TYPE_BOOL:
+            return equal ? IR_BINARY_BOOLEAN_EQUAL : IR_BINARY_BOOLEAN_NOT_EQUAL;
+        default:
+            return equal ? IR_BINARY_INTEGER_EQUAL : IR_BINARY_INTEGER_NOT_EQUAL;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL IrBinaryOperation ir_ordering_operation(
+    AnalysisResult* analysis,
+    AstNodeId operation,
+    AnalysisTypeId operand_type)
+{
+    AnalysisTypeKind kind =
+        analysis_type_from_id(analysis, operand_type)->kind;
+    IrBinaryOperation less;
+    if (kind == ANALYSIS_TYPE_FLOAT)
+    {
+        less = IR_BINARY_FLOAT_LESS;
+    }
+    else
+    {
+        less = ir_type_is_signed_integer(analysis, operand_type) ?
+            IR_BINARY_SIGNED_LESS :
+            IR_BINARY_UNSIGNED_LESS;
+    }
+    switch (operation)
+    {
+        case AST_NODE_BINARY_LESS: return less;
+        case AST_NODE_BINARY_LESS_EQUAL:
+            return (IrBinaryOperation)(less + 1);
+        case AST_NODE_BINARY_GREATER:
+            return (IrBinaryOperation)(less + 2);
+        case AST_NODE_BINARY_GREATER_EQUAL:
+            return (IrBinaryOperation)(less + 3);
+        default: break;
+    }
+    return IR_BINARY_COUNT;
+}
+
+BUSTER_GLOBAL_LOCAL IrBinaryOperation ir_binary_operation(
+    AnalysisResult* analysis,
+    AstNodeId operation,
+    AnalysisTypeId operand_type)
+{
+    AnalysisTypeKind kind =
+        analysis_type_from_id(analysis, operand_type)->kind;
+    bool is_float = kind == ANALYSIS_TYPE_FLOAT;
+    bool is_signed = ir_type_is_signed_integer(analysis, operand_type);
+    switch (operation)
+    {
+        case AST_NODE_BINARY_PLUS:
+            return is_float ? IR_BINARY_FLOAT_ADD : IR_BINARY_INTEGER_ADD;
+        case AST_NODE_BINARY_MINUS:
+            return is_float ? IR_BINARY_FLOAT_SUBTRACT : IR_BINARY_INTEGER_SUBTRACT;
+        case AST_NODE_BINARY_ASTERISK:
+            return is_float ? IR_BINARY_FLOAT_MULTIPLY : IR_BINARY_INTEGER_MULTIPLY;
+        case AST_NODE_BINARY_SLASH:
+            return is_float ? IR_BINARY_FLOAT_DIVIDE :
+                is_signed ? IR_BINARY_SIGNED_DIVIDE : IR_BINARY_UNSIGNED_DIVIDE;
+        case AST_NODE_BINARY_PERCENT:
+            return is_signed ?
+                IR_BINARY_SIGNED_REMAINDER :
+                IR_BINARY_UNSIGNED_REMAINDER;
+        case AST_NODE_BINARY_SHIFT_LEFT: return IR_BINARY_SHIFT_LEFT;
+        case AST_NODE_BINARY_SHIFT_RIGHT:
+            return is_signed ?
+                IR_BINARY_SIGNED_SHIFT_RIGHT :
+                IR_BINARY_UNSIGNED_SHIFT_RIGHT;
+        case AST_NODE_BINARY_EQUAL:
+        case AST_NODE_BINARY_NOT_EQUAL:
+            return ir_equality_operation(analysis, operation, operand_type);
+        case AST_NODE_BINARY_LESS:
+        case AST_NODE_BINARY_LESS_EQUAL:
+        case AST_NODE_BINARY_GREATER:
+        case AST_NODE_BINARY_GREATER_EQUAL:
+            return ir_ordering_operation(analysis, operation, operand_type);
+        case AST_NODE_BINARY_AMPERSAND: return IR_BINARY_INTEGER_BITWISE_AND;
+        case AST_NODE_BINARY_BAR: return IR_BINARY_INTEGER_BITWISE_OR;
+        case AST_NODE_BINARY_CARET: return IR_BINARY_INTEGER_BITWISE_XOR;
+        case AST_NODE_BINARY_BOOLEAN_AND: return IR_BINARY_BOOLEAN_AND;
+        case AST_NODE_BINARY_BOOLEAN_OR: return IR_BINARY_BOOLEAN_OR;
+        case AST_NODE_BINARY_RANGE: return IR_BINARY_RANGE;
+        default: break;
+    }
+    return IR_BINARY_COUNT;
 }
 
 BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpression ast)
@@ -1231,7 +1366,6 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                     true);
             } break;
             case AST_NODE_UNARY_MINUS:
-            case AST_NODE_UNARY_PLUS:
             case AST_NODE_UNARY_LOGICAL_NOT:
             case AST_NODE_UNARY_BITWISE_NOT:
             {
@@ -1245,7 +1379,14 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                     &operand,
                     1,
                     true);
-                instruction->ast_operation = node->id;
+                instruction->unary_operation = ir_unary_operation(
+                    builder->analysis,
+                    node->id,
+                    expression->nodes[roots[0]].type);
+            } break;
+            case AST_NODE_UNARY_PLUS:
+            {
+                lowered = results[roots[0]];
             } break;
             case AST_NODE_BINARY_PLUS:
             case AST_NODE_BINARY_MINUS:
@@ -1282,7 +1423,10 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                     operands,
                     2,
                     true);
-                instruction->ast_operation = node->id;
+                instruction->binary_operation = ir_binary_operation(
+                    builder->analysis,
+                    node->id,
+                    expression->nodes[roots[0]].type);
             } break;
             case AST_NODE_COUNT: break;
         }
@@ -1347,7 +1491,7 @@ BUSTER_GLOBAL_LOCAL void ir_seal_task_push(
     *top = task;
 }
 
-BUSTER_GLOBAL_LOCAL AstNodeId ir_assignment_operation(AstAssignmentOperator operation)
+BUSTER_GLOBAL_LOCAL AstNodeId ir_assignment_ast_operation(AstAssignmentOperator operation)
 {
     switch (operation)
     {
@@ -1483,7 +1627,10 @@ BUSTER_GLOBAL_LOCAL void ir_lower_statement_task(
                     operands,
                     2,
                     true);
-                binary->ast_operation = ir_assignment_operation(assignment->operator);
+                binary->binary_operation = ir_binary_operation(
+                    builder->analysis,
+                    ir_assignment_ast_operation(assignment->operator),
+                    target.type);
                 stored = binary->result;
             }
             if (target.local.value != ANALYSIS_ID_UNDERLYING_INVALID &&
@@ -2317,6 +2464,121 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(
     };
 }
 
+BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(
+    AnalysisResult* analysis,
+    IrFunction* function,
+    IrInstruction* instruction)
+{
+    if (instruction->opcode == IR_OPCODE_UNARY)
+    {
+        if (instruction->operand_count != 1 ||
+            instruction->unary_operation >= IR_UNARY_COUNT ||
+            instruction->binary_operation != IR_BINARY_COUNT)
+        {
+            return false;
+        }
+        AnalysisTypeId operand_type =
+            function->values[instruction->operands[0].value].type;
+        AnalysisTypeKind kind =
+            analysis_type_from_id(analysis, operand_type)->kind;
+        bool domain_matches =
+            (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE &&
+                kind == ANALYSIS_TYPE_INTEGER) ||
+            (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE &&
+                kind == ANALYSIS_TYPE_FLOAT) ||
+            (instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT &&
+                kind == ANALYSIS_TYPE_INTEGER) ||
+            (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT &&
+                kind == ANALYSIS_TYPE_BOOL);
+        return domain_matches &&
+            ir_type_id_equal(instruction->type, operand_type) &&
+            instruction->unary_operation < IR_UNARY_COUNT &&
+            instruction->binary_operation == IR_BINARY_COUNT;
+    }
+    if (instruction->opcode == IR_OPCODE_BINARY)
+    {
+        if (instruction->operand_count != 2 ||
+            instruction->unary_operation != IR_UNARY_COUNT ||
+            instruction->binary_operation >= IR_BINARY_COUNT)
+        {
+            return false;
+        }
+        AnalysisTypeId left_type =
+            function->values[instruction->operands[0].value].type;
+        AnalysisTypeId right_type =
+            function->values[instruction->operands[1].value].type;
+        if (!ir_type_id_equal(left_type, right_type))
+        {
+            return false;
+        }
+        AnalysisTypeKind operand_kind =
+            analysis_type_from_id(analysis, left_type)->kind;
+        IrBinaryOperation operation = instruction->binary_operation;
+        bool integer_operation =
+            operation <= IR_BINARY_UNSIGNED_DIVIDE ||
+            (operation >= IR_BINARY_SIGNED_REMAINDER &&
+                operation <= IR_BINARY_INTEGER_BITWISE_XOR) ||
+            (operation >= IR_BINARY_SIGNED_LESS &&
+                operation <= IR_BINARY_UNSIGNED_GREATER_EQUAL);
+        bool float_operation =
+            (operation >= IR_BINARY_FLOAT_ADD &&
+                operation <= IR_BINARY_FLOAT_DIVIDE) ||
+            (operation >= IR_BINARY_FLOAT_EQUAL &&
+                operation <= IR_BINARY_FLOAT_NOT_EQUAL) ||
+            (operation >= IR_BINARY_FLOAT_LESS &&
+                operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
+        bool boolean_operation =
+            (operation >= IR_BINARY_BOOLEAN_AND &&
+                operation <= IR_BINARY_BOOLEAN_OR) ||
+            (operation >= IR_BINARY_BOOLEAN_EQUAL &&
+                operation <= IR_BINARY_BOOLEAN_NOT_EQUAL);
+        bool pointer_operation =
+            operation >= IR_BINARY_POINTER_EQUAL &&
+            operation <= IR_BINARY_POINTER_NOT_EQUAL;
+        bool integer_equality =
+            operation >= IR_BINARY_INTEGER_EQUAL &&
+            operation <= IR_BINARY_INTEGER_NOT_EQUAL;
+        bool signed_semantics =
+            operation == IR_BINARY_SIGNED_DIVIDE ||
+            operation == IR_BINARY_SIGNED_REMAINDER ||
+            operation == IR_BINARY_SIGNED_SHIFT_RIGHT ||
+            (operation >= IR_BINARY_SIGNED_LESS &&
+                operation <= IR_BINARY_SIGNED_GREATER_EQUAL);
+        bool unsigned_semantics =
+            operation == IR_BINARY_UNSIGNED_DIVIDE ||
+            operation == IR_BINARY_UNSIGNED_REMAINDER ||
+            operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT ||
+            (operation >= IR_BINARY_UNSIGNED_LESS &&
+                operation <= IR_BINARY_UNSIGNED_GREATER_EQUAL);
+        bool signedness_matches = operand_kind != ANALYSIS_TYPE_INTEGER ||
+            (!signed_semantics && !unsigned_semantics) ||
+            (signed_semantics ==
+                analysis_type_from_id(analysis, left_type)->as.integer.is_signed);
+        bool comparison = operation >= IR_BINARY_INTEGER_EQUAL &&
+            operation <= IR_BINARY_FLOAT_GREATER_EQUAL;
+        bool range = operation == IR_BINARY_RANGE;
+        bool domain_matches =
+            (integer_operation && operand_kind == ANALYSIS_TYPE_INTEGER) ||
+            (integer_equality &&
+                (operand_kind == ANALYSIS_TYPE_INTEGER ||
+                 operand_kind == ANALYSIS_TYPE_ENUM)) ||
+            (float_operation && operand_kind == ANALYSIS_TYPE_FLOAT) ||
+            (boolean_operation && operand_kind == ANALYSIS_TYPE_BOOL) ||
+            (pointer_operation && operand_kind == ANALYSIS_TYPE_POINTER) ||
+            (range && operand_kind == ANALYSIS_TYPE_INTEGER);
+        AnalysisTypeKind result_kind =
+            analysis_type_from_id(analysis, instruction->type)->kind;
+        bool result_matches = comparison ?
+            result_kind == ANALYSIS_TYPE_BOOL :
+            range ?
+                result_kind == ANALYSIS_TYPE_RANGE :
+                ir_type_id_equal(instruction->type, left_type);
+        return domain_matches && signedness_matches && result_matches;
+    }
+    return instruction->unary_operation == IR_UNARY_COUNT &&
+        instruction->binary_operation == IR_BINARY_COUNT;
+}
+
 IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module)
 {
     IrValidationResult result = {
@@ -2418,6 +2680,17 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
                 {
                     return ir_validation_error(
                         IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR,
+                        function,
+                        block->id,
+                        instruction_id);
+                }
+                if (!ir_instruction_operation_valid(
+                        analysis,
+                        function,
+                        instruction))
+                {
+                    return ir_validation_error(
+                        IR_VALIDATION_OPERATION,
                         function,
                         block->id,
                         instruction_id);
@@ -2706,6 +2979,68 @@ BUSTER_GLOBAL_LOCAL String8 ir_opcode_name(IrOpcode opcode)
     return S8("invalid");
 }
 
+BUSTER_GLOBAL_LOCAL String8 ir_unary_operation_name(IrUnaryOperation operation)
+{
+    switch (operation)
+    {
+        case IR_UNARY_INTEGER_NEGATE: return S8("integer_negate");
+        case IR_UNARY_FLOAT_NEGATE: return S8("float_negate");
+        case IR_UNARY_INTEGER_BITWISE_NOT: return S8("integer_bitwise_not");
+        case IR_UNARY_BOOLEAN_NOT: return S8("boolean_not");
+        case IR_UNARY_COUNT: break;
+    }
+    return S8("invalid");
+}
+
+BUSTER_GLOBAL_LOCAL String8 ir_binary_operation_name(IrBinaryOperation operation)
+{
+    switch (operation)
+    {
+        case IR_BINARY_INTEGER_ADD: return S8("integer_add");
+        case IR_BINARY_INTEGER_SUBTRACT: return S8("integer_subtract");
+        case IR_BINARY_INTEGER_MULTIPLY: return S8("integer_multiply");
+        case IR_BINARY_SIGNED_DIVIDE: return S8("signed_divide");
+        case IR_BINARY_UNSIGNED_DIVIDE: return S8("unsigned_divide");
+        case IR_BINARY_FLOAT_ADD: return S8("float_add");
+        case IR_BINARY_FLOAT_SUBTRACT: return S8("float_subtract");
+        case IR_BINARY_FLOAT_MULTIPLY: return S8("float_multiply");
+        case IR_BINARY_FLOAT_DIVIDE: return S8("float_divide");
+        case IR_BINARY_SIGNED_REMAINDER: return S8("signed_remainder");
+        case IR_BINARY_UNSIGNED_REMAINDER: return S8("unsigned_remainder");
+        case IR_BINARY_SHIFT_LEFT: return S8("shift_left");
+        case IR_BINARY_SIGNED_SHIFT_RIGHT: return S8("signed_shift_right");
+        case IR_BINARY_UNSIGNED_SHIFT_RIGHT: return S8("unsigned_shift_right");
+        case IR_BINARY_INTEGER_BITWISE_AND: return S8("integer_bitwise_and");
+        case IR_BINARY_INTEGER_BITWISE_OR: return S8("integer_bitwise_or");
+        case IR_BINARY_INTEGER_BITWISE_XOR: return S8("integer_bitwise_xor");
+        case IR_BINARY_BOOLEAN_AND: return S8("boolean_and");
+        case IR_BINARY_BOOLEAN_OR: return S8("boolean_or");
+        case IR_BINARY_INTEGER_EQUAL: return S8("integer_equal");
+        case IR_BINARY_INTEGER_NOT_EQUAL: return S8("integer_not_equal");
+        case IR_BINARY_FLOAT_EQUAL: return S8("float_equal");
+        case IR_BINARY_FLOAT_NOT_EQUAL: return S8("float_not_equal");
+        case IR_BINARY_POINTER_EQUAL: return S8("pointer_equal");
+        case IR_BINARY_POINTER_NOT_EQUAL: return S8("pointer_not_equal");
+        case IR_BINARY_BOOLEAN_EQUAL: return S8("boolean_equal");
+        case IR_BINARY_BOOLEAN_NOT_EQUAL: return S8("boolean_not_equal");
+        case IR_BINARY_SIGNED_LESS: return S8("signed_less");
+        case IR_BINARY_SIGNED_LESS_EQUAL: return S8("signed_less_equal");
+        case IR_BINARY_SIGNED_GREATER: return S8("signed_greater");
+        case IR_BINARY_SIGNED_GREATER_EQUAL: return S8("signed_greater_equal");
+        case IR_BINARY_UNSIGNED_LESS: return S8("unsigned_less");
+        case IR_BINARY_UNSIGNED_LESS_EQUAL: return S8("unsigned_less_equal");
+        case IR_BINARY_UNSIGNED_GREATER: return S8("unsigned_greater");
+        case IR_BINARY_UNSIGNED_GREATER_EQUAL: return S8("unsigned_greater_equal");
+        case IR_BINARY_FLOAT_LESS: return S8("float_less");
+        case IR_BINARY_FLOAT_LESS_EQUAL: return S8("float_less_equal");
+        case IR_BINARY_FLOAT_GREATER: return S8("float_greater");
+        case IR_BINARY_FLOAT_GREATER_EQUAL: return S8("float_greater_equal");
+        case IR_BINARY_RANGE: return S8("range");
+        case IR_BINARY_COUNT: break;
+    }
+    return S8("invalid");
+}
+
 String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module)
 {
     BUSTER_UNUSED(analysis);
@@ -2755,18 +3090,25 @@ String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module
                 id = function->instructions[id.value].next)
             {
                 IrInstruction* instruction = function->instructions + id.value;
+                String8 operation = instruction->opcode == IR_OPCODE_UNARY ?
+                    ir_unary_operation_name(instruction->unary_operation) :
+                    instruction->opcode == IR_OPCODE_BINARY ?
+                        ir_binary_operation_name(instruction->binary_operation) :
+                        S8("");
                 parts[part_count++] = instruction->result.value == IR_ID_UNDERLYING_INVALID ?
                     string_format(
                         arena,
-                        S8("    {S8} operands={u32} targets={u32}\n"),
+                        S8("    {S8} {S8} operands={u32} targets={u32}\n"),
                         ir_opcode_name(instruction->opcode),
+                        operation,
                         instruction->operand_count,
                         instruction->target_count) :
                     string_format(
                         arena,
-                        S8("    %{u32} = {S8} type={u32} operands={u32}\n"),
+                        S8("    %{u32} = {S8} {S8} type={u32} operands={u32}\n"),
                         instruction->result.value,
                         ir_opcode_name(instruction->opcode),
+                        operation,
                         instruction->type.value,
                         instruction->operand_count);
             }
@@ -2843,6 +3185,34 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opco
     for (u32 index = 0; index < function->instruction_count; index += 1)
     {
         count += function->instructions[index].opcode == opcode;
+    }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL u32 ir_test_unary_operation_count(
+    IrFunction* function,
+    IrUnaryOperation operation)
+{
+    u32 count = 0;
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        IrInstruction* instruction = function->instructions + index;
+        count += instruction->opcode == IR_OPCODE_UNARY &&
+            instruction->unary_operation == operation;
+    }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(
+    IrFunction* function,
+    IrBinaryOperation operation)
+{
+    u32 count = 0;
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        IrInstruction* instruction = function->instructions + index;
+        count += instruction->opcode == IR_OPCODE_BINARY &&
+            instruction->binary_operation == operation;
     }
     return count;
 }
@@ -2945,8 +3315,142 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, ir_test_opcode_count(focused_function, IR_OPCODE_LOAD) == 0);
     BUSTER_TEST(arguments, ir_test_parameter_count(focused_function) == 1);
     BUSTER_TEST(arguments, ir_test_opcode_count(focused_function, IR_OPCODE_RETURN) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_binary_operation_count(
+            focused_function,
+            IR_BINARY_SIGNED_LESS) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_binary_operation_count(
+            focused_function,
+            IR_BINARY_INTEGER_ADD) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_binary_operation_count(
+            focused_function,
+            IR_BINARY_INTEGER_SUBTRACT) == 1);
     IrValidationResult focused_validation = ir_validate_module(&focused_analysis, &focused_module);
     BUSTER_TEST(arguments, focused_validation.error == IR_VALIDATION_NONE);
+    IrInstruction* focused_binary = 0;
+    for (u32 instruction_index = 0;
+        instruction_index < focused_function->instruction_count;
+        instruction_index += 1)
+    {
+        IrInstruction* candidate =
+            focused_function->instructions + instruction_index;
+        if (candidate->opcode == IR_OPCODE_BINARY)
+        {
+            focused_binary = candidate;
+            break;
+        }
+    }
+    BUSTER_TEST(arguments, focused_binary != 0);
+    if (focused_binary)
+    {
+        IrBinaryOperation saved_operation =
+            focused_binary->binary_operation;
+        focused_binary->binary_operation = IR_BINARY_FLOAT_ADD;
+        IrValidationResult wrong_operation = ir_validate_module(
+            &focused_analysis,
+            &focused_module);
+        BUSTER_TEST(
+            arguments,
+            wrong_operation.error == IR_VALIDATION_OPERATION);
+        focused_binary->binary_operation = saved_operation;
+        IrValidationResult restored_operation = ir_validate_module(
+            &focused_analysis,
+            &focused_module);
+        BUSTER_TEST(
+            arguments,
+            restored_operation.error == IR_VALIDATION_NONE);
+    }
+
+    String8 typed_operation_source = S8(
+        "code typed_operations : fn (\n"
+        "    signed_value: s32,\n"
+        "    unsigned_value: u32,\n"
+        "    float_value: f32,\n"
+        "    pointer: &s32) bool\n"
+        "{\n"
+        "    data integer: s32 = -signed_value;\n"
+        "    data floating: f32 = -float_value;\n"
+        "    return signed_value < integer or\n"
+        "        unsigned_value < 1 or\n"
+        "        float_value < floating or\n"
+        "        pointer == pointer;\n"
+        "}\n");
+    TokenizerResult typed_operation_tokens = tokenize(
+        arguments->arena,
+        typed_operation_source.pointer,
+        typed_operation_source.length);
+    ParserResult typed_operation_parser = parser_parse(
+        arguments->arena,
+        expression_arena,
+        typed_operation_source,
+        typed_operation_tokens);
+    BUSTER_TEST(arguments, typed_operation_tokens.error_count == 0);
+    BUSTER_TEST(arguments, typed_operation_parser.diagnostic_count == 0);
+    AnalysisSourceInput typed_operation_input = {
+        .path = S8("typed-operations-ir.bbb"),
+        .parser = &typed_operation_parser,
+    };
+    AnalysisResult typed_operation_analysis = analysis_index_module(
+        arguments->arena,
+        (AnalysisModuleId){ .value = 906 },
+        S8("typed-operations-ir"),
+        &typed_operation_input,
+        1);
+    analysis_resolve_module_interfaces(
+        arguments->arena,
+        &typed_operation_analysis);
+    IrModule typed_operation_module = ir_analyze_and_generate_module(
+        arguments->arena,
+        &typed_operation_analysis);
+    BUSTER_TEST(arguments, typed_operation_analysis.diagnostic_count == 0);
+    BUSTER_TEST(arguments, typed_operation_module.lowered_function_count == 1);
+    IrFunction* typed_operation_function = typed_operation_module.functions;
+    BUSTER_TEST(
+        arguments,
+        ir_test_unary_operation_count(
+            typed_operation_function,
+            IR_UNARY_INTEGER_NEGATE) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_unary_operation_count(
+            typed_operation_function,
+            IR_UNARY_FLOAT_NEGATE) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_binary_operation_count(
+            typed_operation_function,
+            IR_BINARY_SIGNED_LESS) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_binary_operation_count(
+            typed_operation_function,
+            IR_BINARY_UNSIGNED_LESS) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_binary_operation_count(
+            typed_operation_function,
+            IR_BINARY_FLOAT_LESS) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_binary_operation_count(
+            typed_operation_function,
+            IR_BINARY_POINTER_EQUAL) == 1);
+    BUSTER_TEST(
+        arguments,
+        ir_test_binary_operation_count(
+            typed_operation_function,
+            IR_BINARY_BOOLEAN_OR) == 3);
+    IrValidationResult typed_operation_validation = ir_validate_module(
+        &typed_operation_analysis,
+        &typed_operation_module);
+    BUSTER_TEST(
+        arguments,
+        typed_operation_validation.error == IR_VALIDATION_NONE);
 
     String8 short_source = S8(
         "code side : fn () bool\n"

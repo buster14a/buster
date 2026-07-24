@@ -199,6 +199,10 @@ has hard design constraints:
 - New semantic or IR behavior needs focused unit coverage in addition to the
   fixture-wide pipeline test. IR tests must validate structural invariants, not
   merely check that generation returned a non-null pointer.
+- The single typed IR must not retain parser/AST operation identifiers.
+  Unary and binary instructions use IR-native operations that encode the
+  semantic domain (integer, float, boolean, or pointer) and signed behavior;
+  the IR value type supplies the width.
 - Semantic analysis and IR lowering follow the repository-wide recursion rule:
   nested expressions, statements, types, and control flow use arena-backed
   explicit stacks or worklists.
@@ -206,6 +210,10 @@ has hard design constraints:
   explicit bounded frame stack, and every execution has explicit instruction
   and call-depth limits. The interpreter is a runtime correctness oracle; it
   must not silently acquire compile-time execution semantics.
+- Interpreter memory is arena-owned and bounds-checked. Language pointers are
+  symbolic object-plus-offset references, never host addresses; loads track
+  byte initialization, aggregate copies preserve symbolic values, and invalid
+  memory access must return an execution trap instead of asserting.
 - `$` function parameters and `$T` types are compile-time generic inputs.
   Semantic analysis interns concrete instantiations by a canonical key made
   from the declaration identity, normalized type bindings, and normalized

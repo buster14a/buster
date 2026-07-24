@@ -6,18 +6,60 @@ typedef enum IrRuntimeValueKind
 {
     IR_RUNTIME_VALUE_SCALAR,
     IR_RUNTIME_VALUE_FUNCTION,
+    IR_RUNTIME_VALUE_PLACE,
+    IR_RUNTIME_VALUE_AGGREGATE,
+    IR_RUNTIME_VALUE_ADDRESS,
+    IR_RUNTIME_VALUE_SLICE,
+    IR_RUNTIME_VALUE_RANGE,
+    IR_RUNTIME_VALUE_ITERATOR,
     IR_RUNTIME_VALUE_KIND_COUNT,
 } IrRuntimeValueKind;
 
+typedef struct IrRuntimeObject IrRuntimeObject;
+typedef struct IrRuntimeStoredValue IrRuntimeStoredValue;
+typedef struct IrRuntimeIterator IrRuntimeIterator;
 typedef struct IrRuntimeValue IrRuntimeValue;
 struct IrRuntimeValue
 {
     AnalysisEntityId entity;
     AnalysisInstantiationId instantiation;
+    AnalysisModuleId type_module;
+    AnalysisTypeId type;
+    IrRuntimeObject* object;
+    IrRuntimeIterator* iterator;
     u64 bits;
+    u64 offset;
+    u64 length;
+    u64 element_size;
     IrRuntimeValueKind kind;
     bool initialized;
-    u8 reserved[3];
+    bool reversed;
+    u8 reserved[2];
+};
+
+struct IrRuntimeObject
+{
+    IrRuntimeStoredValue* first_stored_value;
+    u8* bytes;
+    u8* initialized;
+    u64 size;
+};
+
+struct IrRuntimeStoredValue
+{
+    IrRuntimeStoredValue* next;
+    IrRuntimeValue value;
+    u64 offset;
+    u64 size;
+};
+
+struct IrRuntimeIterator
+{
+    IrRuntimeValue iterable;
+    IrRuntimeValue current;
+    u64 index;
+    bool has_current;
+    u8 reserved[7];
 };
 
 typedef struct IrExecutionFrame IrExecutionFrame;
@@ -211,6 +253,373 @@ BUSTER_GLOBAL_LOCAL u64 ir_interpreter_float_write(
     return bits;
 }
 
+BUSTER_GLOBAL_LOCAL AnalysisResult* ir_interpreter_analysis_find(
+    AnalysisResult* analysis,
+    AnalysisModuleId module)
+{
+    if (analysis->module.id.value == module.value)
+    {
+        return analysis;
+    }
+    for (u32 module_index = 0;
+        module_index < analysis->program_module_count;
+        module_index += 1)
+    {
+        AnalysisResult* candidate =
+            analysis->program_modules[module_index];
+        if (candidate &&
+            candidate->module.id.value == module.value)
+        {
+            return candidate;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ir_interpreter_type_size(
+    AnalysisResult* analysis,
+    AnalysisTypeId type_id)
+{
+    AnalysisType* type = analysis_type_from_id(analysis, type_id);
+    if (type->layout.state == ANALYSIS_LAYOUT_RESOLVED)
+    {
+        return type->layout.size;
+    }
+    switch (type->kind)
+    {
+        case ANALYSIS_TYPE_BOOL: return 1;
+        case ANALYSIS_TYPE_INTEGER:
+            return (type->as.integer.bit_width + 7) / 8;
+        case ANALYSIS_TYPE_FLOAT:
+            return type->as.float_bit_width / 8;
+        case ANALYSIS_TYPE_ENUM: return 4;
+        case ANALYSIS_TYPE_POINTER:
+        case ANALYSIS_TYPE_FUNCTION: return 8;
+        case ANALYSIS_TYPE_SLICE: return 16;
+        case ANALYSIS_TYPE_RANGE:
+        {
+            return ir_interpreter_type_size(
+                analysis,
+                type->as.element_type) * 2;
+        }
+        case ANALYSIS_TYPE_ARRAY:
+        {
+            return ir_interpreter_type_size(
+                analysis,
+                type->as.array.element_type) *
+                type->as.array.count;
+        }
+        default: return 0;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL IrRuntimeObject* ir_interpreter_object_create(
+    Arena* arena,
+    u64 size)
+{
+    IrRuntimeObject* object = arena_allocate(
+        arena,
+        IrRuntimeObject,
+        1);
+    *object = (IrRuntimeObject){ .size = size };
+    if (size)
+    {
+        object->bytes = arena_allocate(arena, u8, size);
+        object->initialized = arena_allocate(arena, u8, size);
+        for (u64 index = 0; index < size; index += 1)
+        {
+            object->bytes[index] = 0;
+            object->initialized[index] = 0;
+        }
+    }
+    return object;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_object_range_valid(
+    IrRuntimeObject* object,
+    u64 offset,
+    u64 size)
+{
+    return object && offset <= object->size &&
+        size <= object->size - offset;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_ranges_overlap(
+    u64 left_offset,
+    u64 left_size,
+    u64 right_offset,
+    u64 right_size)
+{
+    return left_size && right_size &&
+        left_offset < right_offset + right_size &&
+        right_offset < left_offset + left_size;
+}
+
+BUSTER_GLOBAL_LOCAL void ir_interpreter_stored_values_clear(
+    IrRuntimeObject* object,
+    u64 offset,
+    u64 size)
+{
+    IrRuntimeStoredValue** link = &object->first_stored_value;
+    while (*link)
+    {
+        IrRuntimeStoredValue* stored = *link;
+        if (ir_interpreter_ranges_overlap(
+                stored->offset,
+                stored->size,
+                offset,
+                size))
+        {
+            *link = stored->next;
+        }
+        else
+        {
+            link = &stored->next;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ir_interpreter_stored_value_add(
+    Arena* arena,
+    IrRuntimeObject* object,
+    u64 offset,
+    u64 size,
+    IrRuntimeValue value)
+{
+    IrRuntimeStoredValue* stored = arena_allocate(
+        arena,
+        IrRuntimeStoredValue,
+        1);
+    *stored = (IrRuntimeStoredValue){
+        .next = object->first_stored_value,
+        .value = value,
+        .offset = offset,
+        .size = size,
+    };
+    object->first_stored_value = stored;
+}
+
+BUSTER_GLOBAL_LOCAL IrRuntimeStoredValue*
+ir_interpreter_stored_value_find(
+    IrRuntimeObject* object,
+    u64 offset,
+    u64 size)
+{
+    for (IrRuntimeStoredValue* stored =
+            object->first_stored_value;
+        stored;
+        stored = stored->next)
+    {
+        if (stored->offset == offset && stored->size == size)
+        {
+            return stored;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL void ir_interpreter_object_region_copy(
+    Arena* arena,
+    IrRuntimeObject* destination,
+    u64 destination_offset,
+    IrRuntimeObject* source,
+    u64 source_offset,
+    u64 size)
+{
+    for (u64 index = 0; index < size; index += 1)
+    {
+        destination->bytes[destination_offset + index] =
+            source->bytes[source_offset + index];
+        destination->initialized[destination_offset + index] =
+            source->initialized[source_offset + index];
+    }
+    for (IrRuntimeStoredValue* stored =
+            source->first_stored_value;
+        stored;
+        stored = stored->next)
+    {
+        if (stored->offset >= source_offset &&
+            stored->size <=
+                source_offset + size - stored->offset)
+        {
+            ir_interpreter_stored_value_add(
+                arena,
+                destination,
+                destination_offset +
+                    stored->offset - source_offset,
+                stored->size,
+                stored->value);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(
+    Arena* arena,
+    IrRuntimeObject* object,
+    u64 offset,
+    u64 size,
+    IrRuntimeValue value)
+{
+    if (!ir_interpreter_object_range_valid(object, offset, size))
+    {
+        return false;
+    }
+    ir_interpreter_stored_values_clear(object, offset, size);
+    if (!value.initialized)
+    {
+        for (u64 index = 0; index < size; index += 1)
+        {
+            object->initialized[offset + index] = 0;
+        }
+        return true;
+    }
+    if (value.kind == IR_RUNTIME_VALUE_SCALAR)
+    {
+        for (u64 index = 0; index < size; index += 1)
+        {
+            object->bytes[offset + index] =
+                index < 8 ?
+                    (u8)(value.bits >> (u32)(index * 8)) : 0;
+            object->initialized[offset + index] = 1;
+        }
+        return true;
+    }
+    if (value.kind == IR_RUNTIME_VALUE_AGGREGATE &&
+        ir_interpreter_object_range_valid(
+            value.object,
+            value.offset,
+            size))
+    {
+        ir_interpreter_object_region_copy(
+            arena,
+            object,
+            offset,
+            value.object,
+            value.offset,
+            size);
+        return true;
+    }
+    for (u64 index = 0; index < size; index += 1)
+    {
+        object->bytes[offset + index] = 0;
+        object->initialized[offset + index] = 1;
+    }
+    ir_interpreter_stored_value_add(
+        arena,
+        object,
+        offset,
+        size,
+        value);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_read(
+    Arena* arena,
+    AnalysisResult* analysis,
+    AnalysisTypeId type_id,
+    IrRuntimeObject* object,
+    u64 offset,
+    IrRuntimeValue* value_out)
+{
+    u64 size = ir_interpreter_type_size(analysis, type_id);
+    if (!ir_interpreter_object_range_valid(object, offset, size))
+    {
+        return false;
+    }
+    AnalysisType* type = analysis_type_from_id(analysis, type_id);
+    bool scalar =
+        type->kind == ANALYSIS_TYPE_BOOL ||
+        type->kind == ANALYSIS_TYPE_INTEGER ||
+        type->kind == ANALYSIS_TYPE_FLOAT ||
+        type->kind == ANALYSIS_TYPE_ENUM;
+    if (scalar)
+    {
+        u64 bits = 0;
+        for (u64 index = 0; index < size; index += 1)
+        {
+            if (!object->initialized[offset + index])
+            {
+                return false;
+            }
+            if (index < 8)
+            {
+                bits |= (u64)object->bytes[offset + index] <<
+                    (u32)(index * 8);
+            }
+        }
+        *value_out = (IrRuntimeValue){
+            .bits = bits,
+            .kind = IR_RUNTIME_VALUE_SCALAR,
+            .initialized = true,
+        };
+        return true;
+    }
+    if (type->kind == ANALYSIS_TYPE_ARRAY ||
+        type->kind == ANALYSIS_TYPE_STRUCT ||
+        type->kind == ANALYSIS_TYPE_UNION)
+    {
+        IrRuntimeObject* copy =
+            ir_interpreter_object_create(arena, size);
+        ir_interpreter_object_region_copy(
+            arena,
+            copy,
+            0,
+            object,
+            offset,
+            size);
+        *value_out = (IrRuntimeValue){
+            .object = copy,
+            .length = size,
+            .kind = IR_RUNTIME_VALUE_AGGREGATE,
+            .initialized = true,
+        };
+        return true;
+    }
+    IrRuntimeStoredValue* stored =
+        ir_interpreter_stored_value_find(object, offset, size);
+    if (!stored || !stored->value.initialized)
+    {
+        return false;
+    }
+    *value_out = stored->value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_field(
+    IrExecutionFrame* frame,
+    AnalysisTypeId aggregate_type_id,
+    u32 field_index,
+    AnalysisField** field_out)
+{
+    AnalysisType* aggregate_type = analysis_type_from_id(
+        frame->analysis,
+        aggregate_type_id);
+    if (aggregate_type->kind != ANALYSIS_TYPE_STRUCT &&
+        aggregate_type->kind != ANALYSIS_TYPE_UNION)
+    {
+        return false;
+    }
+    AnalysisResult* declaration_analysis =
+        ir_interpreter_analysis_find(
+            frame->analysis,
+            aggregate_type->as.declaration.module);
+    if (!declaration_analysis ||
+        aggregate_type->as.declaration.index.value >=
+            declaration_analysis->module.entity_count)
+    {
+        return false;
+    }
+    AnalysisEntitySemantic* semantic =
+        declaration_analysis->module.semantics +
+        aggregate_type->as.declaration.index.value;
+    if (field_index >= semantic->field_count)
+    {
+        return false;
+    }
+    *field_out = semantic->fields + field_index;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_frame_prepare(
     Arena* scratch_arena,
     IrExecutionFrame* frame,
@@ -330,7 +739,9 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_operands_ready(
     {
         IrValueId operand = instruction->operands[operand_index];
         if (operand.value >= frame->function->value_count ||
-            !frame->values[operand.value].initialized)
+            (!frame->values[operand.value].initialized &&
+             !(instruction->opcode == IR_OPCODE_STORE &&
+               operand_index == 1)))
         {
             return false;
         }
@@ -354,24 +765,29 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_integer_binary(
     u64 mask = ir_interpreter_mask(width);
     left &= mask;
     right &= mask;
-    bool is_signed = ir_interpreter_type_signed(
-        frame->analysis,
-        operand_type);
     u64 value = 0;
-    switch (instruction->ast_operation)
+    switch (instruction->binary_operation)
     {
-        case AST_NODE_BINARY_PLUS: value = left + right; break;
-        case AST_NODE_BINARY_MINUS: value = left - right; break;
-        case AST_NODE_BINARY_ASTERISK: value = left * right; break;
-        case AST_NODE_BINARY_SLASH:
-        case AST_NODE_BINARY_PERCENT:
+        case IR_BINARY_INTEGER_ADD: value = left + right; break;
+        case IR_BINARY_INTEGER_SUBTRACT: value = left - right; break;
+        case IR_BINARY_INTEGER_MULTIPLY: value = left * right; break;
+        case IR_BINARY_SIGNED_DIVIDE:
+        case IR_BINARY_UNSIGNED_DIVIDE:
+        case IR_BINARY_SIGNED_REMAINDER:
+        case IR_BINARY_UNSIGNED_REMAINDER:
         {
             if (!right)
             {
                 *trap_out = IR_EXECUTION_TRAP_DIVISION_BY_ZERO;
                 return false;
             }
-            if (is_signed)
+            bool divide =
+                instruction->binary_operation == IR_BINARY_SIGNED_DIVIDE ||
+                instruction->binary_operation == IR_BINARY_UNSIGNED_DIVIDE;
+            bool signed_operation =
+                instruction->binary_operation == IR_BINARY_SIGNED_DIVIDE ||
+                instruction->binary_operation == IR_BINARY_SIGNED_REMAINDER;
+            if (signed_operation)
             {
                 bool left_negative =
                     ir_interpreter_integer_negative(left, width);
@@ -381,8 +797,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_integer_binary(
                     ir_interpreter_integer_magnitude(left, width);
                 u64 right_magnitude =
                     ir_interpreter_integer_magnitude(right, width);
-                if (instruction->ast_operation ==
-                    AST_NODE_BINARY_SLASH)
+                if (divide)
                 {
                     value = left_magnitude / right_magnitude;
                     if (left_negative != right_negative)
@@ -401,25 +816,24 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_integer_binary(
             }
             else
             {
-                value = instruction->ast_operation ==
-                    AST_NODE_BINARY_SLASH ?
-                    left / right : left % right;
+                value = divide ? left / right : left % right;
             }
         } break;
-        case AST_NODE_BINARY_SHIFT_LEFT:
-        case AST_NODE_BINARY_SHIFT_RIGHT:
+        case IR_BINARY_SHIFT_LEFT:
+        case IR_BINARY_SIGNED_SHIFT_RIGHT:
+        case IR_BINARY_UNSIGNED_SHIFT_RIGHT:
         {
             if (right >= width)
             {
                 *trap_out = IR_EXECUTION_TRAP_INVALID_SHIFT;
                 return false;
             }
-            if (instruction->ast_operation ==
-                AST_NODE_BINARY_SHIFT_LEFT)
+            if (instruction->binary_operation == IR_BINARY_SHIFT_LEFT)
             {
                 value = left << (u32)right;
             }
-            else if (is_signed &&
+            else if (instruction->binary_operation ==
+                    IR_BINARY_SIGNED_SHIFT_RIGHT &&
                 ir_interpreter_integer_negative(left, width) &&
                 right)
             {
@@ -431,37 +845,52 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_integer_binary(
                 value = left >> (u32)right;
             }
         } break;
-        case AST_NODE_BINARY_EQUAL: value = left == right; break;
-        case AST_NODE_BINARY_NOT_EQUAL: value = left != right; break;
-        case AST_NODE_BINARY_LESS:
-        case AST_NODE_BINARY_LESS_EQUAL:
-        case AST_NODE_BINARY_GREATER:
-        case AST_NODE_BINARY_GREATER_EQUAL:
+        case IR_BINARY_INTEGER_EQUAL:
+        case IR_BINARY_BOOLEAN_EQUAL:
+            value = left == right;
+            break;
+        case IR_BINARY_INTEGER_NOT_EQUAL:
+        case IR_BINARY_BOOLEAN_NOT_EQUAL:
+            value = left != right;
+            break;
+        case IR_BINARY_SIGNED_LESS:
+        case IR_BINARY_SIGNED_LESS_EQUAL:
+        case IR_BINARY_SIGNED_GREATER:
+        case IR_BINARY_SIGNED_GREATER_EQUAL:
+        case IR_BINARY_UNSIGNED_LESS:
+        case IR_BINARY_UNSIGNED_LESS_EQUAL:
+        case IR_BINARY_UNSIGNED_GREATER:
+        case IR_BINARY_UNSIGNED_GREATER_EQUAL:
         {
-            s32 order = is_signed ?
+            bool signed_operation =
+                instruction->binary_operation >= IR_BINARY_SIGNED_LESS &&
+                instruction->binary_operation <= IR_BINARY_SIGNED_GREATER_EQUAL;
+            s32 order = signed_operation ?
                 ir_interpreter_signed_compare(left, right, width) :
                 left < right ? -1 : left > right ? 1 : 0;
-            value = instruction->ast_operation ==
-                    AST_NODE_BINARY_LESS ? order < 0 :
-                instruction->ast_operation ==
-                    AST_NODE_BINARY_LESS_EQUAL ? order <= 0 :
-                instruction->ast_operation ==
-                    AST_NODE_BINARY_GREATER ? order > 0 :
-                    order >= 0;
+            IrBinaryOperation relative = signed_operation ?
+                (IrBinaryOperation)(
+                    instruction->binary_operation -
+                    IR_BINARY_SIGNED_LESS) :
+                (IrBinaryOperation)(
+                    instruction->binary_operation -
+                    IR_BINARY_UNSIGNED_LESS);
+            value = relative == 0 ? order < 0 :
+                relative == 1 ? order <= 0 :
+                relative == 2 ? order > 0 :
+                order >= 0;
         } break;
-        case AST_NODE_BINARY_AMPERSAND:
-        case AST_NODE_BINARY_BOOLEAN_AND:
-        case AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT:
+        case IR_BINARY_INTEGER_BITWISE_AND:
+        case IR_BINARY_BOOLEAN_AND:
         {
             value = left & right;
         } break;
-        case AST_NODE_BINARY_BAR:
-        case AST_NODE_BINARY_BOOLEAN_OR:
-        case AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT:
+        case IR_BINARY_INTEGER_BITWISE_OR:
+        case IR_BINARY_BOOLEAN_OR:
         {
             value = left | right;
         } break;
-        case AST_NODE_BINARY_CARET: value = left ^ right; break;
+        case IR_BINARY_INTEGER_BITWISE_XOR: value = left ^ right; break;
         default:
         {
             *trap_out = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
@@ -497,12 +926,12 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_float_binary(
     f64 value = 0.0;
     bool comparison = false;
     bool comparison_value = false;
-    switch (instruction->ast_operation)
+    switch (instruction->binary_operation)
     {
-        case AST_NODE_BINARY_PLUS: value = left + right; break;
-        case AST_NODE_BINARY_MINUS: value = left - right; break;
-        case AST_NODE_BINARY_ASTERISK: value = left * right; break;
-        case AST_NODE_BINARY_SLASH:
+        case IR_BINARY_FLOAT_ADD: value = left + right; break;
+        case IR_BINARY_FLOAT_SUBTRACT: value = left - right; break;
+        case IR_BINARY_FLOAT_MULTIPLY: value = left * right; break;
+        case IR_BINARY_FLOAT_DIVIDE:
         {
             if (right == 0.0)
             {
@@ -511,27 +940,27 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_float_binary(
             }
             value = left / right;
         } break;
-        case AST_NODE_BINARY_EQUAL:
+        case IR_BINARY_FLOAT_EQUAL:
             comparison = true;
             comparison_value = left == right;
             break;
-        case AST_NODE_BINARY_NOT_EQUAL:
+        case IR_BINARY_FLOAT_NOT_EQUAL:
             comparison = true;
             comparison_value = left != right;
             break;
-        case AST_NODE_BINARY_LESS:
+        case IR_BINARY_FLOAT_LESS:
             comparison = true;
             comparison_value = left < right;
             break;
-        case AST_NODE_BINARY_LESS_EQUAL:
+        case IR_BINARY_FLOAT_LESS_EQUAL:
             comparison = true;
             comparison_value = left <= right;
             break;
-        case AST_NODE_BINARY_GREATER:
+        case IR_BINARY_FLOAT_GREATER:
             comparison = true;
             comparison_value = left > right;
             break;
-        case AST_NODE_BINARY_GREATER_EQUAL:
+        case IR_BINARY_FLOAT_GREATER_EQUAL:
             comparison = true;
             comparison_value = left >= right;
             break;
@@ -644,6 +1073,160 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_cast(
         return true;
     }
     return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_collection(
+    IrExecutionFrame* frame,
+    AnalysisTypeId type_id,
+    IrRuntimeValue value,
+    IrRuntimeObject** object_out,
+    u64* offset_out,
+    u64* count_out,
+    u64* element_size_out)
+{
+    AnalysisType* type = analysis_type_from_id(
+        frame->analysis,
+        type_id);
+    if (type->kind == ANALYSIS_TYPE_SLICE &&
+        value.kind == IR_RUNTIME_VALUE_PLACE)
+    {
+        IrRuntimeStoredValue* stored =
+            ir_interpreter_stored_value_find(
+                value.object,
+                value.offset,
+                ir_interpreter_type_size(
+                    frame->analysis,
+                    type_id));
+        if (!stored)
+        {
+            return false;
+        }
+        value = stored->value;
+    }
+    if (type->kind == ANALYSIS_TYPE_SLICE &&
+        value.kind == IR_RUNTIME_VALUE_SLICE)
+    {
+        *object_out = value.object;
+        *offset_out = value.offset;
+        *count_out = value.length;
+        *element_size_out = value.element_size;
+        return true;
+    }
+    if (type->kind == ANALYSIS_TYPE_ARRAY ||
+        type->kind == ANALYSIS_TYPE_INFERRED_ARRAY)
+    {
+        AnalysisTypeId element = type->kind == ANALYSIS_TYPE_ARRAY ?
+            type->as.array.element_type : type->as.element_type;
+        u64 element_size = ir_interpreter_type_size(
+            frame->analysis,
+            element);
+        u64 count = type->kind == ANALYSIS_TYPE_ARRAY ?
+            type->as.array.count : value.length;
+        if ((value.kind != IR_RUNTIME_VALUE_AGGREGATE &&
+             value.kind != IR_RUNTIME_VALUE_PLACE) ||
+            !value.object || !element_size)
+        {
+            return false;
+        }
+        *object_out = value.object;
+        *offset_out = value.offset;
+        *count_out = count;
+        *element_size_out = element_size;
+        return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_iterator_next(
+    Arena* arena,
+    IrExecutionFrame* frame,
+    IrRuntimeIterator* iterator,
+    IrExecutionTrap* trap_out)
+{
+    IrRuntimeValue iterable = iterator->iterable;
+    AnalysisType* type = analysis_type_from_id(
+        frame->analysis,
+        iterable.type);
+    iterator->has_current = false;
+    if (type->kind == ANALYSIS_TYPE_RANGE &&
+        iterable.kind == IR_RUNTIME_VALUE_RANGE)
+    {
+        AnalysisTypeId element_type = type->as.element_type;
+        u32 width = ir_interpreter_type_width(
+            frame->analysis,
+            element_type);
+        u64 mask = ir_interpreter_mask(width);
+        u64 start = iterable.bits & mask;
+        u64 end = iterable.length & mask;
+        bool is_signed = ir_interpreter_type_signed(
+            frame->analysis,
+            element_type);
+        s32 order = is_signed ?
+            ir_interpreter_signed_compare(start, end, width) :
+            start < end ? -1 : start > end ? 1 : 0;
+        if (order > 0)
+        {
+            *trap_out = IR_EXECUTION_TRAP_INVALID_MEMORY;
+            return false;
+        }
+        u64 count = (end - start) & mask;
+        if (iterator->index >= count)
+        {
+            return true;
+        }
+        u64 element_index = iterable.reversed ?
+            count - iterator->index - 1 : iterator->index;
+        iterator->current = (IrRuntimeValue){
+            .type_module = frame->analysis->module.id,
+            .type = element_type,
+            .bits = (start + element_index) & mask,
+            .kind = IR_RUNTIME_VALUE_SCALAR,
+            .initialized = true,
+        };
+        iterator->index += 1;
+        iterator->has_current = true;
+        return true;
+    }
+
+    IrRuntimeObject* object = 0;
+    u64 offset = 0;
+    u64 count = 0;
+    u64 element_size = 0;
+    if (!ir_interpreter_collection(
+            frame,
+            iterable.type,
+            iterable,
+            &object,
+            &offset,
+            &count,
+            &element_size))
+    {
+        *trap_out = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+        return false;
+    }
+    if (iterator->index >= count)
+    {
+        return true;
+    }
+    u64 element_index = iterable.reversed ?
+        count - iterator->index - 1 : iterator->index;
+    AnalysisTypeId element_type =
+        type->kind == ANALYSIS_TYPE_ARRAY ?
+            type->as.array.element_type : type->as.element_type;
+    if (!ir_interpreter_memory_read(
+            arena,
+            frame->analysis,
+            element_type,
+            object,
+            offset + element_index * element_size,
+            &iterator->current))
+    {
+        *trap_out = IR_EXECUTION_TRAP_UNINITIALIZED_VALUE;
+        return false;
+    }
+    iterator->index += 1;
+    iterator->has_current = true;
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL IrExecutionResult ir_interpreter_trap(
@@ -855,6 +1438,342 @@ IrExecutionResult ir_execute(
                 }
                 produced.bits = instruction->immediates[0];
             } break;
+            case IR_OPCODE_CONSTANT_STRING:
+            {
+                AnalysisType* string_type = analysis_type_from_id(
+                    frame->analysis,
+                    instruction->type);
+                if (string_type->kind != ANALYSIS_TYPE_SLICE &&
+                    string_type->kind != ANALYSIS_TYPE_ARRAY &&
+                    string_type->kind !=
+                        ANALYSIS_TYPE_INFERRED_ARRAY)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_PROGRAM;
+                    break;
+                }
+                IrRuntimeObject* object =
+                    ir_interpreter_object_create(
+                        scratch.arena,
+                        instruction->literal.length);
+                for (u64 index = 0;
+                    index < instruction->literal.length;
+                    index += 1)
+                {
+                    object->bytes[index] =
+                        instruction->literal.pointer[index];
+                    object->initialized[index] = 1;
+                }
+                produced = (IrRuntimeValue){
+                    .object = object,
+                    .length = instruction->literal.length,
+                    .element_size = 1,
+                    .kind = string_type->kind ==
+                        ANALYSIS_TYPE_SLICE ?
+                        IR_RUNTIME_VALUE_SLICE :
+                        IR_RUNTIME_VALUE_AGGREGATE,
+                    .initialized = true,
+                };
+            } break;
+            case IR_OPCODE_UNDEFINED:
+            {
+                produced.initialized = false;
+            } break;
+            case IR_OPCODE_LOCAL:
+            {
+                u64 size = ir_interpreter_type_size(
+                    frame->analysis,
+                    instruction->type);
+                if (!size)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    break;
+                }
+                produced = (IrRuntimeValue){
+                    .object = ir_interpreter_object_create(
+                        scratch.arena,
+                        size),
+                    .length = size,
+                    .kind = IR_RUNTIME_VALUE_PLACE,
+                    .initialized = true,
+                };
+            } break;
+            case IR_OPCODE_LOAD:
+            {
+                IrRuntimeValue place = frame->values[
+                    instruction->operands[0].value];
+                if (place.kind != IR_RUNTIME_VALUE_PLACE ||
+                    !ir_interpreter_memory_read(
+                        scratch.arena,
+                        frame->analysis,
+                        instruction->type,
+                        place.object,
+                        place.offset,
+                        &produced))
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_UNINITIALIZED_VALUE;
+                }
+            } break;
+            case IR_OPCODE_STORE:
+            {
+                IrRuntimeValue place = frame->values[
+                    instruction->operands[0].value];
+                IrRuntimeValue stored = frame->values[
+                    instruction->operands[1].value];
+                AnalysisTypeId stored_type =
+                    frame->function->values[
+                        instruction->operands[1].value].type;
+                u64 size = ir_interpreter_type_size(
+                    frame->analysis,
+                    stored_type);
+                if (place.kind != IR_RUNTIME_VALUE_PLACE ||
+                    !size ||
+                    !ir_interpreter_memory_write(
+                        scratch.arena,
+                        place.object,
+                        place.offset,
+                        size,
+                        stored))
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                }
+            } break;
+            case IR_OPCODE_ARRAY:
+            {
+                AnalysisType* array_type = analysis_type_from_id(
+                    frame->analysis,
+                    instruction->type);
+                AnalysisTypeId element_type =
+                    array_type->kind == ANALYSIS_TYPE_ARRAY ?
+                        array_type->as.array.element_type :
+                        array_type->as.element_type;
+                u64 element_size = ir_interpreter_type_size(
+                    frame->analysis,
+                    element_type);
+                u64 count = instruction->operand_count;
+                u64 size = element_size * count;
+                IrRuntimeObject* object =
+                    ir_interpreter_object_create(
+                        scratch.arena,
+                        size);
+                for (u32 element_index = 0;
+                    element_index < instruction->operand_count;
+                    element_index += 1)
+                {
+                    if (!element_size ||
+                        !ir_interpreter_memory_write(
+                            scratch.arena,
+                            object,
+                            (u64)element_index * element_size,
+                            element_size,
+                            frame->values[instruction->operands[
+                                element_index].value]))
+                    {
+                        operation_trap =
+                            IR_EXECUTION_TRAP_INVALID_MEMORY;
+                        break;
+                    }
+                }
+                produced = (IrRuntimeValue){
+                    .object = object,
+                    .length = count,
+                    .element_size = element_size,
+                    .kind = IR_RUNTIME_VALUE_AGGREGATE,
+                    .initialized = operation_trap ==
+                        IR_EXECUTION_TRAP_NONE,
+                };
+            } break;
+            case IR_OPCODE_AGGREGATE:
+            {
+                u64 size = ir_interpreter_type_size(
+                    frame->analysis,
+                    instruction->type);
+                IrRuntimeObject* object =
+                    ir_interpreter_object_create(
+                        scratch.arena,
+                        size);
+                for (u32 operand_index = 0;
+                    operand_index < instruction->operand_count;
+                    operand_index += 1)
+                {
+                    AnalysisField* field = 0;
+                    if (operand_index >=
+                            instruction->immediate_count ||
+                        !ir_interpreter_field(
+                            frame,
+                            instruction->type,
+                            (u32)instruction->immediates[
+                                operand_index],
+                            &field))
+                    {
+                        operation_trap =
+                            IR_EXECUTION_TRAP_INVALID_MEMORY;
+                        break;
+                    }
+                    u64 field_size = ir_interpreter_type_size(
+                        frame->analysis,
+                        field->type);
+                    if (!ir_interpreter_memory_write(
+                            scratch.arena,
+                            object,
+                            field->offset,
+                            field_size,
+                            frame->values[instruction->operands[
+                                operand_index].value]))
+                    {
+                        operation_trap =
+                            IR_EXECUTION_TRAP_INVALID_MEMORY;
+                        break;
+                    }
+                }
+                produced = (IrRuntimeValue){
+                    .object = object,
+                    .length = size,
+                    .kind = IR_RUNTIME_VALUE_AGGREGATE,
+                    .initialized = operation_trap ==
+                        IR_EXECUTION_TRAP_NONE,
+                };
+            } break;
+            case IR_OPCODE_INDEX:
+            {
+                IrValueId base_id = instruction->operands[0];
+                IrRuntimeValue base = frame->values[base_id.value];
+                u64 index = frame->values[
+                    instruction->operands[1].value].bits;
+                IrRuntimeObject* object = 0;
+                u64 offset = 0;
+                u64 count = 0;
+                u64 element_size = 0;
+                if (!ir_interpreter_collection(
+                        frame,
+                        frame->function->values[base_id.value].type,
+                        base,
+                        &object,
+                        &offset,
+                        &count,
+                        &element_size) ||
+                    index >= count)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_OUT_OF_BOUNDS;
+                    break;
+                }
+                produced = (IrRuntimeValue){
+                    .object = object,
+                    .offset = offset + index * element_size,
+                    .length = element_size,
+                    .kind = IR_RUNTIME_VALUE_PLACE,
+                    .initialized = true,
+                };
+                if (frame->function->values[
+                        instruction->result.value].category ==
+                    IR_VALUE_VALUE)
+                {
+                    if (!ir_interpreter_memory_read(
+                            scratch.arena,
+                            frame->analysis,
+                            instruction->type,
+                            produced.object,
+                            produced.offset,
+                            &produced))
+                    {
+                        operation_trap =
+                            IR_EXECUTION_TRAP_UNINITIALIZED_VALUE;
+                    }
+                }
+            } break;
+            case IR_OPCODE_SLICE:
+            {
+                IrValueId base_id = instruction->operands[0];
+                IrRuntimeObject* object = 0;
+                u64 offset = 0;
+                u64 count = 0;
+                u64 element_size = 0;
+                if (instruction->immediate_count != 2 ||
+                    !ir_interpreter_collection(
+                        frame,
+                        frame->function->values[base_id.value].type,
+                        frame->values[base_id.value],
+                        &object,
+                        &offset,
+                        &count,
+                        &element_size))
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    break;
+                }
+                bool has_start = instruction->immediates[0] != 0;
+                bool has_end = instruction->immediates[1] != 0;
+                u32 operand_index = 1;
+                u64 start = has_start ?
+                    frame->values[instruction->operands[
+                        operand_index++].value].bits : 0;
+                u64 end = has_end ?
+                    frame->values[instruction->operands[
+                        operand_index].value].bits : count;
+                if (start > end || end > count)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_OUT_OF_BOUNDS;
+                    break;
+                }
+                produced = (IrRuntimeValue){
+                    .object = object,
+                    .offset = offset + start * element_size,
+                    .length = end - start,
+                    .element_size = element_size,
+                    .kind = IR_RUNTIME_VALUE_SLICE,
+                    .initialized = true,
+                };
+            } break;
+            case IR_OPCODE_FIELD:
+            {
+                IrValueId base_id = instruction->operands[0];
+                IrRuntimeValue base = frame->values[base_id.value];
+                AnalysisField* field = 0;
+                if (instruction->immediate_count != 1 ||
+                    !ir_interpreter_field(
+                        frame,
+                        frame->function->values[base_id.value].type,
+                        (u32)instruction->immediates[0],
+                        &field) ||
+                    (base.kind != IR_RUNTIME_VALUE_PLACE &&
+                     base.kind != IR_RUNTIME_VALUE_AGGREGATE))
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    break;
+                }
+                produced = (IrRuntimeValue){
+                    .object = base.object,
+                    .offset = base.offset + field->offset,
+                    .length = ir_interpreter_type_size(
+                        frame->analysis,
+                        field->type),
+                    .kind = IR_RUNTIME_VALUE_PLACE,
+                    .initialized = true,
+                };
+                if (frame->function->values[
+                        instruction->result.value].category ==
+                    IR_VALUE_VALUE)
+                {
+                    if (!ir_interpreter_memory_read(
+                            scratch.arena,
+                            frame->analysis,
+                            instruction->type,
+                            produced.object,
+                            produced.offset,
+                            &produced))
+                    {
+                        operation_trap =
+                            IR_EXECUTION_TRAP_UNINITIALIZED_VALUE;
+                    }
+                }
+            } break;
             case IR_OPCODE_FUNCTION:
             {
                 produced.kind = IR_RUNTIME_VALUE_FUNCTION;
@@ -863,7 +1782,17 @@ IrExecutionResult ir_execute(
             } break;
             case IR_OPCODE_CAST:
             {
-                if (!ir_interpreter_cast(
+                IrRuntimeValue operand = frame->values[
+                    instruction->operands[0].value];
+                AnalysisType* target_type = analysis_type_from_id(
+                    frame->analysis,
+                    instruction->type);
+                if (operand.kind == IR_RUNTIME_VALUE_ADDRESS &&
+                    target_type->kind == ANALYSIS_TYPE_POINTER)
+                {
+                    produced = operand;
+                }
+                else if (!ir_interpreter_cast(
                         frame,
                         instruction,
                         &produced.bits))
@@ -876,50 +1805,38 @@ IrExecutionResult ir_execute(
             {
                 IrValueId operand_id = instruction->operands[0];
                 u64 operand = frame->values[operand_id.value].bits;
-                AnalysisType* type = analysis_type_from_id(
-                    frame->analysis,
-                    instruction->type);
-                if (type->kind == ANALYSIS_TYPE_FLOAT)
+                switch (instruction->unary_operation)
                 {
-                    f64 value = ir_interpreter_float_read(
-                        operand,
-                        type->as.float_bit_width);
-                    if (instruction->ast_operation ==
-                        AST_NODE_UNARY_MINUS)
+                    case IR_UNARY_FLOAT_NEGATE:
                     {
-                        value = -value;
-                    }
-                    else if (instruction->ast_operation !=
-                        AST_NODE_UNARY_PLUS)
+                        AnalysisType* type = analysis_type_from_id(
+                            frame->analysis,
+                            instruction->type);
+                        f64 value = ir_interpreter_float_read(
+                            operand,
+                            type->as.float_bit_width);
+                        produced.bits = ir_interpreter_float_write(
+                            -value,
+                            type->as.float_bit_width);
+                    } break;
+                    case IR_UNARY_INTEGER_NEGATE:
+                        produced.bits = 0 - operand;
+                        break;
+                    case IR_UNARY_BOOLEAN_NOT:
+                        produced.bits = !operand;
+                        break;
+                    case IR_UNARY_INTEGER_BITWISE_NOT:
+                        produced.bits = ~operand;
+                        break;
+                    case IR_UNARY_COUNT:
                     {
                         operation_trap =
                             IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
-                    }
-                    produced.bits = ir_interpreter_float_write(
-                        value,
-                        type->as.float_bit_width);
+                    } break;
                 }
-                else
+                if (instruction->unary_operation !=
+                    IR_UNARY_FLOAT_NEGATE)
                 {
-                    switch (instruction->ast_operation)
-                    {
-                        case AST_NODE_UNARY_MINUS:
-                            produced.bits = 0 - operand;
-                            break;
-                        case AST_NODE_UNARY_PLUS:
-                            produced.bits = operand;
-                            break;
-                        case AST_NODE_UNARY_LOGICAL_NOT:
-                            produced.bits = !operand;
-                            break;
-                        case AST_NODE_UNARY_BITWISE_NOT:
-                            produced.bits = ~operand;
-                            break;
-                        default:
-                            operation_trap =
-                                IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
-                            break;
-                    }
                     produced.bits = ir_interpreter_normalize_integer(
                         frame->analysis,
                         instruction->type,
@@ -928,10 +1845,63 @@ IrExecutionResult ir_execute(
             } break;
             case IR_OPCODE_BINARY:
             {
+                IrRuntimeValue left_value = frame->values[
+                    instruction->operands[0].value];
+                IrRuntimeValue right_value = frame->values[
+                    instruction->operands[1].value];
+                if (left_value.kind == IR_RUNTIME_VALUE_ADDRESS ||
+                    right_value.kind == IR_RUNTIME_VALUE_ADDRESS)
+                {
+                    if (left_value.kind !=
+                            IR_RUNTIME_VALUE_ADDRESS ||
+                        right_value.kind !=
+                            IR_RUNTIME_VALUE_ADDRESS)
+                    {
+                        operation_trap =
+                            IR_EXECUTION_TRAP_INVALID_MEMORY;
+                        break;
+                    }
+                    bool same_object =
+                        left_value.object == right_value.object;
+                    switch (instruction->binary_operation)
+                    {
+                        case IR_BINARY_POINTER_EQUAL:
+                            produced.bits = same_object &&
+                                left_value.offset ==
+                                    right_value.offset;
+                            break;
+                        case IR_BINARY_POINTER_NOT_EQUAL:
+                            produced.bits = !same_object ||
+                                left_value.offset !=
+                                    right_value.offset;
+                            break;
+                        default:
+                        {
+                            operation_trap =
+                                IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                        } break;
+                    }
+                    break;
+                }
                 AnalysisType* operand_type = analysis_type_from_id(
                     frame->analysis,
                     frame->function->values[
                         instruction->operands[0].value].type);
+                if (instruction->binary_operation == IR_BINARY_RANGE)
+                {
+                    produced = (IrRuntimeValue){
+                        .bits = frame->values[
+                            instruction->operands[0].value].bits,
+                        .length = frame->values[
+                            instruction->operands[1].value].bits,
+                        .element_size = ir_interpreter_type_size(
+                            frame->analysis,
+                            operand_type->id),
+                        .kind = IR_RUNTIME_VALUE_RANGE,
+                        .initialized = true,
+                    };
+                    break;
+                }
                 bool success = operand_type->kind ==
                     ANALYSIS_TYPE_FLOAT ?
                     ir_interpreter_float_binary(
@@ -998,6 +1968,114 @@ IrExecutionResult ir_execute(
                 frame->instruction = instruction->next;
                 depth += 1;
                 advance = false;
+            } break;
+            case IR_OPCODE_ADDRESS_OF:
+            {
+                IrRuntimeValue place = frame->values[
+                    instruction->operands[0].value];
+                if (place.kind != IR_RUNTIME_VALUE_PLACE)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    break;
+                }
+                produced = place;
+                produced.kind = IR_RUNTIME_VALUE_ADDRESS;
+            } break;
+            case IR_OPCODE_DEREFERENCE:
+            {
+                IrRuntimeValue address = frame->values[
+                    instruction->operands[0].value];
+                if (address.kind != IR_RUNTIME_VALUE_ADDRESS ||
+                    !address.object)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    break;
+                }
+                produced = address;
+                produced.kind = IR_RUNTIME_VALUE_PLACE;
+                produced.length = ir_interpreter_type_size(
+                    frame->analysis,
+                    instruction->type);
+                if (!ir_interpreter_object_range_valid(
+                        produced.object,
+                        produced.offset,
+                        produced.length))
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                }
+            } break;
+            case IR_OPCODE_REVERSE:
+            {
+                produced = frame->values[
+                    instruction->operands[0].value];
+                if (produced.kind != IR_RUNTIME_VALUE_RANGE &&
+                    produced.kind != IR_RUNTIME_VALUE_SLICE &&
+                    produced.kind != IR_RUNTIME_VALUE_AGGREGATE &&
+                    produced.kind != IR_RUNTIME_VALUE_PLACE)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                    break;
+                }
+                produced.reversed = !produced.reversed;
+            } break;
+            case IR_OPCODE_ITERATOR_BEGIN:
+            {
+                IrRuntimeIterator* iterator = arena_allocate(
+                    scratch.arena,
+                    IrRuntimeIterator,
+                    1);
+                *iterator = (IrRuntimeIterator){
+                    .iterable = frame->values[
+                        instruction->operands[0].value],
+                };
+                produced = (IrRuntimeValue){
+                    .iterator = iterator,
+                    .kind = IR_RUNTIME_VALUE_ITERATOR,
+                    .initialized = true,
+                };
+            } break;
+            case IR_OPCODE_ITERATOR_NEXT:
+            {
+                IrRuntimeValue iterator_value = frame->values[
+                    instruction->operands[0].value];
+                if (iterator_value.kind !=
+                        IR_RUNTIME_VALUE_ITERATOR ||
+                    !iterator_value.iterator ||
+                    !ir_interpreter_iterator_next(
+                        scratch.arena,
+                        frame,
+                        iterator_value.iterator,
+                        &operation_trap))
+                {
+                    if (operation_trap ==
+                        IR_EXECUTION_TRAP_NONE)
+                    {
+                        operation_trap =
+                            IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    }
+                    break;
+                }
+                produced.bits =
+                    iterator_value.iterator->has_current;
+            } break;
+            case IR_OPCODE_ITERATOR_VALUE:
+            {
+                IrRuntimeValue iterator_value = frame->values[
+                    instruction->operands[0].value];
+                if (iterator_value.kind !=
+                        IR_RUNTIME_VALUE_ITERATOR ||
+                    !iterator_value.iterator ||
+                    !iterator_value.iterator->has_current)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    break;
+                }
+                produced = iterator_value.iterator->current;
             } break;
             case IR_OPCODE_BRANCH:
             {
@@ -1110,6 +2188,10 @@ IrExecutionResult ir_execute(
                 IrExecutionFrame* caller = frames + depth - 1;
                 if (caller_result.value != IR_ID_UNDERLYING_INVALID)
                 {
+                    returned.type_module = caller->analysis->module.id;
+                    returned.type =
+                        caller->function->values[
+                            caller_result.value].type;
                     caller->values[caller_result.value] = returned;
                 }
                 advance = false;
@@ -1118,30 +2200,6 @@ IrExecutionResult ir_execute(
             {
                 operation_trap =
                     IR_EXECUTION_TRAP_UNREACHABLE;
-            } break;
-            case IR_OPCODE_LOCAL:
-            case IR_OPCODE_LOAD:
-            case IR_OPCODE_STORE:
-            case IR_OPCODE_CONSTANT_STRING:
-            case IR_OPCODE_ARRAY:
-            case IR_OPCODE_AGGREGATE:
-            case IR_OPCODE_INDEX:
-            case IR_OPCODE_SLICE:
-            case IR_OPCODE_FIELD:
-            case IR_OPCODE_ADDRESS_OF:
-            case IR_OPCODE_DEREFERENCE:
-            case IR_OPCODE_REVERSE:
-            case IR_OPCODE_ITERATOR_BEGIN:
-            case IR_OPCODE_ITERATOR_NEXT:
-            case IR_OPCODE_ITERATOR_VALUE:
-            {
-                operation_trap =
-                    IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
-            } break;
-            case IR_OPCODE_UNDEFINED:
-            {
-                operation_trap =
-                    IR_EXECUTION_TRAP_UNINITIALIZED_VALUE;
             } break;
             case IR_OPCODE_COUNT:
             {
@@ -1162,6 +2220,8 @@ IrExecutionResult ir_execute(
                 IR_ID_UNDERLYING_INVALID &&
             instruction->opcode != IR_OPCODE_CALL)
         {
+            produced.type_module = frame->analysis->module.id;
+            produced.type = instruction->type;
             frame->values[instruction->result.value] = produced;
         }
         if (advance)
@@ -1204,6 +2264,16 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
     BUSTER_CHECK(expression_arena);
 
     String8 scalar_source = S8(
+        "type Pair = struct\n"
+        "{\n"
+        "    a: s32,\n"
+        "    b: s32,\n"
+        "}\n"
+        "type Number = union\n"
+        "{\n"
+        "    signed_value: s32,\n"
+        "    unsigned_value: u32,\n"
+        "}\n"
         "code choose : fn (a: s32, b: s32) s32\n"
         "{\n"
         "    data value: s32 = a;\n"
@@ -1230,6 +2300,79 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
         "    loop\n"
         "    {\n"
         "    }\n"
+        "}\n"
+        "code memory : fn () s32\n"
+        "{\n"
+        "    data values: [3]s32 = [ 2, 3, 4 ];\n"
+        "    data pair: Pair = { .a = 5, .b = 7 };\n"
+        "    data pointer: &s32 = &values[1];\n"
+        "    data same_pointer: &s32 = &values[1];\n"
+        "    pointer.& += pair.a;\n"
+        "    data selected: []s32 = values[1..];\n"
+        "    selected[1] += 1;\n"
+        "    data total: s32 = 0;\n"
+        "    for (data value = @reverse(selected))\n"
+        "    {\n"
+        "        total += value;\n"
+        "    }\n"
+        "    if (pointer == same_pointer)\n"
+        "    {\n"
+        "        total += 1;\n"
+        "    }\n"
+        "    return total + pair.b;\n"
+        "}\n"
+        "code range_total : fn () s32\n"
+        "{\n"
+        "    data total: s32 = 0;\n"
+        "    for (data value = 0 .. 4)\n"
+        "    {\n"
+        "        total += value;\n"
+        "    }\n"
+        "    for (data value = @reverse(0 .. 4))\n"
+        "    {\n"
+        "        total += value;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "code array_total : fn () s32\n"
+        "{\n"
+        "    data values: [3]s32 = [ 1, 2, 3 ];\n"
+        "    data total: s32 = 0;\n"
+        "    for (data value = values)\n"
+        "    {\n"
+        "        total += value;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "code aggregate_copy : fn () s32\n"
+        "{\n"
+        "    data first: Pair = { .a = 5, .b = 7 };\n"
+        "    data second: Pair = first;\n"
+        "    second.a += 1;\n"
+        "    return first.a * 10 + second.a;\n"
+        "}\n"
+        "code pointer_storage : fn () s32\n"
+        "{\n"
+        "    data value: s32 = 4;\n"
+        "    data pointer: &s32 = &value;\n"
+        "    data pointer_pointer: &&s32 = &pointer;\n"
+        "    pointer_pointer.&.& += 3;\n"
+        "    return value;\n"
+        "}\n"
+        "code union_value : fn () s32\n"
+        "{\n"
+        "    data number: Number = { .signed_value = 9 };\n"
+        "    return number.signed_value;\n"
+        "}\n"
+        "code string_value : fn () s32\n"
+        "{\n"
+        "    data text = \"hello\";\n"
+        "    return @cast(text[1] - 'e');\n"
+        "}\n"
+        "code indexed : fn (index: s32) s32\n"
+        "{\n"
+        "    data values: [1]s32 = [ 9 ];\n"
+        "    return values[index];\n"
         "}\n"
         "code main : fn () s32\n"
         "{\n"
@@ -1260,6 +2403,12 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
         arguments->arena,
         &scalar_analysis);
     analysis_analyze_bodies(arguments->arena, &scalar_analysis);
+    analysis_compute_layouts(
+        &scalar_analysis,
+        (AnalysisLayoutOptions){
+            .pointer_size = 8,
+            .pointer_alignment = 8,
+        });
     AnalysisResult* scalar_modules[] = { &scalar_analysis };
     AnalysisProgram scalar_program_analysis = {
         .module_results = scalar_modules,
@@ -1417,6 +2566,173 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
             step_limited.trap ==
                 IR_EXECUTION_TRAP_STEP_LIMIT);
         BUSTER_TEST(arguments, step_limited.step_count == 32);
+    }
+
+    AnalysisEntity* memory_entity = ir_interpreter_test_entity_find(
+        &scalar_analysis,
+        S8("memory"));
+    BUSTER_TEST(arguments, memory_entity != 0);
+    if (memory_entity)
+    {
+        IrExecutionResult memory_result = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            memory_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            0,
+            0,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(arguments,
+            memory_result.trap == IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments, memory_result.bits == 21);
+    }
+
+    AnalysisEntity* range_entity = ir_interpreter_test_entity_find(
+        &scalar_analysis,
+        S8("range_total"));
+    BUSTER_TEST(arguments, range_entity != 0);
+    if (range_entity)
+    {
+        IrExecutionResult range_result = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            range_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            0,
+            0,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(arguments,
+            range_result.trap == IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments, range_result.bits == 12);
+    }
+
+    AnalysisEntity* array_entity = ir_interpreter_test_entity_find(
+        &scalar_analysis,
+        S8("array_total"));
+    BUSTER_TEST(arguments, array_entity != 0);
+    if (array_entity)
+    {
+        IrExecutionResult array_result = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            array_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            0,
+            0,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(arguments,
+            array_result.trap == IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments, array_result.bits == 6);
+    }
+
+    AnalysisEntity* aggregate_copy_entity =
+        ir_interpreter_test_entity_find(
+            &scalar_analysis,
+            S8("aggregate_copy"));
+    BUSTER_TEST(arguments, aggregate_copy_entity != 0);
+    if (aggregate_copy_entity)
+    {
+        IrExecutionResult aggregate_copy_result = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            aggregate_copy_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            0,
+            0,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(arguments,
+            aggregate_copy_result.trap ==
+                IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments,
+            aggregate_copy_result.bits == 56);
+    }
+
+    AnalysisEntity* pointer_storage_entity =
+        ir_interpreter_test_entity_find(
+            &scalar_analysis,
+            S8("pointer_storage"));
+    BUSTER_TEST(arguments, pointer_storage_entity != 0);
+    if (pointer_storage_entity)
+    {
+        IrExecutionResult pointer_storage_result = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            pointer_storage_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            0,
+            0,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(arguments,
+            pointer_storage_result.trap ==
+                IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments,
+            pointer_storage_result.bits == 7);
+    }
+
+    AnalysisEntity* union_entity = ir_interpreter_test_entity_find(
+        &scalar_analysis,
+        S8("union_value"));
+    BUSTER_TEST(arguments, union_entity != 0);
+    if (union_entity)
+    {
+        IrExecutionResult union_result = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            union_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            0,
+            0,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(arguments,
+            union_result.trap == IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments, union_result.bits == 9);
+    }
+
+    AnalysisEntity* string_entity = ir_interpreter_test_entity_find(
+        &scalar_analysis,
+        S8("string_value"));
+    BUSTER_TEST(arguments, string_entity != 0);
+    if (string_entity)
+    {
+        IrExecutionResult string_result = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            string_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            0,
+            0,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(arguments,
+            string_result.trap == IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments, string_result.bits == 0);
+    }
+
+    AnalysisEntity* indexed_entity = ir_interpreter_test_entity_find(
+        &scalar_analysis,
+        S8("indexed"));
+    BUSTER_TEST(arguments, indexed_entity != 0);
+    if (indexed_entity)
+    {
+        IrExecutionArgument outside = { .bits = 2 };
+        IrExecutionResult bounds_result = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            indexed_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            &outside,
+            1,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(arguments,
+            bounds_result.trap ==
+                IR_EXECUTION_TRAP_OUT_OF_BOUNDS);
     }
 
     String8 math_source = S8(
