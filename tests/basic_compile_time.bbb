@@ -1,14 +1,17 @@
 data $this_is_a_constant: u64 = 5;
 
-code a : fn ($this_is_a_polymorphic_variable: u64) u64
+code identity : fn ($value: $T) $T
 {
-    return this_is_a_polymorphic_variable + this_is_a_constant;
+    return value;
 }
-
-code b : fn ($this_is_a_polymorphic_variable_with_ct_type: $T) $T;
 
 code main : fn () s32
 {
     data $local: u64 = 3;
-    return @cast(local + this_is_a_constant);
+    data first: s32 = identity(5);
+    data reused: s32 = identity(5);
+    data distinct_value: s32 = identity(6);
+    data distinct_type: u64 = identity(this_is_a_constant);
+    return first + reused + distinct_value +
+        @cast(distinct_type + local);
 }

@@ -6747,9 +6747,16 @@ BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
     },
     {
         .path = S8_INITIALIZER("tests/basic_compile_time.bbb"),
-        .expected_expression = S8_INITIALIZER("(@cast (+ local this_is_a_constant))"),
+        .expected_expression =
+            S8_INITIALIZER("(+ (+ (+ first reused) distinct_value) (@cast (+ distinct_type local)))"),
         .expression_code_name = S8_INITIALIZER("main"),
-        .expected_code_count = 3,
+        .expected_code_count = 2,
+    },
+    {
+        .path = S8_INITIALIZER("tests/compile_time_argument_error.bbb"),
+        .expected_expression = S8_INITIALIZER("(call choose runtime_value)"),
+        .expression_code_name = S8_INITIALIZER("main"),
+        .expected_code_count = 2,
     },
     {
         .path = S8_INITIALIZER("tests/modules/core/math.bbb"),
@@ -10014,23 +10021,16 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments,
                     parsed.first_data_declaration &&
                     parsed.first_data_declaration->is_compile_time);
-                AstCode* compile_time_value = parsed.first_code;
-                AstCode* compile_time_type =
-                    compile_time_value ? compile_time_value->next : 0;
+                AstCode* compile_time_identity = parsed.first_code;
                 BUSTER_TEST(arguments,
-                    compile_time_value &&
-                    compile_time_value->type->function.first_argument &&
-                    compile_time_value->type->function.first_argument->
+                    compile_time_identity &&
+                    compile_time_identity->type->function.first_argument &&
+                    compile_time_identity->type->function.first_argument->
                         is_compile_time);
                 BUSTER_TEST(arguments,
-                    compile_time_type &&
-                    compile_time_type->type->function.first_argument &&
-                    compile_time_type->type->function.first_argument->
-                        is_compile_time);
-                BUSTER_TEST(arguments,
-                    compile_time_type &&
-                    compile_time_type->type->function.first_argument &&
-                    compile_time_type->type->function.first_argument->type->
+                    compile_time_identity &&
+                    compile_time_identity->type->function.first_argument &&
+                    compile_time_identity->type->function.first_argument->type->
                         is_compile_time);
             }
         }

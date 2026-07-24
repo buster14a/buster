@@ -701,9 +701,410 @@ AnalysisEntity* analysis_find_qualified_entity(
     return 0;
 }
 
+typedef enum AnalysisCanonicalTaskKind
+{
+    ANALYSIS_CANONICAL_TASK_TEXT,
+    ANALYSIS_CANONICAL_TASK_TYPE,
+    ANALYSIS_CANONICAL_TASK_CONSTANT,
+} AnalysisCanonicalTaskKind;
+
+typedef struct AnalysisCanonicalTask AnalysisCanonicalTask;
+struct AnalysisCanonicalTask
+{
+    AnalysisCanonicalTask* previous;
+    String8 text;
+    AnalysisTypeId type;
+    AnalysisConstant constant;
+    AnalysisCanonicalTaskKind kind;
+};
+
+typedef struct AnalysisCanonicalPart AnalysisCanonicalPart;
+struct AnalysisCanonicalPart
+{
+    AnalysisCanonicalPart* next;
+    String8 text;
+};
+
+BUSTER_GLOBAL_LOCAL void analysis_canonical_task_push(
+    Arena* scratch_arena,
+    AnalysisCanonicalTask** top,
+    AnalysisCanonicalTask task)
+{
+    AnalysisCanonicalTask* pushed =
+        arena_allocate(scratch_arena, AnalysisCanonicalTask, 1);
+    task.previous = *top;
+    *pushed = task;
+    *top = pushed;
+}
+
+BUSTER_GLOBAL_LOCAL void analysis_canonical_part_push(
+    Arena* scratch_arena,
+    AnalysisCanonicalPart** first,
+    AnalysisCanonicalPart** last,
+    u32* count,
+    String8 text)
+{
+    AnalysisCanonicalPart* part =
+        arena_allocate(scratch_arena, AnalysisCanonicalPart, 1);
+    *part = (AnalysisCanonicalPart){ .text = text };
+    if (*last)
+    {
+        (*last)->next = part;
+    }
+    else
+    {
+        *first = part;
+    }
+    *last = part;
+    *count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisResult* analysis_canonical_module_from_id(
+    AnalysisResult* result,
+    AnalysisModuleId id)
+{
+    if (result->module.id.value == id.value)
+    {
+        return result;
+    }
+    for (u32 index = 0; index < result->program_module_count; index += 1)
+    {
+        AnalysisResult* candidate = result->program_modules[index];
+        if (candidate && candidate->module.id.value == id.value)
+        {
+            return candidate;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL String8 analysis_canonical_tasks_join(
+    Arena* result_arena,
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisCanonicalTask* top)
+{
+    AnalysisCanonicalPart* first = 0;
+    AnalysisCanonicalPart* last = 0;
+    u32 part_count = 0;
+    while (top)
+    {
+        AnalysisCanonicalTask task = *top;
+        top = top->previous;
+        if (task.kind == ANALYSIS_CANONICAL_TASK_TEXT)
+        {
+            analysis_canonical_part_push(
+                scratch_arena,
+                &first,
+                &last,
+                &part_count,
+                task.text);
+            continue;
+        }
+        if (task.kind == ANALYSIS_CANONICAL_TASK_CONSTANT)
+        {
+            AnalysisConstant constant = task.constant;
+            if (constant.kind == ANALYSIS_CONSTANT_ARRAY ||
+                constant.kind == ANALYSIS_CONSTANT_AGGREGATE)
+            {
+                analysis_canonical_part_push(
+                    scratch_arena,
+                    &first,
+                    &last,
+                    &part_count,
+                    string_format(
+                        result_arena,
+                        S8("c{u32}:{u32}["),
+                        (u32)constant.kind,
+                        constant.aggregate.element_count));
+                analysis_canonical_task_push(
+                    scratch_arena,
+                    &top,
+                    (AnalysisCanonicalTask){
+                        .text = S8("]"),
+                        .kind = ANALYSIS_CANONICAL_TASK_TEXT,
+                    });
+                for (u32 index = constant.aggregate.element_count;
+                    index > 0;
+                    index -= 1)
+                {
+                    if (index < constant.aggregate.element_count)
+                    {
+                        analysis_canonical_task_push(
+                            scratch_arena,
+                            &top,
+                            (AnalysisCanonicalTask){
+                                .text = S8(","),
+                                .kind = ANALYSIS_CANONICAL_TASK_TEXT,
+                            });
+                    }
+                    analysis_canonical_task_push(
+                        scratch_arena,
+                        &top,
+                        (AnalysisCanonicalTask){
+                            .constant =
+                                constant.aggregate.elements[index - 1],
+                            .kind = ANALYSIS_CANONICAL_TASK_CONSTANT,
+                        });
+                }
+                continue;
+            }
+            u64 bits = constant.integer;
+            if (constant.kind == ANALYSIS_CONSTANT_FLOAT)
+            {
+                BUSTER_CT_CHECK(sizeof(bits) == sizeof(constant.floating));
+                memcpy(&bits, &constant.floating, sizeof(bits));
+            }
+            analysis_canonical_part_push(
+                scratch_arena,
+                &first,
+                &last,
+                &part_count,
+                string_format(
+                    result_arena,
+                    S8("c{u32}:{u32}:{u64:x,no_prefix}"),
+                    (u32)constant.kind,
+                    (u32)constant.is_negative,
+                    bits));
+            continue;
+        }
+
+        AnalysisType* type = analysis_type_from_id(result, task.type);
+        switch (type->kind)
+        {
+            case ANALYSIS_TYPE_POINTER:
+            case ANALYSIS_TYPE_SLICE:
+            case ANALYSIS_TYPE_INFERRED_ARRAY:
+            case ANALYSIS_TYPE_RANGE:
+            {
+                analysis_canonical_part_push(
+                    scratch_arena,
+                    &first,
+                    &last,
+                    &part_count,
+                    string_format(
+                        result_arena,
+                        S8("t{u32}("),
+                        (u32)type->kind));
+                analysis_canonical_task_push(
+                    scratch_arena,
+                    &top,
+                    (AnalysisCanonicalTask){
+                        .text = S8(")"),
+                        .kind = ANALYSIS_CANONICAL_TASK_TEXT,
+                    });
+                analysis_canonical_task_push(
+                    scratch_arena,
+                    &top,
+                    (AnalysisCanonicalTask){
+                        .type = type->as.element_type,
+                        .kind = ANALYSIS_CANONICAL_TASK_TYPE,
+                    });
+            } break;
+            case ANALYSIS_TYPE_ARRAY:
+            {
+                analysis_canonical_part_push(
+                    scratch_arena,
+                    &first,
+                    &last,
+                    &part_count,
+                    string_format(
+                        result_arena,
+                        S8("t{u32}:{u64}("),
+                        (u32)type->kind,
+                        type->as.array.count));
+                analysis_canonical_task_push(
+                    scratch_arena,
+                    &top,
+                    (AnalysisCanonicalTask){
+                        .text = S8(")"),
+                        .kind = ANALYSIS_CANONICAL_TASK_TEXT,
+                    });
+                analysis_canonical_task_push(
+                    scratch_arena,
+                    &top,
+                    (AnalysisCanonicalTask){
+                        .type = type->as.array.element_type,
+                        .kind = ANALYSIS_CANONICAL_TASK_TYPE,
+                    });
+            } break;
+            case ANALYSIS_TYPE_FUNCTION:
+            {
+                analysis_canonical_part_push(
+                    scratch_arena,
+                    &first,
+                    &last,
+                    &part_count,
+                    string_format(
+                        result_arena,
+                        S8("fn{u32}("),
+                        (u32)type->as.function.calling_convention));
+                analysis_canonical_task_push(
+                    scratch_arena,
+                    &top,
+                    (AnalysisCanonicalTask){
+                        .type = type->as.function.return_type,
+                        .kind = ANALYSIS_CANONICAL_TASK_TYPE,
+                    });
+                analysis_canonical_task_push(
+                    scratch_arena,
+                    &top,
+                    (AnalysisCanonicalTask){
+                        .text = S8(")->"),
+                        .kind = ANALYSIS_CANONICAL_TASK_TEXT,
+                    });
+                for (u32 index = type->as.function.argument_count;
+                    index > 0;
+                    index -= 1)
+                {
+                    if (index < type->as.function.argument_count)
+                    {
+                        analysis_canonical_task_push(
+                            scratch_arena,
+                            &top,
+                            (AnalysisCanonicalTask){
+                                .text = S8(","),
+                                .kind = ANALYSIS_CANONICAL_TASK_TEXT,
+                            });
+                    }
+                    analysis_canonical_task_push(
+                        scratch_arena,
+                        &top,
+                        (AnalysisCanonicalTask){
+                            .type =
+                                type->as.function.argument_types[index - 1],
+                            .kind = ANALYSIS_CANONICAL_TASK_TYPE,
+                        });
+                }
+            } break;
+            case ANALYSIS_TYPE_STRUCT:
+            case ANALYSIS_TYPE_UNION:
+            case ANALYSIS_TYPE_ENUM:
+            {
+                AnalysisResult* declaration_module =
+                    analysis_canonical_module_from_id(
+                        result,
+                        type->as.declaration.module);
+                AnalysisEntity* declaration =
+                    declaration_module &&
+                    type->as.declaration.index.value <
+                        declaration_module->module.entity_count ?
+                    declaration_module->module.entities +
+                        type->as.declaration.index.value : 0;
+                analysis_canonical_part_push(
+                    scratch_arena,
+                    &first,
+                    &last,
+                    &part_count,
+                    string_format(
+                        result_arena,
+                        S8("nominal{u32}:{S8}:{S8}"),
+                        (u32)type->kind,
+                        declaration_module ?
+                            declaration_module->module.name : S8(""),
+                        declaration ? declaration->name : type->name));
+            } break;
+            case ANALYSIS_TYPE_POISON:
+            case ANALYSIS_TYPE_VOID:
+            case ANALYSIS_TYPE_BOOL:
+            case ANALYSIS_TYPE_INTEGER:
+            case ANALYSIS_TYPE_FLOAT:
+            case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
+            {
+                analysis_canonical_part_push(
+                    scratch_arena,
+                    &first,
+                    &last,
+                    &part_count,
+                    string_format(
+                        result_arena,
+                        S8("scalar{u32}:{S8}"),
+                        (u32)type->kind,
+                        type->name.pointer ? type->name : S8("")));
+            } break;
+            case ANALYSIS_TYPE_COUNT: BUSTER_UNREACHABLE();
+        }
+    }
+    String8* parts = arena_allocate(scratch_arena, String8, part_count);
+    u32 index = 0;
+    for (AnalysisCanonicalPart* part = first; part; part = part->next)
+    {
+        parts[index++] = part->text;
+    }
+    BUSTER_CHECK(index == part_count);
+    return string_join_arena(
+        result_arena,
+        (SliceString8){ .pointer = parts, .length = part_count },
+        false);
+}
+
+BUSTER_GLOBAL_LOCAL String8 analysis_type_canonical(
+    Arena* result_arena,
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisTypeId type)
+{
+    AnalysisCanonicalTask* top = 0;
+    analysis_canonical_task_push(
+        scratch_arena,
+        &top,
+        (AnalysisCanonicalTask){
+            .type = type,
+            .kind = ANALYSIS_CANONICAL_TASK_TYPE,
+        });
+    return analysis_canonical_tasks_join(
+        result_arena,
+        scratch_arena,
+        result,
+        top);
+}
+
+BUSTER_GLOBAL_LOCAL String8 analysis_constant_canonical(
+    Arena* result_arena,
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisConstant constant)
+{
+    AnalysisCanonicalTask* top = 0;
+    analysis_canonical_task_push(
+        scratch_arena,
+        &top,
+        (AnalysisCanonicalTask){
+            .constant = constant,
+            .kind = ANALYSIS_CANONICAL_TASK_CONSTANT,
+        });
+    return analysis_canonical_tasks_join(
+        result_arena,
+        scratch_arena,
+        result,
+        top);
+}
+
+BUSTER_GLOBAL_LOCAL u64 analysis_bytes_hash(String8 bytes)
+{
+    u64 hash = UINT64_C(1469598103934665603);
+    for (u64 index = 0; index < bytes.length; index += 1)
+    {
+        hash ^= (u8)bytes.pointer[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
 String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result)
 {
+    Arena* conflicts[] = { arena };
+    TemporalArena scratch = scratch_begin(
+        conflicts,
+        BUSTER_ARRAY_LENGTH(conflicts));
     u32 function_argument_count = 0;
+    u32 specialization_request_count = 0;
+    for (AnalysisInstantiation* instantiation = result->first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
+    {
+        specialization_request_count += instantiation->requester_count;
+    }
     for (u32 type_index = 0; type_index < result->types.count; type_index += 1)
     {
         AnalysisType* type = result->types.types + type_index;
@@ -715,14 +1116,14 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
     u32 part_capacity =
             1 + result->module.source_count +
             result->module.import_count + result->module.entity_count +
-            result->types.count + function_argument_count;
+            result->types.count + function_argument_count +
+            result->instantiation_count + specialization_request_count;
     String8* parts = arena_allocate(arena, String8, part_capacity);
     u32 part_count = 0;
     parts[part_count++] = string_format(
             arena,
-            S8("module {S8} id={u32}\n"),
-            result->module.name,
-            result->module.id.value);
+            S8("module {S8}\n"),
+            result->module.name);
     for (u32 source_index = 0;
          source_index < result->module.source_count;
          source_index += 1)
@@ -741,12 +1142,12 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
         AnalysisImport* import = result->module.imports + import_index;
         parts[part_count++] = string_format(
                 arena,
-                S8("import {S8}={S8} source={u32} state={u32} target={u32}\n"),
+                S8("import {S8}={S8} source={u32} state={u32} target={S8}\n"),
                 import->name_space,
                 import->path,
                 import->source.value,
                 (u32)import->state,
-                import->target_id.value);
+                import->target ? import->target->module.name : S8(""));
     }
     for (u32 entity_index = 0;
          entity_index < result->module.entity_count;
@@ -779,6 +1180,8 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
         u64 array_count = 0;
         AnalysisTypeId return_type = ANALYSIS_TYPE_ID_INVALID;
         AnalysisEntityId declaration = ANALYSIS_ENTITY_ID_INVALID;
+        String8 declaration_module_name = {0};
+        String8 declaration_entity_name = {0};
         u32 argument_count = 0;
         u32 calling_convention = 0;
         if (type->kind == ANALYSIS_TYPE_POINTER ||
@@ -804,10 +1207,26 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
             type->kind == ANALYSIS_TYPE_ENUM)
         {
             declaration = type->as.declaration;
+            AnalysisResult* declaration_module =
+                analysis_canonical_module_from_id(
+                    result,
+                    declaration.module);
+            if (declaration_module)
+            {
+                declaration_module_name =
+                    declaration_module->module.name;
+                if (declaration.index.value <
+                    declaration_module->module.entity_count)
+                {
+                    declaration_entity_name =
+                        declaration_module->module
+                            .entities[declaration.index.value].name;
+                }
+            }
         }
         parts[part_count++] = string_format(
             arena,
-            S8("type {u32} kind={u32} name={S8} element={u32} count={u64} return={u32} arguments={u32} cc={u32} declaration={u32}:{u32}\n"),
+            S8("type {u32} kind={u32} name={S8} element={u32} count={u64} return={u32} arguments={u32} cc={u32} declaration={S8}:{S8}\n"),
             type->id.value,
             (u32)type->kind,
             type->name.pointer ? type->name : S8(""),
@@ -816,8 +1235,10 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
             return_type.value,
             argument_count,
             calling_convention,
-            declaration.module.value,
-            declaration.index.value);
+            declaration_module_name.pointer ?
+                declaration_module_name : S8(""),
+            declaration_entity_name.pointer ?
+                declaration_entity_name : S8(""));
         for (u32 argument_index = 0;
             argument_index < argument_count;
             argument_index += 1)
@@ -830,11 +1251,103 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
                 type->as.function.argument_types[argument_index].value);
         }
     }
+    AnalysisInstantiation** specializations = arena_allocate(
+        scratch.arena,
+        AnalysisInstantiation*,
+        result->instantiation_count);
+    u32 specialization_index = 0;
+    for (AnalysisInstantiation* instantiation = result->first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
+    {
+        specializations[specialization_index++] = instantiation;
+    }
+    BUSTER_CHECK(specialization_index == result->instantiation_count);
+    for (u32 index = 1; index < result->instantiation_count; index += 1)
+    {
+        AnalysisInstantiation* instantiation = specializations[index];
+        u32 insertion = index;
+        while (insertion &&
+            analysis_string_compare(
+                specializations[insertion - 1]->canonical_key,
+                instantiation->canonical_key) > 0)
+        {
+            specializations[insertion] = specializations[insertion - 1];
+            insertion -= 1;
+        }
+        specializations[insertion] = instantiation;
+    }
+    for (u32 index = 0; index < result->instantiation_count; index += 1)
+    {
+        AnalysisInstantiation* instantiation = specializations[index];
+        AnalysisResult* owner = analysis_canonical_module_from_id(
+            result,
+            instantiation->codegen_owner);
+        parts[part_count++] = string_format(
+            arena,
+            S8("specialization hash={u64:x,no_prefix} symbol={S8} owner={S8} type={S8} key={S8}\n"),
+            instantiation->canonical_hash,
+            instantiation->symbol_name,
+            owner ? owner->module.name : result->module.name,
+            analysis_type_canonical(
+                arena,
+                scratch.arena,
+                result,
+                instantiation->function_type),
+            instantiation->canonical_key);
+        String8* requester_names = arena_allocate(
+            scratch.arena,
+            String8,
+            instantiation->requester_count);
+        u32 requester_index = 0;
+        for (AnalysisInstantiationRequester* requester =
+                instantiation->first_requester;
+            requester;
+            requester = requester->next)
+        {
+            AnalysisResult* requester_module =
+                analysis_canonical_module_from_id(
+                    result,
+                    requester->module);
+            requester_names[requester_index++] = requester_module ?
+                requester_module->module.name : S8("");
+        }
+        BUSTER_CHECK(requester_index == instantiation->requester_count);
+        for (u32 requester = 1;
+            requester < instantiation->requester_count;
+            requester += 1)
+        {
+            String8 name = requester_names[requester];
+            u32 insertion = requester;
+            while (insertion &&
+                analysis_string_compare(
+                    requester_names[insertion - 1],
+                    name) > 0)
+            {
+                requester_names[insertion] =
+                    requester_names[insertion - 1];
+                insertion -= 1;
+            }
+            requester_names[insertion] = name;
+        }
+        for (u32 requester = 0;
+            requester < instantiation->requester_count;
+            requester += 1)
+        {
+            parts[part_count++] = string_format(
+                arena,
+                S8("specialization_request hash={u64:x,no_prefix} requester={S8}\n"),
+                instantiation->canonical_hash,
+                requester_names[requester]);
+        }
+    }
     BUSTER_CHECK(part_count == part_capacity);
-    return string_join_arena(
+    String8 serialized = string_join_arena(
             arena,
             (SliceString8){ .pointer = parts, .length = part_count },
             false);
+    scratch_end(scratch);
+    return serialized;
 }
 
 AnalysisInterfaceSummary analysis_module_interface_summary(
@@ -843,13 +1356,9 @@ AnalysisInterfaceSummary analysis_module_interface_summary(
 {
     AnalysisInterfaceSummary summary = {
         .bytes = analysis_serialize_module_interface(arena, result),
-        .hash = UINT64_C(1469598103934665603),
+        .hash = 0,
     };
-    for (u64 index = 0; index < summary.bytes.length; index += 1)
-    {
-        summary.hash ^= (u8)summary.bytes.pointer[index];
-        summary.hash *= UINT64_C(1099511628211);
-    }
+    summary.hash = analysis_bytes_hash(summary.bytes);
     return summary;
 }
 
@@ -1108,6 +1617,42 @@ AnalysisProgram analysis_program_load(
             continue;
         }
         analysis_analyze_bodies(result_arena, analysis);
+    }
+    bool pending = true;
+    while (pending)
+    {
+        pending = false;
+        for (u32 index = 0; index < discovery_count; index += 1)
+        {
+            AnalysisResult* analysis = program.module_results[index];
+            if (!analysis)
+            {
+                continue;
+            }
+            for (AnalysisInstantiation* instantiation =
+                    analysis->first_instantiation;
+                instantiation;
+                instantiation = instantiation->next)
+            {
+                pending |=
+                    analysis->module
+                        .entities[instantiation->generic_entity.index.value]
+                        .ast.code->has_body &&
+                    !instantiation->analyzed;
+            }
+            if (pending)
+            {
+                analysis_analyze_bodies(result_arena, analysis);
+            }
+        }
+    }
+    for (u32 index = 0; index < discovery_count; index += 1)
+    {
+        AnalysisResult* analysis = program.module_results[index];
+        if (!analysis)
+        {
+            continue;
+        }
         analysis_compute_layouts(analysis, layout);
         analysis_build_jobs(result_arena, analysis);
         program.analysis_diagnostic_count += analysis->diagnostic_count;
@@ -1544,6 +2089,21 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_intern(
         }
         candidate.as.function.argument_types = argument_types;
     }
+    if (table->count == table->capacity)
+    {
+        u32 new_capacity = table->capacity ? table->capacity * 2 : 16;
+        BUSTER_CHECK(new_capacity > table->capacity);
+        AnalysisType* types = arena_allocate(
+            result_arena,
+            AnalysisType,
+            new_capacity);
+        for (u32 index = 0; index < table->count; index += 1)
+        {
+            types[index] = table->types[index];
+        }
+        table->types = types;
+        table->capacity = new_capacity;
+    }
     return analysis_type_add(table, candidate);
 }
 
@@ -1910,6 +2470,254 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_import(
         }
     }
     return result;
+}
+
+typedef enum AnalysisSubstituteTaskKind
+{
+    ANALYSIS_SUBSTITUTE_VISIT,
+    ANALYSIS_SUBSTITUTE_FINISH_ELEMENT,
+    ANALYSIS_SUBSTITUTE_FINISH_ARRAY,
+    ANALYSIS_SUBSTITUTE_FINISH_FUNCTION,
+} AnalysisSubstituteTaskKind;
+
+typedef struct AnalysisSubstituteTask AnalysisSubstituteTask;
+struct AnalysisSubstituteTask
+{
+    AnalysisSubstituteTask* previous;
+    AnalysisTypeId* destination;
+    AnalysisSubstituteTaskKind kind;
+    union
+    {
+        AnalysisTypeId source;
+        struct
+        {
+            AnalysisTypeKind kind;
+            AnalysisTypeId element;
+        } element;
+        struct
+        {
+            AnalysisTypeId element;
+            u64 count;
+        } array;
+        struct
+        {
+            AnalysisTypeId* arguments;
+            AnalysisTypeId return_type;
+            AstCallingConvention calling_convention;
+            u32 argument_count;
+        } function;
+    } as;
+};
+
+BUSTER_GLOBAL_LOCAL void analysis_substitute_task_push(
+    Arena* scratch_arena,
+    AnalysisSubstituteTask** top,
+    AnalysisSubstituteTask task)
+{
+    AnalysisSubstituteTask* pushed =
+        arena_allocate(scratch_arena, AnalysisSubstituteTask, 1);
+    task.previous = *top;
+    *pushed = task;
+    *top = pushed;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_generic_binding_find(
+    AnalysisGenericTypeBinding* bindings,
+    u32 binding_count,
+    String8 name)
+{
+    for (u32 index = 0; index < binding_count; index += 1)
+    {
+        if (string_equal(bindings[index].name, name))
+        {
+            return bindings[index].type;
+        }
+    }
+    return ANALYSIS_TYPE_ID_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_substitute(
+    Arena* result_arena,
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisTypeId source,
+    AnalysisGenericTypeBinding* bindings,
+    u32 binding_count)
+{
+    AnalysisTypeId substituted = result->types.builtin.poison;
+    AnalysisSubstituteTask* top = 0;
+    analysis_substitute_task_push(
+        scratch_arena,
+        &top,
+        (AnalysisSubstituteTask){
+            .destination = &substituted,
+            .kind = ANALYSIS_SUBSTITUTE_VISIT,
+            .as.source = source,
+        });
+    while (top)
+    {
+        AnalysisSubstituteTask* task = top;
+        top = task->previous;
+        if (task->kind == ANALYSIS_SUBSTITUTE_VISIT)
+        {
+            AnalysisType* type = analysis_type_from_id(result, task->as.source);
+            switch (type->kind)
+            {
+                case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
+                {
+                    AnalysisTypeId binding = analysis_generic_binding_find(
+                        bindings,
+                        binding_count,
+                        type->name);
+                    *task->destination =
+                        binding.value == ANALYSIS_ID_UNDERLYING_INVALID ?
+                        task->as.source : binding;
+                } break;
+                case ANALYSIS_TYPE_POINTER:
+                case ANALYSIS_TYPE_SLICE:
+                case ANALYSIS_TYPE_INFERRED_ARRAY:
+                case ANALYSIS_TYPE_RANGE:
+                {
+                    AnalysisSubstituteTask* finish =
+                        arena_allocate(scratch_arena, AnalysisSubstituteTask, 1);
+                    *finish = (AnalysisSubstituteTask){
+                        .previous = top,
+                        .destination = task->destination,
+                        .kind = ANALYSIS_SUBSTITUTE_FINISH_ELEMENT,
+                        .as.element = {
+                            .kind = type->kind,
+                            .element = result->types.builtin.poison,
+                        },
+                    };
+                    top = finish;
+                    analysis_substitute_task_push(
+                        scratch_arena,
+                        &top,
+                        (AnalysisSubstituteTask){
+                            .destination = &finish->as.element.element,
+                            .kind = ANALYSIS_SUBSTITUTE_VISIT,
+                            .as.source = type->as.element_type,
+                        });
+                } break;
+                case ANALYSIS_TYPE_ARRAY:
+                {
+                    AnalysisSubstituteTask* finish =
+                        arena_allocate(scratch_arena, AnalysisSubstituteTask, 1);
+                    *finish = (AnalysisSubstituteTask){
+                        .previous = top,
+                        .destination = task->destination,
+                        .kind = ANALYSIS_SUBSTITUTE_FINISH_ARRAY,
+                        .as.array = {
+                            .element = result->types.builtin.poison,
+                            .count = type->as.array.count,
+                        },
+                    };
+                    top = finish;
+                    analysis_substitute_task_push(
+                        scratch_arena,
+                        &top,
+                        (AnalysisSubstituteTask){
+                            .destination = &finish->as.array.element,
+                            .kind = ANALYSIS_SUBSTITUTE_VISIT,
+                            .as.source = type->as.array.element_type,
+                        });
+                } break;
+                case ANALYSIS_TYPE_FUNCTION:
+                {
+                    u32 count = type->as.function.argument_count;
+                    AnalysisTypeId* arguments =
+                        arena_allocate(scratch_arena, AnalysisTypeId, count);
+                    AnalysisSubstituteTask* finish =
+                        arena_allocate(scratch_arena, AnalysisSubstituteTask, 1);
+                    *finish = (AnalysisSubstituteTask){
+                        .previous = top,
+                        .destination = task->destination,
+                        .kind = ANALYSIS_SUBSTITUTE_FINISH_FUNCTION,
+                        .as.function = {
+                            .arguments = arguments,
+                            .return_type = result->types.builtin.poison,
+                            .calling_convention = type->as.function.calling_convention,
+                            .argument_count = count,
+                        },
+                    };
+                    top = finish;
+                    analysis_substitute_task_push(
+                        scratch_arena,
+                        &top,
+                        (AnalysisSubstituteTask){
+                            .destination = &finish->as.function.return_type,
+                            .kind = ANALYSIS_SUBSTITUTE_VISIT,
+                            .as.source = type->as.function.return_type,
+                        });
+                    for (u32 index = count; index > 0; index -= 1)
+                    {
+                        analysis_substitute_task_push(
+                            scratch_arena,
+                            &top,
+                            (AnalysisSubstituteTask){
+                                .destination = arguments + index - 1,
+                                .kind = ANALYSIS_SUBSTITUTE_VISIT,
+                                .as.source = type->as.function.argument_types[index - 1],
+                            });
+                    }
+                } break;
+                case ANALYSIS_TYPE_POISON:
+                case ANALYSIS_TYPE_VOID:
+                case ANALYSIS_TYPE_BOOL:
+                case ANALYSIS_TYPE_INTEGER:
+                case ANALYSIS_TYPE_FLOAT:
+                case ANALYSIS_TYPE_STRUCT:
+                case ANALYSIS_TYPE_UNION:
+                case ANALYSIS_TYPE_ENUM:
+                {
+                    *task->destination = task->as.source;
+                } break;
+                case ANALYSIS_TYPE_COUNT: BUSTER_UNREACHABLE();
+            }
+            continue;
+        }
+
+        if (task->kind == ANALYSIS_SUBSTITUTE_FINISH_ELEMENT)
+        {
+            *task->destination = analysis_type_intern(
+                result_arena,
+                &result->types,
+                (AnalysisType){
+                    .kind = task->as.element.kind,
+                    .as.element_type = task->as.element.element,
+                });
+        }
+        else if (task->kind == ANALYSIS_SUBSTITUTE_FINISH_ARRAY)
+        {
+            *task->destination = analysis_type_intern(
+                result_arena,
+                &result->types,
+                (AnalysisType){
+                    .kind = ANALYSIS_TYPE_ARRAY,
+                    .as.array = {
+                        .element_type = task->as.array.element,
+                        .count = task->as.array.count,
+                    },
+                });
+        }
+        else
+        {
+            BUSTER_CHECK(task->kind == ANALYSIS_SUBSTITUTE_FINISH_FUNCTION);
+            *task->destination = analysis_type_intern(
+                result_arena,
+                &result->types,
+                (AnalysisType){
+                    .kind = ANALYSIS_TYPE_FUNCTION,
+                    .as.function = {
+                        .argument_types = task->as.function.arguments,
+                        .return_type = task->as.function.return_type,
+                        .calling_convention = task->as.function.calling_convention,
+                        .argument_count = task->as.function.argument_count,
+                    },
+                });
+        }
+    }
+    return substituted;
 }
 
 BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_builtin_type_find(AnalysisTypeTable* table, String8 name)
@@ -2803,6 +3611,7 @@ struct AnalysisBodyContext
     AnalysisResult* result;
     AnalysisEntity* owner;
     AnalysisBody* body;
+    AnalysisInstantiation* instantiation;
     AnalysisResolutionContext resolution;
 };
 
@@ -2832,6 +3641,8 @@ BUSTER_GLOBAL_LOCAL String8 analysis_diagnostic_message(AnalysisDiagnosticKind k
         case ANALYSIS_DIAGNOSTIC_EXPECTED_PLACE: return S8("expression is not assignable");
         case ANALYSIS_DIAGNOSTIC_NOT_CALLABLE: return S8("expression is not callable");
         case ANALYSIS_DIAGNOSTIC_ARGUMENT_COUNT: return S8("incorrect argument count");
+        case ANALYSIS_DIAGNOSTIC_COMPILE_TIME_ARGUMENT_REQUIRED:
+            return S8("compile-time argument must be a constant");
         case ANALYSIS_DIAGNOSTIC_UNKNOWN_MEMBER: return S8("unknown member");
         case ANALYSIS_DIAGNOSTIC_INVALID_OPERAND: return S8("invalid operand type");
         case ANALYSIS_DIAGNOSTIC_EXPECTED_CONTEXTUAL_TYPE: return S8("expression requires a contextual type");
@@ -2910,6 +3721,16 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_body_type_resolve(
     AnalysisTypeId result = context->result->types.builtin.poison;
     analysis_type_task_ast_push(&context->resolution, context->owner, ast, &result);
     analysis_resolution_run(&context->resolution);
+    if (context->instantiation)
+    {
+        result = analysis_type_substitute(
+            context->result_arena,
+            context->scratch_arena,
+            context->result,
+            result,
+            context->instantiation->type_bindings,
+            context->instantiation->type_binding_count);
+    }
     return result;
 }
 
@@ -2999,6 +3820,200 @@ BUSTER_GLOBAL_LOCAL bool analysis_type_is_numeric(AnalysisResult* result, Analys
 BUSTER_GLOBAL_LOCAL bool analysis_type_is_integer(AnalysisResult* result, AnalysisTypeId id)
 {
     return analysis_type_from_id(result, id)->kind == ANALYSIS_TYPE_INTEGER;
+}
+
+BUSTER_GLOBAL_LOCAL bool analysis_type_has_compile_time_parameter(
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisTypeId root)
+{
+    typedef struct AnalysisTypeLink AnalysisTypeLink;
+    struct AnalysisTypeLink
+    {
+        AnalysisTypeLink* previous;
+        AnalysisTypeId type;
+    };
+    AnalysisTypeLink* top = arena_allocate(scratch_arena, AnalysisTypeLink, 1);
+    *top = (AnalysisTypeLink){ .type = root };
+    while (top)
+    {
+        AnalysisTypeId id = top->type;
+        top = top->previous;
+        AnalysisType* type = analysis_type_from_id(result, id);
+        if (type->kind == ANALYSIS_TYPE_COMPILE_TIME_PARAMETER)
+        {
+            return true;
+        }
+        if (type->kind == ANALYSIS_TYPE_POINTER ||
+            type->kind == ANALYSIS_TYPE_SLICE ||
+            type->kind == ANALYSIS_TYPE_INFERRED_ARRAY ||
+            type->kind == ANALYSIS_TYPE_RANGE)
+        {
+            AnalysisTypeLink* link = arena_allocate(scratch_arena, AnalysisTypeLink, 1);
+            *link = (AnalysisTypeLink){ .previous = top, .type = type->as.element_type };
+            top = link;
+        }
+        else if (type->kind == ANALYSIS_TYPE_ARRAY)
+        {
+            AnalysisTypeLink* link = arena_allocate(scratch_arena, AnalysisTypeLink, 1);
+            *link = (AnalysisTypeLink){ .previous = top, .type = type->as.array.element_type };
+            top = link;
+        }
+        else if (type->kind == ANALYSIS_TYPE_FUNCTION)
+        {
+            AnalysisTypeLink* link = arena_allocate(scratch_arena, AnalysisTypeLink, 1);
+            *link = (AnalysisTypeLink){
+                .previous = top,
+                .type = type->as.function.return_type,
+            };
+            top = link;
+            for (u32 index = 0; index < type->as.function.argument_count; index += 1)
+            {
+                link = arena_allocate(scratch_arena, AnalysisTypeLink, 1);
+                *link = (AnalysisTypeLink){
+                    .previous = top,
+                    .type = type->as.function.argument_types[index],
+                };
+                top = link;
+            }
+        }
+    }
+    return false;
+}
+
+bool analysis_entity_is_generic(
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisEntity* entity)
+{
+    if (!entity || entity->kind != ANALYSIS_ENTITY_CODE)
+    {
+        return false;
+    }
+    for (AstTypeArgument* argument = entity->ast.code->type->function.first_argument;
+        argument;
+        argument = argument->next)
+    {
+        if (argument->is_compile_time)
+        {
+            return true;
+        }
+    }
+    AnalysisTypeId type = result->module.semantics[entity->id.index.value].type;
+    return analysis_type_has_compile_time_parameter(scratch_arena, result, type);
+}
+
+BUSTER_GLOBAL_LOCAL bool analysis_generic_type_infer(
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisTypeId pattern_root,
+    AnalysisTypeId actual_root,
+    AnalysisGenericTypeBinding* bindings,
+    u32* binding_count,
+    u32 binding_capacity)
+{
+    typedef struct AnalysisTypePair AnalysisTypePair;
+    struct AnalysisTypePair
+    {
+        AnalysisTypePair* previous;
+        AnalysisTypeId pattern;
+        AnalysisTypeId actual;
+    };
+    AnalysisTypePair* top = arena_allocate(scratch_arena, AnalysisTypePair, 1);
+    *top = (AnalysisTypePair){ .pattern = pattern_root, .actual = actual_root };
+    while (top)
+    {
+        AnalysisTypePair pair = *top;
+        top = top->previous;
+        AnalysisType* pattern = analysis_type_from_id(result, pair.pattern);
+        AnalysisType* actual = analysis_type_from_id(result, pair.actual);
+        if (pattern->kind == ANALYSIS_TYPE_COMPILE_TIME_PARAMETER)
+        {
+            AnalysisTypeId existing = analysis_generic_binding_find(
+                bindings,
+                *binding_count,
+                pattern->name);
+            if (existing.value != ANALYSIS_ID_UNDERLYING_INVALID)
+            {
+                if (!analysis_type_id_equal(existing, pair.actual))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                BUSTER_CHECK(*binding_count < binding_capacity);
+                bindings[*binding_count] = (AnalysisGenericTypeBinding){
+                    .name = pattern->name,
+                    .type = pair.actual,
+                };
+                *binding_count += 1;
+            }
+            continue;
+        }
+        if (pattern->kind != actual->kind)
+        {
+            return false;
+        }
+        if (pattern->kind == ANALYSIS_TYPE_POINTER ||
+            pattern->kind == ANALYSIS_TYPE_SLICE ||
+            pattern->kind == ANALYSIS_TYPE_INFERRED_ARRAY ||
+            pattern->kind == ANALYSIS_TYPE_RANGE)
+        {
+            AnalysisTypePair* pushed = arena_allocate(scratch_arena, AnalysisTypePair, 1);
+            *pushed = (AnalysisTypePair){
+                .previous = top,
+                .pattern = pattern->as.element_type,
+                .actual = actual->as.element_type,
+            };
+            top = pushed;
+        }
+        else if (pattern->kind == ANALYSIS_TYPE_ARRAY)
+        {
+            if (pattern->as.array.count != actual->as.array.count)
+            {
+                return false;
+            }
+            AnalysisTypePair* pushed = arena_allocate(scratch_arena, AnalysisTypePair, 1);
+            *pushed = (AnalysisTypePair){
+                .previous = top,
+                .pattern = pattern->as.array.element_type,
+                .actual = actual->as.array.element_type,
+            };
+            top = pushed;
+        }
+        else if (pattern->kind == ANALYSIS_TYPE_FUNCTION)
+        {
+            if (pattern->as.function.argument_count != actual->as.function.argument_count ||
+                pattern->as.function.calling_convention !=
+                    actual->as.function.calling_convention)
+            {
+                return false;
+            }
+            AnalysisTypePair* pushed = arena_allocate(scratch_arena, AnalysisTypePair, 1);
+            *pushed = (AnalysisTypePair){
+                .previous = top,
+                .pattern = pattern->as.function.return_type,
+                .actual = actual->as.function.return_type,
+            };
+            top = pushed;
+            for (u32 index = 0; index < pattern->as.function.argument_count; index += 1)
+            {
+                pushed = arena_allocate(scratch_arena, AnalysisTypePair, 1);
+                *pushed = (AnalysisTypePair){
+                    .previous = top,
+                    .pattern = pattern->as.function.argument_types[index],
+                    .actual = actual->as.function.argument_types[index],
+                };
+                top = pushed;
+            }
+        }
+        else if (!analysis_type_id_equal(pair.pattern, pair.actual))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL AnalysisEntity* analysis_value_entity_find(AnalysisResult* result, String8 name)
@@ -3816,6 +4831,452 @@ BUSTER_GLOBAL_LOCAL void analysis_expression_expect(
     }
 }
 
+BUSTER_GLOBAL_LOCAL String8 analysis_instantiation_key(
+    Arena* result_arena,
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisEntity* entity,
+    AnalysisGenericTypeBinding* bindings,
+    u32 binding_count,
+    AnalysisCompileTimeArgument* compile_time_arguments,
+    u32 compile_time_argument_count)
+{
+    AnalysisTypeId generic_type =
+        result->module.semantics[entity->id.index.value].type;
+    AnalysisGenericTypeBinding** sorted_bindings = arena_allocate(
+        scratch_arena,
+        AnalysisGenericTypeBinding*,
+        binding_count);
+    for (u32 index = 0; index < binding_count; index += 1)
+    {
+        sorted_bindings[index] = bindings + index;
+    }
+    for (u32 index = 1; index < binding_count; index += 1)
+    {
+        AnalysisGenericTypeBinding* binding = sorted_bindings[index];
+        u32 insertion = index;
+        while (insertion &&
+            analysis_string_compare(
+                sorted_bindings[insertion - 1]->name,
+                binding->name) > 0)
+        {
+            sorted_bindings[insertion] = sorted_bindings[insertion - 1];
+            insertion -= 1;
+        }
+        sorted_bindings[insertion] = binding;
+    }
+    AnalysisCompileTimeArgument** sorted_arguments = arena_allocate(
+        scratch_arena,
+        AnalysisCompileTimeArgument*,
+        compile_time_argument_count);
+    for (u32 index = 0; index < compile_time_argument_count; index += 1)
+    {
+        sorted_arguments[index] = compile_time_arguments + index;
+    }
+    for (u32 index = 1; index < compile_time_argument_count; index += 1)
+    {
+        AnalysisCompileTimeArgument* argument = sorted_arguments[index];
+        u32 insertion = index;
+        while (insertion &&
+            sorted_arguments[insertion - 1]->source_argument_index >
+                argument->source_argument_index)
+        {
+            sorted_arguments[insertion] = sorted_arguments[insertion - 1];
+            insertion -= 1;
+        }
+        sorted_arguments[insertion] = argument;
+    }
+
+    u32 part_capacity =
+        4 + entity->ast.code->type->function.argument_count +
+        binding_count * 3 + compile_time_argument_count * 4;
+    String8* parts = arena_allocate(scratch_arena, String8, part_capacity);
+    u32 part_count = 0;
+    parts[part_count++] = string_format(
+        result_arena,
+        S8("module={S8};entity={S8};signature={S8};"),
+        result->module.name,
+        entity->name,
+        analysis_type_canonical(
+            result_arena,
+            scratch_arena,
+            result,
+            generic_type));
+    u32 argument_index = 0;
+    for (AstTypeArgument* argument =
+            entity->ast.code->type->function.first_argument;
+        argument;
+        argument = argument->next, argument_index += 1)
+    {
+        parts[part_count++] = string_format(
+            result_arena,
+            S8("parameter={u32}:{u32};"),
+            argument_index,
+            (u32)argument->is_compile_time);
+    }
+    for (u32 index = 0; index < binding_count; index += 1)
+    {
+        AnalysisGenericTypeBinding* binding = sorted_bindings[index];
+        parts[part_count++] = S8("binding=");
+        parts[part_count++] = binding->name;
+        parts[part_count++] = string_format(
+            result_arena,
+            S8(":{S8};"),
+            analysis_type_canonical(
+                result_arena,
+                scratch_arena,
+                result,
+                binding->type));
+    }
+    for (u32 index = 0; index < compile_time_argument_count; index += 1)
+    {
+        AnalysisCompileTimeArgument* argument = sorted_arguments[index];
+        parts[part_count++] = string_format(
+            result_arena,
+            S8("constant={u32}:"),
+            argument->source_argument_index);
+        parts[part_count++] = analysis_type_canonical(
+            result_arena,
+            scratch_arena,
+            result,
+            argument->type);
+        parts[part_count++] = S8(":");
+        parts[part_count++] = string_format(
+            result_arena,
+            S8("{S8};"),
+            analysis_constant_canonical(
+                result_arena,
+                scratch_arena,
+                result,
+                argument->constant));
+    }
+    BUSTER_CHECK(part_count <= part_capacity);
+    return string_join_arena(
+        result_arena,
+        (SliceString8){ .pointer = parts, .length = part_count },
+        false);
+}
+
+BUSTER_GLOBAL_LOCAL void analysis_instantiation_requester_add(
+    Arena* result_arena,
+    AnalysisInstantiation* instantiation,
+    AnalysisModuleId requester)
+{
+    for (AnalysisInstantiationRequester* existing =
+            instantiation->first_requester;
+        existing;
+        existing = existing->next)
+    {
+        if (existing->module.value == requester.value)
+        {
+            return;
+        }
+    }
+    AnalysisInstantiationRequester* added = arena_allocate(
+        result_arena,
+        AnalysisInstantiationRequester,
+        1);
+    *added = (AnalysisInstantiationRequester){ .module = requester };
+    if (instantiation->last_requester)
+    {
+        instantiation->last_requester->next = added;
+    }
+    else
+    {
+        instantiation->first_requester = added;
+    }
+    instantiation->last_requester = added;
+    instantiation->requester_count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisInstantiation* analysis_instantiation_find(
+    AnalysisResult* result,
+    AnalysisEntityId entity,
+    String8 canonical_key,
+    u64 canonical_hash)
+{
+    for (AnalysisInstantiation* instantiation = result->first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
+    {
+        if (instantiation->generic_entity.module.value != entity.module.value ||
+            instantiation->generic_entity.index.value != entity.index.value ||
+            instantiation->canonical_hash != canonical_hash)
+        {
+            continue;
+        }
+        if (string_equal(instantiation->canonical_key, canonical_key))
+        {
+            return instantiation;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisInstantiation* analysis_generic_call_resolve(
+    AnalysisBodyContext* context,
+    AnalysisTypedExpression* expression,
+    AstNode* call,
+    AnalysisTypedNode* callee,
+    u32* operands,
+    u32 first_operand)
+{
+    AnalysisResult* owner = analysis_program_module_from_id(
+        context->result,
+        callee->entity.module);
+    if (!owner || callee->entity.index.value >= owner->module.entity_count)
+    {
+        return 0;
+    }
+    AnalysisEntity* entity = owner->module.entities + callee->entity.index.value;
+    AnalysisType* generic_function = analysis_type_from_id(
+        owner,
+        owner->module.semantics[callee->entity.index.value].type);
+    if (entity->kind != ANALYSIS_ENTITY_CODE ||
+        generic_function->kind != ANALYSIS_TYPE_FUNCTION)
+    {
+        return 0;
+    }
+
+    u32 source_argument_count = generic_function->as.function.argument_count;
+    if (call->call.argument_count != source_argument_count)
+    {
+        analysis_body_diagnostic_push(
+            context,
+            call->call.range,
+            ANALYSIS_DIAGNOSTIC_ARGUMENT_COUNT,
+            (String8){0});
+        return 0;
+    }
+
+    AnalysisGenericTypeBinding* bindings = arena_allocate(
+        context->scratch_arena,
+        AnalysisGenericTypeBinding,
+        owner->types.count);
+    AnalysisCompileTimeArgument* compile_time_arguments = arena_allocate(
+        context->scratch_arena,
+        AnalysisCompileTimeArgument,
+        source_argument_count);
+    u32 binding_count = 0;
+    u32 compile_time_argument_count = 0;
+    bool valid = true;
+    AstTypeArgument* source_argument =
+        entity->ast.code->type->function.first_argument;
+    for (u32 argument_index = 0;
+        argument_index < source_argument_count;
+        argument_index += 1, source_argument = source_argument->next)
+    {
+        BUSTER_CHECK(source_argument);
+        AnalysisDiagnostic* previous_diagnostic =
+            context->result->last_diagnostic;
+        u32 node_index = operands[first_operand + 1 + argument_index];
+        AnalysisTypeId pattern =
+            generic_function->as.function.argument_types[argument_index];
+        if (!analysis_type_has_compile_time_parameter(
+                context->scratch_arena,
+                owner,
+                pattern))
+        {
+            AnalysisTypeId expected = analysis_type_import(
+                context->result_arena,
+                context->scratch_arena,
+                context->result,
+                owner,
+                pattern);
+            analysis_expression_expect(context, expression, node_index, expected);
+        }
+        AnalysisTypedNode* actual_node = expression->nodes + node_index;
+        AnalysisTypeId actual = analysis_type_import(
+            context->result_arena,
+            context->scratch_arena,
+            owner,
+            context->result,
+            actual_node->type);
+        if (!analysis_generic_type_infer(
+                context->scratch_arena,
+                owner,
+                pattern,
+                actual,
+                bindings,
+                &binding_count,
+                owner->types.count))
+        {
+            valid = false;
+            analysis_mismatch_diagnostic_push(
+                context,
+                analysis_node_range(context->owner, expression->ast.nodes + node_index),
+                analysis_type_import(
+                    context->result_arena,
+                    context->scratch_arena,
+                    context->result,
+                    owner,
+                    pattern),
+                actual_node->type);
+        }
+        if (source_argument->is_compile_time)
+        {
+            if (actual_node->constant.kind == ANALYSIS_CONSTANT_NONE)
+            {
+                valid = false;
+                analysis_body_diagnostic_push(
+                    context,
+                    analysis_node_range(context->owner, expression->ast.nodes + node_index),
+                    ANALYSIS_DIAGNOSTIC_COMPILE_TIME_ARGUMENT_REQUIRED,
+                    source_argument->name);
+            }
+            compile_time_arguments[compile_time_argument_count] =
+                (AnalysisCompileTimeArgument){
+                    .constant = actual_node->constant,
+                    .type = actual,
+                    .source_argument_index = argument_index,
+                };
+            compile_time_argument_count += 1;
+        }
+        AnalysisDiagnostic* argument_diagnostic = previous_diagnostic ?
+            previous_diagnostic->next : context->result->first_diagnostic;
+        while (argument_diagnostic)
+        {
+            argument_diagnostic->argument_index = argument_index;
+            argument_diagnostic->has_argument_index = true;
+            argument_diagnostic = argument_diagnostic->next;
+        }
+    }
+    BUSTER_CHECK(!source_argument);
+    if (!valid)
+    {
+        return 0;
+    }
+
+    u32 runtime_argument_count =
+        source_argument_count - compile_time_argument_count;
+    AnalysisTypeId* runtime_argument_types = arena_allocate(
+        context->scratch_arena,
+        AnalysisTypeId,
+        runtime_argument_count);
+    u32 runtime_argument_index = 0;
+    source_argument = entity->ast.code->type->function.first_argument;
+    for (u32 argument_index = 0;
+        argument_index < source_argument_count;
+        argument_index += 1, source_argument = source_argument->next)
+    {
+        if (source_argument->is_compile_time)
+        {
+            continue;
+        }
+        runtime_argument_types[runtime_argument_index] = analysis_type_substitute(
+            context->result_arena,
+            context->scratch_arena,
+            owner,
+            generic_function->as.function.argument_types[argument_index],
+            bindings,
+            binding_count);
+        runtime_argument_index += 1;
+    }
+    AnalysisTypeId return_type = analysis_type_substitute(
+        context->result_arena,
+        context->scratch_arena,
+        owner,
+        generic_function->as.function.return_type,
+        bindings,
+        binding_count);
+    if (analysis_type_has_compile_time_parameter(
+            context->scratch_arena,
+            owner,
+            return_type))
+    {
+        analysis_body_diagnostic_push(
+            context,
+            call->call.range,
+            ANALYSIS_DIAGNOSTIC_EXPECTED_CONTEXTUAL_TYPE,
+            entity->name);
+        return 0;
+    }
+
+    String8 canonical_key = analysis_instantiation_key(
+        context->result_arena,
+        context->scratch_arena,
+        owner,
+        entity,
+        bindings,
+        binding_count,
+        compile_time_arguments,
+        compile_time_argument_count);
+    u64 canonical_hash = analysis_bytes_hash(canonical_key);
+    AnalysisInstantiation* instantiation = analysis_instantiation_find(
+        owner,
+        entity->id,
+        canonical_key,
+        canonical_hash);
+    if (instantiation)
+    {
+        analysis_instantiation_requester_add(
+            context->result_arena,
+            instantiation,
+            context->result->module.id);
+        return instantiation;
+    }
+
+    instantiation = arena_allocate(context->result_arena, AnalysisInstantiation, 1);
+    *instantiation = (AnalysisInstantiation){
+        .generic_entity = entity->id,
+        .codegen_owner = owner->module.id,
+        .canonical_key = canonical_key,
+        .canonical_hash = canonical_hash,
+        .symbol_name = string_format(
+            context->result_arena,
+            S8("{S8}${u64:x,no_prefix}"),
+            entity->name,
+            canonical_hash),
+        .function_type = analysis_type_intern(
+            context->result_arena,
+            &owner->types,
+            (AnalysisType){
+                .kind = ANALYSIS_TYPE_FUNCTION,
+                .as.function = {
+                    .argument_types = runtime_argument_types,
+                    .return_type = return_type,
+                    .calling_convention = generic_function->as.function.calling_convention,
+                    .argument_count = runtime_argument_count,
+                },
+            }),
+        .id = { .value = owner->instantiation_count },
+        .type_binding_count = binding_count,
+        .compile_time_argument_count = compile_time_argument_count,
+    };
+    instantiation->type_bindings = arena_allocate(
+        context->result_arena,
+        AnalysisGenericTypeBinding,
+        binding_count);
+    for (u32 index = 0; index < binding_count; index += 1)
+    {
+        instantiation->type_bindings[index] = bindings[index];
+    }
+    instantiation->compile_time_arguments = arena_allocate(
+        context->result_arena,
+        AnalysisCompileTimeArgument,
+        compile_time_argument_count);
+    for (u32 index = 0; index < compile_time_argument_count; index += 1)
+    {
+        instantiation->compile_time_arguments[index] =
+            compile_time_arguments[index];
+    }
+    analysis_instantiation_requester_add(
+        context->result_arena,
+        instantiation,
+        context->result->module.id);
+    if (owner->last_instantiation)
+    {
+        owner->last_instantiation->next = instantiation;
+    }
+    else
+    {
+        owner->first_instantiation = instantiation;
+    }
+    owner->last_instantiation = instantiation;
+    owner->instantiation_count += 1;
+    return instantiation;
+}
+
 BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
     AnalysisBodyContext* context,
     AnalysisBinding* bindings,
@@ -3856,6 +5317,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
             .local = ANALYSIS_LOCAL_ID_INVALID,
             .entity = ANALYSIS_ENTITY_ID_INVALID,
             .namespace_module = ANALYSIS_MODULE_ID_INVALID,
+            .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
             .subtree_start = arity ? expression->nodes[operands[first_operand]].subtree_start : index,
         };
         switch (node->id)
@@ -4225,6 +5687,48 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
                 AnalysisType* callee_type = analysis_type_from_id(context->result, callee->type);
                 if (callee_type->kind == ANALYSIS_TYPE_FUNCTION)
                 {
+                    AnalysisResult* callee_module = analysis_program_module_from_id(
+                        context->result,
+                        callee->entity.module);
+                    AnalysisEntity* callee_entity =
+                        callee_module &&
+                        callee->entity.index.value < callee_module->module.entity_count ?
+                        callee_module->module.entities + callee->entity.index.value : 0;
+                    if (callee_entity &&
+                        analysis_entity_is_generic(
+                            context->scratch_arena,
+                            callee_module,
+                            callee_entity))
+                    {
+                        AnalysisInstantiation* instantiation =
+                            analysis_generic_call_resolve(
+                                context,
+                                expression,
+                                node,
+                                callee,
+                                operands,
+                                first_operand);
+                        if (instantiation)
+                        {
+                            AnalysisType* concrete = analysis_type_from_id(
+                                callee_module,
+                                instantiation->function_type);
+                            callee->type = analysis_type_import(
+                                context->result_arena,
+                                context->scratch_arena,
+                                context->result,
+                                callee_module,
+                                instantiation->function_type);
+                            typed.type = analysis_type_import(
+                                context->result_arena,
+                                context->scratch_arena,
+                                context->result,
+                                callee_module,
+                                concrete->as.function.return_type);
+                            typed.instantiation = instantiation->id;
+                        }
+                        break;
+                    }
                     typed.type = callee_type->as.function.return_type;
                     if (node->call.argument_count != callee_type->as.function.argument_count)
                     {
@@ -6027,6 +7531,129 @@ BUSTER_GLOBAL_LOCAL void analysis_analyze_module_constants(
     }
 }
 
+BUSTER_GLOBAL_LOCAL void analysis_analyze_code_body(
+    Arena* result_arena,
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisEntity* entity,
+    AnalysisBody* body,
+    AnalysisInstantiation* instantiation)
+{
+    u32 expression_node_count = 0;
+    analysis_body_capacity_measure(
+        scratch_arena,
+        entity->ast.code,
+        &body->local_capacity,
+        &expression_node_count);
+    body->locals = arena_allocate(result_arena, AnalysisLocal, body->local_capacity);
+    body->dependency_capacity = expression_node_count;
+    body->dependencies = arena_allocate(
+        result_arena,
+        AnalysisEntityId,
+        body->dependency_capacity);
+    AnalysisBodyContext context = {
+        .result_arena = result_arena,
+        .scratch_arena = scratch_arena,
+        .result = result,
+        .owner = entity,
+        .body = body,
+        .instantiation = instantiation,
+    };
+    context.resolution = (AnalysisResolutionContext){
+        .result_arena = result_arena,
+        .scratch_arena = scratch_arena,
+        .result = result,
+    };
+    AnalysisTypeId function_type = instantiation ?
+        instantiation->function_type :
+        result->module.semantics[entity->id.index.value].type;
+    AnalysisType* function = analysis_type_from_id(result, function_type);
+    if (function->kind != ANALYSIS_TYPE_FUNCTION)
+    {
+        body->analyzed = true;
+        return;
+    }
+
+    AnalysisBinding* bindings = 0;
+    u32 source_argument_index = 0;
+    u32 runtime_argument_index = 0;
+    for (AstTypeArgument* argument = entity->ast.code->type->function.first_argument;
+        argument;
+        argument = argument->next, source_argument_index += 1)
+    {
+        AnalysisTypeId argument_type = result->module
+            .semantics[entity->id.index.value]
+            .type;
+        AnalysisType* generic_function = analysis_type_from_id(result, argument_type);
+        argument_type =
+            generic_function->as.function.argument_types[source_argument_index];
+        if (instantiation)
+        {
+            argument_type = argument->is_compile_time ?
+                analysis_type_substitute(
+                    result_arena,
+                    scratch_arena,
+                    result,
+                    argument_type,
+                    instantiation->type_bindings,
+                    instantiation->type_binding_count) :
+                function->as.function.argument_types[runtime_argument_index++];
+        }
+        AstIdentifier identifier = { .text = argument->name, .range = argument->range };
+        AnalysisLocal* local = analysis_local_add(
+            &context,
+            &bindings,
+            identifier,
+            argument_type,
+            ANALYSIS_LOCAL_ARGUMENT,
+            0,
+            argument->is_compile_time);
+        if (instantiation && argument->is_compile_time)
+        {
+            for (u32 index = 0;
+                index < instantiation->compile_time_argument_count;
+                index += 1)
+            {
+                AnalysisCompileTimeArgument* compile_time =
+                    instantiation->compile_time_arguments + index;
+                if (compile_time->source_argument_index == source_argument_index)
+                {
+                    local->constant = compile_time->constant;
+                    break;
+                }
+            }
+        }
+    }
+    BUSTER_CHECK(!instantiation ||
+        runtime_argument_index == function->as.function.argument_count);
+
+    AnalysisBodyTask* top = 0;
+    analysis_body_task_push(
+        &context,
+        &top,
+        entity->ast.code->body.first_statement,
+        bindings,
+        0,
+        0);
+    while (top)
+    {
+        AnalysisBodyTask* task = top;
+        top = task->previous;
+        analysis_body_statement(
+            &context,
+            &top,
+            task,
+            function->as.function.return_type);
+    }
+    analysis_control_flow(&context, function->as.function.return_type);
+    analysis_definite_initialization(&context);
+    body->analyzed = true;
+    if (instantiation)
+    {
+        instantiation->analyzed = true;
+    }
+}
+
 void analysis_analyze_bodies_with_consumer(
     Arena* result_arena,
     AnalysisResult* result,
@@ -6044,88 +7671,41 @@ void analysis_analyze_bodies_with_consumer(
         {
             continue;
         }
-        AnalysisBody* body = result->module.bodies + entity_index;
-        BUSTER_CHECK(!body->analyzed);
-        u32 expression_node_count = 0;
-        analysis_body_capacity_measure(
-            scratch.arena,
-            entity->ast.code,
-            &body->local_capacity,
-            &expression_node_count);
-        BUSTER_UNUSED(expression_node_count);
-        body->locals = arena_allocate(result_arena, AnalysisLocal, body->local_capacity);
-        body->dependency_capacity = expression_node_count;
-        body->dependencies = arena_allocate(
-            result_arena,
-            AnalysisEntityId,
-            body->dependency_capacity);
-        AnalysisBodyContext context = {
-            .result_arena = result_arena,
-            .scratch_arena = scratch.arena,
-            .result = result,
-            .owner = entity,
-            .body = body,
-        };
-        context.resolution = (AnalysisResolutionContext){
-            .result_arena = result_arena,
-            .scratch_arena = scratch.arena,
-            .result = result,
-        };
-        AnalysisEntitySemantic* semantic = result->module.semantics + entity_index;
-        AnalysisType* function = analysis_type_from_id(result, semantic->type);
-        if (function->kind != ANALYSIS_TYPE_FUNCTION)
+        if (analysis_entity_is_generic(scratch.arena, result, entity))
         {
-            body->analyzed = true;
+            continue;
+        }
+        AnalysisBody* body = result->module.bodies + entity_index;
+        if (!body->analyzed)
+        {
+            analysis_analyze_code_body(
+                result_arena,
+                scratch.arena,
+                result,
+                entity,
+                body,
+                0);
             if (consumer)
             {
                 consumer(result_arena, scratch.arena, result, entity_index, user_data);
             }
-            continue;
         }
-
-        AnalysisBinding* bindings = 0;
-        u32 argument_index = 0;
-        for (AstTypeArgument* argument = entity->ast.code->type->function.first_argument;
-            argument;
-            argument = argument->next)
+    }
+    for (AnalysisInstantiation* instantiation = result->first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
+    {
+        AnalysisEntity* entity =
+            result->module.entities + instantiation->generic_entity.index.value;
+        if (entity->ast.code->has_body && !instantiation->analyzed)
         {
-            AstIdentifier identifier = { .text = argument->name, .range = argument->range };
-            analysis_local_add(
-                &context,
-                &bindings,
-                identifier,
-                function->as.function.argument_types[argument_index],
-                ANALYSIS_LOCAL_ARGUMENT,
-                0,
-                argument->is_compile_time);
-            argument_index += 1;
-        }
-        BUSTER_CHECK(argument_index == function->as.function.argument_count);
-
-        AnalysisBodyTask* top = 0;
-        analysis_body_task_push(
-            &context,
-            &top,
-            entity->ast.code->body.first_statement,
-            bindings,
-            0,
-            0);
-        while (top)
-        {
-            AnalysisBodyTask* task = top;
-            top = task->previous;
-            analysis_body_statement(
-                &context,
-                &top,
-                task,
-                function->as.function.return_type);
-        }
-        analysis_control_flow(&context, function->as.function.return_type);
-        analysis_definite_initialization(&context);
-        body->analyzed = true;
-        if (consumer)
-        {
-            consumer(result_arena, scratch.arena, result, entity_index, user_data);
+            analysis_analyze_code_body(
+                result_arena,
+                scratch.arena,
+                result,
+                entity,
+                &instantiation->body,
+                instantiation);
         }
     }
     scratch_end(scratch);
@@ -6647,10 +8227,88 @@ AnalysisFunctionAbi analysis_classify_function_abi(
     return abi;
 }
 
+BUSTER_GLOBAL_LOCAL void analysis_body_job_build(
+    Arena* result_arena,
+    AnalysisResult* result,
+    AnalysisEntity* entity,
+    AnalysisBody* body,
+    AnalysisInstantiationId instantiation,
+    u32 job_index)
+{
+    u32 dependency_capacity = body->dependency_count + 1;
+    AnalysisJobId* dependencies = arena_allocate(
+        result_arena,
+        AnalysisJobId,
+        dependency_capacity);
+    AnalysisDependencyKind* dependency_kinds = arena_allocate(
+        result_arena,
+        AnalysisDependencyKind,
+        dependency_capacity);
+    u32 dependency_count = 0;
+    dependencies[dependency_count] = (AnalysisJobId){
+        .value = entity->id.index.value,
+    };
+    dependency_kinds[dependency_count] = ANALYSIS_DEPENDENCY_INTERFACE;
+    dependency_count += 1;
+    for (u32 body_dependency_index = 0;
+        body_dependency_index < body->dependency_count;
+        body_dependency_index += 1)
+    {
+        AnalysisEntityId dependency_entity =
+            body->dependencies[body_dependency_index];
+        if (dependency_entity.module.value != result->module.id.value)
+        {
+            continue;
+        }
+        bool duplicate = false;
+        for (u32 existing = 0; existing < dependency_count; existing += 1)
+        {
+            duplicate |=
+                dependencies[existing].value == dependency_entity.index.value;
+        }
+        if (!duplicate)
+        {
+            dependencies[dependency_count] = (AnalysisJobId){
+                .value = dependency_entity.index.value,
+            };
+            dependency_kinds[dependency_count] =
+                ANALYSIS_DEPENDENCY_INTERFACE;
+            dependency_count += 1;
+        }
+    }
+    result->jobs[job_index] = (AnalysisJob){
+        .dependencies = dependencies,
+        .dependency_kinds = dependency_kinds,
+        .entity = entity->id,
+        .instantiation = instantiation,
+        .id = { .value = job_index },
+        .kind = ANALYSIS_JOB_BODY,
+        .dependency_count = dependency_count,
+    };
+}
+
 void analysis_build_jobs(Arena* result_arena, AnalysisResult* result)
 {
     BUSTER_CHECK(result->jobs == 0);
-    result->job_count = result->module.entity_count + result->module.type_count + result->module.code_count;
+    Arena* conflicts[] = { result_arena };
+    TemporalArena scratch = scratch_begin(
+        conflicts,
+        BUSTER_ARRAY_LENGTH(conflicts));
+    u32 ordinary_code_count = 0;
+    for (u32 entity_index = 0;
+        entity_index < result->module.entity_count;
+        entity_index += 1)
+    {
+        AnalysisEntity* entity = result->module.entities + entity_index;
+        ordinary_code_count +=
+            entity->kind == ANALYSIS_ENTITY_CODE &&
+            !analysis_entity_is_generic(scratch.arena, result, entity);
+    }
+    result->job_count =
+        result->module.entity_count +
+        result->module.type_count +
+        ordinary_code_count +
+        result->instantiation_count;
     result->jobs = arena_allocate(result_arena, AnalysisJob, result->job_count);
     u32 job_index = 0;
     for (u32 entity_index = 0; entity_index < result->module.entity_count; entity_index += 1)
@@ -6658,6 +8316,7 @@ void analysis_build_jobs(Arena* result_arena, AnalysisResult* result)
         AnalysisEntity* entity = result->module.entities + entity_index;
         result->jobs[job_index] = (AnalysisJob){
             .entity = entity->id,
+            .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
             .id = { .value = job_index },
             .kind = ANALYSIS_JOB_INTERFACE,
         };
@@ -6681,6 +8340,7 @@ void analysis_build_jobs(Arena* result_arena, AnalysisResult* result)
             .dependencies = dependency,
             .dependency_kinds = dependency_kind,
             .entity = entity->id,
+            .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
             .id = { .value = job_index },
             .kind = ANALYSIS_JOB_LAYOUT,
             .dependency_count = 1,
@@ -6694,54 +8354,36 @@ void analysis_build_jobs(Arena* result_arena, AnalysisResult* result)
         {
             continue;
         }
-        AnalysisBody* body = result->module.bodies + entity_index;
-        u32 dependency_capacity = body->dependency_count + 1;
-        AnalysisJobId* dependencies = arena_allocate(
-            result_arena,
-            AnalysisJobId,
-            dependency_capacity);
-        AnalysisDependencyKind* dependency_kinds = arena_allocate(
-            result_arena,
-            AnalysisDependencyKind,
-            dependency_capacity);
-        u32 dependency_count = 0;
-        dependencies[dependency_count] = (AnalysisJobId){ .value = entity_index };
-        dependency_kinds[dependency_count] = ANALYSIS_DEPENDENCY_INTERFACE;
-        dependency_count += 1;
-        for (u32 body_dependency_index = 0;
-            body_dependency_index < body->dependency_count;
-            body_dependency_index += 1)
+        if (analysis_entity_is_generic(scratch.arena, result, entity))
         {
-            AnalysisEntityId dependency_entity = body->dependencies[body_dependency_index];
-            if (dependency_entity.module.value != result->module.id.value)
-            {
-                continue;
-            }
-            bool duplicate = false;
-            for (u32 existing = 0; existing < dependency_count; existing += 1)
-            {
-                duplicate |= dependencies[existing].value == dependency_entity.index.value;
-            }
-            if (!duplicate)
-            {
-                dependencies[dependency_count] = (AnalysisJobId){
-                    .value = dependency_entity.index.value,
-                };
-                dependency_kinds[dependency_count] = ANALYSIS_DEPENDENCY_INTERFACE;
-                dependency_count += 1;
-            }
+            continue;
         }
-        result->jobs[job_index] = (AnalysisJob){
-            .dependencies = dependencies,
-            .dependency_kinds = dependency_kinds,
-            .entity = entity->id,
-            .id = { .value = job_index },
-            .kind = ANALYSIS_JOB_BODY,
-            .dependency_count = dependency_count,
-        };
+        analysis_body_job_build(
+            result_arena,
+            result,
+            entity,
+            result->module.bodies + entity_index,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            job_index);
+        job_index += 1;
+    }
+    for (AnalysisInstantiation* instantiation = result->first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
+    {
+        AnalysisEntity* entity =
+            result->module.entities + instantiation->generic_entity.index.value;
+        analysis_body_job_build(
+            result_arena,
+            result,
+            entity,
+            &instantiation->body,
+            instantiation->id,
+            job_index);
         job_index += 1;
     }
     BUSTER_CHECK(job_index == result->job_count);
+    scratch_end(scratch);
 }
 
 typedef struct AnalysisScheduleWorker AnalysisScheduleWorker;
@@ -6870,6 +8512,22 @@ struct AnalysisProgramScheduleWorker
     u32 worker_index;
     u32 worker_count;
 };
+
+BUSTER_GLOBAL_LOCAL AnalysisInstantiation* analysis_instantiation_from_id(
+    AnalysisResult* result,
+    AnalysisInstantiationId id)
+{
+    for (AnalysisInstantiation* instantiation = result->first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
+    {
+        if (instantiation->id.value == id.value)
+        {
+            return instantiation;
+        }
+    }
+    return 0;
+}
 
 BUSTER_GLOBAL_LOCAL void analysis_program_schedule_worker(void* raw_worker)
 {
@@ -7017,7 +8675,14 @@ AnalysisProgramScheduleResult analysis_execute_program_jobs(
                 else if (job->kind == ANALYSIS_JOB_BODY &&
                     job->entity.index.value < module->module.entity_count)
                 {
-                    AnalysisBody* body =
+                    AnalysisInstantiation* instantiation =
+                        job->instantiation.value ==
+                            ANALYSIS_ID_UNDERLYING_INVALID ?
+                        0 : analysis_instantiation_from_id(
+                            module,
+                            job->instantiation);
+                    AnalysisBody* body = instantiation ?
+                        &instantiation->body :
                         module->module.bodies + job->entity.index.value;
                     for (u32 dependency_index = 0;
                         dependencies_complete &&
@@ -7168,6 +8833,7 @@ BUSTER_GLOBAL_LOCAL AnalysisFixtureTest analysis_fixture_tests[] =
     { S8_INITIALIZER("tests/basic_character_literal.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_comment.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_compile_time.bbb"), 0 },
+    { S8_INITIALIZER("tests/compile_time_argument_error.bbb"), 1 },
     { S8_INITIALIZER("tests/modules/core/math.bbb"), 0 },
     { S8_INITIALIZER("tests/modules/system/platform.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_continue.bbb"), 0 },
@@ -7940,13 +9606,23 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
         "code add : fn (a: s32, b: s32) s32\n"
         "{\n"
         "    return a + b;\n"
+        "}\n"
+        "code identity : fn ($value: $T) $T\n"
+        "{\n"
+        "    return value;\n"
         "}\n");
     String8 namespace_app_source = S8(
         "import math = \"core/math\";\n"
         "code use : fn (value: math.Vector) s32\n"
         "{\n"
         "    data copy: math.Vector = value;\n"
-        "    return math.add(copy.x, copy.y);\n"
+        "    return math.add(copy.x, copy.y) + math.identity(5);\n"
+        "}\n");
+    String8 namespace_app_two_source = S8(
+        "import math = \"core/math\";\n"
+        "code use_again : fn () s32\n"
+        "{\n"
+        "    return math.identity(5);\n"
         "}\n");
     TokenizerResult namespace_math_tokens = tokenize(
             arguments->arena,
@@ -7966,8 +9642,18 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
             expression_arena,
             namespace_app_source,
             namespace_app_tokens);
+    TokenizerResult namespace_app_two_tokens = tokenize(
+            arguments->arena,
+            namespace_app_two_source.pointer,
+            namespace_app_two_source.length);
+    ParserResult namespace_app_two_parser = parser_parse(
+            arguments->arena,
+            expression_arena,
+            namespace_app_two_source,
+            namespace_app_two_tokens);
     BUSTER_TEST(arguments, namespace_math_parser.diagnostic_count == 0);
     BUSTER_TEST(arguments, namespace_app_parser.diagnostic_count == 0);
+    BUSTER_TEST(arguments, namespace_app_two_parser.diagnostic_count == 0);
     AnalysisSourceInput namespace_math_input = {
         .path = S8("math.bbb"),
         .parser = &namespace_math_parser,
@@ -7975,6 +9661,10 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
     AnalysisSourceInput namespace_app_input = {
         .path = S8("app.bbb"),
         .parser = &namespace_app_parser,
+    };
+    AnalysisSourceInput namespace_app_two_input = {
+        .path = S8("app-two.bbb"),
+        .parser = &namespace_app_two_parser,
     };
     AnalysisResult namespace_math = analysis_index_module(
             arguments->arena,
@@ -7988,7 +9678,14 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
             S8("app"),
             &namespace_app_input,
             1);
+    AnalysisResult namespace_app_two = analysis_index_module(
+            arguments->arena,
+            (AnalysisModuleId){ .value = 42 },
+            S8("app-two"),
+            &namespace_app_two_input,
+            1);
     AnalysisResult* namespace_modules[] = {
+        &namespace_app_two,
         &namespace_math,
         &namespace_app,
     };
@@ -7998,17 +9695,32 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
             BUSTER_ARRAY_LENGTH(namespace_modules));
     analysis_analyze_bodies(arguments->arena, &namespace_math);
     analysis_analyze_bodies(arguments->arena, &namespace_app);
+    analysis_analyze_bodies(arguments->arena, &namespace_app_two);
+    BUSTER_TEST(arguments, namespace_math.instantiation_count == 1);
+    BUSTER_TEST(arguments,
+        namespace_math.first_instantiation &&
+        namespace_math.first_instantiation->requester_count == 2);
+    BUSTER_TEST(arguments,
+        namespace_math.first_instantiation &&
+        namespace_math.first_instantiation->codegen_owner.value == 40);
+    analysis_analyze_bodies(arguments->arena, &namespace_math);
     analysis_compute_layouts(
             &namespace_math,
             (AnalysisLayoutOptions){ .pointer_size = 8, .pointer_alignment = 8 });
     analysis_compute_layouts(
             &namespace_app,
             (AnalysisLayoutOptions){ .pointer_size = 8, .pointer_alignment = 8 });
+    analysis_compute_layouts(
+            &namespace_app_two,
+            (AnalysisLayoutOptions){ .pointer_size = 8, .pointer_alignment = 8 });
     BUSTER_TEST(arguments, namespace_math.diagnostic_count == 0);
     BUSTER_TEST(arguments, namespace_app.diagnostic_count == 0);
+    BUSTER_TEST(arguments, namespace_app_two.diagnostic_count == 0);
     analysis_build_jobs(arguments->arena, &namespace_math);
     analysis_build_jobs(arguments->arena, &namespace_app);
+    analysis_build_jobs(arguments->arena, &namespace_app_two);
     AnalysisResult* scheduled_modules[] = {
+        &namespace_app_two,
         &namespace_math,
         &namespace_app,
     };
@@ -8027,7 +9739,8 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
     BUSTER_TEST(
         arguments,
         program_schedule.execution_count ==
-            namespace_math.job_count + namespace_app.job_count);
+            namespace_math.job_count + namespace_app.job_count +
+            namespace_app_two.job_count);
     BUSTER_TEST(arguments, program_schedule.wave_count >= 2);
     AnalysisEntity* namespace_use =
             analysis_value_entity_find(&namespace_app, S8("use"));
@@ -8064,10 +9777,183 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
                 namespace_app.module.bodies +
                 namespace_use->id.index.value;
         BUSTER_TEST(arguments, namespace_body->analyzed);
-        BUSTER_TEST(arguments, namespace_body->dependency_count == 1);
-        BUSTER_TEST(arguments,
-                namespace_body->dependencies[0].module.value == 40);
+        BUSTER_TEST(arguments, namespace_body->dependency_count == 2);
+        for (u32 dependency_index = 0;
+            dependency_index < namespace_body->dependency_count;
+            dependency_index += 1)
+        {
+            BUSTER_TEST(arguments,
+                namespace_body->dependencies[dependency_index].module.value ==
+                    40);
+        }
     }
+    AnalysisInterfaceSummary specialization_summary =
+        analysis_module_interface_summary(
+            arguments->arena,
+            &namespace_math);
+    BUSTER_TEST(arguments,
+        string_first_sequence(
+            specialization_summary.bytes,
+            S8("specialization ")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments,
+        string_first_sequence(
+            specialization_summary.bytes,
+            S8("requester=app\n")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments,
+        string_first_sequence(
+            specialization_summary.bytes,
+            S8("requester=app-two\n")) != BUSTER_STRING_NO_MATCH);
+    AnalysisInterfaceCache specialization_cache = {0};
+    BUSTER_TEST(arguments,
+        analysis_interface_cache_store(
+            arguments->arena,
+            &specialization_cache,
+            namespace_math.module.name,
+            specialization_summary));
+    AnalysisInterfaceSummary specialization_round_trip =
+        analysis_module_interface_summary(
+            arguments->arena,
+            &namespace_math);
+    BUSTER_TEST(arguments,
+        !analysis_interface_cache_store(
+            arguments->arena,
+            &specialization_cache,
+            namespace_math.module.name,
+            specialization_round_trip));
+    AnalysisInterfaceCacheEntry* specialization_cache_entry =
+        analysis_interface_cache_find(
+            &specialization_cache,
+            namespace_math.module.name);
+    BUSTER_TEST(arguments, specialization_cache_entry != 0);
+    BUSTER_TEST(arguments,
+        specialization_cache_entry &&
+        specialization_cache_entry->summary.hash ==
+            specialization_summary.hash);
+    BUSTER_TEST(arguments,
+        specialization_cache_entry &&
+        string_equal(
+            specialization_cache_entry->summary.bytes,
+            specialization_summary.bytes));
+
+    String8 stable_source_left = S8(
+        "code identity : fn ($value: $T) $T { return value; }\n"
+        "code main : fn () s32\n"
+        "{\n"
+        "    data first: s32 = identity(5);\n"
+        "    data second: s32 = identity(6);\n"
+        "    return first + second;\n"
+        "}\n");
+    String8 stable_source_right = S8(
+        "code identity : fn ($value: $T) $T { return value; }\n"
+        "code main : fn () s32\n"
+        "{\n"
+        "    data second: s32 = identity(6);\n"
+        "    data first: s32 = identity(5);\n"
+        "    return first + second;\n"
+        "}\n");
+    TokenizerResult stable_left_tokens = tokenize(
+        arguments->arena,
+        stable_source_left.pointer,
+        stable_source_left.length);
+    ParserResult stable_left_parser = parser_parse(
+        arguments->arena,
+        expression_arena,
+        stable_source_left,
+        stable_left_tokens);
+    TokenizerResult stable_right_tokens = tokenize(
+        arguments->arena,
+        stable_source_right.pointer,
+        stable_source_right.length);
+    ParserResult stable_right_parser = parser_parse(
+        arguments->arena,
+        expression_arena,
+        stable_source_right,
+        stable_right_tokens);
+    AnalysisSourceInput stable_left_input = {
+        .path = S8("stable.bbb"),
+        .parser = &stable_left_parser,
+    };
+    AnalysisSourceInput stable_right_input = {
+        .path = S8("stable.bbb"),
+        .parser = &stable_right_parser,
+    };
+    AnalysisResult stable_left = analysis_index_module(
+        arguments->arena,
+        (AnalysisModuleId){ .value = 50 },
+        S8("stable"),
+        &stable_left_input,
+        1);
+    AnalysisResult stable_right = analysis_index_module(
+        arguments->arena,
+        (AnalysisModuleId){ .value = 99 },
+        S8("stable"),
+        &stable_right_input,
+        1);
+    analysis_resolve_module_interfaces(arguments->arena, &stable_left);
+    analysis_resolve_module_interfaces(arguments->arena, &stable_right);
+    analysis_analyze_bodies(arguments->arena, &stable_left);
+    analysis_analyze_bodies(arguments->arena, &stable_right);
+    BUSTER_TEST(arguments, stable_left.instantiation_count == 2);
+    BUSTER_TEST(arguments, stable_right.instantiation_count == 2);
+    String8 stable_left_five = {0};
+    String8 stable_right_five = {0};
+    AnalysisInstantiationId stable_left_five_id =
+        ANALYSIS_INSTANTIATION_ID_INVALID;
+    AnalysisInstantiationId stable_right_five_id =
+        ANALYSIS_INSTANTIATION_ID_INVALID;
+    for (AnalysisInstantiation* instantiation =
+            stable_left.first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
+    {
+        if (instantiation->compile_time_argument_count &&
+            instantiation->compile_time_arguments[0].constant.integer == 5)
+        {
+            stable_left_five = instantiation->symbol_name;
+            stable_left_five_id = instantiation->id;
+        }
+    }
+    for (AnalysisInstantiation* instantiation =
+            stable_right.first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
+    {
+        if (instantiation->compile_time_argument_count &&
+            instantiation->compile_time_arguments[0].constant.integer == 5)
+        {
+            stable_right_five = instantiation->symbol_name;
+            stable_right_five_id = instantiation->id;
+        }
+    }
+    BUSTER_STRING_TEST(
+        arguments,
+        stable_left_five,
+        stable_right_five);
+    BUSTER_TEST(arguments,
+        stable_left_five_id.value != stable_right_five_id.value);
+    AnalysisInterfaceSummary stable_left_summary =
+        analysis_module_interface_summary(arguments->arena, &stable_left);
+    AnalysisInterfaceSummary stable_right_summary =
+        analysis_module_interface_summary(arguments->arena, &stable_right);
+    BUSTER_STRING_TEST(
+        arguments,
+        stable_left_summary.bytes,
+        stable_right_summary.bytes);
+    BUSTER_TEST(arguments,
+        stable_left_summary.hash == stable_right_summary.hash);
+    AnalysisInterfaceCache stable_cache = {0};
+    BUSTER_TEST(arguments,
+        analysis_interface_cache_store(
+            arguments->arena,
+            &stable_cache,
+            S8("stable"),
+            stable_left_summary));
+    BUSTER_TEST(arguments,
+        !analysis_interface_cache_store(
+            arguments->arena,
+            &stable_cache,
+            S8("stable"),
+            stable_right_summary));
     BUSTER_CHECK(arena_destroy(expression_arena, 1));
 
     Arena* fixture_expression_arena = arena_create((ArenaCreation){0});
@@ -8198,7 +10084,7 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
             }
             AnalysisEntity* generic = analysis_value_entity_find(
                 &fixture_result,
-                S8("b"));
+                S8("identity"));
             BUSTER_TEST(arguments, generic != 0);
             if (generic)
             {
@@ -8215,6 +10101,76 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
                         generic_function->as.function.return_type)->kind ==
                         ANALYSIS_TYPE_COMPILE_TIME_PARAMETER);
             }
+            BUSTER_TEST(arguments, fixture_result.instantiation_count == 3);
+            u32 analyzed_instantiation_count = 0;
+            for (AnalysisInstantiation* instantiation =
+                    fixture_result.first_instantiation;
+                instantiation;
+                instantiation = instantiation->next)
+            {
+                AnalysisType* concrete = analysis_type_from_id(
+                    &fixture_result,
+                    instantiation->function_type);
+                BUSTER_TEST(arguments, instantiation->analyzed);
+                BUSTER_TEST(arguments, instantiation->body.analyzed);
+                BUSTER_TEST(arguments,
+                    concrete->kind == ANALYSIS_TYPE_FUNCTION);
+                BUSTER_TEST(arguments,
+                    concrete->kind != ANALYSIS_TYPE_FUNCTION ||
+                    concrete->as.function.argument_count == 0);
+                analyzed_instantiation_count += instantiation->analyzed;
+            }
+            BUSTER_TEST(arguments, analyzed_instantiation_count == 3);
+            u32 specialized_body_job_count = 0;
+            u32 ordinary_body_job_count = 0;
+            for (u32 job_index = 0;
+                job_index < fixture_result.job_count;
+                job_index += 1)
+            {
+                AnalysisJob* job = fixture_result.jobs + job_index;
+                if (job->kind != ANALYSIS_JOB_BODY)
+                {
+                    continue;
+                }
+                if (job->instantiation.value ==
+                    ANALYSIS_ID_UNDERLYING_INVALID)
+                {
+                    ordinary_body_job_count += 1;
+                }
+                else
+                {
+                    specialized_body_job_count += 1;
+                }
+            }
+            BUSTER_TEST(arguments, ordinary_body_job_count == 1);
+            BUSTER_TEST(arguments, specialized_body_job_count == 3);
+            AnalysisScheduleResult generic_schedule = analysis_execute_jobs(
+                arguments->arena,
+                &fixture_result,
+                2,
+                0,
+                0);
+            BUSTER_TEST(arguments, !generic_schedule.has_cycle);
+            BUSTER_TEST(arguments,
+                generic_schedule.execution_count ==
+                    fixture_result.job_count);
+        }
+        else if (string_equal(
+                fixture.path,
+                S8("tests/compile_time_argument_error.bbb")))
+        {
+            BUSTER_TEST(arguments, fixture_result.instantiation_count == 0);
+            BUSTER_TEST(arguments, fixture_result.first_diagnostic != 0);
+            if (fixture_result.first_diagnostic)
+            {
+                BUSTER_TEST(arguments,
+                    fixture_result.first_diagnostic->kind ==
+                        ANALYSIS_DIAGNOSTIC_COMPILE_TIME_ARGUMENT_REQUIRED);
+                BUSTER_TEST(arguments,
+                    fixture_result.first_diagnostic->has_argument_index);
+                BUSTER_TEST(arguments,
+                    fixture_result.first_diagnostic->argument_index == 0);
+            }
         }
         for (u32 entity_index = 0;
             entity_index < fixture_result.module.entity_count;
@@ -8223,7 +10179,14 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
             AnalysisEntity* fixture_entity = fixture_result.module.entities + entity_index;
             if (fixture_entity->kind == ANALYSIS_ENTITY_CODE && fixture_entity->ast.code->has_body)
             {
-                BUSTER_TEST(arguments, fixture_result.module.bodies[entity_index].analyzed);
+                if (!analysis_entity_is_generic(
+                        fixture_temporary.arena,
+                        &fixture_result,
+                        fixture_entity))
+                {
+                    BUSTER_TEST(arguments,
+                        fixture_result.module.bodies[entity_index].analyzed);
+                }
             }
         }
         arena_set_position(fixture_temporary.arena, fixture_temporary.position);

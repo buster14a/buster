@@ -127,6 +127,7 @@ struct IrInstruction
     ParserSourceRange source;
     AnalysisTypeId type;
     AnalysisEntityId entity;
+    AnalysisInstantiationId instantiation;
     AnalysisLocalId local;
     IrInstructionId id;
     IrInstructionId next;
@@ -173,6 +174,7 @@ struct IrFunction
 {
     String8 name;
     AnalysisEntityId entity;
+    AnalysisInstantiationId instantiation;
     AnalysisTypeId type;
     IrFunctionId id;
     IrBlockId entry;
@@ -220,6 +222,8 @@ typedef enum IrValidationError
     IR_VALIDATION_OPERAND_TYPE,
     IR_VALIDATION_BRANCH_TARGET,
     IR_VALIDATION_RETURN_TYPE,
+    IR_VALIDATION_CALL_TARGET,
+    IR_VALIDATION_CALL_SIGNATURE,
     IR_VALIDATION_BLOCK_PARAMETER,
     IR_VALIDATION_COUNT,
 } IrValidationError;

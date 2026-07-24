@@ -42,6 +42,12 @@ struct AnalysisJobId
     AnalysisIdUnderlying value;
 };
 
+typedef struct AnalysisInstantiationId AnalysisInstantiationId;
+struct AnalysisInstantiationId
+{
+    AnalysisIdUnderlying value;
+};
+
 #define ANALYSIS_ID_UNDERLYING_INVALID UINT32_MAX
 #define ANALYSIS_MODULE_ID_INVALID ((AnalysisModuleId){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
 #define ANALYSIS_SOURCE_ID_INVALID ((AnalysisSourceId){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
@@ -49,6 +55,8 @@ struct AnalysisJobId
 #define ANALYSIS_ENTITY_INDEX_INVALID ((AnalysisEntityIndex){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
 #define ANALYSIS_LOCAL_ID_INVALID ((AnalysisLocalId){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
 #define ANALYSIS_JOB_ID_INVALID ((AnalysisJobId){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
+#define ANALYSIS_INSTANTIATION_ID_INVALID \
+    ((AnalysisInstantiationId){ .value = ANALYSIS_ID_UNDERLYING_INVALID })
 #define ANALYSIS_ENTITY_ID_INVALID ((AnalysisEntityId){ \
     .module = ANALYSIS_MODULE_ID_INVALID, \
     .index = ANALYSIS_ENTITY_INDEX_INVALID, \
@@ -60,6 +68,7 @@ BUSTER_CT_CHECK(sizeof(AnalysisTypeId) == sizeof(AnalysisIdUnderlying));
 BUSTER_CT_CHECK(sizeof(AnalysisEntityIndex) == sizeof(AnalysisIdUnderlying));
 BUSTER_CT_CHECK(sizeof(AnalysisLocalId) == sizeof(AnalysisIdUnderlying));
 BUSTER_CT_CHECK(sizeof(AnalysisJobId) == sizeof(AnalysisIdUnderlying));
+BUSTER_CT_CHECK(sizeof(AnalysisInstantiationId) == sizeof(AnalysisIdUnderlying));
 
 typedef struct AnalysisEntityId AnalysisEntityId;
 struct AnalysisEntityId
@@ -319,6 +328,7 @@ struct AnalysisTypedNode
     AnalysisLocalId local;
     AnalysisEntityId entity;
     AnalysisModuleId namespace_module;
+    AnalysisInstantiationId instantiation;
     AnalysisConstant constant;
     // Inclusive node index where this node's flattened postorder subtree starts.
     u32 subtree_start;
@@ -354,6 +364,51 @@ struct AnalysisBody
     bool can_fall_through;
     bool has_unreachable;
     u8 reserved;
+};
+
+typedef struct AnalysisGenericTypeBinding AnalysisGenericTypeBinding;
+struct AnalysisGenericTypeBinding
+{
+    String8 name;
+    AnalysisTypeId type;
+};
+
+typedef struct AnalysisCompileTimeArgument AnalysisCompileTimeArgument;
+struct AnalysisCompileTimeArgument
+{
+    AnalysisConstant constant;
+    AnalysisTypeId type;
+    u32 source_argument_index;
+};
+
+typedef struct AnalysisInstantiationRequester AnalysisInstantiationRequester;
+struct AnalysisInstantiationRequester
+{
+    AnalysisInstantiationRequester* next;
+    AnalysisModuleId module;
+};
+
+typedef struct AnalysisInstantiation AnalysisInstantiation;
+struct AnalysisInstantiation
+{
+    AnalysisInstantiation* next;
+    AnalysisInstantiationRequester* first_requester;
+    AnalysisInstantiationRequester* last_requester;
+    AnalysisGenericTypeBinding* type_bindings;
+    AnalysisCompileTimeArgument* compile_time_arguments;
+    String8 canonical_key;
+    String8 symbol_name;
+    AnalysisBody body;
+    AnalysisEntityId generic_entity;
+    AnalysisModuleId codegen_owner;
+    AnalysisTypeId function_type;
+    AnalysisInstantiationId id;
+    u64 canonical_hash;
+    u32 type_binding_count;
+    u32 compile_time_argument_count;
+    u32 requester_count;
+    bool analyzed;
+    u8 reserved[3];
 };
 
 // Parser results and their source storage are borrowed. They must outlive the
@@ -450,6 +505,7 @@ typedef enum AnalysisDiagnosticKind
     ANALYSIS_DIAGNOSTIC_EXPECTED_PLACE,
     ANALYSIS_DIAGNOSTIC_NOT_CALLABLE,
     ANALYSIS_DIAGNOSTIC_ARGUMENT_COUNT,
+    ANALYSIS_DIAGNOSTIC_COMPILE_TIME_ARGUMENT_REQUIRED,
     ANALYSIS_DIAGNOSTIC_UNKNOWN_MEMBER,
     ANALYSIS_DIAGNOSTIC_INVALID_OPERAND,
     ANALYSIS_DIAGNOSTIC_EXPECTED_CONTEXTUAL_TYPE,
@@ -522,6 +578,7 @@ struct AnalysisJob
     AnalysisJobId* dependencies;
     AnalysisDependencyKind* dependency_kinds;
     AnalysisEntityId entity;
+    AnalysisInstantiationId instantiation;
     AnalysisJobId id;
     AnalysisJobKind kind;
     u32 dependency_count;
@@ -685,9 +742,12 @@ struct AnalysisResult
     AnalysisDiagnostic* last_diagnostic;
     AnalysisJob* jobs;
     AnalysisResult** program_modules;
+    AnalysisInstantiation* first_instantiation;
+    AnalysisInstantiation* last_instantiation;
     u32 diagnostic_count;
     u32 job_count;
     u32 program_module_count;
+    u32 instantiation_count;
 };
 
 // Builds the immutable declaration interface which later type-resolution and
@@ -740,6 +800,10 @@ BUSTER_F_DECL String8 analysis_format_diagnostic(
 // published before dependency-aware resolution jobs are scheduled.
 BUSTER_F_DECL void analysis_resolve_module_interfaces(Arena* result_arena, AnalysisResult* result);
 BUSTER_F_DECL AnalysisType* analysis_type_from_id(AnalysisResult* result, AnalysisTypeId id);
+BUSTER_F_DECL bool analysis_entity_is_generic(
+    Arena* scratch_arena,
+    AnalysisResult* result,
+    AnalysisEntity* entity);
 // Resolves lexical bindings and annotates every node in each flattened body
 // expression. Interfaces must have been resolved first.
 typedef void AnalysisBodyConsumer(

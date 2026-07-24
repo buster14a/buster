@@ -202,6 +202,15 @@ has hard design constraints:
 - Semantic analysis and IR lowering follow the repository-wide recursion rule:
   nested expressions, statements, types, and control flow use arena-backed
   explicit stacks or worklists.
+- `$` function parameters and `$T` types are compile-time generic inputs.
+  Semantic analysis interns concrete instantiations by a canonical key made
+  from the declaration identity, normalized type bindings, and normalized
+  compile-time values; never use arena-local type/constant IDs as a persistent
+  specialization identity. Compile-time parameters are absent from runtime
+  signatures and call operands; uninstantiated templates publish no IR. The
+  defining module owns exactly one body-analysis job and specialized IR function
+  for each key, while interface summaries record deterministic symbols and the
+  requesting modules so cached builds preserve specialization demand.
 
 ## Repository map
 

@@ -396,6 +396,7 @@ BUSTER_GLOBAL_LOCAL IrInstruction* ir_emit(
     *instruction = (IrInstruction){
         .type = type,
         .entity = ANALYSIS_ENTITY_ID_INVALID,
+        .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
         .local = ANALYSIS_LOCAL_ID_INVALID,
         .id = id,
         .next = IR_INSTRUCTION_ID_INVALID,
@@ -584,6 +585,54 @@ BUSTER_GLOBAL_LOCAL void ir_expression_child_roots(
     }
 }
 
+BUSTER_GLOBAL_LOCAL AnalysisResult* ir_analysis_module_from_id(
+    AnalysisResult* analysis,
+    AnalysisModuleId id)
+{
+    if (analysis->module.id.value == id.value)
+    {
+        return analysis;
+    }
+    for (u32 index = 0; index < analysis->program_module_count; index += 1)
+    {
+        AnalysisResult* candidate = analysis->program_modules[index];
+        if (candidate && candidate->module.id.value == id.value)
+        {
+            return candidate;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_call_argument_is_compile_time(
+    IrBuilder* builder,
+    AnalysisTypedExpression* expression,
+    u32 callee_root,
+    u32 argument_index)
+{
+    AnalysisTypedNode* callee = expression->nodes + callee_root;
+    AnalysisResult* module = ir_analysis_module_from_id(
+        builder->analysis,
+        callee->entity.module);
+    if (!module || callee->entity.index.value >= module->module.entity_count)
+    {
+        return false;
+    }
+    AnalysisEntity* entity =
+        module->module.entities + callee->entity.index.value;
+    if (entity->kind != ANALYSIS_ENTITY_CODE)
+    {
+        return false;
+    }
+    AstTypeArgument* argument =
+        entity->ast.code->type->function.first_argument;
+    for (u32 index = 0; argument && index < argument_index; index += 1)
+    {
+        argument = argument->next;
+    }
+    return argument && argument->is_compile_time;
+}
+
 BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpression ast)
 {
     IrLowered invalid = {
@@ -644,6 +693,18 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                 };
                 for (u32 child = arity; child > 0; child -= 1)
                 {
+                    if (node->id == AST_NODE_CALL &&
+                        typed->instantiation.value !=
+                            ANALYSIS_ID_UNDERLYING_INVALID &&
+                        child > 1 &&
+                        ir_call_argument_is_compile_time(
+                            builder,
+                            expression,
+                            roots[0],
+                            child - 2))
+                    {
+                        continue;
+                    }
                     tasks[task_count++] = (IrExpressionTask){
                         .node_index = roots[child - 1],
                         .kind = IR_EXPRESSION_TASK_VISIT,
@@ -797,6 +858,24 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                 {
                     lowered.value = IR_VALUE_ID_INVALID;
                     lowered.category = IR_VALUE_VALUE;
+                }
+                else if (typed->local.value != ANALYSIS_ID_UNDERLYING_INVALID &&
+                    builder->body->locals[typed->local.value].is_compile_time)
+                {
+                    BUSTER_CHECK(typed->constant.kind != ANALYSIS_CONSTANT_NONE);
+                    instruction = ir_emit(
+                        builder,
+                        IR_OPCODE_CONSTANT_INTEGER,
+                        typed->type,
+                        IR_VALUE_VALUE,
+                        source,
+                        0,
+                        0,
+                        true);
+                    instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
+                    instruction->immediates[0] = typed->constant.integer;
+                    instruction->immediate_count = 1;
+                    instruction->immediate_is_negative = typed->constant.is_negative;
                 }
                 else if (typed->local.value != ANALYSIS_ID_UNDERLYING_INVALID)
                 {
@@ -1003,9 +1082,55 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
             case AST_NODE_CALL:
             {
                 IrValueId* operands = arena_allocate(builder->scratch_arena, IrValueId, arity);
-                for (u32 index = 0; index < arity; index += 1)
+                u32 operand_count = 0;
+                operands[operand_count++] =
+                    ir_materialize(builder, results[roots[0]], source);
+                AnalysisTypedNode* callee_typed = expression->nodes + roots[0];
+                AnalysisResult* callee_module = 0;
+                AnalysisEntity* callee_entity = 0;
+                if (typed->instantiation.value != ANALYSIS_ID_UNDERLYING_INVALID)
                 {
-                    operands[index] = ir_materialize(builder, results[roots[index]], source);
+                    callee_module = builder->analysis;
+                    if (callee_typed->entity.module.value !=
+                        builder->analysis->module.id.value)
+                    {
+                        for (u32 module_index = 0;
+                            module_index < builder->analysis->program_module_count;
+                            module_index += 1)
+                        {
+                            AnalysisResult* candidate =
+                                builder->analysis->program_modules[module_index];
+                            if (candidate &&
+                                candidate->module.id.value ==
+                                    callee_typed->entity.module.value)
+                            {
+                                callee_module = candidate;
+                                break;
+                            }
+                        }
+                    }
+                    if (callee_module &&
+                        callee_typed->entity.index.value <
+                            callee_module->module.entity_count)
+                    {
+                        callee_entity = callee_module->module.entities +
+                            callee_typed->entity.index.value;
+                    }
+                }
+                AstTypeArgument* argument = callee_entity ?
+                    callee_entity->ast.code->type->function.first_argument : 0;
+                for (u32 index = 1; index < arity; index += 1)
+                {
+                    bool compile_time = argument && argument->is_compile_time;
+                    if (!compile_time)
+                    {
+                        operands[operand_count++] =
+                            ir_materialize(builder, results[roots[index]], source);
+                    }
+                    if (argument)
+                    {
+                        argument = argument->next;
+                    }
                 }
                 instruction = ir_emit(
                     builder,
@@ -1014,8 +1139,24 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                     IR_VALUE_VALUE,
                     node->call.range,
                     operands,
-                    arity,
+                    operand_count,
                     analysis_type_from_id(builder->analysis, typed->type)->kind != ANALYSIS_TYPE_VOID);
+                instruction->entity = callee_typed->entity;
+                instruction->instantiation = typed->instantiation;
+                IrValue* callee_value =
+                    builder->function->values + operands[0].value;
+                if (callee_value->definition.value !=
+                    IR_ID_UNDERLYING_INVALID)
+                {
+                    IrInstruction* reference =
+                        builder->function->instructions +
+                        callee_value->definition.value;
+                    if (reference->opcode == IR_OPCODE_FUNCTION)
+                    {
+                        reference->instantiation =
+                            typed->instantiation;
+                    }
+                }
             } break;
             case AST_NODE_INTRINSIC_CALL:
             {
@@ -1775,15 +1916,22 @@ BUSTER_GLOBAL_LOCAL void ir_lower_function(
     Arena* scratch_arena,
     AnalysisResult* analysis,
     AnalysisEntity* entity,
+    AnalysisInstantiation* instantiation,
     IrFunction* function)
 {
     u32 entity_index = entity->id.index.value;
-    AnalysisBody* body = analysis->module.bodies + entity_index;
-    AnalysisTypeId function_type_id = analysis->module.semantics[entity_index].type;
+    AnalysisBody* body = instantiation ?
+        &instantiation->body : analysis->module.bodies + entity_index;
+    AnalysisTypeId function_type_id = instantiation ?
+        instantiation->function_type : analysis->module.semantics[entity_index].type;
     AnalysisType* function_type = analysis_type_from_id(analysis, function_type_id);
     BUSTER_CHECK(function_type->kind == ANALYSIS_TYPE_FUNCTION);
-    function->name = entity->name;
+    function->name = instantiation ?
+        instantiation->symbol_name :
+        entity->name;
     function->entity = entity->id;
+    function->instantiation = instantiation ?
+        instantiation->id : ANALYSIS_INSTANTIATION_ID_INVALID;
     function->type = function_type_id;
     function->local_count = body->local_count;
     ir_function_measure(
@@ -1838,6 +1986,10 @@ BUSTER_GLOBAL_LOCAL void ir_lower_function(
     {
         AnalysisLocal* local = body->locals + local_index;
         if (local->kind != ANALYSIS_LOCAL_ARGUMENT)
+        {
+            continue;
+        }
+        if (local->is_compile_time)
         {
             continue;
         }
@@ -1909,9 +2061,35 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(
     Arena* result_arena,
     AnalysisResult* analysis)
 {
+    Arena* conflicts[] = { result_arena };
+    TemporalArena scratch = scratch_begin(
+        conflicts,
+        BUSTER_ARRAY_LENGTH(conflicts));
+    u32 ordinary_function_count = 0;
+    for (u32 entity_index = 0;
+        entity_index < analysis->module.entity_count;
+        entity_index += 1)
+    {
+        AnalysisEntity* entity = analysis->module.entities + entity_index;
+        if (entity->kind == ANALYSIS_ENTITY_CODE &&
+            !analysis_entity_is_generic(scratch.arena, analysis, entity))
+        {
+            ordinary_function_count += 1;
+        }
+    }
+    u32 owned_specialization_count = 0;
+    for (AnalysisInstantiation* instantiation = analysis->first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
+    {
+        owned_specialization_count +=
+            instantiation->codegen_owner.value ==
+            analysis->module.id.value;
+    }
     IrModule module = {
         .name = analysis->module.name,
-        .function_count = analysis->module.code_count,
+        .function_count =
+            ordinary_function_count + owned_specialization_count,
     };
     module.functions = arena_allocate(result_arena, IrFunction, module.function_count);
     u32 function_index = 0;
@@ -1922,9 +2100,14 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(
         {
             continue;
         }
+        if (analysis_entity_is_generic(scratch.arena, analysis, entity))
+        {
+            continue;
+        }
         module.functions[function_index] = (IrFunction){
             .name = entity->name,
             .entity = entity->id,
+            .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
             .type = analysis->module.semantics[entity_index].type,
             .id = { .value = function_index },
             .entry = IR_BLOCK_ID_INVALID,
@@ -1933,51 +2116,82 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(
         };
         function_index += 1;
     }
+    AnalysisInstantiation** specializations = arena_allocate(
+        scratch.arena,
+        AnalysisInstantiation*,
+        analysis->instantiation_count);
+    u32 specialization_count = 0;
+    for (AnalysisInstantiation* instantiation = analysis->first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
+    {
+        if (instantiation->codegen_owner.value ==
+            analysis->module.id.value)
+        {
+            specializations[specialization_count++] = instantiation;
+        }
+    }
+    BUSTER_CHECK(specialization_count == owned_specialization_count);
+    for (u32 index = 1; index < specialization_count; index += 1)
+    {
+        AnalysisInstantiation* instantiation = specializations[index];
+        u32 insertion = index;
+        while (insertion)
+        {
+            String8 left = specializations[insertion - 1]->canonical_key;
+            String8 right = instantiation->canonical_key;
+            u64 common = BUSTER_MIN(left.length, right.length);
+            s32 order = memcmp(left.pointer, right.pointer, (size_t)common);
+            if (!order)
+            {
+                order = left.length > right.length ?
+                    1 : left.length < right.length ? -1 : 0;
+            }
+            if (order <= 0)
+            {
+                break;
+            }
+            specializations[insertion] = specializations[insertion - 1];
+            insertion -= 1;
+        }
+        specializations[insertion] = instantiation;
+    }
+    for (u32 index = 0; index < specialization_count; index += 1)
+    {
+        AnalysisInstantiation* instantiation = specializations[index];
+        AnalysisEntity* entity =
+            analysis->module.entities + instantiation->generic_entity.index.value;
+        module.functions[function_index] = (IrFunction){
+            .name = instantiation->symbol_name,
+            .entity = entity->id,
+            .instantiation = instantiation->id,
+            .type = instantiation->function_type,
+            .id = { .value = function_index },
+            .entry = IR_BLOCK_ID_INVALID,
+            .state = entity->ast.code->has_body ?
+                IR_FUNCTION_NOT_LOWERED : IR_FUNCTION_DECLARATION,
+        };
+        function_index += 1;
+    }
     BUSTER_CHECK(function_index == module.function_count);
+    scratch_end(scratch);
     return module;
 }
 
-BUSTER_GLOBAL_LOCAL IrFunction* ir_function_from_entity(
-    IrModule* module,
-    AnalysisEntityId entity)
+BUSTER_GLOBAL_LOCAL AnalysisInstantiation* ir_instantiation_from_id(
+    AnalysisResult* analysis,
+    AnalysisInstantiationId id)
 {
-    for (u32 index = 0; index < module->function_count; index += 1)
+    for (AnalysisInstantiation* instantiation = analysis->first_instantiation;
+        instantiation;
+        instantiation = instantiation->next)
     {
-        if (ir_entity_id_equal(module->functions[index].entity, entity))
+        if (instantiation->id.value == id.value)
         {
-            return module->functions + index;
+            return instantiation;
         }
     }
     return 0;
-}
-
-typedef struct IrAnalysisConsumerContext IrAnalysisConsumerContext;
-struct IrAnalysisConsumerContext
-{
-    IrModule* module;
-};
-
-BUSTER_GLOBAL_LOCAL void ir_analysis_body_consume(
-    Arena* result_arena,
-    Arena* scratch_arena,
-    AnalysisResult* analysis,
-    u32 entity_index,
-    void* user_data)
-{
-    IrAnalysisConsumerContext* context = (IrAnalysisConsumerContext*)user_data;
-    AnalysisEntity* entity = analysis->module.entities + entity_index;
-    IrFunction* function = ir_function_from_entity(context->module, entity->id);
-    BUSTER_CHECK(function && function->state == IR_FUNCTION_NOT_LOWERED);
-    if (ir_entity_has_diagnostic(analysis, entity->id))
-    {
-        function->state = IR_FUNCTION_REJECTED;
-        context->module->rejected_function_count += 1;
-    }
-    else
-    {
-        ir_lower_function(result_arena, scratch_arena, analysis, entity, function);
-        context->module->lowered_function_count += 1;
-    }
 }
 
 IrModule ir_generate_module(Arena* result_arena, AnalysisResult* analysis)
@@ -1986,20 +2200,23 @@ IrModule ir_generate_module(Arena* result_arena, AnalysisResult* analysis)
     IrModule module = ir_module_initialize(result_arena, analysis);
     Arena* conflicts[] = { result_arena };
     TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    u32 function_index = 0;
-    for (u32 entity_index = 0; entity_index < analysis->module.entity_count; entity_index += 1)
+    for (u32 function_index = 0;
+        function_index < module.function_count;
+        function_index += 1)
     {
-        AnalysisEntity* entity = analysis->module.entities + entity_index;
-        if (entity->kind != ANALYSIS_ENTITY_CODE)
-        {
-            continue;
-        }
         IrFunction* function = module.functions + function_index;
+        AnalysisEntity* entity =
+            analysis->module.entities + function->entity.index.value;
+        AnalysisInstantiation* instantiation =
+            function->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID ?
+            0 : ir_instantiation_from_id(analysis, function->instantiation);
         if (!entity->ast.code->has_body)
         {
             BUSTER_CHECK(function->state == IR_FUNCTION_DECLARATION);
         }
-        else if (!analysis->module.bodies[entity_index].analyzed ||
+        else if ((!instantiation &&
+                !analysis->module.bodies[entity->id.index.value].analyzed) ||
+            (instantiation && !instantiation->body.analyzed) ||
             ir_entity_has_diagnostic(analysis, entity->id))
         {
             function->state = IR_FUNCTION_REJECTED;
@@ -2007,12 +2224,16 @@ IrModule ir_generate_module(Arena* result_arena, AnalysisResult* analysis)
         }
         else
         {
-            ir_lower_function(result_arena, scratch.arena, analysis, entity, function);
+            ir_lower_function(
+                result_arena,
+                scratch.arena,
+                analysis,
+                entity,
+                instantiation,
+                function);
             module.lowered_function_count += 1;
         }
-        function_index += 1;
     }
-    BUSTER_CHECK(function_index == module.function_count);
     scratch_end(scratch);
     return module;
 }
@@ -2020,14 +2241,8 @@ IrModule ir_generate_module(Arena* result_arena, AnalysisResult* analysis)
 IrModule ir_analyze_and_generate_module(Arena* result_arena, AnalysisResult* analysis)
 {
     BUSTER_CHECK(analysis && analysis->types.types);
-    IrModule module = ir_module_initialize(result_arena, analysis);
-    IrAnalysisConsumerContext context = { .module = &module };
-    analysis_analyze_bodies_with_consumer(
-        result_arena,
-        analysis,
-        ir_analysis_body_consume,
-        &context);
-    return module;
+    analysis_analyze_bodies(result_arena, analysis);
+    return ir_generate_module(result_arena, analysis);
 }
 
 IrProgram ir_generate_program(
@@ -2245,6 +2460,147 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
                             instruction_id);
                     }
                 }
+                else if (instruction->opcode == IR_OPCODE_CALL)
+                {
+                    if (!instruction->operand_count ||
+                        instruction->entity.module.value ==
+                            ANALYSIS_ID_UNDERLYING_INVALID ||
+                        instruction->entity.index.value ==
+                            ANALYSIS_ID_UNDERLYING_INVALID)
+                    {
+                        return ir_validation_error(
+                            IR_VALIDATION_CALL_TARGET,
+                            function,
+                            block->id,
+                            instruction_id);
+                    }
+                    IrValue* callee =
+                        function->values + instruction->operands[0].value;
+                    AnalysisType* signature =
+                        analysis_type_from_id(analysis, callee->type);
+                    if (signature->kind != ANALYSIS_TYPE_FUNCTION ||
+                        instruction->operand_count !=
+                            signature->as.function.argument_count + 1 ||
+                        !ir_type_id_equal(
+                            instruction->type,
+                            signature->as.function.return_type))
+                    {
+                        return ir_validation_error(
+                            IR_VALIDATION_CALL_SIGNATURE,
+                            function,
+                            block->id,
+                            instruction_id);
+                    }
+                    for (u32 argument_index = 0;
+                        argument_index <
+                            signature->as.function.argument_count;
+                        argument_index += 1)
+                    {
+                        IrValue* argument = function->values +
+                            instruction->operands[argument_index + 1].value;
+                        if (!ir_type_id_equal(
+                                argument->type,
+                                signature->as.function
+                                    .argument_types[argument_index]))
+                        {
+                            return ir_validation_error(
+                                IR_VALIDATION_CALL_SIGNATURE,
+                                function,
+                                block->id,
+                                instruction_id);
+                        }
+                    }
+                    if (callee->definition.value ==
+                        IR_ID_UNDERLYING_INVALID)
+                    {
+                        return ir_validation_error(
+                            IR_VALIDATION_CALL_TARGET,
+                            function,
+                            block->id,
+                            instruction_id);
+                    }
+                    IrInstruction* reference =
+                        function->instructions +
+                        callee->definition.value;
+                    if (reference->opcode != IR_OPCODE_FUNCTION ||
+                        !ir_entity_id_equal(
+                            reference->entity,
+                            instruction->entity) ||
+                        reference->instantiation.value !=
+                            instruction->instantiation.value)
+                    {
+                        return ir_validation_error(
+                            IR_VALIDATION_CALL_TARGET,
+                            function,
+                            block->id,
+                            instruction_id);
+                    }
+                    AnalysisResult* target_module =
+                        ir_analysis_module_from_id(
+                            analysis,
+                            instruction->entity.module);
+                    if (!target_module ||
+                        instruction->entity.index.value >=
+                            target_module->module.entity_count)
+                    {
+                        return ir_validation_error(
+                            IR_VALIDATION_CALL_TARGET,
+                            function,
+                            block->id,
+                            instruction_id);
+                    }
+                    AnalysisEntity* target =
+                        target_module->module.entities +
+                        instruction->entity.index.value;
+                    if (target->kind != ANALYSIS_ENTITY_CODE)
+                    {
+                        return ir_validation_error(
+                            IR_VALIDATION_CALL_TARGET,
+                            function,
+                            block->id,
+                            instruction_id);
+                    }
+                    if (instruction->instantiation.value !=
+                        ANALYSIS_ID_UNDERLYING_INVALID)
+                    {
+                        AnalysisInstantiation* instantiation =
+                            ir_instantiation_from_id(
+                                target_module,
+                                instruction->instantiation);
+                        if (!instantiation ||
+                            instantiation->generic_entity.module.value !=
+                                instruction->entity.module.value ||
+                            instantiation->generic_entity.index.value !=
+                                instruction->entity.index.value ||
+                            instantiation->codegen_owner.value !=
+                                target_module->module.id.value)
+                        {
+                            return ir_validation_error(
+                                IR_VALIDATION_CALL_TARGET,
+                                function,
+                                block->id,
+                                instruction_id);
+                        }
+                    }
+                    else
+                    {
+                        TemporalArena validation_scratch =
+                            scratch_begin(0, 0);
+                        bool generic = analysis_entity_is_generic(
+                            validation_scratch.arena,
+                            target_module,
+                            target);
+                        scratch_end(validation_scratch);
+                        if (generic)
+                        {
+                            return ir_validation_error(
+                                IR_VALIDATION_CALL_TARGET,
+                                function,
+                                block->id,
+                                instruction_id);
+                        }
+                    }
+                }
                 else if (instruction->opcode == IR_OPCODE_RETURN)
                 {
                     AnalysisTypeId return_type = function_type->as.function.return_type;
@@ -2415,6 +2771,7 @@ BUSTER_GLOBAL_LOCAL IrFixtureTest ir_fixture_tests[] =
     { S8_INITIALIZER("tests/basic_character_literal.bbb") },
     { S8_INITIALIZER("tests/basic_comment.bbb") },
     { S8_INITIALIZER("tests/basic_compile_time.bbb") },
+    { S8_INITIALIZER("tests/compile_time_argument_error.bbb") },
     { S8_INITIALIZER("tests/modules/core/math.bbb") },
     { S8_INITIALIZER("tests/modules/system/platform.bbb") },
     { S8_INITIALIZER("tests/basic_continue.bbb") },
@@ -2672,12 +3029,22 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         "code add : fn (a: s32, b: s32) s32\n"
         "{\n"
         "    return a + b;\n"
+        "}\n"
+        "code identity : fn ($value: $T) $T\n"
+        "{\n"
+        "    return value;\n"
         "}\n");
     String8 namespace_app_source = S8(
         "import math = \"core/math\";\n"
         "code use : fn () s32\n"
         "{\n"
-        "    return math.add(2, 3);\n"
+        "    return math.add(2, 3) + math.identity(5);\n"
+        "}\n");
+    String8 namespace_app_two_source = S8(
+        "import math = \"core/math\";\n"
+        "code use_again : fn () s32\n"
+        "{\n"
+        "    return math.identity(5);\n"
         "}\n");
     TokenizerResult namespace_math_tokens = tokenize(
             arguments->arena,
@@ -2697,6 +3064,15 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             expression_arena,
             namespace_app_source,
             namespace_app_tokens);
+    TokenizerResult namespace_app_two_tokens = tokenize(
+            arguments->arena,
+            namespace_app_two_source.pointer,
+            namespace_app_two_source.length);
+    ParserResult namespace_app_two_parser = parser_parse(
+            arguments->arena,
+            expression_arena,
+            namespace_app_two_source,
+            namespace_app_two_tokens);
     AnalysisSourceInput namespace_math_input = {
         .path = S8("math.bbb"),
         .parser = &namespace_math_parser,
@@ -2704,6 +3080,10 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     AnalysisSourceInput namespace_app_input = {
         .path = S8("app.bbb"),
         .parser = &namespace_app_parser,
+    };
+    AnalysisSourceInput namespace_app_two_input = {
+        .path = S8("app-two.bbb"),
+        .parser = &namespace_app_two_parser,
     };
     AnalysisResult namespace_math = analysis_index_module(
             arguments->arena,
@@ -2717,9 +3097,16 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             S8("app"),
             &namespace_app_input,
             1);
+    AnalysisResult namespace_app_two = analysis_index_module(
+            arguments->arena,
+            (AnalysisModuleId){ .value = 912 },
+            S8("app-two"),
+            &namespace_app_two_input,
+            1);
     AnalysisResult* namespace_modules[] = {
-        &namespace_math,
+        &namespace_app_two,
         &namespace_app,
+        &namespace_math,
     };
     analysis_resolve_program_interfaces(
             arguments->arena,
@@ -2728,14 +3115,33 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     IrModule namespace_module = ir_analyze_and_generate_module(
             arguments->arena,
             &namespace_app);
+    IrModule namespace_math_module = ir_analyze_and_generate_module(
+            arguments->arena,
+            &namespace_math);
+    IrModule namespace_app_two_module = ir_analyze_and_generate_module(
+            arguments->arena,
+            &namespace_app_two);
     BUSTER_TEST(arguments, namespace_app.diagnostic_count == 0);
+    BUSTER_TEST(arguments, namespace_app_two.diagnostic_count == 0);
+    BUSTER_TEST(arguments, namespace_math.diagnostic_count == 0);
+    BUSTER_TEST(arguments, namespace_math.instantiation_count == 1);
+    BUSTER_TEST(arguments,
+            namespace_math.first_instantiation &&
+            namespace_math.first_instantiation->requester_count == 2);
+    BUSTER_TEST(arguments,
+            namespace_math.first_instantiation &&
+            namespace_math.first_instantiation->codegen_owner.value == 910);
     BUSTER_TEST(arguments, namespace_module.lowered_function_count == 1);
     BUSTER_TEST(arguments, namespace_module.function_count == 1);
+    BUSTER_TEST(arguments, namespace_app_two_module.lowered_function_count == 1);
+    BUSTER_TEST(arguments, namespace_app_two_module.function_count == 1);
+    BUSTER_TEST(arguments, namespace_math_module.lowered_function_count == 2);
+    BUSTER_TEST(arguments, namespace_math_module.function_count == 2);
     IrFunction* namespace_use = namespace_module.functions;
     BUSTER_TEST(arguments,
-            ir_test_opcode_count(namespace_use, IR_OPCODE_FUNCTION) == 1);
+            ir_test_opcode_count(namespace_use, IR_OPCODE_FUNCTION) == 2);
     BUSTER_TEST(arguments,
-            ir_test_opcode_count(namespace_use, IR_OPCODE_CALL) == 1);
+            ir_test_opcode_count(namespace_use, IR_OPCODE_CALL) == 2);
     bool found_external_reference = false;
     for (u32 instruction_index = 0;
          instruction_index < namespace_use->instruction_count;
@@ -2745,9 +3151,8 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                 namespace_use->instructions + instruction_index;
         if (instruction->opcode == IR_OPCODE_FUNCTION)
         {
-            found_external_reference =
-                    instruction->entity.module.value == 910 &&
-                    instruction->entity.index.value == 0;
+            found_external_reference |=
+                instruction->entity.module.value == 910;
         }
     }
     BUSTER_TEST(arguments, found_external_reference);
@@ -2755,6 +3160,48 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             &namespace_app,
             &namespace_module);
     BUSTER_TEST(arguments, namespace_validation.error == IR_VALIDATION_NONE);
+    IrValidationResult namespace_app_two_validation = ir_validate_module(
+            &namespace_app_two,
+            &namespace_app_two_module);
+    BUSTER_TEST(arguments,
+            namespace_app_two_validation.error == IR_VALIDATION_NONE);
+    IrValidationResult namespace_math_validation = ir_validate_module(
+            &namespace_math,
+            &namespace_math_module);
+    BUSTER_TEST(arguments, namespace_math_validation.error == IR_VALIDATION_NONE);
+    AnalysisProgram namespace_program_analysis = {
+        .module_results = namespace_modules,
+        .module_count = BUSTER_ARRAY_LENGTH(namespace_modules),
+    };
+    IrProgram namespace_program = ir_generate_program(
+            arguments->arena,
+            &namespace_program_analysis);
+    u32 namespace_specialized_function_count = 0;
+    String8 namespace_specialized_name = {0};
+    for (u32 module_index = 0;
+        module_index < namespace_program.module_count;
+        module_index += 1)
+    {
+        IrModule* program_module = namespace_program.modules + module_index;
+        for (u32 function_index = 0;
+            function_index < program_module->function_count;
+            function_index += 1)
+        {
+            IrFunction* function = program_module->functions + function_index;
+            if (function->instantiation.value !=
+                ANALYSIS_ID_UNDERLYING_INVALID)
+            {
+                namespace_specialized_function_count += 1;
+                namespace_specialized_name = function->name;
+            }
+        }
+    }
+    BUSTER_TEST(arguments, namespace_specialized_function_count == 1);
+    BUSTER_TEST(arguments,
+            namespace_math.first_instantiation &&
+            string_equal(
+                namespace_specialized_name,
+                namespace_math.first_instantiation->symbol_name));
 
     for (u32 fixture_index = 0;
         fixture_index < BUSTER_ARRAY_LENGTH(ir_fixture_tests);
@@ -2783,7 +3230,25 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             1);
         analysis_resolve_module_interfaces(arguments->arena, &analysis);
         IrModule module = ir_analyze_and_generate_module(arguments->arena, &analysis);
-        BUSTER_TEST(arguments, module.function_count == parser.code_count);
+        u32 generic_code_count = 0;
+        for (u32 entity_index = 0;
+            entity_index < analysis.module.entity_count;
+            entity_index += 1)
+        {
+            AnalysisEntity* entity = analysis.module.entities + entity_index;
+            if (entity->kind == ANALYSIS_ENTITY_CODE &&
+                analysis_entity_is_generic(
+                    fixture_temporary.arena,
+                    &analysis,
+                    entity))
+            {
+                generic_code_count += 1;
+            }
+        }
+        BUSTER_TEST(arguments,
+            module.function_count ==
+                parser.code_count - generic_code_count +
+                analysis.instantiation_count);
         BUSTER_TEST(arguments, module.lowered_function_count + module.rejected_function_count <=
             module.function_count);
         IrValidationResult validation = ir_validate_module(&analysis, &module);
@@ -2817,6 +3282,143 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_LOCAL) == 0);
             BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_LOAD) == 0);
             BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_STORE) == 0);
+        }
+        else if (string_equal(
+                fixture.path,
+                S8("tests/basic_compile_time.bbb")))
+        {
+            BUSTER_TEST(arguments, analysis.instantiation_count == 3);
+            BUSTER_TEST(arguments, module.function_count == 4);
+            BUSTER_TEST(arguments, module.lowered_function_count == 4);
+            IrFunction* main_function = 0;
+            u32 specialized_count = 0;
+            for (u32 function_index = 0;
+                function_index < module.function_count;
+                function_index += 1)
+            {
+                IrFunction* function = module.functions + function_index;
+                if (string_equal(function->name, S8("main")))
+                {
+                    main_function = function;
+                }
+                if (function->instantiation.value !=
+                    ANALYSIS_ID_UNDERLYING_INVALID)
+                {
+                    AnalysisInstantiation* instantiation =
+                        ir_instantiation_from_id(
+                            &analysis,
+                            function->instantiation);
+                    AnalysisType* concrete = analysis_type_from_id(
+                        &analysis,
+                        function->type);
+                    BUSTER_TEST(arguments, instantiation != 0);
+                    BUSTER_TEST(arguments,
+                        instantiation &&
+                        string_equal(
+                            function->name,
+                            instantiation->symbol_name));
+                    BUSTER_TEST(arguments,
+                        concrete->kind == ANALYSIS_TYPE_FUNCTION);
+                    BUSTER_TEST(arguments,
+                        concrete->kind != ANALYSIS_TYPE_FUNCTION ||
+                        concrete->as.function.argument_count == 0);
+                    specialized_count += 1;
+                }
+            }
+            BUSTER_TEST(arguments, specialized_count == 3);
+            BUSTER_TEST(arguments, main_function != 0);
+            if (main_function)
+            {
+                u32 call_count = 0;
+                IrInstruction* first_call = 0;
+                AnalysisInstantiationId first = ANALYSIS_INSTANTIATION_ID_INVALID;
+                AnalysisInstantiationId second = ANALYSIS_INSTANTIATION_ID_INVALID;
+                for (u32 instruction_index = 0;
+                    instruction_index < main_function->instruction_count;
+                    instruction_index += 1)
+                {
+                    IrInstruction* instruction =
+                        main_function->instructions + instruction_index;
+                    if (instruction->opcode != IR_OPCODE_CALL)
+                    {
+                        continue;
+                    }
+                    BUSTER_TEST(arguments, instruction->operand_count == 1);
+                    BUSTER_TEST(arguments,
+                        instruction->instantiation.value !=
+                            ANALYSIS_ID_UNDERLYING_INVALID);
+                    if (call_count == 0)
+                    {
+                        first_call = instruction;
+                        first = instruction->instantiation;
+                    }
+                    else if (call_count == 1)
+                    {
+                        second = instruction->instantiation;
+                    }
+                    call_count += 1;
+                }
+                BUSTER_TEST(arguments, call_count == 4);
+                BUSTER_TEST(arguments, first.value == second.value);
+                BUSTER_TEST(arguments, first_call != 0);
+                if (first_call)
+                {
+                    u32 saved_operand_count = first_call->operand_count;
+                    first_call->operand_count = 0;
+                    IrValidationResult missing_target = ir_validate_module(
+                        &analysis,
+                        &module);
+                    BUSTER_TEST(arguments,
+                        missing_target.error == IR_VALIDATION_CALL_TARGET);
+                    first_call->operand_count = saved_operand_count;
+
+                    IrValue* call_target = main_function->values +
+                        first_call->operands[0].value;
+                    AnalysisType* call_signature = analysis_type_from_id(
+                        &analysis,
+                        call_target->type);
+                    AnalysisTypeId saved_return_type =
+                        call_signature->as.function.return_type;
+                    call_signature->as.function.return_type =
+                        analysis.types.builtin.bool_type;
+                    IrValidationResult wrong_signature = ir_validate_module(
+                        &analysis,
+                        &module);
+                    BUSTER_TEST(arguments,
+                        wrong_signature.error ==
+                            IR_VALIDATION_CALL_SIGNATURE);
+                    call_signature->as.function.return_type =
+                        saved_return_type;
+
+                    AnalysisInstantiationId saved_instantiation =
+                        first_call->instantiation;
+                    first_call->instantiation =
+                        ANALYSIS_INSTANTIATION_ID_INVALID;
+                    IrValidationResult wrong_specialization =
+                        ir_validate_module(&analysis, &module);
+                    BUSTER_TEST(arguments,
+                        wrong_specialization.error ==
+                            IR_VALIDATION_CALL_TARGET);
+                    first_call->instantiation = saved_instantiation;
+
+                    IrValidationResult restored = ir_validate_module(
+                        &analysis,
+                        &module);
+                    BUSTER_TEST(arguments,
+                        restored.error == IR_VALIDATION_NONE);
+                }
+            }
+        }
+        else if (string_equal(
+                fixture.path,
+                S8("tests/compile_time_argument_error.bbb")))
+        {
+            BUSTER_TEST(arguments, analysis.instantiation_count == 0);
+            BUSTER_TEST(arguments, module.function_count == 1);
+            BUSTER_TEST(arguments, module.lowered_function_count == 0);
+            BUSTER_TEST(arguments, module.rejected_function_count == 1);
+            BUSTER_TEST(arguments,
+                module.functions[0].state == IR_FUNCTION_REJECTED);
         }
         for (u32 function_index = 0; function_index < module.function_count; function_index += 1)
         {
