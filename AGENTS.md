@@ -212,14 +212,23 @@ has hard design constraints:
   iterable values; stateful iterator begin/next/value instructions do not
   belong in the IR.
 - Native code generation consumes the typed IR directly; do not introduce a
-  second machine IR. The baseline backend assigns IR values to stack slots and
-  resolves block parameters with parallel edge copies before later register
-  allocation. Executable tests use writable memory only while copying code,
-  then switch it to read/execute before calling it.
+  second machine IR. Each backend performs a conservative linear-scan
+  allocation of same-block scalar IR values to backend-owned caller-saved
+  registers. Values crossing calls or control-flow edges, aggregates, and
+  excess live values retain stack slots as spill storage; block parameters are
+  resolved with parallel edge copies. Executable tests use writable memory
+  only while copying code, then switch it to read/execute before calling it.
 - Standalone code generation must compute target layouts before allocating
   locals or aggregate backing storage. ABI decisions come from
   `analysis_classify_function_abi`; backends translate that canonical
   multi-part classification rather than maintaining a second classifier.
+  System V x86-64, Win64, AAPCS64, and Darwin AArch64 classifications include
+  split integer/float aggregates, homogeneous floating aggregates, stack
+  placement, caller-owned copies for indirect arguments, and hidden result
+  pointers (`rdi`, `rcx`, or `x8` as required). Code generation must reject a
+  calling convention that is incompatible with the selected architecture and
+  validate every part against the type layout, register limits, and outgoing
+  stack area before emitting it.
 - Module code generation emits all lowered functions into one image and
   resolves direct-call relocations by `(entity, instantiation)`. Aggregate
   values use frame-owned backing storage while array/slice/range descriptors

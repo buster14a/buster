@@ -10,6 +10,8 @@ struct CodegenBuffer
     u8* bytes;
     u64 count;
     u64 capacity;
+    u8* value_registers;
+    u8 allocated_register_base;
     CodegenError error;
 };
 
@@ -33,6 +35,8 @@ typedef enum X64Register
     X64_REGISTER_RDI,
     X64_REGISTER_R8,
     X64_REGISTER_R9,
+    X64_REGISTER_R10,
+    X64_REGISTER_R11,
 } X64Register;
 
 typedef struct X64Builder X64Builder;
@@ -53,6 +57,10 @@ struct X64Builder
     u32 local_storage_base;
     u32* value_storage_offsets;
     u32* local_storage_offsets;
+    u8* value_registers;
+    s32 hidden_result_displacement;
+    s32 va_register_save_displacement;
+    CodegenAbiSignature signature;
     CodegenAbi abi;
 };
 
@@ -82,10 +90,12 @@ CodegenAbi codegen_abi_for_target(Target target)
     return CODEGEN_ABI_COUNT;
 }
 
-CodegenAbiSignature codegen_classify_signature(
+BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_with_arguments(
     Arena* arena,
     AnalysisResult* analysis,
     AnalysisTypeId function_type_id,
+    AnalysisTypeId* argument_types,
+    u32 argument_count,
     CodegenAbi abi)
 {
     CodegenAbiSignature result = {0};
@@ -115,13 +125,34 @@ CodegenAbiSignature codegen_classify_signature(
             .pointer_size = 8,
             .pointer_alignment = 8,
         });
-    AnalysisFunctionAbi classified =
+    AnalysisFunctionAbi classified = argument_types ?
+        analysis_classify_call_abi(
+            arena,
+            analysis,
+            function_type_id,
+            argument_types,
+            argument_count,
+            target) :
         analysis_classify_function_abi(
             arena,
             analysis,
             function_type_id,
             target);
+    AnalysisAbiConvention expected =
+        abi == CODEGEN_ABI_X86_64_SYSTEM_V ?
+            ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 :
+        abi == CODEGEN_ABI_X86_64_WINDOWS ?
+            ANALYSIS_ABI_CONVENTION_WIN64_X86_64 :
+        abi == CODEGEN_ABI_AARCH64_DARWIN ?
+            ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 :
+            ANALYSIS_ABI_CONVENTION_AAPCS64;
+    if (classified.convention != expected)
+    {
+        return result;
+    }
     result.argument_count = classified.argument_count;
+    result.indirect_result_register =
+        classified.indirect_result_register;
     result.arguments = arena_allocate(
         arena,
         CodegenAbiLocation,
@@ -138,8 +169,33 @@ CodegenAbiSignature codegen_classify_signature(
             value_index == result.argument_count ?
                 &result.result :
                 result.arguments + value_index;
+        AnalysisTypeId value_type_id =
+            value_index == result.argument_count ?
+                function_type->as.function.return_type :
+                (argument_types ?
+                    argument_types[value_index] :
+                    function_type->as.function
+                        .argument_types[value_index]);
+        AnalysisType* value_type =
+            analysis_type_from_id(
+                analysis,
+                value_type_id);
+        if (source->part_count > CODEGEN_ABI_MAX_PARTS)
+        {
+            return result;
+        }
         destination->part_count = source->part_count;
         destination->indirect = source->indirect;
+        destination->indirect_copy_offset =
+            source->indirect_copy_offset;
+        if (source->indirect &&
+            value_index != result.argument_count &&
+            source->indirect_copy_offset +
+                value_type->layout.size >
+                classified.stack_size)
+        {
+            return result;
+        }
         for (u32 part_index = 0;
             part_index < source->part_count;
             part_index += 1)
@@ -148,14 +204,21 @@ CodegenAbiSignature codegen_classify_signature(
                 source->parts + part_index;
             CodegenAbiPart* destination_part =
                 destination->parts + part_index;
+            if (!source_part->size ||
+                source_part->value_offset +
+                    source_part->size >
+                    value_type->layout.size)
+            {
+                return result;
+            }
             destination_part->index =
                 source_part->register_index;
             destination_part->stack_offset =
                 source_part->stack_offset;
+            destination_part->value_offset =
+                source_part->value_offset;
             destination_part->size = source_part->size;
             destination_part->kind =
-                source->indirect ?
-                    CODEGEN_ABI_LOCATION_INDIRECT :
                 source_part->location ==
                     ANALYSIS_ABI_LOCATION_STACK ?
                     CODEGEN_ABI_LOCATION_STACK :
@@ -163,6 +226,37 @@ CodegenAbiSignature codegen_classify_signature(
                     ANALYSIS_ABI_CLASS_FLOAT ?
                     CODEGEN_ABI_LOCATION_FLOAT_REGISTER :
                     CODEGEN_ABI_LOCATION_INTEGER_REGISTER;
+            if (destination_part->kind ==
+                    CODEGEN_ABI_LOCATION_STACK &&
+                destination_part->stack_offset +
+                    destination_part->size >
+                    classified.stack_size)
+            {
+                return result;
+            }
+            if (destination_part->kind !=
+                CODEGEN_ABI_LOCATION_STACK)
+            {
+                u32 limit =
+                    abi == CODEGEN_ABI_X86_64_SYSTEM_V ?
+                        (destination_part->kind ==
+                                CODEGEN_ABI_LOCATION_FLOAT_REGISTER ?
+                            8 :
+                            (value_index ==
+                                    result.argument_count ?
+                                2 :
+                                6)) :
+                    abi == CODEGEN_ABI_X86_64_WINDOWS ?
+                        (value_index ==
+                                result.argument_count ?
+                            1 :
+                            4) :
+                        8;
+                if (destination_part->index >= limit)
+                {
+                    return result;
+                }
+            }
         }
         if (destination->part_count)
         {
@@ -175,7 +269,23 @@ CodegenAbiSignature codegen_classify_signature(
         }
     }
     result.stack_size = classified.stack_size;
+    result.valid = true;
     return result;
+}
+
+CodegenAbiSignature codegen_classify_signature(
+    Arena* arena,
+    AnalysisResult* analysis,
+    AnalysisTypeId function_type_id,
+    CodegenAbi abi)
+{
+    return codegen_classify_signature_with_arguments(
+        arena,
+        analysis,
+        function_type_id,
+        0,
+        0,
+        abi);
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_emit_u8(
@@ -254,7 +364,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_type_is_inline_collection(
     AnalysisType* type)
 {
     return type->kind == ANALYSIS_TYPE_SLICE ||
-        type->kind == ANALYSIS_TYPE_RANGE;
+        type->kind == ANALYSIS_TYPE_RANGE ||
+        type->kind == ANALYSIS_TYPE_VA_LIST;
 }
 
 BUSTER_GLOBAL_LOCAL u32 codegen_type_storage_size(
@@ -311,6 +422,268 @@ BUSTER_GLOBAL_LOCAL AnalysisEntitySemantic* codegen_type_semantic(
         type->as.declaration.index.value;
 }
 
+typedef struct CodegenRegisterAllocation
+    CodegenRegisterAllocation;
+struct CodegenRegisterAllocation
+{
+    u8* registers;
+    u32 allocated_count;
+    u32 spilled_count;
+};
+
+#define CODEGEN_REGISTER_UNALLOCATED UINT8_MAX
+
+BUSTER_GLOBAL_LOCAL bool codegen_register_type_eligible(
+    AnalysisType* type)
+{
+    return type->kind == ANALYSIS_TYPE_BOOL ||
+        type->kind == ANALYSIS_TYPE_INTEGER ||
+        type->kind == ANALYSIS_TYPE_POINTER ||
+        type->kind == ANALYSIS_TYPE_ENUM;
+}
+
+BUSTER_GLOBAL_LOCAL CodegenRegisterAllocation
+codegen_allocate_scalar_registers(
+    Arena* arena,
+    AnalysisResult* analysis,
+    IrFunction* function,
+    u32 register_count)
+{
+    CodegenRegisterAllocation result = {
+        .registers = arena_allocate(
+            arena,
+            u8,
+            function->value_count),
+    };
+    u32* starts = arena_allocate(
+        arena,
+        u32,
+        function->value_count);
+    u32* ends = arena_allocate(
+        arena,
+        u32,
+        function->value_count);
+    u32* blocks = arena_allocate(
+        arena,
+        u32,
+        function->value_count);
+    u32* instruction_blocks = arena_allocate(
+        arena,
+        u32,
+        function->instruction_count);
+    bool* candidates = arena_allocate(
+        arena,
+        bool,
+        function->value_count);
+    bool* eligible = arena_allocate(
+        arena,
+        bool,
+        function->value_count);
+    memset(
+        candidates,
+        0,
+        sizeof(*candidates) * function->value_count);
+    memset(
+        eligible,
+        0,
+        sizeof(*eligible) * function->value_count);
+    for (u32 value_index = 0;
+        value_index < function->value_count;
+        value_index += 1)
+    {
+        result.registers[value_index] =
+            CODEGEN_REGISTER_UNALLOCATED;
+        blocks[value_index] = UINT32_MAX;
+    }
+    for (u32 block_index = 0;
+        block_index < function->block_count;
+        block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        for (IrInstructionId id = block->first_instruction;
+            id.value != IR_ID_UNDERLYING_INVALID;
+            id = function->instructions[id.value].next)
+        {
+            instruction_blocks[id.value] = block_index;
+            IrInstruction* instruction =
+                function->instructions + id.value;
+            if (instruction->result.value ==
+                IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            IrValueId value_id = instruction->result;
+            IrValue* value =
+                function->values + value_id.value;
+            AnalysisType* type = analysis_type_from_id(
+                analysis,
+                value->type);
+            candidates[value_id.value] =
+                value->category == IR_VALUE_VALUE &&
+                codegen_register_type_eligible(type);
+            eligible[value_id.value] =
+                candidates[value_id.value];
+            starts[value_id.value] = id.value;
+            ends[value_id.value] = id.value;
+            blocks[value_id.value] = block_index;
+        }
+    }
+    for (u32 instruction_index = 0;
+        instruction_index < function->instruction_count;
+        instruction_index += 1)
+    {
+        IrInstruction* instruction =
+            function->instructions + instruction_index;
+        for (u32 operand_index = 0;
+            operand_index < instruction->operand_count;
+            operand_index += 1)
+        {
+            IrValueId operand =
+                instruction->operands[operand_index];
+            if (operand.value >= function->value_count ||
+                !candidates[operand.value])
+            {
+                continue;
+            }
+            if (blocks[operand.value] !=
+                instruction_blocks[instruction_index])
+            {
+                candidates[operand.value] = false;
+                continue;
+            }
+            ends[operand.value] = BUSTER_MAX(
+                ends[operand.value],
+                instruction_index);
+        }
+    }
+    for (u32 block_index = 0;
+        block_index < function->block_count;
+        block_index += 1)
+    {
+        for (IrBlockParameter* parameter =
+                function->blocks[block_index].first_parameter;
+            parameter;
+            parameter = parameter->next)
+        {
+            for (IrIncoming* incoming =
+                    parameter->first_incoming;
+                incoming;
+                incoming = incoming->next)
+            {
+                if (incoming->value.value <
+                    function->value_count)
+                {
+                    candidates[incoming->value.value] =
+                        false;
+                }
+            }
+        }
+    }
+    for (u32 value_index = 0;
+        value_index < function->value_count;
+        value_index += 1)
+    {
+        if (!candidates[value_index] ||
+            starts[value_index] == ends[value_index])
+        {
+            candidates[value_index] = false;
+            continue;
+        }
+        for (u32 instruction_index =
+                starts[value_index] + 1;
+            instruction_index < ends[value_index];
+            instruction_index += 1)
+        {
+            if (function->instructions[
+                    instruction_index].opcode ==
+                IR_OPCODE_CALL)
+            {
+                candidates[value_index] = false;
+                break;
+            }
+        }
+    }
+    IrValueId* active_values = arena_allocate(
+        arena,
+        IrValueId,
+        register_count);
+    u32* active_ends = arena_allocate(
+        arena,
+        u32,
+        register_count);
+    for (u32 register_index = 0;
+        register_index < register_count;
+        register_index += 1)
+    {
+        active_values[register_index] =
+            IR_VALUE_ID_INVALID;
+    }
+    for (u32 instruction_index = 0;
+        instruction_index < function->instruction_count;
+        instruction_index += 1)
+    {
+        for (u32 register_index = 0;
+            register_index < register_count;
+            register_index += 1)
+        {
+            if (active_values[register_index].value !=
+                    IR_ID_UNDERLYING_INVALID &&
+                active_ends[register_index] <
+                    instruction_index)
+            {
+                active_values[register_index] =
+                    IR_VALUE_ID_INVALID;
+            }
+        }
+        IrInstruction* instruction =
+            function->instructions + instruction_index;
+        if (instruction->result.value ==
+                IR_ID_UNDERLYING_INVALID ||
+            !candidates[instruction->result.value])
+        {
+            continue;
+        }
+        bool assigned = false;
+        for (u32 register_index = 0;
+            register_index < register_count;
+            register_index += 1)
+        {
+            if (active_values[register_index].value !=
+                IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            active_values[register_index] =
+                instruction->result;
+            active_ends[register_index] =
+                ends[instruction->result.value];
+            result.registers[
+                instruction->result.value] =
+                (u8)register_index;
+            result.allocated_count += 1;
+            assigned = true;
+            break;
+        }
+        if (!assigned)
+        {
+            continue;
+        }
+    }
+    for (u32 value_index = 0;
+        value_index < function->value_count;
+        value_index += 1)
+    {
+        if (eligible[value_index] &&
+            starts[value_index] != ends[value_index] &&
+            result.registers[value_index] ==
+                CODEGEN_REGISTER_UNALLOCATED)
+        {
+            result.spilled_count += 1;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void x64_emit_load(
     X64Builder* builder,
     X64Register target,
@@ -339,6 +712,56 @@ BUSTER_GLOBAL_LOCAL void x64_emit_store(
         &builder->buffer,
         (u8)(0x85 | (register_bits << 3)));
     codegen_emit_u32(&builder->buffer, (u32)displacement);
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_move_register(
+    X64Builder* builder,
+    X64Register target,
+    X64Register source)
+{
+    if (target == source)
+    {
+        return;
+    }
+    u8 rex = 0x48;
+    rex |= source >= X64_REGISTER_R8 ? 0x04 : 0;
+    rex |= target >= X64_REGISTER_R8 ? 0x01 : 0;
+    codegen_emit_u8(&builder->buffer, rex);
+    codegen_emit_u8(&builder->buffer, 0x89);
+    codegen_emit_u8(
+        &builder->buffer,
+        (u8)(0xc0 |
+            ((source & 7) << 3) |
+            (target & 7)));
+}
+
+BUSTER_GLOBAL_LOCAL X64Register x64_allocated_register(
+    X64Builder* builder,
+    IrValueId value)
+{
+    BUSTER_CHECK(
+        builder->value_registers[value.value] == 0);
+    return X64_REGISTER_R10;
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_load_value(
+    X64Builder* builder,
+    X64Register target,
+    IrValueId value)
+{
+    if (builder->value_registers[value.value] !=
+        CODEGEN_REGISTER_UNALLOCATED)
+    {
+        x64_emit_move_register(
+            builder,
+            target,
+            x64_allocated_register(builder, value));
+        return;
+    }
+    x64_emit_load(
+        builder,
+        target,
+        x64_value_displacement(value));
 }
 
 BUSTER_GLOBAL_LOCAL void x64_emit_constant_register(
@@ -477,6 +900,147 @@ BUSTER_GLOBAL_LOCAL void x64_emit_store_memory_rcx(
     }
 }
 
+BUSTER_GLOBAL_LOCAL void x64_emit_load_memory(
+    X64Builder* builder,
+    X64Register target,
+    X64Register base,
+    u32 offset,
+    u32 size)
+{
+    u8 rex = 0x40;
+    rex |= target >= X64_REGISTER_R8 ? 0x04 : 0;
+    rex |= base >= X64_REGISTER_R8 ? 0x01 : 0;
+    if (size == 8)
+    {
+        rex |= 0x08;
+    }
+    if (size == 1 || size == 2)
+    {
+        if (size == 2)
+        {
+            codegen_emit_u8(&builder->buffer, 0x66);
+        }
+        if (rex != 0x40)
+        {
+            codegen_emit_u8(&builder->buffer, rex);
+        }
+        codegen_emit_u8(&builder->buffer, 0x0f);
+        codegen_emit_u8(
+            &builder->buffer,
+            size == 1 ? 0xb6 : 0xb7);
+    }
+    else
+    {
+        if (rex != 0x40)
+        {
+            codegen_emit_u8(&builder->buffer, rex);
+        }
+        codegen_emit_u8(&builder->buffer, 0x8b);
+    }
+    codegen_emit_u8(
+        &builder->buffer,
+        (u8)(0x80 |
+            ((target & 7) << 3) |
+            (base & 7)));
+    codegen_emit_u32(&builder->buffer, offset);
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_store_memory(
+    X64Builder* builder,
+    X64Register base,
+    u32 offset,
+    X64Register source,
+    u32 size)
+{
+    if (size == 2)
+    {
+        codegen_emit_u8(&builder->buffer, 0x66);
+    }
+    u8 rex = 0x40;
+    rex |= source >= X64_REGISTER_R8 ? 0x04 : 0;
+    rex |= base >= X64_REGISTER_R8 ? 0x01 : 0;
+    rex |= size == 8 ? 0x08 : 0;
+    if (rex != 0x40)
+    {
+        codegen_emit_u8(&builder->buffer, rex);
+    }
+    codegen_emit_u8(
+        &builder->buffer,
+        size == 1 ? 0x88 : 0x89);
+    codegen_emit_u8(
+        &builder->buffer,
+        (u8)(0x80 |
+            ((source & 7) << 3) |
+            (base & 7)));
+    codegen_emit_u32(&builder->buffer, offset);
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_load_float_bits(
+    X64Builder* builder,
+    u32 target,
+    X64Register base,
+    u32 offset,
+    u32 size)
+{
+    codegen_emit_u8(&builder->buffer, 0xf3);
+    if (base >= X64_REGISTER_R8)
+    {
+        codegen_emit_u8(&builder->buffer, 0x41);
+    }
+    codegen_emit_u8(&builder->buffer, 0x0f);
+    codegen_emit_u8(
+        &builder->buffer,
+        size <= 4 ? 0x10 : 0x7e);
+    codegen_emit_u8(
+        &builder->buffer,
+        (u8)(0x80 |
+            ((target & 7) << 3) |
+            (base & 7)));
+    codegen_emit_u32(&builder->buffer, offset);
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_store_float_bits(
+    X64Builder* builder,
+    X64Register base,
+    u32 offset,
+    u32 source,
+    u32 size)
+{
+    codegen_emit_u8(
+        &builder->buffer,
+        size <= 4 ? 0xf3 : 0x66);
+    if (base >= X64_REGISTER_R8)
+    {
+        codegen_emit_u8(&builder->buffer, 0x41);
+    }
+    codegen_emit_u8(&builder->buffer, 0x0f);
+    codegen_emit_u8(
+        &builder->buffer,
+        size <= 4 ? 0x11 : 0xd6);
+    codegen_emit_u8(
+        &builder->buffer,
+        (u8)(0x80 |
+            ((source & 7) << 3) |
+            (base & 7)));
+    codegen_emit_u32(&builder->buffer, offset);
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_rsp_address(
+    X64Builder* builder,
+    X64Register target,
+    u32 offset)
+{
+    codegen_emit_u8(
+        &builder->buffer,
+        target >= X64_REGISTER_R8 ? 0x4c : 0x48);
+    codegen_emit_u8(&builder->buffer, 0x8d);
+    codegen_emit_u8(
+        &builder->buffer,
+        (u8)(0x84 | ((target & 7) << 3)));
+    codegen_emit_u8(&builder->buffer, 0x24);
+    codegen_emit_u32(&builder->buffer, offset);
+}
+
 BUSTER_GLOBAL_LOCAL bool x64_emit_collection_component(
     X64Builder* builder,
     IrValueId base_id,
@@ -585,6 +1149,309 @@ BUSTER_GLOBAL_LOCAL void x64_emit_float_store(
     codegen_emit_u32(&builder->buffer, (u32)displacement);
 }
 
+BUSTER_GLOBAL_LOCAL X64Register x64_abi_integer_argument_register(
+    CodegenAbi abi,
+    u32 index)
+{
+    X64Register system_v[] = {
+        X64_REGISTER_RDI,
+        X64_REGISTER_RSI,
+        X64_REGISTER_RDX,
+        X64_REGISTER_RCX,
+        X64_REGISTER_R8,
+        X64_REGISTER_R9,
+    };
+    X64Register windows[] = {
+        X64_REGISTER_RCX,
+        X64_REGISTER_RDX,
+        X64_REGISTER_R8,
+        X64_REGISTER_R9,
+    };
+    return abi == CODEGEN_ABI_X86_64_WINDOWS ?
+        windows[index] :
+        system_v[index];
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_initialize_aggregate_result(
+    X64Builder* builder,
+    IrValueId value)
+{
+    x64_emit_address(
+        builder,
+        X64_REGISTER_RAX,
+        -(s32)builder->value_storage_offsets[value.value]);
+    x64_emit_store(
+        builder,
+        X64_REGISTER_RAX,
+        x64_value_displacement_component(value, 0));
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_load_abi_part(
+    X64Builder* builder,
+    IrValueId value,
+    AnalysisType* type,
+    CodegenAbiPart* part,
+    X64Register integer_target,
+    u32 float_target)
+{
+    if (codegen_type_is_indirect_value(type))
+    {
+        x64_emit_load(
+            builder,
+            X64_REGISTER_R11,
+            x64_value_displacement_component(value, 0));
+        if (part->kind ==
+            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+        {
+            x64_emit_load_float_bits(
+                builder,
+                float_target,
+                X64_REGISTER_R11,
+                part->value_offset,
+                part->size);
+        }
+        else
+        {
+            x64_emit_load_memory(
+                builder,
+                integer_target,
+                X64_REGISTER_R11,
+                part->value_offset,
+                part->size);
+        }
+        return;
+    }
+    if (codegen_type_is_inline_collection(type))
+    {
+        u32 component = part->value_offset / 8;
+        if (type->kind == ANALYSIS_TYPE_RANGE)
+        {
+            AnalysisType* element = analysis_type_from_id(
+                builder->analysis,
+                type->as.element_type);
+            component = part->value_offset /
+                BUSTER_MAX(
+                    codegen_type_storage_size(element),
+                    1);
+        }
+        if (part->kind ==
+            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+        {
+            x64_emit_float_load(
+                builder,
+                float_target,
+                x64_value_displacement_component(
+                    value,
+                    component),
+                part->size * 8);
+        }
+        else
+        {
+            x64_emit_load(
+                builder,
+                integer_target,
+                x64_value_displacement_component(
+                    value,
+                    component));
+            if (type->kind == ANALYSIS_TYPE_RANGE)
+            {
+                AnalysisType* element =
+                    analysis_type_from_id(
+                        builder->analysis,
+                        type->as.element_type);
+                u32 element_size =
+                    codegen_type_storage_size(element);
+                if (element_size < 8 &&
+                    part->size > element_size)
+                {
+                    u8 target_rex =
+                        integer_target >=
+                                X64_REGISTER_R8 ?
+                            0x49 :
+                            0x48;
+                    u8 target_bits =
+                        (u8)(integer_target & 7);
+                    u8 shift =
+                        (u8)(element_size * 8);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        target_rex);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        0xc1);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        (u8)(0xe0 | target_bits));
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        (u8)(64 - shift));
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        target_rex);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        0xc1);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        (u8)(0xe8 | target_bits));
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        (u8)(64 - shift));
+                    x64_emit_load(
+                        builder,
+                        X64_REGISTER_R11,
+                        x64_value_displacement_component(
+                            value,
+                            component + 1));
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        0x49);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        0xc1);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        0xe3);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        shift);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        integer_target >=
+                                X64_REGISTER_R8 ?
+                            0x4d :
+                            0x4c);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        0x09);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        (u8)(0xd8 | target_bits));
+                }
+            }
+        }
+        return;
+    }
+    if (part->kind == CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+    {
+        x64_emit_float_load(
+            builder,
+            float_target,
+            x64_value_displacement(value),
+            type->as.float_bit_width);
+    }
+    else
+    {
+        x64_emit_load_value(builder, integer_target, value);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_store_abi_part(
+    X64Builder* builder,
+    IrValueId value,
+    AnalysisType* type,
+    CodegenAbiPart* part,
+    X64Register integer_source,
+    u32 float_source)
+{
+    if (codegen_type_is_indirect_value(type))
+    {
+        x64_emit_load(
+            builder,
+            X64_REGISTER_R11,
+            x64_value_displacement_component(value, 0));
+        if (part->kind ==
+            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+        {
+            x64_emit_store_float_bits(
+                builder,
+                X64_REGISTER_R11,
+                part->value_offset,
+                float_source,
+                part->size);
+        }
+        else
+        {
+            x64_emit_store_memory(
+                builder,
+                X64_REGISTER_R11,
+                part->value_offset,
+                integer_source,
+                part->size);
+        }
+        return;
+    }
+    if (codegen_type_is_inline_collection(type))
+    {
+        u32 component = part->value_offset / 8;
+        if (type->kind == ANALYSIS_TYPE_RANGE)
+        {
+            AnalysisType* element = analysis_type_from_id(
+                builder->analysis,
+                type->as.element_type);
+            component = part->value_offset /
+                BUSTER_MAX(
+                    codegen_type_storage_size(element),
+                    1);
+        }
+        if (part->kind ==
+            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+        {
+            x64_emit_float_store(
+                builder,
+                float_source,
+                x64_value_displacement_component(
+                    value,
+                    component),
+                part->size * 8);
+        }
+        else
+        {
+            x64_emit_store(
+                builder,
+                integer_source,
+                x64_value_displacement_component(
+                    value,
+                    component));
+            if (type->kind == ANALYSIS_TYPE_RANGE)
+            {
+                AnalysisType* element =
+                    analysis_type_from_id(
+                        builder->analysis,
+                        type->as.element_type);
+                u32 element_size =
+                    codegen_type_storage_size(element);
+                if (element_size < 8 &&
+                    part->size > element_size)
+                {
+                    x64_emit_move_register(
+                        builder,
+                        X64_REGISTER_R11,
+                        integer_source);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        0x49);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        0xc1);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        0xeb);
+                    codegen_emit_u8(
+                        &builder->buffer,
+                        (u8)(element_size * 8));
+                    x64_emit_store(
+                        builder,
+                        X64_REGISTER_R11,
+                        x64_value_displacement_component(
+                            value,
+                            component + 1));
+                }
+            }
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void x64_emit_stack_adjust(
     X64Builder* builder,
     u32 size,
@@ -642,10 +1509,25 @@ BUSTER_GLOBAL_LOCAL void x64_emit_store_result(
 {
     if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
     {
-        x64_emit_store(
-            builder,
-            X64_REGISTER_RAX,
-            x64_value_displacement(instruction->result));
+        if (builder->value_registers[
+                instruction->result.value] !=
+            CODEGEN_REGISTER_UNALLOCATED)
+        {
+            x64_emit_move_register(
+                builder,
+                x64_allocated_register(
+                    builder,
+                    instruction->result),
+                X64_REGISTER_RAX);
+        }
+        else
+        {
+            x64_emit_store(
+                builder,
+                X64_REGISTER_RAX,
+                x64_value_displacement(
+                    instruction->result));
+        }
     }
 }
 
@@ -807,20 +1689,20 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_integer_binary(
 {
     if (instruction->binary_operation == IR_BINARY_RANGE)
     {
-        x64_emit_load(
+        x64_emit_load_value(
             builder,
             X64_REGISTER_RAX,
-            x64_value_displacement(instruction->operands[0]));
+            instruction->operands[0]);
         x64_emit_store(
             builder,
             X64_REGISTER_RAX,
             x64_value_displacement_component(
                 instruction->result,
                 0));
-        x64_emit_load(
+        x64_emit_load_value(
             builder,
             X64_REGISTER_RAX,
-            x64_value_displacement(instruction->operands[1]));
+            instruction->operands[1]);
         x64_emit_store(
             builder,
             X64_REGISTER_RAX,
@@ -837,14 +1719,14 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_integer_binary(
                 2));
         return true;
     }
-    x64_emit_load(
+    x64_emit_load_value(
         builder,
         X64_REGISTER_RAX,
-        x64_value_displacement(instruction->operands[0]));
-    x64_emit_load(
+        instruction->operands[0]);
+    x64_emit_load_value(
         builder,
         X64_REGISTER_RCX,
-        x64_value_displacement(instruction->operands[1]));
+        instruction->operands[1]);
     switch (instruction->binary_operation)
     {
         case IR_BINARY_INTEGER_ADD:
@@ -1114,10 +1996,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             AnalysisType* type = analysis_type_from_id(
                 builder->analysis,
                 instruction->type);
-            x64_emit_load(
+            x64_emit_load_value(
                 builder,
                 X64_REGISTER_RAX,
-                x64_value_displacement(instruction->operands[0]));
+                instruction->operands[0]);
             if (codegen_type_is_indirect_value(type))
             {
                 x64_emit_store_result(builder, instruction);
@@ -1162,10 +2044,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                 builder->analysis,
                 builder->function->values[
                     instruction->operands[1].value].type);
-            x64_emit_load(
+            x64_emit_load_value(
                 builder,
                 X64_REGISTER_RAX,
-                x64_value_displacement(instruction->operands[0]));
+                instruction->operands[0]);
             if (codegen_type_is_indirect_value(type))
             {
                 x64_emit_load(
@@ -1200,10 +2082,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             }
             else
             {
-                x64_emit_load(
+                x64_emit_load_value(
                     builder,
                     X64_REGISTER_RCX,
-                    x64_value_displacement(instruction->operands[1]));
+                    instruction->operands[1]);
                 x64_emit_store_memory_rcx(
                     builder,
                     codegen_type_storage_size(type));
@@ -1231,6 +2113,119 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             }
             CodegenAbiLocation* location =
                 signature.arguments + argument;
+            if (codegen_type_is_indirect_value(
+                    argument_type) ||
+                codegen_type_is_inline_collection(
+                    argument_type))
+            {
+                if (codegen_type_is_indirect_value(
+                        argument_type))
+                {
+                    x64_emit_initialize_aggregate_result(
+                        builder,
+                        instruction->result);
+                }
+                if (location->indirect)
+                {
+                    CodegenAbiPart* part =
+                        location->parts;
+                    if (part->kind ==
+                        CODEGEN_ABI_LOCATION_STACK)
+                    {
+                        x64_emit_load(
+                            builder,
+                            X64_REGISTER_RCX,
+                            (s32)part->stack_offset + 16);
+                    }
+                    else
+                    {
+                        x64_emit_move_register(
+                            builder,
+                            X64_REGISTER_RCX,
+                            x64_abi_integer_argument_register(
+                                builder->abi,
+                                part->index));
+                    }
+                    x64_emit_load(
+                        builder,
+                        X64_REGISTER_RAX,
+                        x64_value_displacement_component(
+                            instruction->result,
+                            0));
+                    x64_emit_copy_memory(
+                        builder,
+                        codegen_type_storage_size(
+                            argument_type));
+                    break;
+                }
+                if (codegen_type_is_indirect_value(
+                        argument_type) &&
+                    location->part_count &&
+                    location->parts[0].kind ==
+                        CODEGEN_ABI_LOCATION_STACK)
+                {
+                    x64_emit_load(
+                        builder,
+                        X64_REGISTER_RAX,
+                        x64_value_displacement_component(
+                            instruction->result,
+                            0));
+                    x64_emit_address(
+                        builder,
+                        X64_REGISTER_RCX,
+                        (s32)location->parts[0]
+                            .stack_offset + 16);
+                    x64_emit_copy_memory(
+                        builder,
+                        codegen_type_storage_size(
+                            argument_type));
+                    break;
+                }
+                for (u32 part_index = 0;
+                    part_index < location->part_count;
+                    part_index += 1)
+                {
+                    CodegenAbiPart* part =
+                        location->parts + part_index;
+                    if (part->kind ==
+                        CODEGEN_ABI_LOCATION_STACK)
+                    {
+                        x64_emit_load(
+                            builder,
+                            X64_REGISTER_RDX,
+                            (s32)part->stack_offset + 16);
+                    }
+                    else if (part->kind ==
+                        CODEGEN_ABI_LOCATION_INTEGER_REGISTER)
+                    {
+                        x64_emit_move_register(
+                            builder,
+                            X64_REGISTER_RDX,
+                            x64_abi_integer_argument_register(
+                                builder->abi,
+                                part->index));
+                    }
+                    else
+                    {
+                        x64_emit_store_abi_part(
+                            builder,
+                            instruction->result,
+                            argument_type,
+                            part,
+                            X64_REGISTER_RDX,
+                            part->index);
+                        continue;
+                    }
+                    x64_emit_store_abi_part(
+                        builder,
+                        instruction->result,
+                        argument_type,
+                        part,
+                        X64_REGISTER_RDX,
+                        0);
+                }
+                break;
+            }
             if (location->part_count != 1)
             {
                 return false;
@@ -1245,20 +2240,6 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                     argument_type->as.float_bit_width);
                 break;
             }
-            X64Register sysv[] = {
-                X64_REGISTER_RDI,
-                X64_REGISTER_RSI,
-                X64_REGISTER_RDX,
-                X64_REGISTER_RCX,
-                X64_REGISTER_R8,
-                X64_REGISTER_R9,
-            };
-            X64Register windows[] = {
-                X64_REGISTER_RCX,
-                X64_REGISTER_RDX,
-                X64_REGISTER_R8,
-                X64_REGISTER_R9,
-            };
             if (location->kind ==
                 CODEGEN_ABI_LOCATION_STACK)
             {
@@ -1298,14 +2279,15 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             {
                 return false;
             }
-            X64Register source = builder->abi ==
-                CODEGEN_ABI_X86_64_WINDOWS ?
-                windows[location->index] :
-                sysv[location->index];
-            x64_emit_store(
+            X64Register source =
+                x64_abi_integer_argument_register(
+                    builder->abi,
+                    location->index);
+            x64_emit_move_register(
                 builder,
-                source,
-                x64_value_displacement(instruction->result));
+                X64_REGISTER_RAX,
+                source);
+            x64_emit_store_result(builder, instruction);
         } break;
         case IR_OPCODE_CONSTANT_INTEGER:
         case IR_OPCODE_ENUM:
@@ -1345,10 +2327,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
         } break;
         case IR_OPCODE_UNARY:
         {
-            x64_emit_load(
+            x64_emit_load_value(
                 builder,
                 X64_REGISTER_RAX,
-                x64_value_displacement(instruction->operands[0]));
+                instruction->operands[0]);
             if (instruction->unary_operation ==
                 IR_UNARY_FLOAT_NEGATE)
             {
@@ -1419,12 +2401,39 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             AnalysisTypeId function_type_id =
                 builder->function->values[
                     instruction->operands[0].value].type;
+            AnalysisType* function_type =
+                analysis_type_from_id(
+                    builder->analysis,
+                    function_type_id);
+            u32 call_argument_count =
+                instruction->operand_count - 1;
+            AnalysisTypeId* call_argument_types =
+                arena_allocate(
+                    builder->arena,
+                    AnalysisTypeId,
+                    call_argument_count);
+            for (u32 index = 0;
+                index < call_argument_count;
+                index += 1)
+            {
+                call_argument_types[index] =
+                    builder->function->values[
+                        instruction->operands[index + 1].value]
+                        .type;
+            }
             CodegenAbiSignature signature =
-                codegen_classify_signature(
+                codegen_classify_signature_with_arguments(
                     builder->arena,
                     builder->analysis,
                     function_type_id,
+                    function_type->as.function.is_variadic ?
+                        call_argument_types : 0,
+                    call_argument_count,
                     builder->abi);
+            if (!signature.valid)
+            {
+                return false;
+            }
             if (signature.argument_count !=
                 instruction->operand_count - 1)
             {
@@ -1444,6 +2453,45 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                 X64_REGISTER_R8,
                 X64_REGISTER_R9,
             };
+            AnalysisType* call_result_type =
+                instruction->result.value !=
+                        IR_ID_UNDERLYING_INVALID ?
+                    analysis_type_from_id(
+                        builder->analysis,
+                        instruction->type) :
+                    0;
+            if (call_result_type &&
+                (codegen_type_is_indirect_value(
+                    call_result_type) ||
+                 codegen_type_is_inline_collection(
+                    call_result_type)))
+            {
+                if (codegen_type_is_indirect_value(
+                        call_result_type))
+                {
+                    x64_emit_initialize_aggregate_result(
+                        builder,
+                        instruction->result);
+                }
+                if (signature.result.indirect)
+                {
+                    X64Register hidden_register =
+                        x64_abi_integer_argument_register(
+                            builder->abi,
+                            signature
+                                .indirect_result_register);
+                    if (codegen_type_is_indirect_value(
+                            call_result_type))
+                    {
+                        x64_emit_load(
+                            builder,
+                            hidden_register,
+                            x64_value_displacement_component(
+                                instruction->result,
+                                0));
+                    }
+                }
+            }
             x64_emit_stack_adjust(
                 builder,
                 signature.stack_size,
@@ -1454,19 +2502,133 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             {
                 CodegenAbiLocation* location =
                     signature.arguments + index;
-                if (location->part_count != 1 ||
-                    location->kind ==
-                        CODEGEN_ABI_LOCATION_INDIRECT)
-                {
-                    return false;
-                }
-                IrValueId operand =
-                    instruction->operands[index + 1];
                 AnalysisType* operand_type =
                     analysis_type_from_id(
                         builder->analysis,
                         builder->function->values[
-                            operand.value].type);
+                            instruction->operands[
+                                index + 1].value].type);
+                IrValueId operand =
+                    instruction->operands[index + 1];
+                if (location->indirect)
+                {
+                    x64_emit_rsp_address(
+                        builder,
+                        X64_REGISTER_RAX,
+                        location->indirect_copy_offset);
+                    x64_emit_load(
+                        builder,
+                        X64_REGISTER_RCX,
+                        x64_value_displacement_component(
+                            operand,
+                            0));
+                    x64_emit_copy_memory(
+                        builder,
+                        codegen_type_storage_size(
+                            operand_type));
+                    CodegenAbiPart* part =
+                        location->parts;
+                    if (part->kind ==
+                        CODEGEN_ABI_LOCATION_STACK)
+                    {
+                        x64_emit_store_rsp(
+                            builder,
+                            X64_REGISTER_RAX,
+                            part->stack_offset);
+                    }
+                    else
+                    {
+                        x64_emit_move_register(
+                            builder,
+                            x64_abi_integer_argument_register(
+                                builder->abi,
+                                part->index),
+                            X64_REGISTER_RAX);
+                    }
+                    continue;
+                }
+                if (codegen_type_is_indirect_value(
+                        operand_type) &&
+                    location->part_count &&
+                    location->parts[0].kind ==
+                        CODEGEN_ABI_LOCATION_STACK)
+                {
+                    x64_emit_rsp_address(
+                        builder,
+                        X64_REGISTER_RAX,
+                        location->parts[0].stack_offset);
+                    x64_emit_load(
+                        builder,
+                        X64_REGISTER_RCX,
+                        x64_value_displacement_component(
+                            operand,
+                            0));
+                    x64_emit_copy_memory(
+                        builder,
+                        codegen_type_storage_size(
+                            operand_type));
+                    continue;
+                }
+                if (location->part_count != 1 &&
+                    !codegen_type_is_indirect_value(
+                        operand_type) &&
+                    !codegen_type_is_inline_collection(
+                        operand_type))
+                {
+                    return false;
+                }
+                if (codegen_type_is_indirect_value(
+                        operand_type) ||
+                    codegen_type_is_inline_collection(
+                        operand_type))
+                {
+                    for (u32 part_index = 0;
+                        part_index < location->part_count;
+                        part_index += 1)
+                    {
+                        CodegenAbiPart* part =
+                            location->parts + part_index;
+                        if (part->kind ==
+                            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+                        {
+                            x64_emit_load_abi_part(
+                                builder,
+                                operand,
+                                operand_type,
+                                part,
+                                X64_REGISTER_RAX,
+                                part->index);
+                        }
+                        else
+                        {
+                            x64_emit_load_abi_part(
+                                builder,
+                                operand,
+                                operand_type,
+                                part,
+                                X64_REGISTER_RAX,
+                                0);
+                            if (part->kind ==
+                                CODEGEN_ABI_LOCATION_STACK)
+                            {
+                                x64_emit_store_rsp(
+                                    builder,
+                                    X64_REGISTER_RAX,
+                                    part->stack_offset);
+                            }
+                            else
+                            {
+                                x64_emit_move_register(
+                                    builder,
+                                    x64_abi_integer_argument_register(
+                                        builder->abi,
+                                        part->index),
+                                    X64_REGISTER_RAX);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if (location->kind ==
                     CODEGEN_ABI_LOCATION_STACK)
                 {
@@ -1486,10 +2648,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                     }
                     else
                     {
-                        x64_emit_load(
+                        x64_emit_load_value(
                             builder,
                             X64_REGISTER_RAX,
-                            x64_value_displacement(operand));
+                            operand);
                         x64_emit_store_rsp(
                             builder,
                             X64_REGISTER_RAX,
@@ -1504,6 +2666,17 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                         location->index,
                         x64_value_displacement(operand),
                         operand_type->as.float_bit_width);
+                    if (builder->abi ==
+                            CODEGEN_ABI_X86_64_WINDOWS &&
+                        function_type->as.function.is_variadic &&
+                        index >=
+                            function_type->as.function.argument_count)
+                    {
+                        x64_emit_load_value(
+                            builder,
+                            windows_registers[location->index],
+                            operand);
+                    }
                 }
                 else
                 {
@@ -1523,11 +2696,40 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                     {
                         return false;
                     }
-                    x64_emit_load(
+                    x64_emit_load_value(
                         builder,
                         registers[location->index],
-                        x64_value_displacement(operand));
+                        operand);
                 }
+            }
+            if (builder->abi ==
+                    CODEGEN_ABI_X86_64_SYSTEM_V &&
+                function_type->as.function.is_variadic)
+            {
+                u32 vector_register_count = 0;
+                for (u32 index = 0;
+                    index < signature.argument_count;
+                    index += 1)
+                {
+                    CodegenAbiLocation* location =
+                        signature.arguments + index;
+                    for (u32 part = 0;
+                        part < location->part_count;
+                        part += 1)
+                    {
+                        if (location->parts[part].kind ==
+                            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+                        {
+                            vector_register_count = BUSTER_MAX(
+                                vector_register_count,
+                                location->parts[part].index + 1);
+                        }
+                    }
+                }
+                codegen_emit_u8(&builder->buffer, 0xb8);
+                codegen_emit_u32(
+                    &builder->buffer,
+                    vector_register_count);
             }
             codegen_emit_u8(&builder->buffer, 0xe8);
             x64_call_relocation_add(builder, instruction);
@@ -1542,7 +2744,47 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                     analysis_type_from_id(
                         builder->analysis,
                         instruction->type);
-                if (result_type->kind == ANALYSIS_TYPE_FLOAT)
+                if (signature.result.indirect)
+                {
+                    if (builder->abi ==
+                        CODEGEN_ABI_X86_64_WINDOWS)
+                    {
+                        x64_emit_load(
+                            builder,
+                            X64_REGISTER_RAX,
+                            x64_value_displacement_component(
+                                instruction->result,
+                                0));
+                    }
+                }
+                else if (codegen_type_is_indirect_value(
+                            result_type) ||
+                         codegen_type_is_inline_collection(
+                            result_type))
+                {
+                    X64Register integer_results[] = {
+                        X64_REGISTER_RAX,
+                        X64_REGISTER_RDX,
+                    };
+                    for (u32 part_index = 0;
+                        part_index <
+                            signature.result.part_count;
+                        part_index += 1)
+                    {
+                        CodegenAbiPart* part =
+                            signature.result.parts +
+                            part_index;
+                        x64_emit_store_abi_part(
+                            builder,
+                            instruction->result,
+                            result_type,
+                            part,
+                            integer_results[part->index],
+                            part->index);
+                    }
+                }
+                else if (result_type->kind ==
+                    ANALYSIS_TYPE_FLOAT)
                 {
                     x64_emit_float_store(
                         builder,
@@ -1609,11 +2851,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                 instruction->conversion_operation ==
                     IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT)
             {
-                x64_emit_load(
+                x64_emit_load_value(
                     builder,
                     X64_REGISTER_RAX,
-                    x64_value_displacement(
-                        instruction->operands[0]));
+                    instruction->operands[0]);
                 if (instruction->conversion_operation ==
                     IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT)
                 {
@@ -1707,10 +2948,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             {
                 return false;
             }
-            x64_emit_load(
+            x64_emit_load_value(
                 builder,
                 X64_REGISTER_RAX,
-                x64_value_displacement(instruction->operands[0]));
+                instruction->operands[0]);
             if (instruction->conversion_operation ==
                 IR_CONVERSION_INTEGER_SIGN_EXTEND)
             {
@@ -1768,10 +3009,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
         case IR_OPCODE_ADDRESS_OF:
         case IR_OPCODE_DEREFERENCE:
         {
-            x64_emit_load(
+            x64_emit_load_value(
                 builder,
                 X64_REGISTER_RAX,
-                x64_value_displacement(instruction->operands[0]));
+                instruction->operands[0]);
             x64_emit_store_result(builder, instruction);
         } break;
         case IR_OPCODE_ARRAY:
@@ -1826,11 +3067,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                 }
                 else
                 {
-                    x64_emit_load(
+                    x64_emit_load_value(
                         builder,
                         X64_REGISTER_RCX,
-                        x64_value_displacement(
-                            instruction->operands[index]));
+                        instruction->operands[index]);
                     x64_emit_store_memory_rcx(
                         builder,
                         element_size);
@@ -1920,11 +3160,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                 }
                 else
                 {
-                    x64_emit_load(
+                    x64_emit_load_value(
                         builder,
                         X64_REGISTER_RCX,
-                        x64_value_displacement(
-                            instruction->operands[index]));
+                        instruction->operands[index]);
                     x64_emit_store_memory_rcx(
                         builder,
                         field_size);
@@ -1996,6 +3235,288 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             codegen_emit_u8(&builder->buffer, 0xc8);
             x64_emit_store_result(builder, instruction);
         } break;
+        case IR_OPCODE_VA_START:
+        {
+            AnalysisType* function_type = analysis_type_from_id(
+                builder->analysis,
+                builder->function->type);
+            u32 integer_register_count =
+                builder->signature.result.indirect ? 1 : 0;
+            u32 float_register_count = 0;
+            u32 stack_end = 0;
+            for (u32 argument = 0;
+                argument < function_type->as.function.argument_count;
+                argument += 1)
+            {
+                CodegenAbiLocation* location =
+                    builder->signature.arguments + argument;
+                for (u32 part = 0;
+                    part < location->part_count;
+                    part += 1)
+                {
+                    CodegenAbiPart* abi_part =
+                        location->parts + part;
+                    if (abi_part->kind ==
+                        CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+                    {
+                        float_register_count = BUSTER_MAX(
+                            float_register_count,
+                            abi_part->index + 1);
+                    }
+                    else if (abi_part->kind ==
+                        CODEGEN_ABI_LOCATION_INTEGER_REGISTER)
+                    {
+                        integer_register_count = BUSTER_MAX(
+                            integer_register_count,
+                            abi_part->index + 1);
+                    }
+                    else
+                    {
+                        stack_end = BUSTER_MAX(
+                            stack_end,
+                            abi_part->stack_offset +
+                                codegen_align_u32(
+                                    abi_part->size,
+                                    8));
+                    }
+                }
+            }
+            if (builder->abi == CODEGEN_ABI_X86_64_SYSTEM_V)
+            {
+                u64 offsets = (u64)(integer_register_count * 8) |
+                    ((u64)(48 + float_register_count * 16) << 32);
+                codegen_emit_u8(&builder->buffer, 0x48);
+                codegen_emit_u8(&builder->buffer, 0xb8);
+                codegen_emit_u64(&builder->buffer, offsets);
+                x64_emit_store(
+                    builder,
+                    X64_REGISTER_RAX,
+                    x64_value_displacement_component(
+                        instruction->result,
+                        0));
+                codegen_emit_u8(&builder->buffer, 0x48);
+                codegen_emit_u8(&builder->buffer, 0x8d);
+                codegen_emit_u8(&builder->buffer, 0x85);
+                codegen_emit_u32(
+                    &builder->buffer,
+                    16 + stack_end);
+                x64_emit_store(
+                    builder,
+                    X64_REGISTER_RAX,
+                    x64_value_displacement_component(
+                        instruction->result,
+                        1));
+                codegen_emit_u8(&builder->buffer, 0x48);
+                codegen_emit_u8(&builder->buffer, 0x8d);
+                codegen_emit_u8(&builder->buffer, 0x85);
+                codegen_emit_u32(
+                    &builder->buffer,
+                    (u32)builder->va_register_save_displacement);
+                x64_emit_store(
+                    builder,
+                    X64_REGISTER_RAX,
+                    x64_value_displacement_component(
+                        instruction->result,
+                        2));
+            }
+            else
+            {
+                u32 slot = function_type->as.function.argument_count +
+                    (builder->signature.result.indirect ? 1 : 0);
+                codegen_emit_u8(&builder->buffer, 0x48);
+                codegen_emit_u8(&builder->buffer, 0x8d);
+                codegen_emit_u8(&builder->buffer, 0x85);
+                codegen_emit_u32(
+                    &builder->buffer,
+                    16 + slot * 8);
+                x64_emit_store(
+                    builder,
+                    X64_REGISTER_RAX,
+                    x64_value_displacement_component(
+                        instruction->result,
+                        0));
+                codegen_emit_u8(&builder->buffer, 0x31);
+                codegen_emit_u8(&builder->buffer, 0xc0);
+                for (u32 component = 1; component < 3; component += 1)
+                {
+                    x64_emit_store(
+                        builder,
+                        X64_REGISTER_RAX,
+                        x64_value_displacement_component(
+                            instruction->result,
+                            component));
+                }
+            }
+            codegen_emit_u8(&builder->buffer, 0x31);
+            codegen_emit_u8(&builder->buffer, 0xc0);
+            x64_emit_store(
+                builder,
+                X64_REGISTER_RAX,
+                x64_value_displacement_component(
+                    instruction->result,
+                    3));
+        } break;
+        case IR_OPCODE_VA_COPY:
+        {
+            x64_emit_load_value(
+                builder,
+                X64_REGISTER_RAX,
+                instruction->operands[0]);
+            for (u32 component = 0; component < 4; component += 1)
+            {
+                x64_emit_load_memory(
+                    builder,
+                    X64_REGISTER_RDX,
+                    X64_REGISTER_RAX,
+                    component * 8,
+                    8);
+                x64_emit_store(
+                    builder,
+                    X64_REGISTER_RDX,
+                    x64_value_displacement_component(
+                        instruction->result,
+                        component));
+            }
+        } break;
+        case IR_OPCODE_VA_END:
+        {
+            x64_emit_load_value(
+                builder,
+                X64_REGISTER_RAX,
+                instruction->operands[0]);
+            codegen_emit_u8(&builder->buffer, 0xba);
+            codegen_emit_u32(&builder->buffer, 1);
+            x64_emit_store_memory(
+                builder,
+                X64_REGISTER_RAX,
+                24,
+                X64_REGISTER_RDX,
+                8);
+        } break;
+        case IR_OPCODE_VA_ARG:
+        {
+            AnalysisType* type =
+                analysis_type_from_id(
+                    builder->analysis,
+                    instruction->type);
+            u32 size = codegen_type_storage_size(type);
+            if (!size || size > 8 ||
+                (type->kind != ANALYSIS_TYPE_INTEGER &&
+                 type->kind != ANALYSIS_TYPE_FLOAT &&
+                 type->kind != ANALYSIS_TYPE_BOOL &&
+                 type->kind != ANALYSIS_TYPE_POINTER &&
+                 type->kind != ANALYSIS_TYPE_ENUM))
+            {
+                return false;
+            }
+            x64_emit_load_value(
+                builder,
+                X64_REGISTER_RAX,
+                instruction->operands[0]);
+            if (builder->abi == CODEGEN_ABI_X86_64_WINDOWS)
+            {
+                x64_emit_load_memory(
+                    builder,
+                    X64_REGISTER_RDX,
+                    X64_REGISTER_RAX,
+                    0,
+                    8);
+                codegen_emit_u8(&builder->buffer, 0x48);
+                codegen_emit_u8(&builder->buffer, 0x83);
+                codegen_emit_u8(&builder->buffer, 0xc2);
+                codegen_emit_u8(&builder->buffer, 8);
+                x64_emit_store_memory(
+                    builder,
+                    X64_REGISTER_RAX,
+                    0,
+                    X64_REGISTER_RDX,
+                    8);
+                codegen_emit_u8(&builder->buffer, 0x48);
+                codegen_emit_u8(&builder->buffer, 0x83);
+                codegen_emit_u8(&builder->buffer, 0xea);
+                codegen_emit_u8(&builder->buffer, 8);
+            }
+            else
+            {
+                bool floating = type->kind == ANALYSIS_TYPE_FLOAT;
+                u32 offset = floating ? 4 : 0;
+                u32 limit = floating ? 160 : 40;
+                u32 increment = floating ? 16 : 8;
+                x64_emit_load_memory(
+                    builder,
+                    X64_REGISTER_RCX,
+                    X64_REGISTER_RAX,
+                    offset,
+                    4);
+                codegen_emit_u8(&builder->buffer, 0x83);
+                codegen_emit_u8(&builder->buffer, 0xf9);
+                codegen_emit_u8(&builder->buffer, (u8)limit);
+                codegen_emit_u8(&builder->buffer, 0x0f);
+                codegen_emit_u8(&builder->buffer, 0x87);
+                u32 overflow_patch = (u32)builder->buffer.count;
+                codegen_emit_u32(&builder->buffer, 0);
+                x64_emit_load_memory(
+                    builder,
+                    X64_REGISTER_RDX,
+                    X64_REGISTER_RAX,
+                    16,
+                    8);
+                codegen_emit_u8(&builder->buffer, 0x48);
+                codegen_emit_u8(&builder->buffer, 0x01);
+                codegen_emit_u8(&builder->buffer, 0xca);
+                codegen_emit_u8(&builder->buffer, 0x83);
+                codegen_emit_u8(&builder->buffer, (u8)(offset ? 0x40 : 0x00));
+                if (offset)
+                {
+                    codegen_emit_u8(&builder->buffer, (u8)offset);
+                }
+                codegen_emit_u8(&builder->buffer, (u8)increment);
+                codegen_emit_u8(&builder->buffer, 0xe9);
+                u32 end_patch = (u32)builder->buffer.count;
+                codegen_emit_u32(&builder->buffer, 0);
+                u32 overflow_offset = (u32)builder->buffer.count;
+                x64_emit_load_memory(
+                    builder,
+                    X64_REGISTER_RDX,
+                    X64_REGISTER_RAX,
+                    8,
+                    8);
+                codegen_emit_u8(&builder->buffer, 0x48);
+                codegen_emit_u8(&builder->buffer, 0x83);
+                codegen_emit_u8(&builder->buffer, 0xc2);
+                codegen_emit_u8(&builder->buffer, 8);
+                x64_emit_store_memory(
+                    builder,
+                    X64_REGISTER_RAX,
+                    8,
+                    X64_REGISTER_RDX,
+                    8);
+                codegen_emit_u8(&builder->buffer, 0x48);
+                codegen_emit_u8(&builder->buffer, 0x83);
+                codegen_emit_u8(&builder->buffer, 0xea);
+                codegen_emit_u8(&builder->buffer, 8);
+                u32 end_offset = (u32)builder->buffer.count;
+                s32 overflow_displacement =
+                    (s32)(overflow_offset - (overflow_patch + 4));
+                s32 end_displacement =
+                    (s32)(end_offset - (end_patch + 4));
+                memcpy(
+                    builder->buffer.bytes + overflow_patch,
+                    &overflow_displacement,
+                    sizeof(overflow_displacement));
+                memcpy(
+                    builder->buffer.bytes + end_patch,
+                    &end_displacement,
+                    sizeof(end_displacement));
+            }
+            x64_emit_load_memory(
+                builder,
+                X64_REGISTER_RAX,
+                X64_REGISTER_RDX,
+                0,
+                size);
+            x64_emit_store_result(builder, instruction);
+        } break;
         case IR_OPCODE_INDEX:
         {
             AnalysisType* base = analysis_type_from_id(
@@ -2004,10 +3525,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                     instruction->operands[0].value].type);
             if (base->kind != ANALYSIS_TYPE_RANGE)
             {
-                x64_emit_load(
+                x64_emit_load_value(
                     builder,
                     X64_REGISTER_RCX,
-                    x64_value_displacement(instruction->operands[1]));
+                    instruction->operands[1]);
                 x64_emit_collection_component(
                     builder,
                     instruction->operands[0],
@@ -2091,10 +3612,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                 }
                 break;
             }
-            x64_emit_load(
+            x64_emit_load_value(
                 builder,
                 X64_REGISTER_RCX,
-                x64_value_displacement(instruction->operands[1]));
+                instruction->operands[1]);
             x64_emit_load(
                 builder,
                 X64_REGISTER_RDX,
@@ -2161,11 +3682,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             u32 operand_index = 1;
             if (has_start)
             {
-                x64_emit_load(
+                x64_emit_load_value(
                     builder,
                     X64_REGISTER_RCX,
-                    x64_value_displacement(
-                        instruction->operands[operand_index++]));
+                    instruction->operands[operand_index++]);
             }
             else
             {
@@ -2174,11 +3694,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
             }
             if (has_end)
             {
-                x64_emit_load(
+                x64_emit_load_value(
                     builder,
                     X64_REGISTER_RDX,
-                    x64_value_displacement(
-                        instruction->operands[operand_index]));
+                    instruction->operands[operand_index]);
             }
             else
             {
@@ -2306,10 +3825,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
         } break;
         case IR_OPCODE_BRANCH_IF:
         {
-            x64_emit_load(
+            x64_emit_load_value(
                 builder,
                 X64_REGISTER_RAX,
-                x64_value_displacement(instruction->operands[0]));
+                instruction->operands[0]);
             codegen_emit_u8(&builder->buffer, 0x48);
             codegen_emit_u8(&builder->buffer, 0x85);
             codegen_emit_u8(&builder->buffer, 0xc0);
@@ -2347,11 +3866,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                 index < instruction->immediate_count;
                 index += 1)
             {
-                x64_emit_load(
+                x64_emit_load_value(
                     builder,
                     X64_REGISTER_RAX,
-                    x64_value_displacement(
-                        instruction->operands[0]));
+                    instruction->operands[0]);
                 x64_emit_constant_register(
                     builder,
                     X64_REGISTER_RCX,
@@ -2398,7 +3916,65 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                     builder->analysis,
                     builder->function->values[
                         instruction->operands[0].value].type);
-                if (return_type->kind == ANALYSIS_TYPE_FLOAT)
+                IrValueId return_value =
+                    instruction->operands[0];
+                if (builder->signature.result.indirect)
+                {
+                    x64_emit_load(
+                        builder,
+                        X64_REGISTER_RAX,
+                        builder->hidden_result_displacement);
+                    x64_emit_load(
+                        builder,
+                        X64_REGISTER_RCX,
+                        x64_value_displacement_component(
+                            return_value,
+                            0));
+                    x64_emit_copy_memory(
+                        builder,
+                        codegen_type_storage_size(
+                            return_type));
+                    if (builder->abi ==
+                            CODEGEN_ABI_X86_64_SYSTEM_V ||
+                        builder->abi ==
+                            CODEGEN_ABI_X86_64_WINDOWS)
+                    {
+                        x64_emit_load(
+                            builder,
+                            X64_REGISTER_RAX,
+                            builder->
+                                hidden_result_displacement);
+                    }
+                }
+                else if (codegen_type_is_indirect_value(
+                            return_type) ||
+                         codegen_type_is_inline_collection(
+                            return_type))
+                {
+                    X64Register integer_results[] = {
+                        X64_REGISTER_RAX,
+                        X64_REGISTER_RDX,
+                    };
+                    for (u32 part_index = 0;
+                        part_index <
+                            builder->signature.result
+                                .part_count;
+                        part_index += 1)
+                    {
+                        CodegenAbiPart* part =
+                            builder->signature.result.parts +
+                            part_index;
+                        x64_emit_load_abi_part(
+                            builder,
+                            return_value,
+                            return_type,
+                            part,
+                            integer_results[part->index],
+                            part->index);
+                    }
+                }
+                else if (return_type->kind ==
+                    ANALYSIS_TYPE_FLOAT)
                 {
                     x64_emit_float_load(
                         builder,
@@ -2409,11 +3985,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
                 }
                 else
                 {
-                    x64_emit_load(
+                    x64_emit_load_value(
                         builder,
                         X64_REGISTER_RAX,
-                        x64_value_displacement(
-                            instruction->operands[0]));
+                        instruction->operands[0]);
                 }
             }
             x64_emit_return(builder);
@@ -2436,6 +4011,17 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
     CodegenFunction result = {
         .abi = abi,
     };
+    CodegenAbiSignature signature =
+        codegen_classify_signature(
+            arena,
+            analysis,
+            function->type,
+            abi);
+    if (!signature.valid)
+    {
+        result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+        return result;
+    }
     u32 maximum_parameters = 0;
     for (u32 block_index = 0;
         block_index < function->block_count;
@@ -2521,9 +4107,32 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
         frame_cursor += size;
         value_storage_offsets[index] = frame_cursor;
     }
+    s32 hidden_result_displacement = 0;
+    if (signature.result.indirect)
+    {
+        frame_cursor = codegen_align_u32(frame_cursor, 8);
+        frame_cursor += 8;
+        hidden_result_displacement = -(s32)frame_cursor;
+    }
+    s32 va_register_save_displacement = 0;
+    AnalysisType* generated_function_type =
+        analysis_type_from_id(analysis, function->type);
+    if (generated_function_type->as.function.is_variadic &&
+        abi == CODEGEN_ABI_X86_64_SYSTEM_V)
+    {
+        frame_cursor = codegen_align_u32(frame_cursor, 16);
+        frame_cursor += 176;
+        va_register_save_displacement = -(s32)frame_cursor;
+    }
     u32 frame_size = codegen_align_u32(frame_cursor, 16);
-    u64 capacity = (u64)function->instruction_count * 96 +
-        (u64)function->block_count * 64 + 64;
+    u64 capacity = (u64)function->instruction_count * 256 +
+        (u64)function->block_count * 128 + 128;
+    CodegenRegisterAllocation allocation =
+        codegen_allocate_scalar_registers(
+            arena,
+            analysis,
+            function,
+            1);
     X64Builder builder = {
         .arena = arena,
         .analysis = analysis,
@@ -2542,6 +4151,12 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
         .local_storage_base = value_bytes + temporary_bytes,
         .value_storage_offsets = value_storage_offsets,
         .local_storage_offsets = local_storage_offsets,
+        .value_registers = allocation.registers,
+        .hidden_result_displacement =
+            hidden_result_displacement,
+        .va_register_save_displacement =
+            va_register_save_displacement,
+        .signature = signature,
         .abi = abi,
     };
     codegen_emit_u8(&builder.buffer, 0x55);
@@ -2552,6 +4167,70 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
     codegen_emit_u8(&builder.buffer, 0x81);
     codegen_emit_u8(&builder.buffer, 0xec);
     codegen_emit_u32(&builder.buffer, frame_size);
+    if (signature.result.indirect)
+    {
+        X64Register source =
+            abi == CODEGEN_ABI_X86_64_WINDOWS ?
+                X64_REGISTER_RCX :
+                X64_REGISTER_RDI;
+        x64_emit_store(
+            &builder,
+            source,
+            hidden_result_displacement);
+    }
+    if (generated_function_type->as.function.is_variadic)
+    {
+        X64Register registers[] = {
+            X64_REGISTER_RDI,
+            X64_REGISTER_RSI,
+            X64_REGISTER_RDX,
+            X64_REGISTER_RCX,
+            X64_REGISTER_R8,
+            X64_REGISTER_R9,
+        };
+        if (abi == CODEGEN_ABI_X86_64_SYSTEM_V)
+        {
+            for (u32 index = 0;
+                index < BUSTER_ARRAY_LENGTH(registers);
+                index += 1)
+            {
+                x64_emit_store(
+                    &builder,
+                    registers[index],
+                    va_register_save_displacement +
+                        (s32)(index * 8));
+            }
+            for (u32 index = 0; index < 8; index += 1)
+            {
+                x64_emit_float_store(
+                    &builder,
+                    index,
+                    va_register_save_displacement +
+                        48 + (s32)(index * 16),
+                    64);
+            }
+        }
+        else
+        {
+            X64Register windows[] = {
+                X64_REGISTER_RCX,
+                X64_REGISTER_RDX,
+                X64_REGISTER_R8,
+                X64_REGISTER_R9,
+            };
+            for (u32 index = 0;
+                index < BUSTER_ARRAY_LENGTH(windows);
+                index += 1)
+            {
+                x64_emit_store_memory(
+                    &builder,
+                    X64_REGISTER_RBP,
+                    16 + index * 8,
+                    windows[index],
+                    8);
+            }
+        }
+    }
     for (u32 block_index = 0;
         block_index < function->block_count &&
             builder.buffer.error == CODEGEN_ERROR_NONE;
@@ -2606,6 +4285,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
     result.stack_frame_size = frame_size;
     result.first_call_relocation =
         builder.first_call_relocation;
+    result.register_value_count =
+        allocation.allocated_count;
+    result.spilled_value_count =
+        allocation.spilled_count;
     return result;
 }
 
@@ -2646,6 +4329,22 @@ BUSTER_GLOBAL_LOCAL void a64_emit_load_value(
     u32 target,
     IrValueId value)
 {
+    if (buffer->value_registers &&
+        buffer->value_registers[value.value] !=
+            CODEGEN_REGISTER_UNALLOCATED)
+    {
+        u32 source = buffer->allocated_register_base +
+            buffer->value_registers[value.value];
+        if (target != source)
+        {
+            a64_emit_instruction_word(
+                buffer,
+                0xaa0003e0 |
+                    (source << 16) |
+                    target);
+        }
+        return;
+    }
     u32 offset = a64_value_offset(value);
     if (offset > 32760)
     {
@@ -2664,6 +4363,22 @@ BUSTER_GLOBAL_LOCAL void a64_emit_store_value(
     u32 source,
     IrValueId value)
 {
+    if (buffer->value_registers &&
+        buffer->value_registers[value.value] !=
+            CODEGEN_REGISTER_UNALLOCATED)
+    {
+        u32 target = buffer->allocated_register_base +
+            buffer->value_registers[value.value];
+        if (target != source)
+        {
+            a64_emit_instruction_word(
+                buffer,
+                0xaa0003e0 |
+                    (source << 16) |
+                    target);
+        }
+        return;
+    }
     u32 offset = a64_value_offset(value);
     if (offset > 32760)
     {
@@ -2877,6 +4592,94 @@ BUSTER_GLOBAL_LOCAL void a64_emit_store_pointer(
         encoded | (address << 5) | source);
 }
 
+BUSTER_GLOBAL_LOCAL void a64_emit_load_pointer_offset(
+    CodegenBuffer* buffer,
+    u32 target,
+    u32 address,
+    u32 offset,
+    u32 size)
+{
+    u32 scale =
+        size == 1 ? 1 :
+        size == 2 ? 2 :
+        size == 4 ? 4 : 8;
+    u32 encoded =
+        size == 1 ? 0x39400000 :
+        size == 2 ? 0x79400000 :
+        size == 4 ? 0xb9400000 :
+        size == 8 ? 0xf9400000 :
+        0;
+    if (!encoded || offset % scale ||
+        offset / scale > 4095)
+    {
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return;
+    }
+    a64_emit_instruction_word(
+        buffer,
+        encoded |
+            ((offset / scale) << 10) |
+            (address << 5) |
+            target);
+}
+
+BUSTER_GLOBAL_LOCAL void a64_emit_store_pointer_offset(
+    CodegenBuffer* buffer,
+    u32 source,
+    u32 address,
+    u32 offset,
+    u32 size)
+{
+    u32 scale =
+        size == 1 ? 1 :
+        size == 2 ? 2 :
+        size == 4 ? 4 : 8;
+    u32 encoded =
+        size == 1 ? 0x39000000 :
+        size == 2 ? 0x79000000 :
+        size == 4 ? 0xb9000000 :
+        size == 8 ? 0xf9000000 :
+        0;
+    if (!encoded || offset % scale ||
+        offset / scale > 4095)
+    {
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return;
+    }
+    a64_emit_instruction_word(
+        buffer,
+        encoded |
+            ((offset / scale) << 10) |
+            (address << 5) |
+            source);
+}
+
+BUSTER_GLOBAL_LOCAL void a64_emit_float_pointer_offset(
+    CodegenBuffer* buffer,
+    u32 target,
+    u32 address,
+    u32 offset,
+    u32 size,
+    bool store)
+{
+    u32 scale = size <= 4 ? 4 : 8;
+    if (offset % scale || offset / scale > 4095)
+    {
+        buffer->error = CODEGEN_ERROR_CAPACITY;
+        return;
+    }
+    u32 encoded =
+        size <= 4 ?
+            (store ? 0xbd000000 : 0xbd400000) :
+            (store ? 0xfd000000 : 0xfd400000);
+    a64_emit_instruction_word(
+        buffer,
+        encoded |
+            ((offset / scale) << 10) |
+            (address << 5) |
+            target);
+}
+
 BUSTER_GLOBAL_LOCAL void a64_emit_copy_memory(
     CodegenBuffer* buffer,
     u32 size)
@@ -2921,6 +4724,236 @@ BUSTER_GLOBAL_LOCAL void a64_emit_copy_memory(
             buffer,
             0x39000002 | (offset << 10));
     }
+}
+
+BUSTER_GLOBAL_LOCAL void a64_emit_initialize_aggregate_result(
+    CodegenBuffer* buffer,
+    u32* value_storage_offsets,
+    IrValueId value)
+{
+    a64_emit_stack_address(
+        buffer,
+        0,
+        value_storage_offsets[value.value]);
+    a64_emit_store_value_component(buffer, 0, value, 0);
+}
+
+BUSTER_GLOBAL_LOCAL void a64_emit_load_abi_part(
+    CodegenBuffer* buffer,
+    AnalysisResult* analysis,
+    IrFunction* function,
+    IrValueId value,
+    AnalysisType* type,
+    CodegenAbiPart* part,
+    u32 integer_target,
+    u32 float_target)
+{
+    if (codegen_type_is_indirect_value(type))
+    {
+        a64_emit_load_value_component(buffer, 16, value, 0);
+        if (part->kind ==
+            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+        {
+            a64_emit_float_pointer_offset(
+                buffer,
+                float_target,
+                16,
+                part->value_offset,
+                part->size,
+                false);
+        }
+        else
+        {
+            a64_emit_load_pointer_offset(
+                buffer,
+                integer_target,
+                16,
+                part->value_offset,
+                part->size);
+        }
+        return;
+    }
+    if (codegen_type_is_inline_collection(type))
+    {
+        u32 component = part->value_offset / 8;
+        if (type->kind == ANALYSIS_TYPE_RANGE)
+        {
+            AnalysisType* element = analysis_type_from_id(
+                analysis,
+                type->as.element_type);
+            component = part->value_offset /
+                BUSTER_MAX(
+                    codegen_type_storage_size(element),
+                    1);
+        }
+        if (part->kind ==
+            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+        {
+            u32 offset =
+                a64_value_component_offset(value, component);
+            u32 scale = part->size <= 4 ? 4 : 8;
+            a64_emit_instruction_word(
+                buffer,
+                (part->size <= 4 ?
+                    0xbd4003e0 :
+                    0xfd4003e0) |
+                    ((offset / scale) << 10) |
+                    float_target);
+        }
+        else
+        {
+            a64_emit_load_value_component(
+                buffer,
+                integer_target,
+                value,
+                component);
+            if (type->kind == ANALYSIS_TYPE_RANGE)
+            {
+                AnalysisType* element =
+                    analysis_type_from_id(
+                        analysis,
+                        type->as.element_type);
+                u32 element_size =
+                    codegen_type_storage_size(element);
+                if (element_size < 8 &&
+                    part->size > element_size)
+                {
+                    u32 shift = element_size * 8;
+                    a64_emit_instruction_word(
+                        buffer,
+                        0xd3400000 |
+                            ((shift - 1) << 10) |
+                            (integer_target << 5) |
+                            integer_target);
+                    a64_emit_load_value_component(
+                        buffer,
+                        16,
+                        value,
+                        component + 1);
+                    a64_emit_instruction_word(
+                        buffer,
+                        0xd3400000 |
+                            ((64 - shift) << 16) |
+                            ((63 - shift) << 10) |
+                            (16 << 5) |
+                            16);
+                    a64_emit_instruction_word(
+                        buffer,
+                        0xaa000000 |
+                            (16 << 16) |
+                            (integer_target << 5) |
+                            integer_target);
+                }
+            }
+        }
+        return;
+    }
+    BUSTER_UNUSED(function);
+}
+
+BUSTER_GLOBAL_LOCAL void a64_emit_store_abi_part(
+    CodegenBuffer* buffer,
+    AnalysisResult* analysis,
+    IrFunction* function,
+    IrValueId value,
+    AnalysisType* type,
+    CodegenAbiPart* part,
+    u32 integer_source,
+    u32 float_source)
+{
+    if (codegen_type_is_indirect_value(type))
+    {
+        a64_emit_load_value_component(buffer, 16, value, 0);
+        if (part->kind ==
+            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+        {
+            a64_emit_float_pointer_offset(
+                buffer,
+                float_source,
+                16,
+                part->value_offset,
+                part->size,
+                true);
+        }
+        else
+        {
+            a64_emit_store_pointer_offset(
+                buffer,
+                integer_source,
+                16,
+                part->value_offset,
+                part->size);
+        }
+        return;
+    }
+    if (codegen_type_is_inline_collection(type))
+    {
+        u32 component = part->value_offset / 8;
+        if (type->kind == ANALYSIS_TYPE_RANGE)
+        {
+            AnalysisType* element = analysis_type_from_id(
+                analysis,
+                type->as.element_type);
+            component = part->value_offset /
+                BUSTER_MAX(
+                    codegen_type_storage_size(element),
+                    1);
+        }
+        if (part->kind ==
+            CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+        {
+            u32 offset =
+                a64_value_component_offset(value, component);
+            u32 scale = part->size <= 4 ? 4 : 8;
+            a64_emit_instruction_word(
+                buffer,
+                (part->size <= 4 ?
+                    0xbd0003e0 :
+                    0xfd0003e0) |
+                    ((offset / scale) << 10) |
+                    float_source);
+        }
+        else
+        {
+            a64_emit_store_value_component(
+                buffer,
+                integer_source,
+                value,
+                component);
+            if (type->kind == ANALYSIS_TYPE_RANGE)
+            {
+                AnalysisType* element =
+                    analysis_type_from_id(
+                        analysis,
+                        type->as.element_type);
+                u32 element_size =
+                    codegen_type_storage_size(element);
+                if (element_size < 8 &&
+                    part->size > element_size)
+                {
+                    u32 shift = element_size * 8;
+                    a64_emit_instruction_word(
+                        buffer,
+                        0xaa0003f0 |
+                            (integer_source << 16));
+                    a64_emit_instruction_word(
+                        buffer,
+                        0xd3400000 |
+                            (shift << 16) |
+                            (63 << 10) |
+                            (16 << 5) |
+                            16);
+                    a64_emit_store_value_component(
+                        buffer,
+                        16,
+                        value,
+                        component + 1);
+                }
+            }
+        }
+        return;
+    }
+    BUSTER_UNUSED(function);
 }
 
 BUSTER_GLOBAL_LOCAL void a64_emit_collection_component(
@@ -3117,6 +5150,23 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
     CodegenFunction result = {
         .abi = abi,
     };
+    CodegenAbiSignature function_signature =
+        codegen_classify_signature(
+            arena,
+            analysis,
+            function->type,
+            abi);
+    if (!function_signature.valid)
+    {
+        result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+        return result;
+    }
+    CodegenRegisterAllocation allocation =
+        codegen_allocate_scalar_registers(
+            arena,
+            analysis,
+            function,
+            7);
     u32 maximum_parameters = 0;
     for (u32 block_index = 0;
         block_index < function->block_count;
@@ -3206,6 +5256,23 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
         value_storage_offsets[index] = frame_cursor;
         frame_cursor += size;
     }
+    u32 hidden_result_offset = 0;
+    if (function_signature.result.indirect)
+    {
+        frame_cursor = codegen_align_u32(frame_cursor, 8);
+        hidden_result_offset = frame_cursor;
+        frame_cursor += 8;
+    }
+    AnalysisType* generated_function_type =
+        analysis_type_from_id(analysis, function->type);
+    u32 va_register_save_base = 0;
+    if (generated_function_type->as.function.is_variadic &&
+        abi == CODEGEN_ABI_AARCH64_AAPCS64)
+    {
+        frame_cursor = codegen_align_u32(frame_cursor, 16);
+        va_register_save_base = frame_cursor;
+        frame_cursor += 192;
+    }
     u32 frame_size = codegen_align_u32(
         frame_cursor,
         16);
@@ -3215,11 +5282,13 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
         return result;
     }
     u64 capacity =
-        (u64)function->instruction_count * 128 +
-        (u64)function->block_count * 128 + 128;
+        (u64)function->instruction_count * 256 +
+        (u64)function->block_count * 192 + 192;
     CodegenBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
+        .value_registers = allocation.registers,
+        .allocated_register_base = 9,
     };
     u32* block_offsets = arena_allocate(
         arena,
@@ -3237,6 +5306,30 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
             &buffer,
             frame_size,
             true);
+    }
+    if (function_signature.result.indirect)
+    {
+        a64_emit_store_offset(
+            &buffer,
+            8,
+            hidden_result_offset);
+    }
+    if (generated_function_type->as.function.is_variadic &&
+        abi == CODEGEN_ABI_AARCH64_AAPCS64)
+    {
+        for (u32 index = 0; index < 8; index += 1)
+        {
+            a64_emit_store_offset(
+                &buffer,
+                index,
+                va_register_save_base + index * 8);
+            a64_emit_instruction_word(
+                &buffer,
+                0xfd0003e0 |
+                    (((va_register_save_base + 64 +
+                        index * 16) / 8) << 10) |
+                    index);
+        }
     }
     for (u32 block_index = 0;
         block_index < function->block_count &&
@@ -3401,6 +5494,100 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                         analysis_type_from_id(
                             analysis,
                             instruction->type);
+                    if (codegen_type_is_indirect_value(type) ||
+                        codegen_type_is_inline_collection(type))
+                    {
+                        if (codegen_type_is_indirect_value(type))
+                        {
+                            a64_emit_initialize_aggregate_result(
+                                &buffer,
+                                value_storage_offsets,
+                                instruction->result);
+                        }
+                        if (location->indirect)
+                        {
+                            CodegenAbiPart* part =
+                                location->parts;
+                            if (part->kind ==
+                                CODEGEN_ABI_LOCATION_STACK)
+                            {
+                                a64_emit_load_offset(
+                                    &buffer,
+                                    1,
+                                    frame_size + 16 +
+                                        part->stack_offset);
+                            }
+                            else
+                            {
+                                a64_emit_instruction_word(
+                                    &buffer,
+                                    0xaa0003e1 |
+                                        (part->index << 16));
+                            }
+                            a64_emit_load_value_component(
+                                &buffer,
+                                0,
+                                instruction->result,
+                                0);
+                            a64_emit_copy_memory(
+                                &buffer,
+                                codegen_type_storage_size(
+                                    type));
+                            break;
+                        }
+                        if (codegen_type_is_indirect_value(type) &&
+                            location->part_count &&
+                            location->parts[0].kind ==
+                                CODEGEN_ABI_LOCATION_STACK)
+                        {
+                            a64_emit_load_value_component(
+                                &buffer,
+                                0,
+                                instruction->result,
+                                0);
+                            a64_emit_stack_address(
+                                &buffer,
+                                1,
+                                frame_size + 16 +
+                                    location->parts[0]
+                                        .stack_offset);
+                            a64_emit_copy_memory(
+                                &buffer,
+                                codegen_type_storage_size(
+                                    type));
+                            break;
+                        }
+                        for (u32 part_index = 0;
+                            part_index <
+                                location->part_count;
+                            part_index += 1)
+                        {
+                            CodegenAbiPart* part =
+                                location->parts + part_index;
+                            if (part->kind ==
+                                CODEGEN_ABI_LOCATION_STACK)
+                            {
+                                a64_emit_load_offset(
+                                    &buffer,
+                                    1,
+                                    frame_size + 16 +
+                                        part->stack_offset);
+                            }
+                            a64_emit_store_abi_part(
+                                &buffer,
+                                analysis,
+                                function,
+                                instruction->result,
+                                type,
+                                part,
+                                part->kind ==
+                                    CODEGEN_ABI_LOCATION_STACK ?
+                                    1 :
+                                    part->index,
+                                part->index);
+                        }
+                        break;
+                    }
                     if (location->part_count != 1 ||
                         (location->kind !=
                                 CODEGEN_ABI_LOCATION_STACK &&
@@ -3691,12 +5878,41 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                     AnalysisTypeId function_type_id =
                         function->values[
                             instruction->operands[0].value].type;
+                    AnalysisType* function_type =
+                        analysis_type_from_id(
+                            analysis,
+                            function_type_id);
+                    u32 call_argument_count =
+                        instruction->operand_count - 1;
+                    AnalysisTypeId* call_argument_types =
+                        arena_allocate(
+                            arena,
+                            AnalysisTypeId,
+                            call_argument_count);
+                    for (u32 index = 0;
+                        index < call_argument_count;
+                        index += 1)
+                    {
+                        call_argument_types[index] =
+                            function->values[
+                                instruction->operands[index + 1].value]
+                                .type;
+                    }
                     CodegenAbiSignature signature =
-                        codegen_classify_signature(
+                        codegen_classify_signature_with_arguments(
                             arena,
                             analysis,
                             function_type_id,
+                            function_type->as.function.is_variadic ?
+                                call_argument_types : 0,
+                            call_argument_count,
                             abi);
+                    if (!signature.valid)
+                    {
+                        buffer.error =
+                            CODEGEN_ERROR_UNSUPPORTED_ABI;
+                        break;
+                    }
                     if (signature.argument_count !=
                         instruction->operand_count - 1)
                     {
@@ -3709,6 +5925,36 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                         buffer.error =
                             CODEGEN_ERROR_CAPACITY;
                         break;
+                    }
+                    AnalysisType* call_result_type =
+                        instruction->result.value !=
+                                IR_ID_UNDERLYING_INVALID ?
+                            analysis_type_from_id(
+                                analysis,
+                                instruction->type) :
+                            0;
+                    if (call_result_type &&
+                        (codegen_type_is_indirect_value(
+                            call_result_type) ||
+                         codegen_type_is_inline_collection(
+                            call_result_type)))
+                    {
+                        if (codegen_type_is_indirect_value(
+                                call_result_type))
+                        {
+                            a64_emit_initialize_aggregate_result(
+                                &buffer,
+                                value_storage_offsets,
+                                instruction->result);
+                        }
+                        if (signature.result.indirect)
+                        {
+                            a64_emit_load_value_component(
+                                &buffer,
+                                8,
+                                instruction->result,
+                                0);
+                        }
                     }
                     if (signature.stack_size)
                     {
@@ -3733,6 +5979,120 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                                 analysis,
                                 function->values[
                                     operand.value].type);
+                        if (location->indirect)
+                        {
+                            a64_emit_stack_address(
+                                &buffer,
+                                0,
+                                location->
+                                    indirect_copy_offset);
+                            a64_emit_load_value_component(
+                                &buffer,
+                                1,
+                                operand,
+                                0);
+                            a64_emit_copy_memory(
+                                &buffer,
+                                codegen_type_storage_size(
+                                    operand_type));
+                            CodegenAbiPart* part =
+                                location->parts;
+                            if (part->kind ==
+                                CODEGEN_ABI_LOCATION_STACK)
+                            {
+                                a64_emit_store_offset(
+                                    &buffer,
+                                    0,
+                                    part->stack_offset);
+                            }
+                            else if (part->index)
+                            {
+                                a64_emit_instruction_word(
+                                    &buffer,
+                                    0xaa0003e0 |
+                                        (0 << 16) |
+                                        part->index);
+                            }
+                            continue;
+                        }
+                        if (codegen_type_is_indirect_value(
+                                operand_type) &&
+                            location->part_count &&
+                            location->parts[0].kind ==
+                                CODEGEN_ABI_LOCATION_STACK)
+                        {
+                            a64_emit_stack_address(
+                                &buffer,
+                                0,
+                                location->parts[0]
+                                    .stack_offset);
+                            a64_emit_load_value_component(
+                                &buffer,
+                                1,
+                                operand,
+                                0);
+                            a64_emit_copy_memory(
+                                &buffer,
+                                codegen_type_storage_size(
+                                    operand_type));
+                            continue;
+                        }
+                        if (codegen_type_is_indirect_value(
+                                operand_type) ||
+                            codegen_type_is_inline_collection(
+                                operand_type))
+                        {
+                            for (u32 part_index = 0;
+                                part_index <
+                                    location->part_count;
+                                part_index += 1)
+                            {
+                                CodegenAbiPart* part =
+                                    location->parts +
+                                    part_index;
+                                if (part->kind ==
+                                    CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+                                {
+                                    a64_emit_load_abi_part(
+                                        &buffer,
+                                        analysis,
+                                        function,
+                                        operand,
+                                        operand_type,
+                                        part,
+                                        0,
+                                        part->index);
+                                }
+                                else
+                                {
+                                    a64_emit_load_abi_part(
+                                        &buffer,
+                                        analysis,
+                                        function,
+                                        operand,
+                                        operand_type,
+                                        part,
+                                        0,
+                                        0);
+                                    if (part->kind ==
+                                        CODEGEN_ABI_LOCATION_STACK)
+                                    {
+                                        a64_emit_store_offset(
+                                            &buffer,
+                                            0,
+                                            part->stack_offset);
+                                    }
+                                    else if (part->index)
+                                    {
+                                        a64_emit_instruction_word(
+                                            &buffer,
+                                            0xaa0003e0 |
+                                                part->index);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         if (location->part_count != 1 ||
                             (location->kind !=
                                     CODEGEN_ABI_LOCATION_STACK &&
@@ -3826,7 +6186,43 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                             analysis_type_from_id(
                                 analysis,
                                 instruction->type);
-                        if (result_type->kind ==
+                        if (signature.result.indirect)
+                        {
+                            if (abi ==
+                                CODEGEN_ABI_AARCH64_DARWIN)
+                            {
+                                a64_emit_load_value_component(
+                                    &buffer,
+                                    0,
+                                    instruction->result,
+                                    0);
+                            }
+                        }
+                        else if (codegen_type_is_indirect_value(
+                                    result_type) ||
+                                 codegen_type_is_inline_collection(
+                                    result_type))
+                        {
+                            for (u32 part_index = 0;
+                                part_index <
+                                    signature.result.part_count;
+                                part_index += 1)
+                            {
+                                CodegenAbiPart* part =
+                                    signature.result.parts +
+                                    part_index;
+                                a64_emit_store_abi_part(
+                                    &buffer,
+                                    analysis,
+                                    function,
+                                    instruction->result,
+                                    result_type,
+                                    part,
+                                    part->index,
+                                    part->index);
+                            }
+                        }
+                        else if (result_type->kind ==
                             ANALYSIS_TYPE_FLOAT)
                         {
                             a64_emit_float_store_value(
@@ -4239,6 +6635,278 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                             &buffer,
                             0xcb010000);
                     }
+                    a64_emit_store_value(
+                        &buffer,
+                        0,
+                        instruction->result);
+                } break;
+                case IR_OPCODE_VA_START:
+                {
+                    u32 integer_register_count =
+                        function_signature.result.indirect ? 1 : 0;
+                    u32 float_register_count = 0;
+                    u32 stack_end = 0;
+                    for (u32 argument = 0;
+                        argument <
+                            generated_function_type->as.function.argument_count;
+                        argument += 1)
+                    {
+                        CodegenAbiLocation* location =
+                            function_signature.arguments + argument;
+                        for (u32 part = 0;
+                            part < location->part_count;
+                            part += 1)
+                        {
+                            CodegenAbiPart* abi_part =
+                                location->parts + part;
+                            if (abi_part->kind ==
+                                CODEGEN_ABI_LOCATION_FLOAT_REGISTER)
+                            {
+                                float_register_count = BUSTER_MAX(
+                                    float_register_count,
+                                    abi_part->index + 1);
+                            }
+                            else if (abi_part->kind ==
+                                CODEGEN_ABI_LOCATION_INTEGER_REGISTER)
+                            {
+                                integer_register_count = BUSTER_MAX(
+                                    integer_register_count,
+                                    abi_part->index + 1);
+                            }
+                            else
+                            {
+                                stack_end = BUSTER_MAX(
+                                    stack_end,
+                                    abi_part->stack_offset +
+                                        codegen_align_u32(
+                                            abi_part->size,
+                                            8));
+                            }
+                        }
+                    }
+                    u32 incoming_offset = 16 + stack_end;
+                    if (incoming_offset > 4095)
+                    {
+                        buffer.error = CODEGEN_ERROR_CAPACITY;
+                        break;
+                    }
+                    a64_emit_instruction_word(
+                        &buffer,
+                        0x91000000 |
+                            (incoming_offset << 10) |
+                            (29 << 5));
+                    a64_emit_store_value_component(
+                        &buffer,
+                        0,
+                        instruction->result,
+                        0);
+                    if (abi == CODEGEN_ABI_AARCH64_AAPCS64)
+                    {
+                        a64_emit_stack_address(
+                            &buffer,
+                            0,
+                            va_register_save_base + 64);
+                        a64_emit_store_value_component(
+                            &buffer,
+                            0,
+                            instruction->result,
+                            1);
+                        a64_emit_stack_address(
+                            &buffer,
+                            0,
+                            va_register_save_base + 192);
+                        a64_emit_store_value_component(
+                            &buffer,
+                            0,
+                            instruction->result,
+                            2);
+                        s32 gr_offset =
+                            -(s32)((8 - integer_register_count) * 8);
+                        s32 vr_offset =
+                            -(s32)((8 - float_register_count) * 16);
+                        u64 packed = (u32)gr_offset |
+                            ((u64)(u32)vr_offset << 32);
+                        a64_emit_constant(&buffer, 0, packed);
+                        a64_emit_store_value_component(
+                            &buffer,
+                            0,
+                            instruction->result,
+                            3);
+                    }
+                    else
+                    {
+                        a64_emit_constant(&buffer, 0, 0);
+                        for (u32 component = 1;
+                            component < 4;
+                            component += 1)
+                        {
+                            a64_emit_store_value_component(
+                                &buffer,
+                                0,
+                                instruction->result,
+                                component);
+                        }
+                    }
+                } break;
+                case IR_OPCODE_VA_COPY:
+                {
+                    a64_emit_load_value(
+                        &buffer,
+                        0,
+                        instruction->operands[0]);
+                    for (u32 component = 0;
+                        component < 4;
+                        component += 1)
+                    {
+                        a64_emit_load_pointer_offset(
+                            &buffer,
+                            1,
+                            0,
+                            component * 8,
+                            8);
+                        a64_emit_store_value_component(
+                            &buffer,
+                            1,
+                            instruction->result,
+                            component);
+                    }
+                } break;
+                case IR_OPCODE_VA_END:
+                {
+                    a64_emit_load_value(
+                        &buffer,
+                        0,
+                        instruction->operands[0]);
+                    a64_emit_constant(&buffer, 1, 1);
+                    a64_emit_store_pointer_offset(
+                        &buffer,
+                        1,
+                        0,
+                        24,
+                        8);
+                } break;
+                case IR_OPCODE_VA_ARG:
+                {
+                    AnalysisType* type =
+                        analysis_type_from_id(
+                            analysis,
+                            instruction->type);
+                    u32 size = codegen_type_storage_size(type);
+                    if (!size || size > 8 ||
+                        (type->kind != ANALYSIS_TYPE_INTEGER &&
+                         type->kind != ANALYSIS_TYPE_FLOAT &&
+                         type->kind != ANALYSIS_TYPE_BOOL &&
+                         type->kind != ANALYSIS_TYPE_POINTER &&
+                         type->kind != ANALYSIS_TYPE_ENUM))
+                    {
+                        buffer.error =
+                            CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                        break;
+                    }
+                    a64_emit_load_value(
+                        &buffer,
+                        0,
+                        instruction->operands[0]);
+                    if (abi == CODEGEN_ABI_AARCH64_DARWIN)
+                    {
+                        a64_emit_load_pointer_offset(
+                            &buffer,
+                            1,
+                            0,
+                            0,
+                            8);
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0x91002022);
+                        a64_emit_store_pointer_offset(
+                            &buffer,
+                            2,
+                            0,
+                            0,
+                            8);
+                    }
+                    else
+                    {
+                        bool floating =
+                            type->kind == ANALYSIS_TYPE_FLOAT;
+                        u32 offset = floating ? 28 : 24;
+                        u32 top_offset = floating ? 16 : 8;
+                        u32 increment = floating ? 16 : 8;
+                        a64_emit_load_pointer_offset(
+                            &buffer,
+                            1,
+                            0,
+                            offset,
+                            4);
+                        u32 test_offset = (u32)buffer.count;
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0x36f80001);
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0x93407c21);
+                        a64_emit_load_pointer_offset(
+                            &buffer,
+                            2,
+                            0,
+                            top_offset,
+                            8);
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0x8b010042);
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0x11000021 |
+                                (increment << 10));
+                        a64_emit_store_pointer_offset(
+                            &buffer,
+                            1,
+                            0,
+                            offset,
+                            4);
+                        u32 end_branch = (u32)buffer.count;
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0x14000000);
+                        u32 overflow_offset =
+                            (u32)buffer.count;
+                        a64_emit_load_pointer_offset(
+                            &buffer,
+                            2,
+                            0,
+                            0,
+                            8);
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0x91002043);
+                        a64_emit_store_pointer_offset(
+                            &buffer,
+                            3,
+                            0,
+                            0,
+                            8);
+                        u32 end_offset = (u32)buffer.count;
+                        a64_emit_instruction_word(
+                            &buffer,
+                            0xaa0203e1);
+                        u32 test_instruction = 0x36f80001 |
+                            (((overflow_offset - test_offset) / 4) << 5);
+                        u32 end_instruction = 0x14000000 |
+                            ((end_offset - end_branch) / 4);
+                        memcpy(
+                            buffer.bytes + test_offset,
+                            &test_instruction,
+                            sizeof(test_instruction));
+                        memcpy(
+                            buffer.bytes + end_branch,
+                            &end_instruction,
+                            sizeof(end_instruction));
+                    }
+                    a64_emit_load_pointer(
+                        &buffer,
+                        0,
+                        1,
+                        size);
                     a64_emit_store_value(
                         &buffer,
                         0,
@@ -4819,7 +7487,50 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
                                 function->values[
                                     instruction->operands[0]
                                         .value].type);
-                        if (return_type->kind ==
+                        IrValueId return_value =
+                            instruction->operands[0];
+                        if (function_signature.result.indirect)
+                        {
+                            a64_emit_load_offset(
+                                &buffer,
+                                0,
+                                hidden_result_offset);
+                            a64_emit_load_value_component(
+                                &buffer,
+                                1,
+                                return_value,
+                                0);
+                            a64_emit_copy_memory(
+                                &buffer,
+                                codegen_type_storage_size(
+                                    return_type));
+                        }
+                        else if (codegen_type_is_indirect_value(
+                                    return_type) ||
+                                 codegen_type_is_inline_collection(
+                                    return_type))
+                        {
+                            for (u32 part_index = 0;
+                                part_index <
+                                    function_signature.result
+                                        .part_count;
+                                part_index += 1)
+                            {
+                                CodegenAbiPart* part =
+                                    function_signature.result.parts +
+                                    part_index;
+                                a64_emit_load_abi_part(
+                                    &buffer,
+                                    analysis,
+                                    function,
+                                    return_value,
+                                    return_type,
+                                    part,
+                                    part->index,
+                                    part->index);
+                            }
+                        }
+                        else if (return_type->kind ==
                             ANALYSIS_TYPE_FLOAT)
                         {
                             a64_emit_float_load_value(
@@ -4901,6 +7612,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(
     result.stack_frame_size = frame_size;
     result.first_call_relocation =
         first_call_relocation;
+    result.register_value_count =
+        allocation.allocated_count;
+    result.spilled_value_count =
+        allocation.spilled_count;
     return result;
 }
 
@@ -5213,6 +7928,35 @@ typedef f64 CodegenTestIntegerToFloatFunction(s32 value);
 typedef s64 CodegenTestFloatToIntegerFunction(f64 value);
 typedef u64 CodegenTestFunction0(void);
 typedef f64 CodegenTestFloatFunction2(f64 left, f64 right);
+typedef f64 CodegenTestFloatFunction0(void);
+typedef struct CodegenTestAbiPair
+{
+    s64 left;
+    s64 right;
+} CodegenTestAbiPair;
+typedef struct CodegenTestAbiMixed
+{
+    f64 value;
+    s64 count;
+} CodegenTestAbiMixed;
+typedef struct CodegenTestAbiLarge
+{
+    s64 first;
+    s64 second;
+    s64 third;
+} CodegenTestAbiLarge;
+typedef s64 CodegenTestAbiPairSumFunction(CodegenTestAbiPair pair);
+typedef CodegenTestAbiPair CodegenTestAbiPairMakeFunction(
+    s64 left,
+    s64 right);
+typedef f64 CodegenTestAbiMixedSumFunction(
+    CodegenTestAbiMixed mixed);
+typedef s64 CodegenTestAbiLargeSumFunction(
+    CodegenTestAbiLarge large);
+typedef CodegenTestAbiLarge CodegenTestAbiLargeMakeFunction(
+    s64 first,
+    s64 second,
+    s64 third);
 
 BUSTER_GLOBAL_LOCAL AnalysisEntity* codegen_test_entity_find(
     AnalysisResult* analysis,
@@ -5295,6 +8039,22 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "    first,\n"
         "    second,\n"
         "}\n"
+        "type CodegenAbiPair = struct\n"
+        "{\n"
+        "    left: s64,\n"
+        "    right: s64,\n"
+        "}\n"
+        "type CodegenAbiMixed = struct\n"
+        "{\n"
+        "    value: f64,\n"
+        "    count: s64,\n"
+        "}\n"
+        "type CodegenAbiLarge = struct\n"
+        "{\n"
+        "    first: s64,\n"
+        "    second: s64,\n"
+        "    third: s64,\n"
+        "}\n"
         "code arithmetic : fn (left: s64, right: s64) s64\n"
         "{\n"
         "    data value: s64 = left * 3;\n"
@@ -5322,6 +8082,45 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "code straight_arithmetic : fn (left: s64, right: s64) s64\n"
         "{\n"
         "    return left * 3 + right;\n"
+        "}\n"
+        "code register_pressure : fn (a: s64, b: s64, c: s64, d: s64, e: s64, f: s64, g: s64, h: s64, i: s64) s64\n"
+        "{\n"
+        "    return a + b + c + d + e + f + g + h + i;\n"
+        "}\n"
+        "code abi_pair_sum : fn (pair: CodegenAbiPair) s64\n"
+        "{\n"
+        "    return pair.left + pair.right;\n"
+        "}\n"
+        "code abi_pair_make : fn (left: s64, right: s64) CodegenAbiPair\n"
+        "{\n"
+        "    return { .left = left, .right = right };\n"
+        "}\n"
+        "code abi_pair_round_trip : fn () s64\n"
+        "{\n"
+        "    data pair: CodegenAbiPair = abi_pair_make(19, 23);\n"
+        "    return abi_pair_sum(pair);\n"
+        "}\n"
+        "code abi_mixed_sum : fn (mixed: CodegenAbiMixed) f64\n"
+        "{\n"
+        "    return mixed.value + @cast(mixed.count);\n"
+        "}\n"
+        "code abi_mixed_round_trip : fn () f64\n"
+        "{\n"
+        "    data mixed: CodegenAbiMixed = { .value = 1.5, .count = 2 };\n"
+        "    return abi_mixed_sum(mixed);\n"
+        "}\n"
+        "code abi_large_make : fn (first: s64, second: s64, third: s64) CodegenAbiLarge\n"
+        "{\n"
+        "    return { .first = first, .second = second, .third = third };\n"
+        "}\n"
+        "code abi_large_sum : fn (large: CodegenAbiLarge) s64\n"
+        "{\n"
+        "    return large.first + large.second + large.third;\n"
+        "}\n"
+        "code abi_large_round_trip : fn () s64\n"
+        "{\n"
+        "    data large: CodegenAbiLarge = abi_large_make(5, 7, 11);\n"
+        "    return abi_large_sum(large);\n"
         "}\n"
         "code range_sum : fn () s32\n"
         "{\n"
@@ -5394,6 +8193,20 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "        .first => { return 11; },\n"
         "        else => { return 22; },\n"
         "    }\n"
+        "}\n"
+        "code variadic_sum : fn (first: s64, ...) s64\n"
+        "{\n"
+        "    data arguments = @va_start();\n"
+        "    data copy = @va_copy(&arguments);\n"
+        "    data second: s64 = @va_arg(&copy, s64);\n"
+        "    data third: s64 = @va_arg(&copy, s64);\n"
+        "    @va_end(&copy);\n"
+        "    @va_end(&arguments);\n"
+        "    return first + second + third;\n"
+        "}\n"
+        "code variadic_call : fn () s64\n"
+        "{\n"
+        "    return variadic_sum(10, 20, 12);\n"
         "}\n");
     TokenizerResult tokens = tokenize(
         arguments->arena,
@@ -5431,7 +8244,6 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, function != 0);
     Target target = target_native;
     target.cpu_arch = CPU_ARCH_X86_64;
-    target.os = OPERATING_SYSTEM_LINUX;
     CodegenFunction generated = function ?
         codegen_generate_function(
             arguments->arena,
@@ -5443,6 +8255,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         arguments,
         generated.error == CODEGEN_ERROR_NONE);
     BUSTER_TEST(arguments, generated.code.length > 0);
+    BUSTER_TEST(arguments, generated.register_value_count > 0);
+    BUSTER_TEST(arguments, generated.spilled_value_count > 0);
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
     CodegenExecutable executable =
         codegen_make_executable(generated);
@@ -5517,6 +8331,130 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             CODEGEN_ABI_LOCATION_INTEGER_REGISTER);
     BUSTER_TEST(arguments, system_v.arguments[0].index == 0);
     BUSTER_TEST(arguments, system_v.arguments[1].index == 1);
+    AnalysisEntity* pair_sum_abi_entity =
+        codegen_test_entity_find(&analysis, S8("abi_pair_sum"));
+    AnalysisEntity* mixed_sum_abi_entity =
+        codegen_test_entity_find(&analysis, S8("abi_mixed_sum"));
+    AnalysisEntity* large_make_abi_entity =
+        codegen_test_entity_find(&analysis, S8("abi_large_make"));
+    IrFunction* pair_sum_abi_function =
+        pair_sum_abi_entity ?
+            codegen_test_function_find(
+                &module,
+                pair_sum_abi_entity->id) :
+            0;
+    IrFunction* mixed_sum_abi_function =
+        mixed_sum_abi_entity ?
+            codegen_test_function_find(
+                &module,
+                mixed_sum_abi_entity->id) :
+            0;
+    IrFunction* large_make_abi_function =
+        large_make_abi_entity ?
+            codegen_test_function_find(
+                &module,
+                large_make_abi_entity->id) :
+            0;
+    BUSTER_TEST(arguments, pair_sum_abi_function != 0);
+    BUSTER_TEST(arguments, mixed_sum_abi_function != 0);
+    BUSTER_TEST(arguments, large_make_abi_function != 0);
+    if (pair_sum_abi_function &&
+        mixed_sum_abi_function &&
+        large_make_abi_function)
+    {
+        CodegenAbiSignature pair_system_v =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                pair_sum_abi_function->type,
+                CODEGEN_ABI_X86_64_SYSTEM_V);
+        CodegenAbiSignature pair_windows =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                pair_sum_abi_function->type,
+                CODEGEN_ABI_X86_64_WINDOWS);
+        CodegenAbiSignature pair_aapcs =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                pair_sum_abi_function->type,
+                CODEGEN_ABI_AARCH64_AAPCS64);
+        BUSTER_TEST(arguments, pair_system_v.valid);
+        BUSTER_TEST(
+            arguments,
+            pair_system_v.arguments[0].part_count == 2);
+        BUSTER_TEST(
+            arguments,
+            pair_system_v.arguments[0].parts[0].index == 0);
+        BUSTER_TEST(
+            arguments,
+            pair_system_v.arguments[0].parts[1].index == 1);
+        BUSTER_TEST(arguments, pair_windows.valid);
+        BUSTER_TEST(arguments, pair_windows.arguments[0].indirect);
+        BUSTER_TEST(
+            arguments,
+            pair_windows.arguments[0]
+                .indirect_copy_offset >= 32);
+        BUSTER_TEST(arguments, pair_aapcs.valid);
+        BUSTER_TEST(
+            arguments,
+            pair_aapcs.arguments[0].part_count == 2);
+        CodegenAbiSignature mixed_system_v =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                mixed_sum_abi_function->type,
+                CODEGEN_ABI_X86_64_SYSTEM_V);
+        BUSTER_TEST(arguments, mixed_system_v.valid);
+        BUSTER_TEST(
+            arguments,
+            mixed_system_v.arguments[0].parts[0].kind ==
+                CODEGEN_ABI_LOCATION_FLOAT_REGISTER);
+        BUSTER_TEST(
+            arguments,
+            mixed_system_v.arguments[0].parts[1].kind ==
+                CODEGEN_ABI_LOCATION_INTEGER_REGISTER);
+        CodegenAbiSignature large_system_v =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                large_make_abi_function->type,
+                CODEGEN_ABI_X86_64_SYSTEM_V);
+        CodegenAbiSignature large_windows =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                large_make_abi_function->type,
+                CODEGEN_ABI_X86_64_WINDOWS);
+        CodegenAbiSignature large_aapcs =
+            codegen_classify_signature(
+                arguments->arena,
+                &analysis,
+                large_make_abi_function->type,
+                CODEGEN_ABI_AARCH64_AAPCS64);
+        BUSTER_TEST(arguments, large_system_v.result.indirect);
+        BUSTER_TEST(
+            arguments,
+            large_system_v.indirect_result_register == 0);
+        BUSTER_TEST(
+            arguments,
+            large_system_v.arguments[0].index == 1);
+        BUSTER_TEST(arguments, large_windows.result.indirect);
+        BUSTER_TEST(
+            arguments,
+            large_windows.indirect_result_register == 0);
+        BUSTER_TEST(
+            arguments,
+            large_windows.arguments[0].index == 1);
+        BUSTER_TEST(arguments, large_aapcs.result.indirect);
+        BUSTER_TEST(
+            arguments,
+            large_aapcs.indirect_result_register == 8);
+        BUSTER_TEST(
+            arguments,
+            large_aapcs.arguments[0].index == 0);
+    }
 
     AnalysisEntity* float_entity =
         codegen_test_entity_find(
@@ -5676,6 +8614,59 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(
         arguments,
         aarch64_generated.code.length >= 4);
+    BUSTER_TEST(
+        arguments,
+        aarch64_generated.register_value_count > 0);
+    AnalysisEntity* pressure_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("register_pressure"));
+    IrFunction* pressure_function = pressure_entity ?
+        codegen_test_function_find(
+            &module,
+            pressure_entity->id) :
+        0;
+    BUSTER_TEST(arguments, pressure_function != 0);
+    CodegenFunction x86_64_pressure_generated =
+        pressure_function ?
+            codegen_generate_function(
+                arguments->arena,
+                &analysis,
+                pressure_function,
+                target) :
+            (CodegenFunction){
+                .error = CODEGEN_ERROR_INVALID_IR,
+            };
+    CodegenFunction aarch64_pressure_generated =
+        pressure_function ?
+            codegen_generate_function(
+                arguments->arena,
+                &analysis,
+                pressure_function,
+                aarch64_target) :
+            (CodegenFunction){
+                .error = CODEGEN_ERROR_INVALID_IR,
+            };
+    BUSTER_TEST(
+        arguments,
+        x86_64_pressure_generated.error ==
+            CODEGEN_ERROR_NONE);
+    BUSTER_TEST(
+        arguments,
+        x86_64_pressure_generated.register_value_count > 0);
+    BUSTER_TEST(
+        arguments,
+        x86_64_pressure_generated.spilled_value_count > 0);
+    BUSTER_TEST(
+        arguments,
+        aarch64_pressure_generated.error ==
+            CODEGEN_ERROR_NONE);
+    BUSTER_TEST(
+        arguments,
+        aarch64_pressure_generated.register_value_count > 0);
+    BUSTER_TEST(
+        arguments,
+        aarch64_pressure_generated.spilled_value_count > 0);
     CodegenFunction aarch64_cfg_generated =
         function ?
             codegen_generate_function(
@@ -6046,6 +9037,37 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(
         arguments,
         generated_module.error == CODEGEN_ERROR_NONE);
+    Target windows_target = target;
+    windows_target.os = OPERATING_SYSTEM_WINDOWS;
+    CodegenModule windows_abi_module =
+        codegen_generate_module(
+            arguments->arena,
+            &analysis,
+            &module,
+            windows_target);
+    BUSTER_TEST(
+        arguments,
+        windows_abi_module.error == CODEGEN_ERROR_NONE);
+    CodegenModule aapcs64_abi_module =
+        codegen_generate_module(
+            arguments->arena,
+            &analysis,
+            &module,
+            aarch64_target);
+    BUSTER_TEST(
+        arguments,
+        aapcs64_abi_module.error == CODEGEN_ERROR_NONE);
+    Target darwin_target = aarch64_target;
+    darwin_target.os = OPERATING_SYSTEM_MACOS;
+    CodegenModule darwin_abi_module =
+        codegen_generate_module(
+            arguments->arena,
+            &analysis,
+            &module,
+            darwin_target);
+    BUSTER_TEST(
+        arguments,
+        darwin_abi_module.error == CODEGEN_ERROR_NONE);
     AnalysisEntity* caller_entity =
         codegen_test_entity_find(
             &analysis,
@@ -6055,6 +9077,10 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         codegen_test_entity_find(
             &analysis,
             S8("call_many"));
+    AnalysisEntity* variadic_call_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("variadic_call"));
     AnalysisEntity* add_one_entity =
         codegen_test_entity_find(
             &analysis,
@@ -6073,6 +9099,12 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, caller_function != 0);
     CodegenModuleEntry* caller_entry = 0;
     CodegenModuleEntry* call_many_entry = 0;
+    CodegenModuleEntry* variadic_call_entry =
+        variadic_call_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                variadic_call_entity->id) :
+            0;
     if (caller_entity)
     {
         for (u32 index = 0;
@@ -6113,6 +9145,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, caller_entry != 0);
     BUSTER_TEST(arguments, call_many_entry != 0);
+    BUSTER_TEST(arguments, variadic_call_entry != 0);
     AnalysisEntity* integer_to_float_entity =
         codegen_test_entity_find(
             &analysis,
@@ -6142,9 +9175,87 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             &generated_module,
             choose_entity->id) :
         0;
+    AnalysisEntity* abi_pair_round_trip_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("abi_pair_round_trip"));
+    AnalysisEntity* abi_mixed_round_trip_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("abi_mixed_round_trip"));
+    AnalysisEntity* abi_large_round_trip_entity =
+        codegen_test_entity_find(
+            &analysis,
+            S8("abi_large_round_trip"));
+    AnalysisEntity* abi_pair_sum_entity =
+        codegen_test_entity_find(&analysis, S8("abi_pair_sum"));
+    AnalysisEntity* abi_pair_make_entity =
+        codegen_test_entity_find(&analysis, S8("abi_pair_make"));
+    AnalysisEntity* abi_mixed_sum_entity =
+        codegen_test_entity_find(&analysis, S8("abi_mixed_sum"));
+    AnalysisEntity* abi_large_sum_entity =
+        codegen_test_entity_find(&analysis, S8("abi_large_sum"));
+    AnalysisEntity* abi_large_make_entity =
+        codegen_test_entity_find(&analysis, S8("abi_large_make"));
+    CodegenModuleEntry* abi_pair_round_trip_entry =
+        abi_pair_round_trip_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                abi_pair_round_trip_entity->id) :
+            0;
+    CodegenModuleEntry* abi_mixed_round_trip_entry =
+        abi_mixed_round_trip_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                abi_mixed_round_trip_entity->id) :
+            0;
+    CodegenModuleEntry* abi_large_round_trip_entry =
+        abi_large_round_trip_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                abi_large_round_trip_entity->id) :
+            0;
+    CodegenModuleEntry* abi_pair_sum_entry =
+        abi_pair_sum_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                abi_pair_sum_entity->id) :
+            0;
+    CodegenModuleEntry* abi_pair_make_entry =
+        abi_pair_make_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                abi_pair_make_entity->id) :
+            0;
+    CodegenModuleEntry* abi_mixed_sum_entry =
+        abi_mixed_sum_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                abi_mixed_sum_entity->id) :
+            0;
+    CodegenModuleEntry* abi_large_sum_entry =
+        abi_large_sum_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                abi_large_sum_entity->id) :
+            0;
+    CodegenModuleEntry* abi_large_make_entry =
+        abi_large_make_entity ?
+            codegen_test_module_entry_find(
+                &generated_module,
+                abi_large_make_entity->id) :
+            0;
     BUSTER_TEST(arguments, integer_to_float_entry != 0);
     BUSTER_TEST(arguments, float_to_integer_entry != 0);
     BUSTER_TEST(arguments, choose_entry != 0);
+    BUSTER_TEST(arguments, abi_pair_round_trip_entry != 0);
+    BUSTER_TEST(arguments, abi_mixed_round_trip_entry != 0);
+    BUSTER_TEST(arguments, abi_large_round_trip_entry != 0);
+    BUSTER_TEST(arguments, abi_pair_sum_entry != 0);
+    BUSTER_TEST(arguments, abi_pair_make_entry != 0);
+    BUSTER_TEST(arguments, abi_mixed_sum_entry != 0);
+    BUSTER_TEST(arguments, abi_large_sum_entry != 0);
+    BUSTER_TEST(arguments, abi_large_make_entry != 0);
     IrFunction* choose_function = choose_entity ?
         codegen_test_function_find(
             &module,
@@ -6242,6 +9353,20 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 arguments,
                 native_call_many() == 28);
         }
+        if (variadic_call_entry)
+        {
+            void* variadic_call_address =
+                (u8*)module_executable.address +
+                variadic_call_entry->offset;
+            CodegenTestFunction0* native_variadic_call = 0;
+            memcpy(
+                &native_variadic_call,
+                &variadic_call_address,
+                sizeof(native_variadic_call));
+            BUSTER_TEST(
+                arguments,
+                native_variadic_call() == 42);
+        }
         if (integer_to_float_entry &&
             float_to_integer_entry)
         {
@@ -6283,8 +9408,208 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, native_choose(0) == 11);
             BUSTER_TEST(arguments, native_choose(1) == 22);
         }
+        if (abi_pair_round_trip_entry &&
+            abi_mixed_round_trip_entry &&
+            abi_large_round_trip_entry)
+        {
+            void* pair_address =
+                (u8*)module_executable.address +
+                abi_pair_round_trip_entry->offset;
+            void* mixed_address =
+                (u8*)module_executable.address +
+                abi_mixed_round_trip_entry->offset;
+            void* large_address =
+                (u8*)module_executable.address +
+                abi_large_round_trip_entry->offset;
+            CodegenTestFunction0* native_pair = 0;
+            CodegenTestFunction0* native_large = 0;
+            CodegenTestFloatFunction0* native_mixed = 0;
+            memcpy(
+                &native_pair,
+                &pair_address,
+                sizeof(native_pair));
+            memcpy(
+                &native_large,
+                &large_address,
+                sizeof(native_large));
+            memcpy(
+                &native_mixed,
+                &mixed_address,
+                sizeof(native_mixed));
+            u64 native_pair_value = native_pair();
+            BUSTER_TEST(arguments, native_pair_value == 42);
+            BUSTER_TEST(arguments, native_large() == 23);
+            BUSTER_TEST(arguments, native_mixed() == 3.5);
+        }
+#if !BUSTER_COMPILER_TCC
+        if (abi_pair_sum_entry &&
+            abi_pair_make_entry &&
+            abi_mixed_sum_entry &&
+            abi_large_sum_entry &&
+            abi_large_make_entry)
+        {
+            void* pair_sum_address =
+                (u8*)module_executable.address +
+                abi_pair_sum_entry->offset;
+            void* pair_make_address =
+                (u8*)module_executable.address +
+                abi_pair_make_entry->offset;
+            void* mixed_sum_address =
+                (u8*)module_executable.address +
+                abi_mixed_sum_entry->offset;
+            void* large_sum_address =
+                (u8*)module_executable.address +
+                abi_large_sum_entry->offset;
+            void* large_make_address =
+                (u8*)module_executable.address +
+                abi_large_make_entry->offset;
+            CodegenTestAbiPairSumFunction* pair_sum = 0;
+            CodegenTestAbiPairMakeFunction* pair_make = 0;
+            CodegenTestAbiMixedSumFunction* mixed_sum = 0;
+            CodegenTestAbiLargeSumFunction* large_sum = 0;
+            CodegenTestAbiLargeMakeFunction* large_make = 0;
+            memcpy(
+                &pair_sum,
+                &pair_sum_address,
+                sizeof(pair_sum));
+            memcpy(
+                &pair_make,
+                &pair_make_address,
+                sizeof(pair_make));
+            memcpy(
+                &mixed_sum,
+                &mixed_sum_address,
+                sizeof(mixed_sum));
+            memcpy(
+                &large_sum,
+                &large_sum_address,
+                sizeof(large_sum));
+            memcpy(
+                &large_make,
+                &large_make_address,
+                sizeof(large_make));
+            CodegenTestAbiPair pair = { 13, 17 };
+            BUSTER_TEST(arguments, pair_sum(pair) == 30);
+            pair = pair_make(29, 31);
+            BUSTER_TEST(arguments, pair.left == 29);
+            BUSTER_TEST(arguments, pair.right == 31);
+            CodegenTestAbiMixed mixed = { 2.25, 3 };
+            BUSTER_TEST(arguments, mixed_sum(mixed) == 5.25);
+            CodegenTestAbiLarge large = { 2, 3, 5 };
+            BUSTER_TEST(arguments, large_sum(large) == 10);
+            large = large_make(7, 11, 13);
+            BUSTER_TEST(arguments, large.first == 7);
+            BUSTER_TEST(arguments, large.second == 11);
+            BUSTER_TEST(arguments, large.third == 13);
+        }
+#endif
         codegen_release_executable(module_executable);
     }
+#endif
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_SANITIZE
+    CodegenModule native_aarch64_module =
+        codegen_generate_module(
+            arguments->arena,
+            &analysis,
+            &module,
+            aarch64_target);
+    BUSTER_TEST(
+        arguments,
+        native_aarch64_module.error ==
+            CODEGEN_ERROR_NONE);
+    CodegenModuleEntry* native_aarch64_pair_sum_entry =
+        abi_pair_sum_entity ?
+            codegen_test_module_entry_find(
+                &native_aarch64_module,
+                abi_pair_sum_entity->id) :
+            0;
+    CodegenModuleEntry* native_aarch64_pair_make_entry =
+        abi_pair_make_entity ?
+            codegen_test_module_entry_find(
+                &native_aarch64_module,
+                abi_pair_make_entity->id) :
+            0;
+    CodegenModuleEntry* native_aarch64_mixed_sum_entry =
+        abi_mixed_sum_entity ?
+            codegen_test_module_entry_find(
+                &native_aarch64_module,
+                abi_mixed_sum_entity->id) :
+            0;
+    CodegenModuleEntry* native_aarch64_large_sum_entry =
+        abi_large_sum_entity ?
+            codegen_test_module_entry_find(
+                &native_aarch64_module,
+                abi_large_sum_entity->id) :
+            0;
+    CodegenModuleEntry* native_aarch64_large_make_entry =
+        abi_large_make_entity ?
+            codegen_test_module_entry_find(
+                &native_aarch64_module,
+                abi_large_make_entity->id) :
+            0;
+    CodegenExecutable native_aarch64_executable =
+        codegen_make_executable(
+            (CodegenFunction){
+                .code = native_aarch64_module.code,
+                .error = native_aarch64_module.error,
+            });
+    BUSTER_TEST(
+        arguments,
+        native_aarch64_executable.error ==
+            CODEGEN_ERROR_NONE);
+    if (native_aarch64_executable.address &&
+        native_aarch64_pair_sum_entry &&
+        native_aarch64_pair_make_entry &&
+        native_aarch64_mixed_sum_entry &&
+        native_aarch64_large_sum_entry &&
+        native_aarch64_large_make_entry)
+    {
+        void* pair_sum_address =
+            (u8*)native_aarch64_executable.address +
+            native_aarch64_pair_sum_entry->offset;
+        void* pair_make_address =
+            (u8*)native_aarch64_executable.address +
+            native_aarch64_pair_make_entry->offset;
+        void* mixed_sum_address =
+            (u8*)native_aarch64_executable.address +
+            native_aarch64_mixed_sum_entry->offset;
+        void* large_sum_address =
+            (u8*)native_aarch64_executable.address +
+            native_aarch64_large_sum_entry->offset;
+        void* large_make_address =
+            (u8*)native_aarch64_executable.address +
+            native_aarch64_large_make_entry->offset;
+        CodegenTestAbiPairSumFunction* pair_sum = 0;
+        CodegenTestAbiPairMakeFunction* pair_make = 0;
+        CodegenTestAbiMixedSumFunction* mixed_sum = 0;
+        CodegenTestAbiLargeSumFunction* large_sum = 0;
+        CodegenTestAbiLargeMakeFunction* large_make = 0;
+        memcpy(&pair_sum, &pair_sum_address, sizeof(pair_sum));
+        memcpy(&pair_make, &pair_make_address, sizeof(pair_make));
+        memcpy(&mixed_sum, &mixed_sum_address, sizeof(mixed_sum));
+        memcpy(&large_sum, &large_sum_address, sizeof(large_sum));
+        memcpy(&large_make, &large_make_address, sizeof(large_make));
+        BUSTER_TEST(
+            arguments,
+            pair_sum((CodegenTestAbiPair){ 13, 17 }) == 30);
+        CodegenTestAbiPair pair = pair_make(29, 31);
+        BUSTER_TEST(arguments, pair.left == 29);
+        BUSTER_TEST(arguments, pair.right == 31);
+        BUSTER_TEST(
+            arguments,
+            mixed_sum((CodegenTestAbiMixed){ 2.25, 3 }) ==
+                5.25);
+        BUSTER_TEST(
+            arguments,
+            large_sum((CodegenTestAbiLarge){ 2, 3, 5 }) ==
+                10);
+        CodegenTestAbiLarge large =
+            large_make(7, 11, 13);
+        BUSTER_TEST(arguments, large.first == 7);
+        BUSTER_TEST(arguments, large.second == 11);
+        BUSTER_TEST(arguments, large.third == 13);
+    }
+    codegen_release_executable(native_aarch64_executable);
 #endif
     BUSTER_CHECK(arena_destroy(expression_arena, 1));
     arena_set_position(temporary.arena, temporary.position);

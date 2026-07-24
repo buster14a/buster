@@ -327,14 +327,16 @@ struct AstCall
     u32 argument_count;
 };
 
+typedef struct AstType AstType;
+
 struct AstIntrinsicCall
 {
     AstIdentifier name;
     ParserSourceRange range;
+    AstType* type_argument;
     u32 argument_count;
 };
 
-typedef struct AstType AstType;
 typedef struct AstNode AstNode;
 
 struct AstNode
@@ -578,6 +580,8 @@ struct AstType
             AstType* return_type;
             AstCallingConvention calling_convention;
             u32 argument_count;
+            bool is_variadic;
+            u8 reserved[3];
         } function;
     };
 };

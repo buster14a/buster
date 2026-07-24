@@ -1146,6 +1146,7 @@ struct ParserState
         {
             AstIdentifier name;
             ParserSourceRange range;
+            AstType** type_argument_destination;
             IntrinsicCallStateId state;
             u32 argument_count;
         } intrinsic_call;
@@ -2751,6 +2752,11 @@ BUSTER_GLOBAL_LOCAL void finish_type_reference(Parser* parser, u32 end_offset)
                 break; default: BUSTER_UNREACHABLE();
             }
         }
+        break; case PARSER_STATE_INTRINSIC_CALL:
+        {
+            BUSTER_CHECK(resume_state->intrinsic_call.type_argument_destination);
+            resume_state->intrinsic_call.state = INTRINSIC_CALL_STATE_DELIMITER;
+        }
         break; case PARSER_STATE_FOR_STATEMENT:
         {
             BUSTER_CHECK(resume_state->statement.for_state.id == FOR_STATEMENT_STATE_TYPE);
@@ -4076,6 +4082,8 @@ BUSTER_GLOBAL_LOCAL void finish_intrinsic_call(Parser* restrict parser, Extended
     node->intrinsic_call = (AstIntrinsicCall){
         .name = intrinsic.intrinsic_call.name,
         .range = range,
+        .type_argument = intrinsic.intrinsic_call.type_argument_destination ?
+            *intrinsic.intrinsic_call.type_argument_destination : 0,
         .argument_count = intrinsic.intrinsic_call.argument_count,
     };
     expression_finish_operand(parser, owner);
@@ -4674,6 +4682,12 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                                     type_state->type.argument_is_compile_time = true;
                                 }
                             }
+                            break; case TOKEN_TRIPLE_DOT:
+                            {
+                                consume(&parser.iterator);
+                                type_state->type.type->function.is_variadic = true;
+                                type_state->type.current_state = TYPE_STATE_FUNCTION_ARGUMENT_DELIMITER_OR_CLOSE;
+                            }
                             break; case TOKEN_IDENTIFIER:
                             {
                                 consume(&parser.iterator);
@@ -4740,6 +4754,11 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         {
                             break; case TOKEN_COMMA:
                             {
+                                if (type_state->type.type->function.is_variadic)
+                                {
+                                    parser_unexpected(&parser, token, TOKEN_RIGHT_PARENTHESIS);
+                                    continue;
+                                }
                                 consume(&parser.iterator);
                                 type_state->type.current_state = TYPE_STATE_FUNCTION_ARGUMENT_NAME_OR_CLOSE;
                             }
@@ -5960,7 +5979,23 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
                         if (token.id == TOKEN_COMMA)
                         {
                             consume(&parser.iterator);
-                            intrinsic->intrinsic_call.state = INTRINSIC_CALL_STATE_ARGUMENT_OR_CLOSE;
+                            if (string_equal(intrinsic->intrinsic_call.name.text, S8("va_arg")) &&
+                                intrinsic->intrinsic_call.argument_count == 1 &&
+                                !intrinsic->intrinsic_call.type_argument_destination)
+                            {
+                                AstType** destination =
+                                    arena_allocate(parser.result_arena, AstType*, 1);
+                                *destination = 0;
+                                intrinsic->intrinsic_call.type_argument_destination = destination;
+                                ParserState* type_state = state_push(&parser.state);
+                                type_state->id = PARSER_STATE_TYPE_REFERENCE;
+                                type_state->type.current_state = TYPE_STATE_PREFIX_OR_BASE;
+                                type_state->type.destination = destination;
+                            }
+                            else
+                            {
+                                intrinsic->intrinsic_call.state = INTRINSIC_CALL_STATE_ARGUMENT_OR_CLOSE;
+                            }
                         }
                         else if (token.id == TOKEN_RIGHT_PARENTHESIS)
                         {
@@ -6732,6 +6767,15 @@ BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic missing_compile_time_marker_dia
 
 BUSTER_GLOBAL_LOCAL ParserFileTestCase parser_file_test_cases[] =
 {
+    {
+        .path = S8_INITIALIZER("tests/basic_variadic.bbb"),
+        .expected_expression = S8_INITIALIZER("(- (call first_two 1 2 100) 3)"),
+        .expression_code_name = S8_INITIALIZER("main"),
+        .expected_code_count = 2,
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_variadic_error.bbb"),
+    },
     {
         .path = S8_INITIALIZER("tests/basic_minimal.bbb"),
         .expected_expression = S8_INITIALIZER("0")
@@ -10032,6 +10076,25 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
                     compile_time_identity->type->function.first_argument &&
                     compile_time_identity->type->function.first_argument->type->
                         is_compile_time);
+            }
+            else if (string_equal(
+                    test_case.path,
+                    S8("tests/basic_variadic.bbb")))
+            {
+                AstCode* variadic = parsed.first_code;
+                BUSTER_TEST(arguments,
+                    variadic && variadic->type->function.is_variadic);
+                BUSTER_TEST(arguments,
+                    variadic &&
+                    variadic->type->function.argument_count == 1);
+                AstStatement* statement =
+                    variadic ? variadic->body.first_statement : 0;
+                while (statement &&
+                    statement->id != AST_STATEMENT_DATA)
+                {
+                    statement = statement->next;
+                }
+                BUSTER_TEST(arguments, statement != 0);
             }
         }
 

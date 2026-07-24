@@ -11,6 +11,7 @@ typedef enum IrRuntimeValueKind
     IR_RUNTIME_VALUE_ADDRESS,
     IR_RUNTIME_VALUE_SLICE,
     IR_RUNTIME_VALUE_RANGE,
+    IR_RUNTIME_VALUE_VA_LIST,
     IR_RUNTIME_VALUE_KIND_COUNT,
 } IrRuntimeValueKind;
 
@@ -24,14 +25,18 @@ struct IrRuntimeValue
     AnalysisModuleId type_module;
     AnalysisTypeId type;
     IrRuntimeObject* object;
+    IrRuntimeValue* va_arguments;
     u64 bits;
     u64 offset;
     u64 length;
     u64 element_size;
+    u32 va_index;
+    u32 va_count;
     IrRuntimeValueKind kind;
     bool initialized;
     bool reversed;
-    u8 reserved[2];
+    bool va_ended;
+    u8 reserved;
 };
 
 struct IrRuntimeObject
@@ -280,6 +285,7 @@ BUSTER_GLOBAL_LOCAL u64 ir_interpreter_type_size(
             return (type->as.integer.bit_width + 7) / 8;
         case ANALYSIS_TYPE_FLOAT:
             return type->as.float_bit_width / 8;
+        case ANALYSIS_TYPE_VA_LIST: return 32;
         case ANALYSIS_TYPE_ENUM: return 4;
         case ANALYSIS_TYPE_POINTER:
         case ANALYSIS_TYPE_FUNCTION: return 8;
@@ -466,8 +472,8 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(
         for (u64 index = 0; index < size; index += 1)
         {
             object->bytes[offset + index] =
-                index < 8 ?
-                    (u8)(value.bits >> (u32)(index * 8)) : 0;
+                (u8)(index < 8 ?
+                    value.bits >> (u32)(index * 8) : 0);
             object->initialized[offset + index] = 1;
         }
         return true;
@@ -540,6 +546,18 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_read(
             .kind = IR_RUNTIME_VALUE_SCALAR,
             .initialized = true,
         };
+        return true;
+    }
+    if (type_id.value == analysis->types.builtin.va_list_type.value)
+    {
+        IrRuntimeStoredValue* stored =
+            ir_interpreter_stored_value_find(object, offset, size);
+        if (!stored || !stored->value.initialized ||
+            stored->value.kind != IR_RUNTIME_VALUE_VA_LIST)
+        {
+            return false;
+        }
+        *value_out = stored->value;
         return true;
     }
     if (type->kind == ANALYSIS_TYPE_ARRAY ||
@@ -620,7 +638,10 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_frame_prepare(
         target.analysis,
         target.function->type);
     if (function_type->kind != ANALYSIS_TYPE_FUNCTION ||
-        function_type->as.function.argument_count != argument_count ||
+        (!function_type->as.function.is_variadic &&
+            function_type->as.function.argument_count != argument_count) ||
+        (function_type->as.function.is_variadic &&
+            function_type->as.function.argument_count > argument_count) ||
         target.function->state != IR_FUNCTION_LOWERED)
     {
         return false;
@@ -1215,7 +1236,10 @@ IrExecutionResult ir_execute(
         entry_target.analysis,
         entry_target.function->type);
     if (entry_type->kind != ANALYSIS_TYPE_FUNCTION ||
-        entry_type->as.function.argument_count != argument_count)
+        (!entry_type->as.function.is_variadic &&
+            entry_type->as.function.argument_count != argument_count) ||
+        (entry_type->as.function.is_variadic &&
+            entry_type->as.function.argument_count > argument_count))
     {
         IrExecutionResult result = ir_interpreter_trap(
             0,
@@ -2018,6 +2042,81 @@ IrExecutionResult ir_execute(
                 }
                 produced.reversed = !produced.reversed;
             } break;
+            case IR_OPCODE_VA_START:
+            {
+                AnalysisType* function_type = analysis_type_from_id(
+                    frame->analysis,
+                    frame->function->type);
+                produced = (IrRuntimeValue){
+                    .va_arguments = frame->arguments,
+                    .va_index = function_type->as.function.argument_count,
+                    .va_count = frame->argument_count,
+                    .kind = IR_RUNTIME_VALUE_VA_LIST,
+                    .initialized = true,
+                };
+            } break;
+            case IR_OPCODE_VA_COPY:
+            case IR_OPCODE_VA_END:
+            case IR_OPCODE_VA_ARG:
+            {
+                IrRuntimeValue address = frame->values[
+                    instruction->operands[0].value];
+                IrRuntimeValue list = {0};
+                if (address.kind != IR_RUNTIME_VALUE_ADDRESS ||
+                    !ir_interpreter_memory_read(
+                        scratch.arena,
+                        frame->analysis,
+                        frame->analysis->types.builtin.va_list_type,
+                        address.object,
+                        address.offset,
+                        &list) ||
+                    list.kind != IR_RUNTIME_VALUE_VA_LIST ||
+                    list.va_ended)
+                {
+                    operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+                    break;
+                }
+                if (instruction->opcode == IR_OPCODE_VA_COPY)
+                {
+                    produced = list;
+                }
+                else if (instruction->opcode == IR_OPCODE_VA_END)
+                {
+                    list.va_ended = true;
+                    if (!ir_interpreter_memory_write(
+                            scratch.arena,
+                            address.object,
+                            address.offset,
+                            ir_interpreter_type_size(
+                                frame->analysis,
+                                frame->analysis->types.builtin.va_list_type),
+                            list))
+                    {
+                        operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    }
+                }
+                else
+                {
+                    if (list.va_index >= list.va_count)
+                    {
+                        operation_trap = IR_EXECUTION_TRAP_ARGUMENT_COUNT;
+                        break;
+                    }
+                    produced = list.va_arguments[list.va_index];
+                    list.va_index += 1;
+                    if (!ir_interpreter_memory_write(
+                            scratch.arena,
+                            address.object,
+                            address.offset,
+                            ir_interpreter_type_size(
+                                frame->analysis,
+                                frame->analysis->types.builtin.va_list_type),
+                            list))
+                    {
+                        operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    }
+                }
+            } break;
             case IR_OPCODE_BRANCH:
             {
                 IrBlockId predecessor = frame->block;
@@ -2322,6 +2421,19 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
         "    data values: [1]s32 = [ 9 ];\n"
         "    return values[index];\n"
         "}\n"
+        "code variadic_first_two : fn (first: s32, ...) s32\n"
+        "{\n"
+        "    data arguments = @va_start();\n"
+        "    data copy = @va_copy(&arguments);\n"
+        "    data second: s32 = @va_arg(&copy, s32);\n"
+        "    @va_end(&copy);\n"
+        "    @va_end(&arguments);\n"
+        "    return first + second;\n"
+        "}\n"
+        "code variadic_main : fn () s32\n"
+        "{\n"
+        "    return variadic_first_two(20, 22, 99);\n"
+        "}\n"
         "code main : fn () s32\n"
         "{\n"
         "    return choose(3, 4) * 2;\n"
@@ -2407,6 +2519,27 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments,
             depth_limited.trap ==
                 IR_EXECUTION_TRAP_CALL_DEPTH_LIMIT);
+    }
+    AnalysisEntity* variadic_main_entity =
+        ir_interpreter_test_entity_find(
+            &scalar_analysis,
+            S8("variadic_main"));
+    BUSTER_TEST(arguments, variadic_main_entity != 0);
+    if (variadic_main_entity)
+    {
+        IrExecutionResult executed = ir_execute(
+            expression_arena,
+            &scalar_program_analysis,
+            &scalar_program,
+            variadic_main_entity->id,
+            ANALYSIS_INSTANTIATION_ID_INVALID,
+            0,
+            0,
+            (IrExecutionOptions){0});
+        BUSTER_TEST(arguments,
+            executed.trap == IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments, executed.has_value);
+        BUSTER_TEST(arguments, executed.bits == 42);
     }
 
     AnalysisEntity* choose_entity = ir_interpreter_test_entity_find(

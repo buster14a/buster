@@ -1,0 +1,14 @@
+code first_two : fn (first: s32, ...) s32
+{
+    data arguments = @va_start();
+    data copy = @va_copy(&arguments);
+    data second: s32 = @va_arg(&copy, s32);
+    @va_end(&copy);
+    @va_end(&arguments);
+    return first + second;
+}
+
+code main[export] : fn [cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+{
+    return first_two(1, 2, 100) - 3;
+}

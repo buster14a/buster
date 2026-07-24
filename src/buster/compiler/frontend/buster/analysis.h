@@ -109,6 +109,7 @@ typedef enum AnalysisTypeKind
     ANALYSIS_TYPE_BOOL,
     ANALYSIS_TYPE_INTEGER,
     ANALYSIS_TYPE_FLOAT,
+    ANALYSIS_TYPE_VA_LIST,
     ANALYSIS_TYPE_COMPILE_TIME_PARAMETER,
     ANALYSIS_TYPE_POINTER,
     ANALYSIS_TYPE_SLICE,
@@ -180,6 +181,8 @@ struct AnalysisType
             AnalysisTypeId return_type;
             AstCallingConvention calling_convention;
             u32 argument_count;
+            bool is_variadic;
+            u8 reserved[3];
         } function;
         AnalysisEntityId declaration;
     } as;
@@ -201,6 +204,7 @@ struct AnalysisBuiltinTypes
     AnalysisTypeId s64_type;
     AnalysisTypeId f32_type;
     AnalysisTypeId f64_type;
+    AnalysisTypeId va_list_type;
 };
 
 typedef struct AnalysisTypeTable AnalysisTypeTable;
@@ -707,6 +711,7 @@ struct AnalysisAbiPart
     AnalysisAbiLocationKind location;
     u32 register_index;
     u32 stack_offset;
+    u32 value_offset;
     u32 size;
 };
 
@@ -720,6 +725,7 @@ struct AnalysisAbiValue
 {
     AnalysisAbiPart parts[ANALYSIS_ABI_MAX_PARTS];
     u32 part_count;
+    u32 indirect_copy_offset;
     bool indirect;
     u8 reserved[3];
 };
@@ -732,6 +738,10 @@ struct AnalysisFunctionAbi
     AnalysisAbiConvention convention;
     u32 argument_count;
     u32 stack_size;
+    u32 indirect_result_register;
+    u32 fixed_argument_count;
+    bool is_variadic;
+    u8 reserved[3];
 };
 
 struct AnalysisResult
@@ -823,6 +833,13 @@ BUSTER_F_DECL AnalysisFunctionAbi analysis_classify_function_abi(
     Arena* result_arena,
     AnalysisResult* result,
     AnalysisTypeId function_type,
+    Target target);
+BUSTER_F_DECL AnalysisFunctionAbi analysis_classify_call_abi(
+    Arena* result_arena,
+    AnalysisResult* result,
+    AnalysisTypeId function_type,
+    AnalysisTypeId* argument_types,
+    u32 argument_count,
     Target target);
 BUSTER_F_DECL void analysis_build_jobs(Arena* result_arena, AnalysisResult* result);
 BUSTER_F_DECL AnalysisScheduleResult analysis_execute_jobs(

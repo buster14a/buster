@@ -1373,13 +1373,62 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                 }
                 AstTypeArgument* argument = callee_entity ?
                     callee_entity->ast.code->type->function.first_argument : 0;
+                AnalysisType* callee_signature = analysis_type_from_id(
+                    builder->analysis,
+                    callee_typed->type);
                 for (u32 index = 1; index < arity; index += 1)
                 {
                     bool compile_time = argument && argument->is_compile_time;
                     if (!compile_time)
                     {
-                        operands[operand_count++] =
+                        IrValueId value =
                             ir_materialize(builder, results[roots[index]], source);
+                        u32 source_argument = index - 1;
+                        if (callee_signature->kind == ANALYSIS_TYPE_FUNCTION &&
+                            callee_signature->as.function.is_variadic &&
+                            source_argument >=
+                                callee_signature->as.function.argument_count)
+                        {
+                            AnalysisTypeId source_type =
+                                builder->function->values[value.value].type;
+                            AnalysisType* source_value_type =
+                                analysis_type_from_id(
+                                    builder->analysis,
+                                    source_type);
+                            AnalysisTypeId promoted = source_type;
+                            if (source_value_type->kind == ANALYSIS_TYPE_FLOAT &&
+                                source_value_type->as.float_bit_width == 32)
+                            {
+                                promoted =
+                                    builder->analysis->types.builtin.f64_type;
+                            }
+                            else if (source_value_type->kind == ANALYSIS_TYPE_BOOL ||
+                                (source_value_type->kind == ANALYSIS_TYPE_INTEGER &&
+                                    source_value_type->as.integer.bit_width < 32))
+                            {
+                                promoted =
+                                    builder->analysis->types.builtin.s32_type;
+                            }
+                            if (!ir_type_id_equal(source_type, promoted))
+                            {
+                                IrInstruction* conversion = ir_emit(
+                                    builder,
+                                    IR_OPCODE_CAST,
+                                    promoted,
+                                    IR_VALUE_VALUE,
+                                    source,
+                                    &value,
+                                    1,
+                                    true);
+                                conversion->conversion_operation =
+                                    ir_conversion_operation(
+                                        builder->analysis,
+                                        source_type,
+                                        promoted);
+                                value = conversion->result;
+                            }
+                        }
+                        operands[operand_count++] = value;
                     }
                     if (argument)
                     {
@@ -1419,8 +1468,27 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                 {
                     operands[index] = ir_materialize(builder, results[roots[index]], source);
                 }
-                IrOpcode opcode = string_equal(node->intrinsic_call.name.text, S8("cast")) ?
-                    IR_OPCODE_CAST : IR_OPCODE_REVERSE;
+                IrOpcode opcode = IR_OPCODE_REVERSE;
+                if (string_equal(node->intrinsic_call.name.text, S8("cast")))
+                {
+                    opcode = IR_OPCODE_CAST;
+                }
+                else if (string_equal(node->intrinsic_call.name.text, S8("va_start")))
+                {
+                    opcode = IR_OPCODE_VA_START;
+                }
+                else if (string_equal(node->intrinsic_call.name.text, S8("va_copy")))
+                {
+                    opcode = IR_OPCODE_VA_COPY;
+                }
+                else if (string_equal(node->intrinsic_call.name.text, S8("va_end")))
+                {
+                    opcode = IR_OPCODE_VA_END;
+                }
+                else if (string_equal(node->intrinsic_call.name.text, S8("va_arg")))
+                {
+                    opcode = IR_OPCODE_VA_ARG;
+                }
                 instruction = ir_emit(
                     builder,
                     opcode,
@@ -1429,7 +1497,8 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                     node->intrinsic_call.range,
                     operands,
                     arity,
-                    true);
+                    analysis_type_from_id(builder->analysis, typed->type)->kind !=
+                        ANALYSIS_TYPE_VOID);
                 if (opcode == IR_OPCODE_CAST)
                 {
                     BUSTER_CHECK(arity == 1);
@@ -2712,6 +2781,47 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(
                 source,
                 instruction->type);
     }
+    if (instruction->opcode == IR_OPCODE_VA_START)
+    {
+        AnalysisType* signature =
+            analysis_type_from_id(analysis, function->type);
+        return instruction->operand_count == 0 &&
+            signature->kind == ANALYSIS_TYPE_FUNCTION &&
+            signature->as.function.is_variadic &&
+            ir_type_id_equal(
+                instruction->type,
+                analysis->types.builtin.va_list_type);
+    }
+    if (instruction->opcode == IR_OPCODE_VA_COPY ||
+        instruction->opcode == IR_OPCODE_VA_END ||
+        instruction->opcode == IR_OPCODE_VA_ARG)
+    {
+        if (instruction->operand_count != 1)
+        {
+            return false;
+        }
+        AnalysisType* operand = analysis_type_from_id(
+            analysis,
+            function->values[instruction->operands[0].value].type);
+        if (operand->kind != ANALYSIS_TYPE_POINTER ||
+            !ir_type_id_equal(
+                operand->as.element_type,
+                analysis->types.builtin.va_list_type))
+        {
+            return false;
+        }
+        return instruction->opcode == IR_OPCODE_VA_COPY ?
+                ir_type_id_equal(
+                    instruction->type,
+                    analysis->types.builtin.va_list_type) :
+            instruction->opcode == IR_OPCODE_VA_END ?
+                ir_type_id_equal(
+                    instruction->type,
+                    analysis->types.builtin.void_type) :
+                !ir_type_id_equal(
+                    instruction->type,
+                    analysis->types.builtin.void_type);
+    }
     if (instruction->conversion_operation != IR_CONVERSION_COUNT)
     {
         return false;
@@ -3030,9 +3140,14 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
                         function->values + instruction->operands[0].value;
                     AnalysisType* signature =
                         analysis_type_from_id(analysis, callee->type);
+                    u32 call_argument_count = instruction->operand_count - 1;
                     if (signature->kind != ANALYSIS_TYPE_FUNCTION ||
-                        instruction->operand_count !=
-                            signature->as.function.argument_count + 1 ||
+                        (!signature->as.function.is_variadic &&
+                            call_argument_count !=
+                                signature->as.function.argument_count) ||
+                        (signature->as.function.is_variadic &&
+                            call_argument_count <
+                                signature->as.function.argument_count) ||
                         !ir_type_id_equal(
                             instruction->type,
                             signature->as.function.return_type))
@@ -3219,6 +3334,10 @@ BUSTER_GLOBAL_LOCAL String8 ir_opcode_name(IrOpcode opcode)
         case IR_OPCODE_UNARY: return S8("unary");
         case IR_OPCODE_BINARY: return S8("binary");
         case IR_OPCODE_REVERSE: return S8("reverse");
+        case IR_OPCODE_VA_START: return S8("va_start");
+        case IR_OPCODE_VA_COPY: return S8("va_copy");
+        case IR_OPCODE_VA_END: return S8("va_end");
+        case IR_OPCODE_VA_ARG: return S8("va_arg");
         case IR_OPCODE_BRANCH: return S8("branch");
         case IR_OPCODE_BRANCH_IF: return S8("branch_if");
         case IR_OPCODE_SWITCH: return S8("switch");
@@ -3407,6 +3526,8 @@ struct IrFixtureTest
 
 BUSTER_GLOBAL_LOCAL IrFixtureTest ir_fixture_tests[] =
 {
+    { S8_INITIALIZER("tests/basic_variadic.bbb") },
+    { S8_INITIALIZER("tests/basic_variadic_error.bbb") },
     { S8_INITIALIZER("tests/array_slices.bbb") },
     { S8_INITIALIZER("tests/basic_array_literal.bbb") },
     { S8_INITIALIZER("tests/basic_assignment.bbb") },
@@ -4257,6 +4378,28 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_LOCAL) >= 1);
             BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_LOAD) >= 1);
             BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_STORE) >= 1);
+        }
+        else if (string_equal(
+                fixture.path,
+                S8("tests/basic_variadic.bbb")))
+        {
+            BUSTER_TEST(arguments, module.function_count == 2);
+            BUSTER_TEST(arguments,
+                ir_test_opcode_count(
+                    module.functions,
+                    IR_OPCODE_VA_START) == 1);
+            BUSTER_TEST(arguments,
+                ir_test_opcode_count(
+                    module.functions,
+                    IR_OPCODE_VA_COPY) == 1);
+            BUSTER_TEST(arguments,
+                ir_test_opcode_count(
+                    module.functions,
+                    IR_OPCODE_VA_ARG) == 1);
+            BUSTER_TEST(arguments,
+                ir_test_opcode_count(
+                    module.functions,
+                    IR_OPCODE_VA_END) == 2);
         }
         else if (string_equal(fixture.path, S8("tests/basic_for.bbb")))
         {

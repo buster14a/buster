@@ -939,6 +939,15 @@ BUSTER_GLOBAL_LOCAL String8 analysis_canonical_tasks_join(
                         result_arena,
                         S8("fn{u32}("),
                         (u32)type->as.function.calling_convention));
+                if (type->as.function.is_variadic)
+                {
+                    analysis_canonical_part_push(
+                        scratch_arena,
+                        &first,
+                        &last,
+                        &part_count,
+                        S8("..."));
+                }
                 analysis_canonical_task_push(
                     scratch_arena,
                     &top,
@@ -1009,6 +1018,7 @@ BUSTER_GLOBAL_LOCAL String8 analysis_canonical_tasks_join(
             case ANALYSIS_TYPE_BOOL:
             case ANALYSIS_TYPE_INTEGER:
             case ANALYSIS_TYPE_FLOAT:
+            case ANALYSIS_TYPE_VA_LIST:
             case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
             {
                 analysis_canonical_part_push(
@@ -1184,6 +1194,7 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
         String8 declaration_entity_name = {0};
         u32 argument_count = 0;
         u32 calling_convention = 0;
+        u32 is_variadic = 0;
         if (type->kind == ANALYSIS_TYPE_POINTER ||
             type->kind == ANALYSIS_TYPE_SLICE ||
             type->kind == ANALYSIS_TYPE_INFERRED_ARRAY ||
@@ -1201,6 +1212,7 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
             return_type = type->as.function.return_type;
             argument_count = type->as.function.argument_count;
             calling_convention = (u32)type->as.function.calling_convention;
+            is_variadic = (u32)type->as.function.is_variadic;
         }
         else if (type->kind == ANALYSIS_TYPE_STRUCT ||
             type->kind == ANALYSIS_TYPE_UNION ||
@@ -1226,7 +1238,7 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
         }
         parts[part_count++] = string_format(
             arena,
-            S8("type {u32} kind={u32} name={S8} element={u32} count={u64} return={u32} arguments={u32} cc={u32} declaration={S8}:{S8}\n"),
+            S8("type {u32} kind={u32} name={S8} element={u32} count={u64} return={u32} arguments={u32} variadic={u32} cc={u32} declaration={S8}:{S8}\n"),
             type->id.value,
             (u32)type->kind,
             type->name.pointer ? type->name : S8(""),
@@ -1234,6 +1246,7 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
             array_count,
             return_type.value,
             argument_count,
+            is_variadic,
             calling_convention,
             declaration_module_name.pointer ?
                 declaration_module_name : S8(""),
@@ -1989,6 +2002,12 @@ BUSTER_GLOBAL_LOCAL void analysis_builtin_types_initialize(AnalysisTypeTable* ta
     table->builtin.s64_type = analysis_builtin_add(table, S8("s64"), ANALYSIS_TYPE_INTEGER, 64, true);
     table->builtin.f32_type = analysis_builtin_add(table, S8("f32"), ANALYSIS_TYPE_FLOAT, 32, true);
     table->builtin.f64_type = analysis_builtin_add(table, S8("f64"), ANALYSIS_TYPE_FLOAT, 64, true);
+    table->builtin.va_list_type = analysis_builtin_add(
+        table,
+        S8("va_list"),
+        ANALYSIS_TYPE_VA_LIST,
+        0,
+        false);
 }
 
 BUSTER_GLOBAL_LOCAL bool analysis_type_id_equal(AnalysisTypeId left, AnalysisTypeId right)
@@ -2027,6 +2046,7 @@ BUSTER_GLOBAL_LOCAL bool analysis_type_matches(AnalysisType* existing, AnalysisT
         {
             if (
                 existing->as.function.argument_count != candidate->as.function.argument_count ||
+                existing->as.function.is_variadic != candidate->as.function.is_variadic ||
                 existing->as.function.calling_convention != candidate->as.function.calling_convention ||
                 !analysis_type_id_equal(existing->as.function.return_type, candidate->as.function.return_type))
             {
@@ -2062,6 +2082,7 @@ BUSTER_GLOBAL_LOCAL bool analysis_type_matches(AnalysisType* existing, AnalysisT
         case ANALYSIS_TYPE_BOOL:
         case ANALYSIS_TYPE_INTEGER:
         case ANALYSIS_TYPE_FLOAT:
+        case ANALYSIS_TYPE_VA_LIST:
         case ANALYSIS_TYPE_COUNT: break;
     }
     return false;
@@ -2251,6 +2272,8 @@ struct AnalysisImportTypeTask
             AnalysisTypeId return_type;
             AstCallingConvention calling_convention;
             u32 argument_count;
+            bool is_variadic;
+            u8 reserved[3];
         } function;
     } as;
 };
@@ -2303,6 +2326,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_import(
                 case ANALYSIS_TYPE_BOOL:
                 case ANALYSIS_TYPE_INTEGER:
                 case ANALYSIS_TYPE_FLOAT:
+                case ANALYSIS_TYPE_VA_LIST:
                 {
                     AnalysisTypeId builtin =
                             analysis_builtin_type_find(&destination->types, type->name);
@@ -2399,6 +2423,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_import(
                             .calling_convention =
                                     type->as.function.calling_convention,
                             .argument_count = count,
+                            .is_variadic = type->as.function.is_variadic,
                         },
                     };
                     top = finish;
@@ -2465,6 +2490,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_import(
                             .calling_convention =
                                     task->as.function.calling_convention,
                             .argument_count = task->as.function.argument_count,
+                            .is_variadic = task->as.function.is_variadic,
                         },
                     });
         }
@@ -2505,6 +2531,8 @@ struct AnalysisSubstituteTask
             AnalysisTypeId return_type;
             AstCallingConvention calling_convention;
             u32 argument_count;
+            bool is_variadic;
+            u8 reserved[3];
         } function;
     } as;
 };
@@ -2638,6 +2666,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_substitute(
                             .return_type = result->types.builtin.poison,
                             .calling_convention = type->as.function.calling_convention,
                             .argument_count = count,
+                            .is_variadic = type->as.function.is_variadic,
                         },
                     };
                     top = finish;
@@ -2666,6 +2695,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_substitute(
                 case ANALYSIS_TYPE_BOOL:
                 case ANALYSIS_TYPE_INTEGER:
                 case ANALYSIS_TYPE_FLOAT:
+                case ANALYSIS_TYPE_VA_LIST:
                 case ANALYSIS_TYPE_STRUCT:
                 case ANALYSIS_TYPE_UNION:
                 case ANALYSIS_TYPE_ENUM:
@@ -2713,6 +2743,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_substitute(
                         .return_type = task->as.function.return_type,
                         .calling_convention = task->as.function.calling_convention,
                         .argument_count = task->as.function.argument_count,
+                        .is_variadic = task->as.function.is_variadic,
                     },
                 });
         }
@@ -2805,6 +2836,8 @@ struct AnalysisTypeTask
             AnalysisTypeId return_type;
             AstCallingConvention calling_convention;
             u32 argument_count;
+            bool is_variadic;
+            u8 reserved[3];
         } function;
         struct
         {
@@ -3033,6 +3066,7 @@ BUSTER_GLOBAL_LOCAL void analysis_resolve_ast_task(
                     .return_type = poison,
                     .calling_convention = ast->function.calling_convention,
                     .argument_count = argument_count,
+                    .is_variadic = ast->function.is_variadic,
                 },
             });
             analysis_type_task_ast_push(
@@ -3256,6 +3290,7 @@ BUSTER_GLOBAL_LOCAL void analysis_finish_type_task(
                         .return_type = task->as.function.return_type,
                         .calling_convention = task->as.function.calling_convention,
                         .argument_count = task->as.function.argument_count,
+                        .is_variadic = task->as.function.is_variadic,
                     },
                 });
         } break;
@@ -3985,6 +4020,7 @@ BUSTER_GLOBAL_LOCAL bool analysis_generic_type_infer(
         else if (pattern->kind == ANALYSIS_TYPE_FUNCTION)
         {
             if (pattern->as.function.argument_count != actual->as.function.argument_count ||
+                pattern->as.function.is_variadic != actual->as.function.is_variadic ||
                 pattern->as.function.calling_convention !=
                     actual->as.function.calling_convention)
             {
@@ -5237,6 +5273,7 @@ BUSTER_GLOBAL_LOCAL AnalysisInstantiation* analysis_generic_call_resolve(
                     .return_type = return_type,
                     .calling_convention = generic_function->as.function.calling_convention,
                     .argument_count = runtime_argument_count,
+                    .is_variadic = generic_function->as.function.is_variadic,
                 },
             }),
         .id = { .value = owner->instantiation_count },
@@ -5730,7 +5767,10 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
                         break;
                     }
                     typed.type = callee_type->as.function.return_type;
-                    if (node->call.argument_count != callee_type->as.function.argument_count)
+                    if ((!callee_type->as.function.is_variadic &&
+                            node->call.argument_count != callee_type->as.function.argument_count) ||
+                        (callee_type->as.function.is_variadic &&
+                            node->call.argument_count < callee_type->as.function.argument_count))
                     {
                         analysis_body_diagnostic_push(
                             context,
@@ -5802,6 +5842,89 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(
                     else if (contextual.value != ANALYSIS_ID_UNDERLYING_INVALID)
                     {
                         typed.type = contextual;
+                    }
+                }
+                else if (string_equal(node->intrinsic_call.name.text, S8("va_start")))
+                {
+                    AnalysisTypeId function_type = context->instantiation ?
+                        context->instantiation->function_type :
+                        context->result->module
+                            .semantics[context->owner->id.index.value]
+                            .type;
+                    AnalysisType* function =
+                        analysis_type_from_id(context->result, function_type);
+                    if (arity != 0 || node->intrinsic_call.type_argument)
+                    {
+                        analysis_body_diagnostic_push(
+                            context,
+                            node->intrinsic_call.range,
+                            ANALYSIS_DIAGNOSTIC_ARGUMENT_COUNT,
+                            node->intrinsic_call.name.text);
+                    }
+                    else if (function->kind != ANALYSIS_TYPE_FUNCTION ||
+                        !function->as.function.is_variadic)
+                    {
+                        analysis_body_diagnostic_push(
+                            context,
+                            node->intrinsic_call.range,
+                            ANALYSIS_DIAGNOSTIC_INVALID_OPERAND,
+                            node->intrinsic_call.name.text);
+                    }
+                    else
+                    {
+                        typed.type = context->result->types.builtin.va_list_type;
+                    }
+                }
+                else if (string_equal(node->intrinsic_call.name.text, S8("va_copy")) ||
+                    string_equal(node->intrinsic_call.name.text, S8("va_end")) ||
+                    string_equal(node->intrinsic_call.name.text, S8("va_arg")))
+                {
+                    bool is_arg =
+                        string_equal(node->intrinsic_call.name.text, S8("va_arg"));
+                    bool valid_arguments = arity == 1 &&
+                        (is_arg == (node->intrinsic_call.type_argument != 0));
+                    if (!valid_arguments)
+                    {
+                        analysis_body_diagnostic_push(
+                            context,
+                            node->intrinsic_call.range,
+                            ANALYSIS_DIAGNOSTIC_ARGUMENT_COUNT,
+                            node->intrinsic_call.name.text);
+                    }
+                    else
+                    {
+                        AnalysisTypedNode* operand =
+                            expression->nodes + operands[first_operand];
+                        AnalysisType* operand_type =
+                            analysis_type_from_id(context->result, operand->type);
+                        bool valid_list = operand_type->kind == ANALYSIS_TYPE_POINTER &&
+                            analysis_type_id_equal(
+                                operand_type->as.element_type,
+                                context->result->types.builtin.va_list_type);
+                        if (!valid_list)
+                        {
+                            analysis_body_diagnostic_push(
+                                context,
+                                node->intrinsic_call.range,
+                                ANALYSIS_DIAGNOSTIC_INVALID_OPERAND,
+                                node->intrinsic_call.name.text);
+                        }
+                        else if (is_arg)
+                        {
+                            typed.type = analysis_body_type_resolve(
+                                context,
+                                node->intrinsic_call.type_argument);
+                        }
+                        else if (string_equal(
+                            node->intrinsic_call.name.text,
+                            S8("va_copy")))
+                        {
+                            typed.type = context->result->types.builtin.va_list_type;
+                        }
+                        else
+                        {
+                            typed.type = context->result->types.builtin.void_type;
+                        }
                     }
                 }
                 else
@@ -7772,6 +7895,12 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
                     layout.alignment = (u32)layout.size;
                     layout.abi_class = ANALYSIS_ABI_CLASS_FLOAT;
                 } break;
+                case ANALYSIS_TYPE_VA_LIST:
+                {
+                    layout.size = 32;
+                    layout.alignment = 8;
+                    layout.abi_class = ANALYSIS_ABI_CLASS_MEMORY;
+                } break;
                 case ANALYSIS_TYPE_POINTER:
                 case ANALYSIS_TYPE_FUNCTION:
                 {
@@ -7941,57 +8070,126 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiConvention analysis_abi_convention(
 }
 
 BUSTER_GLOBAL_LOCAL bool analysis_abi_homogeneous_float(
+    Arena* arena,
     AnalysisResult* result,
     AnalysisTypeId type_id,
     AnalysisTypeId* element_out,
     u32* count_out)
 {
-    AnalysisType* type = analysis_type_from_id(result, type_id);
+    typedef struct AnalysisAbiHomogeneousTask
+    {
+        AnalysisResult* module;
+        AnalysisTypeId type;
+    } AnalysisAbiHomogeneousTask;
+    u32 capacity = BUSTER_MAX(result->types.count * 16, 16);
+    AnalysisAbiHomogeneousTask* tasks = arena_allocate(
+        arena,
+        AnalysisAbiHomogeneousTask,
+        capacity);
+    u32 task_count = 1;
+    tasks[0] = (AnalysisAbiHomogeneousTask){
+        .module = result,
+        .type = type_id,
+    };
     AnalysisTypeId element = ANALYSIS_TYPE_ID_INVALID;
     u32 count = 0;
-    if (type->kind == ANALYSIS_TYPE_ARRAY)
+    String8 element_name = {0};
+    while (task_count)
     {
-        AnalysisType* child = analysis_type_from_id(result, type->as.array.element_type);
-        if (child->kind != ANALYSIS_TYPE_FLOAT || !type->as.array.count || type->as.array.count > 4)
+        AnalysisAbiHomogeneousTask task =
+            tasks[--task_count];
+        AnalysisType* type =
+            analysis_type_from_id(task.module, task.type);
+        if (type->kind == ANALYSIS_TYPE_FLOAT)
+        {
+            if (count && !string_equal(
+                    element_name,
+                    type->name))
+            {
+                return false;
+            }
+            element_name = type->name;
+            count += 1;
+            if (count > 4)
+            {
+                return false;
+            }
+            continue;
+        }
+        if (type->kind == ANALYSIS_TYPE_ARRAY)
+        {
+            if (!type->as.array.count ||
+                task_count + type->as.array.count >
+                    capacity)
+            {
+                return false;
+            }
+            for (u64 index = 0;
+                index < type->as.array.count;
+                index += 1)
+            {
+                tasks[task_count++] =
+                    (AnalysisAbiHomogeneousTask){
+                        .module = task.module,
+                        .type =
+                            type->as.array.element_type,
+                    };
+            }
+            continue;
+        }
+        if (type->kind == ANALYSIS_TYPE_RANGE)
+        {
+            if (task_count + 2 > capacity)
+            {
+                return false;
+            }
+            tasks[task_count++] =
+                (AnalysisAbiHomogeneousTask){
+                    .module = task.module,
+                    .type = type->as.element_type,
+                };
+            tasks[task_count++] =
+                (AnalysisAbiHomogeneousTask){
+                    .module = task.module,
+                    .type = type->as.element_type,
+                };
+            continue;
+        }
+        if (type->kind != ANALYSIS_TYPE_STRUCT)
         {
             return false;
         }
-        element = child->id;
-        count = (u32)type->as.array.count;
-    }
-    else if (type->kind == ANALYSIS_TYPE_STRUCT)
-    {
         AnalysisResult* declaration_module = 0;
-        AnalysisEntitySemantic* semantic = analysis_declaration_semantic(
-                result,
+        AnalysisEntitySemantic* semantic =
+            analysis_declaration_semantic(
+                task.module,
                 type->as.declaration,
                 &declaration_module);
-        BUSTER_CHECK(semantic);
-        if (!semantic->field_count || semantic->field_count > 4)
+        if (!semantic || !semantic->field_count ||
+            task_count + semantic->field_count > capacity)
         {
             return false;
         }
-        for (u32 field_index = 0; field_index < semantic->field_count; field_index += 1)
+        for (u32 field_index = 0;
+            field_index < semantic->field_count;
+            field_index += 1)
         {
-            AnalysisType* field = analysis_type_from_id(
-                    declaration_module,
-                    semantic->fields[field_index].type);
-            if (field->kind != ANALYSIS_TYPE_FLOAT ||
-                (count && !string_equal(
-                        field->name,
-                        analysis_type_from_id(result, element)->name)))
-            {
-                return false;
-            }
-            element = analysis_builtin_type_find(&result->types, field->name);
-            if (element.value == ANALYSIS_ID_UNDERLYING_INVALID)
-            {
-                return false;
-            }
-            count += 1;
+            tasks[task_count++] =
+                (AnalysisAbiHomogeneousTask){
+                    .module = declaration_module,
+                    .type =
+                        semantic->fields[field_index].type,
+                };
         }
     }
-    else
+    if (!count)
+    {
+        return false;
+    }
+    element = analysis_builtin_type_find(
+        &result->types,
+        element_name);
+    if (element.value == ANALYSIS_ID_UNDERLYING_INVALID)
     {
         return false;
     }
@@ -8000,7 +8198,152 @@ BUSTER_GLOBAL_LOCAL bool analysis_abi_homogeneous_float(
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool analysis_abi_systemv_classify(
+    Arena* arena,
+    AnalysisResult* result,
+    AnalysisTypeId root_type,
+    AnalysisAbiClass classes[2])
+{
+    typedef struct AnalysisAbiClassificationTask
+    {
+        AnalysisResult* module;
+        AnalysisTypeId type;
+        u64 offset;
+    } AnalysisAbiClassificationTask;
+    u32 capacity = BUSTER_MAX(result->types.count * 16, 16);
+    AnalysisAbiClassificationTask* tasks = arena_allocate(
+        arena,
+        AnalysisAbiClassificationTask,
+        capacity);
+    u32 count = 1;
+    tasks[0] = (AnalysisAbiClassificationTask){
+        .module = result,
+        .type = root_type,
+    };
+    while (count)
+    {
+        AnalysisAbiClassificationTask task = tasks[--count];
+        AnalysisType* type =
+            analysis_type_from_id(task.module, task.type);
+        if (task.offset + type->layout.size > 16)
+        {
+            return false;
+        }
+        if (type->layout.alignment &&
+            task.offset % type->layout.alignment)
+        {
+            return false;
+        }
+        if (type->kind == ANALYSIS_TYPE_STRUCT ||
+            type->kind == ANALYSIS_TYPE_UNION)
+        {
+            AnalysisResult* declaration_module = 0;
+            AnalysisEntitySemantic* semantic =
+                analysis_declaration_semantic(
+                    task.module,
+                    type->as.declaration,
+                    &declaration_module);
+            if (!semantic)
+            {
+                return false;
+            }
+            if (count + semantic->field_count > capacity)
+            {
+                return false;
+            }
+            for (u32 index = 0;
+                index < semantic->field_count;
+                index += 1)
+            {
+                AnalysisField* field =
+                    semantic->fields + index;
+                tasks[count++] =
+                    (AnalysisAbiClassificationTask){
+                        .module = declaration_module,
+                        .type = field->type,
+                        .offset =
+                            task.offset + field->offset,
+                    };
+            }
+            continue;
+        }
+        if (type->kind == ANALYSIS_TYPE_ARRAY)
+        {
+            AnalysisType* element = analysis_type_from_id(
+                task.module,
+                type->as.array.element_type);
+            if (count + type->as.array.count > capacity)
+            {
+                return false;
+            }
+            for (u64 index = 0;
+                index < type->as.array.count;
+                index += 1)
+            {
+                tasks[count++] =
+                    (AnalysisAbiClassificationTask){
+                        .module = task.module,
+                        .type = type->as.array.element_type,
+                        .offset = task.offset +
+                            index * element->layout.size,
+                    };
+            }
+            continue;
+        }
+        if (type->kind == ANALYSIS_TYPE_RANGE)
+        {
+            if (count + 2 > capacity)
+            {
+                return false;
+            }
+            AnalysisType* range_element =
+                analysis_type_from_id(
+                    task.module,
+                    type->as.element_type);
+            tasks[count++] =
+                (AnalysisAbiClassificationTask){
+                    .module = task.module,
+                    .type = type->as.element_type,
+                    .offset = task.offset,
+                };
+            tasks[count++] =
+                (AnalysisAbiClassificationTask){
+                    .module = task.module,
+                    .type = type->as.element_type,
+                    .offset = task.offset +
+                        range_element->layout.size,
+                };
+            continue;
+        }
+        AnalysisAbiClass abi_class =
+            type->kind == ANALYSIS_TYPE_FLOAT ?
+                ANALYSIS_ABI_CLASS_FLOAT :
+                ANALYSIS_ABI_CLASS_INTEGER;
+        u32 first = (u32)(task.offset / 8);
+        u32 last = (u32)(
+            (task.offset + BUSTER_MAX(type->layout.size, 1) - 1) /
+            8);
+        for (u32 part = first; part <= last; part += 1)
+        {
+            if (part >= 2)
+            {
+                return false;
+            }
+            if (classes[part] == ANALYSIS_ABI_CLASS_NONE)
+            {
+                classes[part] = abi_class;
+            }
+            else if (classes[part] != abi_class)
+            {
+                classes[part] = ANALYSIS_ABI_CLASS_INTEGER;
+            }
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
+    Arena* arena,
     AnalysisResult* result,
     AnalysisTypeId type_id,
     AnalysisAbiConvention convention,
@@ -8020,6 +8363,7 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
             .abi_class = ANALYSIS_ABI_CLASS_FLOAT,
             .location = ANALYSIS_ABI_LOCATION_REGISTER,
             .size = (u32)layout.size,
+            .value_offset = 0,
         };
         return value;
     }
@@ -8034,6 +8378,7 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
                 ANALYSIS_ABI_CLASS_POINTER : ANALYSIS_ABI_CLASS_INTEGER,
             .location = ANALYSIS_ABI_LOCATION_REGISTER,
             .size = (u32)layout.size,
+            .value_offset = 0,
         };
         return value;
     }
@@ -8046,6 +8391,7 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
                 .abi_class = ANALYSIS_ABI_CLASS_INTEGER,
                 .location = ANALYSIS_ABI_LOCATION_REGISTER,
                 .size = (u32)layout.size,
+                .value_offset = 0,
             };
         }
         else
@@ -8056,6 +8402,7 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
                 .abi_class = ANALYSIS_ABI_CLASS_POINTER,
                 .location = ANALYSIS_ABI_LOCATION_INDIRECT,
                 .size = 8,
+                .value_offset = 0,
             };
         }
         return value;
@@ -8065,7 +8412,12 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
     {
         AnalysisTypeId homogeneous_type = ANALYSIS_TYPE_ID_INVALID;
         u32 homogeneous_count = 0;
-        if (analysis_abi_homogeneous_float(result, type_id, &homogeneous_type, &homogeneous_count))
+        if (analysis_abi_homogeneous_float(
+                arena,
+                result,
+                type_id,
+                &homogeneous_type,
+                &homogeneous_count))
         {
             AnalysisType* element = analysis_type_from_id(result, homogeneous_type);
             value.part_count = homogeneous_count;
@@ -8075,6 +8427,8 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
                     .abi_class = ANALYSIS_ABI_CLASS_FLOAT,
                     .location = ANALYSIS_ABI_LOCATION_REGISTER,
                     .size = (u32)element->layout.size,
+                    .value_offset =
+                        part * (u32)element->layout.size,
                 };
             }
         }
@@ -8087,6 +8441,7 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
                     .abi_class = ANALYSIS_ABI_CLASS_INTEGER,
                     .location = ANALYSIS_ABI_LOCATION_REGISTER,
                     .size = (u32)BUSTER_MIN((u64)8, layout.size - (u64)part * 8),
+                    .value_offset = part * 8,
                 };
             }
         }
@@ -8098,6 +8453,7 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
                 .abi_class = ANALYSIS_ABI_CLASS_POINTER,
                 .location = ANALYSIS_ABI_LOCATION_INDIRECT,
                 .size = 8,
+                .value_offset = 0,
             };
         }
         return value;
@@ -8110,42 +8466,79 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify(
             .abi_class = is_result ? ANALYSIS_ABI_CLASS_POINTER : ANALYSIS_ABI_CLASS_MEMORY,
             .location = is_result ? ANALYSIS_ABI_LOCATION_INDIRECT : ANALYSIS_ABI_LOCATION_STACK,
             .size = is_result ? 8 : (u32)layout.size,
+            .value_offset = 0,
         };
+        return value;
+    }
+    AnalysisAbiClass classes[2] = {0};
+    if (!analysis_abi_systemv_classify(
+            arena,
+            result,
+            type_id,
+            classes))
+    {
+        value.part_count = 1;
+        value.parts[0] = (AnalysisAbiPart){
+            .abi_class = is_result ?
+                ANALYSIS_ABI_CLASS_POINTER :
+                ANALYSIS_ABI_CLASS_MEMORY,
+            .location = is_result ?
+                ANALYSIS_ABI_LOCATION_INDIRECT :
+                ANALYSIS_ABI_LOCATION_STACK,
+            .size = is_result ? 8 : (u32)layout.size,
+        };
+        value.indirect = is_result;
         return value;
     }
     value.part_count = (u32)((layout.size + 7) / 8);
     for (u32 part = 0; part < value.part_count; part += 1)
     {
         value.parts[part] = (AnalysisAbiPart){
-            .abi_class = ANALYSIS_ABI_CLASS_INTEGER,
+            .abi_class = classes[part] ==
+                    ANALYSIS_ABI_CLASS_NONE ?
+                ANALYSIS_ABI_CLASS_INTEGER :
+                classes[part],
             .location = ANALYSIS_ABI_LOCATION_REGISTER,
             .size = (u32)BUSTER_MIN((u64)8, layout.size - (u64)part * 8),
+            .value_offset = part * 8,
         };
     }
     return value;
 }
 
-AnalysisFunctionAbi analysis_classify_function_abi(
+BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(
     Arena* result_arena,
     AnalysisResult* result,
     AnalysisTypeId function_type_id,
+    AnalysisTypeId* argument_types,
+    u32 argument_count,
     Target target)
 {
     AnalysisType* function = analysis_type_from_id(result, function_type_id);
     BUSTER_CHECK(function->kind == ANALYSIS_TYPE_FUNCTION);
     AnalysisFunctionAbi abi = {
         .convention = analysis_abi_convention(function, target),
-        .argument_count = function->as.function.argument_count,
+        .argument_count = argument_count,
+        .indirect_result_register = UINT32_MAX,
+        .fixed_argument_count = function->as.function.argument_count,
+        .is_variadic = function->as.function.is_variadic,
     };
     abi.arguments = arena_allocate(result_arena, AnalysisAbiValue, abi.argument_count);
     abi.result = analysis_abi_value_classify(
+        result_arena,
         result,
         function->as.function.return_type,
         abi.convention,
         true);
+    u32 result_integer_register = 0;
+    u32 result_float_register = 0;
     for (u32 part = 0; part < abi.result.part_count; part += 1)
     {
-        abi.result.parts[part].register_index = part;
+        abi.result.parts[part].register_index =
+            abi.result.parts[part].abi_class ==
+                    ANALYSIS_ABI_CLASS_FLOAT ?
+                result_float_register++ :
+                result_integer_register++;
     }
     u32 integer_register = 0;
     u32 float_register = 0;
@@ -8155,15 +8548,31 @@ AnalysisFunctionAbi analysis_classify_function_abi(
         abi.convention == ANALYSIS_ABI_CONVENTION_WIN64_X86_64 ? 4 : 8;
     u32 float_limit = abi.convention == ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 ? 8 :
         abi.convention == ANALYSIS_ABI_CONVENTION_WIN64_X86_64 ? 4 : 8;
-    if (abi.result.indirect && abi.convention != ANALYSIS_ABI_CONVENTION_WIN64_X86_64)
+    if (abi.result.indirect)
     {
-        integer_register += 1;
+        if (abi.convention ==
+            ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64)
+        {
+            abi.indirect_result_register = 0;
+            integer_register += 1;
+        }
+        else if (abi.convention ==
+            ANALYSIS_ABI_CONVENTION_WIN64_X86_64)
+        {
+            abi.indirect_result_register = 0;
+            windows_slot += 1;
+        }
+        else
+        {
+            abi.indirect_result_register = 8;
+        }
     }
     for (u32 argument = 0; argument < abi.argument_count; argument += 1)
     {
-        AnalysisTypeId argument_type = function->as.function.argument_types[argument];
+        AnalysisTypeId argument_type = argument_types[argument];
         AnalysisTypeLayout layout = analysis_type_from_id(result, argument_type)->layout;
         AnalysisAbiValue value = analysis_abi_value_classify(
+            result_arena,
             result,
             argument_type,
             abi.convention,
@@ -8194,7 +8603,10 @@ AnalysisFunctionAbi analysis_classify_function_abi(
             }
             bool registers_fit = integer_register + required_integer <= integer_limit &&
                 float_register + required_float <= float_limit &&
-                value.parts[0].location != ANALYSIS_ABI_LOCATION_STACK;
+                value.parts[0].location != ANALYSIS_ABI_LOCATION_STACK &&
+                !(abi.convention == ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 &&
+                    abi.is_variadic &&
+                    argument >= abi.fixed_argument_count);
             if (registers_fit)
             {
                 for (u32 part = 0; part < value.part_count; part += 1)
@@ -8211,20 +8623,97 @@ AnalysisFunctionAbi analysis_classify_function_abi(
             }
             else
             {
-                u32 alignment = BUSTER_MAX(layout.alignment, 8);
-                stack_offset = (u32)analysis_layout_align(stack_offset, alignment);
+            u32 alignment =
+                abi.convention ==
+                    ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ?
+                    layout.alignment :
+                    BUSTER_MAX(layout.alignment, 8);
+            stack_offset = (u32)analysis_layout_align(stack_offset, alignment);
                 for (u32 part = 0; part < value.part_count; part += 1)
                 {
                     value.parts[part].location = ANALYSIS_ABI_LOCATION_STACK;
-                    value.parts[part].stack_offset = stack_offset + part * 8;
+                    value.parts[part].stack_offset =
+                        stack_offset +
+                        value.parts[part].value_offset;
                 }
-                stack_offset += (u32)analysis_layout_align(layout.size, 8);
+                stack_offset += (u32)analysis_layout_align(
+                    layout.size,
+                    abi.convention ==
+                            ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ?
+                        BUSTER_MAX(layout.alignment, 1) :
+                        8);
             }
         }
         abi.arguments[argument] = value;
     }
+    for (u32 argument = 0;
+        argument < abi.argument_count;
+        argument += 1)
+    {
+        AnalysisAbiValue* value =
+            abi.arguments + argument;
+        if (!value->indirect)
+        {
+            continue;
+        }
+        AnalysisType* argument_type =
+            analysis_type_from_id(
+                result,
+                argument_types[argument]);
+        stack_offset = (u32)analysis_layout_align(
+            stack_offset,
+            BUSTER_MAX(
+                argument_type->layout.alignment,
+                8));
+        value->indirect_copy_offset = stack_offset;
+        stack_offset += (u32)analysis_layout_align(
+            argument_type->layout.size,
+            8);
+    }
     abi.stack_size = (u32)analysis_layout_align(stack_offset, 16);
     return abi;
+}
+
+AnalysisFunctionAbi analysis_classify_function_abi(
+    Arena* result_arena,
+    AnalysisResult* result,
+    AnalysisTypeId function_type_id,
+    Target target)
+{
+    AnalysisType* function =
+        analysis_type_from_id(result, function_type_id);
+    BUSTER_CHECK(function->kind == ANALYSIS_TYPE_FUNCTION);
+    return analysis_classify_abi(
+        result_arena,
+        result,
+        function_type_id,
+        function->as.function.argument_types,
+        function->as.function.argument_count,
+        target);
+}
+
+AnalysisFunctionAbi analysis_classify_call_abi(
+    Arena* result_arena,
+    AnalysisResult* result,
+    AnalysisTypeId function_type_id,
+    AnalysisTypeId* argument_types,
+    u32 argument_count,
+    Target target)
+{
+    AnalysisType* function =
+        analysis_type_from_id(result, function_type_id);
+    BUSTER_CHECK(function->kind == ANALYSIS_TYPE_FUNCTION);
+    BUSTER_CHECK(
+        function->as.function.is_variadic ?
+            argument_count >= function->as.function.argument_count :
+            argument_count == function->as.function.argument_count);
+    return analysis_classify_abi(
+        result_arena,
+        result,
+        function_type_id,
+        argument_types,
+        argument_count,
+        target);
 }
 
 BUSTER_GLOBAL_LOCAL void analysis_body_job_build(
@@ -8823,6 +9312,8 @@ struct AnalysisFixtureTest
 
 BUSTER_GLOBAL_LOCAL AnalysisFixtureTest analysis_fixture_tests[] =
 {
+    { S8_INITIALIZER("tests/basic_variadic.bbb"), 0 },
+    { S8_INITIALIZER("tests/basic_variadic_error.bbb"), 1 },
     { S8_INITIALIZER("tests/array_slices.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_array_literal.bbb"), 0 },
     { S8_INITIALIZER("tests/basic_assignment.bbb"), 0 },

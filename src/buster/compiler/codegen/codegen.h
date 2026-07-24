@@ -39,6 +39,7 @@ struct CodegenAbiPart
 {
     u32 index;
     u32 stack_offset;
+    u32 value_offset;
     u32 size;
     CodegenAbiLocationKind kind;
 };
@@ -53,6 +54,7 @@ struct CodegenAbiLocation
     CodegenAbiPart parts[CODEGEN_ABI_MAX_PARTS];
     u32 index;
     u32 stack_offset;
+    u32 indirect_copy_offset;
     CodegenAbiLocationKind kind;
     u32 part_count;
     bool indirect;
@@ -66,6 +68,9 @@ struct CodegenAbiSignature
     CodegenAbiLocation result;
     u32 argument_count;
     u32 stack_size;
+    u32 indirect_result_register;
+    bool valid;
+    u8 reserved[3];
 };
 
 typedef struct CodegenFunction CodegenFunction;
@@ -87,6 +92,8 @@ struct CodegenFunction
     CodegenError error;
     CodegenAbi abi;
     u32 stack_frame_size;
+    u32 register_value_count;
+    u32 spilled_value_count;
 };
 
 typedef struct CodegenModuleEntry CodegenModuleEntry;
