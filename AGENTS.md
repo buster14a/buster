@@ -236,6 +236,16 @@ has hard design constraints:
   descriptor aliasing. The x86-64 and AArch64 baselines share this value
   representation even though their stack addressing and instruction emission
   are backend-specific.
+- Separate compilation merges format-neutral `ObjectFile` values before native
+  serialization. Global definitions resolve by symbol name, private
+  object symbols remain object-local, non-exported language definitions use
+  deterministic internal names, duplicate definitions are diagnosed, and
+  unresolved symbols are retained only when the final platform linker is
+  allowed to satisfy them.
+- Native executables initially target the platform libc and CRT. Buster emits
+  ELF64, COFF, or Mach-O relocatable objects itself, then invokes the host C
+  compiler driver for startup objects, system libraries, and final executable
+  construction; freestanding startup is a separate future mode.
 - Semantic analysis and IR lowering follow the repository-wide recursion rule:
   nested expressions, statements, types, and control flow use arena-backed
   explicit stacks or worklists.
@@ -305,6 +315,8 @@ Compiler:
 | `compiler/frontend/buster/analysis.{c,h}` | Semantic analysis. |
 | `compiler/ir/ir.{c,h}` | Typed control-flow IR, semantic lowering, validation, printing, and fixture-wide IR tests. |
 | `compiler/object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers; in-memory object linking. |
+| `compiler/link/link.{c,h}` | Multi-object section merging and symbol resolution; host C-driver integration for libc-backed native executables. |
+| `compiler/driver/driver.{c,h}` | End-to-end source-to-object compilation and host-libc executable linking. |
 | `compiler/codegen/codegen.{c,h}` | Direct-IR ABI classification, native instruction emission, executable-memory support, and interpreter/native differential tests. |
 | `compiler/ir/interpreter.{c,h}` | Bounded, explicit-stack runtime IR interpreter and end-to-end execution tests. |
 | `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/ABI descriptions and per-arch instruction encoders. |

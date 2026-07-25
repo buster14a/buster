@@ -10,6 +10,8 @@
 #include <buster/compiler/ir/ir.h>
 #include <buster/compiler/ir/interpreter.h>
 #include <buster/compiler/object/object.h>
+#include <buster/compiler/link/link.h>
+#include <buster/compiler/driver/driver.h>
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/x86_64.h>
 #endif
@@ -101,6 +103,8 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &ir_interpreter_tests,
     &codegen_tests,
     &object_tests,
+    &link_tests,
+    &compiler_driver_tests,
 #if BUSTER_CPU_ARCH_X86_64
     &x86_64_tests,
 #endif

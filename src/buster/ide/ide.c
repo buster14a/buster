@@ -15,6 +15,8 @@
 #include <buster/compiler/ir/interpreter.h>
 #include <buster/compiler/codegen/codegen.h>
 #include <buster/compiler/object/object.h>
+#include <buster/compiler/link/link.h>
+#include <buster/compiler/driver/driver.h>
 #include <buster/integer.h>
 #include <buster/string.h>
 
@@ -44,6 +46,8 @@
 #include <buster/compiler/ir/interpreter.c>
 #include <buster/compiler/codegen/codegen.c>
 #include <buster/compiler/object/object.c>
+#include <buster/compiler/link/link.c>
+#include <buster/compiler/driver/driver.c>
 #include <buster/hash.c>
 #endif
 
@@ -82,9 +86,14 @@ struct IdeProgram
     IdeWindow* last_window;
     WmHandle* windowing;
     RenderingHandle* rendering;
+    String8 compile_source_path;
+    String8 compile_output_path;
+    String8 compile_linker;
+    String8 compile_module_root;
     bool test;
     bool bench;
-    u8 reserved[6];
+    bool compile;
+    u8 reserved[5];
     TimeDataType last_frame_timestamp;
 };
 
@@ -171,6 +180,79 @@ ProcessResult process_arguments(void)
         else if (string_equal(arg, S8("bench")))
         {
             ide_state.bench = true;
+        }
+        else if (string_equal(arg, S8("compile")))
+        {
+            if (ide_state.compile ||
+                i + 1 >= arguments.length)
+            {
+                string_print(S8(
+                    "usage: ide compile <source.bbb> "
+                    "[-o <output>] [--module-root=<path>] "
+                    "[--linker=<path>]\n"));
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
+            ide_state.compile = true;
+            i += 1;
+            ide_state.compile_source_path =
+                arguments.pointer[i];
+        }
+        else if (string_equal(arg, S8("-o")) &&
+            ide_state.compile)
+        {
+            if (i + 1 >= arguments.length)
+            {
+                string_print(S8(
+                    "expected an output path after -o\n"));
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
+            i += 1;
+            ide_state.compile_output_path =
+                arguments.pointer[i];
+        }
+        else if (ide_state.compile &&
+            string_starts_with_sequence(
+                arg,
+                S8("--module-root=")))
+        {
+            ide_state.compile_module_root = (String8){
+                .pointer =
+                    arg.pointer +
+                    S8("--module-root=").length,
+                .length =
+                    arg.length -
+                    S8("--module-root=").length,
+            };
+            if (!ide_state.compile_module_root.length)
+            {
+                string_print(S8(
+                    "expected a module root after --module-root=\n"));
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
+        }
+        else if (ide_state.compile &&
+            string_starts_with_sequence(
+                arg,
+                S8("--linker=")))
+        {
+            ide_state.compile_linker = (String8){
+                .pointer =
+                    arg.pointer +
+                    S8("--linker=").length,
+                .length =
+                    arg.length -
+                    S8("--linker=").length,
+            };
+            if (!ide_state.compile_linker.length)
+            {
+                string_print(S8(
+                    "expected a linker path after --linker=\n"));
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
         }
         else
         {
@@ -906,8 +988,73 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
     return run_graphical_app();
 }
 
+BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
+{
+    Arena* arena = arena_create((ArenaCreation){0});
+    if (!arena)
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 output_path =
+        ide_state.compile_output_path;
+    if (!output_path.length)
+    {
+#if BUSTER_WINDOWS
+        output_path = S8("a.exe");
+#else
+        output_path = S8("a.out");
+#endif
+    }
+#if BUSTER_WINDOWS
+    String8 object_suffix = S8(".obj");
+#else
+    String8 object_suffix = S8(".o");
+#endif
+    String8 object_path = string_format_z(
+        arena,
+        S8("{S8}{S8}"),
+        output_path,
+        object_suffix);
+    CompilerDriverResult compile =
+        compiler_driver_compile_with_libc(
+            arena,
+            (CompilerDriverOptions){
+                .source_path =
+                    ide_state.compile_source_path,
+                .output_path = output_path,
+                .object_path = object_path,
+                .linker_executable =
+                    ide_state.compile_linker,
+                .module_root =
+                    ide_state.compile_module_root,
+                .target = target_native,
+            });
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
+    if (compile.error !=
+        COMPILER_DRIVER_ERROR_NONE)
+    {
+        string_print(
+            S8("compile failed: {S8}\n"),
+            compile.diagnostic);
+        result = PROCESS_RESULT_FAILED;
+    }
+    else
+    {
+        string_print(
+            S8("compiled {S8} -> {S8}\n"),
+            ide_state.compile_source_path,
+            output_path);
+    }
+    arena_destroy(arena, 1);
+    return result;
+}
+
 ProcessResult entry_point(void)
 {
+    if (ide_state.compile)
+    {
+        return run_compiler();
+    }
     if (ide_state.bench)
     {
         return run_benchmarks();
