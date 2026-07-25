@@ -52,6 +52,25 @@ void buster_test_error(u32 line, String8 function, String8 file_path, String8 fo
     }
 }
 
+String8 buster_test_temporary_path(
+    Arena* arena,
+    String8 name,
+    String8 suffix)
+{
+#if BUSTER_WINDOWS
+    String8 prefix = S8("build/");
+#else
+    String8 prefix = S8("/tmp/");
+#endif
+    return string_format_z(
+        arena,
+        S8("{S8}{S8}-{u64}{S8}"),
+        prefix,
+        name,
+        os_get_current_process_id(),
+        suffix);
+}
+
 void default_show(UnitTestArguments* arguments, String8 format, ...)
 {
     BUSTER_UNUSED(arguments);

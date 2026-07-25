@@ -1626,8 +1626,11 @@ BUSTER_GLOBAL_LOCAL SliceString8 shell_split(Arena* arena, String8 command, bool
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(String8 argument, String8 next_argument, u64* skip_count)
+BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(SliceString8 arguments, u64 argument_index, u64* skip_count)
 {
+    BUSTER_CHECK(argument_index < arguments.length);
+    String8 argument = arguments.pointer[argument_index];
+    String8 next_argument = argument_index + 1 < arguments.length ? arguments.pointer[argument_index + 1] : (String8){0};
     String8 drop_options[] = {
         S8("-c"),
         S8("-fcolor-diagnostics"),
@@ -1652,6 +1655,11 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(String8 argument, String8 nex
         S8("-o"),
         S8("--output="),
         S8("-dependency-file="),
+    };
+    String8 build_host_definitions[] = {
+        S8("-DBUSTER_HOST_C_COMPILER="),
+        S8("-DBUSTER_HOST_C_COMPILER_ARG1="),
+        S8("-DBUSTER_HOST_C_COMPILER_MSVC="),
     };
 
     bool result = false;
@@ -1688,6 +1696,29 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(String8 argument, String8 nex
         }
     }
 
+    for (u64 i = 0; !result && i < BUSTER_ARRAY_LENGTH(build_host_definitions); i += 1)
+    {
+        String8 prefix = build_host_definitions[i];
+        if (argument.length >= prefix.length && string_starts_with_sequence(argument, prefix))
+        {
+            *skip_count = 1;
+            // CMake can emit an escaped string definition containing spaces as
+            // multiple command arguments on Windows. These build-host values
+            // are adjacent to compiler options and are irrelevant to analysis.
+            while (argument_index + *skip_count < arguments.length)
+            {
+                String8 continuation = arguments.pointer[argument_index + *skip_count];
+                if (continuation.length && continuation.pointer[0] == '-')
+                {
+                    break;
+                }
+                *skip_count += 1;
+            }
+            result = true;
+            break;
+        }
+    }
+
     return result;
 }
 
@@ -1699,9 +1730,8 @@ BUSTER_GLOBAL_LOCAL SliceString8 clang_analyzer_command(Arena* arena, SliceStrin
         u64 count = 6;
         for (u64 i = 1; i < compile_arguments.length;)
         {
-            String8 next = i + 1 < compile_arguments.length ? compile_arguments.pointer[i + 1] : (String8){0};
             u64 skip_count = 0;
-            if (clang_analyze_skip_option(compile_arguments.pointer[i], next, &skip_count))
+            if (clang_analyze_skip_option(compile_arguments, i, &skip_count))
             {
                 i += skip_count;
             }
@@ -1723,9 +1753,8 @@ BUSTER_GLOBAL_LOCAL SliceString8 clang_analyzer_command(Arena* arena, SliceStrin
 
         for (u64 i = 1; i < compile_arguments.length;)
         {
-            String8 next = i + 1 < compile_arguments.length ? compile_arguments.pointer[i + 1] : (String8){0};
             u64 skip_count = 0;
-            if (clang_analyze_skip_option(compile_arguments.pointer[i], next, &skip_count))
+            if (clang_analyze_skip_option(compile_arguments, i, &skip_count))
             {
                 i += skip_count;
             }

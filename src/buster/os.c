@@ -1552,11 +1552,20 @@ u64 os_get_page_size(void)
     return page_size;
 }
 
+u64 os_get_current_process_id(void)
+{
+#if defined(__linux__) || defined(__APPLE__)
+    return (u64)getpid();
+#else
+    return (u64)GetCurrentProcessId();
+#endif
+}
+
 OsProcessHandle* os_get_current_process_handle(void)
 {
     OsProcessHandle* result;
 #if defined(__linux__) || defined(__APPLE__)
-     result = (OsProcessHandle*)(u64)getpid();
+     result = (OsProcessHandle*)os_get_current_process_id();
 #else
      result = (OsProcessHandle*)GetCurrentProcess();
 #endif

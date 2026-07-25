@@ -217,6 +217,7 @@ BUSTER_F_DECL void os_dynamic_library_unload(OsModuleHandle* module);
 BUSTER_F_DECL OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbol);
 BUSTER_F_DECL u32 os_get_logical_thread_count(void);
 BUSTER_F_DECL u64 os_get_page_size(void);
+BUSTER_F_DECL u64 os_get_current_process_id(void);
 BUSTER_F_DECL OsProcessHandle* os_get_current_process_handle(void);
 BUSTER_F_DECL OsThreadHandle* os_get_current_thread_handle(void);
 BUSTER_F_DECL void os_thread_set_name(String8 thread_name);

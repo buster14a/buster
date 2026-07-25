@@ -71,6 +71,10 @@ BUSTER_F_DECL void consume_unit_tests(BatchTestResult* batch, UnitTestResult uni
 BUSTER_F_DECL void consume_external_tests(BatchTestResult* batch, ProcessResult result);
 
 BUSTER_F_DECL void buster_test_error(u32 line, String8 function, String8 file_path, String8 format, ...);
+BUSTER_F_DECL String8 buster_test_temporary_path(
+    Arena* arena,
+    String8 name,
+    String8 suffix);
 
 BUSTER_F_DECL BatchTestResult library_tests(UnitTestArguments* arguments);
 

@@ -484,20 +484,63 @@ LibcLinkResult link_object_with_libc(
         return result;
     }
     String8 linker = options.linker_executable;
+    String8 linker_argument = {0};
+    bool linker_is_msvc = false;
     if (!linker.length)
     {
-#if BUSTER_WINDOWS
+#if defined(BUSTER_HOST_C_COMPILER)
+        linker = S8(BUSTER_HOST_C_COMPILER);
+#if defined(BUSTER_HOST_C_COMPILER_ARG1)
+        linker_argument =
+            S8(BUSTER_HOST_C_COMPILER_ARG1);
+#endif
+#if defined(BUSTER_HOST_C_COMPILER_MSVC)
+        linker_is_msvc =
+            BUSTER_HOST_C_COMPILER_MSVC;
+#endif
+#elif BUSTER_WINDOWS
         linker = S8("clang");
 #else
         linker = S8("cc");
 #endif
     }
-    String8 spawn_arguments[] = {
-        linker,
-        options.object_path,
-        S8("-o"),
-        options.output_path,
-    };
+    String8 spawn_arguments[10] = {0};
+    u64 spawn_argument_count = 0;
+    spawn_arguments[spawn_argument_count++] = linker;
+    if (linker_argument.length)
+    {
+        spawn_arguments[spawn_argument_count++] =
+            linker_argument;
+    }
+    if (linker_is_msvc)
+    {
+        spawn_arguments[spawn_argument_count++] =
+            S8("/nologo");
+        spawn_arguments[spawn_argument_count++] =
+            options.object_path;
+        spawn_arguments[spawn_argument_count++] =
+            string_format_z(
+                arena,
+                S8("/Fe{S8}"),
+                options.output_path);
+        spawn_arguments[spawn_argument_count++] =
+            S8("/link");
+        spawn_arguments[spawn_argument_count++] =
+            S8("/subsystem:console");
+        spawn_arguments[spawn_argument_count++] =
+            S8("/defaultlib:libcmt");
+        spawn_arguments[spawn_argument_count++] =
+            S8("/defaultlib:oldnames");
+    }
+    else
+    {
+        spawn_arguments[spawn_argument_count++] =
+            options.object_path;
+        spawn_arguments[spawn_argument_count++] =
+            S8("-o");
+        spawn_arguments[spawn_argument_count++] =
+            options.output_path;
+    }
     ProcessSpawnOptions spawn_options = {
         .capture =
             ((u64)1 << STANDARD_STREAM_OUTPUT) |
@@ -505,8 +548,10 @@ LibcLinkResult link_object_with_libc(
         .use_process_environment = true,
     };
     ProcessSpawnResult spawn = os_process_spawn(
-        (SliceString8)
-            BUSTER_ARRAY_TO_SLICE(spawn_arguments),
+        (SliceString8){
+            .pointer = spawn_arguments,
+            .length = spawn_argument_count,
+        },
         (SliceString8){0},
         (SliceString8){0},
         spawn_options);
@@ -740,16 +785,23 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         permitted.error == LINK_ERROR_NONE);
 #if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && \
     !BUSTER_SANITIZE
+    String8 object_path =
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-link-test"),
 #if BUSTER_WINDOWS
-    String8 object_path =
-        S8("build/buster-link-test.obj");
-    String8 output_path =
-        S8("build/buster-link-test.exe");
+            S8(".obj"));
 #else
-    String8 object_path =
-        S8("/tmp/buster-link-test.o");
+            S8(".o"));
+#endif
     String8 output_path =
-        S8("/tmp/buster-link-test");
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-link-test"),
+#if BUSTER_WINDOWS
+            S8(".exe"));
+#else
+            S8(""));
 #endif
     LibcLinkResult executable =
         link_object_with_libc(
@@ -759,6 +811,19 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                 .output_path = output_path,
                 .object_path = object_path,
             });
+    if (executable.error != LINK_ERROR_NONE &&
+        executable.standard_error.length)
+    {
+        arguments->show(
+            arguments,
+            S8("libc linker error: {S8}\n"),
+            ((String8){
+                .pointer = (char8*)
+                    executable.standard_error.pointer,
+                .length =
+                    executable.standard_error.length,
+            }));
+    }
     BUSTER_TEST(arguments,
         executable.error == LINK_ERROR_NONE);
     if (executable.error == LINK_ERROR_NONE)

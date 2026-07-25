@@ -314,7 +314,12 @@
 #if BUSTER_OPTIMIZE
 #define BUSTER_UNREACHABLE() BUSTER_RAW_UNREACHABLE()
 #else
-#define BUSTER_UNREACHABLE() BUSTER_TRAP()
+#define BUSTER_UNREACHABLE() \
+    do \
+    { \
+        BUSTER_TRAP(); \
+        BUSTER_RAW_UNREACHABLE(); \
+    } while (0)
 #endif
 
 #include <stdbool.h>

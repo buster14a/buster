@@ -266,20 +266,28 @@ UnitTestResult compiler_driver_tests(
     UnitTestResult result = {0};
 #if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && \
     !BUSTER_SANITIZE
+    String8 source_path =
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-driver-test"),
+            S8(".bbb"));
+    String8 object_path =
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-driver-test"),
 #if BUSTER_WINDOWS
-    String8 source_path =
-        S8("build/buster-driver-test.bbb");
-    String8 object_path =
-        S8("build/buster-driver-test.obj");
-    String8 output_path =
-        S8("build/buster-driver-test.exe");
+            S8(".obj"));
 #else
-    String8 source_path =
-        S8("/tmp/buster-driver-test.bbb");
-    String8 object_path =
-        S8("/tmp/buster-driver-test.o");
+            S8(".o"));
+#endif
     String8 output_path =
-        S8("/tmp/buster-driver-test");
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-driver-test"),
+#if BUSTER_WINDOWS
+            S8(".exe"));
+#else
+            S8(""));
 #endif
     String8 source = S8(
         "code main[export] : fn () s32\n"
@@ -302,6 +310,15 @@ UnitTestResult compiler_driver_tests(
                 .object_path = object_path,
                 .target = target_native,
             });
+    if (compile.error !=
+            COMPILER_DRIVER_ERROR_NONE &&
+        compile.diagnostic.length)
+    {
+        arguments->show(
+            arguments,
+            S8("compiler driver error: {S8}\n"),
+            compile.diagnostic);
+    }
     BUSTER_TEST(arguments,
         compile.error ==
             COMPILER_DRIVER_ERROR_NONE);
@@ -332,32 +349,40 @@ UnitTestResult compiler_driver_tests(
                     PROCESS_RESULT_SUCCESS);
         }
     }
+    String8 module_directory =
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-driver-modules"),
+            S8(""));
+    String8 module_child_directory = string_format_z(
+        arguments->arena,
+        S8("{S8}/core"),
+        module_directory);
+    String8 module_root_path = string_format_z(
+        arguments->arena,
+        S8("{S8}/main.bbb"),
+        module_directory);
+    String8 module_dependency_path = string_format_z(
+        arguments->arena,
+        S8("{S8}/core/math.bbb"),
+        module_directory);
+    String8 module_object_path =
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-driver-modules"),
 #if BUSTER_WINDOWS
-    String8 module_directory =
-        S8("build/buster-driver-modules");
-    String8 module_child_directory =
-        S8("build/buster-driver-modules/core");
-    String8 module_root_path =
-        S8("build/buster-driver-modules/main.bbb");
-    String8 module_dependency_path =
-        S8("build/buster-driver-modules/core/math.bbb");
-    String8 module_object_path =
-        S8("build/buster-driver-modules.obj");
-    String8 module_output_path =
-        S8("build/buster-driver-modules.exe");
+            S8(".obj"));
 #else
-    String8 module_directory =
-        S8("/tmp/buster-driver-modules");
-    String8 module_child_directory =
-        S8("/tmp/buster-driver-modules/core");
-    String8 module_root_path =
-        S8("/tmp/buster-driver-modules/main.bbb");
-    String8 module_dependency_path =
-        S8("/tmp/buster-driver-modules/core/math.bbb");
-    String8 module_object_path =
-        S8("/tmp/buster-driver-modules.o");
+            S8(".o"));
+#endif
     String8 module_output_path =
-        S8("/tmp/buster-driver-modules-executable");
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-driver-modules-executable"),
+#if BUSTER_WINDOWS
+            S8(".exe"));
+#else
+            S8(""));
 #endif
     os_make_directory(module_directory);
     os_make_directory(module_child_directory);
@@ -400,6 +425,15 @@ UnitTestResult compiler_driver_tests(
                 .module_root = module_directory,
                 .target = target_native,
             });
+    if (module_compile.error !=
+            COMPILER_DRIVER_ERROR_NONE &&
+        module_compile.diagnostic.length)
+    {
+        arguments->show(
+            arguments,
+            S8("module compiler driver error: {S8}\n"),
+            module_compile.diagnostic);
+    }
     BUSTER_TEST(arguments,
         module_compile.error ==
             COMPILER_DRIVER_ERROR_NONE);
