@@ -13,6 +13,22 @@ jobs:
         uses: https://data.forgejo.org/actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Test (Linux)
+        shell: bash
+        if: ${{ matrix.runner == 'x86_64-linux' }}
+        run: |
+          ./build.sh test_all_combinations_ci --verbose=1
+      - name: Perf (Linux)
+        shell: bash
+        if: ${{ matrix.runner == 'x86_64-linux' || contains(matrix.runner, 'x86_64-linux-dedicated') }}
+        env:
+          PERF_HISTORY_TOKEN: ${{ secrets.PERF_HISTORY_TOKEN }}
+          RUNNER_NAME: ${{ matrix.runner }}
+          COMMIT_SHA: ${{ github.sha }}
+          PUSH_HISTORY: ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
+        run: |
+          source /opt/vulkan-sdk/current/setup-env.sh
+          ./.forgejo/scripts/perf_step.sh
       - name: Test (Android)
         shell: bash
         if: ${{ contains(matrix.runner, 'x86_64-linux-dedicated') }}
@@ -47,14 +63,14 @@ jobs:
             echo "Running Android ${build_config} tests"
             BUSTER_ANDROID_BUILD_CONFIG="$build_config" ./android/test_ci.sh
           done
-      - name: Test (Linux)
+      - name: Test (macOS)
         shell: bash
-        if: ${{ matrix.runner == 'x86_64-linux' }}
+        if: ${{ contains(matrix.runner, 'macos') }}
         run: |
           ./build.sh test_all_combinations_ci --verbose=1
-      - name: Perf (Linux)
+      - name: Perf (macOS)
         shell: bash
-        if: ${{ matrix.runner == 'x86_64-linux' || contains(matrix.runner, 'x86_64-linux-dedicated') }}
+        if: ${{ contains(matrix.runner, 'macos') }}
         env:
           PERF_HISTORY_TOKEN: ${{ secrets.PERF_HISTORY_TOKEN }}
           RUNNER_NAME: ${{ matrix.runner }}
@@ -72,22 +88,6 @@ jobs:
             echo "Running iOS ${build_config} tests"
             BUSTER_IOS_BUILD_CONFIG="$build_config" ./ios/test_ci.sh
           done
-      - name: Test (macOS)
-        shell: bash
-        if: ${{ contains(matrix.runner, 'macos') }}
-        run: |
-          ./build.sh test_all_combinations_ci --verbose=1
-      - name: Perf (macOS)
-        shell: bash
-        if: ${{ contains(matrix.runner, 'macos') }}
-        env:
-          PERF_HISTORY_TOKEN: ${{ secrets.PERF_HISTORY_TOKEN }}
-          RUNNER_NAME: ${{ matrix.runner }}
-          COMMIT_SHA: ${{ github.sha }}
-          PUSH_HISTORY: ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
-        run: |
-          source /opt/vulkan-sdk/current/setup-env.sh
-          ./.forgejo/scripts/perf_step.sh
       - name: Test (Windows)
         shell: powershell
         if: ${{ contains(matrix.runner, 'windows') }}
