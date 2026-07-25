@@ -608,8 +608,11 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         0xd65f03c0,
     };
     u32 main_instructions[] = {
+        0xa9bf7bfd,
+        0x910003fd,
         0x94000000,
         0x5100a800,
+        0xa8c17bfd,
         0xd65f03c0,
     };
     ByteSlice answer_bytes = {
@@ -621,7 +624,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         .length = sizeof(main_instructions),
     };
     ObjectRelocation main_relocation = {
-        .offset = 0,
+        .offset = 8,
         .section = OBJECT_SECTION_TEXT,
         .symbol = 1,
         .kind =

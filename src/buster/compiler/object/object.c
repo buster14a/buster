@@ -1875,7 +1875,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         0xc3,
     };
     u8 aarch64_text[] = {
+        0xfd, 0x7b, 0xbf, 0xa9,
         0x00, 0x00, 0x00, 0x94,
+        0xfd, 0x7b, 0xc1, 0xa8,
         0xc0, 0x03, 0x5f, 0xd6,
         0x40, 0x05, 0x80, 0x52,
         0xc0, 0x03, 0x5f, 0xd6,
@@ -2048,12 +2050,14 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_text);
     object.target.cpu_arch = CPU_ARCH_AARCH64;
     relocation = (ObjectRelocation){
-        .offset = 0,
+        .offset = 4,
         .section = OBJECT_SECTION_TEXT,
         .symbol = 1,
         .kind = OBJECT_RELOCATION_AARCH64_CALL26,
     };
-    symbols[1].value = 8;
+    symbols[0].size = 16;
+    symbols[1].value = 16;
+    symbols[1].size = 8;
     ObjectArtifact aarch64_elf = object_write(
         arguments->arena,
         &object,
@@ -2115,7 +2119,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         .symbol = 1,
         .kind = OBJECT_RELOCATION_X86_64_PC32,
     };
+    symbols[0].size = 6;
     symbols[1].value = 6;
+    symbols[1].size = 6;
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
     ObjectExecutable executable =
         object_link_executable(&object);
@@ -2137,12 +2143,14 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_text);
     object.target.cpu_arch = CPU_ARCH_AARCH64;
     relocation = (ObjectRelocation){
-        .offset = 0,
+        .offset = 4,
         .section = OBJECT_SECTION_TEXT,
         .symbol = 1,
         .kind = OBJECT_RELOCATION_AARCH64_CALL26,
     };
-    symbols[1].value = 8;
+    symbols[0].size = 16;
+    symbols[1].value = 16;
+    symbols[1].size = 8;
     ObjectExecutable executable =
         object_link_executable(&object);
     BUSTER_TEST(arguments,

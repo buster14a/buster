@@ -430,6 +430,10 @@ bool os_flush_instruction_cache(void* address, u64 size)
         GetCurrentProcess(),
         address,
         (SIZE_T)size) != 0;
+#elif BUSTER_COMPILER_TCC
+    BUSTER_UNUSED(address);
+    BUSTER_UNUSED(size);
+    return true;
 #elif defined(__GNUC__) || defined(__clang__)
     __builtin___clear_cache(
         (char*)address,
