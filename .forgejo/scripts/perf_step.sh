@@ -20,9 +20,8 @@ host="${GITHUB_SERVER_URL#https://}"
 host="${host#http://}"
 export REPO_PUSH_URL="https://x-access-token:${PERF_HISTORY_TOKEN}@${host}/${GITHUB_REPOSITORY}.git"
 
-# Both configs must always run and record, even if one regresses -- `set -e`
-# would otherwise abort the loop after the first config's record_perf.sh
-# failure and silently skip the other one.
+# Both configs must always run and record. Keep genuine record/push failures
+# until both configurations have had an opportunity to run.
 overall_result=0
 
 for config in Debug Release; do

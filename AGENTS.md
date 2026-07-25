@@ -103,9 +103,12 @@ Vulkan or Slang shader compilation is enabled.
   the same `(runner, config)`'s own rolling history on the orphan
   `perf-history` git branch — one row per metric, not one wide line per run
   (`ts=... runner=... config=... commit=... metric=... value=...
-  [file=...]`, plain text, no JSON/`jq`) — and **fails the CI job** only if
+  [file=...]`, plain text, no JSON/`jq`) — and emits a **warning without
+  failing the CI job** if
   `compile_milliseconds` or `bench_median_ns_per_file` regresses more than
   15% (`PERF_REGRESSION_THRESHOLD`) past that `(runner, config)`'s median.
+  Regressions emit both a `::warning` Actions annotation for CI interfaces
+  that support workflow commands and a plain stderr warning as a fallback.
   The raw `bench_median_ns` and `bench_file_count` metrics are also retained,
   but the normalized metric is gated so growing the parser corpus does not
   register as a performance regression. `compile_milliseconds` times CMake

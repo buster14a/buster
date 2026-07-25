@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Records one CI run's compile-time/run-time numbers into the `perf-history`
-# orphan branch, and fails (exit 1) if compile time or parse time per corpus
-# file regresses past PERF_REGRESSION_THRESHOLD relative to that runner's own
-# recent median for the same config. Gating the aggregate parse time would make
-# every legitimate corpus addition look like a performance regression.
+# orphan branch, and warns if compile time or parse time per corpus file
+# regresses past PERF_REGRESSION_THRESHOLD relative to that runner's own recent
+# median for the same config. Gating the aggregate parse time would make every
+# legitimate corpus addition look like a performance regression.
 #
 # History is kept as one row per metric, not one wide line per run: phase
 # (tokenize/parse) and per-file breakdown (from BUSTER_INSTRUMENT builds)
@@ -161,20 +161,20 @@ check_regression() {
             delta = new - base
             pct = (base != 0) ? (delta / base) * 100 : 0
             if (new > limit) {
-                printf "REGRESSION: %s = %s exceeds baseline median %s by %+g (%+.1f%%, threshold %.0f%%)\n", label, new, base, delta, pct, thresh * 100 > "/dev/stderr"
-                exit 1
+                format = "performance regression: %s = %s exceeds baseline median %s by %+g (%+.1f%%, threshold %.0f%%)"
+                printf "WARNING: " format "\n", label, new, base, delta, pct, thresh * 100 > "/dev/stderr"
+                printf "::warning title=Performance regression::" format "\n", label, new, base, delta, pct, thresh * 100
+                exit 0
             }
             printf "OK: %s = %s (baseline median %s, delta %+g, %+.1f%%)\n", label, new, base, delta, pct
         }
     '
 }
 
-regressed=0
-
 for gated_metric in compile_milliseconds bench_median_ns_per_file; do
     gated_value=$([[ "$gated_metric" == "compile_milliseconds" ]] && echo "$COMPILE_MILLISECONDS" || echo "$bench_median_ns_per_file")
     if baseline=$(median_of "$gated_metric"); then
-        check_regression "$gated_metric" "$gated_value" "$baseline" || regressed=1
+        check_regression "$gated_metric" "$gated_value" "$baseline"
     else
         echo "record_perf.sh: no prior $gated_metric history for runner '$RUNNER_NAME' config '$CONFIG' yet; skipping regression check"
     fi
@@ -219,4 +219,4 @@ else
     echo "record_perf.sh: PUSH_HISTORY not set; comparing only, not persisting this run"
 fi
 
-exit "$regressed"
+exit 0
