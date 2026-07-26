@@ -346,11 +346,14 @@ BUSTER_GLOBAL_LOCAL pthread_t os_posix_thread_from_generic(OsThreadHandle* handl
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL bool os_lock_and_unlock(void* address, u64 size)
+BUSTER_GLOBAL_LOCAL bool os_fault(void* address, u64 size)
 {
     bool result = 1;
 
-#if defined (__linux__) || defined(__APPLE__)
+#if defined(__linux__)
+    int os_result = madvise(address, size, MADV_POPULATE_WRITE);
+    result = os_result == 0;
+#elif defined(__APPLE__)
     int os_result = mlock(address, size);
     result = os_result == 0;
     if (result)
@@ -396,7 +399,7 @@ bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
 
     if (result & lock)
     {
-        os_lock_and_unlock(address, size);
+        os_fault(address, size);
     }
 
     return result;

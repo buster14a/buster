@@ -2,7 +2,7 @@
 #include <buster/os.h>
 #include <buster/integer.h>
 
-BUSTER_GLOBAL_LOCAL bool arena_lock_pages = true;
+BUSTER_GLOBAL_LOCAL bool arena_lock_pages = false;
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(64);
