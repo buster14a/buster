@@ -58,13 +58,25 @@ for config in Debug Release; do
     # Keep benchmark execution outside the compile timer and after the build
     # diagnostics. `bench_all` depends on the already up-to-date `ide`, so this
     # invocation only runs the benchmark, does not inflate compile time, and
-    # does not appear among the compile edges printed above.
-    ./build.sh build --build-dir "$build_dir" --config "$config" -t bench_all \
-        2>&1 | tee "$build_dir/bench_output.log"
+    # does not appear among the compile edges printed above. Its wall time is
+    # timed separately as this config's total benchmark run time. The command's
+    # stderr is merged into the pipe before the outer redirection, so the
+    # timing file receives only the `time` output.
+    timing_file=$(mktemp)
+    { time {
+        ./build.sh build --build-dir "$build_dir" --config "$config" -t bench_all \
+            2>&1 | tee "$build_dir/bench_output.log"
+    }; } 2>"$timing_file"
+    export BENCH_RUN_MILLISECONDS
+    BENCH_RUN_MILLISECONDS=$(awk '{ printf "%.0f\n", $1 * 1000 }' "$timing_file")
+    rm -f "$timing_file"
 
     export BENCH_LINE=$(grep '^BENCH ' "$build_dir/bench_output.log" | tail -n1)
     export BENCH_PHASE_LINES=$(grep '^BENCH_PHASE ' "$build_dir/bench_output.log" || true)
     export BENCH_FILE_LINES=$(grep '^BENCH_FILE ' "$build_dir/bench_output.log" || true)
+
+    # Per-config totals; Debug and Release each report their own, never summed.
+    echo "PERF_TOTAL config=$config compile_milliseconds=$COMPILE_MILLISECONDS bench_run_milliseconds=$BENCH_RUN_MILLISECONDS"
 
     if ! ./.forgejo/scripts/record_perf.sh; then
         overall_result=1

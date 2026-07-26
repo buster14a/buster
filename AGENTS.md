@@ -114,6 +114,12 @@ Vulkan or Slang shader compilation is enabled.
   register as a performance regression. `compile_milliseconds` times CMake
   generation plus the clean `ide` build; `bench_all` runs afterward, outside
   that timer, so growing the corpus cannot inflate the compile metric. The
+  `bench_all` invocation is wall-clock timed separately and recorded as
+  `bench_run_milliseconds` (not gated — it includes ninja/process overhead),
+  and each config prints its own
+  `PERF_TOTAL config=... compile_milliseconds=... bench_run_milliseconds=...`
+  line to the CI log; Debug and Release totals are reported independently,
+  never summed. The
   phase (`bench_tokenize_median_ns`, `bench_parse_median_ns`) and per-file
   (`bench_file_median_ns` + `file=`) rows are recorded for trend/diagnostic
   purposes but never gate the build — 20+ per-file checks per run would make

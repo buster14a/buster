@@ -155,9 +155,12 @@ jobs:
 
             # Keep benchmark execution outside the compile timer. bench_all
             # depends on the already up-to-date ide target, so corpus growth
-            # cannot be misreported as a compile-time regression.
+            # cannot be misreported as a compile-time regression. Its wall
+            # time is timed separately as this config's benchmark run time.
+            $benchStart = Get-Date
             $benchOutput = ./build.ps1 build --build-dir $buildDir --config $config -t bench_all
             $benchExitCode = $LASTEXITCODE
+            $benchEnd = Get-Date
             $benchOutput | ForEach-Object { Write-Output $_ }
             if ($benchExitCode -ne 0) { exit $benchExitCode }
 
@@ -169,10 +172,15 @@ jobs:
             $benchFileLines = ($benchOutput | Select-String '^BENCH_FILE ' | ForEach-Object { $_.Line }) -join "`n"
 
             $compileMilliseconds = [int](($genEnd - $genStart).TotalMilliseconds + ($buildEnd - $buildStart).TotalMilliseconds)
+            $benchRunMilliseconds = [int](($benchEnd - $benchStart).TotalMilliseconds)
+
+            # Per-config totals; Debug and Release each report their own, never summed.
+            Write-Output "PERF_TOTAL config=$config compile_milliseconds=$compileMilliseconds bench_run_milliseconds=$benchRunMilliseconds"
 
             $env:RUNNER_NAME = "${{ matrix.runner }}"
             $env:CONFIG = $config
             $env:COMPILE_MILLISECONDS = "$compileMilliseconds"
+            $env:BENCH_RUN_MILLISECONDS = "$benchRunMilliseconds"
             $env:BENCH_LINE = $benchLine
             $env:BENCH_PHASE_LINES = $benchPhaseLines
             $env:BENCH_FILE_LINES = $benchFileLines

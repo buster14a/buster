@@ -27,6 +27,10 @@
 #                   fetch) and, when PUSH_HISTORY=1, the write
 #
 # Optional env:
+#   BENCH_RUN_MILLISECONDS     wall-clock milliseconds for the bench_all run
+#                               (compile time excluded). Recorded, not gated:
+#                               it includes ninja/process overhead, so the
+#                               per-file median remains the gated signal.
 #   BENCH_PHASE_LINES          newline-separated "BENCH_PHASE <name> min_ns=..
 #                               median_ns=.." lines (BUSTER_INSTRUMENT only).
 #                               Recorded, not gated.
@@ -52,6 +56,7 @@ set -euo pipefail
 : "${COMMIT_SHA:?COMMIT_SHA is required}"
 : "${REPO_PUSH_URL:?REPO_PUSH_URL is required}"
 
+BENCH_RUN_MILLISECONDS="${BENCH_RUN_MILLISECONDS:-}"
 BENCH_PHASE_LINES="${BENCH_PHASE_LINES:-}"
 BENCH_FILE_LINES="${BENCH_FILE_LINES:-}"
 PERF_REGRESSION_THRESHOLD="${PERF_REGRESSION_THRESHOLD:-0.15}"
@@ -82,6 +87,9 @@ bench_median_ns_per_file=$(awk -v median="$bench_median_ns" -v files="$bench_fil
 # config/commit and written out.
 new_rows=()
 new_rows+=("metric=compile_milliseconds value=$COMPILE_MILLISECONDS")
+if [[ -n "$BENCH_RUN_MILLISECONDS" ]]; then
+    new_rows+=("metric=bench_run_milliseconds value=$BENCH_RUN_MILLISECONDS")
+fi
 new_rows+=("metric=bench_median_ns value=$bench_median_ns")
 new_rows+=("metric=bench_min_ns value=$bench_min_ns")
 new_rows+=("metric=bench_file_count value=$bench_file_count")
