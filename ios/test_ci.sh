@@ -20,7 +20,10 @@ build_config=${BUSTER_IOS_BUILD_CONFIG:-Debug}
 deployment_target=${BUSTER_IOS_DEPLOYMENT_TARGET:-13.0}
 # Apple Silicon runners run the simulator natively as arm64.
 arch=${BUSTER_IOS_ARCH:-arm64}
-build_directory=${BUSTER_IOS_BUILD_DIRECTORY:-build/ios-simulator-${arch}-${build_config}}
+# One directory for all configs: the Ninja Multi-Config generator keeps
+# per-config artifacts separate, so the Debug and Release CI invocations
+# share a single CMake configure instead of paying it once per config.
+build_directory=${BUSTER_IOS_BUILD_DIRECTORY:-build/ios-simulator-${arch}}
 
 # A monospace font to bundle into the .app. The in-app test always exercises the
 # GUI/rendering path (run_app), which builds a font atlas and hard-fails if no

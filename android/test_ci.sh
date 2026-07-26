@@ -77,7 +77,11 @@ if [[ -z ${android_abi} ]]; then
     exit 1
 fi
 
-build_directory=${BUSTER_ANDROID_BUILD_DIRECTORY:-build/android-ci-${android_abi}-${build_config}}
+# One directory for all configs: the Ninja Multi-Config generator keeps
+# per-config artifacts separate, so the Debug and Release CI invocations
+# share a single CMake configure (the NDK toolchain + try_compile probes
+# are the expensive part) instead of paying it once per config.
+build_directory=${BUSTER_ANDROID_BUILD_DIRECTORY:-build/android-ci-${android_abi}}
 
 # This job intentionally uses an already-running full GUI Android device/emulator.
 # Do not start a headless emulator here; the test_all target launches the app and

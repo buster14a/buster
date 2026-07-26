@@ -1,7 +1,15 @@
 on: [push]
 
+# Stacked pushes to the same ref supersede each other instead of queueing
+# full matrices on the self-hosted runners. Runs on main are never
+# cancelled: they must finish to record perf history.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -32,7 +40,6 @@ jobs:
       - name: Test (Android)
         shell: bash
         if: ${{ contains(matrix.runner, 'x86_64-linux-dedicated') }}
-        timeout-minutes: 10
         env:
           BUSTER_ANDROID_AVD: buster-ci
           BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
@@ -82,7 +89,6 @@ jobs:
       - name: Test (iOS simulator)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
-        timeout-minutes: 40
         run: |
           for build_config in Debug Release; do
             echo "Running iOS ${build_config} tests"
@@ -127,9 +133,10 @@ jobs:
           # above -- a fresh step would start a new process without it.
           # Unlike the Linux/macOS Perf steps, this doesn't also run
           # ninja_log_summary/time_trace_summary: those are diagnostics
-          # only and there's no safe way to ignore-and-continue past a
-          # build.ps1 failure here (its internal error handling calls
-          # `exit`, which would kill this whole process, not just the call).
+          # only, printed to the CI log for humans, not recorded.
+          # A generate/build failure must stop this config immediately:
+          # continuing would record a garbage COMPILE_MILLISECONDS into
+          # perf history or surface later as a confusing "no BENCH line".
           $overallExitCode = 0
 
           foreach ($config in @('Debug', 'Release')) {
@@ -138,17 +145,21 @@ jobs:
 
             $genStart = Get-Date
             ./build.ps1 generate --build-dir $buildDir --config $config --no-sanitize --no-fuzz --instrument --time-trace
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $genEnd = Get-Date
 
             $buildStart = Get-Date
             ./build.ps1 build --build-dir $buildDir --config $config -t ide
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $buildEnd = Get-Date
 
             # Keep benchmark execution outside the compile timer. bench_all
             # depends on the already up-to-date ide target, so corpus growth
             # cannot be misreported as a compile-time regression.
             $benchOutput = ./build.ps1 build --build-dir $buildDir --config $config -t bench_all
+            $benchExitCode = $LASTEXITCODE
             $benchOutput | ForEach-Object { Write-Output $_ }
+            if ($benchExitCode -ne 0) { exit $benchExitCode }
 
             $benchLine = ($benchOutput | Select-String '^BENCH ' | Select-Object -Last 1).Line
             if (-not $benchLine) {
