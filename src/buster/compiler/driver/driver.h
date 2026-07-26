@@ -22,8 +22,6 @@ struct CompilerDriverOptions
 {
     String8 source_path;
     String8 output_path;
-    String8 object_path;
-    String8 linker_executable;
     String8 module_root;
     Target target;
 };
@@ -32,7 +30,7 @@ typedef struct CompilerDriverResult CompilerDriverResult;
 struct CompilerDriverResult
 {
     String8 diagnostic;
-    LibcLinkResult link;
+    NativeExecutableLinkResult native_link;
     CompilerDriverError error;
     CodegenError codegen_error;
     ObjectError object_error;
@@ -42,7 +40,7 @@ struct CompilerDriverResult
 };
 
 BUSTER_F_DECL CompilerDriverResult
-compiler_driver_compile_with_libc(
+compiler_driver_compile(
     Arena* arena,
     CompilerDriverOptions options);
 

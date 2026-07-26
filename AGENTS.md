@@ -245,10 +245,17 @@ has hard design constraints:
   deterministic internal names, duplicate definitions are diagnosed, and
   unresolved symbols are retained only when the final platform linker is
   allowed to satisfy them.
-- Native executables initially target the platform libc and CRT. Buster emits
-  ELF64, COFF, or Mach-O relocatable objects itself, then invokes the host C
-  compiler driver for startup objects, system libraries, and final executable
-  construction; freestanding startup is a separate future mode.
+- Native executables target the platform libc and CRT without invoking a host
+  compiler or linker. Buster writes final ELF64 images for Linux and Android,
+  PE32+ images for Windows, and ad-hoc-signed Mach-O images for macOS and iOS,
+  for both x86-64 and AArch64 where the platform supports the architecture.
+  The writers supply process startup where the format requires it, apply
+  internal relocations, and emit the dynamic-loader metadata, import veneers,
+  symbol tables, and libc/UCRT/libSystem dependencies themselves. Android
+  images are PIE and use the system linker and bionic `libc.so`; Apple images
+  are PIE and use `LC_MAIN`, dyld rebase/bind opcodes, libSystem, and an
+  internally generated SHA-256 CodeDirectory. Freestanding startup remains a
+  separate mode.
 - Semantic analysis and IR lowering follow the repository-wide recursion rule:
   nested expressions, statements, types, and control flow use arena-backed
   explicit stacks or worklists.

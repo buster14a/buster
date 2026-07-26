@@ -14,6 +14,8 @@ typedef enum LinkError
     LINK_ERROR_PROCESS_SPAWN,
     LINK_ERROR_PROCESS_FAILED,
     LINK_ERROR_UNSUPPORTED_HOST,
+    LINK_ERROR_ENTRY_SYMBOL,
+    LINK_ERROR_RELOCATION,
     LINK_ERROR_COUNT,
 } LinkError;
 
@@ -32,20 +34,18 @@ struct LinkObjectResult
     LinkError error;
 };
 
-typedef struct LibcLinkOptions LibcLinkOptions;
-struct LibcLinkOptions
+typedef struct NativeExecutableLinkOptions NativeExecutableLinkOptions;
+struct NativeExecutableLinkOptions
 {
     String8 output_path;
-    String8 object_path;
-    String8 linker_executable;
+    String8 entry_symbol;
 };
 
-typedef struct LibcLinkResult LibcLinkResult;
-struct LibcLinkResult
+typedef struct NativeExecutableLinkResult NativeExecutableLinkResult;
+struct NativeExecutableLinkResult
 {
-    ByteSlice standard_output;
-    ByteSlice standard_error;
-    ProcessResult process_result;
+    ByteSlice executable;
+    String8 symbol;
     LinkError error;
 };
 
@@ -54,11 +54,11 @@ BUSTER_F_DECL LinkObjectResult link_objects(
     ObjectFile* objects,
     u32 object_count,
     LinkOptions options);
-BUSTER_F_DECL LibcLinkResult link_object_with_libc(
+BUSTER_F_DECL NativeExecutableLinkResult
+link_native_executable(
     Arena* arena,
     ObjectFile* object,
-    LibcLinkOptions options);
-
+    NativeExecutableLinkOptions options);
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
 BUSTER_F_DECL UnitTestResult link_tests(

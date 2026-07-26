@@ -30,15 +30,14 @@ compiler_driver_parser_diagnostic(
         diagnostic->message);
 }
 
-CompilerDriverResult compiler_driver_compile_with_libc(
+CompilerDriverResult compiler_driver_compile(
     Arena* arena,
     CompilerDriverOptions options)
 {
     CompilerDriverResult result = {0};
     if (!arena ||
         !options.source_path.length ||
-        !options.output_path.length ||
-        !options.object_path.length)
+        !options.output_path.length)
     {
         result.error =
             COMPILER_DRIVER_ERROR_INVALID_INPUT;
@@ -230,31 +229,24 @@ CompilerDriverResult compiler_driver_compile_with_libc(
             linked.symbol);
         return result;
     }
-    result.link = link_object_with_libc(
-        arena,
-        &linked.object,
-        (LibcLinkOptions){
-            .output_path = options.output_path,
-            .object_path = options.object_path,
-            .linker_executable =
-                options.linker_executable,
-        });
-    if (result.link.error != LINK_ERROR_NONE)
+    result.native_link =
+        link_native_executable(
+            arena,
+            &linked.object,
+            (NativeExecutableLinkOptions){
+                .output_path = options.output_path,
+                .entry_symbol = S8("main"),
+            });
+    if (result.native_link.error !=
+        LINK_ERROR_NONE)
     {
         result.error =
             COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic =
-            result.link.standard_error.length ?
-                (String8){
-                    .pointer = (char8*)
-                        result.link.standard_error.pointer,
-                    .length =
-                        result.link.standard_error.length,
-                } :
-                string_format(
-                    arena,
-                    S8("libc linking failed with error {u32}"),
-                    (u32)result.link.error);
+        result.diagnostic = string_format(
+            arena,
+            S8("native executable linking failed with error {u32}: {S8}"),
+            (u32)result.native_link.error,
+            result.native_link.symbol);
     }
     return result;
 }
@@ -271,15 +263,6 @@ UnitTestResult compiler_driver_tests(
             arguments->arena,
             S8("buster-driver-test"),
             S8(".bbb"));
-    String8 object_path =
-        buster_test_temporary_path(
-            arguments->arena,
-            S8("buster-driver-test"),
-#if BUSTER_WINDOWS
-            S8(".obj"));
-#else
-            S8(".o"));
-#endif
     String8 output_path =
         buster_test_temporary_path(
             arguments->arena,
@@ -302,12 +285,11 @@ UnitTestResult compiler_driver_tests(
                 .length = source.length,
             }));
     CompilerDriverResult compile =
-        compiler_driver_compile_with_libc(
+        compiler_driver_compile(
             arguments->arena,
             (CompilerDriverOptions){
                 .source_path = source_path,
                 .output_path = output_path,
-                .object_path = object_path,
                 .target = target_native,
             });
     if (compile.error !=
@@ -366,15 +348,6 @@ UnitTestResult compiler_driver_tests(
         arguments->arena,
         S8("{S8}/core/math.bbb"),
         module_directory);
-    String8 module_object_path =
-        buster_test_temporary_path(
-            arguments->arena,
-            S8("buster-driver-modules"),
-#if BUSTER_WINDOWS
-            S8(".obj"));
-#else
-            S8(".o"));
-#endif
     String8 module_output_path =
         buster_test_temporary_path(
             arguments->arena,
@@ -416,12 +389,11 @@ UnitTestResult compiler_driver_tests(
                     module_dependency_source.length,
             }));
     CompilerDriverResult module_compile =
-        compiler_driver_compile_with_libc(
+        compiler_driver_compile(
             arguments->arena,
             (CompilerDriverOptions){
                 .source_path = module_root_path,
                 .output_path = module_output_path,
-                .object_path = module_object_path,
                 .module_root = module_directory,
                 .target = target_native,
             });

@@ -1005,26 +1005,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
         output_path = S8("a.out");
 #endif
     }
-#if BUSTER_WINDOWS
-    String8 object_suffix = S8(".obj");
-#else
-    String8 object_suffix = S8(".o");
-#endif
-    String8 object_path = string_format_z(
-        arena,
-        S8("{S8}{S8}"),
-        output_path,
-        object_suffix);
     CompilerDriverResult compile =
-        compiler_driver_compile_with_libc(
+        compiler_driver_compile(
             arena,
             (CompilerDriverOptions){
                 .source_path =
                     ide_state.compile_source_path,
                 .output_path = output_path,
-                .object_path = object_path,
-                .linker_executable =
-                    ide_state.compile_linker,
                 .module_root =
                     ide_state.compile_module_root,
                 .target = target_native,
