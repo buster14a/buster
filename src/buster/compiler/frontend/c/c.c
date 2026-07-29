@@ -42698,8 +42698,16 @@ CIRLowerResult c_lower_to_ir(
     {
         return result;
     }
+    Arena* temporary_conflicts[] = {
+        arena,
+    };
+    TemporalArena temporary =
+        scratch_begin(
+            temporary_conflicts,
+            BUSTER_ARRAY_LENGTH(
+                temporary_conflicts));
     Arena* temporary_arena =
-        arena_create((ArenaCreation){0});
+        temporary.arena;
     result.diagnostics = arena_allocate(
         arena,
         CDiagnostic,
@@ -44745,14 +44753,9 @@ CIRLowerResult c_lower_to_ir(
             program->rejected_function_count += 1;
             continue;
         }
-        Arena* lowering_conflicts[] = {
-            arena,
-        };
         TemporalArena lowering_temporary =
-            scratch_begin(
-                lowering_conflicts,
-                BUSTER_ARRAY_LENGTH(
-                    lowering_conflicts));
+            arena_begin_temporal(
+                temporary_arena);
         u64 local_capacity =
             signatures[declaration_index].
                 parameter_count;
@@ -45095,19 +45098,14 @@ CIRLowerResult c_lower_to_ir(
             module->rejected_function_count += 1;
             program->rejected_function_count += 1;
             scratch_end(lowering_temporary);
-            arena_reset_to_start(
-                temporary_arena);
             continue;
         }
         function->state = IR_FUNCTION_LOWERED;
         module->lowered_function_count += 1;
         program->lowered_function_count += 1;
         scratch_end(lowering_temporary);
-        arena_reset_to_start(temporary_arena);
     }
-    bool destroyed_temporary_arena =
-        arena_destroy(temporary_arena, 1);
-    BUSTER_CHECK(destroyed_temporary_arena);
+    scratch_end(temporary);
     return result;
 }
 
