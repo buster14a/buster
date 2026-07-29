@@ -16433,6 +16433,9 @@ struct CIrPreparedCall
     u32 open_index;
     u32 close_index;
     u32 argument_count;
+    u32 parent_index;
+    u32 previous_sibling_index;
+    u32 last_child_index;
     CTypeId indirect_function_type;
     IrUnaryOperation builtin_unary;
     CIrAtomicBuiltin builtin_atomic;
@@ -16448,6 +16451,17 @@ struct CIrPreparedCall
     bool builtin_va_arg;
     bool builtin_generic;
     bool indirect;
+};
+
+typedef struct CIrFunctionNameResolution
+    CIrFunctionNameResolution;
+struct CIrFunctionNameResolution
+{
+    String8 name;
+    u32 declaration_index;
+    bool found;
+    bool unique;
+    u8 reserved[2];
 };
 
 typedef struct CIrGenericTypePrediction
@@ -16611,8 +16625,16 @@ struct CIntegerIrBuilder
     IrFunction** declaration_functions;
     IrSymbolId* entity_symbols;
     CIrPreparedCall* prepared_calls;
+    CIrFunctionNameResolution*
+        function_name_resolutions;
+    u32* prepared_call_indices;
+    u32* matching_delimiters;
     u32 prepared_call_count;
     u32 prepared_call_capacity;
+    u32 function_name_resolution_count;
+    u32 function_name_resolution_capacity;
+    u32 body_token_start;
+    u32 body_token_count;
     CIrPreparedControlExpression*
         prepared_control_expressions;
     u32 prepared_control_expression_count;
@@ -16644,8 +16666,131 @@ struct CIntegerIrBuilder
     u32 local_count;
     u32 local_capacity;
     bool returns_void;
-    u8 reserved[3];
+    bool preparing_calls;
+    u8 reserved[2];
 };
+
+BUSTER_GLOBAL_LOCAL u32 c_ir_matching_delimiter(
+    CPreprocessResult preprocess,
+    u32 open,
+    u32 end,
+    String8 opening,
+    String8 closing);
+
+BUSTER_GLOBAL_LOCAL bool
+c_ir_build_delimiter_index(
+    CIntegerIrBuilder* builder)
+{
+    typedef struct CIrDelimiterStackEntry
+        CIrDelimiterStackEntry;
+    struct CIrDelimiterStackEntry
+    {
+        u32 token_index;
+        char8 opening;
+        u8 reserved[3];
+    };
+    TemporalArena temporary =
+        arena_begin_temporal(
+            builder->temporary_arena);
+    CIrDelimiterStackEntry* stack =
+        arena_allocate(
+            temporary.arena,
+            CIrDelimiterStackEntry,
+            builder->body_token_count ?
+                builder->body_token_count :
+                1);
+    u32 stack_count = 0;
+    bool valid = true;
+    for (u32 offset = 0;
+        offset < builder->body_token_count;
+        offset += 1)
+    {
+        u32 token_index =
+            builder->body_token_start + offset;
+        CToken token =
+            builder->preprocess.tokens[
+                token_index];
+        if (token.kind != C_TOKEN_PUNCTUATOR ||
+            token.spelling.length != 1)
+        {
+            continue;
+        }
+        char8 character = token.spelling.pointer[0];
+        if (character == '(' ||
+            character == '[' ||
+            character == '{')
+        {
+            stack[stack_count++] =
+                (CIrDelimiterStackEntry){
+                    .token_index = token_index,
+                    .opening = character,
+                };
+            continue;
+        }
+        char8 expected =
+            character == ')' ? '(' :
+            character == ']' ? '[' :
+            character == '}' ? '{' : 0;
+        if (!expected)
+        {
+            continue;
+        }
+        if (!stack_count ||
+            stack[stack_count - 1].opening !=
+                expected)
+        {
+            valid = false;
+            break;
+        }
+        u32 open =
+            stack[--stack_count].token_index;
+        builder->matching_delimiters[
+            open - builder->body_token_start] =
+                token_index;
+    }
+    valid &= stack_count == 0;
+    scratch_end(temporary);
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u32
+c_ir_matching_delimiter_cached(
+    CIntegerIrBuilder* builder,
+    u32 open,
+    u32 end,
+    String8 opening,
+    String8 closing)
+{
+    if (open >= builder->body_token_start)
+    {
+        u32 offset =
+            open - builder->body_token_start;
+        if (offset < builder->body_token_count)
+        {
+            u32 match =
+                builder->matching_delimiters[
+                    offset];
+            if (match < end &&
+                c_token_is_punctuator(
+                    builder->preprocess.tokens[
+                        open],
+                    opening) &&
+                c_token_is_punctuator(
+                    builder->preprocess.tokens[
+                        match],
+                    closing))
+            {
+                return match;
+            }
+        }
+    }
+    return c_ir_matching_delimiter(
+        builder->preprocess,
+        open,
+        end,
+        opening,
+        closing);
+}
 
 BUSTER_GLOBAL_LOCAL IrInstruction
 c_ir_instruction_initialize(
@@ -18262,8 +18407,8 @@ c_ir_emit_vla_index_place(
             builder->preprocess.tokens[*index],
             S8("[")))
     {
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             *index,
             end,
             S8("["),
@@ -20956,6 +21101,66 @@ BUSTER_GLOBAL_LOCAL u32 c_ir_find_function(
     return UINT32_MAX;
 }
 
+BUSTER_GLOBAL_LOCAL CIrFunctionNameResolution*
+c_ir_function_name_resolution(
+    CIntegerIrBuilder* builder,
+    String8 name)
+{
+    for (u32 index = 0;
+        index <
+            builder->
+                function_name_resolution_count;
+        index += 1)
+    {
+        CIrFunctionNameResolution* cached =
+            builder->function_name_resolutions +
+                index;
+        if (string_equal(cached->name, name))
+        {
+            return cached;
+        }
+    }
+    BUSTER_CHECK(
+        builder->function_name_resolution_count <
+            builder->
+                function_name_resolution_capacity);
+    CIrFunctionNameResolution* result =
+        builder->function_name_resolutions +
+            builder->
+                function_name_resolution_count++;
+    *result = (CIrFunctionNameResolution){
+        .name = name,
+        .declaration_index = UINT32_MAX,
+        .unique = true,
+    };
+    CEntityId entity = C_ENTITY_ID_INVALID;
+    for (u32 index = 0;
+        index < builder->parse.declaration_count;
+        index += 1)
+    {
+        CDeclaration declaration =
+            builder->parse.declarations[index];
+        if (declaration.kind !=
+                C_DECLARATION_FUNCTION ||
+            !string_equal(declaration.name, name))
+        {
+            continue;
+        }
+        if (!result->found)
+        {
+            result->found = true;
+            result->declaration_index = index;
+            entity = declaration.entity;
+        }
+        else if (declaration.entity.value !=
+            entity.value)
+        {
+            result->unique = false;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u32
 c_ir_implicit_conversion_rank(
     CIntegerIrBuilder* builder,
@@ -21078,6 +21283,29 @@ c_ir_find_function_for_call(
     u32* argument_ends,
     u32 argument_count)
 {
+    CIrFunctionNameResolution* resolution =
+        c_ir_function_name_resolution(
+            builder,
+            name);
+    if (resolution->found &&
+        resolution->unique)
+    {
+        CIrSignature signature =
+            builder->signatures[
+                resolution->
+                    declaration_index];
+        bool arity_matches =
+            signature.valid &&
+            ((!signature.is_variadic &&
+              argument_count ==
+                  signature.parameter_count) ||
+             (signature.is_variadic &&
+              argument_count >=
+                  signature.parameter_count));
+        return arity_matches ?
+            resolution->declaration_index :
+            UINT32_MAX;
+    }
     u32 best = UINT32_MAX;
     u32 best_rank = UINT32_MAX;
     u32 sole_candidate = UINT32_MAX;
@@ -21568,6 +21796,27 @@ c_ir_prepared_call_find(
     CIntegerIrBuilder* builder,
     u32 token_index)
 {
+    if (token_index >= builder->body_token_start)
+    {
+        u32 offset =
+            token_index -
+                builder->body_token_start;
+        if (offset < builder->body_token_count)
+        {
+            u32 index =
+                builder->prepared_call_indices[
+                    offset];
+            if (index <
+                    builder->prepared_call_count &&
+                builder->prepared_calls[index].
+                    token_index == token_index)
+            {
+                return builder->prepared_calls +
+                    index;
+            }
+            return 0;
+        }
+    }
     for (u32 index = 0;
         index < builder->prepared_call_count;
         index += 1)
@@ -21698,8 +21947,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_generic_selection(
         {
             continue;
         }
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             index + 1,
             end,
             S8("("),
@@ -22230,8 +22479,8 @@ c_ir_prepare_control_expressions(
                     index + 1],
                 S8("(")))
         {
-            u32 close = c_ir_matching_delimiter(
-                builder->preprocess,
+            u32 close = c_ir_matching_delimiter_cached(
+                builder,
                 index + 1,
                 end,
                 S8("("),
@@ -22267,8 +22516,8 @@ c_ir_prepare_control_expressions(
         {
             continue;
         }
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             index,
             end,
             parentheses ? S8("(") : S8("["),
@@ -22526,17 +22775,34 @@ c_ir_atomic_compare_orders_valid(
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(
+BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(
     CIntegerIrBuilder* builder,
     u32 start,
     u32 end)
 {
     u32 first_new =
         builder->prepared_call_count;
+    u32 active_capacity =
+        end > start ? end - start : 1;
+    u32* active_calls = arena_allocate(
+        builder->temporary_arena,
+        u32,
+        active_capacity);
+    u32 active_call_count = 0;
+    u32 last_root = UINT32_MAX;
     for (u32 index = start;
         index + 1 < end;
         index += 1)
     {
+        while (active_call_count &&
+            index >
+                builder->prepared_calls[
+                    active_calls[
+                        active_call_count - 1]].
+                            close_index)
+        {
+            active_call_count -= 1;
+        }
         CToken token =
             builder->preprocess.tokens[index];
         bool builtin_identity =
@@ -22811,10 +23077,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(
              !builtin_math_link_name.length &&
              builtin_unary == IR_UNARY_COUNT &&
              !indirect &&
-             c_ir_find_function(
-                 builder,
-                 token.spelling) ==
-                    UINT32_MAX) ||
+             !c_ir_function_name_resolution(
+                  builder,
+                  token.spelling)->found) ||
             (!indirect &&
              c_ir_prepared_control_expression_contains(
                  builder,
@@ -22825,8 +23090,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(
         {
             continue;
         }
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             index + 1,
             end,
             S8("("),
@@ -22837,14 +23102,32 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(
         {
             return false;
         }
+        u32 prepared_call_index =
+            builder->prepared_call_count++;
+        u32 parent_index =
+            active_call_count ?
+                active_calls[
+                    active_call_count - 1] :
+                UINT32_MAX;
+        u32 previous_sibling_index =
+            parent_index != UINT32_MAX ?
+                builder->prepared_calls[
+                    parent_index].
+                        last_child_index :
+                last_root;
         builder->prepared_calls[
-            builder->prepared_call_count++] =
+            prepared_call_index] =
             (CIrPreparedCall){
                 .result =
                     IR_VALUE_ID_INVALID,
                 .token_index = callee_start,
                 .open_index = index + 1,
                 .close_index = close,
+                .parent_index = parent_index,
+                .previous_sibling_index =
+                    previous_sibling_index,
+                .last_child_index =
+                    UINT32_MAX,
                 .builtin_identity =
                     builtin_identity,
                 .builtin_debugtrap =
@@ -22875,6 +23158,32 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(
                     indirect_function_type,
                 .indirect = indirect,
             };
+        if (parent_index != UINT32_MAX)
+        {
+            builder->prepared_calls[
+                parent_index].last_child_index =
+                    prepared_call_index;
+        }
+        else
+        {
+            last_root = prepared_call_index;
+        }
+        BUSTER_CHECK(
+            active_call_count <
+                active_capacity);
+        active_calls[
+            active_call_count++] =
+                prepared_call_index;
+        BUSTER_CHECK(
+            callee_start >=
+                builder->body_token_start &&
+            callee_start -
+                    builder->body_token_start <
+                builder->body_token_count);
+        builder->prepared_call_indices[
+            callee_start -
+                builder->body_token_start] =
+                    prepared_call_index;
         if (builtin_generic)
         {
             index = close;
@@ -22883,30 +23192,77 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(
     u32 remaining =
         builder->prepared_call_count -
         first_new;
-    while (remaining)
+    typedef struct CIrCallEmissionTask
+        CIrCallEmissionTask;
+    struct CIrCallEmissionTask
     {
-        CIrPreparedCall* selected = 0;
-        u32 selected_span = UINT32_MAX;
-        for (u32 index = first_new;
-            index < builder->prepared_call_count;
-            index += 1)
+        u32 call_index;
+        bool finish;
+        u8 reserved[3];
+    };
+    CIrCallEmissionTask* tasks =
+        arena_allocate(
+            builder->temporary_arena,
+            CIrCallEmissionTask,
+            remaining ?
+                (u64)remaining * 2 :
+                1);
+    u32* emission_order = arena_allocate(
+        builder->temporary_arena,
+        u32,
+        remaining ? remaining : 1);
+    u32 task_count = 0;
+    u32 emission_count = 0;
+    for (u32 root = last_root;
+        root != UINT32_MAX;
+        root =
+            builder->prepared_calls[root].
+                previous_sibling_index)
+    {
+        tasks[task_count++] =
+            (CIrCallEmissionTask){
+                .call_index = root,
+            };
+    }
+    while (task_count)
+    {
+        CIrCallEmissionTask task =
+            tasks[--task_count];
+        CIrPreparedCall* call =
+            builder->prepared_calls +
+                task.call_index;
+        if (task.finish)
         {
-            CIrPreparedCall* candidate =
-                builder->prepared_calls + index;
-            u32 span =
-                candidate->close_index -
-                candidate->token_index;
-            if (!candidate->emitted &&
-                span < selected_span)
-            {
-                selected = candidate;
-                selected_span = span;
-            }
+            emission_order[emission_count++] =
+                task.call_index;
+            continue;
         }
-        if (!selected)
+        tasks[task_count++] =
+            (CIrCallEmissionTask){
+                .call_index =
+                    task.call_index,
+                .finish = true,
+            };
+        for (u32 child = call->last_child_index;
+            child != UINT32_MAX;
+            child =
+                builder->prepared_calls[child].
+                    previous_sibling_index)
         {
-            return false;
+            tasks[task_count++] =
+                (CIrCallEmissionTask){
+                    .call_index = child,
+                };
         }
+    }
+    BUSTER_CHECK(emission_count == remaining);
+    for (u32 emission_index = 0;
+        emission_index < emission_count;
+        emission_index += 1)
+    {
+        CIrPreparedCall* selected =
+            builder->prepared_calls +
+                emission_order[emission_index];
         CToken token =
             builder->preprocess.tokens[
                 selected->token_index];
@@ -22916,18 +23272,24 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(
             u32 association_end = 0;
             IrTypeId association_type =
                 IR_TYPE_ID_INVALID;
-            if (!c_ir_generic_selection(
+            bool selection_valid =
+                c_ir_generic_selection(
                     builder,
                     selected->token_index,
                     selected->close_index + 1,
                     &association_start,
                     &association_end,
-                    &association_type) ||
-                !c_ir_lower_expression(
+                    &association_type);
+            builder->preparing_calls = false;
+            bool association_lowered =
+                selection_valid &&
+                c_ir_lower_expression(
                     builder,
                     association_start,
                     association_end,
-                    &selected->result))
+                    &selected->result);
+            builder->preparing_calls = true;
+            if (!association_lowered)
             {
                 return false;
             }
@@ -23514,8 +23876,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(
                     builder->preprocess.tokens[
                         argument_start],
                     S8("(")) &&
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     argument_start,
                     argument_end,
                     S8("("),
@@ -24683,7 +25045,26 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(
         selected->emitted = true;
         remaining -= 1;
     }
+    BUSTER_CHECK(!remaining);
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(
+    CIntegerIrBuilder* builder,
+    u32 start,
+    u32 end)
+{
+    if (builder->preparing_calls)
+    {
+        return true;
+    }
+    builder->preparing_calls = true;
+    bool result = c_ir_prepare_calls_impl(
+        builder,
+        start,
+        end);
+    builder->preparing_calls = false;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_operation(
@@ -26968,8 +27349,8 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name(
                 index + 1],
             S8("(")))
     {
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             index + 1,
             end,
             S8("("),
@@ -27063,8 +27444,8 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name(
                         S8("[")))
                 {
                     u32 bracket_close =
-                        c_ir_matching_delimiter(
-                            builder->preprocess,
+                        c_ir_matching_delimiter_cached(
+                            builder,
                             postfix,
                             close,
                             S8("["),
@@ -27290,8 +27671,8 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name(
             builder->preprocess.tokens[index],
             S8("[")))
     {
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             index,
             end,
             S8("["),
@@ -27438,8 +27819,8 @@ c_ir_compound_literal_element_count(
                 S8("[")))
         {
             u32 designator_close =
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     item_start,
                     index,
                     S8("["),
@@ -28073,8 +28454,8 @@ c_ir_emit_nested_compound_literal(
                     S8("[")))
             {
                 u32 close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         item_start,
                         index,
                         S8("["),
@@ -28340,8 +28721,8 @@ c_ir_emit_nested_compound_literal(
                     builder->preprocess.tokens[
                         index - 1],
                     S8("}")) &&
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     value_start,
                     index,
                     S8("{"),
@@ -28589,8 +28970,8 @@ c_ir_emit_compound_literal(
                 S8("[")))
         {
             u32 designator_close =
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     index,
                     close,
                     S8("["),
@@ -28956,8 +29337,8 @@ c_ir_static_postfix_type(
                 token,
                 S8("[")))
         {
-            u32 close = c_ir_matching_delimiter(
-                builder->preprocess,
+            u32 close = c_ir_matching_delimiter_cached(
+                builder,
                 index,
                 end,
                 S8("["),
@@ -29048,8 +29429,8 @@ c_ir_sizeof_expression(
                 builder->preprocess.tokens[start],
                 S8("(")))
         {
-            u32 close = c_ir_matching_delimiter(
-                builder->preprocess,
+            u32 close = c_ir_matching_delimiter_cached(
+                builder,
                 start,
                 end,
                 S8("("),
@@ -29093,8 +29474,8 @@ c_ir_sizeof_expression(
             builder->preprocess.tokens[start],
             S8("(")))
     {
-        u32 type_close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 type_close = c_ir_matching_delimiter_cached(
+            builder,
             start,
             end,
             S8("("),
@@ -29106,8 +29487,8 @@ c_ir_sizeof_expression(
                 S8("{")))
         {
             u32 initializer_close =
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     type_close + 1,
                     end,
                     S8("{"),
@@ -29138,8 +29519,8 @@ c_ir_sizeof_expression(
             S8("(")))
     {
         u32 base_close =
-            c_ir_matching_delimiter(
-                builder->preprocess,
+            c_ir_matching_delimiter_cached(
+                builder,
                 start,
                 end,
                 S8("("),
@@ -29151,8 +29532,8 @@ c_ir_sizeof_expression(
                 builder->preprocess.tokens[
                     base_start],
                 S8("(")) &&
-            c_ir_matching_delimiter(
-                builder->preprocess,
+            c_ir_matching_delimiter_cached(
+                builder,
                 base_start,
                 base_end,
                 S8("("),
@@ -29203,8 +29584,8 @@ c_ir_sizeof_expression(
             builder->preprocess.tokens[start],
             S8("(")))
     {
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             start,
             end,
             S8("("),
@@ -29216,8 +29597,8 @@ c_ir_sizeof_expression(
                 builder->preprocess.tokens[
                     nested_start],
                 S8("(")) &&
-            c_ir_matching_delimiter(
-                builder->preprocess,
+            c_ir_matching_delimiter_cached(
+                builder,
                 nested_start,
                 nested_end,
                 S8("("),
@@ -29310,8 +29691,8 @@ c_ir_sizeof_expression(
             builder->preprocess.tokens[start],
             S8("(")))
     {
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             start,
             end,
             S8("("),
@@ -29323,8 +29704,8 @@ c_ir_sizeof_expression(
                 builder->preprocess.tokens[
                     nested_start],
                 S8("(")) &&
-            c_ir_matching_delimiter(
-                builder->preprocess,
+            c_ir_matching_delimiter_cached(
+                builder,
                 nested_start,
                 nested_end,
                 S8("("),
@@ -29381,8 +29762,8 @@ c_ir_sizeof_expression(
                     S8("[")))
             {
                 u32 close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         index,
                         end,
                         S8("["),
@@ -29534,8 +29915,8 @@ c_ir_unary_expression_end(
                 primary,
                 S8("(")))
         {
-            u32 close = c_ir_matching_delimiter(
-                builder->preprocess,
+            u32 close = c_ir_matching_delimiter_cached(
+                builder,
                 index,
                 end,
                 S8("("),
@@ -29559,8 +29940,8 @@ c_ir_unary_expression_end(
                         S8("{")))
                 {
                     u32 initializer_close =
-                        c_ir_matching_delimiter(
-                            builder->preprocess,
+                        c_ir_matching_delimiter_cached(
+                            builder,
                             close + 1,
                             end,
                             S8("{"),
@@ -29616,8 +29997,8 @@ c_ir_unary_expression_end(
                 token,
                 S8("(")))
         {
-            u32 close = c_ir_matching_delimiter(
-                builder->preprocess,
+            u32 close = c_ir_matching_delimiter_cached(
+                builder,
                 index,
                 end,
                 S8("("),
@@ -29633,8 +30014,8 @@ c_ir_unary_expression_end(
                 token,
                 S8("[")))
         {
-            u32 close = c_ir_matching_delimiter(
-                builder->preprocess,
+            u32 close = c_ir_matching_delimiter_cached(
+                builder,
                 index,
                 end,
                 S8("["),
@@ -29757,8 +30138,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(
                 first,
                 S8("(")))
         {
-            u32 close = c_ir_matching_delimiter(
-                builder->preprocess,
+            u32 close = c_ir_matching_delimiter_cached(
+                builder,
                 update_operand_start,
                 update_operand_end,
                 S8("("),
@@ -30052,8 +30433,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(
                     S8("(")))
             {
                 u32 close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         index,
                         operand_end - 1,
                         S8("("),
@@ -30130,8 +30511,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(
                     index + 1],
                 S8("(")))
         {
-            u32 close = c_ir_matching_delimiter(
-                builder->preprocess,
+            u32 close = c_ir_matching_delimiter_cached(
+                builder,
                 index + 1,
                 end,
                 S8("("),
@@ -30243,8 +30624,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(
                         S8("[")))
                 {
                     u32 bracket_close =
-                        c_ir_matching_delimiter(
-                            builder->preprocess,
+                        c_ir_matching_delimiter_cached(
+                            builder,
                             designator,
                             close,
                             S8("["),
@@ -30343,8 +30724,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(
             u32 operand_start =
                 index + (parenthesized ? 2 : 1);
             u32 operand_end = parenthesized ?
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     index + 1,
                     end,
                     S8("("),
@@ -30390,8 +30771,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(
                             S8("[")))
                     {
                         u32 suffix_close =
-                            c_ir_matching_delimiter(
-                            builder->preprocess,
+                            c_ir_matching_delimiter_cached(
+                            builder,
                             suffix_token,
                             operand_end,
                             S8("["),
@@ -30823,8 +31204,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(
                             S8("[")))
                     {
                         u32 close =
-                            c_ir_matching_delimiter(
-                                builder->preprocess,
+                            c_ir_matching_delimiter_cached(
+                                builder,
                                 place_end,
                                 end,
                                 S8("["),
@@ -31174,8 +31555,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(
             {
                 return false;
             }
-            u32 close = c_ir_matching_delimiter(
-                builder->preprocess,
+            u32 close = c_ir_matching_delimiter_cached(
+                builder,
                 index,
                 end,
                 S8("("),
@@ -31197,8 +31578,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(
             if (compound_literal)
             {
                 initializer_close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         close + 1,
                         end,
                         S8("{"),
@@ -32191,8 +32572,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(
                 S8("(")))
         {
             u32 close =
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     task.start,
                     task.end,
                     S8("("),
@@ -32233,8 +32614,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(
                     builder->preprocess.tokens[
                         task.start + 1],
                     S8("(")) ||
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     task.start + 1,
                     task.end,
                     S8("("),
@@ -32309,8 +32690,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(
                     builder->preprocess.tokens[
                         task.start],
                     S8("(")) &&
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     task.start,
                     task.end,
                     S8("("),
@@ -32605,8 +32986,8 @@ c_ir_expression_has_root_logical(
             builder->preprocess.tokens[start],
             S8("(")))
     {
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             start,
             end,
             S8("("),
@@ -32831,8 +33212,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_root_conditional(
             builder->preprocess.tokens[start],
             S8("(")))
     {
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             start,
             end,
             S8("("),
@@ -32966,8 +33347,8 @@ c_ir_expression_core_range(
             c_token_is_punctuator(
                 builder->preprocess.tokens[start],
                 S8("(")) &&
-            c_ir_matching_delimiter(
-                builder->preprocess,
+            c_ir_matching_delimiter_cached(
+                builder,
                 start,
                 end,
                 S8("("),
@@ -33058,8 +33439,8 @@ c_ir_predict_nonconditional_expression_type(
             builder->preprocess.tokens[start],
             S8("(")))
     {
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             start,
             end,
             S8("("),
@@ -33072,8 +33453,8 @@ c_ir_predict_nonconditional_expression_type(
                 S8("{")))
         {
             u32 initializer_close =
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     close + 1,
                     end,
                     S8("{"),
@@ -33195,8 +33576,8 @@ c_ir_predict_nonconditional_expression_type(
             S8("(")))
     {
         u32 group_close =
-            c_ir_matching_delimiter(
-                builder->preprocess,
+            c_ir_matching_delimiter_cached(
+                builder,
                 start,
                 end,
                 S8("("),
@@ -33208,8 +33589,8 @@ c_ir_predict_nonconditional_expression_type(
                 S8("(")))
         {
             u32 cast_close =
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     start + 1,
                     group_close,
                     S8("("),
@@ -33242,8 +33623,8 @@ c_ir_predict_nonconditional_expression_type(
         c_token_is_punctuator(
             builder->preprocess.tokens[start + 1],
             S8("(")) &&
-        c_ir_matching_delimiter(
-            builder->preprocess,
+        c_ir_matching_delimiter_cached(
+            builder,
             start + 1,
             end,
             S8("("),
@@ -33258,8 +33639,8 @@ c_ir_predict_nonconditional_expression_type(
             S8("(")))
     {
         u32 type_close =
-            c_ir_matching_delimiter(
-                builder->preprocess,
+            c_ir_matching_delimiter_cached(
+                builder,
                 start,
                 end,
                 S8("("),
@@ -33276,8 +33657,8 @@ c_ir_predict_nonconditional_expression_type(
                 builder->preprocess.tokens[
                     type_close + 1],
                 S8("{")) &&
-            c_ir_matching_delimiter(
-                builder->preprocess,
+            c_ir_matching_delimiter_cached(
+                builder,
                 type_close + 1,
                 end,
                 S8("{"),
@@ -33309,8 +33690,8 @@ c_ir_predict_nonconditional_expression_type(
                 S8("(")))
         {
             u32 type_close =
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     index,
                     end,
                     S8("("),
@@ -33322,8 +33703,8 @@ c_ir_predict_nonconditional_expression_type(
                     S8("{")))
             {
                 u32 initializer_close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         type_close + 1,
                         end,
                         S8("{"),
@@ -33528,24 +33909,47 @@ c_ir_predict_nonconditional_expression_type(
                     index + 1],
                 S8("(")))
         {
-            u32 declaration_index =
-                c_ir_find_function(
+            CIrPreparedCall* prepared_call =
+                c_ir_prepared_call_find(
                     builder,
-                    token.spelling);
-            if (declaration_index !=
-                UINT32_MAX)
+                    index);
+            u32 close = UINT32_MAX;
+            if (prepared_call &&
+                prepared_call->emitted &&
+                prepared_call->result.value <
+                    builder->function->value_count)
             {
                 candidate =
-                    builder->signatures[
-                        declaration_index].
-                        return_type;
-                u32 close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
-                        index + 1,
-                        end,
-                        S8("("),
-                        S8(")"));
+                    builder->function->values[
+                        prepared_call->result.value].
+                            canonical_type;
+                close = prepared_call->close_index;
+            }
+            else
+            {
+                u32 declaration_index =
+                    c_ir_find_function(
+                        builder,
+                        token.spelling);
+                if (declaration_index !=
+                        UINT32_MAX)
+                {
+                    candidate =
+                        builder->signatures[
+                            declaration_index].
+                            return_type;
+                    close =
+                        c_ir_matching_delimiter_cached(
+                            builder,
+                            index + 1,
+                            end,
+                            S8("("),
+                            S8(")"));
+                }
+            }
+            if (candidate.value !=
+                    IR_ID_UNDERLYING_INVALID)
+            {
                 IrTypeId postfix_type =
                     candidate;
                 if (close + 1 < end &&
@@ -33594,8 +33998,8 @@ c_ir_predict_nonconditional_expression_type(
                             S8("[")))
                     {
                         u32 close =
-                            c_ir_matching_delimiter(
-                                builder->preprocess,
+                            c_ir_matching_delimiter_cached(
+                                builder,
                                 postfix,
                                 end,
                                 S8("["),
@@ -34508,8 +34912,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_impl(
         c_token_is_punctuator(
             builder->preprocess.tokens[start],
             S8("(")) &&
-        c_ir_matching_delimiter(
-            builder->preprocess,
+        c_ir_matching_delimiter_cached(
+            builder,
             start,
             end,
             S8("("),
@@ -34885,8 +35289,8 @@ c_ir_lower_simple_assignment_segment(
         c_token_is_punctuator(
             builder->preprocess.tokens[start],
             S8("(")) &&
-        c_ir_matching_delimiter(
-            builder->preprocess,
+        c_ir_matching_delimiter_cached(
+            builder,
             start,
             end,
             S8("("),
@@ -35719,8 +36123,8 @@ c_ir_lower_automatic_declaration_segment(
         c_token_is_punctuator(
             builder->preprocess.tokens[end - 1],
             S8("}")) &&
-        c_ir_matching_delimiter(
-            builder->preprocess,
+        c_ir_matching_delimiter_cached(
+            builder,
             value_start,
             end,
             S8("{"),
@@ -35892,8 +36296,8 @@ c_ir_lower_inline_assembly_segment(
         {
             return false;
         }
-        u32 close = c_ir_matching_delimiter(
-            builder->preprocess,
+        u32 close = c_ir_matching_delimiter_cached(
+            builder,
             index + 1,
             end,
             S8("("),
@@ -36073,8 +36477,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_inline_assembly(
     {
         return false;
     }
-    u32 close = c_ir_matching_delimiter(
-        builder->preprocess,
+    u32 close = c_ir_matching_delimiter_cached(
+        builder,
         open,
         end,
         S8("("),
@@ -36469,8 +36873,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(
                     S8("{")))
             {
                 u32 close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         index,
                         task.end,
                         S8("{"),
@@ -36641,8 +37045,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(
                     return false;
                 }
                 u32 expression_close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         index + 1,
                         task.end,
                         S8("("),
@@ -36662,8 +37066,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(
                 u32 body_open =
                     expression_close + 1;
                 u32 body_close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         body_open,
                         task.end,
                         S8("{"),
@@ -36949,8 +37353,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(
                     return false;
                 }
                 u32 condition_close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         index + 1,
                         task.end,
                         S8("("),
@@ -37118,8 +37522,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(
                     return false;
                 }
                 u32 condition_close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         after_body + 1,
                         task.end,
                         S8("("),
@@ -37225,8 +37629,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(
                     return false;
                 }
                 u32 header_close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         index + 1,
                         task.end,
                         S8("("),
@@ -37442,8 +37846,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(
                     return false;
                 }
                 u32 condition_close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         index + 1,
                         task.end,
                         S8("("),
@@ -37725,8 +38129,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(
                     builder->preprocess.tokens[
                         assignment_start],
                     S8("(")) &&
-                c_ir_matching_delimiter(
-                    builder->preprocess,
+                c_ir_matching_delimiter_cached(
+                    builder,
                     assignment_start,
                     assignment_end,
                     S8("("),
@@ -38964,8 +39368,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(
                             builder->preprocess.tokens[
                                 end - 1],
                             S8("}")) &&
-                        c_ir_matching_delimiter(
-                            builder->preprocess,
+                        c_ir_matching_delimiter_cached(
+                            builder,
                             value_start,
                             end,
                             S8("{"),
@@ -39425,8 +39829,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(
                     S8("[")))
             {
                 u32 close =
-                    c_ir_matching_delimiter(
-                        builder->preprocess,
+                    c_ir_matching_delimiter_cached(
+                        builder,
                         index + 1,
                         end,
                         S8("["),
@@ -44502,10 +44906,39 @@ CIRLowerResult c_lower_to_ir(
                 prepared_call_capacity ?
                     (u32)prepared_call_capacity :
                     1),
+            .function_name_resolutions =
+                arena_allocate(
+                    lowering_temporary.arena,
+                    CIrFunctionNameResolution,
+                    prepared_call_capacity ?
+                        (u32)prepared_call_capacity :
+                        1),
+            .prepared_call_indices =
+                arena_allocate(
+                    lowering_temporary.arena,
+                    u32,
+                    declaration.body_token_count ?
+                        declaration.body_token_count :
+                        1),
+            .matching_delimiters =
+                arena_allocate(
+                    lowering_temporary.arena,
+                    u32,
+                    declaration.body_token_count ?
+                        declaration.body_token_count :
+                        1),
             .prepared_call_capacity =
                 prepared_call_capacity ?
                     (u32)prepared_call_capacity :
                     1,
+            .function_name_resolution_capacity =
+                prepared_call_capacity ?
+                    (u32)prepared_call_capacity :
+                    1,
+            .body_token_start =
+                declaration.body_start,
+            .body_token_count =
+                declaration.body_token_count,
             .prepared_control_expressions =
                 arena_allocate(
                     lowering_temporary.arena,
@@ -44523,6 +44956,18 @@ CIRLowerResult c_lower_to_ir(
                 signatures[declaration_index].
                     returns_void,
         };
+        for (u32 token_offset = 0;
+            token_offset < builder.body_token_count;
+            token_offset += 1)
+        {
+            builder.prepared_call_indices[
+                token_offset] = UINT32_MAX;
+            builder.matching_delimiters[
+                token_offset] = UINT32_MAX;
+        }
+        BUSTER_CHECK(
+            c_ir_build_delimiter_index(
+                &builder));
         CIrSignature signature =
             signatures[declaration_index];
         bool parameters_lowered = true;
