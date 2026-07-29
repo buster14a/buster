@@ -47,6 +47,296 @@ bool cpu_is_native(CpuModel model)
     return (model == CPU_MODEL_NATIVE) | (model == target_native.cpu_model);
 }
 
+BUSTER_GLOBAL_LOCAL bool target_component_equal(
+    String8 component,
+    String8 expected)
+{
+    return string_equal(component, expected);
+}
+
+BUSTER_GLOBAL_LOCAL bool target_component_starts_with(
+    String8 component,
+    String8 expected)
+{
+    return string_starts_with_sequence(
+        component,
+        expected);
+}
+
+BUSTER_GLOBAL_LOCAL bool target_parse_version_suffix(
+    String8 component,
+    u64 prefix_length,
+    Target* target)
+{
+    if (component.length == prefix_length)
+    {
+        return true;
+    }
+    if (component.length < prefix_length ||
+        !target)
+    {
+        return false;
+    }
+    u32 components[3] = {0};
+    u32 component_count = 0;
+    u64 index = prefix_length;
+    while (index < component.length)
+    {
+        if (component_count >=
+                BUSTER_ARRAY_LENGTH(components) ||
+            component.pointer[index] < '0' ||
+            component.pointer[index] > '9')
+        {
+            return false;
+        }
+        u32 value = 0;
+        while (index < component.length &&
+            component.pointer[index] >= '0' &&
+            component.pointer[index] <= '9')
+        {
+            u32 digit =
+                (u32)(component.pointer[index] -
+                    '0');
+            if (value >
+                (UINT32_MAX - digit) / 10)
+            {
+                return false;
+            }
+            value = value * 10 + digit;
+            index += 1;
+        }
+        components[component_count++] = value;
+        if (index == component.length)
+        {
+            break;
+        }
+        if (component.pointer[index] != '.')
+        {
+            return false;
+        }
+        index += 1;
+        if (index == component.length)
+        {
+            return false;
+        }
+    }
+    if (!component_count ||
+        components[0] > UINT16_MAX ||
+        (component_count > 1 &&
+         components[1] > UINT8_MAX) ||
+        (component_count > 2 &&
+         components[2] > UINT8_MAX))
+    {
+        return false;
+    }
+    target->os_version_major =
+        (u16)components[0];
+    target->os_version_minor =
+        component_count > 1 ?
+            (u8)components[1] : 0;
+    target->os_version_patch =
+        component_count > 2 ?
+            (u8)components[2] : 0;
+    return true;
+}
+
+TargetParseResult target_parse_triple(String8 triple)
+{
+    TargetParseResult result = {
+        .target = {
+            .cpu_arch = CPU_ARCH_COUNT,
+            .cpu_model = CPU_MODEL_BASELINE,
+            .os = OPERATING_SYSTEM_COUNT,
+        },
+    };
+    if (!triple.length)
+    {
+        result.error = TARGET_PARSE_ERROR_EMPTY;
+        return result;
+    }
+    if (string_equal(triple, S8("native")))
+    {
+        result.target = target_native;
+        return result;
+    }
+
+    u64 component_start = 0;
+    u32 component_index = 0;
+    while (component_start < triple.length)
+    {
+        u64 component_end = component_start;
+        while (component_end < triple.length &&
+            triple.pointer[component_end] != '-')
+        {
+            component_end += 1;
+        }
+        String8 component = {
+            .pointer =
+                triple.pointer + component_start,
+            .length =
+                component_end - component_start,
+        };
+        if (component_index == 0)
+        {
+            if (target_component_equal(
+                    component,
+                    S8("x86_64")) ||
+                target_component_equal(
+                    component,
+                    S8("amd64")))
+            {
+                result.target.cpu_arch =
+                    CPU_ARCH_X86_64;
+            }
+            else if (target_component_equal(
+                    component,
+                    S8("aarch64")) ||
+                target_component_equal(
+                    component,
+                    S8("arm64")))
+            {
+                result.target.cpu_arch =
+                    CPU_ARCH_AARCH64;
+            }
+            else
+            {
+                result.invalid_component = component;
+                result.error =
+                    TARGET_PARSE_ERROR_ARCHITECTURE;
+                return result;
+            }
+        }
+        else if (target_component_equal(
+                component,
+                S8("android")) ||
+            target_component_starts_with(
+                component,
+                S8("android")))
+        {
+            if (!target_parse_version_suffix(
+                    component,
+                    S8("android").length,
+                    &result.target))
+            {
+                result.invalid_component =
+                    component;
+                result.error =
+                    TARGET_PARSE_ERROR_OPERATING_SYSTEM;
+                return result;
+            }
+            result.target.os =
+                OPERATING_SYSTEM_ANDROID;
+        }
+        else if (target_component_equal(
+                component,
+                S8("ios")) ||
+            target_component_starts_with(
+                component,
+                S8("ios")))
+        {
+            if (!target_parse_version_suffix(
+                    component,
+                    S8("ios").length,
+                    &result.target))
+            {
+                result.invalid_component =
+                    component;
+                result.error =
+                    TARGET_PARSE_ERROR_OPERATING_SYSTEM;
+                return result;
+            }
+            result.target.os =
+                OPERATING_SYSTEM_IOS;
+        }
+        else if (target_component_equal(
+                component,
+                S8("darwin")) ||
+            target_component_starts_with(
+                component,
+                S8("macos")))
+        {
+            if (target_component_starts_with(
+                    component,
+                    S8("macos")) &&
+                !target_parse_version_suffix(
+                    component,
+                    S8("macos").length,
+                    &result.target))
+            {
+                result.invalid_component =
+                    component;
+                result.error =
+                    TARGET_PARSE_ERROR_OPERATING_SYSTEM;
+                return result;
+            }
+            if (result.target.os !=
+                OPERATING_SYSTEM_IOS)
+            {
+                result.target.os =
+                    OPERATING_SYSTEM_MACOS;
+            }
+        }
+        else if (target_component_equal(
+                component,
+                S8("linux")))
+        {
+            if (result.target.os !=
+                OPERATING_SYSTEM_ANDROID)
+            {
+                result.target.os =
+                    OPERATING_SYSTEM_LINUX;
+            }
+        }
+        else if (target_component_equal(
+                component,
+                S8("windows")) ||
+            target_component_equal(
+                component,
+                S8("win32")) ||
+            target_component_equal(
+                component,
+                S8("mingw32")) ||
+            target_component_equal(
+                component,
+                S8("msvc")))
+        {
+            result.target.os =
+                OPERATING_SYSTEM_WINDOWS;
+        }
+        else if (target_component_equal(
+                component,
+                S8("uefi")))
+        {
+            result.target.os =
+                OPERATING_SYSTEM_UEFI;
+        }
+        else if (target_component_equal(
+                component,
+                S8("freestanding")) ||
+            target_component_equal(
+                component,
+                S8("elf")))
+        {
+            result.target.os =
+                OPERATING_SYSTEM_FREESTANDING;
+        }
+
+        component_index += 1;
+        component_start =
+            component_end < triple.length ?
+                component_end + 1 :
+                triple.length;
+    }
+    if (result.target.os ==
+        OPERATING_SYSTEM_COUNT)
+    {
+        result.invalid_component = triple;
+        result.error =
+            TARGET_PARSE_ERROR_OPERATING_SYSTEM;
+    }
+    return result;
+}
+
 CpuModel cpu_detect_model(void)
 {
     CpuModel cpu_model = CPU_MODEL_ERROR;
@@ -408,3 +698,101 @@ String8 cpu_model_to_string_os(CpuModel model)
     BUSTER_UNREACHABLE();
     return S8("error");
 }
+
+#if BUSTER_INCLUDE_TESTS
+UnitTestResult target_tests(
+    UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 triple;
+        CpuArch architecture;
+        OperatingSystem operating_system;
+        u16 version_major;
+        u8 version_minor;
+        u8 version_patch;
+    } cases[] = {
+        {
+            S8("x86_64-unknown-linux-gnu"),
+            CPU_ARCH_X86_64,
+            OPERATING_SYSTEM_LINUX,
+        },
+        {
+            S8("aarch64-linux-android35"),
+            CPU_ARCH_AARCH64,
+            OPERATING_SYSTEM_ANDROID,
+            35,
+        },
+        {
+            S8("x86_64-pc-windows-msvc"),
+            CPU_ARCH_X86_64,
+            OPERATING_SYSTEM_WINDOWS,
+        },
+        {
+            S8("aarch64-apple-darwin"),
+            CPU_ARCH_AARCH64,
+            OPERATING_SYSTEM_MACOS,
+        },
+        {
+            S8("arm64-apple-ios17.0-simulator"),
+            CPU_ARCH_AARCH64,
+            OPERATING_SYSTEM_IOS,
+            17,
+        },
+        {
+            S8("x86_64-unknown-uefi"),
+            CPU_ARCH_X86_64,
+            OPERATING_SYSTEM_UEFI,
+        },
+        {
+            S8("aarch64-none-elf"),
+            CPU_ARCH_AARCH64,
+            OPERATING_SYSTEM_FREESTANDING,
+        },
+    };
+    for (u32 case_index = 0;
+        case_index < BUSTER_ARRAY_LENGTH(cases);
+        case_index += 1)
+    {
+        TargetParseResult parsed =
+            target_parse_triple(
+                cases[case_index].triple);
+        BUSTER_TEST(arguments,
+            parsed.error ==
+                TARGET_PARSE_ERROR_NONE);
+        BUSTER_TEST(arguments,
+            parsed.target.cpu_arch ==
+                cases[case_index].architecture);
+        BUSTER_TEST(arguments,
+            parsed.target.os ==
+                cases[case_index].operating_system);
+        BUSTER_TEST(arguments,
+            parsed.target.cpu_model ==
+                CPU_MODEL_BASELINE);
+        BUSTER_TEST(arguments,
+            parsed.target.os_version_major ==
+                cases[case_index].version_major);
+        BUSTER_TEST(arguments,
+            parsed.target.os_version_minor ==
+                cases[case_index].version_minor);
+        BUSTER_TEST(arguments,
+            parsed.target.os_version_patch ==
+                cases[case_index].version_patch);
+    }
+    TargetParseResult bad_architecture =
+        target_parse_triple(
+            S8("riscv64-unknown-linux-gnu"));
+    BUSTER_TEST(arguments,
+        bad_architecture.error ==
+            TARGET_PARSE_ERROR_ARCHITECTURE);
+    TargetParseResult bad_operating_system =
+        target_parse_triple(
+            S8("x86_64-unknown-haiku"));
+    BUSTER_TEST(arguments,
+        bad_operating_system.error ==
+            TARGET_PARSE_ERROR_OPERATING_SYSTEM);
+    return result;
+}
+#endif

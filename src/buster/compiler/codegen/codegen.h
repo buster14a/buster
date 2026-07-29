@@ -123,18 +123,34 @@ struct CodegenModuleEntry
 {
     AnalysisEntityId entity;
     AnalysisInstantiationId instantiation;
+    IrSymbolId symbol;
     u32 offset;
 };
 
 typedef struct CodegenModuleRelocation CodegenModuleRelocation;
+typedef enum CodegenModuleRelocationSource
+{
+    CODEGEN_MODULE_RELOCATION_CODE,
+    CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA,
+    CODEGEN_MODULE_RELOCATION_DATA,
+    CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA,
+    CODEGEN_MODULE_RELOCATION_SOURCE_COUNT,
+} CodegenModuleRelocationSource;
+
 struct CodegenModuleRelocation
 {
     AnalysisEntityId entity;
     AnalysisInstantiationId instantiation;
+    IrSymbolId symbol;
+    s64 addend;
     u32 offset;
+    CodegenModuleRelocationSource source;
     bool aarch64;
     bool absolute;
-    u8 reserved[2];
+    bool is_thread_local;
+    bool thread_local_low;
+    bool thread_local_index;
+    u8 reserved;
 };
 
 typedef struct CodegenModuleDataRelocation
@@ -146,17 +162,38 @@ struct CodegenModuleDataRelocation
     CodegenDataRelocationKind kind;
 };
 
+typedef struct CodegenModuleGlobal CodegenModuleGlobal;
+struct CodegenModuleGlobal
+{
+    IrSymbolId symbol;
+    u32 offset;
+    u32 size;
+    u32 alignment;
+    bool read_only;
+    bool is_thread_local;
+    bool zero_fill;
+    u8 reserved;
+};
+
 typedef struct CodegenModule CodegenModule;
 struct CodegenModule
 {
     ByteSlice code;
     ByteSlice read_only_data;
+    ByteSlice writable_data;
+    ByteSlice thread_local_data;
+    u64 thread_local_zero_size;
     CodegenModuleEntry* entries;
+    CodegenModuleGlobal* globals;
     CodegenModuleRelocation* relocations;
     CodegenModuleDataRelocation* data_relocations;
     CodegenError error;
     CodegenAbi abi;
+    IrFunctionId failed_function;
+    IrInstructionId failed_instruction;
+    IrOpcode failed_opcode;
     u32 entry_count;
+    u32 global_count;
     u32 relocation_count;
     u32 data_relocation_count;
 };
@@ -183,6 +220,12 @@ BUSTER_F_DECL CodegenFunction codegen_generate_function(
 BUSTER_F_DECL CodegenModule codegen_generate_module(
     Arena* arena,
     AnalysisResult* analysis,
+    IrModule* module,
+    Target target);
+BUSTER_F_DECL CodegenModule
+codegen_generate_canonical_module(
+    Arena* arena,
+    IrProgram* program,
     IrModule* module,
     Target target);
 BUSTER_F_DECL CodegenExecutable codegen_make_executable(

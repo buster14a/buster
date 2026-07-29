@@ -1900,7 +1900,61 @@ IrExecutionResult ir_execute(
                     .initialized = true,
                 };
             } break;
+            case IR_OPCODE_STACK_ALLOCATE:
+            {
+                IrRuntimeValue size = frame->values[
+                    instruction->operands[0].value];
+                if (!size.initialized ||
+                    size.kind !=
+                        IR_RUNTIME_VALUE_SCALAR)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    break;
+                }
+                produced = (IrRuntimeValue){
+                    .object = ir_interpreter_object_create(
+                        scratch.arena,
+                        size.bits),
+                    .length = size.bits,
+                    .kind =
+                        IR_RUNTIME_VALUE_ADDRESS,
+                    .initialized = true,
+                };
+            } break;
+            case IR_OPCODE_STACK_SAVE:
+            {
+                produced = (IrRuntimeValue){
+                    .object =
+                        ir_interpreter_object_create(
+                            scratch.arena,
+                            1),
+                    .kind =
+                        IR_RUNTIME_VALUE_ADDRESS,
+                    .initialized = true,
+                };
+            } break;
+            case IR_OPCODE_STACK_RESTORE:
+            {
+                IrRuntimeValue checkpoint =
+                    frame->values[
+                        instruction->
+                            operands[0].value];
+                if (!checkpoint.initialized ||
+                    checkpoint.kind !=
+                        IR_RUNTIME_VALUE_ADDRESS)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                }
+            } break;
+            case IR_OPCODE_GLOBAL:
+            {
+                operation_trap =
+                    IR_EXECUTION_TRAP_INVALID_PROGRAM;
+            } break;
             case IR_OPCODE_LOAD:
+            case IR_OPCODE_ATOMIC_LOAD:
             {
                 IrRuntimeValue place = frame->values[
                     instruction->operands[0].value];
@@ -1918,6 +1972,7 @@ IrExecutionResult ir_execute(
                 }
             } break;
             case IR_OPCODE_STORE:
+            case IR_OPCODE_ATOMIC_STORE:
             {
                 IrRuntimeValue place = frame->values[
                     instruction->operands[0].value];
@@ -1942,6 +1997,178 @@ IrExecutionResult ir_execute(
                         IR_EXECUTION_TRAP_INVALID_MEMORY;
                 }
             } break;
+            case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
+            {
+                IrRuntimeValue place = frame->values[
+                    instruction->operands[0].value];
+                IrRuntimeValue operand = frame->values[
+                    instruction->operands[1].value];
+                IrRuntimeValue updated = {0};
+                AnalysisTypeId value_type =
+                    frame->function->values[
+                        instruction->operands[1].value].
+                        type;
+                u64 size = ir_interpreter_type_size(
+                    frame->analysis,
+                    value_type);
+                if (place.kind !=
+                        IR_RUNTIME_VALUE_PLACE ||
+                    !operand.initialized ||
+                    !size ||
+                    !ir_interpreter_memory_read(
+                        scratch.arena,
+                        frame->analysis,
+                        value_type,
+                        place.object,
+                        place.offset,
+                        &produced) ||
+                    (instruction->atomic_operation !=
+                            IR_ATOMIC_EXCHANGE &&
+                        (operand.kind !=
+                                IR_RUNTIME_VALUE_SCALAR ||
+                            (produced.kind !=
+                                    IR_RUNTIME_VALUE_SCALAR &&
+                                !((instruction->
+                                            atomic_operation ==
+                                        IR_ATOMIC_ADD ||
+                                    instruction->
+                                            atomic_operation ==
+                                        IR_ATOMIC_SUBTRACT) &&
+                                    produced.kind ==
+                                        IR_RUNTIME_VALUE_ADDRESS)))))
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    break;
+                }
+                updated = produced;
+                switch (instruction->atomic_operation)
+                {
+                    case IR_ATOMIC_ADD:
+                        if (updated.kind ==
+                            IR_RUNTIME_VALUE_ADDRESS)
+                        {
+                            updated.offset +=
+                                operand.bits;
+                        }
+                        else
+                        {
+                            updated.bits += operand.bits;
+                        }
+                        break;
+                    case IR_ATOMIC_SUBTRACT:
+                        if (updated.kind ==
+                            IR_RUNTIME_VALUE_ADDRESS)
+                        {
+                            updated.offset -=
+                                operand.bits;
+                        }
+                        else
+                        {
+                            updated.bits -= operand.bits;
+                        }
+                        break;
+                    case IR_ATOMIC_BITWISE_AND:
+                        updated.bits &= operand.bits;
+                        break;
+                    case IR_ATOMIC_BITWISE_OR:
+                        updated.bits |= operand.bits;
+                        break;
+                    case IR_ATOMIC_BITWISE_XOR:
+                        updated.bits ^= operand.bits;
+                        break;
+                    case IR_ATOMIC_EXCHANGE:
+                        updated = operand;
+                        break;
+                    case IR_ATOMIC_OPERATION_COUNT:
+                    {
+                        operation_trap =
+                            IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                    } break;
+                }
+                if (updated.kind ==
+                    IR_RUNTIME_VALUE_SCALAR)
+                {
+                    updated.bits =
+                        ir_interpreter_normalize_integer(
+                            frame->analysis,
+                            value_type,
+                            updated.bits);
+                }
+                if (operation_trap ==
+                        IR_EXECUTION_TRAP_NONE &&
+                    !ir_interpreter_memory_write(
+                        scratch.arena,
+                        place.object,
+                        place.offset,
+                        size,
+                        updated))
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                }
+            } break;
+            case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
+            {
+                IrRuntimeValue place = frame->values[
+                    instruction->operands[0].value];
+                IrRuntimeValue expected = frame->values[
+                    instruction->operands[1].value];
+                IrRuntimeValue desired = frame->values[
+                    instruction->operands[2].value];
+                AnalysisTypeId value_type =
+                    frame->function->values[
+                        instruction->operands[1].value].
+                        type;
+                u64 size = ir_interpreter_type_size(
+                    frame->analysis,
+                    value_type);
+                if (place.kind !=
+                        IR_RUNTIME_VALUE_PLACE ||
+                    !expected.initialized ||
+                    !desired.initialized ||
+                    !size ||
+                    !ir_interpreter_memory_read(
+                        scratch.arena,
+                        frame->analysis,
+                        value_type,
+                        place.object,
+                        place.offset,
+                        &produced) ||
+                    !produced.initialized)
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    break;
+                }
+                bool equal =
+                    produced.kind == expected.kind &&
+                    ((produced.kind ==
+                            IR_RUNTIME_VALUE_SCALAR &&
+                        produced.bits ==
+                            expected.bits) ||
+                     (produced.kind ==
+                            IR_RUNTIME_VALUE_ADDRESS &&
+                        produced.object ==
+                            expected.object &&
+                        produced.offset ==
+                            expected.offset));
+                if (equal &&
+                    !ir_interpreter_memory_write(
+                        scratch.arena,
+                        place.object,
+                        place.offset,
+                        size,
+                        desired))
+                {
+                    operation_trap =
+                        IR_EXECUTION_TRAP_INVALID_MEMORY;
+                }
+            } break;
+            case IR_OPCODE_ATOMIC_FENCE:
+                break;
+            case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
+                break;
             case IR_OPCODE_ARRAY:
             {
                 AnalysisType* array_type = analysis_type_from_id(
@@ -2335,6 +2562,41 @@ IrExecutionResult ir_execute(
                     case IR_UNARY_INTEGER_BITWISE_NOT:
                         produced.bits = ~operand;
                         break;
+                    case IR_UNARY_INTEGER_COUNT_LEADING_ZEROS:
+                    case IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS:
+                    {
+                        AnalysisType* type =
+                            analysis_type_from_id(
+                                frame->analysis,
+                                instruction->type);
+                        u32 width =
+                            type->as.integer.bit_width;
+                        u32 count = 0;
+                        if (instruction->unary_operation ==
+                            IR_UNARY_INTEGER_COUNT_LEADING_ZEROS)
+                        {
+                            u64 bit =
+                                (u64)1 <<
+                                (width - 1);
+                            while (count < width &&
+                                !(operand & bit))
+                            {
+                                count += 1;
+                                bit >>= 1;
+                            }
+                        }
+                        else
+                        {
+                            u64 bit = 1;
+                            while (count < width &&
+                                !(operand & bit))
+                            {
+                                count += 1;
+                                bit <<= 1;
+                            }
+                        }
+                        produced.bits = count;
+                    } break;
                     case IR_UNARY_VECTOR_INTEGER_NEGATE:
                     case IR_UNARY_VECTOR_FLOAT_NEGATE:
                     case IR_UNARY_VECTOR_INTEGER_BITWISE_NOT:
@@ -2445,12 +2707,32 @@ IrExecutionResult ir_execute(
                         IR_EXECUTION_TRAP_CALL_DEPTH_LIMIT;
                     break;
                 }
+                AnalysisEntityId callee_entity =
+                    instruction->entity;
+                AnalysisInstantiationId
+                    callee_instantiation =
+                        instruction->instantiation;
+                if (instruction->operand_count)
+                {
+                    IrRuntimeValue reference =
+                        frame->values[
+                            instruction->
+                                operands[0].value];
+                    if (reference.kind ==
+                        IR_RUNTIME_VALUE_FUNCTION)
+                    {
+                        callee_entity =
+                            reference.entity;
+                        callee_instantiation =
+                            reference.instantiation;
+                    }
+                }
                 IrExecutionTarget callee =
                     ir_interpreter_function_find(
                         analysis,
                         program,
-                        instruction->entity,
-                        instruction->instantiation);
+                        callee_entity,
+                        callee_instantiation);
                 if (!callee.function)
                 {
                     operation_trap =
@@ -2618,6 +2900,11 @@ IrExecutionResult ir_execute(
                     }
                 }
             } break;
+            case IR_OPCODE_INLINE_ASSEMBLY:
+            {
+                operation_trap =
+                    IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+            } break;
             case IR_OPCODE_BRANCH:
             {
                 IrBlockId predecessor = frame->block;
@@ -2736,6 +3023,11 @@ IrExecutionResult ir_execute(
                     caller->values[caller_result.value] = returned;
                 }
                 advance = false;
+            } break;
+            case IR_OPCODE_DEBUG_TRAP:
+            {
+                operation_trap =
+                    IR_EXECUTION_TRAP_DEBUG;
             } break;
             case IR_OPCODE_UNREACHABLE:
             {
@@ -3001,6 +3293,44 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, main_entity != 0);
     if (main_entity)
     {
+        IrExecutionTarget main_target =
+            ir_interpreter_function_find(
+                &scalar_program_analysis,
+                &scalar_program,
+                main_entity->id,
+                ANALYSIS_INSTANTIATION_ID_INVALID);
+        IrInstruction* indirect_test_call = 0;
+        if (main_target.function)
+        {
+            for (u32 instruction_index = 0;
+                instruction_index <
+                    main_target.function->
+                        instruction_count;
+                instruction_index += 1)
+            {
+                IrInstruction* instruction =
+                    main_target.function->
+                        instructions +
+                    instruction_index;
+                if (instruction->opcode ==
+                        IR_OPCODE_CALL &&
+                    instruction->operand_count)
+                {
+                    indirect_test_call =
+                        instruction;
+                    break;
+                }
+            }
+        }
+        BUSTER_TEST(arguments,
+            indirect_test_call != 0);
+        if (indirect_test_call)
+        {
+            indirect_test_call->entity =
+                ANALYSIS_ENTITY_ID_INVALID;
+            indirect_test_call->instantiation =
+                ANALYSIS_INSTANTIATION_ID_INVALID;
+        }
         IrExecutionResult executed = ir_execute(
             expression_arena,
             &scalar_program_analysis,
@@ -3155,6 +3485,14 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
         BUSTER_TEST(
             arguments,
             conversion_result.trap == IR_EXECUTION_TRAP_NONE);
+        if (conversion_result.bits !=
+            (u64)UINT32_MAX - 1)
+        {
+            BUSTER_TEST_ERROR(
+                S8("conversion_value returned {u64}, expected {u64}"),
+                conversion_result.bits,
+                (u64)UINT32_MAX - 1);
+        }
         BUSTER_TEST(
             arguments,
             conversion_result.bits == (u64)UINT32_MAX - 1);
@@ -3262,6 +3600,14 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments,
             vector_result.trap ==
                 IR_EXECUTION_TRAP_NONE);
+        if (vector_result.bits !=
+            (u64)(u32)-10)
+        {
+            BUSTER_TEST_ERROR(
+                S8("vector_value returned {u64}, expected {u64}"),
+                vector_result.bits,
+                (u64)(u32)-10);
+        }
         BUSTER_TEST(arguments,
             vector_result.bits ==
                 (u64)(u32)-10);

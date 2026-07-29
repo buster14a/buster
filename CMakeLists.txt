@@ -496,6 +496,49 @@ if (C_COMPILER_CLANG_FAMILY OR C_COMPILER_GNU)
     set(C_COMPILER_GNU_FAMILY ON)
 endif()
 
+set(BUSTER_HOST_C_RESOURCE_INCLUDE "")
+if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND
+    NOT C_COMPILER_ZIG AND NOT C_COMPILER_TCC)
+    execute_process(
+        COMMAND "${CMAKE_C_COMPILER}" ${CMAKE_C_COMPILER_ARG1} -print-resource-dir
+        OUTPUT_VARIABLE BUSTER_HOST_C_RESOURCE_DIRECTORY
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if (BUSTER_HOST_C_RESOURCE_DIRECTORY)
+        set(BUSTER_HOST_C_RESOURCE_INCLUDE
+            "${BUSTER_HOST_C_RESOURCE_DIRECTORY}/include")
+    endif()
+else()
+    find_program(BUSTER_HOST_CLANG_EXECUTABLE
+        NAMES clang)
+    if (BUSTER_HOST_CLANG_EXECUTABLE)
+        execute_process(
+            COMMAND "${BUSTER_HOST_CLANG_EXECUTABLE}" -print-resource-dir
+            OUTPUT_VARIABLE BUSTER_HOST_C_RESOURCE_DIRECTORY
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if (BUSTER_HOST_C_RESOURCE_DIRECTORY)
+            set(BUSTER_HOST_C_RESOURCE_INCLUDE
+                "${BUSTER_HOST_C_RESOURCE_DIRECTORY}/include")
+        endif()
+    endif()
+endif()
+if (NOT BUSTER_HOST_C_RESOURCE_INCLUDE AND C_COMPILER_GNU)
+    execute_process(
+        COMMAND "${CMAKE_C_COMPILER}" -print-file-name=include
+        OUTPUT_VARIABLE BUSTER_HOST_C_RESOURCE_INCLUDE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+endif()
+if (BUSTER_HOST_C_RESOURCE_INCLUDE)
+    string(REPLACE "\\" "/"
+        BUSTER_HOST_C_RESOURCE_INCLUDE
+        "${BUSTER_HOST_C_RESOURCE_INCLUDE}")
+endif()
+
 set(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "")
 set(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR "")
 if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
@@ -741,6 +784,7 @@ buster_register_module(float "${BUSTER_SOURCE_DIR}/float${COMMON_EXTENSION}")
 buster_register_module(file "${BUSTER_SOURCE_DIR}/file${COMMON_EXTENSION}")
 buster_register_module(compiler_parser "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/parser${COMMON_EXTENSION}")
 buster_register_module(compiler_analysis "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/analysis${COMMON_EXTENSION}")
+buster_register_module(compiler_c_frontend "${BUSTER_SOURCE_DIR}/compiler/frontend/c/c${COMMON_EXTENSION}")
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
 buster_register_module(compiler_ir_interpreter "${BUSTER_SOURCE_DIR}/compiler/ir/interpreter${COMMON_EXTENSION}")
 buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")
@@ -1258,6 +1302,7 @@ function(executable_add name is_buster_program main_file)
         BUSTER_COMPILER_ZIG=$<IF:$<BOOL:${C_COMPILER_ZIG}>,1,0>
         BUSTER_HOST_C_COMPILER="${CMAKE_C_COMPILER}"
         BUSTER_HOST_C_COMPILER_ARG1="${CMAKE_C_COMPILER_ARG1}"
+        BUSTER_HOST_C_RESOURCE_INCLUDE="${BUSTER_HOST_C_RESOURCE_INCLUDE}"
         BUSTER_HOST_C_COMPILER_MSVC=$<IF:$<BOOL:${C_COMPILER_MSVC}>,1,0>
         BUSTER_INSTRUMENT=$<IF:$<BOOL:${BUSTER_INSTRUMENT}>,1,0>
     )
@@ -1494,6 +1539,7 @@ buster_add_executable(ide src/buster/ide/ide.c
     float
     compiler_parser
     compiler_analysis
+    compiler_c_frontend
     compiler_ir
     compiler_ir_interpreter
     compiler_codegen

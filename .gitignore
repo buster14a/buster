@@ -18,3 +18,4 @@ imgui.ini
 /ovmf
 /iso_root
 .codex
+/VDSO/

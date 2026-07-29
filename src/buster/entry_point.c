@@ -449,6 +449,12 @@ void android_main(struct android_app* app)
 
     buster_android_app = app;
     buster_android_asset_manager = app->activity->assetManager;
+    buster_android_internal_data_path =
+        app->activity->internalDataPath ?
+            string_from_pointer(
+                (char8 const*)
+                    app->activity->internalDataPath) :
+            (String8){0};
 
     Arena* android_arg_arena = arena_create((ArenaCreation){0});
     String8 android_args = buster_android_intent_string_extra(android_arg_arena, app, "buster_args");

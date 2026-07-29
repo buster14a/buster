@@ -1,8 +1,7 @@
 #pragma once
 
 #include <buster/compiler/frontend/buster/analysis.h>
-
-typedef u32 IrIdUnderlying;
+#include <buster/compiler/ir/model.h>
 
 typedef struct IrFunctionId IrFunctionId;
 struct IrFunctionId
@@ -28,7 +27,6 @@ struct IrValueId
     IrIdUnderlying value;
 };
 
-#define IR_ID_UNDERLYING_INVALID UINT32_MAX
 #define IR_FUNCTION_ID_INVALID ((IrFunctionId){ .value = IR_ID_UNDERLYING_INVALID })
 #define IR_BLOCK_ID_INVALID ((IrBlockId){ .value = IR_ID_UNDERLYING_INVALID })
 #define IR_INSTRUCTION_ID_INVALID ((IrInstructionId){ .value = IR_ID_UNDERLYING_INVALID })
@@ -50,8 +48,18 @@ typedef enum IrOpcode
 {
     IR_OPCODE_ARGUMENT,
     IR_OPCODE_LOCAL,
+    IR_OPCODE_STACK_ALLOCATE,
+    IR_OPCODE_STACK_SAVE,
+    IR_OPCODE_STACK_RESTORE,
+    IR_OPCODE_GLOBAL,
     IR_OPCODE_LOAD,
     IR_OPCODE_STORE,
+    IR_OPCODE_ATOMIC_LOAD,
+    IR_OPCODE_ATOMIC_STORE,
+    IR_OPCODE_ATOMIC_READ_MODIFY_WRITE,
+    IR_OPCODE_ATOMIC_COMPARE_EXCHANGE,
+    IR_OPCODE_ATOMIC_FENCE,
+    IR_OPCODE_CLEAR_INSTRUCTION_CACHE,
     IR_OPCODE_CONSTANT_INTEGER,
     IR_OPCODE_CONSTANT_FLOAT,
     IR_OPCODE_CONSTANT_STRING,
@@ -75,13 +83,50 @@ typedef enum IrOpcode
     IR_OPCODE_VA_COPY,
     IR_OPCODE_VA_END,
     IR_OPCODE_VA_ARG,
+    IR_OPCODE_INLINE_ASSEMBLY,
     IR_OPCODE_BRANCH,
     IR_OPCODE_BRANCH_IF,
     IR_OPCODE_SWITCH,
     IR_OPCODE_RETURN,
+    IR_OPCODE_DEBUG_TRAP,
     IR_OPCODE_UNREACHABLE,
     IR_OPCODE_COUNT,
 } IrOpcode;
+
+typedef enum IrMemoryOrder
+{
+    IR_MEMORY_ORDER_RELAXED,
+    IR_MEMORY_ORDER_CONSUME,
+    IR_MEMORY_ORDER_ACQUIRE,
+    IR_MEMORY_ORDER_RELEASE,
+    IR_MEMORY_ORDER_ACQUIRE_RELEASE,
+    IR_MEMORY_ORDER_SEQUENTIAL,
+    IR_MEMORY_ORDER_COUNT,
+} IrMemoryOrder;
+
+typedef enum IrAtomicOperation
+{
+    IR_ATOMIC_ADD,
+    IR_ATOMIC_SUBTRACT,
+    IR_ATOMIC_BITWISE_AND,
+    IR_ATOMIC_BITWISE_OR,
+    IR_ATOMIC_BITWISE_XOR,
+    IR_ATOMIC_EXCHANGE,
+    IR_ATOMIC_OPERATION_COUNT,
+} IrAtomicOperation;
+
+typedef enum IrInlineAssemblyConstraint
+{
+    IR_INLINE_ASSEMBLY_CONSTRAINT_A,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_B,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_C,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_D,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_R,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT,
+} IrInlineAssemblyConstraint;
+
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT ((u64)1 << 8)
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE ((u64)1 << 9)
 
 typedef enum IrConversionOperation
 {
@@ -107,6 +152,8 @@ typedef enum IrUnaryOperation
     IR_UNARY_INTEGER_NEGATE,
     IR_UNARY_FLOAT_NEGATE,
     IR_UNARY_INTEGER_BITWISE_NOT,
+    IR_UNARY_INTEGER_COUNT_LEADING_ZEROS,
+    IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS,
     IR_UNARY_BOOLEAN_NOT,
     IR_UNARY_VECTOR_INTEGER_NEGATE,
     IR_UNARY_VECTOR_FLOAT_NEGATE,
@@ -196,9 +243,13 @@ typedef struct IrValue IrValue;
 struct IrValue
 {
     AnalysisTypeId type;
+    IrTypeId canonical_type;
     IrInstructionId definition;
     IrValueCategory category;
-    u32 reserved;
+    u32 alignment;
+    bool is_read_only;
+    bool points_to_read_only;
+    u8 reserved[2];
 };
 
 typedef struct IrIncoming IrIncoming;
@@ -217,6 +268,8 @@ struct IrBlockParameter
     IrIncoming* last_incoming;
     AnalysisTypeId type;
     AnalysisLocalId local;
+    IrTypeId canonical_type;
+    IrLocalId canonical_local;
     IrValueId value;
     u32 incoming_count;
 };
@@ -236,10 +289,14 @@ struct IrInstruction
     u64* immediates;
     String8 literal;
     ParserSourceRange source;
+    IrSourceRange canonical_source;
     AnalysisTypeId type;
     AnalysisEntityId entity;
     AnalysisInstantiationId instantiation;
     AnalysisLocalId local;
+    IrTypeId canonical_type;
+    IrSymbolId symbol;
+    IrLocalId canonical_local;
     IrInstructionId id;
     IrInstructionId next;
     IrValueId result;
@@ -247,11 +304,15 @@ struct IrInstruction
     IrConversionOperation conversion_operation;
     IrUnaryOperation unary_operation;
     IrBinaryOperation binary_operation;
+    IrMemoryOrder memory_order;
+    IrMemoryOrder failure_memory_order;
+    IrAtomicOperation atomic_operation;
     u32 operand_count;
     u32 target_count;
     u32 immediate_count;
     bool immediate_is_negative;
-    u8 reserved[3];
+    bool atomic_signal_fence;
+    u8 reserved[2];
 };
 
 typedef struct IrBlock IrBlock;
@@ -281,13 +342,56 @@ typedef enum IrFunctionState
     IR_FUNCTION_STATE_COUNT,
 } IrFunctionState;
 
+typedef enum IrGlobalInitializerKind
+{
+    IR_GLOBAL_INITIALIZER_NONE,
+    IR_GLOBAL_INITIALIZER_ZERO,
+    IR_GLOBAL_INITIALIZER_INTEGER,
+    IR_GLOBAL_INITIALIZER_FLOAT,
+    IR_GLOBAL_INITIALIZER_BYTES,
+    IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS,
+    IR_GLOBAL_INITIALIZER_COUNT,
+} IrGlobalInitializerKind;
+
+typedef struct IrGlobalRelocation
+    IrGlobalRelocation;
+struct IrGlobalRelocation
+{
+    IrSymbolId symbol;
+    s64 addend;
+    u64 offset;
+};
+
+typedef struct IrGlobal IrGlobal;
+struct IrGlobal
+{
+    ByteSlice bytes;
+    IrGlobalRelocation* relocations;
+    IrSymbolId symbol;
+    IrSymbolId initializer_symbol;
+    IrTypeId type;
+    IrSourceRange source;
+    s64 initializer_addend;
+    u64 initializer_bits;
+    u32 relocation_count;
+    u32 alignment;
+    IrGlobalInitializerKind initializer_kind;
+    bool initializer_is_negative;
+    bool is_read_only;
+    bool is_thread_local;
+    u8 reserved;
+};
+
 typedef struct IrFunction IrFunction;
 struct IrFunction
 {
     String8 name;
+    IrSymbolId symbol;
+    IrSourceRange source;
     AnalysisEntityId entity;
     AnalysisInstantiationId instantiation;
     AnalysisTypeId type;
+    IrTypeId canonical_type;
     IrFunctionId id;
     IrBlockId entry;
     IrBlock* blocks;
@@ -305,12 +409,32 @@ struct IrFunction
     IrFunctionState state;
 };
 
+typedef struct IrModuleAssembly IrModuleAssembly;
+struct IrModuleAssembly
+{
+    String8 source;
+    IrSourceRange source_range;
+};
+
 typedef struct IrModule IrModule;
 struct IrModule
 {
     String8 name;
     IrFunction* functions;
+    IrGlobal* globals;
+    IrModuleAssembly* assemblies;
+    IrTypeId* frontend_type_map;
+    IrSymbolId* frontend_symbol_map;
+    IrSourceId* frontend_source_map;
     u32 function_count;
+    u32 function_capacity;
+    u32 global_count;
+    u32 global_capacity;
+    u32 assembly_count;
+    u32 assembly_capacity;
+    u32 frontend_type_count;
+    u32 frontend_symbol_count;
+    u32 frontend_source_count;
     u32 lowered_function_count;
     u32 rejected_function_count;
 };
@@ -319,6 +443,9 @@ typedef struct IrProgram IrProgram;
 struct IrProgram
 {
     IrModule* modules;
+    IrTypeTable types;
+    IrSymbolTable symbols;
+    IrSourceTable sources;
     u32 module_count;
     u32 lowered_function_count;
     u32 rejected_function_count;
@@ -338,6 +465,7 @@ typedef enum IrValidationError
     IR_VALIDATION_CALL_SIGNATURE,
     IR_VALIDATION_BLOCK_PARAMETER,
     IR_VALIDATION_OPERATION,
+    IR_VALIDATION_ALIGNMENT,
     IR_VALIDATION_COUNT,
 } IrValidationError;
 
@@ -355,7 +483,47 @@ BUSTER_F_DECL IrModule ir_analyze_and_generate_module(Arena* result_arena, Analy
 BUSTER_F_DECL IrProgram ir_generate_program(
     Arena* result_arena,
     AnalysisProgram* analysis);
+BUSTER_F_DECL IrProgram ir_program_initialize(
+    Arena* arena,
+    u32 module_count,
+    u32 type_capacity,
+    u32 symbol_capacity,
+    u32 source_capacity);
+BUSTER_F_DECL IrTypeId ir_program_add_type(
+    IrProgram* program,
+    IrType type);
+BUSTER_F_DECL IrSymbolId ir_program_add_symbol(
+    IrProgram* program,
+    IrSymbol symbol);
+BUSTER_F_DECL IrSourceId ir_program_add_source(
+    IrProgram* program,
+    IrSource source);
+BUSTER_F_DECL IrFunction* ir_module_add_function(
+    Arena* arena,
+    IrModule* module,
+    IrFunction function);
+BUSTER_F_DECL IrGlobal* ir_module_add_global(
+    Arena* arena,
+    IrModule* module,
+    IrGlobal global);
+BUSTER_F_DECL IrBlock* ir_function_add_block(
+    Arena* arena,
+    IrFunction* function,
+    IrBlock block);
+BUSTER_F_DECL IrValueId ir_function_add_value(
+    Arena* arena,
+    IrFunction* function,
+    IrValue value);
+BUSTER_F_DECL IrInstructionId
+ir_function_add_instruction(
+    Arena* arena,
+    IrFunction* function,
+    IrInstruction instruction);
 BUSTER_F_DECL IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module);
+BUSTER_F_DECL IrValidationResult
+ir_validate_canonical_module(
+    IrProgram* program,
+    IrModule* module);
 BUSTER_F_DECL String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module);
 
 #if BUSTER_INCLUDE_TESTS

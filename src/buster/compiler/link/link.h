@@ -35,10 +35,26 @@ struct LinkObjectResult
 };
 
 typedef struct NativeExecutableLinkOptions NativeExecutableLinkOptions;
+typedef struct NativeDynamicLibrary NativeDynamicLibrary;
+struct NativeDynamicLibrary
+{
+    String8 name;
+    String8* exported_symbols;
+    u32 exported_symbol_count;
+    bool exports_known;
+    u8 reserved[3];
+};
+
 struct NativeExecutableLinkOptions
 {
     String8 output_path;
     String8 entry_symbol;
+    NativeDynamicLibrary* dynamic_libraries;
+    String8* runtime_exported_symbols;
+    u32 dynamic_library_count;
+    u32 runtime_exported_symbol_count;
+    bool runtime_exports_known;
+    u8 reserved[7];
 };
 
 typedef struct NativeExecutableLinkResult NativeExecutableLinkResult;

@@ -30,4 +30,5 @@ BUSTER_F_DECL UnitTestResult file_tests(UnitTestArguments* arguments);
 #if BUSTER_ANDROID
 struct AAssetManager;
 extern struct AAssetManager* buster_android_asset_manager;
+extern String8 buster_android_internal_data_path;
 #endif

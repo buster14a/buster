@@ -1659,6 +1659,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(SliceString8 arguments, u64 a
     String8 build_host_definitions[] = {
         S8("-DBUSTER_HOST_C_COMPILER="),
         S8("-DBUSTER_HOST_C_COMPILER_ARG1="),
+        S8("-DBUSTER_HOST_C_RESOURCE_INCLUDE="),
         S8("-DBUSTER_HOST_C_COMPILER_MSVC="),
     };
 

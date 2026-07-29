@@ -7,6 +7,7 @@
 #include <buster/hash.h>
 #include <buster/compiler/frontend/buster/parser.h>
 #include <buster/compiler/frontend/buster/analysis.h>
+#include <buster/compiler/frontend/c/c.h>
 #include <buster/compiler/ir/ir.h>
 #include <buster/compiler/ir/interpreter.h>
 #include <buster/compiler/object/object.h>
@@ -59,6 +60,23 @@ String8 buster_test_temporary_path(
 {
 #if BUSTER_WINDOWS
     String8 prefix = S8("build/");
+#elif BUSTER_ANDROID
+    String8 prefix =
+        buster_android_internal_data_path.length ?
+            buster_android_internal_data_path :
+            S8(".");
+    String8 separator =
+        prefix.pointer[prefix.length - 1] == '/' ?
+            S8("") :
+            S8("/");
+    return string_format_z(
+        arena,
+        S8("{S8}{S8}{S8}-{u64}{S8}"),
+        prefix,
+        separator,
+        name,
+        os_get_current_process_id(),
+        suffix);
 #else
     String8 prefix = S8("/tmp/");
 #endif
@@ -113,10 +131,12 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &string_tests,
     &os_tests,
     &file_tests,
+    &target_tests,
     &parser_tokenizer_tests,
     &parser_expression_tests,
     &parser_result_tests,
     &parser_file_tests,
+    &c_frontend_tests,
     &analysis_tests,
     &ir_tests,
     &ir_interpreter_tests,
@@ -134,8 +154,12 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     BatchTestResult result = {0};
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(test_functions); i += 1)
     {
+        u64 arena_position = arguments->arena->position;
         UnitTestResult unit_test_result = test_functions[i](arguments);
         consume_unit_tests(&result, unit_test_result);
+        arena_set_position(
+            arguments->arena,
+            arena_position);
     }
 
     return result;

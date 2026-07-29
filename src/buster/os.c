@@ -620,9 +620,9 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
     OsFileDescriptor* result = 0;
     if (path.pointer)
     {
+#if defined (__linux__) || defined(__APPLE__)
         BUSTER_CHECK(!path.pointer[path.length]);
 
-#if defined (__linux__) || defined(__APPLE__)
         int o = 0;
         if (flags.read & flags.write)
         {

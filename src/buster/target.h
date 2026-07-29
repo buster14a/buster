@@ -208,7 +208,9 @@ struct Target
     CpuModel cpu_model;
     OperatingSystem os;
     bool cpu_features_explicit;
-    u8 reserved[4];
+    u8 os_version_minor;
+    u8 os_version_patch;
+    u16 os_version_major;
     TargetCpuFeatures cpu_features;
 };
 
@@ -216,6 +218,23 @@ typedef struct TargetStringSplit TargetStringSplit;
 struct TargetStringSplit
 {
     String8 s[(u64)TARGET_STRING_COMPONENT_COUNT];
+};
+
+typedef enum TargetParseError
+{
+    TARGET_PARSE_ERROR_NONE,
+    TARGET_PARSE_ERROR_EMPTY,
+    TARGET_PARSE_ERROR_ARCHITECTURE,
+    TARGET_PARSE_ERROR_OPERATING_SYSTEM,
+    TARGET_PARSE_ERROR_COUNT,
+} TargetParseError;
+
+typedef struct TargetParseResult TargetParseResult;
+struct TargetParseResult
+{
+    String8 invalid_component;
+    Target target;
+    TargetParseError error;
 };
 
 BUSTER_V_DECL Target target_native;
@@ -235,6 +254,14 @@ BUSTER_F_DECL String8 target_to_string(Arena* arena, Target target);
 BUSTER_F_DECL String8 cpu_arch_to_string_os(CpuArch arch);
 BUSTER_F_DECL String8 operating_system_to_string_os(OperatingSystem os);
 BUSTER_F_DECL String8 cpu_model_to_string_os(CpuModel model);
+BUSTER_F_DECL TargetParseResult target_parse_triple(
+    String8 triple);
+
+#if BUSTER_INCLUDE_TESTS
+#include <buster/test.h>
+BUSTER_F_DECL UnitTestResult target_tests(
+    UnitTestArguments* arguments);
+#endif
 
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/x86_64.h>

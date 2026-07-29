@@ -251,6 +251,12 @@ has hard design constraints:
   deterministic internal names, duplicate definitions are diagnosed, and
   unresolved symbols are retained only when the final platform linker is
   allowed to satisfy them.
+- Canonical static-storage objects are `IrGlobal` values. Zero, integer, float,
+  byte aggregate, and symbol-address initializers are materialized into
+  read-only or writable object sections; static locals use deterministic
+  internal global symbols. C aggregate initializer lowering uses an explicit
+  task stack, and incomplete character-array bounds are inferred from string
+  initializers before layout.
 - Native executables target the platform libc and CRT without invoking a host
   compiler or linker. Buster writes final ELF64 images for Linux and Android,
   PE32+ images for Windows, and ad-hoc-signed Mach-O images for macOS and iOS,
@@ -328,11 +334,12 @@ Compiler:
 |---|---|
 | `compiler/frontend/buster/parser.{c,h}` | Lexer + state-machine parser; owns `parser_file_tests()` and the `.bbb` test list. `main.c` there is a scratch main, not built. |
 | `compiler/frontend/asm/asm_main.c` | Assembly frontend prototype; not wired into the build. |
+| `compiler/frontend/c/c.{c,h}` | GNU C frontend in progress: source translation, preprocessing tokens/macros/includes/conditionals, non-recursive external-declaration parsing with strong IDs, flattened scalar/pointer/array/function/aggregate types, nested lexical scopes with entity-based identifier binding and canonical redeclarations, and target-aware shared-IR lowering for scalar/pointer/aggregate parameters, locals, static-storage objects, explicit conversions, array decay/indexing, chained field access, control flow, short-circuit and conditional expressions, direct calls, and constant aggregate initialization. |
 | `compiler/frontend/buster/analysis.{c,h}` | Semantic analysis. |
 | `compiler/ir/ir.{c,h}` | Typed control-flow IR, semantic lowering, validation, printing, and fixture-wide IR tests. |
 | `compiler/object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers; in-memory object linking. |
-| `compiler/link/link.{c,h}` | Multi-object section merging and symbol resolution; host C-driver integration for libc-backed native executables. |
-| `compiler/driver/driver.{c,h}` | End-to-end source-to-object compilation and host-libc executable linking. |
+| `compiler/link/link.{c,h}` | Multi-object section merging and symbol resolution; from-scratch libc-backed ELF64, PE32+, and Mach-O executable writers. |
+| `compiler/driver/driver.{c,h}` | End-to-end source-to-object compilation and libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported target, and multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset. |
 | `compiler/codegen/codegen.{c,h}` | Direct-IR ABI classification, native instruction emission, executable-memory support, and interpreter/native differential tests. |
 | `compiler/ir/interpreter.{c,h}` | Bounded, explicit-stack runtime IR interpreter and end-to-end execution tests. |
 | `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/ABI descriptions and per-arch instruction encoders. |

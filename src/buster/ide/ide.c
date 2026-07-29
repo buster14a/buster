@@ -11,6 +11,7 @@
 #include <buster/arena.h>
 #include <buster/compiler/frontend/buster/parser.h>
 #include <buster/compiler/frontend/buster/analysis.h>
+#include <buster/compiler/frontend/c/c.h>
 #include <buster/compiler/ir/ir.h>
 #include <buster/compiler/ir/interpreter.h>
 #include <buster/compiler/codegen/codegen.h>
@@ -42,6 +43,7 @@
 #include <buster/float.c>
 #include <buster/compiler/frontend/buster/parser.c>
 #include <buster/compiler/frontend/buster/analysis.c>
+#include <buster/compiler/frontend/c/c.c>
 #include <buster/compiler/ir/ir.c>
 #include <buster/compiler/ir/interpreter.c>
 #include <buster/compiler/codegen/codegen.c>
@@ -90,10 +92,12 @@ struct IdeProgram
     String8 compile_output_path;
     String8 compile_linker;
     String8 compile_module_root;
+    SliceString8 cc_arguments;
     bool test;
     bool bench;
     bool compile;
-    u8 reserved[5];
+    bool cc;
+    u8 reserved[4];
     TimeDataType last_frame_timestamp;
 };
 
@@ -197,6 +201,17 @@ ProcessResult process_arguments(void)
             i += 1;
             ide_state.compile_source_path =
                 arguments.pointer[i];
+        }
+        else if (string_equal(arg, S8("cc")))
+        {
+            ide_state.cc = true;
+            ide_state.cc_arguments = (SliceString8){
+                .pointer =
+                    arguments.pointer + i + 1,
+                .length =
+                    arguments.length - i - 1,
+            };
+            break;
         }
         else if (string_equal(arg, S8("-o")) &&
             ide_state.compile)
@@ -990,7 +1005,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
 
 BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
 {
-    Arena* arena = arena_create((ArenaCreation){0});
+    Arena* arena = arena_create(
+        (ArenaCreation){
+            .reserved_size = BUSTER_GB(1),
+        });
     if (!arena)
     {
         return PROCESS_RESULT_FAILED;
@@ -1036,8 +1054,50 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
+{
+    Arena* arena = arena_create(
+        (ArenaCreation){
+            // A unity translation unit retains preprocessing, binding,
+            // typed IR, and object data through the driver call. This is
+            // virtual address space; pages are committed on demand.
+            .reserved_size = BUSTER_GB(4),
+        });
+    if (!arena)
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    CompilerDriverInvocation invocation =
+        compiler_driver_parse_arguments(
+            arena,
+            ide_state.cc_arguments);
+    CompilerDriverResult compile =
+        compiler_driver_execute_invocation(
+            arena,
+            invocation);
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
+    if (compile.error !=
+        COMPILER_DRIVER_ERROR_NONE)
+    {
+        string_print(
+            S8("cc: error: {S8}\n"),
+            compile.diagnostic);
+        result = PROCESS_RESULT_FAILED;
+    }
+    else if (!invocation.output_path.length)
+    {
+        string_print(S8("{S8}"), compile.output);
+    }
+    arena_destroy(arena, 1);
+    return result;
+}
+
 ProcessResult entry_point(void)
 {
+    if (ide_state.cc)
+    {
+        return run_c_compiler();
+    }
     if (ide_state.compile)
     {
         return run_compiler();

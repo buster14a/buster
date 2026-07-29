@@ -7,6 +7,7 @@
 #if BUSTER_ANDROID
 #include <android/asset_manager.h>
 AAssetManager* buster_android_asset_manager = 0;
+String8 buster_android_internal_data_path = {0};
 #endif
 
 #if BUSTER_IOS

@@ -26,6 +26,8 @@ typedef enum ObjectSectionKind
     OBJECT_SECTION_TEXT,
     OBJECT_SECTION_READ_ONLY_DATA,
     OBJECT_SECTION_DATA,
+    OBJECT_SECTION_THREAD_LOCAL_DATA,
+    OBJECT_SECTION_THREAD_LOCAL_ZERO,
     OBJECT_SECTION_COUNT,
 } ObjectSectionKind;
 
@@ -41,6 +43,17 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_X86_64_PC32,
     OBJECT_RELOCATION_AARCH64_CALL26,
     OBJECT_RELOCATION_ABSOLUTE64,
+    OBJECT_RELOCATION_X86_64_TPOFF32,
+    OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32,
+    OBJECT_RELOCATION_PE_TLS_OFFSET32,
+    OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP,
+    OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12,
+    OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12,
+    OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12,
+    OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12,
+    OBJECT_RELOCATION_X86_64_MACH_TLV_PC32,
+    OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21,
+    OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -51,6 +64,7 @@ struct ObjectSection
 {
     String8 name;
     ByteSlice data;
+    u64 virtual_size;
     ObjectSectionKind kind;
     u32 alignment;
 };
@@ -98,6 +112,16 @@ struct ObjectArtifact
     ObjectFormat format;
 };
 
+typedef struct ObjectArchive ObjectArchive;
+struct ObjectArchive
+{
+    ObjectFile* objects;
+    String8* member_names;
+    ObjectError error;
+    u32 object_count;
+    u32 reserved;
+};
+
 typedef struct ObjectExecutable ObjectExecutable;
 struct ObjectExecutable
 {
@@ -112,10 +136,24 @@ BUSTER_F_DECL ObjectFile object_from_codegen_module(
     AnalysisResult* analysis,
     CodegenModule* module,
     Target target);
+BUSTER_F_DECL ObjectFile
+object_from_canonical_codegen_module(
+    Arena* arena,
+    IrProgram* program,
+    CodegenModule* module,
+    Target target);
 BUSTER_F_DECL ObjectArtifact object_write(
     Arena* arena,
     ObjectFile* object,
     ObjectFormat format);
+BUSTER_F_DECL ObjectFile object_read(
+    Arena* arena,
+    ByteSlice bytes,
+    Target target);
+BUSTER_F_DECL ObjectArchive object_archive_read(
+    Arena* arena,
+    ByteSlice bytes,
+    Target target);
 BUSTER_F_DECL ObjectExecutable object_link_executable(
     ObjectFile* object);
 BUSTER_F_DECL void object_release_executable(
