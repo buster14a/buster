@@ -327,13 +327,31 @@ CLexResult c_lex(Arena* arena, String8 source)
     {
         return result;
     }
-    Arena* diagnostic_arena = arena_create(
-        (ArenaCreation){
-            .reserved_size = BUSTER_MAX(
-                BUSTER_MB(64),
-                diagnostic_bytes * 2 +
-                    BUSTER_MB(1)),
-        });
+    u64 diagnostic_reserve_size =
+        diagnostic_bytes * 2 + BUSTER_MB(1);
+    Arena* conflicts[] = {
+        arena,
+    };
+    TemporalArena diagnostic_temporary =
+        scratch_begin(
+            conflicts,
+            BUSTER_ARRAY_LENGTH(conflicts));
+    Arena* diagnostic_arena =
+        diagnostic_temporary.arena;
+    bool diagnostic_arena_is_scratch =
+        diagnostic_reserve_size <=
+            diagnostic_arena->reserved_size -
+                diagnostic_arena->position;
+    if (!diagnostic_arena_is_scratch)
+    {
+        scratch_end(diagnostic_temporary);
+        diagnostic_arena = arena_create(
+            (ArenaCreation){
+                .reserved_size = BUSTER_MAX(
+                    BUSTER_MB(64),
+                    diagnostic_reserve_size),
+            });
+    }
     if (!diagnostic_arena)
     {
         return result;
@@ -603,7 +621,14 @@ CLexResult c_lex(Arena* arena, String8 source)
                 result.diagnostic_count);
     }
     result.diagnostics = diagnostics;
-    arena_destroy(diagnostic_arena, 1);
+    if (diagnostic_arena_is_scratch)
+    {
+        scratch_end(diagnostic_temporary);
+    }
+    else
+    {
+        arena_destroy(diagnostic_arena, 1);
+    }
     return result;
 }
 
