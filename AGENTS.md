@@ -12,11 +12,48 @@ renderers (Vulkan/Metal/D3D12), TrueType rasterizer, compiler frontend, IR,
 codegen backends (x86_64, aarch64), linker, and the in-process test suite.
 Targets: Linux, macOS, Windows, Android, iOS.
 
+## Self-hosting — reproduce first
+
+All contributors—humans and coding agents—should reproduce the current
+self-hosting fixed point from the repository root before changing the compiler:
+
+```sh
+./build.sh test_self_host --config Release
+```
+
+`test_self_host` builds the trusted bootstrap compiler, compiles the complete
+unity-build IDE twice with buster, requires both generations to be
+byte-identical, and runs the stage-2 benchmark. The same build.c-owned workflow
+is also exposed as the `test_self_host` Ninja target. Its expanded equivalent
+is:
+
+```sh
+./build.sh build --config Release -t ide
+build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 src/buster/ide/ide.c -o build/ide-self
+build/ide-self cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 src/buster/ide/ide.c -o build/ide-self-stage2
+cmp build/ide-self build/ide-self-stage2
+build/ide-self-stage2 bench
+```
+
+The target and fixed point are currently available on Linux x86-64. Preserve
+them when changing preprocessing, C semantics, IR, code generation, object
+writing, or linking, and report both self-hosting failures and benchmark
+regressions.
+
 ## Build
 
 Three layers: `./build.sh` bootstraps `build/build` from `build.c` using
 **tcc**, which then drives CMake + ninja (multi-config, outputs in
 `build/<Config>/`).
+
+Keep build orchestration and policy in `build.c`, with the least practical
+process-launch and scripting overhead. Shell and PowerShell scripts exist only
+to bootstrap `build/build`; do not grow them into build systems. Use CMake only
+to generate/cache the platform build graph and let Ninja execute that graph;
+do not implement workflows, iteration, comparison, parsing, timing, or other
+general scripting in the CMake language when `build.c` can do the work
+directly. Prefer one persistent native build-driver process over chains of
+shell, CMake, and utility subprocesses.
 
 ```sh
 ./build.sh                          # configure + build (Debug, clang)
@@ -28,7 +65,7 @@ Three layers: `./build.sh` bootstraps `build/build` from `build.c` using
 
 `build/build` commands: `generate`, `build` (default), `clang_analyze`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
-`test_all_combinations`, `test_all_combinations_ci`.
+`test_self_host`, `test_all_combinations`, `test_all_combinations_ci`.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|tcc|zig|cl>` are accepted **only by
 `generate`** — passing them to `build` fails silently with exit 1 and no
@@ -39,9 +76,10 @@ ninja (`build`) or CMake (`generate`).
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),
-`run_ide`, `test_ide`, `debug_ide`, `buster_shaders`, `apk` (Android),
-`clang_analyze`. The Vulkan SDK (`VULKAN_SDK` env) is required whenever
-Vulkan or Slang shader compilation is enabled.
+`test_self_host` (Linux x86-64 only), `run_ide`, `test_ide`, `debug_ide`,
+`buster_shaders`, `apk` (Android), `clang_analyze`. The Vulkan SDK
+(`VULKAN_SDK` env) is required whenever Vulkan or Slang shader compilation is
+enabled.
 
 ## Tests
 

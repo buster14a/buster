@@ -1559,6 +1559,21 @@ buster_add_executable(ide src/buster/ide/ide.c
     hash
 )
 
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+    CMAKE_SYSTEM_PROCESSOR MATCHES
+        "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
+    add_custom_target(test_self_host
+        COMMAND
+            "${CMAKE_BINARY_DIR}/build"
+            test_self_host
+            --build-directory "${CMAKE_BINARY_DIR}"
+            --config "$<CONFIG>"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        USES_TERMINAL
+        VERBATIM
+    )
+endif()
+
 if (TARGET buster_shaders)
     add_dependencies(ide buster_shaders)
     target_sources(ide PRIVATE ${BUSTER_SHADER_SOURCES})

@@ -29,6 +29,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
     BUILD_COMMAND_NINJA_LOG_SUMMARY,
     BUILD_COMMAND_TIME_TRACE_SUMMARY,
+    BUILD_COMMAND_TEST_SELF_HOST,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -839,6 +840,13 @@ struct CmakeBuildOptions
     u32 verbose:1;
 };
 
+typedef struct SelfHostCompare SelfHostCompare;
+struct SelfHostCompare
+{
+    String8 stage1;
+    String8 stage2;
+};
+
 BUSTER_GLOBAL_LOCAL String8 cmake_build_config(CmakeBuildOptions options)
 {
     String8 result = options.config.pointer ? options.config : (options.optimize ? S8("Release") : S8("Debug"));
@@ -890,6 +898,191 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
     }
 
     generic_tool_run_add_end(r);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(
+    Arena* arena,
+    void* data)
+{
+    SelfHostCompare* compare = data;
+    ByteSlice stage1 = file_read(
+        arena,
+        compare->stage1,
+        (FileReadOptions){0});
+    ByteSlice stage2 = file_read(
+        arena,
+        compare->stage2,
+        (FileReadOptions){0});
+    if (!stage1.pointer || !stage2.pointer)
+    {
+        string_print(
+            S8("error: could not read self-host stage outputs\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    if (stage1.length != stage2.length ||
+        !memory_compare(
+            stage1.pointer,
+            stage2.pointer,
+            stage1.length))
+    {
+        string_print(
+            S8("error: self-host stages differ: {S8} ({u64} bytes) != {S8} ({u64} bytes)\n"),
+            compare->stage1,
+            stage1.length,
+            compare->stage2,
+            stage2.length);
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(
+        S8("SELF_HOST deterministic bytes={u64} stage1={S8} stage2={S8}\n"),
+        stage1.length,
+        compare->stage1,
+        compare->stage2);
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void self_host_compile_add(
+    Arena* arena,
+    String8 compiler,
+    String8 build_directory,
+    String8 output,
+    String8 timing_description)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    String8 generated_include = string_format(
+        arena,
+        S8("-I{S8}/generated"),
+        build_directory);
+    OsArgumentBuilder builder =
+        os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, compiler);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-Isrc"));
+    os_argument_builder_append(
+        &builder,
+        generated_include);
+    os_argument_builder_append(
+        &builder,
+        S8("-DBUSTER_UNITY_BUILD=1"));
+    os_argument_builder_append(
+        &builder,
+        S8("-DBUSTER_INCLUDE_TESTS=0"));
+    os_argument_builder_append(
+        &builder,
+        S8("src/buster/ide/ide.c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    *run = (ProcessRun){
+        .arguments =
+            os_argument_builder_flush(&builder),
+        .working_directory = S8("."),
+        .timing_description = timing_description,
+        .spawn_options = (ProcessSpawnOptions){
+            .use_process_environment = 1,
+        },
+    };
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(
+    Arena* arena,
+    String8 build_directory,
+    CmakeBuildOptions options)
+{
+#if !BUSTER_LINUX || !BUSTER_CPU_ARCH_X86_64
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(build_directory);
+    BUSTER_UNUSED(options);
+    string_print(
+        S8("error: deterministic self-hosting is currently supported only on Linux x86-64\n"));
+    return PROCESS_RESULT_FAILED;
+#else
+    String8 config = cmake_build_config(options);
+    String8 ide_name =
+#if BUSTER_WINDOWS
+        S8("ide.exe");
+#else
+        S8("ide");
+#endif
+    String8 bootstrap = path_join(
+        arena,
+        path_join(arena, build_directory, config),
+        ide_name);
+    String8 output_directory = path_join(
+        arena,
+        path_join(
+            arena,
+            build_directory,
+            S8("self-host")),
+        config);
+    make_directory_recursive(arena, output_directory);
+    String8 stage1 = path_join(
+        arena,
+        output_directory,
+#if BUSTER_WINDOWS
+        S8("ide-stage1.exe"));
+#else
+        S8("ide-stage1"));
+#endif
+    String8 stage2 = path_join(
+        arena,
+        output_directory,
+#if BUSTER_WINDOWS
+        S8("ide-stage2.exe"));
+#else
+        S8("ide-stage2"));
+#endif
+    String8 targets[] = {S8("ide")};
+    build_add(
+        arena,
+        build_directory,
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(targets),
+        (SliceString8){0},
+        options);
+    self_host_compile_add(
+        arena,
+        bootstrap,
+        build_directory,
+        stage1,
+        S8("Self-host stage 1"));
+    self_host_compile_add(
+        arena,
+        stage1,
+        build_directory,
+        stage2,
+        S8("Self-host stage 2"));
+    SelfHostCompare* compare =
+        arena_allocate(arena, SelfHostCompare, 1);
+    *compare = (SelfHostCompare){
+        .stage1 = stage1,
+        .stage2 = stage2,
+    };
+    BuildStep* compare_step = step_add(arena);
+    ProcessRun* compare_run =
+        run_add(arena, compare_step);
+    *compare_run = (ProcessRun){
+        .callback = self_host_compare_action,
+        .callback_data = compare,
+    };
+    BuildStep* bench_step = step_add(arena);
+    ProcessRun* bench_run = run_add(arena, bench_step);
+    String8* bench_arguments =
+        arena_allocate(arena, String8, 2);
+    bench_arguments[0] = stage2;
+    bench_arguments[1] = S8("bench");
+    *bench_run = (ProcessRun){
+        .arguments = {
+            .pointer = bench_arguments,
+            .length = 2,
+        },
+        .timing_description =
+            S8("Self-host stage 2 benchmark"),
+        .spawn_options = (ProcessSpawnOptions){
+            .use_process_environment = 1,
+        },
+    };
+    return PROCESS_RESULT_SUCCESS;
+#endif
 }
 
 typedef struct String8Node String8Node;
@@ -2984,6 +3177,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
         [BUILD_COMMAND_TIME_TRACE_SUMMARY] = S8_INITIALIZER("time_trace_summary"),
+        [BUILD_COMMAND_TEST_SELF_HOST] = S8_INITIALIZER("test_self_host"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -3208,7 +3402,8 @@ ProcessResult process_arguments(void)
                         string_print(S8("error: invalid configuration => \"{S8}\"\n"), config);
                         result = PROCESS_RESULT_FAILED;
                     }
-                    else if (command == BUILD_COMMAND_BUILD)
+                    else if (command == BUILD_COMMAND_BUILD ||
+                        command == BUILD_COMMAND_TEST_SELF_HOST)
                     {
                         options.config = config;
                     }
@@ -3567,6 +3762,13 @@ ProcessResult process_arguments(void)
             {
                 time_trace_summary_options.paths = string8_list_to_slice(arena, time_trace_summary_paths);
                 time_trace_summary_action_add(arena, time_trace_summary_options);
+            }
+            break; case BUILD_COMMAND_TEST_SELF_HOST:
+            {
+                result = self_host_add(
+                    arena,
+                    build_directory,
+                    options);
             }
             break;
             case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

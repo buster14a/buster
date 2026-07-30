@@ -2940,6 +2940,130 @@ BUSTER_GLOBAL_LOCAL bool c_include_read(
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_include_builtin(
+    String8 name,
+    String8* path_out,
+    String8* source_out)
+{
+    String8 source = {0};
+    if (string_equal(name, S8("stdbool.h")))
+    {
+        source =
+            S8("#ifndef __STDBOOL_H\n"
+               "#define __STDBOOL_H\n"
+               "#if __STDC_VERSION__ < 202311L\n"
+               "#define bool _Bool\n"
+               "#define true 1\n"
+               "#define false 0\n"
+               "#endif\n"
+               "#define __bool_true_false_are_defined 1\n"
+               "#endif\n");
+    }
+    else if (string_equal(name, S8("stdalign.h")))
+    {
+        source =
+            S8("#ifndef __STDALIGN_H\n"
+               "#define __STDALIGN_H\n"
+               "#if __STDC_VERSION__ < 202311L\n"
+               "#define alignas _Alignas\n"
+               "#define alignof _Alignof\n"
+               "#endif\n"
+               "#endif\n");
+    }
+    else if (string_equal(name, S8("stdarg.h")))
+    {
+        source =
+            S8("#ifndef __STDARG_H\n"
+               "#define __STDARG_H\n"
+               "typedef __builtin_va_list __gnuc_va_list;\n"
+               "typedef __gnuc_va_list va_list;\n"
+               "#define va_start(arguments, last) "
+                   "__builtin_va_start(arguments, last)\n"
+               "#define va_end(arguments) "
+                   "__builtin_va_end(arguments)\n"
+               "#define va_arg(arguments, type) "
+                   "__builtin_va_arg(arguments, type)\n"
+               "#define va_copy(destination, source) "
+                   "__builtin_va_copy(destination, source)\n"
+               "#endif\n");
+    }
+    else if (string_equal(name, S8("stddef.h")))
+    {
+        source =
+            S8("#ifndef __BUSTER_PTRDIFF_T\n"
+               "#define __BUSTER_PTRDIFF_T\n"
+               "typedef __PTRDIFF_TYPE__ ptrdiff_t;\n"
+               "#endif\n"
+               "#ifndef __BUSTER_SIZE_T\n"
+               "#define __BUSTER_SIZE_T\n"
+               "typedef __SIZE_TYPE__ size_t;\n"
+               "#endif\n"
+               "#ifndef __BUSTER_WCHAR_T\n"
+               "#define __BUSTER_WCHAR_T\n"
+               "typedef __WCHAR_TYPE__ wchar_t;\n"
+               "#endif\n"
+               "#ifndef __BUSTER_MAX_ALIGN_T\n"
+               "#define __BUSTER_MAX_ALIGN_T\n"
+               "typedef union {\n"
+               "    long long integer;\n"
+               "    long double real;\n"
+               "} max_align_t;\n"
+               "#endif\n"
+               "#ifndef NULL\n"
+               "#define NULL ((void *)0)\n"
+               "#endif\n"
+               "#define offsetof(type, member) "
+                   "__builtin_offsetof(type, member)\n"
+               "#undef __need_ptrdiff_t\n"
+               "#undef __need_size_t\n"
+               "#undef __need_rsize_t\n"
+               "#undef __need_wchar_t\n"
+               "#undef __need_NULL\n"
+               "#undef __need_max_align_t\n"
+               "#undef __need_offsetof\n");
+    }
+    else if (string_equal(name, S8("limits.h")))
+    {
+        source =
+            S8("#ifndef __LIMITS_H\n"
+               "#define __LIMITS_H\n"
+               "#define CHAR_BIT 8\n"
+               "#define SCHAR_MIN (-128)\n"
+               "#define SCHAR_MAX 127\n"
+               "#define UCHAR_MAX 255\n"
+               "#define CHAR_MIN 0\n"
+               "#define CHAR_MAX UCHAR_MAX\n"
+               "#define SHRT_MIN (-32768)\n"
+               "#define SHRT_MAX 32767\n"
+               "#define USHRT_MAX 65535\n"
+               "#define INT_MIN (-2147483647 - 1)\n"
+               "#define INT_MAX 2147483647\n"
+               "#define UINT_MAX 4294967295U\n"
+               "#if defined(_WIN64)\n"
+               "#define LONG_MIN INT_MIN\n"
+               "#define LONG_MAX INT_MAX\n"
+               "#define ULONG_MAX UINT_MAX\n"
+               "#else\n"
+               "#define LONG_MIN (-9223372036854775807L - 1)\n"
+               "#define LONG_MAX 9223372036854775807L\n"
+               "#define ULONG_MAX 18446744073709551615UL\n"
+               "#endif\n"
+               "#define LLONG_MIN "
+                   "(-9223372036854775807LL - 1)\n"
+               "#define LLONG_MAX 9223372036854775807LL\n"
+               "#define ULLONG_MAX 18446744073709551615ULL\n"
+               "#define MB_LEN_MAX 16\n"
+               "#endif\n");
+    }
+    if (!source.length)
+    {
+        return false;
+    }
+    *path_out = name;
+    *source_out = source;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_include_resolve(
     Arena* arena,
     CPreprocessOptions options,
@@ -2996,7 +3120,10 @@ BUSTER_GLOBAL_LOCAL bool c_include_resolve(
             return true;
         }
     }
-    return false;
+    return c_include_builtin(
+        name,
+        path_out,
+        source_out);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_include_resolve_next(
@@ -3053,7 +3180,10 @@ BUSTER_GLOBAL_LOCAL bool c_include_resolve_next(
             return true;
         }
     }
-    return false;
+    return c_include_builtin(
+        name,
+        path_out,
+        source_out);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_include_name(
@@ -3610,17 +3740,24 @@ CPreprocessResult c_preprocess(
     if (c_preprocess_dialect_is_gnu(
             options.dialect))
     {
-        c_macro_define(
+        c_macro_define_object_text(
             arena,
             &first_macro,
             &last_macro,
             S8("__GNUC__"),
-            standard_replacement,
-            1,
-            0,
-            0,
-            false,
-            false);
+            S8("4"));
+        c_macro_define_object_text(
+            arena,
+            &first_macro,
+            &last_macro,
+            S8("__GNUC_MINOR__"),
+            S8("2"));
+        c_macro_define_object_text(
+            arena,
+            &first_macro,
+            &last_macro,
+            S8("__GNUC_PATCHLEVEL__"),
+            S8("1"));
     }
     else
     {
@@ -9476,10 +9613,19 @@ c_parse_aggregate_member_segment(
     {
         return false;
     }
-    u32 member_declarator = member_start;
+    u32 member_type_start =
+        c_parse_skip_attributes(
+            preprocess,
+            member_start,
+            member_end);
+    if (member_type_start >= member_end)
+    {
+        return false;
+    }
+    u32 member_declarator = member_type_start;
     CTypeId member_type = C_TYPE_ID_INVALID;
     CToken member_first =
-        preprocess.tokens[member_start];
+        preprocess.tokens[member_type_start];
     if (member_first.kind == C_TOKEN_IDENTIFIER &&
         (string_equal(
              member_first.spelling,
@@ -9501,7 +9647,7 @@ c_parse_aggregate_member_segment(
                 S8("union")) ?
                 C_TYPE_UNION :
                 C_TYPE_ENUM;
-        u32 aggregate_index = member_start + 1;
+        u32 aggregate_index = member_type_start + 1;
         String8 tag = {0};
         if (aggregate_index < member_end &&
             preprocess.tokens[
@@ -9609,7 +9755,7 @@ c_parse_aggregate_member_segment(
     }
     else
     {
-        u32 typedef_index = member_start;
+        u32 typedef_index = member_type_start;
         CType qualifiers = {
             .element_type = C_TYPE_ID_INVALID,
             .return_type = C_TYPE_ID_INVALID,
@@ -9697,7 +9843,7 @@ c_parse_aggregate_member_segment(
             member_type = c_parse_primitive_type(
                 result,
                 preprocess,
-                member_start,
+                member_type_start,
                 member_end,
                 &member_declarator);
         }
@@ -45704,14 +45850,16 @@ UnitTestResult c_frontend_tests(
     CPreprocessResult builtins = c_preprocess(
         arguments->arena,
         S8("__STDC__ __STDC_VERSION__\n"
-           "__LINE__ __FILE__\n"),
+           "__LINE__ __FILE__\n"
+           "__GNUC__ __GNUC_MINOR__ "
+               "__GNUC_PATCHLEVEL__\n"),
         (CPreprocessOptions){
             .source_path = S8("builtins.c"),
         });
     BUSTER_TEST(arguments,
         builtins.diagnostic_count == 0);
     BUSTER_TEST(arguments,
-        builtins.token_count == 5);
+        builtins.token_count == 8);
     c_test_preprocessed_token(
         arguments,
         &result,
@@ -45740,6 +45888,27 @@ UnitTestResult c_frontend_tests(
         3,
         C_TOKEN_STRING_LITERAL,
         S8("\"builtins.c\""));
+    c_test_preprocessed_token(
+        arguments,
+        &result,
+        builtins,
+        4,
+        C_TOKEN_PREPROCESSING_NUMBER,
+        S8("4"));
+    c_test_preprocessed_token(
+        arguments,
+        &result,
+        builtins,
+        5,
+        C_TOKEN_PREPROCESSING_NUMBER,
+        S8("2"));
+    c_test_preprocessed_token(
+        arguments,
+        &result,
+        builtins,
+        6,
+        C_TOKEN_PREPROCESSING_NUMBER,
+        S8("1"));
 
     CPreprocessResult aarch64_android_builtins =
         c_preprocess(
@@ -45844,6 +46013,42 @@ UnitTestResult c_frontend_tests(
         0,
         C_TOKEN_PREPROCESSING_NUMBER,
         S8("37"));
+    CPreprocessResult builtin_headers =
+        c_preprocess(
+            arguments->arena,
+            S8("#include <stdbool.h>\n"
+               "#include <stdalign.h>\n"
+               "#include <stdarg.h>\n"
+               "#include <stddef.h>\n"
+               "#include <limits.h>\n"
+               "alignas(8) int aligned_value;\n"
+               "size_t builtin_size;\n"
+               "ptrdiff_t builtin_difference;\n"
+               "max_align_t builtin_alignment;\n"
+               "_Static_assert(CHAR_BIT == 8,"
+                   " \"character width\");\n"
+               "_Static_assert(INT_MAX == 2147483647,"
+                   " \"integer maximum\");\n"
+               "int variadic_value(bool enabled, ...) {\n"
+               "    va_list arguments;\n"
+               "    va_start(arguments, enabled);\n"
+               "    int value = va_arg(arguments, int);\n"
+               "    va_end(arguments);\n"
+               "    return enabled ? value : false;\n"
+               "}\n"),
+            (CPreprocessOptions){
+                .source_path =
+                    S8("builtin-headers.c"),
+            });
+    BUSTER_TEST(arguments,
+        builtin_headers.diagnostic_count == 0);
+    CParseResult builtin_headers_parse =
+        c_parse(
+            arguments->arena,
+            builtin_headers);
+    BUSTER_TEST(arguments,
+        builtin_headers_parse.
+            diagnostic_count == 0);
     String8 feature_include_paths[] = {
         S8("tests"),
         S8("tests/include_first"),
@@ -48461,6 +48666,72 @@ UnitTestResult c_frontend_tests(
                 IR_VALIDATION_NONE);
     }
     scratch_end(aggregate_temporary);
+    TemporalArena extension_aggregate_temporary =
+        scratch_begin(0, 0);
+    CPreprocessResult extension_aggregate_tokens =
+        c_preprocess(
+            extension_aggregate_temporary.arena,
+            S8("typedef long SystemLong;\n"
+               "struct ResourceUsage {\n"
+               "    int prefix;\n"
+               "    __extension__ union {\n"
+               "        long value;\n"
+               "        SystemLong system_value;\n"
+               "    };\n"
+               "    int suffix;\n"
+               "};\n"
+               "long resource_value(long input) {\n"
+               "    struct ResourceUsage usage;\n"
+               "    usage.value = input;\n"
+               "    return usage.system_value;\n"
+               "}\n"),
+            (CPreprocessOptions){0});
+    CParseResult extension_aggregate_parse =
+        c_parse(
+            extension_aggregate_temporary.arena,
+            extension_aggregate_tokens);
+    BUSTER_TEST(arguments,
+        extension_aggregate_parse.
+            diagnostic_count == 0);
+    CIRLowerResult extension_aggregate_ir =
+        c_lower_to_ir(
+            extension_aggregate_temporary.arena,
+            S8("extension-aggregate.c"),
+            extension_aggregate_tokens,
+            extension_aggregate_parse,
+            lp64_target);
+    BUSTER_TEST(arguments,
+        extension_aggregate_ir.
+            diagnostic_count == 0);
+    bool found_extension_aggregate_layout = false;
+    if (extension_aggregate_ir.program)
+    {
+        for (u32 type_index = 0;
+            type_index <
+                extension_aggregate_ir.
+                    program->types.count;
+            type_index += 1)
+        {
+            IrType* type =
+                &extension_aggregate_ir.
+                    program->types.types[
+                        type_index];
+            if (type->kind == IR_TYPE_STRUCT &&
+                string_equal(
+                    type->name,
+                    S8("ResourceUsage")))
+            {
+                found_extension_aggregate_layout =
+                    type->layout.resolved &&
+                    type->layout.size == 24 &&
+                    type->layout.alignment == 8 &&
+                    type->field_count == 3;
+            }
+        }
+    }
+    BUSTER_TEST(arguments,
+        found_extension_aggregate_layout);
+    scratch_end(extension_aggregate_temporary);
     CPreprocessResult local_tokens =
         c_preprocess(
             arguments->arena,
