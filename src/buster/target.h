@@ -190,7 +190,8 @@ typedef enum TargetCpuFeature
     TARGET_CPU_FEATURE_X86_AVX10_2 = 1u << 6,
     TARGET_CPU_FEATURE_X86_AVX10_512 = 1u << 7,
     TARGET_CPU_FEATURE_X86_APX = 1u << 8,
-    TARGET_CPU_FEATURE_AARCH64_NEON = 1u << 9,
+    TARGET_CPU_FEATURE_X86_AVX512BW = 1u << 9,
+    TARGET_CPU_FEATURE_AARCH64_NEON = 1u << 10,
 } TargetCpuFeature;
 
 typedef enum TargetStringComponents
@@ -241,10 +242,15 @@ BUSTER_V_DECL Target target_native;
 
 BUSTER_F_DECL bool cpu_is_native(CpuModel model);
 BUSTER_F_DECL CpuModel cpu_detect_model(void);
+BUSTER_F_DECL CpuModel cpu_model_from_string(String8 string);
+BUSTER_F_DECL bool cpu_model_supports_arch(
+    CpuModel model,
+    CpuArch arch);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_default(
     CpuArch arch,
     CpuModel model);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_effective(Target target);
+BUSTER_F_DECL bool target_cpu_features_are_valid(Target target);
 BUSTER_F_DECL bool target_cpu_feature_has(
     Target target,
     TargetCpuFeature feature);

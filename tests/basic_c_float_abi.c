@@ -3,6 +3,14 @@ static double add(double left, double right)
     return left + right;
 }
 
+static double multiply_add(
+    double addend,
+    double left,
+    double right)
+{
+    return addend + left * right;
+}
+
 struct Mixed
 {
     double value;
@@ -143,6 +151,10 @@ int main(void)
     if (add(2.25, 3.0) != 5.25)
     {
         return 1;
+    }
+    if (multiply_add(1.25, 2.0, 3.0) != 7.25)
+    {
+        return 12;
     }
     if (!mixed_is_expected((struct Mixed){ 2.25, 3 }))
     {

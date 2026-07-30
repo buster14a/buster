@@ -7,6 +7,15 @@ typedef int Int4
 typedef unsigned int UInt4
     __attribute__((vector_size(16)));
 
+typedef int Int8
+    __attribute__((vector_size(32)));
+
+typedef int Int16
+    __attribute__((vector_size(64)));
+
+typedef signed char Byte64
+    __attribute__((vector_size(64)));
+
 typedef struct VectorPair
 {
     Float4 left;
@@ -30,6 +39,24 @@ typedef union UnsignedVectorStorage
     UInt4 vector;
     unsigned int lanes[4];
 } UnsignedVectorStorage;
+
+typedef union WideIntegerVectorStorage
+{
+    Int8 vector;
+    int lanes[8];
+} WideIntegerVectorStorage;
+
+typedef union VeryWideIntegerVectorStorage
+{
+    Int16 vector;
+    int lanes[16];
+} VeryWideIntegerVectorStorage;
+
+typedef union ByteVectorStorage
+{
+    Byte64 vector;
+    signed char lanes[64];
+} ByteVectorStorage;
 
 Float4 vector_identity(Float4 value)
 {
@@ -75,6 +102,15 @@ int main(void)
     IntegerVectorStorage integer_not = { 0 };
     UnsignedVectorStorage unsigned_values = { 0 };
     IntegerVectorStorage unsigned_comparison = { 0 };
+    WideIntegerVectorStorage wide_left = { 0 };
+    WideIntegerVectorStorage wide_right = { 0 };
+    WideIntegerVectorStorage wide_sum = { 0 };
+    VeryWideIntegerVectorStorage very_wide_left = { 0 };
+    VeryWideIntegerVectorStorage very_wide_right = { 0 };
+    VeryWideIntegerVectorStorage very_wide_sum = { 0 };
+    ByteVectorStorage byte_left = { 0 };
+    ByteVectorStorage byte_right = { 0 };
+    ByteVectorStorage byte_sum = { 0 };
     input.lanes[0] = 1.25f;
     input.lanes[1] = 2.5f;
     input.lanes[2] = 3.75f;
@@ -119,6 +155,28 @@ int main(void)
     unsigned_values.lanes[3] = 0xffffffffu;
     unsigned_comparison.vector =
         unsigned_values.vector > 1u;
+    wide_left.lanes[0] = 3;
+    wide_left.lanes[7] = 11;
+    wide_right.lanes[0] = 4;
+    wide_right.lanes[7] = 13;
+    wide_sum.vector =
+        wide_right.vector +
+        (wide_left.vector + wide_right.vector);
+    very_wide_left.lanes[0] = 5;
+    very_wide_left.lanes[15] = 17;
+    very_wide_right.lanes[0] = 6;
+    very_wide_right.lanes[15] = 19;
+    very_wide_sum.vector =
+        very_wide_right.vector +
+        (very_wide_left.vector +
+            very_wide_right.vector);
+    byte_left.lanes[0] = 3;
+    byte_left.lanes[63] = 11;
+    byte_right.lanes[0] = 4;
+    byte_right.lanes[63] = 13;
+    byte_sum.vector =
+        byte_right.vector +
+        (byte_left.vector + byte_right.vector);
     float indexed = input.vector[2];
     input.vector[2] = indexed + 1.0f;
     int result = 0;
@@ -160,5 +218,11 @@ int main(void)
     if (unsigned_comparison.lanes[3] != -1) return 28;
     if (indexed != 3.75f) return 29;
     if (input.vector[2] != 4.75f) return 30;
+    if (wide_sum.lanes[0] != 11) return 31;
+    if (wide_sum.lanes[7] != 37) return 32;
+    if (very_wide_sum.lanes[0] != 17) return 33;
+    if (very_wide_sum.lanes[15] != 55) return 34;
+    if (byte_sum.lanes[0] != 11) return 35;
+    if (byte_sum.lanes[63] != 37) return 36;
     return result;
 }

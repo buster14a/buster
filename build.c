@@ -744,7 +744,6 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
 
     String8 cc = cmake_string(arena, S8("CMAKE_C_COMPILER"), c_compiler);
     String8 ci = cmake_flag(arena, S8("BUSTER_CI"), generate.ci);
-    String8 optimize = cmake_flag(arena, S8("BUSTER_OPTIMIZE"), generate.optimize);
     String8 lto = cmake_flag(arena, S8("BUSTER_LTO"), generate.lto);
     String8 time_trace = cmake_flag(arena, S8("BUSTER_TIME_TRACE"), generate.time_trace);
     String8 instrument = cmake_flag(arena, S8("BUSTER_INSTRUMENT"), generate.instrument);
@@ -776,10 +775,6 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     os_argument_builder_append(b, ci);
     os_argument_builder_append(b, cc);
     os_argument_builder_append(b, fuzz);
-    if (generate.optimize_set)
-    {
-        os_argument_builder_append(b, optimize);
-    }
     os_argument_builder_append(b, sanitize);
     os_argument_builder_append(b, linker_argument);
 

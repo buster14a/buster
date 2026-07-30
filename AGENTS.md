@@ -12,6 +12,13 @@ renderers (Vulkan/Metal/D3D12), TrueType rasterizer, compiler frontend, IR,
 codegen backends (x86_64, aarch64), linker, and the in-process test suite.
 Targets: Linux, macOS, Windows, Android, iOS.
 
+## Current compiler priority
+
+Prioritize compiler throughput and producing an artifact as soon as possible.
+Do not add optimization passes or spend compile time improving generated code
+unless that work is explicitly requested. Prefer direct, predictable lowering
+and code generation with minimal analysis overhead.
+
 ## Self-hosting — reproduce first
 
 All contributors—humans and coding agents—should reproduce the current
@@ -68,11 +75,18 @@ shell, CMake, and utility subprocesses.
 `test_self_host`, `test_all_combinations`, `test_all_combinations_ci`.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|tcc|zig|cl>` are accepted **only by
-`generate`** — passing them to `build` fails silently with exit 1 and no
-output. `build` accepts
-`--config <name>`, `--optimize`, `--target/-t <ninja target>`,
+`generate`**; `build` rejects them with an explicit diagnostic.
+`--optimize`/`--no-optimize` are configuration shorthands for
+Release/Debug and never create separate cached optimization state. `build`
+accepts `--config <name>`, `--optimize`, `--target/-t <ninja target>`, and
 `--verbose/-v`. Booleans have `--no-` twins; `--` passes the rest through to
-ninja (`build`) or CMake (`generate`).
+Ninja (`build`) or CMake (`generate`).
+
+The Clang-like `ide cc` driver accepts `-march=<model>` and
+`-mcpu=<model>` (or their separated forms). CPU names use the canonical
+spellings printed by `cpu_model_to_string_os`, such as `baseline`, `native`,
+`haswell`, `znver5`, and `apple-m4`; incompatible target/model pairs are
+diagnosed. `-v` reports the selected CPU and maximum native vector width.
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),

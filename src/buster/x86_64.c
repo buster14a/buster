@@ -121,6 +121,10 @@ TargetCpuFeatures cpu_detect_features_x86_64(void)
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512VL;
         }
+        if (leaf_7_0.ebx & (1u << 30))
+        {
+            result |= TARGET_CPU_FEATURE_X86_AVX512BW;
+        }
     }
     if (leaf_7_0.eax < 1)
     {
@@ -150,7 +154,9 @@ TargetCpuFeatures cpu_detect_features_x86_64(void)
     if (avx512_state &&
         (leaf_24.ebx & (1u << 18)))
     {
-        result |= TARGET_CPU_FEATURE_X86_AVX10_512;
+        result |=
+            TARGET_CPU_FEATURE_X86_AVX10_512 |
+            TARGET_CPU_FEATURE_X86_AVX512BW;
     }
     return result;
 }

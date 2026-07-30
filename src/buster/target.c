@@ -337,6 +337,13 @@ TargetParseResult target_parse_triple(String8 triple)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL CpuModel cpu_model_resolve_detected(
+    CpuModel model)
+{
+    return model == CPU_MODEL_ERROR ?
+        CPU_MODEL_NATIVE : model;
+}
+
 CpuModel cpu_detect_model(void)
 {
     CpuModel cpu_model = CPU_MODEL_ERROR;
@@ -351,9 +358,60 @@ CpuModel cpu_detect_model(void)
 #else
 #error TODO: implement CPU detection code for this architecture
 #endif
+    cpu_model = cpu_model_resolve_detected(cpu_model);
     target_native.cpu_model = cpu_model;
     target_native.cpu_features_explicit = true;
     return cpu_model;
+}
+
+CpuModel cpu_model_from_string(String8 string)
+{
+    for (CpuModel model = CPU_MODEL_BASELINE;
+        model < CPU_MODEL_COUNT;
+        model += 1)
+    {
+        if (string_equal(
+                string,
+                cpu_model_to_string_os(model)))
+        {
+            return model;
+        }
+    }
+    return CPU_MODEL_ERROR;
+}
+
+bool cpu_model_supports_arch(
+    CpuModel model,
+    CpuArch arch)
+{
+    if (model == CPU_MODEL_BASELINE)
+    {
+        return arch == CPU_ARCH_X86_64 ||
+            arch == CPU_ARCH_AARCH64;
+    }
+    if (model == CPU_MODEL_NATIVE)
+    {
+        return arch == target_native.cpu_arch;
+    }
+    if (arch == CPU_ARCH_X86_64)
+    {
+        return model >= CPU_MODEL_AMD_I486 &&
+            model <=
+                CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    }
+    if (arch == CPU_ARCH_AARCH64)
+    {
+        return
+            model == CPU_MODEL_A64_GENERIC ||
+            model == CPU_MODEL_A64_ARM_CORTEX_R82 ||
+            model == CPU_MODEL_A64_ARM_CORTEX_R82AE ||
+            (model >= CPU_MODEL_A64_ARM_CORTEX_A34 &&
+                model <=
+                    CPU_MODEL_A64_ARM_NEOVERSE_V3AE) ||
+            (model >= CPU_MODEL_A64_APPLE_A7 &&
+                model <= CPU_MODEL_A64_APPLE_M4);
+    }
+    return false;
 }
 
 TargetCpuFeatures target_cpu_features_default(
@@ -378,7 +436,6 @@ TargetCpuFeatures target_cpu_features_default(
         case CPU_MODEL_INTEL_HASWELL:
         case CPU_MODEL_INTEL_BROADWELL:
         case CPU_MODEL_INTEL_SKYLAKE:
-        case CPU_MODEL_INTEL_ROCKETLAKE:
         case CPU_MODEL_INTEL_ALDERLAKE:
         case CPU_MODEL_INTEL_RAPTORLAKE:
         case CPU_MODEL_INTEL_METEORLAKE:
@@ -394,6 +451,7 @@ TargetCpuFeatures target_cpu_features_default(
         case CPU_MODEL_AMD_ZEN_4:
         case CPU_MODEL_AMD_ZEN_5:
         case CPU_MODEL_INTEL_SKYLAKE_AVX512:
+        case CPU_MODEL_INTEL_ROCKETLAKE:
         case CPU_MODEL_INTEL_COOPERLAKE:
         case CPU_MODEL_INTEL_CASCADELAKE:
         case CPU_MODEL_INTEL_CANNONLAKE:
@@ -402,13 +460,19 @@ TargetCpuFeatures target_cpu_features_default(
         case CPU_MODEL_INTEL_ICELAKE_SERVER:
         case CPU_MODEL_INTEL_EMERALD_RAPIDS:
         case CPU_MODEL_INTEL_SAPPHIRE_RAPIDS:
+            result |=
+                TARGET_CPU_FEATURE_X86_AVX |
+                TARGET_CPU_FEATURE_X86_AVX2 |
+                TARGET_CPU_FEATURE_X86_AVX512F |
+                TARGET_CPU_FEATURE_X86_AVX512VL |
+                TARGET_CPU_FEATURE_X86_AVX512BW;
+            break;
         case CPU_MODEL_INTEL_KNL:
         case CPU_MODEL_INTEL_KNM:
             result |=
                 TARGET_CPU_FEATURE_X86_AVX |
                 TARGET_CPU_FEATURE_X86_AVX2 |
-                TARGET_CPU_FEATURE_X86_AVX512F |
-                TARGET_CPU_FEATURE_X86_AVX512VL;
+                TARGET_CPU_FEATURE_X86_AVX512F;
             break;
         case CPU_MODEL_INTEL_GRANITE_RAPIDS:
         case CPU_MODEL_INTEL_GRANITE_RAPIDS_D:
@@ -417,6 +481,7 @@ TargetCpuFeatures target_cpu_features_default(
                 TARGET_CPU_FEATURE_X86_AVX2 |
                 TARGET_CPU_FEATURE_X86_AVX512F |
                 TARGET_CPU_FEATURE_X86_AVX512VL |
+                TARGET_CPU_FEATURE_X86_AVX512BW |
                 TARGET_CPU_FEATURE_X86_AVX10_1 |
                 TARGET_CPU_FEATURE_X86_AVX10_512;
             break;
@@ -426,6 +491,7 @@ TargetCpuFeatures target_cpu_features_default(
                 TARGET_CPU_FEATURE_X86_AVX2 |
                 TARGET_CPU_FEATURE_X86_AVX512F |
                 TARGET_CPU_FEATURE_X86_AVX512VL |
+                TARGET_CPU_FEATURE_X86_AVX512BW |
                 TARGET_CPU_FEATURE_X86_AVX10_1 |
                 TARGET_CPU_FEATURE_X86_AVX10_2 |
                 TARGET_CPU_FEATURE_X86_AVX10_512 |
@@ -439,6 +505,92 @@ TargetCpuFeatures target_cpu_features_default(
             break;
     }
     return result;
+}
+
+bool target_cpu_features_are_valid(Target target)
+{
+    if (!cpu_model_supports_arch(
+            target.cpu_model,
+            target.cpu_arch))
+    {
+        return false;
+    }
+    if (!target.cpu_features_explicit)
+    {
+        return true;
+    }
+    TargetCpuFeatures features = target.cpu_features;
+    if (target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        return !(features &
+            ~((TargetCpuFeatures)
+                TARGET_CPU_FEATURE_AARCH64_NEON));
+    }
+    if (target.cpu_arch != CPU_ARCH_X86_64)
+    {
+        return false;
+    }
+    TargetCpuFeatures known =
+        TARGET_CPU_FEATURE_X86_SSE2 |
+        TARGET_CPU_FEATURE_X86_AVX |
+        TARGET_CPU_FEATURE_X86_AVX2 |
+        TARGET_CPU_FEATURE_X86_AVX512F |
+        TARGET_CPU_FEATURE_X86_AVX512VL |
+        TARGET_CPU_FEATURE_X86_AVX10_1 |
+        TARGET_CPU_FEATURE_X86_AVX10_2 |
+        TARGET_CPU_FEATURE_X86_AVX10_512 |
+        TARGET_CPU_FEATURE_X86_APX |
+        TARGET_CPU_FEATURE_X86_AVX512BW;
+    if ((features & ~known) ||
+        !(features &
+            TARGET_CPU_FEATURE_X86_SSE2))
+    {
+        return false;
+    }
+    if ((features &
+            TARGET_CPU_FEATURE_X86_AVX2) &&
+        !(features &
+            TARGET_CPU_FEATURE_X86_AVX))
+    {
+        return false;
+    }
+    if ((features &
+            TARGET_CPU_FEATURE_X86_AVX512F) &&
+        !(features &
+            TARGET_CPU_FEATURE_X86_AVX))
+    {
+        return false;
+    }
+    if ((features &
+            TARGET_CPU_FEATURE_X86_AVX512VL) &&
+        !(features &
+            TARGET_CPU_FEATURE_X86_AVX512F))
+    {
+        return false;
+    }
+    if ((features &
+            TARGET_CPU_FEATURE_X86_AVX512BW) &&
+        !(features &
+            (TARGET_CPU_FEATURE_X86_AVX512F |
+             TARGET_CPU_FEATURE_X86_AVX10_512)))
+    {
+        return false;
+    }
+    if ((features &
+            TARGET_CPU_FEATURE_X86_AVX10_2) &&
+        !(features &
+            TARGET_CPU_FEATURE_X86_AVX10_1))
+    {
+        return false;
+    }
+    if ((features &
+            TARGET_CPU_FEATURE_X86_AVX10_512) &&
+        !(features &
+            TARGET_CPU_FEATURE_X86_AVX10_1))
+    {
+        return false;
+    }
+    return true;
 }
 
 TargetCpuFeatures target_cpu_features_effective(Target target)
@@ -793,6 +945,84 @@ UnitTestResult target_tests(
     BUSTER_TEST(arguments,
         bad_operating_system.error ==
             TARGET_PARSE_ERROR_OPERATING_SYSTEM);
+    BUSTER_TEST(arguments,
+        cpu_model_from_string(S8("znver5")) ==
+            CPU_MODEL_AMD_ZEN_5);
+    BUSTER_TEST(arguments,
+        cpu_model_from_string(
+            S8("apple-m4")) ==
+            CPU_MODEL_A64_APPLE_M4);
+    BUSTER_TEST(arguments,
+        cpu_model_from_string(
+            S8("not-a-processor")) ==
+            CPU_MODEL_ERROR);
+    BUSTER_TEST(arguments,
+        cpu_model_resolve_detected(
+            CPU_MODEL_ERROR) ==
+            CPU_MODEL_NATIVE);
+    BUSTER_TEST(arguments,
+        cpu_model_resolve_detected(
+            CPU_MODEL_AMD_ZEN_5) ==
+            CPU_MODEL_AMD_ZEN_5);
+    BUSTER_TEST(arguments,
+        cpu_model_supports_arch(
+            CPU_MODEL_AMD_ZEN_5,
+            CPU_ARCH_X86_64));
+    BUSTER_TEST(arguments,
+        !cpu_model_supports_arch(
+            CPU_MODEL_AMD_ZEN_5,
+            CPU_ARCH_AARCH64));
+    BUSTER_TEST(arguments,
+        cpu_model_supports_arch(
+            CPU_MODEL_A64_APPLE_M4,
+            CPU_ARCH_AARCH64));
+    BUSTER_TEST(arguments,
+        (target_cpu_features_default(
+                CPU_ARCH_X86_64,
+                CPU_MODEL_AMD_ZEN_5) &
+            TARGET_CPU_FEATURE_X86_AVX512BW) != 0);
+    BUSTER_TEST(arguments,
+        (target_cpu_features_default(
+                CPU_ARCH_X86_64,
+                CPU_MODEL_INTEL_KNL) &
+            (TARGET_CPU_FEATURE_X86_AVX512BW |
+             TARGET_CPU_FEATURE_X86_AVX512VL)) == 0);
+    Target valid_avx512 = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .cpu_features_explicit = true,
+        .cpu_features =
+            TARGET_CPU_FEATURE_X86_SSE2 |
+            TARGET_CPU_FEATURE_X86_AVX |
+            TARGET_CPU_FEATURE_X86_AVX2 |
+            TARGET_CPU_FEATURE_X86_AVX512F,
+    };
+    BUSTER_TEST(arguments,
+        target_cpu_features_are_valid(
+            valid_avx512));
+    Target invalid_avx2 = valid_avx512;
+    invalid_avx2.cpu_features =
+        TARGET_CPU_FEATURE_X86_SSE2 |
+        TARGET_CPU_FEATURE_X86_AVX2;
+    BUSTER_TEST(arguments,
+        !target_cpu_features_are_valid(
+            invalid_avx2));
+    Target invalid_avx512vl = valid_avx512;
+    invalid_avx512vl.cpu_features =
+        TARGET_CPU_FEATURE_X86_SSE2 |
+        TARGET_CPU_FEATURE_X86_AVX |
+        TARGET_CPU_FEATURE_X86_AVX512VL;
+    BUSTER_TEST(arguments,
+        !target_cpu_features_are_valid(
+            invalid_avx512vl));
+    Target invalid_avx512bw = valid_avx512;
+    invalid_avx512bw.cpu_features =
+        TARGET_CPU_FEATURE_X86_SSE2 |
+        TARGET_CPU_FEATURE_X86_AVX |
+        TARGET_CPU_FEATURE_X86_AVX512BW;
+    BUSTER_TEST(arguments,
+        !target_cpu_features_are_valid(
+            invalid_avx512bw));
     return result;
 }
 #endif

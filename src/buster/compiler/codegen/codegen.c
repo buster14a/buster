@@ -70,6 +70,11 @@ struct X64Builder
     CodegenDataRelocation* last_data_relocation;
     u32 native_vector_operation_count;
     u32 split_vector_operation_count;
+    u32 vzeroupper_count;
+    u32 forwarded_wide_vector_load_count;
+    bool upper_vector_dirty;
+    IrValueId last_wide_vector_result;
+    u32 last_wide_vector_size;
 };
 
 #define X64_VALUE_SLOT_SIZE 32
@@ -347,7 +352,8 @@ BUSTER_GLOBAL_LOCAL Target codegen_target_for_abi(CodegenAbi abi)
                 TARGET_CPU_FEATURE_X86_AVX |
                 TARGET_CPU_FEATURE_X86_AVX2 |
                 TARGET_CPU_FEATURE_X86_AVX512F |
-                TARGET_CPU_FEATURE_X86_AVX512VL :
+                TARGET_CPU_FEATURE_X86_AVX512VL |
+                TARGET_CPU_FEATURE_X86_AVX512BW :
             TARGET_CPU_FEATURE_AARCH64_NEON,
     };
     return result;
@@ -2242,9 +2248,17 @@ BUSTER_GLOBAL_LOCAL void x64_emit_vector_native_memory(
     if (size == 64)
     {
         codegen_emit_u8(&builder->buffer, 0x62);
-        codegen_emit_u8(&builder->buffer, 0xf1);
+        codegen_emit_u8(
+            &builder->buffer,
+            base >= X64_REGISTER_R8 ? 0xd1 : 0xf1);
         codegen_emit_u8(&builder->buffer, 0x7c);
         codegen_emit_u8(&builder->buffer, 0x48);
+    }
+    else if (base >= X64_REGISTER_R8)
+    {
+        codegen_emit_u8(&builder->buffer, 0xc4);
+        codegen_emit_u8(&builder->buffer, 0xc1);
+        codegen_emit_u8(&builder->buffer, 0x7c);
     }
     else
     {
@@ -2270,11 +2284,21 @@ BUSTER_GLOBAL_LOCAL void x64_emit_vector_native_binary_operation(
     if (size == 64)
     {
         codegen_emit_u8(&builder->buffer, 0x62);
-        codegen_emit_u8(&builder->buffer, 0xf1);
+        codegen_emit_u8(
+            &builder->buffer,
+            base >= X64_REGISTER_R8 ? 0xd1 : 0xf1);
         codegen_emit_u8(
             &builder->buffer,
             (u8)(0x7c | packed_prefix));
         codegen_emit_u8(&builder->buffer, 0x48);
+    }
+    else if (base >= X64_REGISTER_R8)
+    {
+        codegen_emit_u8(&builder->buffer, 0xc4);
+        codegen_emit_u8(&builder->buffer, 0xc1);
+        codegen_emit_u8(
+            &builder->buffer,
+            (u8)(0x7c | packed_prefix));
     }
     else
     {
@@ -2287,6 +2311,68 @@ BUSTER_GLOBAL_LOCAL void x64_emit_vector_native_binary_operation(
     codegen_emit_u8(
         &builder->buffer,
         (u8)(base & 7));
+}
+
+BUSTER_GLOBAL_LOCAL bool
+x64_target_supports_native_vector(
+    Target target,
+    u64 size,
+    u32 element_width,
+    bool integer_operation)
+{
+    if (size <= 16 ||
+        size > target_vector_register_size(target))
+    {
+        return false;
+    }
+    if (!integer_operation)
+    {
+        return true;
+    }
+    if (size == 32)
+    {
+        return target_cpu_feature_has(
+            target,
+            TARGET_CPU_FEATURE_X86_AVX2);
+    }
+    if (size == 64 && element_width < 32)
+    {
+        return target_cpu_feature_has(
+            target,
+            TARGET_CPU_FEATURE_X86_AVX512BW);
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool
+x64_vector_binary_is_commutative(
+    IrBinaryOperation operation)
+{
+    return operation ==
+            IR_BINARY_VECTOR_INTEGER_ADD ||
+        operation ==
+            IR_BINARY_VECTOR_INTEGER_BITWISE_AND ||
+        operation ==
+            IR_BINARY_VECTOR_INTEGER_BITWISE_OR ||
+        operation ==
+            IR_BINARY_VECTOR_INTEGER_BITWISE_XOR;
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_vzeroupper(
+    X64Builder* builder)
+{
+    if (!builder->upper_vector_dirty)
+    {
+        return;
+    }
+    codegen_emit_u8(&builder->buffer, 0xc5);
+    codegen_emit_u8(&builder->buffer, 0xf8);
+    codegen_emit_u8(&builder->buffer, 0x77);
+    builder->upper_vector_dirty = false;
+    builder->last_wide_vector_result =
+        IR_VALUE_ID_INVALID;
+    builder->last_wide_vector_size = 0;
+    builder->vzeroupper_count += 1;
 }
 
 BUSTER_GLOBAL_LOCAL bool x64_vector_comparison_condition(
@@ -2593,39 +2679,62 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_vector_binary(
         x64_value_displacement_component(
             instruction->result,
             0));
-    bool native_width =
-        vector->layout.size > 16 &&
-        vector->layout.size <=
-            target_vector_register_size(builder->target);
     bool integer_operation =
         element->kind == ANALYSIS_TYPE_INTEGER;
-    if (native_width && integer_operation &&
-        vector->layout.size == 32 &&
-        !target_cpu_feature_has(
+    bool native_width =
+        x64_target_supports_native_vector(
             builder->target,
-            TARGET_CPU_FEATURE_X86_AVX2))
-    {
-        native_width = false;
-    }
+            vector->layout.size,
+            width,
+            integer_operation);
     if (native_width)
     {
         builder->native_vector_operation_count += 1;
-        x64_emit_vector_native_memory(
-            builder,
-            false,
-            (u32)vector->layout.size,
-            X64_REGISTER_RAX);
+        bool forwarded_left =
+            builder->upper_vector_dirty &&
+            builder->last_wide_vector_result.value ==
+                instruction->operands[0].value &&
+            builder->last_wide_vector_size ==
+                vector->layout.size;
+        bool forwarded_right =
+            builder->upper_vector_dirty &&
+            x64_vector_binary_is_commutative(
+                instruction->binary_operation) &&
+            builder->last_wide_vector_result.value ==
+                instruction->operands[1].value &&
+            builder->last_wide_vector_size ==
+                vector->layout.size;
+        if (forwarded_left || forwarded_right)
+        {
+            builder->
+                forwarded_wide_vector_load_count += 1;
+        }
+        else
+        {
+            x64_emit_vector_native_memory(
+                builder,
+                false,
+                (u32)vector->layout.size,
+                X64_REGISTER_RAX);
+        }
         x64_emit_vector_native_binary_operation(
             builder,
             prefix,
             opcode,
             (u32)vector->layout.size,
-            X64_REGISTER_RCX);
+            forwarded_right ?
+                X64_REGISTER_RAX :
+                X64_REGISTER_RCX);
         x64_emit_vector_native_memory(
             builder,
             true,
             (u32)vector->layout.size,
             X64_REGISTER_RDX);
+        builder->upper_vector_dirty = true;
+        builder->last_wide_vector_result =
+            instruction->result;
+        builder->last_wide_vector_size =
+            (u32)vector->layout.size;
         return true;
     }
     u32 chunk_count = (u32)((vector->layout.size + 15) / 16);
@@ -2854,6 +2963,62 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_vector_unary(
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool
+x64_instruction_uses_wide_vector(
+    X64Builder* builder,
+    IrInstruction* instruction)
+{
+    if (instruction->opcode != IR_OPCODE_BINARY ||
+        instruction->operand_count != 2 ||
+        instruction->binary_operation >=
+            IR_BINARY_VECTOR_INTEGER_EQUAL)
+    {
+        return false;
+    }
+    AnalysisType* vector = analysis_type_from_id(
+        builder->analysis,
+        builder->function->values[
+            instruction->operands[0].value].type);
+    if (!vector ||
+        vector->kind != ANALYSIS_TYPE_VECTOR)
+    {
+        return false;
+    }
+    AnalysisType* element = analysis_type_from_id(
+        builder->analysis,
+        vector->as.vector.element_type);
+    u32 width =
+        element->kind == ANALYSIS_TYPE_FLOAT ?
+            element->as.float_bit_width :
+        element->kind == ANALYSIS_TYPE_INTEGER ?
+            element->as.integer.bit_width : 0;
+    if (!width ||
+        !x64_target_supports_native_vector(
+            builder->target,
+            vector->layout.size,
+            width,
+            element->kind ==
+                ANALYSIS_TYPE_INTEGER))
+    {
+        return false;
+    }
+    switch (instruction->binary_operation)
+    {
+        case IR_BINARY_VECTOR_FLOAT_ADD:
+        case IR_BINARY_VECTOR_FLOAT_SUBTRACT:
+        case IR_BINARY_VECTOR_FLOAT_MULTIPLY:
+        case IR_BINARY_VECTOR_FLOAT_DIVIDE:
+        case IR_BINARY_VECTOR_INTEGER_ADD:
+        case IR_BINARY_VECTOR_INTEGER_SUBTRACT:
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_AND:
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_OR:
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_XOR:
+            return true;
+        default:
+            return false;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_binary_is_float(
     IrBinaryOperation operation)
 {
@@ -2870,6 +3035,13 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(
     IrBlockId block,
     IrInstruction* instruction)
 {
+    if (builder->upper_vector_dirty &&
+        !x64_instruction_uses_wide_vector(
+            builder,
+            instruction))
+    {
+        x64_emit_vzeroupper(builder);
+    }
     switch (instruction->opcode)
     {
         case IR_OPCODE_LOCAL:
@@ -5599,6 +5771,8 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
         .signature = signature,
         .abi = abi,
         .target = target,
+        .last_wide_vector_result =
+            IR_VALUE_ID_INVALID,
     };
     codegen_emit_u8(&builder.buffer, 0x55);
     codegen_emit_u8(&builder.buffer, 0x48);
@@ -5742,6 +5916,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(
         builder.native_vector_operation_count;
     result.split_vector_operation_count =
         builder.split_vector_operation_count;
+    result.vzeroupper_count =
+        builder.vzeroupper_count;
+    result.forwarded_wide_vector_load_count =
+        builder.forwarded_wide_vector_load_count;
     return result;
 }
 
@@ -12220,12 +12398,96 @@ codegen_canonical_x64_sign_extend(
 }
 
 BUSTER_GLOBAL_LOCAL bool
+codegen_canonical_x64_instruction_uses_wide_vector(
+    IrProgram* program,
+    IrFunction* function,
+    IrInstruction* instruction,
+    Target target)
+{
+    if (instruction->opcode != IR_OPCODE_BINARY ||
+        instruction->operand_count != 2 ||
+        instruction->binary_operation >=
+            IR_BINARY_VECTOR_INTEGER_EQUAL)
+    {
+        return false;
+    }
+    IrType* vector = ir_type_from_id(
+        &program->types,
+        function->values[
+            instruction->operands[0].value].
+            canonical_type);
+    IrType* element = vector &&
+            vector->kind == IR_TYPE_VECTOR ?
+        ir_type_from_id(
+            &program->types,
+            vector->element_type) : 0;
+    if (!element ||
+        (element->kind != IR_TYPE_INTEGER &&
+            element->kind != IR_TYPE_FLOAT) ||
+        !x64_target_supports_native_vector(
+            target,
+            vector->layout.size,
+            element->bit_width,
+            element->kind == IR_TYPE_INTEGER))
+    {
+        return false;
+    }
+    switch (instruction->binary_operation)
+    {
+        case IR_BINARY_VECTOR_FLOAT_ADD:
+        case IR_BINARY_VECTOR_FLOAT_SUBTRACT:
+        case IR_BINARY_VECTOR_FLOAT_MULTIPLY:
+        case IR_BINARY_VECTOR_FLOAT_DIVIDE:
+        case IR_BINARY_VECTOR_INTEGER_ADD:
+        case IR_BINARY_VECTOR_INTEGER_SUBTRACT:
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_AND:
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_OR:
+        case IR_BINARY_VECTOR_INTEGER_BITWISE_XOR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool
+codegen_canonical_x64_instruction_preserves_wide_vector(
+    IrProgram* program,
+    IrInstruction* instruction)
+{
+    if (instruction->opcode == IR_OPCODE_FIELD)
+    {
+        return true;
+    }
+    if (instruction->opcode != IR_OPCODE_LOAD ||
+        instruction->result.value ==
+            IR_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
+    IrType* result_type = ir_type_from_id(
+        &program->types,
+        instruction->canonical_type);
+    return result_type &&
+        result_type->kind == IR_TYPE_VECTOR &&
+        result_type->layout.resolved &&
+        result_type->layout.size &&
+        result_type->layout.size <= 64;
+}
+
+BUSTER_GLOBAL_LOCAL bool
 codegen_canonical_x64_vector_operation(
     CodegenBuffer* output,
     IrProgram* program,
     IrFunction* function,
     IrInstruction* instruction,
-    u32 const* value_offsets)
+    u32 const* value_offsets,
+    Target target,
+    u64* native_operation_count,
+    u64* split_operation_count,
+    bool* upper_vector_dirty,
+    IrValueId* last_wide_vector_result,
+    u32* last_wide_vector_size,
+    u64* forwarded_wide_vector_load_count)
 {
     if (!instruction->operand_count)
     {
@@ -12312,6 +12574,328 @@ codegen_canonical_x64_vector_operation(
             &unordered))
     {
         return false;
+    }
+    bool wide_native =
+        x64_target_supports_native_vector(
+            target,
+            vector->layout.size,
+            element->bit_width,
+            element->kind == IR_TYPE_INTEGER) &&
+        instruction->opcode == IR_OPCODE_BINARY &&
+        instruction->operand_count == 2 &&
+        !comparison;
+    if (wide_native)
+    {
+        u8 operation = 0;
+        u8 prefix = 0;
+        if (element->kind == IR_TYPE_FLOAT)
+        {
+            prefix =
+                element->bit_width == 64 ?
+                    0x66 : 0;
+            operation =
+                instruction->binary_operation ==
+                    IR_BINARY_VECTOR_FLOAT_ADD ?
+                    0x58 :
+                instruction->binary_operation ==
+                    IR_BINARY_VECTOR_FLOAT_SUBTRACT ?
+                    0x5c :
+                instruction->binary_operation ==
+                    IR_BINARY_VECTOR_FLOAT_MULTIPLY ?
+                    0x59 :
+                instruction->binary_operation ==
+                    IR_BINARY_VECTOR_FLOAT_DIVIDE ?
+                    0x5e : 0;
+        }
+        else
+        {
+            prefix = 0x66;
+            IrBinaryOperation binary =
+                instruction->binary_operation;
+            if (binary ==
+                IR_BINARY_VECTOR_INTEGER_ADD)
+            {
+                operation =
+                    element->bit_width == 8 ?
+                        0xfc :
+                    element->bit_width == 16 ?
+                        0xfd :
+                    element->bit_width == 32 ?
+                        0xfe : 0xd4;
+            }
+            else if (binary ==
+                IR_BINARY_VECTOR_INTEGER_SUBTRACT)
+            {
+                operation =
+                    element->bit_width == 8 ?
+                        0xf8 :
+                    element->bit_width == 16 ?
+                        0xf9 :
+                    element->bit_width == 32 ?
+                        0xfa : 0xfb;
+            }
+            else if (binary ==
+                    IR_BINARY_VECTOR_INTEGER_BITWISE_AND ||
+                binary ==
+                    IR_BINARY_VECTOR_INTEGER_BITWISE_OR ||
+                binary ==
+                    IR_BINARY_VECTOR_INTEGER_BITWISE_XOR)
+            {
+                operation =
+                    binary ==
+                            IR_BINARY_VECTOR_INTEGER_BITWISE_AND ?
+                        0xdb :
+                    binary ==
+                            IR_BINARY_VECTOR_INTEGER_BITWISE_OR ?
+                        0xeb : 0xef;
+            }
+        }
+        if (operation)
+        {
+            bool forwarded_left =
+                *upper_vector_dirty &&
+                last_wide_vector_result->value ==
+                    instruction->operands[0].value &&
+                *last_wide_vector_size ==
+                    vector->layout.size;
+            bool forwarded_right =
+                *upper_vector_dirty &&
+                x64_vector_binary_is_commutative(
+                    instruction->binary_operation) &&
+                last_wide_vector_result->value ==
+                    instruction->operands[1].value &&
+                *last_wide_vector_size ==
+                    vector->layout.size;
+            if (forwarded_left || forwarded_right)
+            {
+                *forwarded_wide_vector_load_count +=
+                    1;
+            }
+            else
+            {
+                x64_emit_vector_native_memory(
+                    &builder,
+                    false,
+                    (u32)vector->layout.size,
+                    X64_REGISTER_R8);
+            }
+            x64_emit_vector_native_binary_operation(
+                &builder,
+                prefix,
+                operation,
+                (u32)vector->layout.size,
+                forwarded_right ?
+                    X64_REGISTER_R8 :
+                    X64_REGISTER_R9);
+            x64_emit_vector_native_memory(
+                &builder,
+                true,
+                (u32)vector->layout.size,
+                X64_REGISTER_R10);
+            *output = builder.buffer;
+            *native_operation_count += 1;
+            *upper_vector_dirty = true;
+            *last_wide_vector_result =
+                instruction->result;
+            *last_wide_vector_size =
+                (u32)vector->layout.size;
+            return true;
+        }
+    }
+    if (vector->layout.size == 16 &&
+        instruction->opcode ==
+            IR_OPCODE_BINARY &&
+        instruction->operand_count == 2 &&
+        !comparison)
+    {
+        u8 operation = 0;
+        bool native = false;
+        if (element->kind == IR_TYPE_FLOAT)
+        {
+            operation =
+                instruction->binary_operation ==
+                    IR_BINARY_VECTOR_FLOAT_ADD ?
+                    0x58 :
+                instruction->binary_operation ==
+                    IR_BINARY_VECTOR_FLOAT_SUBTRACT ?
+                    0x5c :
+                instruction->binary_operation ==
+                    IR_BINARY_VECTOR_FLOAT_MULTIPLY ?
+                    0x59 :
+                instruction->binary_operation ==
+                    IR_BINARY_VECTOR_FLOAT_DIVIDE ?
+                    0x5e : 0;
+            native = operation != 0;
+            if (native)
+            {
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x41);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x0f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x10);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x00);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x41);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x0f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x10);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x09);
+                if (element->bit_width == 64)
+                {
+                    codegen_emit_u8(
+                        &builder.buffer,
+                        0x66);
+                }
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x0f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    operation);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0xc1);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x41);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x0f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x11);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x02);
+            }
+        }
+        else
+        {
+            IrBinaryOperation binary =
+                instruction->binary_operation;
+            if (binary ==
+                    IR_BINARY_VECTOR_INTEGER_ADD)
+            {
+                operation =
+                    element->bit_width == 8 ?
+                        0xfc :
+                    element->bit_width == 16 ?
+                        0xfd :
+                    element->bit_width == 32 ?
+                        0xfe : 0xd4;
+                native = true;
+            }
+            else if (binary ==
+                IR_BINARY_VECTOR_INTEGER_SUBTRACT)
+            {
+                operation =
+                    element->bit_width == 8 ?
+                        0xf8 :
+                    element->bit_width == 16 ?
+                        0xf9 :
+                    element->bit_width == 32 ?
+                        0xfa : 0xfb;
+                native = true;
+            }
+            else if (binary ==
+                    IR_BINARY_VECTOR_INTEGER_BITWISE_AND ||
+                binary ==
+                    IR_BINARY_VECTOR_INTEGER_BITWISE_OR ||
+                binary ==
+                    IR_BINARY_VECTOR_INTEGER_BITWISE_XOR)
+            {
+                operation =
+                    binary ==
+                            IR_BINARY_VECTOR_INTEGER_BITWISE_AND ?
+                        0xdb :
+                    binary ==
+                            IR_BINARY_VECTOR_INTEGER_BITWISE_OR ?
+                        0xeb : 0xef;
+                native = true;
+            }
+            if (native)
+            {
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0xf3);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x41);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x0f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x6f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x00);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0xf3);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x41);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x0f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x6f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x09);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x66);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x0f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    operation);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0xc1);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0xf3);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x41);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x0f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x7f);
+                codegen_emit_u8(
+                    &builder.buffer,
+                    0x02);
+            }
+        }
+        if (native)
+        {
+            *output = builder.buffer;
+            *native_operation_count += 1;
+            return true;
+        }
+    }
+    if (vector->layout.size > 16)
+    {
+        *split_operation_count += 1;
     }
     for (u32 lane = 0;
         lane < (u32)vector->element_count;
@@ -13909,16 +14493,11 @@ CodegenModule codegen_generate_canonical_module(
                     CODEGEN_ERROR_CAPACITY;
                 return result;
             }
+            value_offsets[value_index] =
+                (u32)value_bytes;
             if (target.cpu_arch ==
-                CPU_ARCH_X86_64)
+                CPU_ARCH_AARCH64)
             {
-                value_offsets[value_index] =
-                    (u32)value_bytes;
-            }
-            else
-            {
-                value_offsets[value_index] =
-                    (u32)value_bytes;
                 value_bytes += slot_size;
                 if (value_bytes > UINT32_MAX)
                 {
@@ -14083,6 +14662,20 @@ CodegenModule codegen_generate_canonical_module(
         {
             frame_size += 32;
         }
+        result.statistics.function_count += 1;
+        result.statistics.instruction_count +=
+            function->instruction_count;
+        result.statistics.value_count +=
+            function->value_count;
+        result.statistics.stack_value_bytes +=
+            value_bytes;
+        result.statistics.stack_frame_bytes +=
+            frame_size;
+        result.statistics.maximum_stack_frame_bytes =
+            BUSTER_MAX(
+                result.statistics.
+                    maximum_stack_frame_bytes,
+                frame_size);
         if (target.cpu_arch == CPU_ARCH_X86_64)
         {
             codegen_emit_u8(&buffer, 0x55);
@@ -14279,6 +14872,10 @@ CodegenModule codegen_generate_canonical_module(
                 CCanonicalBranchPatch,
                 function->instruction_count * 2);
         u32 branch_patch_count = 0;
+        bool x64_upper_vector_dirty = false;
+        IrValueId x64_last_wide_vector_result =
+            IR_VALUE_ID_INVALID;
+        u32 x64_last_wide_vector_size = 0;
         for (u32 block_index = 0;
             block_index < function->block_count;
             block_index += 1)
@@ -14319,6 +14916,32 @@ CodegenModule codegen_generate_canonical_module(
                         instruction->next;
                     continue;
                 }
+                if (x64_upper_vector_dirty &&
+                    !codegen_canonical_x64_instruction_preserves_wide_vector(
+                        program,
+                        instruction) &&
+                    !codegen_canonical_x64_instruction_uses_wide_vector(
+                        program,
+                        function,
+                        instruction,
+                        target))
+                {
+                    codegen_emit_u8(
+                        &buffer,
+                        0xc5);
+                    codegen_emit_u8(
+                        &buffer,
+                        0xf8);
+                    codegen_emit_u8(
+                        &buffer,
+                        0x77);
+                    x64_upper_vector_dirty = false;
+                    x64_last_wide_vector_result =
+                        IR_VALUE_ID_INVALID;
+                    x64_last_wide_vector_size = 0;
+                    result.statistics.
+                        vzeroupper_count += 1;
+                }
                 if (target.cpu_arch ==
                     CPU_ARCH_X86_64)
                 {
@@ -14349,6 +14972,29 @@ CodegenModule codegen_generate_canonical_module(
         codegen_emit_u32( \
             &buffer, \
             (u32)result_displacement); \
+    } while (0)
+#define C_X64_LOAD_FLOAT( \
+    register_index, \
+    value_id, \
+    width) \
+    do \
+    { \
+        codegen_emit_u8( \
+            &buffer, \
+            (width) == 32 ? 0xf3 : 0xf2); \
+        codegen_emit_u8(&buffer, 0x0f); \
+        codegen_emit_u8(&buffer, 0x10); \
+        codegen_emit_u8( \
+            &buffer, \
+            (u8)(0x85 | ((register_index) << 3))); \
+        codegen_emit_u32( \
+            &buffer, \
+            (u32)(-(s32)value_offsets[(value_id).value])); \
+    } while (0)
+#define C_X64_RECORD_FLOAT_STORE(width) \
+    do \
+    { \
+        (void)(width); \
     } while (0)
                 if (instruction->opcode ==
                     IR_OPCODE_LOCAL)
@@ -19076,7 +19722,17 @@ CodegenModule codegen_generate_canonical_module(
                                 program,
                                 function,
                                 instruction,
-                                value_offsets))
+                                value_offsets,
+                                target,
+                                &result.statistics.
+                                    native_vector_operation_count,
+                                &result.statistics.
+                                    split_vector_operation_count,
+                                &x64_upper_vector_dirty,
+                                &x64_last_wide_vector_result,
+                                &x64_last_wide_vector_size,
+                                &result.statistics.
+                                    forwarded_wide_vector_load_count))
                         {
                             result.error =
                                 CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
@@ -19273,7 +19929,17 @@ CodegenModule codegen_generate_canonical_module(
                                 program,
                                 function,
                                 instruction,
-                                value_offsets))
+                                value_offsets,
+                                target,
+                                &result.statistics.
+                                    native_vector_operation_count,
+                                &result.statistics.
+                                    split_vector_operation_count,
+                                &x64_upper_vector_dirty,
+                                &x64_last_wide_vector_result,
+                                &x64_last_wide_vector_size,
+                                &result.statistics.
+                                    forwarded_wide_vector_load_count))
                         {
                             result.error =
                                 CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
@@ -19297,40 +19963,14 @@ CodegenModule codegen_generate_canonical_module(
                                 CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                             return result;
                         }
-                        codegen_emit_u8(
-                            &buffer,
-                            width == 32 ?
-                                0xf3 : 0xf2);
-                        codegen_emit_u8(
-                            &buffer, 0x0f);
-                        codegen_emit_u8(
-                            &buffer, 0x10);
-                        codegen_emit_u8(
-                            &buffer, 0x85);
-                        codegen_emit_u32(
-                            &buffer,
-                            (u32)(-(s32)(
-                                value_offsets[
-                                    instruction->
-                                        operands[0].
-                                        value])));
-                        codegen_emit_u8(
-                            &buffer,
-                            width == 32 ?
-                                0xf3 : 0xf2);
-                        codegen_emit_u8(
-                            &buffer, 0x0f);
-                        codegen_emit_u8(
-                            &buffer, 0x10);
-                        codegen_emit_u8(
-                            &buffer, 0x8d);
-                        codegen_emit_u32(
-                            &buffer,
-                            (u32)(-(s32)(
-                                value_offsets[
-                                    instruction->
-                                        operands[1].
-                                        value])));
+                        C_X64_LOAD_FLOAT(
+                            0,
+                            instruction->operands[0],
+                            width);
+                        C_X64_LOAD_FLOAT(
+                            1,
+                            instruction->operands[1],
+                            width);
                         IrBinaryOperation operation =
                             instruction->
                                 binary_operation;
@@ -19373,6 +20013,8 @@ CodegenModule codegen_generate_canonical_module(
                                 &buffer,
                                 (u32)
                                     result_displacement);
+                            C_X64_RECORD_FLOAT_STORE(
+                                width);
                         }
                         else
                         {
@@ -20448,6 +21090,8 @@ CodegenModule codegen_generate_canonical_module(
                 }
 #undef C_X64_STORE_RESULT
 #undef C_X64_LOAD
+#undef C_X64_RECORD_FLOAT_STORE
+#undef C_X64_LOAD_FLOAT
                 }
                 else
                 {
@@ -24746,6 +25390,8 @@ CodegenModule codegen_generate_canonical_module(
         .pointer = buffer.bytes,
         .length = buffer.count,
     };
+    result.statistics.code_bytes =
+        result.code.length;
     result.error = buffer.error;
     return result;
 }
@@ -25099,7 +25745,16 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "    data left: CodegenFloat8 = [ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0 ];\n"
         "    data right: CodegenFloat8 = [ 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0 ];\n"
         "    data sum: CodegenFloat8 = left + right;\n"
-        "    return @cast(sum[7]);\n"
+        "    data doubled: CodegenFloat8 = sum + right;\n"
+        "    return @cast(doubled[7]);\n"
+        "}\n"
+        "code vector_256_commutative_rhs : fn () s32\n"
+        "{\n"
+        "    data left: vector[8]s32 = [ 1, 2, 3, 4, 5, 6, 7, 8 ];\n"
+        "    data right: vector[8]s32 = [ 8, 7, 6, 5, 4, 3, 2, 1 ];\n"
+        "    data sum: vector[8]s32 = left + right;\n"
+        "    data doubled: vector[8]s32 = right + sum;\n"
+        "    return doubled[7];\n"
         "}\n"
         "code vector_256_identity : fn (value: CodegenFloat8) CodegenFloat8\n"
         "{\n"
@@ -25399,10 +26054,14 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         TARGET_CPU_FEATURE_X86_SSE2 |
         TARGET_CPU_FEATURE_X86_AVX |
         TARGET_CPU_FEATURE_X86_AVX2;
+    Target avx512f_target = avx2_target;
+    avx512f_target.cpu_features |=
+        TARGET_CPU_FEATURE_X86_AVX512F;
     Target avx10_target = avx2_target;
     avx10_target.cpu_features |=
         TARGET_CPU_FEATURE_X86_AVX512F |
         TARGET_CPU_FEATURE_X86_AVX512VL |
+        TARGET_CPU_FEATURE_X86_AVX512BW |
         TARGET_CPU_FEATURE_X86_AVX10_1 |
         TARGET_CPU_FEATURE_X86_AVX10_2 |
         TARGET_CPU_FEATURE_X86_AVX10_512 |
@@ -25420,6 +26079,24 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         target_cpu_feature_has(
             avx10_target,
             TARGET_CPU_FEATURE_X86_APX));
+    BUSTER_TEST(arguments,
+        x64_target_supports_native_vector(
+            avx512f_target,
+            64,
+            32,
+            true));
+    BUSTER_TEST(arguments,
+        !x64_target_supports_native_vector(
+            avx512f_target,
+            64,
+            8,
+            true));
+    BUSTER_TEST(arguments,
+        x64_target_supports_native_vector(
+            avx10_target,
+            64,
+            8,
+            true));
     BUSTER_TEST(arguments,
         target_vector_register_size(
             (Target){
@@ -25461,6 +26138,104 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             x64_stack_adjust_bytes,
             expected_x64_stack_adjust,
             sizeof(expected_x64_stack_adjust)));
+    u8 x64_wide_vector_bytes[48] = {0};
+    X64Builder x64_wide_vector_builder = {
+        .buffer = {
+            .bytes = x64_wide_vector_bytes,
+            .capacity =
+                sizeof(x64_wide_vector_bytes),
+        },
+    };
+    x64_emit_vector_native_memory(
+        &x64_wide_vector_builder,
+        false,
+        32,
+        X64_REGISTER_R8);
+    x64_emit_vector_native_binary_operation(
+        &x64_wide_vector_builder,
+        0x66,
+        0xfe,
+        32,
+        X64_REGISTER_R9);
+    x64_emit_vector_native_memory(
+        &x64_wide_vector_builder,
+        true,
+        32,
+        X64_REGISTER_R10);
+    x64_emit_vector_native_memory(
+        &x64_wide_vector_builder,
+        false,
+        64,
+        X64_REGISTER_R8);
+    x64_emit_vector_native_binary_operation(
+        &x64_wide_vector_builder,
+        0x66,
+        0xfe,
+        64,
+        X64_REGISTER_R9);
+    x64_emit_vector_native_memory(
+        &x64_wide_vector_builder,
+        true,
+        64,
+        X64_REGISTER_R10);
+    x64_emit_vector_native_binary_operation(
+        &x64_wide_vector_builder,
+        0x66,
+        0xfc,
+        64,
+        X64_REGISTER_R9);
+    static u8 const expected_x64_wide_vector[] = {
+        0xc4, 0xc1, 0x7c, 0x10, 0x00,
+        0xc4, 0xc1, 0x7d, 0xfe, 0x01,
+        0xc4, 0xc1, 0x7c, 0x11, 0x02,
+        0x62, 0xd1, 0x7c, 0x48, 0x10, 0x00,
+        0x62, 0xd1, 0x7d, 0x48, 0xfe, 0x01,
+        0x62, 0xd1, 0x7c, 0x48, 0x11, 0x02,
+        0x62, 0xd1, 0x7d, 0x48, 0xfc, 0x01,
+    };
+    BUSTER_TEST(arguments,
+        x64_wide_vector_builder.buffer.error ==
+            CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        x64_wide_vector_builder.buffer.count ==
+            sizeof(expected_x64_wide_vector));
+    BUSTER_TEST(arguments,
+        !memcmp(
+            x64_wide_vector_bytes,
+            expected_x64_wide_vector,
+            sizeof(expected_x64_wide_vector)));
+    u8 x64_vzeroupper_bytes[4] = {0};
+    X64Builder x64_vzeroupper_builder = {
+        .buffer = {
+            .bytes = x64_vzeroupper_bytes,
+            .capacity =
+                sizeof(x64_vzeroupper_bytes),
+        },
+    };
+    x64_emit_vzeroupper(
+        &x64_vzeroupper_builder);
+    BUSTER_TEST(arguments,
+        x64_vzeroupper_builder.buffer.count == 0);
+    x64_vzeroupper_builder.upper_vector_dirty =
+        true;
+    x64_emit_vzeroupper(
+        &x64_vzeroupper_builder);
+    x64_emit_vzeroupper(
+        &x64_vzeroupper_builder);
+    static u8 const expected_x64_vzeroupper[] = {
+        0xc5, 0xf8, 0x77,
+    };
+    BUSTER_TEST(arguments,
+        x64_vzeroupper_builder.buffer.count ==
+            sizeof(expected_x64_vzeroupper));
+    BUSTER_TEST(arguments,
+        x64_vzeroupper_builder.vzeroupper_count ==
+            1);
+    BUSTER_TEST(arguments,
+        !memcmp(
+            x64_vzeroupper_bytes,
+            expected_x64_vzeroupper,
+            sizeof(expected_x64_vzeroupper)));
     u32 aarch64_stack_adjust_words[6] = {0};
     CodegenBuffer aarch64_stack_adjust_buffer = {
         .bytes =
@@ -26991,11 +27766,12 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     String8 wide_vector_names[] =
     {
         S8_INITIALIZER("vector_256_arithmetic"),
+        S8_INITIALIZER("vector_256_commutative_rhs"),
         S8_INITIALIZER("vector_512_arithmetic"),
     };
-    u64 wide_vector_results[] = { 9, 17 };
+    u64 wide_vector_results[] = { 10, 10, 17 };
     for (u32 wide_index = 0;
-        wide_index < 2;
+        wide_index < 3;
         wide_index += 1)
     {
         AnalysisEntity* wide_entity =
@@ -27036,10 +27812,10 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             aarch64_wide_generated.error ==
                 CODEGEN_ERROR_NONE);
         Target split_target =
-            wide_index == 0 ?
+            wide_index < 2 ?
                 baseline_target : avx2_target;
         Target native_target =
-            wide_index == 0 ?
+            wide_index < 2 ?
                 avx2_target : avx10_target;
         CodegenFunction split_generated =
             wide_function ?
@@ -27075,16 +27851,27 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 0);
         BUSTER_TEST(
             arguments,
+            split_generated.vzeroupper_count == 0);
+        BUSTER_TEST(
+            arguments,
             native_generated.error ==
                 CODEGEN_ERROR_NONE);
         BUSTER_TEST(
             arguments,
-            native_generated.native_vector_operation_count >
-                0);
+            native_generated.native_vector_operation_count ==
+                (wide_index < 2 ? 2 : 1));
         BUSTER_TEST(
             arguments,
             native_generated.split_vector_operation_count ==
                 0);
+        BUSTER_TEST(
+            arguments,
+            native_generated.vzeroupper_count == 1);
+        BUSTER_TEST(
+            arguments,
+            native_generated.
+                forwarded_wide_vector_load_count ==
+                    (wide_index < 2 ? 1 : 0));
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
         CodegenExecutable wide_executable =
             codegen_make_executable(wide_generated);

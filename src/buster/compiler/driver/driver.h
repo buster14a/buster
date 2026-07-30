@@ -100,6 +100,7 @@ struct CompilerDriverResult
     String8 output;
     NativeExecutableLinkResult native_link;
     ObjectFile object;
+    CodegenStatistics codegen_statistics;
     CompilerDriverError error;
     CodegenError codegen_error;
     ObjectError object_error;

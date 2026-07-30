@@ -116,6 +116,8 @@ struct CodegenFunction
     u32 spilled_value_count;
     u32 native_vector_operation_count;
     u32 split_vector_operation_count;
+    u32 vzeroupper_count;
+    u32 forwarded_wide_vector_load_count;
 };
 
 typedef struct CodegenModuleEntry CodegenModuleEntry;
@@ -176,6 +178,22 @@ struct CodegenModuleGlobal
 };
 
 typedef struct CodegenModule CodegenModule;
+typedef struct CodegenStatistics CodegenStatistics;
+struct CodegenStatistics
+{
+    u64 instruction_count;
+    u64 value_count;
+    u64 stack_value_bytes;
+    u64 stack_frame_bytes;
+    u64 code_bytes;
+    u64 native_vector_operation_count;
+    u64 split_vector_operation_count;
+    u64 vzeroupper_count;
+    u64 forwarded_wide_vector_load_count;
+    u32 function_count;
+    u32 maximum_stack_frame_bytes;
+};
+
 struct CodegenModule
 {
     ByteSlice code;
@@ -189,6 +207,7 @@ struct CodegenModule
     CodegenModuleDataRelocation* data_relocations;
     CodegenError error;
     CodegenAbi abi;
+    CodegenStatistics statistics;
     IrFunctionId failed_function;
     IrInstructionId failed_instruction;
     IrOpcode failed_opcode;

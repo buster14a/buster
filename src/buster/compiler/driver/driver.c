@@ -111,6 +111,28 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_argument_error(
             argument);
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_set_cpu_model(
+    Arena* arena,
+    CompilerDriverInvocation* invocation,
+    String8 model_string)
+{
+    CpuModel model =
+        cpu_model_from_string(model_string);
+    if (model == CPU_MODEL_ERROR)
+    {
+        compiler_driver_argument_error(
+            arena,
+            invocation,
+            S8("unsupported CPU model: {S8}"),
+            model_string);
+        return false;
+    }
+    invocation->target.cpu_model = model;
+    invocation->target.cpu_features_explicit = false;
+    invocation->target.cpu_features = 0;
+    return true;
+}
+
 CompilerDriverInvocation compiler_driver_parse_arguments(
     Arena* arena,
     SliceString8 arguments)
@@ -252,6 +274,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(
             string_equal(argument, S8("-x")) ||
             string_equal(argument, S8("-target")) ||
             string_equal(argument, S8("--target")) ||
+            string_equal(argument, S8("-march")) ||
+            string_equal(argument, S8("-mcpu")) ||
             string_equal(argument, S8("-isysroot")) ||
             string_equal(argument, S8("--sysroot")) ||
             string_equal(argument, S8("-Xlinker")))
@@ -398,6 +422,21 @@ CompilerDriverInvocation compiler_driver_parse_arguments(
             }
             else if (string_equal(
                     argument,
+                    S8("-march")) ||
+                string_equal(
+                    argument,
+                    S8("-mcpu")))
+            {
+                if (!compiler_driver_set_cpu_model(
+                        arena,
+                        &invocation,
+                        value))
+                {
+                    return invocation;
+                }
+            }
+            else if (string_equal(
+                    argument,
                     S8("-isysroot")) ||
                 string_equal(
                     argument,
@@ -441,6 +480,26 @@ CompilerDriverInvocation compiler_driver_parse_arguments(
         if (value.length)
         {
             invocation.sysroot = value;
+            continue;
+        }
+        value = compiler_driver_option_value(
+            argument,
+            S8("-march="));
+        if (!value.length)
+        {
+            value = compiler_driver_option_value(
+                argument,
+                S8("-mcpu="));
+        }
+        if (value.length)
+        {
+            if (!compiler_driver_set_cpu_model(
+                    arena,
+                    &invocation,
+                    value))
+            {
+                return invocation;
+            }
             continue;
         }
         value = compiler_driver_option_value(
@@ -606,6 +665,17 @@ CompilerDriverInvocation compiler_driver_parse_arguments(
             &invocation,
             S8("unsupported option: {S8}"),
             argument);
+        return invocation;
+    }
+    if (!target_cpu_features_are_valid(
+            invocation.target))
+    {
+        compiler_driver_argument_error(
+            arena,
+            &invocation,
+            S8("CPU model is incompatible with target: {S8}"),
+            cpu_model_to_string_os(
+                invocation.target.cpu_model));
         return invocation;
     }
     if (!invocation.no_standard_includes)
@@ -1793,6 +1863,8 @@ compiler_driver_execute_c_single(
             lowered.program,
             module,
             invocation.target);
+    result.codegen_statistics =
+        code.statistics;
     result.codegen_error = code.error;
     if (code.error != CODEGEN_ERROR_NONE)
     {
@@ -2380,6 +2452,42 @@ compiler_driver_execute_invocation(
             unit.parser_diagnostic_count;
         result.analysis_diagnostic_count +=
             unit.analysis_diagnostic_count;
+        result.codegen_statistics.instruction_count +=
+            unit.codegen_statistics.
+                instruction_count;
+        result.codegen_statistics.value_count +=
+            unit.codegen_statistics.value_count;
+        result.codegen_statistics.stack_value_bytes +=
+            unit.codegen_statistics.
+                stack_value_bytes;
+        result.codegen_statistics.stack_frame_bytes +=
+            unit.codegen_statistics.
+                stack_frame_bytes;
+        result.codegen_statistics.code_bytes +=
+            unit.codegen_statistics.code_bytes;
+        result.codegen_statistics.
+                native_vector_operation_count +=
+            unit.codegen_statistics.
+                native_vector_operation_count;
+        result.codegen_statistics.
+                split_vector_operation_count +=
+            unit.codegen_statistics.
+                split_vector_operation_count;
+        result.codegen_statistics.vzeroupper_count +=
+            unit.codegen_statistics.vzeroupper_count;
+        result.codegen_statistics.
+                forwarded_wide_vector_load_count +=
+            unit.codegen_statistics.
+                forwarded_wide_vector_load_count;
+        result.codegen_statistics.function_count +=
+            unit.codegen_statistics.function_count;
+        result.codegen_statistics.
+                maximum_stack_frame_bytes =
+            BUSTER_MAX(
+                result.codegen_statistics.
+                    maximum_stack_frame_bytes,
+                unit.codegen_statistics.
+                    maximum_stack_frame_bytes);
         if (unit.error !=
             COMPILER_DRIVER_ERROR_NONE)
         {
@@ -2965,6 +3073,7 @@ UnitTestResult compiler_driver_tests(
         S8("-std=gnu23"),
         S8("-target"),
         S8("aarch64-linux-android"),
+        S8("-mcpu=apple-m4"),
         S8("--sysroot=/sdk"),
         S8("-Iinclude"),
         S8("-isystem"),
@@ -3004,6 +3113,9 @@ UnitTestResult compiler_driver_tests(
     BUSTER_TEST(arguments,
         invocation.target.os ==
             OPERATING_SYSTEM_ANDROID);
+    BUSTER_TEST(arguments,
+        invocation.target.cpu_model ==
+            CPU_MODEL_A64_APPLE_M4);
     BUSTER_TEST(arguments,
         invocation.include_path_count == 1);
     BUSTER_TEST(arguments,
@@ -3063,6 +3175,64 @@ UnitTestResult compiler_driver_tests(
     BUSTER_STRING_TEST(arguments,
         invocation.sysroot,
         S8("/sdk"));
+    String8 x86_cpu_command_line[] = {
+        S8("-c"),
+        S8("--target=x86_64-linux"),
+        S8("-march=znver5"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation x86_cpu_invocation =
+        compiler_driver_parse_arguments(
+            arguments->arena,
+            (SliceString8)
+                BUSTER_ARRAY_TO_SLICE(
+                    x86_cpu_command_line));
+    BUSTER_TEST(arguments,
+        x86_cpu_invocation.error ==
+            COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        x86_cpu_invocation.target.cpu_model ==
+            CPU_MODEL_AMD_ZEN_5);
+    BUSTER_TEST(arguments,
+        target_vector_register_size(
+            x86_cpu_invocation.target) == 64);
+    String8 incompatible_cpu_command_line[] = {
+        S8("--target=x86_64-linux"),
+        S8("-mcpu=apple-m4"),
+        S8("-c"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation incompatible_cpu =
+        compiler_driver_parse_arguments(
+            arguments->arena,
+            (SliceString8)
+                BUSTER_ARRAY_TO_SLICE(
+                    incompatible_cpu_command_line));
+    BUSTER_TEST(arguments,
+        incompatible_cpu.error ==
+            COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(
+        arguments,
+        incompatible_cpu.diagnostic,
+        S8("CPU model is incompatible with target: apple-m4"));
+    String8 unknown_cpu_command_line[] = {
+        S8("-march=future-fast"),
+        S8("-c"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation unknown_cpu =
+        compiler_driver_parse_arguments(
+            arguments->arena,
+            (SliceString8)
+                BUSTER_ARRAY_TO_SLICE(
+                    unknown_cpu_command_line));
+    BUSTER_TEST(arguments,
+        unknown_cpu.error ==
+            COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(
+        arguments,
+        unknown_cpu.diagnostic,
+        S8("unsupported CPU model: future-fast"));
     String8 isolated_command_line[] = {
         S8("-isysroot"),
         S8("/isolated-sdk"),
@@ -3243,6 +3413,26 @@ UnitTestResult compiler_driver_tests(
     BUSTER_TEST(arguments,
         c_object.error ==
             COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        c_object.codegen_statistics.
+            function_count > 0);
+    BUSTER_TEST(arguments,
+        c_object.codegen_statistics.
+            instruction_count > 0);
+    BUSTER_TEST(arguments,
+        c_object.codegen_statistics.
+            value_count > 0);
+    BUSTER_TEST(arguments,
+        c_object.codegen_statistics.
+            stack_value_bytes > 0);
+    BUSTER_TEST(arguments,
+        c_object.codegen_statistics.
+            stack_frame_bytes >=
+        c_object.codegen_statistics.
+            maximum_stack_frame_bytes);
+    BUSTER_TEST(arguments,
+        c_object.codegen_statistics.
+            code_bytes > 0);
     ByteSlice c_object_bytes = file_read(
         c_object_arena,
         c_object_path,
@@ -4635,6 +4825,141 @@ UnitTestResult compiler_driver_tests(
     BUSTER_TEST(arguments,
         c_vector.error ==
             COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        target_native.cpu_arch !=
+            CPU_ARCH_X86_64 ||
+        c_vector.codegen_statistics.
+            native_vector_operation_count > 0);
+    String8 c_vector_baseline_path =
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-c-vector-baseline"),
+            S8(".o"));
+    String8 c_vector_baseline_command_line[] = {
+        S8("-c"),
+        S8("--target=x86_64-linux"),
+        S8("-o"),
+        c_vector_baseline_path,
+        S8("tests/basic_c_vector.c"),
+    };
+    Arena* c_vector_target_arena =
+        arena_create((ArenaCreation){0});
+    CompilerDriverInvocation c_vector_baseline_invocation =
+        compiler_driver_parse_arguments(
+            c_vector_target_arena,
+            (SliceString8)
+                BUSTER_ARRAY_TO_SLICE(
+                    c_vector_baseline_command_line));
+    CompilerDriverResult c_vector_baseline =
+        compiler_driver_execute_invocation(
+            c_vector_target_arena,
+            c_vector_baseline_invocation);
+    BUSTER_TEST(arguments,
+        c_vector_baseline.error ==
+            COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        c_vector_baseline.codegen_statistics.
+            split_vector_operation_count == 6);
+    BUSTER_TEST(arguments,
+        c_vector_baseline.codegen_statistics.
+            vzeroupper_count == 0);
+    BUSTER_TEST(arguments,
+        c_vector_baseline.codegen_statistics.
+            forwarded_wide_vector_load_count == 0);
+    u64 c_vector_baseline_native_operations =
+        c_vector_baseline.codegen_statistics.
+            native_vector_operation_count;
+    BUSTER_TEST(arguments,
+        arena_destroy(c_vector_target_arena, 1));
+    String8 c_vector_avx2_path =
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-c-vector-avx2"),
+            S8(".o"));
+    String8 c_vector_avx2_command_line[] = {
+        S8("-c"),
+        S8("--target=x86_64-linux"),
+        S8("-march=haswell"),
+        S8("-o"),
+        c_vector_avx2_path,
+        S8("tests/basic_c_vector.c"),
+    };
+    c_vector_target_arena =
+        arena_create((ArenaCreation){0});
+    CompilerDriverInvocation c_vector_avx2_invocation =
+        compiler_driver_parse_arguments(
+            c_vector_target_arena,
+            (SliceString8)
+                BUSTER_ARRAY_TO_SLICE(
+                    c_vector_avx2_command_line));
+    CompilerDriverResult c_vector_avx2 =
+        compiler_driver_execute_invocation(
+            c_vector_target_arena,
+            c_vector_avx2_invocation);
+    BUSTER_TEST(arguments,
+        c_vector_avx2.error ==
+            COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        c_vector_avx2.codegen_statistics.
+            split_vector_operation_count == 4);
+    BUSTER_TEST(arguments,
+        c_vector_avx2.codegen_statistics.
+            native_vector_operation_count ==
+            c_vector_baseline_native_operations + 2);
+    BUSTER_TEST(arguments,
+        c_vector_avx2.codegen_statistics.
+            vzeroupper_count == 1);
+    BUSTER_TEST(arguments,
+        c_vector_avx2.codegen_statistics.
+            forwarded_wide_vector_load_count == 1);
+    u64 c_vector_avx2_native_operations =
+        c_vector_avx2.codegen_statistics.
+            native_vector_operation_count;
+    BUSTER_TEST(arguments,
+        arena_destroy(c_vector_target_arena, 1));
+    String8 c_vector_avx512_path =
+        buster_test_temporary_path(
+            arguments->arena,
+            S8("buster-c-vector-avx512"),
+            S8(".o"));
+    String8 c_vector_avx512_command_line[] = {
+        S8("-c"),
+        S8("--target=x86_64-linux"),
+        S8("-march=znver5"),
+        S8("-o"),
+        c_vector_avx512_path,
+        S8("tests/basic_c_vector.c"),
+    };
+    c_vector_target_arena =
+        arena_create((ArenaCreation){0});
+    CompilerDriverInvocation c_vector_avx512_invocation =
+        compiler_driver_parse_arguments(
+            c_vector_target_arena,
+            (SliceString8)
+                BUSTER_ARRAY_TO_SLICE(
+                    c_vector_avx512_command_line));
+    CompilerDriverResult c_vector_avx512 =
+        compiler_driver_execute_invocation(
+            c_vector_target_arena,
+            c_vector_avx512_invocation);
+    BUSTER_TEST(arguments,
+        c_vector_avx512.error ==
+            COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments,
+        c_vector_avx512.codegen_statistics.
+            split_vector_operation_count == 0);
+    BUSTER_TEST(arguments,
+        c_vector_avx512.codegen_statistics.
+            native_vector_operation_count ==
+            c_vector_avx2_native_operations + 4);
+    BUSTER_TEST(arguments,
+        c_vector_avx512.codegen_statistics.
+            vzeroupper_count == 3);
+    BUSTER_TEST(arguments,
+        c_vector_avx512.codegen_statistics.
+            forwarded_wide_vector_load_count == 3);
+    BUSTER_TEST(arguments,
+        arena_destroy(c_vector_target_arena, 1));
     if (c_vector.error ==
         COMPILER_DRIVER_ERROR_NONE)
     {
