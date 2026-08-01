@@ -29,7 +29,8 @@ u64 next_power_of_two(u64 n)
 
 u8 trailing_zeroes_u32(u32 n)
 {
-    if (n == 0) return 32;
+    if (n == 0)
+        return 32;
 
 #if __has_builtin(__builtin_ctz)
     return (u8)__builtin_ctz(n);
@@ -47,7 +48,8 @@ u8 trailing_zeroes_u32(u32 n)
 
 u8 trailing_zeroes_u64(u64 n)
 {
-    if (n == 0) return 64;
+    if (n == 0)
+        return 64;
 
 #if __has_builtin(__builtin_ctzll)
     return (u8)__builtin_ctzll(n);
@@ -65,7 +67,8 @@ u8 trailing_zeroes_u64(u64 n)
 
 u8 leading_zeroes_u32(u32 n)
 {
-    if (n == 0) return 32;
+    if (n == 0)
+        return 32;
 
 #if __has_builtin(__builtin_clz)
     return (u8)__builtin_clz(n);
@@ -84,7 +87,8 @@ u8 leading_zeroes_u32(u32 n)
 
 u8 leading_zeroes_u64(u64 n)
 {
-    if (n == 0) return 64;
+    if (n == 0)
+        return 64;
 
 #if __has_builtin(__builtin_clzll)
     return (u8)__builtin_clzll(n);

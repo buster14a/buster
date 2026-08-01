@@ -187,11 +187,8 @@ typedef enum BuildCompiler
 } BuildCompiler;
 
 BUSTER_GLOBAL_LOCAL String8 build_compilers[] = {
-    [BUILD_COMPILER_CL] = S8_INITIALIZER("cl"),
-    [BUILD_COMPILER_CLANG] = S8_INITIALIZER("clang"),
-    [BUILD_COMPILER_GCC] = S8_INITIALIZER("gcc"),
-    [BUILD_COMPILER_TCC] = S8_INITIALIZER("tcc"),
-    [BUILD_COMPILER_ZIG] = S8_INITIALIZER("zig"),
+    [BUILD_COMPILER_CL] = S8_INITIALIZER("cl"),   [BUILD_COMPILER_CLANG] = S8_INITIALIZER("clang"), [BUILD_COMPILER_GCC] = S8_INITIALIZER("gcc"),
+    [BUILD_COMPILER_TCC] = S8_INITIALIZER("tcc"), [BUILD_COMPILER_ZIG] = S8_INITIALIZER("zig"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(build_compilers) == BUILD_COMPILER_COUNT);
@@ -257,11 +254,13 @@ BUSTER_GLOBAL_LOCAL bool cmake_bool_parse(String8 value, bool* parsed)
 {
     bool result = true;
 
-    if (string_equal_ascii_case_insensitive(value, S8("ON")) || string_equal_ascii_case_insensitive(value, S8("TRUE")) || string_equal_ascii_case_insensitive(value, S8("YES")) || string_equal(value, S8("1")))
+    if (string_equal_ascii_case_insensitive(value, S8("ON")) || string_equal_ascii_case_insensitive(value, S8("TRUE")) ||
+        string_equal_ascii_case_insensitive(value, S8("YES")) || string_equal(value, S8("1")))
     {
         *parsed = true;
     }
-    else if (string_equal_ascii_case_insensitive(value, S8("OFF")) || string_equal_ascii_case_insensitive(value, S8("FALSE")) || string_equal_ascii_case_insensitive(value, S8("NO")) || string_equal(value, S8("0")))
+    else if (string_equal_ascii_case_insensitive(value, S8("OFF")) || string_equal_ascii_case_insensitive(value, S8("FALSE")) ||
+             string_equal_ascii_case_insensitive(value, S8("NO")) || string_equal(value, S8("0")))
     {
         *parsed = false;
     }
@@ -273,7 +272,8 @@ BUSTER_GLOBAL_LOCAL bool cmake_bool_parse(String8 value, bool* parsed)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool build_argument_read_required_value(SliceString8 arguments, u64* argument_i, bool has_inline_value, String8 inline_value, String8* value)
+BUSTER_GLOBAL_LOCAL bool build_argument_read_required_value(SliceString8 arguments, u64* argument_i, bool has_inline_value, String8 inline_value,
+                                                            String8* value)
 {
     bool result = false;
     if (has_inline_value)
@@ -346,24 +346,24 @@ struct Generate
     SliceString8 cmake_arguments;
     u64 cmake_profile_summary_limit;
     BuildCompiler compiler;
-    u32 fuzz:1;
-    u32 sanitize:1;
-    u32 ci:1;
-    u32 optimize:1;
-    u32 link_libc:1;
-    u32 time_trace:1;
-    u32 instrument:1;
-    u32 lto:1;
-    u32 include_tests:1;
-    u32 check_optional_warnings:1;
-    u32 developer_targets:1;
-    u32 profile_cmake:1;
-    u32 cc_set:1;
-    u32 linker_set:1;
-    u32 config_set:1;
-    u32 optimize_set:1;
-    u32 cmake_profile_set:1;
-    u32 cmake_profile_summary:1;
+    u32 fuzz : 1;
+    u32 sanitize : 1;
+    u32 ci : 1;
+    u32 optimize : 1;
+    u32 link_libc : 1;
+    u32 time_trace : 1;
+    u32 instrument : 1;
+    u32 lto : 1;
+    u32 include_tests : 1;
+    u32 check_optional_warnings : 1;
+    u32 developer_targets : 1;
+    u32 profile_cmake : 1;
+    u32 cc_set : 1;
+    u32 linker_set : 1;
+    u32 config_set : 1;
+    u32 optimize_set : 1;
+    u32 cmake_profile_set : 1;
+    u32 cmake_profile_summary : 1;
 };
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
@@ -385,7 +385,7 @@ BUSTER_GLOBAL_LOCAL void build_graph_step_add(BuildStep* step)
 {
     if (program.build_graph.last_step)
     {
-        program.build_graph.last_step->next = step; 
+        program.build_graph.last_step->next = step;
     }
     else
     {
@@ -445,18 +445,19 @@ BUSTER_GLOBAL_LOCAL GenericRun generic_tool_run_add_start(Arena* arena, BuildSte
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, resolved);
 
-    return (GenericRun) { .builder = builder, .run = run };
+    return (GenericRun){.builder = builder, .run = run};
 }
 
 BUSTER_GLOBAL_LOCAL void generic_tool_run_add_end(GenericRun r)
 {
     SliceString8 arguments = os_argument_builder_flush(&r.builder);
 
-    *r.run = (ProcessRun) {
+    *r.run = (ProcessRun){
         .arguments = arguments,
-        .spawn_options = (ProcessSpawnOptions){
-            .use_process_environment = 1,
-        },
+        .spawn_options =
+            (ProcessSpawnOptions){
+                .use_process_environment = 1,
+            },
     };
 }
 
@@ -464,29 +465,42 @@ BUSTER_GLOBAL_LOCAL String8 cmake_cc(Arena* arena, BuildCompiler compiler)
 {
     switch (compiler)
     {
-        break; case BUILD_COMPILER_CL: return get_resolved_path(arena, &cl_path, S8("cl"));
-        break; case BUILD_COMPILER_CLANG: return get_resolved_path(arena, &clang_path, S8("clang"));
-        break; case BUILD_COMPILER_GCC: return get_resolved_path(arena, &gcc_path, S8("gcc"));
-        break; case BUILD_COMPILER_TCC: return get_resolved_path(arena, &tcc_path, S8("tcc"));
-        break; case BUILD_COMPILER_ZIG:
+        break;
+    case BUILD_COMPILER_CL:
+        return get_resolved_path(arena, &cl_path, S8("cl"));
+        break;
+    case BUILD_COMPILER_CLANG:
+        return get_resolved_path(arena, &clang_path, S8("clang"));
+        break;
+    case BUILD_COMPILER_GCC:
+        return get_resolved_path(arena, &gcc_path, S8("gcc"));
+        break;
+    case BUILD_COMPILER_TCC:
+        return get_resolved_path(arena, &tcc_path, S8("tcc"));
+        break;
+    case BUILD_COMPILER_ZIG:
+    {
+        bool resolved = zig_cc_path.pointer != 0;
+
+        String8 result = get_resolved_path(arena, &zig_cc_path, S8("zig"));
+        if (!resolved)
         {
-            bool resolved = zig_cc_path.pointer != 0;
-
-            String8 result = get_resolved_path(arena, &zig_cc_path, S8("zig"));
-            if (!resolved)
-            {
-                String8 zig_path_parts[] = {
-                    result,
-                    S8(";cc"),
-                };
-                result = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(zig_path_parts), true);
-                zig_cc_path = result;
-            }
-
-            return result;
+            String8 zig_path_parts[] = {
+                result,
+                S8(";cc"),
+            };
+            result = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(zig_path_parts), true);
+            zig_cc_path = result;
         }
-        break; case BUILD_COMPILER_COUNT: return S8("");
-        break; default: return S8("");
+
+        return result;
+    }
+    break;
+    case BUILD_COMPILER_COUNT:
+        return S8("");
+        break;
+    default:
+        return S8("");
     }
 }
 
@@ -571,7 +585,7 @@ BUSTER_GLOBAL_LOCAL String8 build_relative_path(Arena* arena, String8 build_dire
 BUSTER_GLOBAL_LOCAL bool path_exists(Arena* arena, String8 path)
 {
     String8 path_z = string_duplicate_arena(arena, path, true);
-    OsFileDescriptor* fd = os_file_open(path_z, (OpenFlags){ .read = 1 }, (OpenPermissions){ .read = 1 });
+    OsFileDescriptor* fd = os_file_open(path_z, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
     bool result = fd != 0;
     if (fd)
     {
@@ -627,7 +641,8 @@ BUSTER_GLOBAL_LOCAL void remove_path_recursive(Arena* arena, String8 path)
             {
                 do
                 {
-                    String8 name = string8_from_string16(temp.arena, (String16){ .pointer = find_data.cFileName, .length = string16_length(find_data.cFileName) }, true);
+                    String8 name =
+                        string8_from_string16(temp.arena, (String16){.pointer = find_data.cFileName, .length = string16_length(find_data.cFileName)}, true);
                     if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
                     {
                         remove_path_recursive(arena, path_join(temp.arena, path_z, name));
@@ -729,7 +744,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     String8 c_compiler = cc_command;
     if (generate_cc_contains(generate, cc_command, S8("zig")))
     {
-        String8 parts[] = { cc_command, S8(";cc") };
+        String8 parts[] = {cc_command, S8(";cc")};
         c_compiler = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
     }
 
@@ -764,7 +779,8 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
         };
         profiling_output_argument = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(profile_parts), true);
     }
-    String8 timing_configuration = string_format(arena, S8(" (cc={S8}, fuzz={S8}, sanitize={S8})"), cc_command, generate.fuzz ? S8("ON") : S8("OFF"), generate.sanitize ? S8("ON") : S8("OFF"));
+    String8 timing_configuration = string_format(arena, S8(" (cc={S8}, fuzz={S8}, sanitize={S8})"), cc_command, generate.fuzz ? S8("ON") : S8("OFF"),
+                                                 generate.sanitize ? S8("ON") : S8("OFF"));
 
     GenericRun r = generic_tool_run_add_start(arena, step, &cmake_path, S8("cmake"));
     OsArgumentBuilder* b = &r.builder;
@@ -815,13 +831,14 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
 
     SliceString8 arguments = os_argument_builder_flush(&r.builder);
     string_print(S8("+ {[]S8}\n"), arguments);
-    *r.run = (ProcessRun) {
+    *r.run = (ProcessRun){
         .arguments = arguments,
         .timing_description = S8("CMake generation"),
         .timing_configuration = timing_configuration,
-        .spawn_options = (ProcessSpawnOptions){
-            .use_process_environment = 1,
-        },
+        .spawn_options =
+            (ProcessSpawnOptions){
+                .use_process_environment = 1,
+            },
     };
 }
 
@@ -829,10 +846,10 @@ typedef struct CmakeBuildOptions CmakeBuildOptions;
 struct CmakeBuildOptions
 {
     String8 config;
-    u32 optimize:1;
-    u32 optimize_set:1;
-    u32 quiet:1;
-    u32 verbose:1;
+    u32 optimize : 1;
+    u32 optimize_set : 1;
+    u32 quiet : 1;
+    u32 verbose : 1;
 };
 
 typedef struct SelfHostCompare SelfHostCompare;
@@ -895,101 +912,59 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
     generic_tool_run_add_end(r);
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(
-    Arena* arena,
-    void* data)
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* data)
 {
     SelfHostCompare* compare = data;
-    ByteSlice stage1 = file_read(
-        arena,
-        compare->stage1,
-        (FileReadOptions){0});
-    ByteSlice stage2 = file_read(
-        arena,
-        compare->stage2,
-        (FileReadOptions){0});
+    ByteSlice stage1 = file_read(arena, compare->stage1, (FileReadOptions){0});
+    ByteSlice stage2 = file_read(arena, compare->stage2, (FileReadOptions){0});
     if (!stage1.pointer || !stage2.pointer)
     {
-        string_print(
-            S8("error: could not read self-host stage outputs\n"));
+        string_print(S8("error: could not read self-host stage outputs\n"));
         return PROCESS_RESULT_FAILED;
     }
-    if (stage1.length != stage2.length ||
-        !memory_compare(
-            stage1.pointer,
-            stage2.pointer,
-            stage1.length))
+    if (stage1.length != stage2.length || !memory_compare(stage1.pointer, stage2.pointer, stage1.length))
     {
-        string_print(
-            S8("error: self-host stages differ: {S8} ({u64} bytes) != {S8} ({u64} bytes)\n"),
-            compare->stage1,
-            stage1.length,
-            compare->stage2,
-            stage2.length);
+        string_print(S8("error: self-host stages differ: {S8} ({u64} bytes) != {S8} ({u64} bytes)\n"), compare->stage1, stage1.length, compare->stage2,
+                     stage2.length);
         return PROCESS_RESULT_FAILED;
     }
-    string_print(
-        S8("SELF_HOST deterministic bytes={u64} stage1={S8} stage2={S8}\n"),
-        stage1.length,
-        compare->stage1,
-        compare->stage2);
+    string_print(S8("SELF_HOST deterministic bytes={u64} stage1={S8} stage2={S8}\n"), stage1.length, compare->stage1, compare->stage2);
     return PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL void self_host_compile_add(
-    Arena* arena,
-    String8 compiler,
-    String8 build_directory,
-    String8 output,
-    String8 timing_description)
+BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 output, String8 timing_description)
 {
     BuildStep* step = step_add(arena);
     ProcessRun* run = run_add(arena, step);
-    String8 generated_include = string_format(
-        arena,
-        S8("-I{S8}/generated"),
-        build_directory);
-    OsArgumentBuilder builder =
-        os_argument_builder_start(arena);
+    String8 generated_include = string_format(arena, S8("-I{S8}/generated"), build_directory);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, compiler);
     os_argument_builder_append(&builder, S8("cc"));
     os_argument_builder_append(&builder, S8("-Isrc"));
-    os_argument_builder_append(
-        &builder,
-        generated_include);
-    os_argument_builder_append(
-        &builder,
-        S8("-DBUSTER_UNITY_BUILD=1"));
-    os_argument_builder_append(
-        &builder,
-        S8("-DBUSTER_INCLUDE_TESTS=0"));
-    os_argument_builder_append(
-        &builder,
-        S8("src/buster/ide/ide.c"));
+    os_argument_builder_append(&builder, generated_include);
+    os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
+    os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
+    os_argument_builder_append(&builder, S8("src/buster/ide/ide.c"));
     os_argument_builder_append(&builder, S8("-o"));
     os_argument_builder_append(&builder, output);
     *run = (ProcessRun){
-        .arguments =
-            os_argument_builder_flush(&builder),
+        .arguments = os_argument_builder_flush(&builder),
         .working_directory = S8("."),
         .timing_description = timing_description,
-        .spawn_options = (ProcessSpawnOptions){
-            .use_process_environment = 1,
-        },
+        .spawn_options =
+            (ProcessSpawnOptions){
+                .use_process_environment = 1,
+            },
     };
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(
-    Arena* arena,
-    String8 build_directory,
-    CmakeBuildOptions options)
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
 {
 #if !BUSTER_LINUX || !BUSTER_CPU_ARCH_X86_64
     BUSTER_UNUSED(arena);
     BUSTER_UNUSED(build_directory);
     BUSTER_UNUSED(options);
-    string_print(
-        S8("error: deterministic self-hosting is currently supported only on Linux x86-64\n"));
+    string_print(S8("error: deterministic self-hosting is currently supported only on Linux x86-64\n"));
     return PROCESS_RESULT_FAILED;
 #else
     String8 config = cmake_build_config(options);
@@ -999,82 +974,52 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(
 #else
         S8("ide");
 #endif
-    String8 bootstrap = path_join(
-        arena,
-        path_join(arena, build_directory, config),
-        ide_name);
-    String8 output_directory = path_join(
-        arena,
-        path_join(
-            arena,
-            build_directory,
-            S8("self-host")),
-        config);
+    String8 bootstrap = path_join(arena, path_join(arena, build_directory, config), ide_name);
+    String8 output_directory = path_join(arena, path_join(arena, build_directory, S8("self-host")), config);
     make_directory_recursive(arena, output_directory);
-    String8 stage1 = path_join(
-        arena,
-        output_directory,
+    String8 stage1 = path_join(arena, output_directory,
 #if BUSTER_WINDOWS
-        S8("ide-stage1.exe"));
+                               S8("ide-stage1.exe"));
 #else
-        S8("ide-stage1"));
+                               S8("ide-stage1"));
 #endif
-    String8 stage2 = path_join(
-        arena,
-        output_directory,
+    String8 stage2 = path_join(arena, output_directory,
 #if BUSTER_WINDOWS
-        S8("ide-stage2.exe"));
+                               S8("ide-stage2.exe"));
 #else
-        S8("ide-stage2"));
+                               S8("ide-stage2"));
 #endif
     String8 targets[] = {S8("ide")};
-    build_add(
-        arena,
-        build_directory,
-        (SliceString8)BUSTER_ARRAY_TO_SLICE(targets),
-        (SliceString8){0},
-        options);
-    self_host_compile_add(
-        arena,
-        bootstrap,
-        build_directory,
-        stage1,
-        S8("Self-host stage 1"));
-    self_host_compile_add(
-        arena,
-        stage1,
-        build_directory,
-        stage2,
-        S8("Self-host stage 2"));
-    SelfHostCompare* compare =
-        arena_allocate(arena, SelfHostCompare, 1);
+    build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
+    self_host_compile_add(arena, bootstrap, build_directory, stage1, S8("Self-host stage 1"));
+    self_host_compile_add(arena, stage1, build_directory, stage2, S8("Self-host stage 2"));
+    SelfHostCompare* compare = arena_allocate(arena, SelfHostCompare, 1);
     *compare = (SelfHostCompare){
         .stage1 = stage1,
         .stage2 = stage2,
     };
     BuildStep* compare_step = step_add(arena);
-    ProcessRun* compare_run =
-        run_add(arena, compare_step);
+    ProcessRun* compare_run = run_add(arena, compare_step);
     *compare_run = (ProcessRun){
         .callback = self_host_compare_action,
         .callback_data = compare,
     };
     BuildStep* bench_step = step_add(arena);
     ProcessRun* bench_run = run_add(arena, bench_step);
-    String8* bench_arguments =
-        arena_allocate(arena, String8, 2);
+    String8* bench_arguments = arena_allocate(arena, String8, 2);
     bench_arguments[0] = stage2;
     bench_arguments[1] = S8("bench");
     *bench_run = (ProcessRun){
-        .arguments = {
-            .pointer = bench_arguments,
-            .length = 2,
-        },
-        .timing_description =
-            S8("Self-host stage 2 benchmark"),
-        .spawn_options = (ProcessSpawnOptions){
-            .use_process_environment = 1,
-        },
+        .arguments =
+            {
+                .pointer = bench_arguments,
+                .length = 2,
+            },
+        .timing_description = S8("Self-host stage 2 benchmark"),
+        .spawn_options =
+            (ProcessSpawnOptions){
+                .use_process_environment = 1,
+            },
     };
     return PROCESS_RESULT_SUCCESS;
 #endif
@@ -1118,8 +1063,8 @@ struct ClangAnalyzeOptions
     String8 compile_commands;
     String8 config;
     String8 clang;
-    u32 quiet:1;
-    u32 compile_commands_set:1;
+    u32 quiet : 1;
+    u32 compile_commands_set : 1;
 };
 
 typedef struct ClangAnalyzeSummary ClangAnalyzeSummary;
@@ -1137,7 +1082,7 @@ struct CmakeProfileSummaryOptions
 {
     String8 profile;
     u64 limit;
-    u32 profile_set:1;
+    u32 profile_set : 1;
 };
 
 BUSTER_GLOBAL_LOCAL CmakeProfileSummaryOptions pending_cmake_profile_summary_options = {0};
@@ -1234,7 +1179,7 @@ BUSTER_GLOBAL_LOCAL bool string_ends_with_sequence_insensitive(String8 s, String
 BUSTER_GLOBAL_LOCAL void string8_list_push(Arena* arena, String8List* list, String8 string)
 {
     String8Node* node = arena_allocate(arena, String8Node, 1);
-    *node = (String8Node){ .string = string };
+    *node = (String8Node){.string = string};
 
     if (list->last)
     {
@@ -1251,7 +1196,7 @@ BUSTER_GLOBAL_LOCAL void string8_list_push(Arena* arena, String8List* list, Stri
 
 BUSTER_GLOBAL_LOCAL SliceString8 string8_list_to_slice(Arena* arena, String8List list)
 {
-    SliceString8 result = { .pointer = arena_allocate(arena, String8, list.count), .length = list.count };
+    SliceString8 result = {.pointer = arena_allocate(arena, String8, list.count), .length = list.count};
 
     u64 i = 0;
     for (String8Node* node = list.first; node; node = node->next, i += 1)
@@ -1413,7 +1358,7 @@ BUSTER_GLOBAL_LOCAL String8 json_parse_string(Arena* arena, JsonParser* parser, 
         char8 c = parser->text.pointer[parser->index++];
         if (c == '"')
         {
-            result = (String8){ .pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start };
+            result = (String8){.pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start};
             arena_append_char8(arena, 0);
             return result;
         }
@@ -1428,42 +1373,60 @@ BUSTER_GLOBAL_LOCAL String8 json_parse_string(Arena* arena, JsonParser* parser, 
             char8 escape = parser->text.pointer[parser->index++];
             switch (escape)
             {
-                break; case '"': arena_append_char8(arena, '"');
-                break; case '\\': arena_append_char8(arena, '\\');
-                break; case '/': arena_append_char8(arena, '/');
-                break; case 'b': arena_append_char8(arena, '\b');
-                break; case 'f': arena_append_char8(arena, '\f');
-                break; case 'n': arena_append_char8(arena, '\n');
-                break; case 'r': arena_append_char8(arena, '\r');
-                break; case 't': arena_append_char8(arena, '\t');
-                break; case 'u':
+                break;
+            case '"':
+                arena_append_char8(arena, '"');
+                break;
+            case '\\':
+                arena_append_char8(arena, '\\');
+                break;
+            case '/':
+                arena_append_char8(arena, '/');
+                break;
+            case 'b':
+                arena_append_char8(arena, '\b');
+                break;
+            case 'f':
+                arena_append_char8(arena, '\f');
+                break;
+            case 'n':
+                arena_append_char8(arena, '\n');
+                break;
+            case 'r':
+                arena_append_char8(arena, '\r');
+                break;
+            case 't':
+                arena_append_char8(arena, '\t');
+                break;
+            case 'u':
+            {
+                if (parser->index + 4 > parser->text.length)
                 {
-                    if (parser->index + 4 > parser->text.length)
-                    {
-                        *valid = false;
-                        break;
-                    }
-
-                    bool hex_valid = true;
-                    u32 codepoint = 0;
-                    for (u64 digit_i = 0; digit_i < 4; digit_i += 1)
-                    {
-                        codepoint = (codepoint << 4) | hexadecimal_digit_value(parser->text.pointer[parser->index++], &hex_valid);
-                    }
-
-                    if (hex_valid)
-                    {
-                        arena_append_utf8(arena, codepoint);
-                    }
-                    else
-                    {
-                        *valid = false;
-                    }
+                    *valid = false;
+                    break;
                 }
-                break; default:
+
+                bool hex_valid = true;
+                u32 codepoint = 0;
+                for (u64 digit_i = 0; digit_i < 4; digit_i += 1)
+                {
+                    codepoint = (codepoint << 4) | hexadecimal_digit_value(parser->text.pointer[parser->index++], &hex_valid);
+                }
+
+                if (hex_valid)
+                {
+                    arena_append_utf8(arena, codepoint);
+                }
+                else
                 {
                     *valid = false;
                 }
+            }
+            break;
+            default:
+            {
+                *valid = false;
+            }
             }
         }
         else
@@ -1722,7 +1685,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 shell_split(Arena* arena, String8 command, bool
             }
         }
 
-        String8 argument = { .pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start };
+        String8 argument = {.pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start};
         arena_append_char8(arena, 0);
         string8_list_push(arena, &list, argument);
     }
@@ -1799,7 +1762,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 shell_split(Arena* arena, String8 command, bool
 
         if (*valid)
         {
-            String8 argument = { .pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start };
+            String8 argument = {.pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start};
             arena_append_char8(arena, 0);
             string8_list_push(arena, &list, argument);
         }
@@ -1820,29 +1783,13 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(SliceString8 arguments, u64 a
     String8 argument = arguments.pointer[argument_index];
     String8 next_argument = argument_index + 1 < arguments.length ? arguments.pointer[argument_index + 1] : (String8){0};
     String8 drop_options[] = {
-        S8("-c"),
-        S8("-fcolor-diagnostics"),
-        S8("-MD"),
-        S8("-MMD"),
-        S8("-MP"),
+        S8("-c"), S8("-fcolor-diagnostics"), S8("-MD"), S8("-MMD"), S8("-MP"),
     };
     String8 separate_options[] = {
-        S8("-MF"),
-        S8("-MJ"),
-        S8("-MQ"),
-        S8("-MT"),
-        S8("-o"),
-        S8("--output"),
-        S8("-dependency-file"),
+        S8("-MF"), S8("-MJ"), S8("-MQ"), S8("-MT"), S8("-o"), S8("--output"), S8("-dependency-file"),
     };
     String8 joined_options[] = {
-        S8("-MF"),
-        S8("-MJ"),
-        S8("-MQ"),
-        S8("-MT"),
-        S8("-o"),
-        S8("--output="),
-        S8("-dependency-file="),
+        S8("-MF"), S8("-MJ"), S8("-MQ"), S8("-MT"), S8("-o"), S8("--output="), S8("-dependency-file="),
     };
     String8 build_host_definitions[] = {
         S8("-DBUSTER_HOST_C_COMPILER="),
@@ -1931,7 +1878,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 clang_analyzer_command(Arena* arena, SliceStrin
             }
         }
 
-        result = (SliceString8){ .pointer = arena_allocate(arena, String8, count), .length = count };
+        result = (SliceString8){.pointer = arena_allocate(arena, String8, count), .length = count};
         u64 out = 0;
         result.pointer[out++] = clang.pointer ? clang : compile_arguments.pointer[0];
         result.pointer[out++] = S8("--analyze");
@@ -1999,13 +1946,15 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_entry_matches_config(Arena* arena, Compil
 
         if (entry.output.pointer)
         {
-            result = string_has_path_part(entry.output, config) || string_contains(entry.output, cmake_intdir_plain) || string_contains(entry.output, cmake_intdir_quoted) || string_contains(entry.output, cmake_intdir_escaped);
+            result = string_has_path_part(entry.output, config) || string_contains(entry.output, cmake_intdir_plain) ||
+                     string_contains(entry.output, cmake_intdir_quoted) || string_contains(entry.output, cmake_intdir_escaped);
         }
 
         for (u64 i = 0; !result && i < arguments.length; i += 1)
         {
             String8 candidate = arguments.pointer[i];
-            result = string_has_path_part(candidate, config) || string_contains(candidate, cmake_intdir_plain) || string_contains(candidate, cmake_intdir_quoted) || string_contains(candidate, cmake_intdir_escaped);
+            result = string_has_path_part(candidate, config) || string_contains(candidate, cmake_intdir_plain) ||
+                     string_contains(candidate, cmake_intdir_quoted) || string_contains(candidate, cmake_intdir_escaped);
         }
     }
     return result;
@@ -2053,7 +2002,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_add(Arena* arena, ClangAnalyzeOp
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     String8 path = clang_analyze_compile_commands_path(arena, options.compile_commands);
-    ByteSlice bytes = file_read(arena, path, (FileReadOptions){ .end_padding = 1 });
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){.end_padding = 1});
 
     if (!bytes.pointer)
     {
@@ -2061,7 +2010,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_add(Arena* arena, ClangAnalyzeOp
         return PROCESS_RESULT_FAILED;
     }
 
-    JsonParser parser = { .text = { .pointer = (char8*)bytes.pointer, .length = bytes.length } };
+    JsonParser parser = {.text = {.pointer = (char8*)bytes.pointer, .length = bytes.length}};
     bool valid = true;
     if (!json_consume(&parser, '['))
     {
@@ -2126,10 +2075,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_add(Arena* arena, ClangAnalyzeOp
                     .arguments = command,
                     .working_directory = entry.directory,
                     .flags = flags,
-                    .spawn_options = (ProcessSpawnOptions){
-                        .capture = ((u64)1 << STANDARD_STREAM_ERROR),
-                        .use_process_environment = 1,
-                    },
+                    .spawn_options =
+                        (ProcessSpawnOptions){
+                            .capture = ((u64)1 << STANDARD_STREAM_ERROR),
+                            .use_process_environment = 1,
+                        },
                 };
                 scheduled += 1;
             }
@@ -2181,11 +2131,12 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_d
         os_argument_builder_append(&builder, S8("--quiet"));
     }
 
-    *run = (ProcessRun) {
+    *run = (ProcessRun){
         .arguments = os_argument_builder_flush(&builder),
-        .spawn_options = (ProcessSpawnOptions){
-            .use_process_environment = 1,
-        },
+        .spawn_options =
+            (ProcessSpawnOptions){
+                .use_process_environment = 1,
+            },
     };
 }
 
@@ -2203,18 +2154,19 @@ BUSTER_GLOBAL_LOCAL void cmake_profile_summary_add(Arena* arena, BuildStep* step
 
     SliceString8 arguments = os_argument_builder_flush(&builder);
     string_print(S8("+ {[]S8}\n"), arguments);
-    *run = (ProcessRun) {
+    *run = (ProcessRun){
         .arguments = arguments,
-        .spawn_options = (ProcessSpawnOptions){
-            .use_process_environment = 1,
-        },
+        .spawn_options =
+            (ProcessSpawnOptions){
+                .use_process_environment = 1,
+            },
     };
 }
 
 BUSTER_GLOBAL_LOCAL void cmake_profile_row_list_push(Arena* arena, CmakeProfileRowList* list, CmakeProfileRow row)
 {
     CmakeProfileRowNode* node = arena_allocate(arena, CmakeProfileRowNode, 1);
-    *node = (CmakeProfileRowNode){ .row = row };
+    *node = (CmakeProfileRowNode){.row = row};
 
     if (list->last)
     {
@@ -2425,14 +2377,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult cmake_profile_summary_run(Arena* arena, CmakeP
         return PROCESS_RESULT_FAILED;
     }
 
-    ByteSlice bytes = file_read(arena, options.profile, (FileReadOptions){ .end_padding = 1 });
+    ByteSlice bytes = file_read(arena, options.profile, (FileReadOptions){.end_padding = 1});
     if (!bytes.pointer)
     {
         string_print(S8("error: failed to read {S8}\n"), options.profile);
         return PROCESS_RESULT_FAILED;
     }
 
-    JsonParser parser = { .text = { .pointer = (char8*)bytes.pointer, .length = bytes.length } };
+    JsonParser parser = {.text = {.pointer = (char8*)bytes.pointer, .length = bytes.length}};
     bool valid = true;
     if (!json_consume(&parser, '['))
     {
@@ -2470,13 +2422,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult cmake_profile_summary_run(Arena* arena, CmakeP
         {
             CmakeProfileEvent* start = stack->top;
             stack->top = start->next;
-            cmake_profile_row_list_push(arena, &row_list, (CmakeProfileRow){
-                .duration_us = event.ts - start->ts,
-                .category = start->category,
-                .name = start->name,
-                .location = start->location,
-                .function_arguments = start->function_arguments,
-            });
+            cmake_profile_row_list_push(arena, &row_list,
+                                        (CmakeProfileRow){
+                                            .duration_us = event.ts - start->ts,
+                                            .category = start->category,
+                                            .name = start->name,
+                                            .location = start->location,
+                                            .function_arguments = start->function_arguments,
+                                        });
         }
 
         if (json_consume(&parser, ','))
@@ -2514,11 +2467,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult cmake_profile_summary_run(Arena* arena, CmakeP
         s64 duration_us = row.duration_us < 0 ? 0 : row.duration_us;
         unsigned long long duration_ms_whole = (unsigned long long)((u64)duration_us / 1000);
         unsigned long long duration_ms_fraction = (unsigned long long)((u64)duration_us % 1000);
-        printf("%4llu.%03llu ms  %-10.*s %-30.*s %.*s %.*s\n",
-               duration_ms_whole,
-               duration_ms_fraction,
-               string8_printf_length(row.category, 10), row.category.pointer ? row.category.pointer : "",
-               string8_printf_length(row.name, 30), row.name.pointer ? row.name.pointer : "",
+        printf("%4llu.%03llu ms  %-10.*s %-30.*s %.*s %.*s\n", duration_ms_whole, duration_ms_fraction, string8_printf_length(row.category, 10),
+               row.category.pointer ? row.category.pointer : "", string8_printf_length(row.name, 30), row.name.pointer ? row.name.pointer : "",
                string8_printf_length(row.location, UINT64_MAX), row.location.pointer ? row.location.pointer : "",
                string8_printf_length(row.function_arguments, 100), row.function_arguments.pointer ? row.function_arguments.pointer : "");
     }
@@ -2557,7 +2507,7 @@ struct NinjaLogSummaryOptions
 {
     String8 build_directory;
     u64 limit;
-    u32 build_directory_set:1;
+    u32 build_directory_set : 1;
 };
 
 typedef struct NinjaLogRow NinjaLogRow;
@@ -2614,7 +2564,7 @@ BUSTER_GLOBAL_LOCAL void ninja_log_row_list_upsert(Arena* arena, NinjaLogRowList
     }
 
     NinjaLogRowNode* node = arena_allocate(arena, NinjaLogRowNode, 1);
-    *node = (NinjaLogRowNode){ .row = row };
+    *node = (NinjaLogRowNode){.row = row};
 
     if (list->last)
     {
@@ -2649,7 +2599,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult ninja_log_summary_run(Arena* arena, NinjaLogSu
     }
 
     String8 log_path = path_join(arena, options.build_directory, S8(".ninja_log"));
-    ByteSlice bytes = file_read(arena, log_path, (FileReadOptions){ .end_padding = 1 });
+    ByteSlice bytes = file_read(arena, log_path, (FileReadOptions){.end_padding = 1});
     if (!bytes.pointer)
     {
         string_print(S8("error: failed to read {S8}\n"), log_path);
@@ -2677,9 +2627,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult ninja_log_summary_run(Arena* arena, NinjaLogSu
         String8 restat_field = {0};
         String8 output_field = {0};
 
-        if (!ninja_log_next_field(&line, &start_field) ||
-            !ninja_log_next_field(&line, &end_field) ||
-            !ninja_log_next_field(&line, &restat_field) ||
+        if (!ninja_log_next_field(&line, &start_field) || !ninja_log_next_field(&line, &end_field) || !ninja_log_next_field(&line, &restat_field) ||
             !ninja_log_next_field(&line, &output_field))
         {
             continue;
@@ -2692,10 +2640,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult ninja_log_summary_run(Arena* arena, NinjaLogSu
             continue;
         }
 
-        ninja_log_row_list_upsert(arena, &row_list, (NinjaLogRow){
-            .output = output_field,
-            .duration_ms = (s64)end_ms.value - (s64)start_ms.value,
-        });
+        ninja_log_row_list_upsert(arena, &row_list,
+                                  (NinjaLogRow){
+                                      .output = output_field,
+                                      .duration_ms = (s64)end_ms.value - (s64)start_ms.value,
+                                  });
     }
 
     if (!row_list.count)
@@ -2792,7 +2741,7 @@ BUSTER_GLOBAL_LOCAL void time_trace_row_list_add(Arena* arena, TimeTraceRowList*
     }
 
     TimeTraceRowNode* node = arena_allocate(arena, TimeTraceRowNode, 1);
-    *node = (TimeTraceRowNode){ .row = { .name = name, .duration_us = duration_us } };
+    *node = (TimeTraceRowNode){.row = {.name = name, .duration_us = duration_us}};
 
     if (list->last)
     {
@@ -2819,7 +2768,7 @@ struct TimeTraceEvent
     String8 name;
     s64 duration_us;
     char8 phase;
-    u32 has_duration:1;
+    u32 has_duration : 1;
 };
 
 BUSTER_GLOBAL_LOCAL TimeTraceEvent time_trace_parse_event(Arena* arena, JsonParser* parser, bool* valid)
@@ -2888,14 +2837,14 @@ BUSTER_GLOBAL_LOCAL TimeTraceEvent time_trace_parse_event(Arena* arena, JsonPars
 
 BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(Arena* arena, String8 path, TimeTraceRowList* row_list)
 {
-    ByteSlice bytes = file_read(arena, path, (FileReadOptions){ .end_padding = 1 });
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){.end_padding = 1});
     if (!bytes.pointer)
     {
         string_print(S8("error: failed to read {S8}\n"), path);
         return PROCESS_RESULT_FAILED;
     }
 
-    JsonParser parser = { .text = { .pointer = (char8*)bytes.pointer, .length = bytes.length } };
+    JsonParser parser = {.text = {.pointer = (char8*)bytes.pointer, .length = bytes.length}};
     if (!json_consume(&parser, '{'))
     {
         string_print(S8("error: failed to parse {S8}: expected a JSON object\n"), path);
@@ -3224,10 +3173,10 @@ ProcessResult process_arguments(void)
         .cmake_profile_summary_limit = 25,
     };
     CmakeBuildOptions options = {0};
-    ClangAnalyzeOptions clang_analyze_options = { .compile_commands = build_directory };
-    CmakeProfileSummaryOptions cmake_profile_summary_options = { .limit = 25 };
-    NinjaLogSummaryOptions ninja_log_summary_options = { .limit = 25 };
-    TimeTraceSummaryOptions time_trace_summary_options = { .limit = 25 };
+    ClangAnalyzeOptions clang_analyze_options = {.compile_commands = build_directory};
+    CmakeProfileSummaryOptions cmake_profile_summary_options = {.limit = 25};
+    NinjaLogSummaryOptions ninja_log_summary_options = {.limit = 25};
+    TimeTraceSummaryOptions time_trace_summary_options = {.limit = 25};
     String8List time_trace_summary_paths = {0};
     String8List generate_cmake_arguments = {0};
     String8List build_targets = {0};
@@ -3278,67 +3227,181 @@ ProcessResult process_arguments(void)
 
         switch (build_argument)
         {
-            break; case BUILD_ARGUMENT_COUNT:
+            break;
+        case BUILD_ARGUMENT_COUNT:
+        {
+            if (command == BUILD_COMMAND_BUILD && !string_starts_with_sequence(argument, S8("--")))
             {
-                if (command == BUILD_COMMAND_BUILD && !string_starts_with_sequence(argument, S8("--")))
+                string8_list_push(arena, &build_targets, argument);
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_CLANG_ANALYZE && !clang_analyze_options.compile_commands_set && !string_starts_with_sequence(argument, S8("--")))
+            {
+                clang_analyze_options.compile_commands = argument;
+                clang_analyze_options.compile_commands_set = 1;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY && !cmake_profile_summary_options.profile_set &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                cmake_profile_summary_options.profile = argument;
+                cmake_profile_summary_options.profile_set = 1;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_NINJA_LOG_SUMMARY && !ninja_log_summary_options.build_directory_set &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                ninja_log_summary_options.build_directory = argument;
+                ninja_log_summary_options.build_directory_set = 1;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TIME_TRACE_SUMMARY && !string_starts_with_sequence(argument, S8("--")))
+            {
+                string8_list_push(arena, &time_trace_summary_paths, argument);
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_GENERATE)
+            {
+                string8_list_push(arena, &generate_cmake_arguments, argument);
+                argument_i += 1;
+            }
+            else
+            {
+                ProcessResult generic_argument_result = buster_argument_process(argument_i);
+                if (generic_argument_result == PROCESS_RESULT_SUCCESS)
                 {
-                    string8_list_push(arena, &build_targets, argument);
                     argument_i += 1;
                 }
-                else if (command == BUILD_COMMAND_CLANG_ANALYZE && !clang_analyze_options.compile_commands_set && !string_starts_with_sequence(argument, S8("--")))
+                else
                 {
-                    clang_analyze_options.compile_commands = argument;
-                    clang_analyze_options.compile_commands_set = 1;
-                    argument_i += 1;
+                    // The catch-all after the loop reports the offending
+                    // argument for every failure path.
+                    result = generic_argument_result;
                 }
-                else if (command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY && !cmake_profile_summary_options.profile_set && !string_starts_with_sequence(argument, S8("--")))
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_BUILD_DIRECTORY:
+        case BUILD_ARGUMENT_BUILD_DIR:
+        {
+            String8 value = {0};
+            if (build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
+            {
+                build_directory = value;
+                generate.build_directory = build_directory;
+                if (!clang_analyze_options.compile_commands_set)
                 {
-                    cmake_profile_summary_options.profile = argument;
-                    cmake_profile_summary_options.profile_set = 1;
-                    argument_i += 1;
+                    clang_analyze_options.compile_commands = build_directory;
                 }
-                else if (command == BUILD_COMMAND_NINJA_LOG_SUMMARY && !ninja_log_summary_options.build_directory_set && !string_starts_with_sequence(argument, S8("--")))
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_CC:
+        {
+            String8 value = {0};
+            if (command == BUILD_COMMAND_GENERATE && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
+            {
+                generate.cc = value;
+                generate.cc_set = true;
+
+                BuildCompiler compiler = BUILD_COMPILER_COUNT;
+                for (u64 i = 0; i < BUILD_COMPILER_COUNT; i += 1)
                 {
-                    ninja_log_summary_options.build_directory = argument;
-                    ninja_log_summary_options.build_directory_set = 1;
-                    argument_i += 1;
+                    if (string_equal(value, build_compilers[i]))
+                    {
+                        compiler = (BuildCompiler)i;
+                        break;
+                    }
                 }
-                else if (command == BUILD_COMMAND_TIME_TRACE_SUMMARY && !string_starts_with_sequence(argument, S8("--")))
+
+                if (compiler != BUILD_COMPILER_COUNT)
                 {
-                    string8_list_push(arena, &time_trace_summary_paths, argument);
-                    argument_i += 1;
+                    generate.compiler = compiler;
+                }
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_CLANG:
+        {
+            String8 value = {0};
+            if (command == BUILD_COMMAND_CLANG_ANALYZE &&
+                build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
+            {
+                clang_analyze_options.clang = value;
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_CONFIG:
+        case BUILD_ARGUMENT_CONFIGURATION:
+        {
+            String8 config = {0};
+            if (build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &config))
+            {
+                if (!build_config_is_valid(config))
+                {
+                    string_print(S8("error: invalid configuration => \"{S8}\"\n"), config);
+                    result = PROCESS_RESULT_FAILED;
+                }
+                else if (command == BUILD_COMMAND_BUILD || command == BUILD_COMMAND_TEST_SELF_HOST)
+                {
+                    options.config = config;
                 }
                 else if (command == BUILD_COMMAND_GENERATE)
                 {
-                    string8_list_push(arena, &generate_cmake_arguments, argument);
-                    argument_i += 1;
+                    generate.config = config;
+                    generate.config_set = true;
+                }
+                else if (command == BUILD_COMMAND_CLANG_ANALYZE)
+                {
+                    clang_analyze_options.config = config;
                 }
                 else
                 {
-                    ProcessResult generic_argument_result = buster_argument_process(argument_i);
-                    if (generic_argument_result == PROCESS_RESULT_SUCCESS)
-                    {
-                        argument_i += 1;
-                    }
-                    else
-                    {
-                        // The catch-all after the loop reports the offending
-                        // argument for every failure path.
-                        result = generic_argument_result;
-                    }
+                    result = PROCESS_RESULT_FAILED;
                 }
             }
-            break; case BUILD_ARGUMENT_BUILD_DIRECTORY:
-            case BUILD_ARGUMENT_BUILD_DIR:
+            else
             {
-                String8 value = {0};
-                if (build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_LIMIT:
+        {
+            String8 candidate_limit = {0};
+            bool is_summary_command =
+                command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY || command == BUILD_COMMAND_NINJA_LOG_SUMMARY || command == BUILD_COMMAND_TIME_TRACE_SUMMARY;
+            if (is_summary_command && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &candidate_limit))
+            {
+                IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit.pointer);
+                if (parsed_limit.length == candidate_limit.length && parsed_limit.value > 0)
                 {
-                    build_directory = value;
-                    generate.build_directory = build_directory;
-                    if (!clang_analyze_options.compile_commands_set)
+                    switch (command)
                     {
-                        clang_analyze_options.compile_commands = build_directory;
+                        break;
+                    case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY:
+                        cmake_profile_summary_options.limit = parsed_limit.value;
+                        break;
+                    case BUILD_COMMAND_NINJA_LOG_SUMMARY:
+                        ninja_log_summary_options.limit = parsed_limit.value;
+                        break;
+                    case BUILD_COMMAND_TIME_TRACE_SUMMARY:
+                        time_trace_summary_options.limit = parsed_limit.value;
+                        break;
+                    default:
+                        BUSTER_UNREACHABLE();
                     }
                 }
                 else
@@ -3346,309 +3409,271 @@ ProcessResult process_arguments(void)
                     result = PROCESS_RESULT_FAILED;
                 }
             }
-            break; case BUILD_ARGUMENT_CC:
+            else
             {
-                String8 value = {0};
-                if (command == BUILD_COMMAND_GENERATE && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
-                {
-                    generate.cc = value;
-                    generate.cc_set = true;
-
-                    BuildCompiler compiler = BUILD_COMPILER_COUNT;
-                    for (u64 i = 0; i < BUILD_COMPILER_COUNT; i += 1)
-                    {
-                        if (string_equal(value, build_compilers[i]))
-                        {
-                            compiler = (BuildCompiler)i;
-                            break;
-                        }
-                    }
-
-                    if (compiler != BUILD_COMPILER_COUNT)
-                    {
-                        generate.compiler = compiler;
-                    }
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
+                result = PROCESS_RESULT_FAILED;
             }
-            break; case BUILD_ARGUMENT_CLANG:
+        }
+        break;
+        case BUILD_ARGUMENT_TARGET:
+        case BUILD_ARGUMENT_TARGET_SHORT:
+        {
+            String8 value = {0};
+            if (command == BUILD_COMMAND_BUILD && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
             {
-                String8 value = {0};
-                if (command == BUILD_COMMAND_CLANG_ANALYZE && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
-                {
-                    clang_analyze_options.clang = value;
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
+                string8_list_push(arena, &build_targets, value);
             }
-            break; case BUILD_ARGUMENT_CONFIG:
-            case BUILD_ARGUMENT_CONFIGURATION:
+            else
             {
-                String8 config = {0};
-                if (build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &config))
-                {
-                    if (!build_config_is_valid(config))
-                    {
-                        string_print(S8("error: invalid configuration => \"{S8}\"\n"), config);
-                        result = PROCESS_RESULT_FAILED;
-                    }
-                    else if (command == BUILD_COMMAND_BUILD ||
-                        command == BUILD_COMMAND_TEST_SELF_HOST)
-                    {
-                        options.config = config;
-                    }
-                    else if (command == BUILD_COMMAND_GENERATE)
-                    {
-                        generate.config = config;
-                        generate.config_set = true;
-                    }
-                    else if (command == BUILD_COMMAND_CLANG_ANALYZE)
-                    {
-                        clang_analyze_options.config = config;
-                    }
-                    else
-                    {
-                        result = PROCESS_RESULT_FAILED;
-                    }
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
+                result = PROCESS_RESULT_FAILED;
             }
-            break; case BUILD_ARGUMENT_LIMIT:
+        }
+        break;
+        case BUILD_ARGUMENT_LINKER:
+        {
+            String8 value = {0};
+            if (command == BUILD_COMMAND_GENERATE && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
             {
-                String8 candidate_limit = {0};
-                bool is_summary_command = command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY
-                    || command == BUILD_COMMAND_NINJA_LOG_SUMMARY
-                    || command == BUILD_COMMAND_TIME_TRACE_SUMMARY;
-                if (is_summary_command && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &candidate_limit))
-                {
-                    IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit.pointer);
-                    if (parsed_limit.length == candidate_limit.length && parsed_limit.value > 0)
-                    {
-                        switch (command)
-                        {
-                            break; case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY: cmake_profile_summary_options.limit = parsed_limit.value;
-                            break; case BUILD_COMMAND_NINJA_LOG_SUMMARY: ninja_log_summary_options.limit = parsed_limit.value;
-                            break; case BUILD_COMMAND_TIME_TRACE_SUMMARY: time_trace_summary_options.limit = parsed_limit.value;
-                            break; default: BUSTER_UNREACHABLE();
-                        }
-                    }
-                    else
-                    {
-                        result = PROCESS_RESULT_FAILED;
-                    }
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
+                generate.linker = value;
+                generate.linker_set = true;
             }
-            break; case BUILD_ARGUMENT_TARGET:
-            case BUILD_ARGUMENT_TARGET_SHORT:
+            else
             {
-                String8 value = {0};
-                if (command == BUILD_COMMAND_BUILD && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
-                {
-                    string8_list_push(arena, &build_targets, value);
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
+                result = PROCESS_RESULT_FAILED;
             }
-            break; case BUILD_ARGUMENT_LINKER:
-            {
-                String8 value = {0};
-                if (command == BUILD_COMMAND_GENERATE && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
-                {
-                    generate.linker = value;
-                    generate.linker_set = true;
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
-            }
-            break; case BUILD_ARGUMENT_CMAKE_PROFILE:
-            {
-                if (command == BUILD_COMMAND_GENERATE)
-                {
-                    if (argument_has_value)
-                    {
-                        generate.cmake_profile = argument_value;
-                        argument_i += 1;
-                    }
-                    else if (argument_i + 1 < arguments.length && !string_starts_with_sequence(arguments.pointer[argument_i + 1], S8("--")))
-                    {
-                        argument_i += 1;
-                        generate.cmake_profile = arguments.pointer[argument_i];
-                        argument_i += 1;
-                    }
-                    else
-                    {
-                        generate.cmake_profile = S8("cmake-profile.json");
-                        argument_i += 1;
-                    }
-                    generate.cmake_profile_set = true;
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
-            }
-            break; case BUILD_ARGUMENT_CMAKE_PROFILE_SUMMARY:
-            {
-                if (command == BUILD_COMMAND_GENERATE && !argument_has_value)
-                {
-                    generate.cmake_profile_summary = true;
-                    argument_i += 1;
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
-            }
-            break; case BUILD_ARGUMENT_CMAKE_PROFILE_SUMMARY_LIMIT:
-            {
-                String8 candidate_limit = {0};
-                if (command == BUILD_COMMAND_GENERATE && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &candidate_limit))
-                {
-                    IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit.pointer);
-                    if (parsed_limit.length == candidate_limit.length && parsed_limit.value > 0)
-                    {
-                        generate.cmake_profile_summary_limit = parsed_limit.value;
-                    }
-                    else
-                    {
-                        result = PROCESS_RESULT_FAILED;
-                    }
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
-            }
-            break; case BUILD_ARGUMENT_CI:
-            case BUILD_ARGUMENT_FUZZ:
-            case BUILD_ARGUMENT_OPTIMIZE:
-            case BUILD_ARGUMENT_SANITIZE:
-            case BUILD_ARGUMENT_LTO:
-            case BUILD_ARGUMENT_TIME_TRACE:
-            case BUILD_ARGUMENT_INSTRUMENT:
-            case BUILD_ARGUMENT_INCLUDE_TESTS:
-            case BUILD_ARGUMENT_LINK_LIBC:
-            case BUILD_ARGUMENT_CHECK_OPTIONAL_WARNINGS:
-            case BUILD_ARGUMENT_DEVELOPER_TARGETS:
-            {
-                bool value = false;
-                if (command == BUILD_COMMAND_GENERATE && build_argument_read_optional_bool(arguments, &argument_i, argument_has_value, argument_value, &value))
-                {
-                    switch (build_argument)
-                    {
-                        break; case BUILD_ARGUMENT_CI: generate.ci = value;
-                        break; case BUILD_ARGUMENT_FUZZ: generate.fuzz = value;
-                        break; case BUILD_ARGUMENT_OPTIMIZE: generate.optimize = value; generate.optimize_set = true;
-                        break; case BUILD_ARGUMENT_SANITIZE: generate.sanitize = value;
-                        break; case BUILD_ARGUMENT_LTO: generate.lto = value;
-                        break; case BUILD_ARGUMENT_TIME_TRACE: generate.time_trace = value;
-                        break; case BUILD_ARGUMENT_INSTRUMENT: generate.instrument = value;
-                        break; case BUILD_ARGUMENT_INCLUDE_TESTS: generate.include_tests = value;
-                        break; case BUILD_ARGUMENT_LINK_LIBC: generate.link_libc = value;
-                        break; case BUILD_ARGUMENT_CHECK_OPTIONAL_WARNINGS: generate.check_optional_warnings = value;
-                        break; case BUILD_ARGUMENT_DEVELOPER_TARGETS: generate.developer_targets = value;
-                        break; default: BUSTER_UNREACHABLE();
-                    }
-                }
-                else if (command == BUILD_COMMAND_BUILD && build_argument == BUILD_ARGUMENT_OPTIMIZE && build_argument_read_optional_bool(arguments, &argument_i, argument_has_value, argument_value, &value))
-                {
-                    options.optimize = value;
-                    options.optimize_set = true;
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
-            }
-            break; case BUILD_ARGUMENT_NO_CI:
-            case BUILD_ARGUMENT_NO_FUZZ:
-            case BUILD_ARGUMENT_NO_OPTIMIZE:
-            case BUILD_ARGUMENT_NO_SANITIZE:
-            case BUILD_ARGUMENT_NO_LTO:
-            case BUILD_ARGUMENT_NO_TIME_TRACE:
-            case BUILD_ARGUMENT_NO_INSTRUMENT:
-            case BUILD_ARGUMENT_NO_INCLUDE_TESTS:
-            case BUILD_ARGUMENT_NO_LINK_LIBC:
-            case BUILD_ARGUMENT_NO_CHECK_OPTIONAL_WARNINGS:
-            case BUILD_ARGUMENT_NO_DEVELOPER_TARGETS:
-            {
-                if (command == BUILD_COMMAND_GENERATE && !argument_has_value)
-                {
-                    switch (build_argument)
-                    {
-                        break; case BUILD_ARGUMENT_NO_CI: generate.ci = false;
-                        break; case BUILD_ARGUMENT_NO_FUZZ: generate.fuzz = false;
-                        break; case BUILD_ARGUMENT_NO_OPTIMIZE: generate.optimize = false; generate.optimize_set = true;
-                        break; case BUILD_ARGUMENT_NO_SANITIZE: generate.sanitize = false;
-                        break; case BUILD_ARGUMENT_NO_LTO: generate.lto = false;
-                        break; case BUILD_ARGUMENT_NO_TIME_TRACE: generate.time_trace = false;
-                        break; case BUILD_ARGUMENT_NO_INSTRUMENT: generate.instrument = false;
-                        break; case BUILD_ARGUMENT_NO_INCLUDE_TESTS: generate.include_tests = false;
-                        break; case BUILD_ARGUMENT_NO_LINK_LIBC: generate.link_libc = false;
-                        break; case BUILD_ARGUMENT_NO_CHECK_OPTIONAL_WARNINGS: generate.check_optional_warnings = false;
-                        break; case BUILD_ARGUMENT_NO_DEVELOPER_TARGETS: generate.developer_targets = false;
-                        break; default: BUSTER_UNREACHABLE();
-                    }
-                    argument_i += 1;
-                }
-                else if (command == BUILD_COMMAND_BUILD && build_argument == BUILD_ARGUMENT_NO_OPTIMIZE && !argument_has_value)
-                {
-                    options.optimize = false;
-                    options.optimize_set = true;
-                    argument_i += 1;
-                }
-                else
-                {
-                    result = PROCESS_RESULT_FAILED;
-                }
-            }
-            break; case BUILD_ARGUMENT_VERBOSE:
-            case BUILD_ARGUMENT_VERBOSE_SHORT:
+        }
+        break;
+        case BUILD_ARGUMENT_CMAKE_PROFILE:
+        {
+            if (command == BUILD_COMMAND_GENERATE)
             {
                 if (argument_has_value)
                 {
-                    ProcessResult generic_argument_result = buster_argument_process(argument_i);
-                    if (generic_argument_result == PROCESS_RESULT_SUCCESS)
-                    {
-                        argument_i += 1;
-                    }
-                    else
-                    {
-                        result = generic_argument_result;
-                    }
-                }
-                else if (command == BUILD_COMMAND_BUILD)
-                {
-                    options.verbose = 1;
+                    generate.cmake_profile = argument_value;
                     argument_i += 1;
+                }
+                else if (argument_i + 1 < arguments.length && !string_starts_with_sequence(arguments.pointer[argument_i + 1], S8("--")))
+                {
+                    argument_i += 1;
+                    generate.cmake_profile = arguments.pointer[argument_i];
+                    argument_i += 1;
+                }
+                else
+                {
+                    generate.cmake_profile = S8("cmake-profile.json");
+                    argument_i += 1;
+                }
+                generate.cmake_profile_set = true;
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_CMAKE_PROFILE_SUMMARY:
+        {
+            if (command == BUILD_COMMAND_GENERATE && !argument_has_value)
+            {
+                generate.cmake_profile_summary = true;
+                argument_i += 1;
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_CMAKE_PROFILE_SUMMARY_LIMIT:
+        {
+            String8 candidate_limit = {0};
+            if (command == BUILD_COMMAND_GENERATE &&
+                build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &candidate_limit))
+            {
+                IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit.pointer);
+                if (parsed_limit.length == candidate_limit.length && parsed_limit.value > 0)
+                {
+                    generate.cmake_profile_summary_limit = parsed_limit.value;
                 }
                 else
                 {
                     result = PROCESS_RESULT_FAILED;
                 }
             }
-            break; case BUILD_ARGUMENT_QUIET:
+            else
             {
-                options.quiet = 1;
-                clang_analyze_options.quiet = 1;
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_CI:
+        case BUILD_ARGUMENT_FUZZ:
+        case BUILD_ARGUMENT_OPTIMIZE:
+        case BUILD_ARGUMENT_SANITIZE:
+        case BUILD_ARGUMENT_LTO:
+        case BUILD_ARGUMENT_TIME_TRACE:
+        case BUILD_ARGUMENT_INSTRUMENT:
+        case BUILD_ARGUMENT_INCLUDE_TESTS:
+        case BUILD_ARGUMENT_LINK_LIBC:
+        case BUILD_ARGUMENT_CHECK_OPTIONAL_WARNINGS:
+        case BUILD_ARGUMENT_DEVELOPER_TARGETS:
+        {
+            bool value = false;
+            if (command == BUILD_COMMAND_GENERATE && build_argument_read_optional_bool(arguments, &argument_i, argument_has_value, argument_value, &value))
+            {
+                switch (build_argument)
+                {
+                    break;
+                case BUILD_ARGUMENT_CI:
+                    generate.ci = value;
+                    break;
+                case BUILD_ARGUMENT_FUZZ:
+                    generate.fuzz = value;
+                    break;
+                case BUILD_ARGUMENT_OPTIMIZE:
+                    generate.optimize = value;
+                    generate.optimize_set = true;
+                    break;
+                case BUILD_ARGUMENT_SANITIZE:
+                    generate.sanitize = value;
+                    break;
+                case BUILD_ARGUMENT_LTO:
+                    generate.lto = value;
+                    break;
+                case BUILD_ARGUMENT_TIME_TRACE:
+                    generate.time_trace = value;
+                    break;
+                case BUILD_ARGUMENT_INSTRUMENT:
+                    generate.instrument = value;
+                    break;
+                case BUILD_ARGUMENT_INCLUDE_TESTS:
+                    generate.include_tests = value;
+                    break;
+                case BUILD_ARGUMENT_LINK_LIBC:
+                    generate.link_libc = value;
+                    break;
+                case BUILD_ARGUMENT_CHECK_OPTIONAL_WARNINGS:
+                    generate.check_optional_warnings = value;
+                    break;
+                case BUILD_ARGUMENT_DEVELOPER_TARGETS:
+                    generate.developer_targets = value;
+                    break;
+                default:
+                    BUSTER_UNREACHABLE();
+                }
+            }
+            else if (command == BUILD_COMMAND_BUILD && build_argument == BUILD_ARGUMENT_OPTIMIZE &&
+                     build_argument_read_optional_bool(arguments, &argument_i, argument_has_value, argument_value, &value))
+            {
+                options.optimize = value;
+                options.optimize_set = true;
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_NO_CI:
+        case BUILD_ARGUMENT_NO_FUZZ:
+        case BUILD_ARGUMENT_NO_OPTIMIZE:
+        case BUILD_ARGUMENT_NO_SANITIZE:
+        case BUILD_ARGUMENT_NO_LTO:
+        case BUILD_ARGUMENT_NO_TIME_TRACE:
+        case BUILD_ARGUMENT_NO_INSTRUMENT:
+        case BUILD_ARGUMENT_NO_INCLUDE_TESTS:
+        case BUILD_ARGUMENT_NO_LINK_LIBC:
+        case BUILD_ARGUMENT_NO_CHECK_OPTIONAL_WARNINGS:
+        case BUILD_ARGUMENT_NO_DEVELOPER_TARGETS:
+        {
+            if (command == BUILD_COMMAND_GENERATE && !argument_has_value)
+            {
+                switch (build_argument)
+                {
+                    break;
+                case BUILD_ARGUMENT_NO_CI:
+                    generate.ci = false;
+                    break;
+                case BUILD_ARGUMENT_NO_FUZZ:
+                    generate.fuzz = false;
+                    break;
+                case BUILD_ARGUMENT_NO_OPTIMIZE:
+                    generate.optimize = false;
+                    generate.optimize_set = true;
+                    break;
+                case BUILD_ARGUMENT_NO_SANITIZE:
+                    generate.sanitize = false;
+                    break;
+                case BUILD_ARGUMENT_NO_LTO:
+                    generate.lto = false;
+                    break;
+                case BUILD_ARGUMENT_NO_TIME_TRACE:
+                    generate.time_trace = false;
+                    break;
+                case BUILD_ARGUMENT_NO_INSTRUMENT:
+                    generate.instrument = false;
+                    break;
+                case BUILD_ARGUMENT_NO_INCLUDE_TESTS:
+                    generate.include_tests = false;
+                    break;
+                case BUILD_ARGUMENT_NO_LINK_LIBC:
+                    generate.link_libc = false;
+                    break;
+                case BUILD_ARGUMENT_NO_CHECK_OPTIONAL_WARNINGS:
+                    generate.check_optional_warnings = false;
+                    break;
+                case BUILD_ARGUMENT_NO_DEVELOPER_TARGETS:
+                    generate.developer_targets = false;
+                    break;
+                default:
+                    BUSTER_UNREACHABLE();
+                }
                 argument_i += 1;
             }
+            else if (command == BUILD_COMMAND_BUILD && build_argument == BUILD_ARGUMENT_NO_OPTIMIZE && !argument_has_value)
+            {
+                options.optimize = false;
+                options.optimize_set = true;
+                argument_i += 1;
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_VERBOSE:
+        case BUILD_ARGUMENT_VERBOSE_SHORT:
+        {
+            if (argument_has_value)
+            {
+                ProcessResult generic_argument_result = buster_argument_process(argument_i);
+                if (generic_argument_result == PROCESS_RESULT_SUCCESS)
+                {
+                    argument_i += 1;
+                }
+                else
+                {
+                    result = generic_argument_result;
+                }
+            }
+            else if (command == BUILD_COMMAND_BUILD)
+            {
+                options.verbose = 1;
+                argument_i += 1;
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_QUIET:
+        {
+            options.quiet = 1;
+            clang_analyze_options.quiet = 1;
+            argument_i += 1;
+        }
         }
     }
 
@@ -3658,11 +3683,8 @@ ProcessResult process_arguments(void)
         bool config_optimize = build_config_is_optimized(build_config);
         if (generate.optimize_set && generate.optimize != config_optimize)
         {
-            fprintf(stderr,
-                    "error: --optimize %s conflicts with --config %.*s\n",
-                    generate.optimize ? "ON" : "OFF",
-                    string8_printf_length(build_config, UINT64_MAX),
-                    build_config.pointer ? build_config.pointer : "");
+            fprintf(stderr, "error: --optimize %s conflicts with --config %.*s\n", generate.optimize ? "ON" : "OFF",
+                    string8_printf_length(build_config, UINT64_MAX), build_config.pointer ? build_config.pointer : "");
             result = PROCESS_RESULT_FAILED;
         }
         else
@@ -3716,11 +3738,8 @@ ProcessResult process_arguments(void)
         bool config_optimize = build_config_is_optimized(options.config);
         if (options.optimize != config_optimize)
         {
-            fprintf(stderr,
-                    "error: --optimize %s conflicts with --config %.*s\n",
-                    options.optimize ? "ON" : "OFF",
-                    string8_printf_length(options.config, UINT64_MAX),
-                    options.config.pointer ? options.config.pointer : "");
+            fprintf(stderr, "error: --optimize %s conflicts with --config %.*s\n", options.optimize ? "ON" : "OFF",
+                    string8_printf_length(options.config, UINT64_MAX), options.config.pointer ? options.config.pointer : "");
             result = PROCESS_RESULT_FAILED;
         }
     }
@@ -3729,49 +3748,58 @@ ProcessResult process_arguments(void)
     {
         switch (command)
         {
-            break; case BUILD_COMMAND_COUNT: BUSTER_UNREACHABLE();
-            break; case BUILD_COMMAND_NONE: {}
-            break; case BUILD_COMMAND_GENERATE:
-            {
-                generate.cmake_arguments = string8_list_to_slice(arena, generate_cmake_arguments);
-                BuildStep* generate_step = step_add(arena);
-                generate_add(arena, generate_step, generate);
-            }
-            break; case BUILD_COMMAND_BUILD:
-            {
-                build_add(arena, build_directory, string8_list_to_slice(arena, build_targets), string8_list_to_slice(arena, native_arguments), options);
-            }
-            break; case BUILD_COMMAND_CLANG_ANALYZE:
-            {
-                result = clang_analyze_add(arena, clang_analyze_options);
-            }
-            break; case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY:
-            {
-                cmake_profile_summary_action_add(arena, cmake_profile_summary_options);
-            }
-            break; case BUILD_COMMAND_NINJA_LOG_SUMMARY:
-            {
-                ninja_log_summary_action_add(arena, ninja_log_summary_options);
-            }
-            break; case BUILD_COMMAND_TIME_TRACE_SUMMARY:
-            {
-                time_trace_summary_options.paths = string8_list_to_slice(arena, time_trace_summary_paths);
-                time_trace_summary_action_add(arena, time_trace_summary_options);
-            }
-            break; case BUILD_COMMAND_TEST_SELF_HOST:
-            {
-                result = self_host_add(
-                    arena,
-                    build_directory,
-                    options);
-            }
             break;
-            case BUILD_COMMAND_TEST_ALL_COMBINATIONS:
-            case BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI:
-            {
-                bool ci = command == BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI;
-                test_all(arena, ci, options);
-            }
+        case BUILD_COMMAND_COUNT:
+            BUSTER_UNREACHABLE();
+            break;
+        case BUILD_COMMAND_NONE:
+        {
+        }
+        break;
+        case BUILD_COMMAND_GENERATE:
+        {
+            generate.cmake_arguments = string8_list_to_slice(arena, generate_cmake_arguments);
+            BuildStep* generate_step = step_add(arena);
+            generate_add(arena, generate_step, generate);
+        }
+        break;
+        case BUILD_COMMAND_BUILD:
+        {
+            build_add(arena, build_directory, string8_list_to_slice(arena, build_targets), string8_list_to_slice(arena, native_arguments), options);
+        }
+        break;
+        case BUILD_COMMAND_CLANG_ANALYZE:
+        {
+            result = clang_analyze_add(arena, clang_analyze_options);
+        }
+        break;
+        case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY:
+        {
+            cmake_profile_summary_action_add(arena, cmake_profile_summary_options);
+        }
+        break;
+        case BUILD_COMMAND_NINJA_LOG_SUMMARY:
+        {
+            ninja_log_summary_action_add(arena, ninja_log_summary_options);
+        }
+        break;
+        case BUILD_COMMAND_TIME_TRACE_SUMMARY:
+        {
+            time_trace_summary_options.paths = string8_list_to_slice(arena, time_trace_summary_paths);
+            time_trace_summary_action_add(arena, time_trace_summary_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_SELF_HOST:
+        {
+            result = self_host_add(arena, build_directory, options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_ALL_COMBINATIONS:
+        case BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI:
+        {
+            bool ci = command == BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI;
+            test_all(arena, ci, options);
+        }
         }
     }
 
@@ -3830,7 +3858,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run
 
     if (run->flags & (PROCESS_RUN_FLAG_PRINT_CAPTURED_ERROR | PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE | PROCESS_RUN_FLAG_CLANG_ANALYZE))
     {
-        String8 error_output = { .pointer = (char8*)wait_result.streams[STANDARD_STREAM_ERROR].pointer, .length = wait_result.streams[STANDARD_STREAM_ERROR].length };
+        String8 error_output = {.pointer = (char8*)wait_result.streams[STANDARD_STREAM_ERROR].pointer,
+                                .length = wait_result.streams[STANDARD_STREAM_ERROR].length};
         has_warning = clang_analyze_output_has_warning(error_output);
 
         if (run->flags & PROCESS_RUN_FLAG_CLANG_ANALYZE)
@@ -3891,12 +3920,11 @@ ProcessResult entry_point(void)
                         u64 elapsed_ns = elapsed_us * 1000;
                         u64 seconds_whole = elapsed_us / 1000000;
                         u64 seconds_fraction = elapsed_us % 1000000;
-                        printf("%.*s%.*s took %llu.%06llu seconds (%llu nanoseconds)\n",
-                               string8_printf_length(wait->timing_description, UINT64_MAX), wait->timing_description.pointer ? wait->timing_description.pointer : "",
-                               string8_printf_length(wait->timing_configuration, UINT64_MAX), wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "",
-                               (unsigned long long)seconds_whole,
-                               (unsigned long long)seconds_fraction,
-                               (unsigned long long)elapsed_ns);
+                        printf("%.*s%.*s took %llu.%06llu seconds (%llu nanoseconds)\n", string8_printf_length(wait->timing_description, UINT64_MAX),
+                               wait->timing_description.pointer ? wait->timing_description.pointer : "",
+                               string8_printf_length(wait->timing_configuration, UINT64_MAX),
+                               wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "", (unsigned long long)seconds_whole,
+                               (unsigned long long)seconds_fraction, (unsigned long long)elapsed_ns);
                     }
 
                     if (result == PROCESS_RESULT_SUCCESS && wait_result != PROCESS_RESULT_SUCCESS)
@@ -3934,12 +3962,11 @@ ProcessResult entry_point(void)
                             u64 elapsed_ns = elapsed_us * 1000;
                             u64 seconds_whole = elapsed_us / 1000000;
                             u64 seconds_fraction = elapsed_us % 1000000;
-                            printf("%.*s%.*s took %llu.%06llu seconds (%llu nanoseconds)\n",
-                                   string8_printf_length(wait->timing_description, UINT64_MAX), wait->timing_description.pointer ? wait->timing_description.pointer : "",
-                                   string8_printf_length(wait->timing_configuration, UINT64_MAX), wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "",
-                                   (unsigned long long)seconds_whole,
-                                   (unsigned long long)seconds_fraction,
-                                   (unsigned long long)elapsed_ns);
+                            printf("%.*s%.*s took %llu.%06llu seconds (%llu nanoseconds)\n", string8_printf_length(wait->timing_description, UINT64_MAX),
+                                   wait->timing_description.pointer ? wait->timing_description.pointer : "",
+                                   string8_printf_length(wait->timing_configuration, UINT64_MAX),
+                                   wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "", (unsigned long long)seconds_whole,
+                                   (unsigned long long)seconds_fraction, (unsigned long long)elapsed_ns);
                         }
 
                         if (result == PROCESS_RESULT_SUCCESS && wait_result != PROCESS_RESULT_SUCCESS)
@@ -3962,7 +3989,8 @@ ProcessResult entry_point(void)
 
     if (clang_analyze_summary.analyzed || clang_analyze_summary.failures || clang_analyze_summary.warnings)
     {
-        string_print(S8("clang --analyze checked {u64} translation unit(s), {u64} with analyzer warning(s), {u64} failed.\n"), clang_analyze_summary.analyzed, clang_analyze_summary.warnings, clang_analyze_summary.failures);
+        string_print(S8("clang --analyze checked {u64} translation unit(s), {u64} with analyzer warning(s), {u64} failed.\n"), clang_analyze_summary.analyzed,
+                     clang_analyze_summary.warnings, clang_analyze_summary.failures);
         if (result == PROCESS_RESULT_SUCCESS && (clang_analyze_summary.failures || clang_analyze_summary.warnings))
         {
             result = PROCESS_RESULT_FAILED;
@@ -3978,7 +4006,8 @@ ProcessResult entry_point(void)
         else
         {
             String8 self = program_state->input.arguments.length ? program_state->input.arguments.pointer[0] : S8("build/build");
-            string_print(S8("+ {S8} cmake_profile_summary {S8} --limit {u64}\n"), self, pending_cmake_profile_summary_options.profile, pending_cmake_profile_summary_options.limit);
+            string_print(S8("+ {S8} cmake_profile_summary {S8} --limit {u64}\n"), self, pending_cmake_profile_summary_options.profile,
+                         pending_cmake_profile_summary_options.limit);
             result = cmake_profile_summary_run(arena, pending_cmake_profile_summary_options);
         }
     }

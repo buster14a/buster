@@ -13,7 +13,6 @@ struct FileReadOptions
 BUSTER_F_DECL ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options);
 BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 
-
 typedef struct CopyFileArguments CopyFileArguments;
 struct CopyFileArguments
 {

@@ -65,18 +65,9 @@ struct NativeExecutableLinkResult
     LinkError error;
 };
 
-BUSTER_F_DECL LinkObjectResult link_objects(
-    Arena* arena,
-    ObjectFile* objects,
-    u32 object_count,
-    LinkOptions options);
-BUSTER_F_DECL NativeExecutableLinkResult
-link_native_executable(
-    Arena* arena,
-    ObjectFile* object,
-    NativeExecutableLinkOptions options);
+BUSTER_F_DECL LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options);
+BUSTER_F_DECL NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options);
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
-BUSTER_F_DECL UnitTestResult link_tests(
-    UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments);
 #endif

@@ -13,7 +13,7 @@ int main(void)
     _Alignas(64) int local_aligned = 5;
     _Alignas(0) int zero_aligned = 19;
     static _Alignas(64) int static_aligned = 7;
-    struct AlignedMember member = { 1, 11 };
+    struct AlignedMember member = {1, 11};
 
     if (_Alignof(struct AlignedMember) != 32)
     {
@@ -35,8 +35,7 @@ int main(void)
     {
         return 5;
     }
-    if ((unsigned long long)&type_aligned &
-        (_Alignof(long double) - 1))
+    if ((unsigned long long)&type_aligned & (_Alignof(long double) - 1))
     {
         return 6;
     }
@@ -44,8 +43,5 @@ int main(void)
     {
         return 7;
     }
-    return global_aligned + local_aligned +
-        static_aligned + member.value +
-        type_aligned + multiple_aligned +
-        zero_aligned == 75 ? 0 : 8;
+    return global_aligned + local_aligned + static_aligned + member.value + type_aligned + multiple_aligned + zero_aligned == 75 ? 0 : 8;
 }

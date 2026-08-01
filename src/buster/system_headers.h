@@ -126,7 +126,7 @@ struct OsState
 BUSTER_V_DECL OsState os_state;
 
 #ifdef _WIN32
-#define BUSTER_MAX_PATH_LENGTH (u64)MAX_PATH
+#define BUSTER_MAX_PATH_LENGTH (u64) MAX_PATH
 #else
 #define BUSTER_MAX_PATH_LENGTH (u64)(PATH_MAX)
 #endif

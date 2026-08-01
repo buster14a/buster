@@ -16,26 +16,27 @@ struct BatchTestResult
 };
 
 #define BUSTER_TEST_ERROR(format, ...) buster_test_error(__LINE__, BUSTER_FUNCTION, S8(__FILE__), (format), __VA_ARGS__);
-#define BUSTER_TEST_RAW(args, boolean, log) \
-do \
-{\
-    bool success_ = (boolean);\
-    if (BUSTER_UNLIKELY(!(success_)))\
-    {\
-        buster_test_error(__LINE__, BUSTER_FUNCTION, S8(__FILE__), log);\
-    }\
-    result.succeeded_test_count += (success_);\
-    result.test_count += 1;\
-} while (0)
+#define BUSTER_TEST_RAW(args, boolean, log)                                                                                                                    \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        bool success_ = (boolean);                                                                                                                             \
+        if (BUSTER_UNLIKELY(!(success_)))                                                                                                                      \
+        {                                                                                                                                                      \
+            buster_test_error(__LINE__, BUSTER_FUNCTION, S8(__FILE__), log);                                                                                   \
+        }                                                                                                                                                      \
+        result.succeeded_test_count += (success_);                                                                                                             \
+        result.test_count += 1;                                                                                                                                \
+    } while (0)
 
 #define BUSTER_TEST(args, boolean) BUSTER_TEST_RAW((args), (boolean), S8(#boolean))
 
-#define BUSTER_STRING_TEST(args, a, b) do\
-{\
-    String8 string_a = (a);\
-    String8 string_b = (b);\
-    BUSTER_TEST_RAW((args), string_equal(string_a, string_b), S8(#a " != " #b));\
-} while (0)
+#define BUSTER_STRING_TEST(args, a, b)                                                                                                                         \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        String8 string_a = (a);                                                                                                                                \
+        String8 string_b = (b);                                                                                                                                \
+        BUSTER_TEST_RAW((args), string_equal(string_a, string_b), S8(#a " != " #b));                                                                           \
+    } while (0)
 
 #if defined(_WIN32)
 #define BUSTER_OS_STRING_TEST(args, a, b) BUSTER_STRING16_TEST(args, a, b)
@@ -44,7 +45,7 @@ do \
 #endif
 
 typedef struct UnitTestArguments UnitTestArguments;
-typedef void ShowCallback(UnitTestArguments*,String8, ...);
+typedef void ShowCallback(UnitTestArguments*, String8, ...);
 struct UnitTestArguments
 {
     Arena* arena;
@@ -71,10 +72,7 @@ BUSTER_F_DECL void consume_unit_tests(BatchTestResult* batch, UnitTestResult uni
 BUSTER_F_DECL void consume_external_tests(BatchTestResult* batch, ProcessResult result);
 
 BUSTER_F_DECL void buster_test_error(u32 line, String8 function, String8 file_path, String8 format, ...);
-BUSTER_F_DECL String8 buster_test_temporary_path(
-    Arena* arena,
-    String8 name,
-    String8 suffix);
+BUSTER_F_DECL String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix);
 
 BUSTER_F_DECL BatchTestResult library_tests(UnitTestArguments* arguments);
 

@@ -3,9 +3,7 @@
 #include <buster/file.h>
 #include <buster/string.h>
 
-IrType* ir_type_from_id(
-    IrTypeTable* table,
-    IrTypeId id)
+IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id)
 {
     if (!table || id.value >= table->count)
     {
@@ -14,9 +12,7 @@ IrType* ir_type_from_id(
     return table->types + id.value;
 }
 
-IrSymbol* ir_symbol_from_id(
-    IrSymbolTable* table,
-    IrSymbolId id)
+IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id)
 {
     if (!table || id.value >= table->count)
     {
@@ -25,9 +21,7 @@ IrSymbol* ir_symbol_from_id(
     return table->symbols + id.value;
 }
 
-IrSource* ir_source_from_id(
-    IrSourceTable* table,
-    IrSourceId id)
+IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id)
 {
     if (!table || id.value >= table->count)
     {
@@ -99,51 +93,60 @@ BUSTER_GLOBAL_LOCAL u32 ir_node_arity(AstNode* node)
 {
     switch (node->id)
     {
-        case AST_NODE_CONSTANT_INTEGER:
-        case AST_NODE_CONSTANT_FLOAT:
-        case AST_NODE_CONSTANT_CHARACTER:
-        case AST_NODE_CONSTANT_STRING:
-        case AST_NODE_IDENTIFIER:
-        case AST_NODE_UNDEFINED:
-        case AST_NODE_ENUM_LITERAL: return 0;
-        case AST_NODE_ARRAY_LITERAL: return node->array_literal.element_count;
-        case AST_NODE_ARRAY_INDEX: return 2;
-        case AST_NODE_ARRAY_SLICE:
-        {
-            return 1 + (u32)node->array_slice.has_start + (u32)node->array_slice.has_end;
-        }
-        case AST_NODE_AGGREGATE_LITERAL: return node->aggregate_literal.field_count;
-        case AST_NODE_CALL: return 1 + node->call.argument_count;
-        case AST_NODE_INTRINSIC_CALL: return node->intrinsic_call.argument_count;
-        case AST_NODE_MEMBER_ACCESS:
-        case AST_NODE_UNARY_MINUS:
-        case AST_NODE_UNARY_PLUS:
-        case AST_NODE_UNARY_LOGICAL_NOT:
-        case AST_NODE_UNARY_BITWISE_NOT:
-        case AST_NODE_ADDRESS_OF:
-        case AST_NODE_DEREFERENCE: return 1;
-        case AST_NODE_BINARY_PLUS:
-        case AST_NODE_BINARY_MINUS:
-        case AST_NODE_BINARY_ASTERISK:
-        case AST_NODE_BINARY_SLASH:
-        case AST_NODE_BINARY_PERCENT:
-        case AST_NODE_BINARY_SHIFT_LEFT:
-        case AST_NODE_BINARY_SHIFT_RIGHT:
-        case AST_NODE_BINARY_EQUAL:
-        case AST_NODE_BINARY_NOT_EQUAL:
-        case AST_NODE_BINARY_LESS:
-        case AST_NODE_BINARY_LESS_EQUAL:
-        case AST_NODE_BINARY_GREATER:
-        case AST_NODE_BINARY_GREATER_EQUAL:
-        case AST_NODE_BINARY_AMPERSAND:
-        case AST_NODE_BINARY_BAR:
-        case AST_NODE_BINARY_CARET:
-        case AST_NODE_BINARY_BOOLEAN_AND:
-        case AST_NODE_BINARY_BOOLEAN_OR:
-        case AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT:
-        case AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT:
-        case AST_NODE_BINARY_RANGE: return 2;
-        case AST_NODE_COUNT: break;
+    case AST_NODE_CONSTANT_INTEGER:
+    case AST_NODE_CONSTANT_FLOAT:
+    case AST_NODE_CONSTANT_CHARACTER:
+    case AST_NODE_CONSTANT_STRING:
+    case AST_NODE_IDENTIFIER:
+    case AST_NODE_UNDEFINED:
+    case AST_NODE_ENUM_LITERAL:
+        return 0;
+    case AST_NODE_ARRAY_LITERAL:
+        return node->array_literal.element_count;
+    case AST_NODE_ARRAY_INDEX:
+        return 2;
+    case AST_NODE_ARRAY_SLICE:
+    {
+        return 1 + (u32)node->array_slice.has_start + (u32)node->array_slice.has_end;
+    }
+    case AST_NODE_AGGREGATE_LITERAL:
+        return node->aggregate_literal.field_count;
+    case AST_NODE_CALL:
+        return 1 + node->call.argument_count;
+    case AST_NODE_INTRINSIC_CALL:
+        return node->intrinsic_call.argument_count;
+    case AST_NODE_MEMBER_ACCESS:
+    case AST_NODE_UNARY_MINUS:
+    case AST_NODE_UNARY_PLUS:
+    case AST_NODE_UNARY_LOGICAL_NOT:
+    case AST_NODE_UNARY_BITWISE_NOT:
+    case AST_NODE_ADDRESS_OF:
+    case AST_NODE_DEREFERENCE:
+        return 1;
+    case AST_NODE_BINARY_PLUS:
+    case AST_NODE_BINARY_MINUS:
+    case AST_NODE_BINARY_ASTERISK:
+    case AST_NODE_BINARY_SLASH:
+    case AST_NODE_BINARY_PERCENT:
+    case AST_NODE_BINARY_SHIFT_LEFT:
+    case AST_NODE_BINARY_SHIFT_RIGHT:
+    case AST_NODE_BINARY_EQUAL:
+    case AST_NODE_BINARY_NOT_EQUAL:
+    case AST_NODE_BINARY_LESS:
+    case AST_NODE_BINARY_LESS_EQUAL:
+    case AST_NODE_BINARY_GREATER:
+    case AST_NODE_BINARY_GREATER_EQUAL:
+    case AST_NODE_BINARY_AMPERSAND:
+    case AST_NODE_BINARY_BAR:
+    case AST_NODE_BINARY_CARET:
+    case AST_NODE_BINARY_BOOLEAN_AND:
+    case AST_NODE_BINARY_BOOLEAN_OR:
+    case AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT:
+    case AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT:
+    case AST_NODE_BINARY_RANGE:
+        return 2;
+    case AST_NODE_COUNT:
+        break;
     }
     return 0;
 }
@@ -152,12 +155,9 @@ BUSTER_GLOBAL_LOCAL IrBlockId ir_block_create(IrBuilder* builder)
 {
     IrFunction* function = builder->function;
     BUSTER_CHECK(function->block_count < function->block_capacity);
-    IrBlockId id = { .value = function->block_count };
+    IrBlockId id = {.value = function->block_count};
     function->blocks[function->block_count] = (IrBlock){
-        .local_values = arena_allocate(
-            builder->result_arena,
-            IrValueId,
-            function->local_count),
+        .local_values = arena_allocate(builder->result_arena, IrValueId, function->local_count),
         .first_instruction = IR_INSTRUCTION_ID_INVALID,
         .last_instruction = IR_INSTRUCTION_ID_INVALID,
         .id = id,
@@ -170,15 +170,11 @@ BUSTER_GLOBAL_LOCAL IrBlockId ir_block_create(IrBuilder* builder)
     return id;
 }
 
-BUSTER_GLOBAL_LOCAL IrValueId ir_value_create(
-    IrBuilder* builder,
-    AnalysisTypeId type,
-    IrInstructionId definition,
-    IrValueCategory category)
+BUSTER_GLOBAL_LOCAL IrValueId ir_value_create(IrBuilder* builder, AnalysisTypeId type, IrInstructionId definition, IrValueCategory category)
 {
     IrFunction* function = builder->function;
     BUSTER_CHECK(function->value_count < function->value_capacity);
-    IrValueId id = { .value = function->value_count };
+    IrValueId id = {.value = function->value_count};
     function->values[function->value_count] = (IrValue){
         .type = type,
         .canonical_type = IR_TYPE_ID_INVALID,
@@ -189,15 +185,12 @@ BUSTER_GLOBAL_LOCAL IrValueId ir_value_create(
     return id;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_predecessor_add(
-    IrBuilder* builder,
-    IrBlockId target,
-    IrBlockId predecessor)
+BUSTER_GLOBAL_LOCAL void ir_predecessor_add(IrBuilder* builder, IrBlockId target, IrBlockId predecessor)
 {
     IrBlock* block = builder->function->blocks + target.value;
     BUSTER_CHECK(!block->sealed);
     IrPredecessor* edge = arena_allocate(builder->result_arena, IrPredecessor, 1);
-    *edge = (IrPredecessor){ .block = predecessor };
+    *edge = (IrPredecessor){.block = predecessor};
     if (block->last_predecessor)
     {
         block->last_predecessor->next = edge;
@@ -210,11 +203,7 @@ BUSTER_GLOBAL_LOCAL void ir_predecessor_add(
     block->predecessor_count += 1;
 }
 
-BUSTER_GLOBAL_LOCAL IrBlockParameter* ir_block_parameter_create(
-    IrBuilder* builder,
-    IrBlockId block_id,
-    AnalysisLocalId local,
-    AnalysisTypeId type)
+BUSTER_GLOBAL_LOCAL IrBlockParameter* ir_block_parameter_create(IrBuilder* builder, IrBlockId block_id, AnalysisLocalId local, AnalysisTypeId type)
 {
     IrBlock* block = builder->function->blocks + block_id.value;
     IrBlockParameter* parameter = arena_allocate(builder->result_arena, IrBlockParameter, 1);
@@ -224,11 +213,7 @@ BUSTER_GLOBAL_LOCAL IrBlockParameter* ir_block_parameter_create(
         .canonical_type = IR_TYPE_ID_INVALID,
         .canonical_local = IR_LOCAL_ID_INVALID,
     };
-    parameter->value = ir_value_create(
-        builder,
-        type,
-        IR_INSTRUCTION_ID_INVALID,
-        IR_VALUE_VALUE);
+    parameter->value = ir_value_create(builder, type, IR_INSTRUCTION_ID_INVALID, IR_VALUE_VALUE);
     if (block->last_parameter)
     {
         block->last_parameter->next = parameter;
@@ -246,14 +231,10 @@ BUSTER_GLOBAL_LOCAL IrBlockParameter* ir_block_parameter_create(
     return parameter;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_block_parameter_incoming_add(
-    IrBuilder* builder,
-    IrBlockParameter* parameter,
-    IrBlockId predecessor,
-    IrValueId value)
+BUSTER_GLOBAL_LOCAL void ir_block_parameter_incoming_add(IrBuilder* builder, IrBlockParameter* parameter, IrBlockId predecessor, IrValueId value)
 {
     IrIncoming* incoming = arena_allocate(builder->result_arena, IrIncoming, 1);
-    *incoming = (IrIncoming){ .predecessor = predecessor, .value = value };
+    *incoming = (IrIncoming){.predecessor = predecessor, .value = value};
     if (parameter->last_incoming)
     {
         parameter->last_incoming->next = incoming;
@@ -284,19 +265,13 @@ struct IrSsaReadFrame
     IrSsaReadState state;
 };
 
-BUSTER_GLOBAL_LOCAL IrValueId ir_ssa_read(
-    IrBuilder* builder,
-    IrBlockId block_id,
-    AnalysisLocalId local)
+BUSTER_GLOBAL_LOCAL IrValueId ir_ssa_read(IrBuilder* builder, IrBlockId block_id, AnalysisLocalId local)
 {
     IrFunction* function = builder->function;
-    IrSsaReadFrame* frames = arena_allocate(
-        builder->scratch_arena,
-        IrSsaReadFrame,
-        function->block_count + 1);
+    IrSsaReadFrame* frames = arena_allocate(builder->scratch_arena, IrSsaReadFrame, function->block_count + 1);
     u32 depth = 1;
     IrValueId completed = IR_VALUE_ID_INVALID;
-    frames[0] = (IrSsaReadFrame){ .block = block_id };
+    frames[0] = (IrSsaReadFrame){.block = block_id};
     while (depth)
     {
         IrSsaReadFrame* frame = frames + depth - 1;
@@ -354,28 +329,20 @@ BUSTER_GLOBAL_LOCAL IrValueId ir_ssa_read(
             frame->predecessor = frame->predecessor->next;
             frame->state = IR_SSA_READ_WAIT_MULTI;
             BUSTER_CHECK(depth < function->block_count + 1);
-            frames[depth] = (IrSsaReadFrame){ .block = frame->pending_predecessor };
+            frames[depth] = (IrSsaReadFrame){.block = frame->pending_predecessor};
             depth += 1;
         }
         else
         {
             BUSTER_CHECK(completed.value != IR_ID_UNDERLYING_INVALID);
-            ir_block_parameter_incoming_add(
-                builder,
-                frame->parameter,
-                frame->pending_predecessor,
-                completed);
+            ir_block_parameter_incoming_add(builder, frame->parameter, frame->pending_predecessor, completed);
             frame->state = IR_SSA_READ_MULTI;
         }
     }
     return completed;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_ssa_write(
-    IrBuilder* builder,
-    IrBlockId block,
-    AnalysisLocalId local,
-    IrValueId value)
+BUSTER_GLOBAL_LOCAL void ir_ssa_write(IrBuilder* builder, IrBlockId block, AnalysisLocalId local, IrValueId value)
 {
     BUSTER_CHECK(local.value < builder->function->local_count);
     builder->function->blocks[block.value].local_values[local.value] = value;
@@ -389,45 +356,30 @@ BUSTER_GLOBAL_LOCAL void ir_block_seal(IrBuilder* builder, IrBlockId block_id)
         return;
     }
     block->sealed = true;
-    for (IrBlockParameter* parameter = block->first_parameter;
-        parameter;
-        parameter = parameter->next)
+    for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
     {
         if (parameter->incoming_count)
         {
             continue;
         }
-        for (IrPredecessor* predecessor = block->first_predecessor;
-            predecessor;
-            predecessor = predecessor->next)
+        for (IrPredecessor* predecessor = block->first_predecessor; predecessor; predecessor = predecessor->next)
         {
             IrValueId incoming = ir_ssa_read(builder, predecessor->block, parameter->local);
             BUSTER_CHECK(incoming.value != IR_ID_UNDERLYING_INVALID);
-            ir_block_parameter_incoming_add(
-                builder,
-                parameter,
-                predecessor->block,
-                incoming);
+            ir_block_parameter_incoming_add(builder, parameter, predecessor->block, incoming);
         }
     }
 }
 
-BUSTER_GLOBAL_LOCAL IrInstruction* ir_emit(
-    IrBuilder* builder,
-    IrOpcode opcode,
-    AnalysisTypeId type,
-    IrValueCategory category,
-    ParserSourceRange source,
-    IrValueId* operands,
-    u32 operand_count,
-    bool produces_value)
+BUSTER_GLOBAL_LOCAL IrInstruction* ir_emit(IrBuilder* builder, IrOpcode opcode, AnalysisTypeId type, IrValueCategory category, ParserSourceRange source,
+                                           IrValueId* operands, u32 operand_count, bool produces_value)
 {
     IrFunction* function = builder->function;
     BUSTER_CHECK(ir_block_id_valid(function, builder->current));
     IrBlock* block = function->blocks + builder->current.value;
     BUSTER_CHECK(!block->terminated);
     BUSTER_CHECK(function->instruction_count < function->instruction_capacity);
-    IrInstructionId id = { .value = function->instruction_count };
+    IrInstructionId id = {.value = function->instruction_count};
     IrInstruction* instruction = function->instructions + function->instruction_count;
     *instruction = (IrInstruction){
         .type = type,
@@ -446,10 +398,8 @@ BUSTER_GLOBAL_LOCAL IrInstruction* ir_emit(
         .unary_operation = IR_UNARY_COUNT,
         .binary_operation = IR_BINARY_COUNT,
         .memory_order = IR_MEMORY_ORDER_COUNT,
-        .failure_memory_order =
-            IR_MEMORY_ORDER_COUNT,
-        .atomic_operation =
-            IR_ATOMIC_OPERATION_COUNT,
+        .failure_memory_order = IR_MEMORY_ORDER_COUNT,
+        .atomic_operation = IR_ATOMIC_OPERATION_COUNT,
         .operand_count = operand_count,
     };
     if (operand_count)
@@ -477,24 +427,10 @@ BUSTER_GLOBAL_LOCAL IrInstruction* ir_emit(
     return instruction;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_terminate(
-    IrBuilder* builder,
-    IrOpcode opcode,
-    ParserSourceRange source,
-    IrValueId* operands,
-    u32 operand_count,
-    IrBlockId* targets,
-    u32 target_count)
+BUSTER_GLOBAL_LOCAL void ir_terminate(IrBuilder* builder, IrOpcode opcode, ParserSourceRange source, IrValueId* operands, u32 operand_count, IrBlockId* targets,
+                                      u32 target_count)
 {
-    IrInstruction* instruction = ir_emit(
-        builder,
-        opcode,
-        builder->analysis->types.builtin.void_type,
-        IR_VALUE_VALUE,
-        source,
-        operands,
-        operand_count,
-        false);
+    IrInstruction* instruction = ir_emit(builder, opcode, builder->analysis->types.builtin.void_type, IR_VALUE_VALUE, source, operands, operand_count, false);
     if (target_count)
     {
         instruction->targets = arena_allocate(builder->result_arena, IrBlockId, target_count);
@@ -516,13 +452,9 @@ BUSTER_GLOBAL_LOCAL void ir_branch(IrBuilder* builder, IrBlockId target, ParserS
     ir_terminate(builder, IR_OPCODE_BRANCH, source, 0, 0, &target, 1);
 }
 
-BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* ir_typed_expression_find(
-    AnalysisBody* body,
-    AstExpression ast)
+BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* ir_typed_expression_find(AnalysisBody* body, AstExpression ast)
 {
-    for (AnalysisTypedExpression* expression = body->first_expression;
-        expression;
-        expression = expression->next)
+    for (AnalysisTypedExpression* expression = body->first_expression; expression; expression = expression->next)
     {
         if (expression->ast.nodes == ast.nodes && expression->ast.count == ast.count)
         {
@@ -536,24 +468,13 @@ BUSTER_GLOBAL_LOCAL IrValueId ir_materialize(IrBuilder* builder, IrLowered lower
 {
     if (lowered.category == IR_VALUE_PLACE)
     {
-        IrInstruction* load = ir_emit(
-            builder,
-            IR_OPCODE_LOAD,
-            lowered.type,
-            IR_VALUE_VALUE,
-            source,
-            &lowered.value,
-            1,
-            true);
+        IrInstruction* load = ir_emit(builder, IR_OPCODE_LOAD, lowered.type, IR_VALUE_VALUE, source, &lowered.value, 1, true);
         return load->result;
     }
     return lowered.value;
 }
 
-BUSTER_GLOBAL_LOCAL u32 ir_field_index(
-    AnalysisResult* analysis,
-    AnalysisTypeId aggregate_type,
-    String8 name)
+BUSTER_GLOBAL_LOCAL u32 ir_field_index(AnalysisResult* analysis, AnalysisTypeId aggregate_type, String8 name)
 {
     AnalysisType* type = analysis_type_from_id(analysis, aggregate_type);
     if (type->kind == ANALYSIS_TYPE_STRUCT || type->kind == ANALYSIS_TYPE_UNION)
@@ -568,24 +489,18 @@ BUSTER_GLOBAL_LOCAL u32 ir_field_index(
             for (u32 index = 0; index < analysis->program_module_count; index += 1)
             {
                 AnalysisResult* candidate = analysis->program_modules[index];
-                if (candidate &&
-                    candidate->module.id.value ==
-                            type->as.declaration.module.value)
+                if (candidate && candidate->module.id.value == type->as.declaration.module.value)
                 {
                     declaration_module = candidate;
                     break;
                 }
             }
         }
-        if (!declaration_module ||
-            type->as.declaration.index.value >=
-                    declaration_module->module.entity_count)
+        if (!declaration_module || type->as.declaration.index.value >= declaration_module->module.entity_count)
         {
             return UINT32_MAX;
         }
-        AnalysisEntitySemantic* semantic =
-                declaration_module->module.semantics +
-                type->as.declaration.index.value;
+        AnalysisEntitySemantic* semantic = declaration_module->module.semantics + type->as.declaration.index.value;
         for (u32 index = 0; index < semantic->field_count; index += 1)
         {
             if (string_equal(semantic->fields[index].name, name))
@@ -616,11 +531,7 @@ struct IrExpressionTask
     IrExpressionTaskKind kind;
 };
 
-BUSTER_GLOBAL_LOCAL void ir_expression_child_roots(
-    AnalysisTypedExpression* expression,
-    u32 node_index,
-    u32* roots,
-    u32 arity)
+BUSTER_GLOBAL_LOCAL void ir_expression_child_roots(AnalysisTypedExpression* expression, u32 node_index, u32* roots, u32 arity)
 {
     u32 cursor = node_index;
     for (u32 child = arity; child > 0; child -= 1)
@@ -631,9 +542,7 @@ BUSTER_GLOBAL_LOCAL void ir_expression_child_roots(
     }
 }
 
-BUSTER_GLOBAL_LOCAL AnalysisResult* ir_analysis_module_from_id(
-    AnalysisResult* analysis,
-    AnalysisModuleId id)
+BUSTER_GLOBAL_LOCAL AnalysisResult* ir_analysis_module_from_id(AnalysisResult* analysis, AnalysisModuleId id)
 {
     if (analysis->module.id.value == id.value)
     {
@@ -650,28 +559,20 @@ BUSTER_GLOBAL_LOCAL AnalysisResult* ir_analysis_module_from_id(
     return 0;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_call_argument_is_compile_time(
-    IrBuilder* builder,
-    AnalysisTypedExpression* expression,
-    u32 callee_root,
-    u32 argument_index)
+BUSTER_GLOBAL_LOCAL bool ir_call_argument_is_compile_time(IrBuilder* builder, AnalysisTypedExpression* expression, u32 callee_root, u32 argument_index)
 {
     AnalysisTypedNode* callee = expression->nodes + callee_root;
-    AnalysisResult* module = ir_analysis_module_from_id(
-        builder->analysis,
-        callee->entity.module);
+    AnalysisResult* module = ir_analysis_module_from_id(builder->analysis, callee->entity.module);
     if (!module || callee->entity.index.value >= module->module.entity_count)
     {
         return false;
     }
-    AnalysisEntity* entity =
-        module->module.entities + callee->entity.index.value;
+    AnalysisEntity* entity = module->module.entities + callee->entity.index.value;
     if (entity->kind != ANALYSIS_ENTITY_CODE)
     {
         return false;
     }
-    AstTypeArgument* argument =
-        entity->ast.code->type->function.first_argument;
+    AstTypeArgument* argument = entity->ast.code->type->function.first_argument;
     for (u32 index = 0; argument && index < argument_index; index += 1)
     {
         argument = argument->next;
@@ -679,48 +580,40 @@ BUSTER_GLOBAL_LOCAL bool ir_call_argument_is_compile_time(
     return argument && argument->is_compile_time;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_type_is_signed_integer(
-    AnalysisResult* analysis,
-    AnalysisTypeId type)
+BUSTER_GLOBAL_LOCAL bool ir_type_is_signed_integer(AnalysisResult* analysis, AnalysisTypeId type)
 {
     AnalysisType* resolved = analysis_type_from_id(analysis, type);
-    return resolved->kind == ANALYSIS_TYPE_INTEGER &&
-        resolved->as.integer.is_signed;
+    return resolved->kind == ANALYSIS_TYPE_INTEGER && resolved->as.integer.is_signed;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_type_is_integer_domain(
-    AnalysisResult* analysis,
-    AnalysisTypeId type)
+BUSTER_GLOBAL_LOCAL bool ir_type_is_integer_domain(AnalysisResult* analysis, AnalysisTypeId type)
 {
     AnalysisTypeKind kind = analysis_type_from_id(analysis, type)->kind;
-    return kind == ANALYSIS_TYPE_BOOL ||
-        kind == ANALYSIS_TYPE_INTEGER ||
-        kind == ANALYSIS_TYPE_ENUM;
+    return kind == ANALYSIS_TYPE_BOOL || kind == ANALYSIS_TYPE_INTEGER || kind == ANALYSIS_TYPE_ENUM;
 }
 
-BUSTER_GLOBAL_LOCAL u32 ir_type_bit_width(
-    AnalysisResult* analysis,
-    AnalysisTypeId type_id)
+BUSTER_GLOBAL_LOCAL u32 ir_type_bit_width(AnalysisResult* analysis, AnalysisTypeId type_id)
 {
     AnalysisType* type = analysis_type_from_id(analysis, type_id);
     switch (type->kind)
     {
-        case ANALYSIS_TYPE_BOOL: return 1;
-        case ANALYSIS_TYPE_INTEGER: return type->as.integer.bit_width;
-        case ANALYSIS_TYPE_FLOAT: return type->as.float_bit_width;
-        case ANALYSIS_TYPE_ENUM:
-            return type->layout.size ? (u32)(type->layout.size * 8) : 32;
-        case ANALYSIS_TYPE_POINTER:
-            return (u32)(type->layout.size * 8);
-        default: break;
+    case ANALYSIS_TYPE_BOOL:
+        return 1;
+    case ANALYSIS_TYPE_INTEGER:
+        return type->as.integer.bit_width;
+    case ANALYSIS_TYPE_FLOAT:
+        return type->as.float_bit_width;
+    case ANALYSIS_TYPE_ENUM:
+        return type->layout.size ? (u32)(type->layout.size * 8) : 32;
+    case ANALYSIS_TYPE_POINTER:
+        return (u32)(type->layout.size * 8);
+    default:
+        break;
     }
     return 0;
 }
 
-BUSTER_GLOBAL_LOCAL IrConversionOperation ir_conversion_operation(
-    AnalysisResult* analysis,
-    AnalysisTypeId source_id,
-    AnalysisTypeId target_id)
+BUSTER_GLOBAL_LOCAL IrConversionOperation ir_conversion_operation(AnalysisResult* analysis, AnalysisTypeId source_id, AnalysisTypeId target_id)
 {
     if (ir_type_id_equal(source_id, target_id))
     {
@@ -736,35 +629,23 @@ BUSTER_GLOBAL_LOCAL IrConversionOperation ir_conversion_operation(
         u32 target_width = ir_type_bit_width(analysis, target_id);
         if (source_width < target_width)
         {
-            return ir_type_is_signed_integer(analysis, source_id) ?
-                IR_CONVERSION_INTEGER_SIGN_EXTEND :
-                IR_CONVERSION_INTEGER_ZERO_EXTEND;
+            return ir_type_is_signed_integer(analysis, source_id) ? IR_CONVERSION_INTEGER_SIGN_EXTEND : IR_CONVERSION_INTEGER_ZERO_EXTEND;
         }
-        return source_width > target_width ?
-            IR_CONVERSION_INTEGER_TRUNCATE :
-            IR_CONVERSION_INTEGER_REINTERPRET;
+        return source_width > target_width ? IR_CONVERSION_INTEGER_TRUNCATE : IR_CONVERSION_INTEGER_REINTERPRET;
     }
-    if (source->kind == ANALYSIS_TYPE_FLOAT &&
-        target->kind == ANALYSIS_TYPE_FLOAT)
+    if (source->kind == ANALYSIS_TYPE_FLOAT && target->kind == ANALYSIS_TYPE_FLOAT)
     {
-        return source->as.float_bit_width < target->as.float_bit_width ?
-            IR_CONVERSION_FLOAT_EXTEND :
-            IR_CONVERSION_FLOAT_TRUNCATE;
+        return source->as.float_bit_width < target->as.float_bit_width ? IR_CONVERSION_FLOAT_EXTEND : IR_CONVERSION_FLOAT_TRUNCATE;
     }
     if (source_integer && target->kind == ANALYSIS_TYPE_FLOAT)
     {
-        return ir_type_is_signed_integer(analysis, source_id) ?
-            IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT :
-            IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT;
+        return ir_type_is_signed_integer(analysis, source_id) ? IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT : IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT;
     }
     if (source->kind == ANALYSIS_TYPE_FLOAT && target_integer)
     {
-        return ir_type_is_signed_integer(analysis, target_id) ?
-            IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER :
-            IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER;
+        return ir_type_is_signed_integer(analysis, target_id) ? IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER : IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER;
     }
-    if (source->kind == ANALYSIS_TYPE_POINTER &&
-        target->kind == ANALYSIS_TYPE_POINTER)
+    if (source->kind == ANALYSIS_TYPE_POINTER && target->kind == ANALYSIS_TYPE_POINTER)
     {
         return IR_CONVERSION_POINTER_REINTERPRET;
     }
@@ -779,92 +660,61 @@ BUSTER_GLOBAL_LOCAL IrConversionOperation ir_conversion_operation(
     return IR_CONVERSION_COUNT;
 }
 
-BUSTER_GLOBAL_LOCAL IrUnaryOperation ir_unary_operation(
-    AnalysisResult* analysis,
-    AstNodeId operation,
-    AnalysisTypeId operand_type)
+BUSTER_GLOBAL_LOCAL IrUnaryOperation ir_unary_operation(AnalysisResult* analysis, AstNodeId operation, AnalysisTypeId operand_type)
 {
     AnalysisType* type = analysis_type_from_id(analysis, operand_type);
     AnalysisTypeKind kind = type->kind;
-    AnalysisTypeKind element_kind = kind == ANALYSIS_TYPE_VECTOR ?
-        analysis_type_from_id(analysis, type->as.vector.element_type)->kind : kind;
+    AnalysisTypeKind element_kind = kind == ANALYSIS_TYPE_VECTOR ? analysis_type_from_id(analysis, type->as.vector.element_type)->kind : kind;
     switch (operation)
     {
-        case AST_NODE_UNARY_MINUS:
-        {
-            return kind == ANALYSIS_TYPE_VECTOR ?
-                    (element_kind == ANALYSIS_TYPE_FLOAT ?
-                        IR_UNARY_VECTOR_FLOAT_NEGATE :
-                        IR_UNARY_VECTOR_INTEGER_NEGATE) :
-                kind == ANALYSIS_TYPE_FLOAT ?
-                    IR_UNARY_FLOAT_NEGATE :
-                    IR_UNARY_INTEGER_NEGATE;
-        }
-        case AST_NODE_UNARY_LOGICAL_NOT:
-            return IR_UNARY_BOOLEAN_NOT;
-        case AST_NODE_UNARY_BITWISE_NOT:
-            return kind == ANALYSIS_TYPE_VECTOR ?
-                IR_UNARY_VECTOR_INTEGER_BITWISE_NOT :
-                IR_UNARY_INTEGER_BITWISE_NOT;
-        default: break;
+    case AST_NODE_UNARY_MINUS:
+    {
+        return kind == ANALYSIS_TYPE_VECTOR  ? (element_kind == ANALYSIS_TYPE_FLOAT ? IR_UNARY_VECTOR_FLOAT_NEGATE : IR_UNARY_VECTOR_INTEGER_NEGATE)
+               : kind == ANALYSIS_TYPE_FLOAT ? IR_UNARY_FLOAT_NEGATE
+                                             : IR_UNARY_INTEGER_NEGATE;
+    }
+    case AST_NODE_UNARY_LOGICAL_NOT:
+        return IR_UNARY_BOOLEAN_NOT;
+    case AST_NODE_UNARY_BITWISE_NOT:
+        return kind == ANALYSIS_TYPE_VECTOR ? IR_UNARY_VECTOR_INTEGER_BITWISE_NOT : IR_UNARY_INTEGER_BITWISE_NOT;
+    default:
+        break;
     }
     return IR_UNARY_COUNT;
 }
 
-BUSTER_GLOBAL_LOCAL IrBinaryOperation ir_equality_operation(
-    AnalysisResult* analysis,
-    AstNodeId operation,
-    AnalysisTypeId operand_type)
+BUSTER_GLOBAL_LOCAL IrBinaryOperation ir_equality_operation(AnalysisResult* analysis, AstNodeId operation, AnalysisTypeId operand_type)
 {
-    AnalysisTypeKind kind =
-        analysis_type_from_id(analysis, operand_type)->kind;
+    AnalysisTypeKind kind = analysis_type_from_id(analysis, operand_type)->kind;
     bool equal = operation == AST_NODE_BINARY_EQUAL;
     if (kind == ANALYSIS_TYPE_VECTOR)
     {
-        return equal ?
-            IR_BINARY_VECTOR_INTEGER_EQUAL :
-            IR_BINARY_VECTOR_INTEGER_NOT_EQUAL;
+        return equal ? IR_BINARY_VECTOR_INTEGER_EQUAL : IR_BINARY_VECTOR_INTEGER_NOT_EQUAL;
     }
     switch (kind)
     {
-        case ANALYSIS_TYPE_FLOAT:
-            return equal ? IR_BINARY_FLOAT_EQUAL : IR_BINARY_FLOAT_NOT_EQUAL;
-        case ANALYSIS_TYPE_POINTER:
-            return equal ? IR_BINARY_POINTER_EQUAL : IR_BINARY_POINTER_NOT_EQUAL;
-        case ANALYSIS_TYPE_BOOL:
-            return equal ? IR_BINARY_BOOLEAN_EQUAL : IR_BINARY_BOOLEAN_NOT_EQUAL;
-        default:
-            return equal ? IR_BINARY_INTEGER_EQUAL : IR_BINARY_INTEGER_NOT_EQUAL;
+    case ANALYSIS_TYPE_FLOAT:
+        return equal ? IR_BINARY_FLOAT_EQUAL : IR_BINARY_FLOAT_NOT_EQUAL;
+    case ANALYSIS_TYPE_POINTER:
+        return equal ? IR_BINARY_POINTER_EQUAL : IR_BINARY_POINTER_NOT_EQUAL;
+    case ANALYSIS_TYPE_BOOL:
+        return equal ? IR_BINARY_BOOLEAN_EQUAL : IR_BINARY_BOOLEAN_NOT_EQUAL;
+    default:
+        return equal ? IR_BINARY_INTEGER_EQUAL : IR_BINARY_INTEGER_NOT_EQUAL;
     }
 }
 
-BUSTER_GLOBAL_LOCAL IrBinaryOperation ir_ordering_operation(
-    AnalysisResult* analysis,
-    AstNodeId operation,
-    AnalysisTypeId operand_type)
+BUSTER_GLOBAL_LOCAL IrBinaryOperation ir_ordering_operation(AnalysisResult* analysis, AstNodeId operation, AnalysisTypeId operand_type)
 {
-    AnalysisTypeKind kind =
-        analysis_type_from_id(analysis, operand_type)->kind;
-    AnalysisTypeId scalar_type = kind ==
-            ANALYSIS_TYPE_VECTOR ?
-        analysis_type_from_id(
-            analysis,
-            operand_type)->as.vector.element_type :
-        operand_type;
-    AnalysisTypeKind scalar_kind =
-        analysis_type_from_id(
-            analysis,
-            scalar_type)->kind;
+    AnalysisTypeKind kind = analysis_type_from_id(analysis, operand_type)->kind;
+    AnalysisTypeId scalar_type = kind == ANALYSIS_TYPE_VECTOR ? analysis_type_from_id(analysis, operand_type)->as.vector.element_type : operand_type;
+    AnalysisTypeKind scalar_kind = analysis_type_from_id(analysis, scalar_type)->kind;
     IrBinaryOperation less;
     if (kind == ANALYSIS_TYPE_VECTOR)
     {
-        less = scalar_kind == ANALYSIS_TYPE_FLOAT ?
-            IR_BINARY_VECTOR_FLOAT_LESS :
-            ir_type_is_signed_integer(
-                analysis,
-                scalar_type) ?
-                IR_BINARY_VECTOR_SIGNED_LESS :
-                IR_BINARY_VECTOR_UNSIGNED_LESS;
+        less = scalar_kind == ANALYSIS_TYPE_FLOAT                 ? IR_BINARY_VECTOR_FLOAT_LESS
+               : ir_type_is_signed_integer(analysis, scalar_type) ? IR_BINARY_VECTOR_SIGNED_LESS
+                                                                  : IR_BINARY_VECTOR_UNSIGNED_LESS;
     }
     else if (kind == ANALYSIS_TYPE_FLOAT)
     {
@@ -872,109 +722,88 @@ BUSTER_GLOBAL_LOCAL IrBinaryOperation ir_ordering_operation(
     }
     else
     {
-        less = ir_type_is_signed_integer(analysis, operand_type) ?
-            IR_BINARY_SIGNED_LESS :
-            IR_BINARY_UNSIGNED_LESS;
+        less = ir_type_is_signed_integer(analysis, operand_type) ? IR_BINARY_SIGNED_LESS : IR_BINARY_UNSIGNED_LESS;
     }
     switch (operation)
     {
-        case AST_NODE_BINARY_LESS: return less;
-        case AST_NODE_BINARY_LESS_EQUAL:
-            return (IrBinaryOperation)(less + 1);
-        case AST_NODE_BINARY_GREATER:
-            return (IrBinaryOperation)(less + 2);
-        case AST_NODE_BINARY_GREATER_EQUAL:
-            return (IrBinaryOperation)(less + 3);
-        default: break;
+    case AST_NODE_BINARY_LESS:
+        return less;
+    case AST_NODE_BINARY_LESS_EQUAL:
+        return (IrBinaryOperation)(less + 1);
+    case AST_NODE_BINARY_GREATER:
+        return (IrBinaryOperation)(less + 2);
+    case AST_NODE_BINARY_GREATER_EQUAL:
+        return (IrBinaryOperation)(less + 3);
+    default:
+        break;
     }
     return IR_BINARY_COUNT;
 }
 
-BUSTER_GLOBAL_LOCAL IrBinaryOperation ir_binary_operation(
-    AnalysisResult* analysis,
-    AstNodeId operation,
-    AnalysisTypeId operand_type)
+BUSTER_GLOBAL_LOCAL IrBinaryOperation ir_binary_operation(AnalysisResult* analysis, AstNodeId operation, AnalysisTypeId operand_type)
 {
     AnalysisType* type = analysis_type_from_id(analysis, operand_type);
     AnalysisTypeKind kind = type->kind;
-    AnalysisTypeId scalar_type = kind == ANALYSIS_TYPE_VECTOR ?
-        type->as.vector.element_type : operand_type;
-    AnalysisTypeKind scalar_kind =
-        analysis_type_from_id(analysis, scalar_type)->kind;
+    AnalysisTypeId scalar_type = kind == ANALYSIS_TYPE_VECTOR ? type->as.vector.element_type : operand_type;
+    AnalysisTypeKind scalar_kind = analysis_type_from_id(analysis, scalar_type)->kind;
     bool is_vector = kind == ANALYSIS_TYPE_VECTOR;
     bool is_float = scalar_kind == ANALYSIS_TYPE_FLOAT;
     bool is_signed = ir_type_is_signed_integer(analysis, scalar_type);
     switch (operation)
     {
-        case AST_NODE_BINARY_PLUS:
-            return is_vector ?
-                    (is_float ? IR_BINARY_VECTOR_FLOAT_ADD :
-                        IR_BINARY_VECTOR_INTEGER_ADD) :
-                is_float ? IR_BINARY_FLOAT_ADD : IR_BINARY_INTEGER_ADD;
-        case AST_NODE_BINARY_MINUS:
-            return is_vector ?
-                    (is_float ? IR_BINARY_VECTOR_FLOAT_SUBTRACT :
-                        IR_BINARY_VECTOR_INTEGER_SUBTRACT) :
-                is_float ? IR_BINARY_FLOAT_SUBTRACT : IR_BINARY_INTEGER_SUBTRACT;
-        case AST_NODE_BINARY_ASTERISK:
-            return is_vector ?
-                    (is_float ? IR_BINARY_VECTOR_FLOAT_MULTIPLY :
-                        IR_BINARY_VECTOR_INTEGER_MULTIPLY) :
-                is_float ? IR_BINARY_FLOAT_MULTIPLY : IR_BINARY_INTEGER_MULTIPLY;
-        case AST_NODE_BINARY_SLASH:
-            return is_vector ?
-                    (is_float ? IR_BINARY_VECTOR_FLOAT_DIVIDE :
-                        is_signed ? IR_BINARY_VECTOR_SIGNED_DIVIDE :
-                            IR_BINARY_VECTOR_UNSIGNED_DIVIDE) :
-                is_float ? IR_BINARY_FLOAT_DIVIDE :
-                    is_signed ? IR_BINARY_SIGNED_DIVIDE : IR_BINARY_UNSIGNED_DIVIDE;
-        case AST_NODE_BINARY_PERCENT:
-            return is_vector ?
-                    (is_signed ? IR_BINARY_VECTOR_SIGNED_REMAINDER :
-                        IR_BINARY_VECTOR_UNSIGNED_REMAINDER) :
-                is_signed ? IR_BINARY_SIGNED_REMAINDER :
-                    IR_BINARY_UNSIGNED_REMAINDER;
-        case AST_NODE_BINARY_SHIFT_LEFT:
-            return is_vector ? IR_BINARY_VECTOR_SHIFT_LEFT : IR_BINARY_SHIFT_LEFT;
-        case AST_NODE_BINARY_SHIFT_RIGHT:
-            return is_vector ?
-                    (is_signed ? IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT :
-                        IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT) :
-                is_signed ? IR_BINARY_SIGNED_SHIFT_RIGHT :
-                    IR_BINARY_UNSIGNED_SHIFT_RIGHT;
-        case AST_NODE_BINARY_EQUAL:
-        case AST_NODE_BINARY_NOT_EQUAL:
-            if (is_vector && is_float)
-            {
-                return operation == AST_NODE_BINARY_EQUAL ?
-                    IR_BINARY_VECTOR_FLOAT_EQUAL :
-                    IR_BINARY_VECTOR_FLOAT_NOT_EQUAL;
-            }
-            return ir_equality_operation(
-                analysis,
-                operation,
-                operand_type);
-        case AST_NODE_BINARY_LESS:
-        case AST_NODE_BINARY_LESS_EQUAL:
-        case AST_NODE_BINARY_GREATER:
-        case AST_NODE_BINARY_GREATER_EQUAL:
-            return ir_ordering_operation(analysis, operation, operand_type);
-        case AST_NODE_BINARY_AMPERSAND:
-            return is_vector ?
-                IR_BINARY_VECTOR_INTEGER_BITWISE_AND :
-                IR_BINARY_INTEGER_BITWISE_AND;
-        case AST_NODE_BINARY_BAR:
-            return is_vector ?
-                IR_BINARY_VECTOR_INTEGER_BITWISE_OR :
-                IR_BINARY_INTEGER_BITWISE_OR;
-        case AST_NODE_BINARY_CARET:
-            return is_vector ?
-                IR_BINARY_VECTOR_INTEGER_BITWISE_XOR :
-                IR_BINARY_INTEGER_BITWISE_XOR;
-        case AST_NODE_BINARY_BOOLEAN_AND: return IR_BINARY_BOOLEAN_AND;
-        case AST_NODE_BINARY_BOOLEAN_OR: return IR_BINARY_BOOLEAN_OR;
-        case AST_NODE_BINARY_RANGE: return IR_BINARY_RANGE;
-        default: break;
+    case AST_NODE_BINARY_PLUS:
+        return is_vector ? (is_float ? IR_BINARY_VECTOR_FLOAT_ADD : IR_BINARY_VECTOR_INTEGER_ADD) : is_float ? IR_BINARY_FLOAT_ADD : IR_BINARY_INTEGER_ADD;
+    case AST_NODE_BINARY_MINUS:
+        return is_vector  ? (is_float ? IR_BINARY_VECTOR_FLOAT_SUBTRACT : IR_BINARY_VECTOR_INTEGER_SUBTRACT)
+               : is_float ? IR_BINARY_FLOAT_SUBTRACT
+                          : IR_BINARY_INTEGER_SUBTRACT;
+    case AST_NODE_BINARY_ASTERISK:
+        return is_vector  ? (is_float ? IR_BINARY_VECTOR_FLOAT_MULTIPLY : IR_BINARY_VECTOR_INTEGER_MULTIPLY)
+               : is_float ? IR_BINARY_FLOAT_MULTIPLY
+                          : IR_BINARY_INTEGER_MULTIPLY;
+    case AST_NODE_BINARY_SLASH:
+        return is_vector   ? (is_float    ? IR_BINARY_VECTOR_FLOAT_DIVIDE
+                              : is_signed ? IR_BINARY_VECTOR_SIGNED_DIVIDE
+                                          : IR_BINARY_VECTOR_UNSIGNED_DIVIDE)
+               : is_float  ? IR_BINARY_FLOAT_DIVIDE
+               : is_signed ? IR_BINARY_SIGNED_DIVIDE
+                           : IR_BINARY_UNSIGNED_DIVIDE;
+    case AST_NODE_BINARY_PERCENT:
+        return is_vector   ? (is_signed ? IR_BINARY_VECTOR_SIGNED_REMAINDER : IR_BINARY_VECTOR_UNSIGNED_REMAINDER)
+               : is_signed ? IR_BINARY_SIGNED_REMAINDER
+                           : IR_BINARY_UNSIGNED_REMAINDER;
+    case AST_NODE_BINARY_SHIFT_LEFT:
+        return is_vector ? IR_BINARY_VECTOR_SHIFT_LEFT : IR_BINARY_SHIFT_LEFT;
+    case AST_NODE_BINARY_SHIFT_RIGHT:
+        return is_vector   ? (is_signed ? IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT : IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT)
+               : is_signed ? IR_BINARY_SIGNED_SHIFT_RIGHT
+                           : IR_BINARY_UNSIGNED_SHIFT_RIGHT;
+    case AST_NODE_BINARY_EQUAL:
+    case AST_NODE_BINARY_NOT_EQUAL:
+        if (is_vector && is_float)
+        {
+            return operation == AST_NODE_BINARY_EQUAL ? IR_BINARY_VECTOR_FLOAT_EQUAL : IR_BINARY_VECTOR_FLOAT_NOT_EQUAL;
+        }
+        return ir_equality_operation(analysis, operation, operand_type);
+    case AST_NODE_BINARY_LESS:
+    case AST_NODE_BINARY_LESS_EQUAL:
+    case AST_NODE_BINARY_GREATER:
+    case AST_NODE_BINARY_GREATER_EQUAL:
+        return ir_ordering_operation(analysis, operation, operand_type);
+    case AST_NODE_BINARY_AMPERSAND:
+        return is_vector ? IR_BINARY_VECTOR_INTEGER_BITWISE_AND : IR_BINARY_INTEGER_BITWISE_AND;
+    case AST_NODE_BINARY_BAR:
+        return is_vector ? IR_BINARY_VECTOR_INTEGER_BITWISE_OR : IR_BINARY_INTEGER_BITWISE_OR;
+    case AST_NODE_BINARY_CARET:
+        return is_vector ? IR_BINARY_VECTOR_INTEGER_BITWISE_XOR : IR_BINARY_INTEGER_BITWISE_XOR;
+    case AST_NODE_BINARY_BOOLEAN_AND:
+        return IR_BINARY_BOOLEAN_AND;
+    case AST_NODE_BINARY_BOOLEAN_OR:
+        return IR_BINARY_BOOLEAN_OR;
+    case AST_NODE_BINARY_RANGE:
+        return IR_BINARY_RANGE;
+    default:
+        break;
     }
     return IR_BINARY_COUNT;
 }
@@ -994,10 +823,7 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
     AnalysisTypedExpression* expression = ir_typed_expression_find(builder->body, ast);
     BUSTER_CHECK(expression);
     IrLowered* results = arena_allocate(builder->scratch_arena, IrLowered, ast.count);
-    IrExpressionTask* tasks = arena_allocate(
-        builder->scratch_arena,
-        IrExpressionTask,
-        ast.count * 3 + 1);
+    IrExpressionTask* tasks = arena_allocate(builder->scratch_arena, IrExpressionTask, ast.count * 3 + 1);
     u32 task_count = 1;
     tasks[0] = (IrExpressionTask){
         .node_index = ast.count - 1,
@@ -1013,8 +839,7 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
         u32 arity = ir_node_arity(node);
         u32* roots = arena_allocate(builder->scratch_arena, u32, arity);
         ir_expression_child_roots(expression, node_index, roots, arity);
-        bool short_circuit = node->id == AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT ||
-            node->id == AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT;
+        bool short_circuit = node->id == AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT || node->id == AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT;
         if (task.kind == IR_EXPRESSION_TASK_VISIT)
         {
             BUSTER_CHECK(task_count + arity + 1 <= ast.count * 3 + 1);
@@ -1039,15 +864,8 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
                 };
                 for (u32 child = arity; child > 0; child -= 1)
                 {
-                    if (node->id == AST_NODE_CALL &&
-                        typed->instantiation.value !=
-                            ANALYSIS_ID_UNDERLYING_INVALID &&
-                        child > 1 &&
-                        ir_call_argument_is_compile_time(
-                            builder,
-                            expression,
-                            roots[0],
-                            child - 2))
+                    if (node->id == AST_NODE_CALL && typed->instantiation.value != ANALYSIS_ID_UNDERLYING_INVALID && child > 1 &&
+                        ir_call_argument_is_compile_time(builder, expression, roots[0], child - 2))
                     {
                         continue;
                     }
@@ -1065,32 +883,17 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
             IrBlockId right_block = ir_block_create(builder);
             IrBlockId short_block = ir_block_create(builder);
             IrBlockId merge = ir_block_create(builder);
-            IrBlockId targets[2] = { right_block, short_block };
+            IrBlockId targets[2] = {right_block, short_block};
             bool is_or = node->id == AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT;
             if (is_or)
             {
                 targets[0] = short_block;
                 targets[1] = right_block;
             }
-            ir_terminate(
-                builder,
-                IR_OPCODE_BRANCH_IF,
-                builder->entity->range,
-                &condition,
-                1,
-                targets,
-                2);
+            ir_terminate(builder, IR_OPCODE_BRANCH_IF, builder->entity->range, &condition, 1, targets, 2);
             builder->current = short_block;
             ir_block_seal(builder, short_block);
-            IrInstruction* constant = ir_emit(
-                builder,
-                IR_OPCODE_CONSTANT_INTEGER,
-                typed->type,
-                IR_VALUE_VALUE,
-                builder->entity->range,
-                0,
-                0,
-                true);
+            IrInstruction* constant = ir_emit(builder, IR_OPCODE_CONSTANT_INTEGER, typed->type, IR_VALUE_VALUE, builder->entity->range, 0, 0, true);
             constant->immediates = arena_allocate(builder->result_arena, u64, 1);
             constant->immediates[0] = is_or;
             constant->immediate_count = 1;
@@ -1114,28 +917,13 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
         }
         if (task.kind == IR_EXPRESSION_TASK_SHORT_AFTER_RIGHT)
         {
-            IrValueId right = ir_materialize(
-                builder,
-                results[task.right_index],
-                builder->entity->range);
+            IrValueId right = ir_materialize(builder, results[task.right_index], builder->entity->range);
             IrBlockId right_predecessor = builder->current;
             ir_branch(builder, task.merge, builder->entity->range);
             ir_block_seal(builder, task.merge);
-            IrBlockParameter* parameter = ir_block_parameter_create(
-                builder,
-                task.merge,
-                ANALYSIS_LOCAL_ID_INVALID,
-                typed->type);
-            ir_block_parameter_incoming_add(
-                builder,
-                parameter,
-                task.short_block,
-                task.short_value);
-            ir_block_parameter_incoming_add(
-                builder,
-                parameter,
-                right_predecessor,
-                right);
+            IrBlockParameter* parameter = ir_block_parameter_create(builder, task.merge, ANALYSIS_LOCAL_ID_INVALID, typed->type);
+            ir_block_parameter_incoming_add(builder, parameter, task.short_block, task.short_value);
+            ir_block_parameter_incoming_add(builder, parameter, right_predecessor, right);
             results[node_index] = (IrLowered){
                 .value = parameter->value,
                 .type = typed->type,
@@ -1148,582 +936,365 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
         IrLowered lowered = invalid;
         lowered.type = typed->type;
         lowered.local = typed->local;
-        bool semantic_place = typed->category == ANALYSIS_VALUE_CATEGORY_IMMUTABLE_PLACE ||
-            typed->category == ANALYSIS_VALUE_CATEGORY_MUTABLE_PLACE;
+        bool semantic_place = typed->category == ANALYSIS_VALUE_CATEGORY_IMMUTABLE_PLACE || typed->category == ANALYSIS_VALUE_CATEGORY_MUTABLE_PLACE;
         lowered.category = semantic_place ? IR_VALUE_PLACE : IR_VALUE_VALUE;
         IrInstruction* instruction = 0;
         ParserSourceRange source = builder->entity->range;
         switch (node->id)
         {
-            case AST_NODE_CONSTANT_INTEGER:
-            case AST_NODE_CONSTANT_CHARACTER:
+        case AST_NODE_CONSTANT_INTEGER:
+        case AST_NODE_CONSTANT_CHARACTER:
+        {
+            instruction = ir_emit(builder, IR_OPCODE_CONSTANT_INTEGER, typed->type, IR_VALUE_VALUE, source, 0, 0, true);
+            instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
+            instruction->immediates[0] = typed->constant.integer;
+            instruction->immediate_count = 1;
+            instruction->immediate_is_negative = typed->constant.is_negative;
+        }
+        break;
+        case AST_NODE_CONSTANT_FLOAT:
+        {
+            instruction = ir_emit(builder, IR_OPCODE_CONSTANT_FLOAT, typed->type, IR_VALUE_VALUE, source, 0, 0, true);
+            instruction->literal = node->floating.spelling;
+            instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
+            AnalysisType* float_type = analysis_type_from_id(builder->analysis, typed->type);
+            BUSTER_CHECK(typed->constant.kind == ANALYSIS_CONSTANT_FLOAT && float_type->kind == ANALYSIS_TYPE_FLOAT);
+            if (float_type->as.float_bit_width == 32)
             {
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_CONSTANT_INTEGER,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    source,
-                    0,
-                    0,
-                    true);
+                f32 value = (f32)typed->constant.floating;
+                u32 bits = 0;
+                memcpy(&bits, &value, sizeof(bits));
+                instruction->immediates[0] = bits;
+            }
+            else
+            {
+                f64 value = typed->constant.floating;
+                BUSTER_CHECK(float_type->as.float_bit_width == 64);
+                memcpy(instruction->immediates, &value, sizeof(value));
+            }
+            instruction->immediate_count = 1;
+        }
+        break;
+        case AST_NODE_CONSTANT_STRING:
+        {
+            instruction = ir_emit(builder, IR_OPCODE_CONSTANT_STRING, typed->type, IR_VALUE_VALUE, source, 0, 0, true);
+            instruction->literal = node->string.value;
+        }
+        break;
+        case AST_NODE_IDENTIFIER:
+        {
+            if (typed->is_namespace)
+            {
+                lowered.value = IR_VALUE_ID_INVALID;
+                lowered.category = IR_VALUE_VALUE;
+            }
+            else if (typed->local.value != ANALYSIS_ID_UNDERLYING_INVALID && builder->body->locals[typed->local.value].is_compile_time)
+            {
+                BUSTER_CHECK(typed->constant.kind != ANALYSIS_CONSTANT_NONE);
+                instruction = ir_emit(builder, IR_OPCODE_CONSTANT_INTEGER, typed->type, IR_VALUE_VALUE, source, 0, 0, true);
                 instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
                 instruction->immediates[0] = typed->constant.integer;
                 instruction->immediate_count = 1;
                 instruction->immediate_is_negative = typed->constant.is_negative;
-            } break;
-            case AST_NODE_CONSTANT_FLOAT:
+            }
+            else if (typed->local.value != ANALYSIS_ID_UNDERLYING_INVALID)
             {
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_CONSTANT_FLOAT,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    source,
-                    0,
-                    0,
-                    true);
-                instruction->literal = node->floating.spelling;
-                instruction->immediates = arena_allocate(
-                    builder->result_arena,
-                    u64,
-                    1);
-                AnalysisType* float_type = analysis_type_from_id(
-                    builder->analysis,
-                    typed->type);
-                BUSTER_CHECK(
-                    typed->constant.kind == ANALYSIS_CONSTANT_FLOAT &&
-                    float_type->kind == ANALYSIS_TYPE_FLOAT);
-                if (float_type->as.float_bit_width == 32)
+                if (builder->function->local_uses_memory[typed->local.value])
                 {
-                    f32 value = (f32)typed->constant.floating;
-                    u32 bits = 0;
-                    memcpy(&bits, &value, sizeof(bits));
-                    instruction->immediates[0] = bits;
+                    lowered.value = builder->function->local_places[typed->local.value];
+                    lowered.category = IR_VALUE_PLACE;
                 }
                 else
                 {
-                    f64 value = typed->constant.floating;
-                    BUSTER_CHECK(float_type->as.float_bit_width == 64);
-                    memcpy(
-                        instruction->immediates,
-                        &value,
-                        sizeof(value));
-                }
-                instruction->immediate_count = 1;
-            } break;
-            case AST_NODE_CONSTANT_STRING:
-            {
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_CONSTANT_STRING,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    source,
-                    0,
-                    0,
-                    true);
-                instruction->literal = node->string.value;
-            } break;
-            case AST_NODE_IDENTIFIER:
-            {
-                if (typed->is_namespace)
-                {
-                    lowered.value = IR_VALUE_ID_INVALID;
+                    lowered.value = ir_ssa_read(builder, builder->current, typed->local);
+                    BUSTER_CHECK(lowered.value.value != IR_ID_UNDERLYING_INVALID);
                     lowered.category = IR_VALUE_VALUE;
                 }
-                else if (typed->local.value != ANALYSIS_ID_UNDERLYING_INVALID &&
-                    builder->body->locals[typed->local.value].is_compile_time)
-                {
-                    BUSTER_CHECK(typed->constant.kind != ANALYSIS_CONSTANT_NONE);
-                    instruction = ir_emit(
-                        builder,
-                        IR_OPCODE_CONSTANT_INTEGER,
-                        typed->type,
-                        IR_VALUE_VALUE,
-                        source,
-                        0,
-                        0,
-                        true);
-                    instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
-                    instruction->immediates[0] = typed->constant.integer;
-                    instruction->immediate_count = 1;
-                    instruction->immediate_is_negative = typed->constant.is_negative;
-                }
-                else if (typed->local.value != ANALYSIS_ID_UNDERLYING_INVALID)
-                {
-                    if (builder->function->local_uses_memory[typed->local.value])
-                    {
-                        lowered.value = builder->function->local_places[typed->local.value];
-                        lowered.category = IR_VALUE_PLACE;
-                    }
-                    else
-                    {
-                        lowered.value = ir_ssa_read(builder, builder->current, typed->local);
-                        BUSTER_CHECK(lowered.value.value != IR_ID_UNDERLYING_INVALID);
-                        lowered.category = IR_VALUE_VALUE;
-                    }
-                }
-                else if (typed->constant.kind != ANALYSIS_CONSTANT_NONE)
-                {
-                    instruction = ir_emit(
-                        builder,
-                        IR_OPCODE_CONSTANT_INTEGER,
-                        typed->type,
-                        IR_VALUE_VALUE,
-                        source,
-                        0,
-                        0,
-                        true);
-                    instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
-                    instruction->immediates[0] = typed->constant.integer;
-                    instruction->immediate_count = 1;
-                }
-                else
-                {
-                    instruction = ir_emit(
-                        builder,
-                        IR_OPCODE_FUNCTION,
-                        typed->type,
-                        IR_VALUE_VALUE,
-                        source,
-                        0,
-                        0,
-                        true);
-                    instruction->entity = typed->entity;
-                }
-            } break;
-            case AST_NODE_UNDEFINED:
+            }
+            else if (typed->constant.kind != ANALYSIS_CONSTANT_NONE)
             {
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_UNDEFINED,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    source,
-                    0,
-                    0,
-                    true);
-            } break;
-            case AST_NODE_ENUM_LITERAL:
-            {
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_ENUM,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    node->enum_literal.range,
-                    0,
-                    0,
-                    true);
+                instruction = ir_emit(builder, IR_OPCODE_CONSTANT_INTEGER, typed->type, IR_VALUE_VALUE, source, 0, 0, true);
                 instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
                 instruction->immediates[0] = typed->constant.integer;
                 instruction->immediate_count = 1;
-            } break;
-            case AST_NODE_ARRAY_LITERAL:
-            case AST_NODE_AGGREGATE_LITERAL:
+            }
+            else
             {
-                IrValueId* operands = arena_allocate(builder->scratch_arena, IrValueId, arity);
-                for (u32 index = 0; index < arity; index += 1)
-                {
-                    operands[index] = ir_materialize(builder, results[roots[index]], source);
-                }
-                instruction = ir_emit(
-                    builder,
-                    node->id == AST_NODE_ARRAY_LITERAL ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    source,
-                    operands,
-                    arity,
-                    true);
-                if (node->id == AST_NODE_AGGREGATE_LITERAL && arity)
-                {
-                    instruction->immediates = arena_allocate(builder->result_arena, u64, arity);
-                    u32 field_index = 0;
-                    for (AstAggregateLiteralField* field = node->aggregate_literal.first_field;
-                        field;
-                        field = field->next)
-                    {
-                        BUSTER_CHECK(field_index < arity);
-                        instruction->immediates[field_index] = ir_field_index(
-                            builder->analysis,
-                            typed->type,
-                            field->name.text);
-                        field_index += 1;
-                    }
-                    BUSTER_CHECK(field_index == arity);
-                    instruction->immediate_count = arity;
-                }
-            } break;
-            case AST_NODE_ARRAY_INDEX:
+                instruction = ir_emit(builder, IR_OPCODE_FUNCTION, typed->type, IR_VALUE_VALUE, source, 0, 0, true);
+                instruction->entity = typed->entity;
+            }
+        }
+        break;
+        case AST_NODE_UNDEFINED:
+        {
+            instruction = ir_emit(builder, IR_OPCODE_UNDEFINED, typed->type, IR_VALUE_VALUE, source, 0, 0, true);
+        }
+        break;
+        case AST_NODE_ENUM_LITERAL:
+        {
+            instruction = ir_emit(builder, IR_OPCODE_ENUM, typed->type, IR_VALUE_VALUE, node->enum_literal.range, 0, 0, true);
+            instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
+            instruction->immediates[0] = typed->constant.integer;
+            instruction->immediate_count = 1;
+        }
+        break;
+        case AST_NODE_ARRAY_LITERAL:
+        case AST_NODE_AGGREGATE_LITERAL:
+        {
+            IrValueId* operands = arena_allocate(builder->scratch_arena, IrValueId, arity);
+            for (u32 index = 0; index < arity; index += 1)
             {
-                IrValueId operands[2] = {
-                    results[roots[0]].value,
-                    ir_materialize(builder, results[roots[1]], source),
-                };
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_INDEX,
-                    typed->type,
-                    lowered.category,
-                    node->array_index.range,
-                    operands,
-                    2,
-                    true);
-            } break;
-            case AST_NODE_ARRAY_SLICE:
+                operands[index] = ir_materialize(builder, results[roots[index]], source);
+            }
+            instruction = ir_emit(builder, node->id == AST_NODE_ARRAY_LITERAL ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, typed->type, IR_VALUE_VALUE, source,
+                                  operands, arity, true);
+            if (node->id == AST_NODE_AGGREGATE_LITERAL && arity)
             {
-                IrValueId* operands = arena_allocate(builder->scratch_arena, IrValueId, arity);
-                operands[0] = results[roots[0]].value;
-                for (u32 index = 1; index < arity; index += 1)
+                instruction->immediates = arena_allocate(builder->result_arena, u64, arity);
+                u32 field_index = 0;
+                for (AstAggregateLiteralField* field = node->aggregate_literal.first_field; field; field = field->next)
                 {
-                    operands[index] = ir_materialize(builder, results[roots[index]], source);
+                    BUSTER_CHECK(field_index < arity);
+                    instruction->immediates[field_index] = ir_field_index(builder->analysis, typed->type, field->name.text);
+                    field_index += 1;
                 }
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_SLICE,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    node->array_slice.range,
-                    operands,
-                    arity,
-                    true);
-                instruction->immediates = arena_allocate(builder->result_arena, u64, 2);
-                instruction->immediates[0] = node->array_slice.has_start;
-                instruction->immediates[1] = node->array_slice.has_end;
-                instruction->immediate_count = 2;
-            } break;
-            case AST_NODE_MEMBER_ACCESS:
+                BUSTER_CHECK(field_index == arity);
+                instruction->immediate_count = arity;
+            }
+        }
+        break;
+        case AST_NODE_ARRAY_INDEX:
+        {
+            IrValueId operands[2] = {
+                results[roots[0]].value,
+                ir_materialize(builder, results[roots[1]], source),
+            };
+            instruction = ir_emit(builder, IR_OPCODE_INDEX, typed->type, lowered.category, node->array_index.range, operands, 2, true);
+        }
+        break;
+        case AST_NODE_ARRAY_SLICE:
+        {
+            IrValueId* operands = arena_allocate(builder->scratch_arena, IrValueId, arity);
+            operands[0] = results[roots[0]].value;
+            for (u32 index = 1; index < arity; index += 1)
             {
-                AnalysisTypedNode* base_typed =
-                        expression->nodes + roots[0];
-                if (base_typed->is_namespace &&
-                    typed->constant.kind != ANALYSIS_CONSTANT_NONE)
-                {
-                    instruction = ir_emit(
-                        builder,
-                        IR_OPCODE_CONSTANT_INTEGER,
-                        typed->type,
-                        IR_VALUE_VALUE,
-                        node->member_access.range,
-                        0,
-                        0,
-                        true);
-                    instruction->immediates = arena_allocate(
-                        builder->result_arena,
-                        u64,
-                        1);
-                    instruction->immediates[0] = typed->constant.integer;
-                    instruction->immediate_count = 1;
-                    instruction->immediate_is_negative =
-                        typed->constant.is_negative;
-                }
-                else if (base_typed->is_namespace)
-                {
-                    instruction = ir_emit(
-                            builder,
-                            IR_OPCODE_FUNCTION,
-                            typed->type,
-                            IR_VALUE_VALUE,
-                            node->member_access.range,
-                            0,
-                            0,
-                            true);
-                    instruction->entity = typed->entity;
-                }
-                else
-                {
-                    IrValueId operand = results[roots[0]].value;
-                    instruction = ir_emit(
-                        builder,
-                        IR_OPCODE_FIELD,
-                        typed->type,
-                        lowered.category,
-                        node->member_access.range,
-                        &operand,
-                        1,
-                        true);
-                    instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
-                    instruction->immediates[0] = ir_field_index(
-                        builder->analysis,
-                        results[roots[0]].type,
-                        node->member_access.member.text);
-                    instruction->immediate_count = 1;
-                }
-            } break;
-            case AST_NODE_CALL:
+                operands[index] = ir_materialize(builder, results[roots[index]], source);
+            }
+            instruction = ir_emit(builder, IR_OPCODE_SLICE, typed->type, IR_VALUE_VALUE, node->array_slice.range, operands, arity, true);
+            instruction->immediates = arena_allocate(builder->result_arena, u64, 2);
+            instruction->immediates[0] = node->array_slice.has_start;
+            instruction->immediates[1] = node->array_slice.has_end;
+            instruction->immediate_count = 2;
+        }
+        break;
+        case AST_NODE_MEMBER_ACCESS:
+        {
+            AnalysisTypedNode* base_typed = expression->nodes + roots[0];
+            if (base_typed->is_namespace && typed->constant.kind != ANALYSIS_CONSTANT_NONE)
             {
-                IrValueId* operands = arena_allocate(builder->scratch_arena, IrValueId, arity);
-                u32 operand_count = 0;
-                operands[operand_count++] =
-                    ir_materialize(builder, results[roots[0]], source);
-                AnalysisTypedNode* callee_typed = expression->nodes + roots[0];
-                AnalysisResult* callee_module = 0;
-                AnalysisEntity* callee_entity = 0;
-                if (typed->instantiation.value != ANALYSIS_ID_UNDERLYING_INVALID)
-                {
-                    callee_module = builder->analysis;
-                    if (callee_typed->entity.module.value !=
-                        builder->analysis->module.id.value)
-                    {
-                        for (u32 module_index = 0;
-                            module_index < builder->analysis->program_module_count;
-                            module_index += 1)
-                        {
-                            AnalysisResult* candidate =
-                                builder->analysis->program_modules[module_index];
-                            if (candidate &&
-                                candidate->module.id.value ==
-                                    callee_typed->entity.module.value)
-                            {
-                                callee_module = candidate;
-                                break;
-                            }
-                        }
-                    }
-                    if (callee_module &&
-                        callee_typed->entity.index.value <
-                            callee_module->module.entity_count)
-                    {
-                        callee_entity = callee_module->module.entities +
-                            callee_typed->entity.index.value;
-                    }
-                }
-                AstTypeArgument* argument = callee_entity ?
-                    callee_entity->ast.code->type->function.first_argument : 0;
-                AnalysisType* callee_signature = analysis_type_from_id(
-                    builder->analysis,
-                    callee_typed->type);
-                for (u32 index = 1; index < arity; index += 1)
-                {
-                    bool compile_time = argument && argument->is_compile_time;
-                    if (!compile_time)
-                    {
-                        IrValueId value =
-                            ir_materialize(builder, results[roots[index]], source);
-                        u32 source_argument = index - 1;
-                        if (callee_signature->kind == ANALYSIS_TYPE_FUNCTION &&
-                            callee_signature->as.function.is_variadic &&
-                            source_argument >=
-                                callee_signature->as.function.argument_count)
-                        {
-                            AnalysisTypeId source_type =
-                                builder->function->values[value.value].type;
-                            AnalysisType* source_value_type =
-                                analysis_type_from_id(
-                                    builder->analysis,
-                                    source_type);
-                            AnalysisTypeId promoted = source_type;
-                            if (source_value_type->kind == ANALYSIS_TYPE_FLOAT &&
-                                source_value_type->as.float_bit_width == 32)
-                            {
-                                promoted =
-                                    builder->analysis->types.builtin.f64_type;
-                            }
-                            else if (source_value_type->kind == ANALYSIS_TYPE_BOOL ||
-                                (source_value_type->kind == ANALYSIS_TYPE_INTEGER &&
-                                    source_value_type->as.integer.bit_width < 32))
-                            {
-                                promoted =
-                                    builder->analysis->types.builtin.s32_type;
-                            }
-                            if (!ir_type_id_equal(source_type, promoted))
-                            {
-                                IrInstruction* conversion = ir_emit(
-                                    builder,
-                                    IR_OPCODE_CAST,
-                                    promoted,
-                                    IR_VALUE_VALUE,
-                                    source,
-                                    &value,
-                                    1,
-                                    true);
-                                conversion->conversion_operation =
-                                    ir_conversion_operation(
-                                        builder->analysis,
-                                        source_type,
-                                        promoted);
-                                value = conversion->result;
-                            }
-                        }
-                        operands[operand_count++] = value;
-                    }
-                    if (argument)
-                    {
-                        argument = argument->next;
-                    }
-                }
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_CALL,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    node->call.range,
-                    operands,
-                    operand_count,
-                    analysis_type_from_id(builder->analysis, typed->type)->kind != ANALYSIS_TYPE_VOID);
-                instruction->entity = callee_typed->entity;
-                instruction->instantiation = typed->instantiation;
-                IrValue* callee_value =
-                    builder->function->values + operands[0].value;
-                if (callee_value->definition.value !=
-                    IR_ID_UNDERLYING_INVALID)
-                {
-                    IrInstruction* reference =
-                        builder->function->instructions +
-                        callee_value->definition.value;
-                    if (reference->opcode == IR_OPCODE_FUNCTION)
-                    {
-                        reference->instantiation =
-                            typed->instantiation;
-                    }
-                }
-            } break;
-            case AST_NODE_INTRINSIC_CALL:
+                instruction = ir_emit(builder, IR_OPCODE_CONSTANT_INTEGER, typed->type, IR_VALUE_VALUE, node->member_access.range, 0, 0, true);
+                instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
+                instruction->immediates[0] = typed->constant.integer;
+                instruction->immediate_count = 1;
+                instruction->immediate_is_negative = typed->constant.is_negative;
+            }
+            else if (base_typed->is_namespace)
             {
-                IrValueId* operands = arena_allocate(builder->scratch_arena, IrValueId, arity);
-                for (u32 index = 0; index < arity; index += 1)
-                {
-                    operands[index] = ir_materialize(builder, results[roots[index]], source);
-                }
-                IrOpcode opcode = IR_OPCODE_REVERSE;
-                if (string_equal(node->intrinsic_call.name.text, S8("cast")))
-                {
-                    opcode = IR_OPCODE_CAST;
-                }
-                else if (string_equal(node->intrinsic_call.name.text, S8("va_start")))
-                {
-                    opcode = IR_OPCODE_VA_START;
-                }
-                else if (string_equal(node->intrinsic_call.name.text, S8("va_copy")))
-                {
-                    opcode = IR_OPCODE_VA_COPY;
-                }
-                else if (string_equal(node->intrinsic_call.name.text, S8("va_end")))
-                {
-                    opcode = IR_OPCODE_VA_END;
-                }
-                else if (string_equal(node->intrinsic_call.name.text, S8("va_arg")))
-                {
-                    opcode = IR_OPCODE_VA_ARG;
-                }
-                instruction = ir_emit(
-                    builder,
-                    opcode,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    node->intrinsic_call.range,
-                    operands,
-                    arity,
-                    analysis_type_from_id(builder->analysis, typed->type)->kind !=
-                        ANALYSIS_TYPE_VOID);
-                if (opcode == IR_OPCODE_CAST)
-                {
-                    BUSTER_CHECK(arity == 1);
-                    instruction->conversion_operation =
-                        ir_conversion_operation(
-                            builder->analysis,
-                            expression->nodes[roots[0]].type,
-                            typed->type);
-                }
-            } break;
-            case AST_NODE_ADDRESS_OF:
+                instruction = ir_emit(builder, IR_OPCODE_FUNCTION, typed->type, IR_VALUE_VALUE, node->member_access.range, 0, 0, true);
+                instruction->entity = typed->entity;
+            }
+            else
             {
                 IrValueId operand = results[roots[0]].value;
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_ADDRESS_OF,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    node->pointer_operator.range,
-                    &operand,
-                    1,
-                    true);
-            } break;
-            case AST_NODE_DEREFERENCE:
+                instruction = ir_emit(builder, IR_OPCODE_FIELD, typed->type, lowered.category, node->member_access.range, &operand, 1, true);
+                instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
+                instruction->immediates[0] = ir_field_index(builder->analysis, results[roots[0]].type, node->member_access.member.text);
+                instruction->immediate_count = 1;
+            }
+        }
+        break;
+        case AST_NODE_CALL:
+        {
+            IrValueId* operands = arena_allocate(builder->scratch_arena, IrValueId, arity);
+            u32 operand_count = 0;
+            operands[operand_count++] = ir_materialize(builder, results[roots[0]], source);
+            AnalysisTypedNode* callee_typed = expression->nodes + roots[0];
+            AnalysisResult* callee_module = 0;
+            AnalysisEntity* callee_entity = 0;
+            if (typed->instantiation.value != ANALYSIS_ID_UNDERLYING_INVALID)
             {
-                IrValueId operand = ir_materialize(builder, results[roots[0]], source);
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_DEREFERENCE,
-                    typed->type,
-                    IR_VALUE_PLACE,
-                    node->pointer_operator.range,
-                    &operand,
-                    1,
-                    true);
-            } break;
-            case AST_NODE_UNARY_MINUS:
-            case AST_NODE_UNARY_LOGICAL_NOT:
-            case AST_NODE_UNARY_BITWISE_NOT:
+                callee_module = builder->analysis;
+                if (callee_typed->entity.module.value != builder->analysis->module.id.value)
+                {
+                    for (u32 module_index = 0; module_index < builder->analysis->program_module_count; module_index += 1)
+                    {
+                        AnalysisResult* candidate = builder->analysis->program_modules[module_index];
+                        if (candidate && candidate->module.id.value == callee_typed->entity.module.value)
+                        {
+                            callee_module = candidate;
+                            break;
+                        }
+                    }
+                }
+                if (callee_module && callee_typed->entity.index.value < callee_module->module.entity_count)
+                {
+                    callee_entity = callee_module->module.entities + callee_typed->entity.index.value;
+                }
+            }
+            AstTypeArgument* argument = callee_entity ? callee_entity->ast.code->type->function.first_argument : 0;
+            AnalysisType* callee_signature = analysis_type_from_id(builder->analysis, callee_typed->type);
+            for (u32 index = 1; index < arity; index += 1)
             {
-                IrValueId operand = ir_materialize(builder, results[roots[0]], source);
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_UNARY,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    source,
-                    &operand,
-                    1,
-                    true);
-                instruction->unary_operation = ir_unary_operation(
-                    builder->analysis,
-                    node->id,
-                    expression->nodes[roots[0]].type);
-            } break;
-            case AST_NODE_UNARY_PLUS:
+                bool compile_time = argument && argument->is_compile_time;
+                if (!compile_time)
+                {
+                    IrValueId value = ir_materialize(builder, results[roots[index]], source);
+                    u32 source_argument = index - 1;
+                    if (callee_signature->kind == ANALYSIS_TYPE_FUNCTION && callee_signature->as.function.is_variadic &&
+                        source_argument >= callee_signature->as.function.argument_count)
+                    {
+                        AnalysisTypeId source_type = builder->function->values[value.value].type;
+                        AnalysisType* source_value_type = analysis_type_from_id(builder->analysis, source_type);
+                        AnalysisTypeId promoted = source_type;
+                        if (source_value_type->kind == ANALYSIS_TYPE_FLOAT && source_value_type->as.float_bit_width == 32)
+                        {
+                            promoted = builder->analysis->types.builtin.f64_type;
+                        }
+                        else if (source_value_type->kind == ANALYSIS_TYPE_BOOL ||
+                                 (source_value_type->kind == ANALYSIS_TYPE_INTEGER && source_value_type->as.integer.bit_width < 32))
+                        {
+                            promoted = builder->analysis->types.builtin.s32_type;
+                        }
+                        if (!ir_type_id_equal(source_type, promoted))
+                        {
+                            IrInstruction* conversion = ir_emit(builder, IR_OPCODE_CAST, promoted, IR_VALUE_VALUE, source, &value, 1, true);
+                            conversion->conversion_operation = ir_conversion_operation(builder->analysis, source_type, promoted);
+                            value = conversion->result;
+                        }
+                    }
+                    operands[operand_count++] = value;
+                }
+                if (argument)
+                {
+                    argument = argument->next;
+                }
+            }
+            instruction = ir_emit(builder, IR_OPCODE_CALL, typed->type, IR_VALUE_VALUE, node->call.range, operands, operand_count,
+                                  analysis_type_from_id(builder->analysis, typed->type)->kind != ANALYSIS_TYPE_VOID);
+            instruction->entity = callee_typed->entity;
+            instruction->instantiation = typed->instantiation;
+            IrValue* callee_value = builder->function->values + operands[0].value;
+            if (callee_value->definition.value != IR_ID_UNDERLYING_INVALID)
             {
-                lowered = results[roots[0]];
-            } break;
-            case AST_NODE_BINARY_PLUS:
-            case AST_NODE_BINARY_MINUS:
-            case AST_NODE_BINARY_ASTERISK:
-            case AST_NODE_BINARY_SLASH:
-            case AST_NODE_BINARY_PERCENT:
-            case AST_NODE_BINARY_SHIFT_LEFT:
-            case AST_NODE_BINARY_SHIFT_RIGHT:
-            case AST_NODE_BINARY_EQUAL:
-            case AST_NODE_BINARY_NOT_EQUAL:
-            case AST_NODE_BINARY_LESS:
-            case AST_NODE_BINARY_LESS_EQUAL:
-            case AST_NODE_BINARY_GREATER:
-            case AST_NODE_BINARY_GREATER_EQUAL:
-            case AST_NODE_BINARY_AMPERSAND:
-            case AST_NODE_BINARY_BAR:
-            case AST_NODE_BINARY_CARET:
-            case AST_NODE_BINARY_BOOLEAN_AND:
-            case AST_NODE_BINARY_BOOLEAN_OR:
-            case AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT:
-            case AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT:
-            case AST_NODE_BINARY_RANGE:
+                IrInstruction* reference = builder->function->instructions + callee_value->definition.value;
+                if (reference->opcode == IR_OPCODE_FUNCTION)
+                {
+                    reference->instantiation = typed->instantiation;
+                }
+            }
+        }
+        break;
+        case AST_NODE_INTRINSIC_CALL:
+        {
+            IrValueId* operands = arena_allocate(builder->scratch_arena, IrValueId, arity);
+            for (u32 index = 0; index < arity; index += 1)
             {
-                IrValueId operands[2] = {
-                    ir_materialize(builder, results[roots[0]], source),
-                    ir_materialize(builder, results[roots[1]], source),
-                };
-                instruction = ir_emit(
-                    builder,
-                    IR_OPCODE_BINARY,
-                    typed->type,
-                    IR_VALUE_VALUE,
-                    source,
-                    operands,
-                    2,
-                    true);
-                instruction->binary_operation = ir_binary_operation(
-                    builder->analysis,
-                    node->id,
-                    expression->nodes[roots[0]].type);
-            } break;
-            case AST_NODE_COUNT: break;
+                operands[index] = ir_materialize(builder, results[roots[index]], source);
+            }
+            IrOpcode opcode = IR_OPCODE_REVERSE;
+            if (string_equal(node->intrinsic_call.name.text, S8("cast")))
+            {
+                opcode = IR_OPCODE_CAST;
+            }
+            else if (string_equal(node->intrinsic_call.name.text, S8("va_start")))
+            {
+                opcode = IR_OPCODE_VA_START;
+            }
+            else if (string_equal(node->intrinsic_call.name.text, S8("va_copy")))
+            {
+                opcode = IR_OPCODE_VA_COPY;
+            }
+            else if (string_equal(node->intrinsic_call.name.text, S8("va_end")))
+            {
+                opcode = IR_OPCODE_VA_END;
+            }
+            else if (string_equal(node->intrinsic_call.name.text, S8("va_arg")))
+            {
+                opcode = IR_OPCODE_VA_ARG;
+            }
+            instruction = ir_emit(builder, opcode, typed->type, IR_VALUE_VALUE, node->intrinsic_call.range, operands, arity,
+                                  analysis_type_from_id(builder->analysis, typed->type)->kind != ANALYSIS_TYPE_VOID);
+            if (opcode == IR_OPCODE_CAST)
+            {
+                BUSTER_CHECK(arity == 1);
+                instruction->conversion_operation = ir_conversion_operation(builder->analysis, expression->nodes[roots[0]].type, typed->type);
+            }
+        }
+        break;
+        case AST_NODE_ADDRESS_OF:
+        {
+            IrValueId operand = results[roots[0]].value;
+            instruction = ir_emit(builder, IR_OPCODE_ADDRESS_OF, typed->type, IR_VALUE_VALUE, node->pointer_operator.range, &operand, 1, true);
+        }
+        break;
+        case AST_NODE_DEREFERENCE:
+        {
+            IrValueId operand = ir_materialize(builder, results[roots[0]], source);
+            instruction = ir_emit(builder, IR_OPCODE_DEREFERENCE, typed->type, IR_VALUE_PLACE, node->pointer_operator.range, &operand, 1, true);
+        }
+        break;
+        case AST_NODE_UNARY_MINUS:
+        case AST_NODE_UNARY_LOGICAL_NOT:
+        case AST_NODE_UNARY_BITWISE_NOT:
+        {
+            IrValueId operand = ir_materialize(builder, results[roots[0]], source);
+            instruction = ir_emit(builder, IR_OPCODE_UNARY, typed->type, IR_VALUE_VALUE, source, &operand, 1, true);
+            instruction->unary_operation = ir_unary_operation(builder->analysis, node->id, expression->nodes[roots[0]].type);
+        }
+        break;
+        case AST_NODE_UNARY_PLUS:
+        {
+            lowered = results[roots[0]];
+        }
+        break;
+        case AST_NODE_BINARY_PLUS:
+        case AST_NODE_BINARY_MINUS:
+        case AST_NODE_BINARY_ASTERISK:
+        case AST_NODE_BINARY_SLASH:
+        case AST_NODE_BINARY_PERCENT:
+        case AST_NODE_BINARY_SHIFT_LEFT:
+        case AST_NODE_BINARY_SHIFT_RIGHT:
+        case AST_NODE_BINARY_EQUAL:
+        case AST_NODE_BINARY_NOT_EQUAL:
+        case AST_NODE_BINARY_LESS:
+        case AST_NODE_BINARY_LESS_EQUAL:
+        case AST_NODE_BINARY_GREATER:
+        case AST_NODE_BINARY_GREATER_EQUAL:
+        case AST_NODE_BINARY_AMPERSAND:
+        case AST_NODE_BINARY_BAR:
+        case AST_NODE_BINARY_CARET:
+        case AST_NODE_BINARY_BOOLEAN_AND:
+        case AST_NODE_BINARY_BOOLEAN_OR:
+        case AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT:
+        case AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT:
+        case AST_NODE_BINARY_RANGE:
+        {
+            IrValueId operands[2] = {
+                ir_materialize(builder, results[roots[0]], source),
+                ir_materialize(builder, results[roots[1]], source),
+            };
+            instruction = ir_emit(builder, IR_OPCODE_BINARY, typed->type, IR_VALUE_VALUE, source, operands, 2, true);
+            instruction->binary_operation = ir_binary_operation(builder->analysis, node->id, expression->nodes[roots[0]].type);
+        }
+        break;
+        case AST_NODE_COUNT:
+            break;
         }
         if (instruction)
         {
             lowered.value = instruction->result;
-            lowered.category = instruction->result.value == IR_ID_UNDERLYING_INVALID ?
-                IR_VALUE_VALUE : builder->function->values[instruction->result.value].category;
+            lowered.category =
+                instruction->result.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_VALUE : builder->function->values[instruction->result.value].category;
         }
         results[node_index] = lowered;
     }
@@ -1743,14 +1314,8 @@ BUSTER_GLOBAL_LOCAL AnalysisLocal* ir_local_find(AnalysisBody* body, AstIdentifi
     return 0;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_task_push(
-    Arena* arena,
-    IrLowerTask** top,
-    AstStatement* statement,
-    IrBlockId block,
-    IrBlockId end,
-    IrBlockId break_block,
-    IrBlockId continue_block)
+BUSTER_GLOBAL_LOCAL void ir_task_push(Arena* arena, IrLowerTask** top, AstStatement* statement, IrBlockId block, IrBlockId end, IrBlockId break_block,
+                                      IrBlockId continue_block)
 {
     IrLowerTask* task = arena_allocate(arena, IrLowerTask, 1);
     *task = (IrLowerTask){
@@ -1765,10 +1330,7 @@ BUSTER_GLOBAL_LOCAL void ir_task_push(
     *top = task;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_seal_task_push(
-    Arena* arena,
-    IrLowerTask** top,
-    IrBlockId block)
+BUSTER_GLOBAL_LOCAL void ir_seal_task_push(Arena* arena, IrLowerTask** top, IrBlockId block)
 {
     IrLowerTask* task = arena_allocate(arena, IrLowerTask, 1);
     *task = (IrLowerTask){
@@ -1783,26 +1345,34 @@ BUSTER_GLOBAL_LOCAL AstNodeId ir_assignment_ast_operation(AstAssignmentOperator 
 {
     switch (operation)
     {
-        case AST_ASSIGNMENT_PLUS_EQUAL: return AST_NODE_BINARY_PLUS;
-        case AST_ASSIGNMENT_MINUS_EQUAL: return AST_NODE_BINARY_MINUS;
-        case AST_ASSIGNMENT_MULTIPLY_EQUAL: return AST_NODE_BINARY_ASTERISK;
-        case AST_ASSIGNMENT_DIVIDE_EQUAL: return AST_NODE_BINARY_SLASH;
-        case AST_ASSIGNMENT_MODULO_EQUAL: return AST_NODE_BINARY_PERCENT;
-        case AST_ASSIGNMENT_SHIFT_LEFT_EQUAL: return AST_NODE_BINARY_SHIFT_LEFT;
-        case AST_ASSIGNMENT_SHIFT_RIGHT_EQUAL: return AST_NODE_BINARY_SHIFT_RIGHT;
-        case AST_ASSIGNMENT_BITWISE_AND_EQUAL: return AST_NODE_BINARY_AMPERSAND;
-        case AST_ASSIGNMENT_BITWISE_OR_EQUAL: return AST_NODE_BINARY_BAR;
-        case AST_ASSIGNMENT_BITWISE_XOR_EQUAL: return AST_NODE_BINARY_CARET;
-        case AST_ASSIGNMENT_EQUAL:
-        case AST_ASSIGNMENT_COUNT: break;
+    case AST_ASSIGNMENT_PLUS_EQUAL:
+        return AST_NODE_BINARY_PLUS;
+    case AST_ASSIGNMENT_MINUS_EQUAL:
+        return AST_NODE_BINARY_MINUS;
+    case AST_ASSIGNMENT_MULTIPLY_EQUAL:
+        return AST_NODE_BINARY_ASTERISK;
+    case AST_ASSIGNMENT_DIVIDE_EQUAL:
+        return AST_NODE_BINARY_SLASH;
+    case AST_ASSIGNMENT_MODULO_EQUAL:
+        return AST_NODE_BINARY_PERCENT;
+    case AST_ASSIGNMENT_SHIFT_LEFT_EQUAL:
+        return AST_NODE_BINARY_SHIFT_LEFT;
+    case AST_ASSIGNMENT_SHIFT_RIGHT_EQUAL:
+        return AST_NODE_BINARY_SHIFT_RIGHT;
+    case AST_ASSIGNMENT_BITWISE_AND_EQUAL:
+        return AST_NODE_BINARY_AMPERSAND;
+    case AST_ASSIGNMENT_BITWISE_OR_EQUAL:
+        return AST_NODE_BINARY_BAR;
+    case AST_ASSIGNMENT_BITWISE_XOR_EQUAL:
+        return AST_NODE_BINARY_CARET;
+    case AST_ASSIGNMENT_EQUAL:
+    case AST_ASSIGNMENT_COUNT:
+        break;
     }
     return AST_NODE_COUNT;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_lower_statement_task(
-    IrBuilder* builder,
-    IrLowerTask** top,
-    IrLowerTask* task)
+BUSTER_GLOBAL_LOCAL void ir_lower_statement_task(IrBuilder* builder, IrLowerTask** top, IrLowerTask* task)
 {
     if (task->kind == IR_LOWER_TASK_SEAL_BLOCK)
     {
@@ -1822,502 +1392,276 @@ BUSTER_GLOBAL_LOCAL void ir_lower_statement_task(
     AstStatement* statement = task->statement;
     switch (statement->id)
     {
-        case AST_STATEMENT_RETURN:
+    case AST_STATEMENT_RETURN:
+    {
+        IrValueId operand = IR_VALUE_ID_INVALID;
+        u32 operand_count = 0;
+        if (statement->return_statement.expression.count)
         {
-            IrValueId operand = IR_VALUE_ID_INVALID;
-            u32 operand_count = 0;
-            if (statement->return_statement.expression.count)
-            {
-                IrLowered lowered = ir_lower_expression(builder, statement->return_statement.expression);
-                operand = ir_materialize(builder, lowered, statement->range);
-                operand_count = 1;
-            }
-            ir_terminate(
-                builder,
-                IR_OPCODE_RETURN,
-                statement->range,
-                operand_count ? &operand : 0,
-                operand_count,
-                0,
-                0);
-        } break;
-        case AST_STATEMENT_DATA:
+            IrLowered lowered = ir_lower_expression(builder, statement->return_statement.expression);
+            operand = ir_materialize(builder, lowered, statement->range);
+            operand_count = 1;
+        }
+        ir_terminate(builder, IR_OPCODE_RETURN, statement->range, operand_count ? &operand : 0, operand_count, 0, 0);
+    }
+    break;
+    case AST_STATEMENT_DATA:
+    {
+        AstDataStatement* data = &statement->data_statement;
+        AnalysisLocal* local = ir_local_find(builder->body, data->name);
+        BUSTER_CHECK(local);
+        IrLowered initializer = ir_lower_expression(builder, data->initializer);
+        IrValueId operands[2] = {
+            builder->function->local_places[local->id.value],
+            ir_materialize(builder, initializer, statement->range),
+        };
+        if (builder->function->local_uses_memory[local->id.value])
         {
-            AstDataStatement* data = &statement->data_statement;
-            AnalysisLocal* local = ir_local_find(builder->body, data->name);
-            BUSTER_CHECK(local);
-            IrLowered initializer = ir_lower_expression(builder, data->initializer);
+            ir_emit(builder, IR_OPCODE_STORE, builder->analysis->types.builtin.void_type, IR_VALUE_VALUE, statement->range, operands, 2, false);
+        }
+        else
+        {
+            ir_ssa_write(builder, task->block, local->id, operands[1]);
+        }
+        ir_task_push(builder->scratch_arena, top, statement->next, task->block, task->end, task->break_block, task->continue_block);
+    }
+    break;
+    case AST_STATEMENT_EXPRESSION:
+    {
+        IrLowered expression = ir_lower_expression(builder, statement->expression_statement.expression);
+        if (expression.value.value != IR_ID_UNDERLYING_INVALID && expression.category == IR_VALUE_PLACE)
+        {
+            ir_materialize(builder, expression, statement->range);
+        }
+        ir_task_push(builder->scratch_arena, top, statement->next, task->block, task->end, task->break_block, task->continue_block);
+    }
+    break;
+    case AST_STATEMENT_ASSIGNMENT:
+    {
+        AstAssignmentStatement* assignment = &statement->assignment_statement;
+        IrLowered target = ir_lower_expression(builder, assignment->target);
+        IrLowered value = ir_lower_expression(builder, assignment->value);
+        IrValueId stored = ir_materialize(builder, value, statement->range);
+        if (assignment->operator!= AST_ASSIGNMENT_EQUAL)
+        {
             IrValueId operands[2] = {
-                builder->function->local_places[local->id.value],
-                ir_materialize(builder, initializer, statement->range),
+                ir_materialize(builder, target, statement->range),
+                stored,
             };
-            if (builder->function->local_uses_memory[local->id.value])
+            IrInstruction* binary = ir_emit(builder, IR_OPCODE_BINARY, target.type, IR_VALUE_VALUE, statement->range, operands, 2, true);
+            binary->binary_operation = ir_binary_operation(builder->analysis, ir_assignment_ast_operation(assignment->operator), target.type);
+            stored = binary->result;
+        }
+        if (target.local.value != ANALYSIS_ID_UNDERLYING_INVALID && !builder->function->local_uses_memory[target.local.value])
+        {
+            ir_ssa_write(builder, task->block, target.local, stored);
+        }
+        else
+        {
+            IrValueId operands[2] = {target.value, stored};
+            ir_emit(builder, IR_OPCODE_STORE, builder->analysis->types.builtin.void_type, IR_VALUE_VALUE, statement->range, operands, 2, false);
+        }
+        ir_task_push(builder->scratch_arena, top, statement->next, task->block, task->end, task->break_block, task->continue_block);
+    }
+    break;
+    case AST_STATEMENT_IF:
+    {
+        AstIfStatement* conditional = &statement->if_statement;
+        IrLowered condition = ir_lower_expression(builder, conditional->condition);
+        IrValueId condition_value = ir_materialize(builder, condition, statement->range);
+        IrBlockId then_block = ir_block_create(builder);
+        IrBlockId else_block = ir_block_create(builder);
+        IrBlockId merge = ir_block_create(builder);
+        IrBlockId targets[2] = {then_block, else_block};
+        ir_terminate(builder, IR_OPCODE_BRANCH_IF, statement->range, &condition_value, 1, targets, 2);
+        ir_task_push(builder->scratch_arena, top, statement->next, merge, task->end, task->break_block, task->continue_block);
+        if (conditional->alternative == AST_IF_ALTERNATIVE_IF)
+        {
+            ir_task_push(builder->scratch_arena, top, conditional->else_if, else_block, merge, task->break_block, task->continue_block);
+        }
+        else
+        {
+            AstStatement* alternative = conditional->alternative == AST_IF_ALTERNATIVE_BLOCK ? conditional->else_block.first_statement : 0;
+            ir_task_push(builder->scratch_arena, top, alternative, else_block, merge, task->break_block, task->continue_block);
+        }
+        ir_task_push(builder->scratch_arena, top, conditional->then_block.first_statement, then_block, merge, task->break_block, task->continue_block);
+    }
+    break;
+    case AST_STATEMENT_SWITCH:
+    {
+        AstSwitchStatement* switch_statement = &statement->switch_statement;
+        IrLowered switched = ir_lower_expression(builder, switch_statement->expression);
+        IrValueId switched_value = ir_materialize(builder, switched, statement->range);
+        IrBlockId merge = ir_block_create(builder);
+        u32 non_else_count = switch_statement->case_count - (switch_statement->else_case ? 1u : 0u);
+        IrBlockId* targets = arena_allocate(builder->scratch_arena, IrBlockId, non_else_count + 1);
+        u64* values = arena_allocate(builder->scratch_arena, u64, non_else_count);
+        AstSwitchCase** cases = arena_allocate(builder->scratch_arena, AstSwitchCase*, switch_statement->case_count);
+        IrBlockId* case_blocks = arena_allocate(builder->scratch_arena, IrBlockId, switch_statement->case_count);
+        u32 value_index = 0;
+        u32 case_index = 0;
+        IrBlockId default_block = merge;
+        for (AstSwitchCase* switch_case = switch_statement->first_case; switch_case; switch_case = switch_case->next)
+        {
+            IrBlockId case_block = ir_block_create(builder);
+            cases[case_index] = switch_case;
+            case_blocks[case_index] = case_block;
+            case_index += 1;
+            if (switch_case->is_else)
             {
-                ir_emit(
-                    builder,
-                    IR_OPCODE_STORE,
-                    builder->analysis->types.builtin.void_type,
-                    IR_VALUE_VALUE,
-                    statement->range,
-                    operands,
-                    2,
-                    false);
+                default_block = case_block;
             }
             else
             {
-                ir_ssa_write(builder, task->block, local->id, operands[1]);
+                AnalysisTypedExpression* case_expression = ir_typed_expression_find(builder->body, switch_case->expression);
+                BUSTER_CHECK(case_expression && case_expression->ast.count);
+                AnalysisTypedNode* root = case_expression->nodes + case_expression->ast.count - 1;
+                targets[value_index] = case_block;
+                values[value_index] = root->constant.integer;
+                value_index += 1;
             }
-            ir_task_push(
-                builder->scratch_arena,
-                top,
-                statement->next,
-                task->block,
-                task->end,
-                task->break_block,
-                task->continue_block);
-        } break;
-        case AST_STATEMENT_EXPRESSION:
+        }
+        BUSTER_CHECK(value_index == non_else_count);
+        targets[non_else_count] = default_block;
+        IrInstruction* switch_ir =
+            ir_emit(builder, IR_OPCODE_SWITCH, builder->analysis->types.builtin.void_type, IR_VALUE_VALUE, statement->range, &switched_value, 1, false);
+        switch_ir->targets = arena_allocate(builder->result_arena, IrBlockId, non_else_count + 1);
+        switch_ir->immediates = arena_allocate(builder->result_arena, u64, non_else_count);
+        for (u32 index = 0; index < non_else_count; index += 1)
         {
-            IrLowered expression = ir_lower_expression(
-                builder,
-                statement->expression_statement.expression);
-            if (expression.value.value != IR_ID_UNDERLYING_INVALID && expression.category == IR_VALUE_PLACE)
-            {
-                ir_materialize(builder, expression, statement->range);
-            }
-            ir_task_push(
-                builder->scratch_arena,
-                top,
-                statement->next,
-                task->block,
-                task->end,
-                task->break_block,
-                task->continue_block);
-        } break;
-        case AST_STATEMENT_ASSIGNMENT:
+            switch_ir->targets[index] = targets[index];
+            switch_ir->immediates[index] = values[index];
+        }
+        switch_ir->targets[non_else_count] = targets[non_else_count];
+        switch_ir->target_count = non_else_count + 1;
+        switch_ir->immediate_count = non_else_count;
+        for (u32 index = 0; index < switch_ir->target_count; index += 1)
         {
-            AstAssignmentStatement* assignment = &statement->assignment_statement;
-            IrLowered target = ir_lower_expression(builder, assignment->target);
-            IrLowered value = ir_lower_expression(builder, assignment->value);
-            IrValueId stored = ir_materialize(builder, value, statement->range);
-            if (assignment->operator != AST_ASSIGNMENT_EQUAL)
-            {
-                IrValueId operands[2] = {
-                    ir_materialize(builder, target, statement->range),
-                    stored,
-                };
-                IrInstruction* binary = ir_emit(
-                    builder,
-                    IR_OPCODE_BINARY,
-                    target.type,
-                    IR_VALUE_VALUE,
-                    statement->range,
-                    operands,
-                    2,
-                    true);
-                binary->binary_operation = ir_binary_operation(
-                    builder->analysis,
-                    ir_assignment_ast_operation(assignment->operator),
-                    target.type);
-                stored = binary->result;
-            }
-            if (target.local.value != ANALYSIS_ID_UNDERLYING_INVALID &&
-                !builder->function->local_uses_memory[target.local.value])
-            {
-                ir_ssa_write(builder, task->block, target.local, stored);
-            }
-            else
-            {
-                IrValueId operands[2] = { target.value, stored };
-                ir_emit(
-                    builder,
-                    IR_OPCODE_STORE,
-                    builder->analysis->types.builtin.void_type,
-                    IR_VALUE_VALUE,
-                    statement->range,
-                    operands,
-                    2,
-                    false);
-            }
-            ir_task_push(
-                builder->scratch_arena,
-                top,
-                statement->next,
-                task->block,
-                task->end,
-                task->break_block,
-                task->continue_block);
-        } break;
-        case AST_STATEMENT_IF:
+            ir_predecessor_add(builder, switch_ir->targets[index], builder->current);
+        }
+        builder->function->blocks[builder->current.value].terminated = true;
+        ir_task_push(builder->scratch_arena, top, statement->next, merge, task->end, task->break_block, task->continue_block);
+        for (u32 index = case_index; index > 0; index -= 1)
         {
-            AstIfStatement* conditional = &statement->if_statement;
-            IrLowered condition = ir_lower_expression(builder, conditional->condition);
+            ir_task_push(builder->scratch_arena, top, cases[index - 1]->body.first_statement, case_blocks[index - 1], merge, task->break_block,
+                         task->continue_block);
+        }
+    }
+    break;
+    case AST_STATEMENT_FOR:
+    {
+        AstForStatement* for_statement = &statement->for_statement;
+        IrLowered iterable = ir_lower_expression(builder, for_statement->iterable);
+        IrValueId iterable_value = ir_materialize(builder, iterable, statement->range);
+        IrInstruction* length =
+            ir_emit(builder, IR_OPCODE_LENGTH, builder->analysis->types.builtin.u64_type, IR_VALUE_VALUE, statement->range, &iterable_value, 1, true);
+        IrInstruction* zero =
+            ir_emit(builder, IR_OPCODE_CONSTANT_INTEGER, builder->analysis->types.builtin.u64_type, IR_VALUE_VALUE, statement->range, 0, 0, true);
+        zero->immediates = arena_allocate(builder->result_arena, u64, 1);
+        zero->immediates[0] = 0;
+        zero->immediate_count = 1;
+        IrBlockId initial = builder->current;
+        IrBlockId header = ir_block_create(builder);
+        IrBlockId body_block = ir_block_create(builder);
+        IrBlockId latch = ir_block_create(builder);
+        IrBlockId exit = ir_block_create(builder);
+        ir_branch(builder, header, statement->range);
+        builder->current = header;
+        IrBlockParameter* index = ir_block_parameter_create(builder, header, ANALYSIS_LOCAL_ID_INVALID, builder->analysis->types.builtin.u64_type);
+        ir_block_parameter_incoming_add(builder, index, initial, zero->result);
+        IrValueId comparison_operands[2] = {
+            index->value,
+            length->result,
+        };
+        IrInstruction* condition =
+            ir_emit(builder, IR_OPCODE_BINARY, builder->analysis->types.builtin.bool_type, IR_VALUE_VALUE, statement->range, comparison_operands, 2, true);
+        condition->binary_operation = IR_BINARY_UNSIGNED_LESS;
+        IrBlockId targets[2] = {body_block, exit};
+        ir_terminate(builder, IR_OPCODE_BRANCH_IF, statement->range, &condition->result, 1, targets, 2);
+        builder->current = latch;
+        IrInstruction* one =
+            ir_emit(builder, IR_OPCODE_CONSTANT_INTEGER, builder->analysis->types.builtin.u64_type, IR_VALUE_VALUE, statement->range, 0, 0, true);
+        one->immediates = arena_allocate(builder->result_arena, u64, 1);
+        one->immediates[0] = 1;
+        one->immediate_count = 1;
+        IrValueId increment_operands[2] = {
+            index->value,
+            one->result,
+        };
+        IrInstruction* increment =
+            ir_emit(builder, IR_OPCODE_BINARY, builder->analysis->types.builtin.u64_type, IR_VALUE_VALUE, statement->range, increment_operands, 2, true);
+        increment->binary_operation = IR_BINARY_INTEGER_ADD;
+        ir_branch(builder, header, statement->range);
+        ir_block_parameter_incoming_add(builder, index, latch, increment->result);
+        builder->current = body_block;
+        AnalysisLocal* local = ir_local_find(builder->body, for_statement->name);
+        BUSTER_CHECK(local);
+        IrValueId element_operands[2] = {
+            iterable_value,
+            index->value,
+        };
+        IrInstruction* element = ir_emit(builder, IR_OPCODE_INDEX, local->type, IR_VALUE_VALUE, statement->range, element_operands, 2, true);
+        IrValueId store_operands[2] = {
+            builder->function->local_places[local->id.value],
+            element->result,
+        };
+        if (builder->function->local_uses_memory[local->id.value])
+        {
+            ir_emit(builder, IR_OPCODE_STORE, builder->analysis->types.builtin.void_type, IR_VALUE_VALUE, statement->range, store_operands, 2, false);
+        }
+        else
+        {
+            ir_ssa_write(builder, body_block, local->id, element->result);
+        }
+        ir_task_push(builder->scratch_arena, top, statement->next, exit, task->end, task->break_block, task->continue_block);
+        ir_seal_task_push(builder->scratch_arena, top, header);
+        ir_task_push(builder->scratch_arena, top, for_statement->body.first_statement, body_block, latch, exit, latch);
+    }
+    break;
+    case AST_STATEMENT_LOOP:
+    {
+        AstLoopStatement* loop = &statement->loop_statement;
+        IrBlockId header = ir_block_create(builder);
+        IrBlockId body_block = ir_block_create(builder);
+        IrBlockId exit = ir_block_create(builder);
+        ir_branch(builder, header, statement->range);
+        builder->current = header;
+        if (loop->has_condition)
+        {
+            IrLowered condition = ir_lower_expression(builder, loop->condition);
             IrValueId condition_value = ir_materialize(builder, condition, statement->range);
-            IrBlockId then_block = ir_block_create(builder);
-            IrBlockId else_block = ir_block_create(builder);
-            IrBlockId merge = ir_block_create(builder);
-            IrBlockId targets[2] = { then_block, else_block };
-            ir_terminate(
-                builder,
-                IR_OPCODE_BRANCH_IF,
-                statement->range,
-                &condition_value,
-                1,
-                targets,
-                2);
-            ir_task_push(
-                builder->scratch_arena,
-                top,
-                statement->next,
-                merge,
-                task->end,
-                task->break_block,
-                task->continue_block);
-            if (conditional->alternative == AST_IF_ALTERNATIVE_IF)
-            {
-                ir_task_push(
-                    builder->scratch_arena,
-                    top,
-                    conditional->else_if,
-                    else_block,
-                    merge,
-                    task->break_block,
-                    task->continue_block);
-            }
-            else
-            {
-                AstStatement* alternative = conditional->alternative == AST_IF_ALTERNATIVE_BLOCK ?
-                    conditional->else_block.first_statement : 0;
-                ir_task_push(
-                    builder->scratch_arena,
-                    top,
-                    alternative,
-                    else_block,
-                    merge,
-                    task->break_block,
-                    task->continue_block);
-            }
-            ir_task_push(
-                builder->scratch_arena,
-                top,
-                conditional->then_block.first_statement,
-                then_block,
-                merge,
-                task->break_block,
-                task->continue_block);
-        } break;
-        case AST_STATEMENT_SWITCH:
+            IrBlockId targets[2] = {body_block, exit};
+            ir_terminate(builder, IR_OPCODE_BRANCH_IF, statement->range, &condition_value, 1, targets, 2);
+        }
+        else
         {
-            AstSwitchStatement* switch_statement = &statement->switch_statement;
-            IrLowered switched = ir_lower_expression(builder, switch_statement->expression);
-            IrValueId switched_value = ir_materialize(builder, switched, statement->range);
-            IrBlockId merge = ir_block_create(builder);
-            u32 non_else_count = switch_statement->case_count - (switch_statement->else_case ? 1u : 0u);
-            IrBlockId* targets = arena_allocate(builder->scratch_arena, IrBlockId, non_else_count + 1);
-            u64* values = arena_allocate(builder->scratch_arena, u64, non_else_count);
-            AstSwitchCase** cases = arena_allocate(
-                builder->scratch_arena,
-                AstSwitchCase*,
-                switch_statement->case_count);
-            IrBlockId* case_blocks = arena_allocate(
-                builder->scratch_arena,
-                IrBlockId,
-                switch_statement->case_count);
-            u32 value_index = 0;
-            u32 case_index = 0;
-            IrBlockId default_block = merge;
-            for (AstSwitchCase* switch_case = switch_statement->first_case;
-                switch_case;
-                switch_case = switch_case->next)
-            {
-                IrBlockId case_block = ir_block_create(builder);
-                cases[case_index] = switch_case;
-                case_blocks[case_index] = case_block;
-                case_index += 1;
-                if (switch_case->is_else)
-                {
-                    default_block = case_block;
-                }
-                else
-                {
-                    AnalysisTypedExpression* case_expression = ir_typed_expression_find(
-                        builder->body,
-                        switch_case->expression);
-                    BUSTER_CHECK(case_expression && case_expression->ast.count);
-                    AnalysisTypedNode* root = case_expression->nodes + case_expression->ast.count - 1;
-                    targets[value_index] = case_block;
-                    values[value_index] = root->constant.integer;
-                    value_index += 1;
-                }
-            }
-            BUSTER_CHECK(value_index == non_else_count);
-            targets[non_else_count] = default_block;
-            IrInstruction* switch_ir = ir_emit(
-                builder,
-                IR_OPCODE_SWITCH,
-                builder->analysis->types.builtin.void_type,
-                IR_VALUE_VALUE,
-                statement->range,
-                &switched_value,
-                1,
-                false);
-            switch_ir->targets = arena_allocate(builder->result_arena, IrBlockId, non_else_count + 1);
-            switch_ir->immediates = arena_allocate(builder->result_arena, u64, non_else_count);
-            for (u32 index = 0; index < non_else_count; index += 1)
-            {
-                switch_ir->targets[index] = targets[index];
-                switch_ir->immediates[index] = values[index];
-            }
-            switch_ir->targets[non_else_count] = targets[non_else_count];
-            switch_ir->target_count = non_else_count + 1;
-            switch_ir->immediate_count = non_else_count;
-            for (u32 index = 0; index < switch_ir->target_count; index += 1)
-            {
-                ir_predecessor_add(builder, switch_ir->targets[index], builder->current);
-            }
-            builder->function->blocks[builder->current.value].terminated = true;
-            ir_task_push(
-                builder->scratch_arena,
-                top,
-                statement->next,
-                merge,
-                task->end,
-                task->break_block,
-                task->continue_block);
-            for (u32 index = case_index; index > 0; index -= 1)
-            {
-                ir_task_push(
-                    builder->scratch_arena,
-                    top,
-                    cases[index - 1]->body.first_statement,
-                    case_blocks[index - 1],
-                    merge,
-                    task->break_block,
-                    task->continue_block);
-            }
-        } break;
-        case AST_STATEMENT_FOR:
-        {
-            AstForStatement* for_statement = &statement->for_statement;
-            IrLowered iterable = ir_lower_expression(builder, for_statement->iterable);
-            IrValueId iterable_value = ir_materialize(builder, iterable, statement->range);
-            IrInstruction* length = ir_emit(
-                builder,
-                IR_OPCODE_LENGTH,
-                builder->analysis->types.builtin.u64_type,
-                IR_VALUE_VALUE,
-                statement->range,
-                &iterable_value,
-                1,
-                true);
-            IrInstruction* zero = ir_emit(
-                builder,
-                IR_OPCODE_CONSTANT_INTEGER,
-                builder->analysis->types.builtin.u64_type,
-                IR_VALUE_VALUE,
-                statement->range,
-                0,
-                0,
-                true);
-            zero->immediates = arena_allocate(
-                builder->result_arena,
-                u64,
-                1);
-            zero->immediates[0] = 0;
-            zero->immediate_count = 1;
-            IrBlockId initial = builder->current;
-            IrBlockId header = ir_block_create(builder);
-            IrBlockId body_block = ir_block_create(builder);
-            IrBlockId latch = ir_block_create(builder);
-            IrBlockId exit = ir_block_create(builder);
-            ir_branch(builder, header, statement->range);
-            builder->current = header;
-            IrBlockParameter* index = ir_block_parameter_create(
-                builder,
-                header,
-                ANALYSIS_LOCAL_ID_INVALID,
-                builder->analysis->types.builtin.u64_type);
-            ir_block_parameter_incoming_add(
-                builder,
-                index,
-                initial,
-                zero->result);
-            IrValueId comparison_operands[2] = {
-                index->value,
-                length->result,
-            };
-            IrInstruction* condition = ir_emit(
-                builder,
-                IR_OPCODE_BINARY,
-                builder->analysis->types.builtin.bool_type,
-                IR_VALUE_VALUE,
-                statement->range,
-                comparison_operands,
-                2,
-                true);
-            condition->binary_operation = IR_BINARY_UNSIGNED_LESS;
-            IrBlockId targets[2] = { body_block, exit };
-            ir_terminate(
-                builder,
-                IR_OPCODE_BRANCH_IF,
-                statement->range,
-                &condition->result,
-                1,
-                targets,
-                2);
-            builder->current = latch;
-            IrInstruction* one = ir_emit(
-                builder,
-                IR_OPCODE_CONSTANT_INTEGER,
-                builder->analysis->types.builtin.u64_type,
-                IR_VALUE_VALUE,
-                statement->range,
-                0,
-                0,
-                true);
-            one->immediates = arena_allocate(
-                builder->result_arena,
-                u64,
-                1);
-            one->immediates[0] = 1;
-            one->immediate_count = 1;
-            IrValueId increment_operands[2] = {
-                index->value,
-                one->result,
-            };
-            IrInstruction* increment = ir_emit(
-                builder,
-                IR_OPCODE_BINARY,
-                builder->analysis->types.builtin.u64_type,
-                IR_VALUE_VALUE,
-                statement->range,
-                increment_operands,
-                2,
-                true);
-            increment->binary_operation = IR_BINARY_INTEGER_ADD;
-            ir_branch(builder, header, statement->range);
-            ir_block_parameter_incoming_add(
-                builder,
-                index,
-                latch,
-                increment->result);
-            builder->current = body_block;
-            AnalysisLocal* local = ir_local_find(builder->body, for_statement->name);
-            BUSTER_CHECK(local);
-            IrValueId element_operands[2] = {
-                iterable_value,
-                index->value,
-            };
-            IrInstruction* element = ir_emit(
-                builder,
-                IR_OPCODE_INDEX,
-                local->type,
-                IR_VALUE_VALUE,
-                statement->range,
-                element_operands,
-                2,
-                true);
-            IrValueId store_operands[2] = {
-                builder->function->local_places[local->id.value],
-                element->result,
-            };
-            if (builder->function->local_uses_memory[local->id.value])
-            {
-                ir_emit(
-                    builder,
-                    IR_OPCODE_STORE,
-                    builder->analysis->types.builtin.void_type,
-                    IR_VALUE_VALUE,
-                    statement->range,
-                    store_operands,
-                    2,
-                    false);
-            }
-            else
-            {
-                ir_ssa_write(builder, body_block, local->id, element->result);
-            }
-            ir_task_push(
-                builder->scratch_arena,
-                top,
-                statement->next,
-                exit,
-                task->end,
-                task->break_block,
-                task->continue_block);
-            ir_seal_task_push(builder->scratch_arena, top, header);
-            ir_task_push(
-                builder->scratch_arena,
-                top,
-                for_statement->body.first_statement,
-                body_block,
-                latch,
-                exit,
-                latch);
-        } break;
-        case AST_STATEMENT_LOOP:
-        {
-            AstLoopStatement* loop = &statement->loop_statement;
-            IrBlockId header = ir_block_create(builder);
-            IrBlockId body_block = ir_block_create(builder);
-            IrBlockId exit = ir_block_create(builder);
-            ir_branch(builder, header, statement->range);
-            builder->current = header;
-            if (loop->has_condition)
-            {
-                IrLowered condition = ir_lower_expression(builder, loop->condition);
-                IrValueId condition_value = ir_materialize(builder, condition, statement->range);
-                IrBlockId targets[2] = { body_block, exit };
-                ir_terminate(
-                    builder,
-                    IR_OPCODE_BRANCH_IF,
-                    statement->range,
-                    &condition_value,
-                    1,
-                    targets,
-                    2);
-            }
-            else
-            {
-                ir_branch(builder, body_block, statement->range);
-            }
-            ir_task_push(
-                builder->scratch_arena,
-                top,
-                statement->next,
-                exit,
-                task->end,
-                task->break_block,
-                task->continue_block);
-            ir_seal_task_push(builder->scratch_arena, top, header);
-            ir_task_push(
-                builder->scratch_arena,
-                top,
-                loop->body.first_statement,
-                body_block,
-                header,
-                exit,
-                header);
-        } break;
-        case AST_STATEMENT_BREAK:
-        {
-            BUSTER_CHECK(ir_block_id_valid(builder->function, task->break_block));
-            ir_branch(builder, task->break_block, statement->range);
-        } break;
-        case AST_STATEMENT_CONTINUE:
-        {
-            BUSTER_CHECK(ir_block_id_valid(builder->function, task->continue_block));
-            ir_branch(builder, task->continue_block, statement->range);
-        } break;
-        case AST_STATEMENT_COUNT: break;
+            ir_branch(builder, body_block, statement->range);
+        }
+        ir_task_push(builder->scratch_arena, top, statement->next, exit, task->end, task->break_block, task->continue_block);
+        ir_seal_task_push(builder->scratch_arena, top, header);
+        ir_task_push(builder->scratch_arena, top, loop->body.first_statement, body_block, header, exit, header);
+    }
+    break;
+    case AST_STATEMENT_BREAK:
+    {
+        BUSTER_CHECK(ir_block_id_valid(builder->function, task->break_block));
+        ir_branch(builder, task->break_block, statement->range);
+    }
+    break;
+    case AST_STATEMENT_CONTINUE:
+    {
+        BUSTER_CHECK(ir_block_id_valid(builder->function, task->continue_block));
+        ir_branch(builder, task->continue_block, statement->range);
+    }
+    break;
+    case AST_STATEMENT_COUNT:
+        break;
     }
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_entity_has_diagnostic(AnalysisResult* analysis, AnalysisEntityId entity)
 {
-    for (AnalysisDiagnostic* diagnostic = analysis->first_diagnostic;
-        diagnostic;
-        diagnostic = diagnostic->next)
+    for (AnalysisDiagnostic* diagnostic = analysis->first_diagnostic; diagnostic; diagnostic = diagnostic->next)
     {
         if (ir_entity_id_equal(diagnostic->entity, entity))
         {
@@ -2334,39 +1678,28 @@ struct IrMeasureTask
     AstStatement* statement;
 };
 
-BUSTER_GLOBAL_LOCAL void ir_measure_task_push(
-    Arena* arena,
-    IrMeasureTask** top,
-    AstStatement* statement)
+BUSTER_GLOBAL_LOCAL void ir_measure_task_push(Arena* arena, IrMeasureTask** top, AstStatement* statement)
 {
     if (statement)
     {
         IrMeasureTask* task = arena_allocate(arena, IrMeasureTask, 1);
-        *task = (IrMeasureTask){ .previous = *top, .statement = statement };
+        *task = (IrMeasureTask){.previous = *top, .statement = statement};
         *top = task;
     }
 }
 
-BUSTER_GLOBAL_LOCAL void ir_function_measure(
-    Arena* scratch_arena,
-    AstCode* code,
-    AnalysisBody* body,
-    u32* instruction_capacity,
-    u32* block_capacity,
-    u32* value_capacity)
+BUSTER_GLOBAL_LOCAL void ir_function_measure(Arena* scratch_arena, AstCode* code, AnalysisBody* body, u32* instruction_capacity, u32* block_capacity,
+                                             u32* value_capacity)
 {
     u32 node_count = 0;
     u32 expression_control_block_count = 0;
-    for (AnalysisTypedExpression* expression = body->first_expression;
-        expression;
-        expression = expression->next)
+    for (AnalysisTypedExpression* expression = body->first_expression; expression; expression = expression->next)
     {
         node_count += expression->ast.count;
         for (u32 node_index = 0; node_index < expression->ast.count; node_index += 1)
         {
             AstNodeId id = expression->ast.nodes[node_index].id;
-            if (id == AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT ||
-                id == AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT)
+            if (id == AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT || id == AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT)
             {
                 expression_control_block_count += 3;
             }
@@ -2385,101 +1718,72 @@ BUSTER_GLOBAL_LOCAL void ir_function_measure(
         ir_measure_task_push(scratch_arena, &top, statement->next);
         switch (statement->id)
         {
-            case AST_STATEMENT_IF:
+        case AST_STATEMENT_IF:
+        {
+            control_block_count += 3;
+            ir_measure_task_push(scratch_arena, &top, statement->if_statement.then_block.first_statement);
+            if (statement->if_statement.alternative == AST_IF_ALTERNATIVE_BLOCK)
             {
-                control_block_count += 3;
-                ir_measure_task_push(
-                    scratch_arena,
-                    &top,
-                    statement->if_statement.then_block.first_statement);
-                if (statement->if_statement.alternative == AST_IF_ALTERNATIVE_BLOCK)
-                {
-                    ir_measure_task_push(
-                        scratch_arena,
-                        &top,
-                        statement->if_statement.else_block.first_statement);
-                }
-                else if (statement->if_statement.alternative == AST_IF_ALTERNATIVE_IF)
-                {
-                    ir_measure_task_push(scratch_arena, &top, statement->if_statement.else_if);
-                }
-            } break;
-            case AST_STATEMENT_SWITCH:
+                ir_measure_task_push(scratch_arena, &top, statement->if_statement.else_block.first_statement);
+            }
+            else if (statement->if_statement.alternative == AST_IF_ALTERNATIVE_IF)
             {
-                control_block_count += statement->switch_statement.case_count + 1;
-                for (AstSwitchCase* switch_case = statement->switch_statement.first_case;
-                    switch_case;
-                    switch_case = switch_case->next)
-                {
-                    ir_measure_task_push(scratch_arena, &top, switch_case->body.first_statement);
-                }
-            } break;
-            case AST_STATEMENT_FOR:
+                ir_measure_task_push(scratch_arena, &top, statement->if_statement.else_if);
+            }
+        }
+        break;
+        case AST_STATEMENT_SWITCH:
+        {
+            control_block_count += statement->switch_statement.case_count + 1;
+            for (AstSwitchCase* switch_case = statement->switch_statement.first_case; switch_case; switch_case = switch_case->next)
             {
-                control_block_count += 4;
-                ir_measure_task_push(
-                    scratch_arena,
-                    &top,
-                    statement->for_statement.body.first_statement);
-            } break;
-            case AST_STATEMENT_LOOP:
-            {
-                control_block_count += 3;
-                ir_measure_task_push(
-                    scratch_arena,
-                    &top,
-                    statement->loop_statement.body.first_statement);
-            } break;
-            case AST_STATEMENT_RETURN:
-            case AST_STATEMENT_DATA:
-            case AST_STATEMENT_EXPRESSION:
-            case AST_STATEMENT_ASSIGNMENT:
-            case AST_STATEMENT_BREAK:
-            case AST_STATEMENT_CONTINUE:
-            case AST_STATEMENT_COUNT: break;
+                ir_measure_task_push(scratch_arena, &top, switch_case->body.first_statement);
+            }
+        }
+        break;
+        case AST_STATEMENT_FOR:
+        {
+            control_block_count += 4;
+            ir_measure_task_push(scratch_arena, &top, statement->for_statement.body.first_statement);
+        }
+        break;
+        case AST_STATEMENT_LOOP:
+        {
+            control_block_count += 3;
+            ir_measure_task_push(scratch_arena, &top, statement->loop_statement.body.first_statement);
+        }
+        break;
+        case AST_STATEMENT_RETURN:
+        case AST_STATEMENT_DATA:
+        case AST_STATEMENT_EXPRESSION:
+        case AST_STATEMENT_ASSIGNMENT:
+        case AST_STATEMENT_BREAK:
+        case AST_STATEMENT_CONTINUE:
+        case AST_STATEMENT_COUNT:
+            break;
         }
     }
     *block_capacity = 2 + control_block_count + expression_control_block_count;
-    *instruction_capacity = node_count * 4 + statement_count * 8 +
-        body->local_count * 3 + *block_capacity * 2 + 32;
+    *instruction_capacity = node_count * 4 + statement_count * 8 + body->local_count * 3 + *block_capacity * 2 + 32;
     *value_capacity = *instruction_capacity;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_lower_function(
-    Arena* result_arena,
-    Arena* scratch_arena,
-    AnalysisResult* analysis,
-    AnalysisEntity* entity,
-    AnalysisInstantiation* instantiation,
-    IrFunction* function)
+BUSTER_GLOBAL_LOCAL void ir_lower_function(Arena* result_arena, Arena* scratch_arena, AnalysisResult* analysis, AnalysisEntity* entity,
+                                           AnalysisInstantiation* instantiation, IrFunction* function)
 {
     u32 entity_index = entity->id.index.value;
-    AnalysisBody* body = instantiation ?
-        &instantiation->body : analysis->module.bodies + entity_index;
-    AnalysisTypeId function_type_id = instantiation ?
-        instantiation->function_type : analysis->module.semantics[entity_index].type;
+    AnalysisBody* body = instantiation ? &instantiation->body : analysis->module.bodies + entity_index;
+    AnalysisTypeId function_type_id = instantiation ? instantiation->function_type : analysis->module.semantics[entity_index].type;
     AnalysisType* function_type = analysis_type_from_id(analysis, function_type_id);
     BUSTER_CHECK(function_type->kind == ANALYSIS_TYPE_FUNCTION);
-    function->name = instantiation ?
-        instantiation->symbol_name :
-        entity->name;
+    function->name = instantiation ? instantiation->symbol_name : entity->name;
     function->entity = entity->id;
-    function->instantiation = instantiation ?
-        instantiation->id : ANALYSIS_INSTANTIATION_ID_INVALID;
+    function->instantiation = instantiation ? instantiation->id : ANALYSIS_INSTANTIATION_ID_INVALID;
     function->type = function_type_id;
     function->local_count = body->local_count;
-    ir_function_measure(
-        scratch_arena,
-        entity->ast.code,
-        body,
-        &function->instruction_capacity,
-        &function->block_capacity,
-        &function->value_capacity);
+    ir_function_measure(scratch_arena, entity->ast.code, body, &function->instruction_capacity, &function->block_capacity, &function->value_capacity);
     function->blocks = arena_allocate(result_arena, IrBlock, function->block_capacity);
-    function->instructions = arena_allocate(
-        result_arena,
-        IrInstruction,
-        function->instruction_capacity);
+    function->instructions = arena_allocate(result_arena, IrInstruction, function->instruction_capacity);
     function->values = arena_allocate(result_arena, IrValue, function->value_capacity);
     function->local_places = arena_allocate(result_arena, IrValueId, function->local_count);
     function->local_uses_memory = arena_allocate(result_arena, bool, function->local_count);
@@ -2497,21 +1801,12 @@ BUSTER_GLOBAL_LOCAL void ir_lower_function(
     {
         AnalysisLocal* local = body->locals + local_index;
         function->local_places[local_index] = IR_VALUE_ID_INVALID;
-        function->local_uses_memory[local_index] =
-            local->address_taken || local->requires_storage;
+        function->local_uses_memory[local_index] = local->address_taken || local->requires_storage;
         if (!function->local_uses_memory[local_index])
         {
             continue;
         }
-        IrInstruction* storage = ir_emit(
-            &builder,
-            IR_OPCODE_LOCAL,
-            local->type,
-            IR_VALUE_PLACE,
-            local->range,
-            0,
-            0,
-            true);
+        IrInstruction* storage = ir_emit(&builder, IR_OPCODE_LOCAL, local->type, IR_VALUE_PLACE, local->range, 0, 0, true);
         storage->local = local->id;
         function->local_places[local_index] = storage->result;
     }
@@ -2527,30 +1822,14 @@ BUSTER_GLOBAL_LOCAL void ir_lower_function(
         {
             continue;
         }
-        IrInstruction* argument = ir_emit(
-            &builder,
-            IR_OPCODE_ARGUMENT,
-            local->type,
-            IR_VALUE_VALUE,
-            local->range,
-            0,
-            0,
-            true);
+        IrInstruction* argument = ir_emit(&builder, IR_OPCODE_ARGUMENT, local->type, IR_VALUE_VALUE, local->range, 0, 0, true);
         argument->immediates = arena_allocate(result_arena, u64, 1);
         argument->immediates[0] = argument_index;
         argument->immediate_count = 1;
-        IrValueId operands[2] = { function->local_places[local_index], argument->result };
+        IrValueId operands[2] = {function->local_places[local_index], argument->result};
         if (function->local_uses_memory[local_index])
         {
-            ir_emit(
-                &builder,
-                IR_OPCODE_STORE,
-                analysis->types.builtin.void_type,
-                IR_VALUE_VALUE,
-                local->range,
-                operands,
-                2,
-                false);
+            ir_emit(&builder, IR_OPCODE_STORE, analysis->types.builtin.void_type, IR_VALUE_VALUE, local->range, operands, 2, false);
         }
         else
         {
@@ -2570,14 +1849,7 @@ BUSTER_GLOBAL_LOCAL void ir_lower_function(
         ir_terminate(&builder, IR_OPCODE_UNREACHABLE, entity->range, 0, 0, 0, 0);
     }
     IrLowerTask* top = 0;
-    ir_task_push(
-        scratch_arena,
-        &top,
-        entity->ast.code->body.first_statement,
-        function->entry,
-        exit,
-        IR_BLOCK_ID_INVALID,
-        IR_BLOCK_ID_INVALID);
+    ir_task_push(scratch_arena, &top, entity->ast.code->body.first_statement, function->entry, exit, IR_BLOCK_ID_INVALID, IR_BLOCK_ID_INVALID);
     while (top)
     {
         IrLowerTask* task = top;
@@ -2586,44 +1858,32 @@ BUSTER_GLOBAL_LOCAL void ir_lower_function(
     }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
-        ir_block_seal(&builder, (IrBlockId){ .value = block_index });
+        ir_block_seal(&builder, (IrBlockId){.value = block_index});
     }
     function->state = IR_FUNCTION_LOWERED;
 }
 
-BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(
-    Arena* result_arena,
-    AnalysisResult* analysis)
+BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(Arena* result_arena, AnalysisResult* analysis)
 {
-    Arena* conflicts[] = { result_arena };
-    TemporalArena scratch = scratch_begin(
-        conflicts,
-        BUSTER_ARRAY_LENGTH(conflicts));
+    Arena* conflicts[] = {result_arena};
+    TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
     u32 ordinary_function_count = 0;
-    for (u32 entity_index = 0;
-        entity_index < analysis->module.entity_count;
-        entity_index += 1)
+    for (u32 entity_index = 0; entity_index < analysis->module.entity_count; entity_index += 1)
     {
         AnalysisEntity* entity = analysis->module.entities + entity_index;
-        if (entity->kind == ANALYSIS_ENTITY_CODE &&
-            !analysis_entity_is_generic(scratch.arena, analysis, entity))
+        if (entity->kind == ANALYSIS_ENTITY_CODE && !analysis_entity_is_generic(scratch.arena, analysis, entity))
         {
             ordinary_function_count += 1;
         }
     }
     u32 owned_specialization_count = 0;
-    for (AnalysisInstantiation* instantiation = analysis->first_instantiation;
-        instantiation;
-        instantiation = instantiation->next)
+    for (AnalysisInstantiation* instantiation = analysis->first_instantiation; instantiation; instantiation = instantiation->next)
     {
-        owned_specialization_count +=
-            instantiation->codegen_owner.value ==
-            analysis->module.id.value;
+        owned_specialization_count += instantiation->codegen_owner.value == analysis->module.id.value;
     }
     IrModule module = {
         .name = analysis->module.name,
-        .function_count =
-            ordinary_function_count + owned_specialization_count,
+        .function_count = ordinary_function_count + owned_specialization_count,
     };
     module.functions = arena_allocate(result_arena, IrFunction, module.function_count);
     u32 function_index = 0;
@@ -2645,24 +1905,17 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(
             .entity = entity->id,
             .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
             .type = analysis->module.semantics[entity_index].type,
-            .id = { .value = function_index },
+            .id = {.value = function_index},
             .entry = IR_BLOCK_ID_INVALID,
-            .state = entity->ast.code->has_body ?
-                IR_FUNCTION_NOT_LOWERED : IR_FUNCTION_DECLARATION,
+            .state = entity->ast.code->has_body ? IR_FUNCTION_NOT_LOWERED : IR_FUNCTION_DECLARATION,
         };
         function_index += 1;
     }
-    AnalysisInstantiation** specializations = arena_allocate(
-        scratch.arena,
-        AnalysisInstantiation*,
-        analysis->instantiation_count);
+    AnalysisInstantiation** specializations = arena_allocate(scratch.arena, AnalysisInstantiation*, analysis->instantiation_count);
     u32 specialization_count = 0;
-    for (AnalysisInstantiation* instantiation = analysis->first_instantiation;
-        instantiation;
-        instantiation = instantiation->next)
+    for (AnalysisInstantiation* instantiation = analysis->first_instantiation; instantiation; instantiation = instantiation->next)
     {
-        if (instantiation->codegen_owner.value ==
-            analysis->module.id.value)
+        if (instantiation->codegen_owner.value == analysis->module.id.value)
         {
             specializations[specialization_count++] = instantiation;
         }
@@ -2680,8 +1933,7 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(
             s32 order = memcmp(left.pointer, right.pointer, (size_t)common);
             if (!order)
             {
-                order = left.length > right.length ?
-                    1 : left.length < right.length ? -1 : 0;
+                order = left.length > right.length ? 1 : left.length < right.length ? -1 : 0;
             }
             if (order <= 0)
             {
@@ -2695,8 +1947,7 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(
     for (u32 index = 0; index < specialization_count; index += 1)
     {
         AnalysisInstantiation* instantiation = specializations[index];
-        AnalysisEntity* entity =
-            analysis->module.entities + instantiation->generic_entity.index.value;
+        AnalysisEntity* entity = analysis->module.entities + instantiation->generic_entity.index.value;
         module.functions[function_index] = (IrFunction){
             .name = instantiation->symbol_name,
             .symbol = IR_SYMBOL_ID_INVALID,
@@ -2704,10 +1955,9 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(
             .entity = entity->id,
             .instantiation = instantiation->id,
             .type = instantiation->function_type,
-            .id = { .value = function_index },
+            .id = {.value = function_index},
             .entry = IR_BLOCK_ID_INVALID,
-            .state = entity->ast.code->has_body ?
-                IR_FUNCTION_NOT_LOWERED : IR_FUNCTION_DECLARATION,
+            .state = entity->ast.code->has_body ? IR_FUNCTION_NOT_LOWERED : IR_FUNCTION_DECLARATION,
         };
         function_index += 1;
     }
@@ -2716,13 +1966,9 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(
     return module;
 }
 
-BUSTER_GLOBAL_LOCAL AnalysisInstantiation* ir_instantiation_from_id(
-    AnalysisResult* analysis,
-    AnalysisInstantiationId id)
+BUSTER_GLOBAL_LOCAL AnalysisInstantiation* ir_instantiation_from_id(AnalysisResult* analysis, AnalysisInstantiationId id)
 {
-    for (AnalysisInstantiation* instantiation = analysis->first_instantiation;
-        instantiation;
-        instantiation = instantiation->next)
+    for (AnalysisInstantiation* instantiation = analysis->first_instantiation; instantiation; instantiation = instantiation->next)
     {
         if (instantiation->id.value == id.value)
         {
@@ -2736,39 +1982,27 @@ IrModule ir_generate_module(Arena* result_arena, AnalysisResult* analysis)
 {
     BUSTER_CHECK(analysis && analysis->types.types);
     IrModule module = ir_module_initialize(result_arena, analysis);
-    Arena* conflicts[] = { result_arena };
+    Arena* conflicts[] = {result_arena};
     TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    for (u32 function_index = 0;
-        function_index < module.function_count;
-        function_index += 1)
+    for (u32 function_index = 0; function_index < module.function_count; function_index += 1)
     {
         IrFunction* function = module.functions + function_index;
-        AnalysisEntity* entity =
-            analysis->module.entities + function->entity.index.value;
+        AnalysisEntity* entity = analysis->module.entities + function->entity.index.value;
         AnalysisInstantiation* instantiation =
-            function->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID ?
-            0 : ir_instantiation_from_id(analysis, function->instantiation);
+            function->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID ? 0 : ir_instantiation_from_id(analysis, function->instantiation);
         if (!entity->ast.code->has_body)
         {
             BUSTER_CHECK(function->state == IR_FUNCTION_DECLARATION);
         }
-        else if ((!instantiation &&
-                !analysis->module.bodies[entity->id.index.value].analyzed) ||
-            (instantiation && !instantiation->body.analyzed) ||
-            ir_entity_has_diagnostic(analysis, entity->id))
+        else if ((!instantiation && !analysis->module.bodies[entity->id.index.value].analyzed) || (instantiation && !instantiation->body.analyzed) ||
+                 ir_entity_has_diagnostic(analysis, entity->id))
         {
             function->state = IR_FUNCTION_REJECTED;
             module.rejected_function_count += 1;
         }
         else
         {
-            ir_lower_function(
-                result_arena,
-                scratch.arena,
-                analysis,
-                entity,
-                instantiation,
-                function);
+            ir_lower_function(result_arena, scratch.arena, analysis, entity, instantiation, function);
             module.lowered_function_count += 1;
         }
     }
@@ -2783,84 +2017,104 @@ IrModule ir_analyze_and_generate_module(Arena* result_arena, AnalysisResult* ana
     return ir_generate_module(result_arena, analysis);
 }
 
-BUSTER_GLOBAL_LOCAL IrTypeKind ir_type_kind_from_analysis(
-    AnalysisTypeKind kind)
+BUSTER_GLOBAL_LOCAL IrTypeKind ir_type_kind_from_analysis(AnalysisTypeKind kind)
 {
     switch (kind)
     {
-        case ANALYSIS_TYPE_VOID: return IR_TYPE_VOID;
-        case ANALYSIS_TYPE_BOOL: return IR_TYPE_BOOLEAN;
-        case ANALYSIS_TYPE_INTEGER: return IR_TYPE_INTEGER;
-        case ANALYSIS_TYPE_FLOAT: return IR_TYPE_FLOAT;
-        case ANALYSIS_TYPE_VA_LIST: return IR_TYPE_VA_LIST;
-        case ANALYSIS_TYPE_POINTER: return IR_TYPE_POINTER;
-        case ANALYSIS_TYPE_SLICE: return IR_TYPE_SLICE;
-        case ANALYSIS_TYPE_ARRAY: return IR_TYPE_ARRAY;
-        case ANALYSIS_TYPE_VECTOR: return IR_TYPE_VECTOR;
-        case ANALYSIS_TYPE_FUNCTION: return IR_TYPE_FUNCTION;
-        case ANALYSIS_TYPE_RANGE: return IR_TYPE_RANGE;
-        case ANALYSIS_TYPE_STRUCT: return IR_TYPE_STRUCT;
-        case ANALYSIS_TYPE_UNION: return IR_TYPE_UNION;
-        case ANALYSIS_TYPE_ENUM: return IR_TYPE_ENUM;
-        case ANALYSIS_TYPE_POISON:
-        case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
-        case ANALYSIS_TYPE_INFERRED_ARRAY:
-        case ANALYSIS_TYPE_COUNT: break;
+    case ANALYSIS_TYPE_VOID:
+        return IR_TYPE_VOID;
+    case ANALYSIS_TYPE_BOOL:
+        return IR_TYPE_BOOLEAN;
+    case ANALYSIS_TYPE_INTEGER:
+        return IR_TYPE_INTEGER;
+    case ANALYSIS_TYPE_FLOAT:
+        return IR_TYPE_FLOAT;
+    case ANALYSIS_TYPE_VA_LIST:
+        return IR_TYPE_VA_LIST;
+    case ANALYSIS_TYPE_POINTER:
+        return IR_TYPE_POINTER;
+    case ANALYSIS_TYPE_SLICE:
+        return IR_TYPE_SLICE;
+    case ANALYSIS_TYPE_ARRAY:
+        return IR_TYPE_ARRAY;
+    case ANALYSIS_TYPE_VECTOR:
+        return IR_TYPE_VECTOR;
+    case ANALYSIS_TYPE_FUNCTION:
+        return IR_TYPE_FUNCTION;
+    case ANALYSIS_TYPE_RANGE:
+        return IR_TYPE_RANGE;
+    case ANALYSIS_TYPE_STRUCT:
+        return IR_TYPE_STRUCT;
+    case ANALYSIS_TYPE_UNION:
+        return IR_TYPE_UNION;
+    case ANALYSIS_TYPE_ENUM:
+        return IR_TYPE_ENUM;
+    case ANALYSIS_TYPE_POISON:
+    case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
+    case ANALYSIS_TYPE_INFERRED_ARRAY:
+    case ANALYSIS_TYPE_COUNT:
+        break;
     }
     return IR_TYPE_COUNT;
 }
 
-BUSTER_GLOBAL_LOCAL IrAbiClass ir_abi_class_from_analysis(
-    AnalysisAbiClass abi_class)
+BUSTER_GLOBAL_LOCAL IrAbiClass ir_abi_class_from_analysis(AnalysisAbiClass abi_class)
 {
     switch (abi_class)
     {
-        case ANALYSIS_ABI_CLASS_NONE: return IR_ABI_CLASS_NONE;
-        case ANALYSIS_ABI_CLASS_INTEGER: return IR_ABI_CLASS_INTEGER;
-        case ANALYSIS_ABI_CLASS_FLOAT: return IR_ABI_CLASS_FLOAT;
-        case ANALYSIS_ABI_CLASS_VECTOR: return IR_ABI_CLASS_VECTOR;
-        case ANALYSIS_ABI_CLASS_POINTER: return IR_ABI_CLASS_POINTER;
-        case ANALYSIS_ABI_CLASS_AGGREGATE: return IR_ABI_CLASS_AGGREGATE;
-        case ANALYSIS_ABI_CLASS_MEMORY: return IR_ABI_CLASS_MEMORY;
-        case ANALYSIS_ABI_CLASS_COUNT: break;
+    case ANALYSIS_ABI_CLASS_NONE:
+        return IR_ABI_CLASS_NONE;
+    case ANALYSIS_ABI_CLASS_INTEGER:
+        return IR_ABI_CLASS_INTEGER;
+    case ANALYSIS_ABI_CLASS_FLOAT:
+        return IR_ABI_CLASS_FLOAT;
+    case ANALYSIS_ABI_CLASS_VECTOR:
+        return IR_ABI_CLASS_VECTOR;
+    case ANALYSIS_ABI_CLASS_POINTER:
+        return IR_ABI_CLASS_POINTER;
+    case ANALYSIS_ABI_CLASS_AGGREGATE:
+        return IR_ABI_CLASS_AGGREGATE;
+    case ANALYSIS_ABI_CLASS_MEMORY:
+        return IR_ABI_CLASS_MEMORY;
+    case ANALYSIS_ABI_CLASS_COUNT:
+        break;
     }
     return IR_ABI_CLASS_COUNT;
 }
 
-BUSTER_GLOBAL_LOCAL IrCallingConvention
-ir_calling_convention_from_ast(
-    AstCallingConvention calling_convention)
+BUSTER_GLOBAL_LOCAL IrCallingConvention ir_calling_convention_from_ast(AstCallingConvention calling_convention)
 {
     switch (calling_convention)
     {
-        case AST_CALLING_CONVENTION_C:
-            return IR_CALLING_CONVENTION_C;
-        case AST_CALLING_CONVENTION_SYSTEMV:
-            return IR_CALLING_CONVENTION_SYSTEMV;
-        case AST_CALLING_CONVENTION_WIN64:
-            return IR_CALLING_CONVENTION_WIN64;
-        case AST_CALLING_CONVENTION_COUNT:
-            break;
+    case AST_CALLING_CONVENTION_C:
+        return IR_CALLING_CONVENTION_C;
+    case AST_CALLING_CONVENTION_SYSTEMV:
+        return IR_CALLING_CONVENTION_SYSTEMV;
+    case AST_CALLING_CONVENTION_WIN64:
+        return IR_CALLING_CONVENTION_WIN64;
+    case AST_CALLING_CONVENTION_COUNT:
+        break;
     }
     return IR_CALLING_CONVENTION_COUNT;
 }
 
-BUSTER_GLOBAL_LOCAL IrSymbolKind ir_symbol_kind_from_analysis(
-    AnalysisEntityKind kind)
+BUSTER_GLOBAL_LOCAL IrSymbolKind ir_symbol_kind_from_analysis(AnalysisEntityKind kind)
 {
     switch (kind)
     {
-        case ANALYSIS_ENTITY_TYPE: return IR_SYMBOL_TYPE;
-        case ANALYSIS_ENTITY_CODE: return IR_SYMBOL_FUNCTION;
-        case ANALYSIS_ENTITY_DATA: return IR_SYMBOL_DATA;
-        case ANALYSIS_ENTITY_COUNT: break;
+    case ANALYSIS_ENTITY_TYPE:
+        return IR_SYMBOL_TYPE;
+    case ANALYSIS_ENTITY_CODE:
+        return IR_SYMBOL_FUNCTION;
+    case ANALYSIS_ENTITY_DATA:
+        return IR_SYMBOL_DATA;
+    case ANALYSIS_ENTITY_COUNT:
+        break;
     }
     return IR_SYMBOL_COUNT;
 }
 
-BUSTER_GLOBAL_LOCAL IrSourceRange ir_source_range_from_parser(
-    IrSourceId source,
-    ParserSourceRange range)
+BUSTER_GLOBAL_LOCAL IrSourceRange ir_source_range_from_parser(IrSourceId source, ParserSourceRange range)
 {
     return (IrSourceRange){
         .source = source,
@@ -2871,10 +2125,7 @@ BUSTER_GLOBAL_LOCAL IrSourceRange ir_source_range_from_parser(
     };
 }
 
-BUSTER_GLOBAL_LOCAL IrTypeId ir_program_type_map(
-    IrProgram* program,
-    AnalysisModuleId module,
-    AnalysisTypeId type)
+BUSTER_GLOBAL_LOCAL IrTypeId ir_program_type_map(IrProgram* program, AnalysisModuleId module, AnalysisTypeId type)
 {
     if (module.value >= program->module_count)
     {
@@ -2888,60 +2139,37 @@ BUSTER_GLOBAL_LOCAL IrTypeId ir_program_type_map(
     return ir_module->frontend_type_map[type.value];
 }
 
-IrProgram ir_program_initialize(
-    Arena* arena,
-    u32 module_count,
-    u32 type_capacity,
-    u32 symbol_capacity,
-    u32 source_capacity)
+IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacity, u32 symbol_capacity, u32 source_capacity)
 {
     IrProgram program = {0};
     if (!arena)
     {
         return program;
     }
-    program.modules = arena_allocate(
-        arena,
-        IrModule,
-        module_count);
+    program.modules = arena_allocate(arena, IrModule, module_count);
     program.module_count = module_count;
     program.types = (IrTypeTable){
-        .types = arena_allocate(
-            arena,
-            IrType,
-            type_capacity),
+        .types = arena_allocate(arena, IrType, type_capacity),
         .capacity = type_capacity,
     };
     program.symbols = (IrSymbolTable){
-        .symbols = arena_allocate(
-            arena,
-            IrSymbol,
-            symbol_capacity),
+        .symbols = arena_allocate(arena, IrSymbol, symbol_capacity),
         .capacity = symbol_capacity,
     };
     program.sources = (IrSourceTable){
-        .sources = arena_allocate(
-            arena,
-            IrSource,
-            source_capacity),
+        .sources = arena_allocate(arena, IrSource, source_capacity),
         .capacity = source_capacity,
     };
-    for (u32 index = 0;
-        index < module_count;
-        index += 1)
+    for (u32 index = 0; index < module_count; index += 1)
     {
         program.modules[index] = (IrModule){0};
     }
     return program;
 }
 
-IrTypeId ir_program_add_type(
-    IrProgram* program,
-    IrType type)
+IrTypeId ir_program_add_type(IrProgram* program, IrType type)
 {
-    if (!program ||
-        program->types.count >=
-            program->types.capacity)
+    if (!program || program->types.count >= program->types.capacity)
     {
         return IR_TYPE_ID_INVALID;
     }
@@ -2953,13 +2181,9 @@ IrTypeId ir_program_add_type(
     return id;
 }
 
-IrSymbolId ir_program_add_symbol(
-    IrProgram* program,
-    IrSymbol symbol)
+IrSymbolId ir_program_add_symbol(IrProgram* program, IrSymbol symbol)
 {
-    if (!program ||
-        program->symbols.count >=
-            program->symbols.capacity)
+    if (!program || program->symbols.count >= program->symbols.capacity)
     {
         return IR_SYMBOL_ID_INVALID;
     }
@@ -2971,13 +2195,9 @@ IrSymbolId ir_program_add_symbol(
     return id;
 }
 
-IrSourceId ir_program_add_source(
-    IrProgram* program,
-    IrSource source)
+IrSourceId ir_program_add_source(IrProgram* program, IrSource source)
 {
-    if (!program ||
-        program->sources.count >=
-            program->sources.capacity)
+    if (!program || program->sources.count >= program->sources.capacity)
     {
         return IR_SOURCE_ID_INVALID;
     }
@@ -2989,33 +2209,19 @@ IrSourceId ir_program_add_source(
     return id;
 }
 
-IrFunction* ir_module_add_function(
-    Arena* arena,
-    IrModule* module,
-    IrFunction function)
+IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction function)
 {
     if (!arena || !module)
     {
         return 0;
     }
-    if (module->function_count >=
-        module->function_capacity)
+    if (module->function_count >= module->function_capacity)
     {
-        u32 capacity =
-            module->function_capacity ?
-                module->function_capacity * 2 :
-                8;
-        IrFunction* functions = arena_allocate(
-            arena,
-            IrFunction,
-            capacity);
+        u32 capacity = module->function_capacity ? module->function_capacity * 2 : 8;
+        IrFunction* functions = arena_allocate(arena, IrFunction, capacity);
         if (module->function_count)
         {
-            memcpy(
-                functions,
-                module->functions,
-                sizeof(IrFunction) *
-                    module->function_count);
+            memcpy(functions, module->functions, sizeof(IrFunction) * module->function_count);
         }
         module->functions = functions;
         module->function_capacity = capacity;
@@ -3023,78 +2229,46 @@ IrFunction* ir_module_add_function(
     function.id = (IrFunctionId){
         .value = module->function_count,
     };
-    module->functions[
-        module->function_count++] = function;
-    return &module->functions[
-        module->function_count - 1];
+    module->functions[module->function_count++] = function;
+    return &module->functions[module->function_count - 1];
 }
 
-IrGlobal* ir_module_add_global(
-    Arena* arena,
-    IrModule* module,
-    IrGlobal global)
+IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global)
 {
     if (!arena || !module)
     {
         return 0;
     }
-    if (module->global_count >=
-        module->global_capacity)
+    if (module->global_count >= module->global_capacity)
     {
-        u32 old_capacity =
-            module->global_capacity;
-        u32 capacity =
-            old_capacity ?
-                old_capacity * 2 : 8;
-        IrGlobal* globals = arena_allocate(
-            arena,
-            IrGlobal,
-            capacity);
+        u32 old_capacity = module->global_capacity;
+        u32 capacity = old_capacity ? old_capacity * 2 : 8;
+        IrGlobal* globals = arena_allocate(arena, IrGlobal, capacity);
         if (module->global_count)
         {
-            memcpy(
-                globals,
-                module->globals,
-                (u64)module->global_count *
-                    sizeof(*globals));
+            memcpy(globals, module->globals, (u64)module->global_count * sizeof(*globals));
         }
         module->globals = globals;
         module->global_capacity = capacity;
     }
-    IrGlobal* result =
-        module->globals +
-        module->global_count++;
+    IrGlobal* result = module->globals + module->global_count++;
     *result = global;
     return result;
 }
 
-IrBlock* ir_function_add_block(
-    Arena* arena,
-    IrFunction* function,
-    IrBlock block)
+IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block)
 {
     if (!arena || !function)
     {
         return 0;
     }
-    if (function->block_count >=
-        function->block_capacity)
+    if (function->block_count >= function->block_capacity)
     {
-        u32 capacity =
-            function->block_capacity ?
-                function->block_capacity * 2 :
-                8;
-        IrBlock* blocks = arena_allocate(
-            arena,
-            IrBlock,
-            capacity);
+        u32 capacity = function->block_capacity ? function->block_capacity * 2 : 8;
+        IrBlock* blocks = arena_allocate(arena, IrBlock, capacity);
         if (function->block_count)
         {
-            memcpy(
-                blocks,
-                function->blocks,
-                sizeof(IrBlock) *
-                    function->block_count);
+            memcpy(blocks, function->blocks, sizeof(IrBlock) * function->block_count);
         }
         function->blocks = blocks;
         function->block_capacity = capacity;
@@ -3102,39 +2276,23 @@ IrBlock* ir_function_add_block(
     block.id = (IrBlockId){
         .value = function->block_count,
     };
-    function->blocks[
-        function->block_count++] = block;
-    return &function->blocks[
-        function->block_count - 1];
+    function->blocks[function->block_count++] = block;
+    return &function->blocks[function->block_count - 1];
 }
 
-IrValueId ir_function_add_value(
-    Arena* arena,
-    IrFunction* function,
-    IrValue value)
+IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue value)
 {
     if (!arena || !function)
     {
         return IR_VALUE_ID_INVALID;
     }
-    if (function->value_count >=
-        function->value_capacity)
+    if (function->value_count >= function->value_capacity)
     {
-        u32 capacity =
-            function->value_capacity ?
-                function->value_capacity * 2 :
-                16;
-        IrValue* values = arena_allocate(
-            arena,
-            IrValue,
-            capacity);
+        u32 capacity = function->value_capacity ? function->value_capacity * 2 : 16;
+        IrValue* values = arena_allocate(arena, IrValue, capacity);
         if (function->value_count)
         {
-            memcpy(
-                values,
-                function->values,
-                sizeof(IrValue) *
-                    function->value_count);
+            memcpy(values, function->values, sizeof(IrValue) * function->value_count);
         }
         function->values = values;
         function->value_capacity = capacity;
@@ -3146,69 +2304,45 @@ IrValueId ir_function_add_value(
     return id;
 }
 
-IrInstructionId ir_function_add_instruction(
-    Arena* arena,
-    IrFunction* function,
-    IrInstruction instruction)
+IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction)
 {
     if (!arena || !function)
     {
         return IR_INSTRUCTION_ID_INVALID;
     }
-    if (function->instruction_count >=
-        function->instruction_capacity)
+    if (function->instruction_count >= function->instruction_capacity)
     {
-        u32 capacity =
-            function->instruction_capacity ?
-                function->instruction_capacity * 2 :
-                16;
-        IrInstruction* instructions =
-            arena_allocate(
-                arena,
-                IrInstruction,
-                capacity);
+        u32 capacity = function->instruction_capacity ? function->instruction_capacity * 2 : 16;
+        IrInstruction* instructions = arena_allocate(arena, IrInstruction, capacity);
         if (function->instruction_count)
         {
-            memcpy(
-                instructions,
-                function->instructions,
-                sizeof(IrInstruction) *
-                    function->instruction_count);
+            memcpy(instructions, function->instructions, sizeof(IrInstruction) * function->instruction_count);
         }
         function->instructions = instructions;
-        function->instruction_capacity =
-            capacity;
+        function->instruction_capacity = capacity;
     }
     IrInstructionId id = {
         .value = function->instruction_count++,
     };
     instruction.id = id;
-    function->instructions[id.value] =
-        instruction;
+    function->instructions[id.value] = instruction;
     return id;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_program_metadata_initialize(
-    Arena* arena,
-    AnalysisProgram* analysis,
-    IrProgram* program)
+BUSTER_GLOBAL_LOCAL void ir_program_metadata_initialize(Arena* arena, AnalysisProgram* analysis, IrProgram* program)
 {
     u32 type_capacity = 0;
     u32 symbol_capacity = 0;
     u32 source_capacity = 0;
-    for (u32 module_index = 0;
-        module_index < analysis->module_count;
-        module_index += 1)
+    for (u32 module_index = 0; module_index < analysis->module_count; module_index += 1)
     {
-        AnalysisResult* module =
-            analysis->module_results[module_index];
+        AnalysisResult* module = analysis->module_results[module_index];
         if (!module)
         {
             continue;
         }
         type_capacity += module->types.count;
-        symbol_capacity += module->module.entity_count +
-            module->instantiation_count;
+        symbol_capacity += module->module.entity_count + module->instantiation_count;
         source_capacity += module->module.source_count;
     }
     program->types = (IrTypeTable){
@@ -3216,123 +2350,69 @@ BUSTER_GLOBAL_LOCAL void ir_program_metadata_initialize(
         .capacity = type_capacity,
     };
     program->symbols = (IrSymbolTable){
-        .symbols = arena_allocate(
-            arena,
-            IrSymbol,
-            symbol_capacity),
+        .symbols = arena_allocate(arena, IrSymbol, symbol_capacity),
         .capacity = symbol_capacity,
     };
     program->sources = (IrSourceTable){
-        .sources = arena_allocate(
-            arena,
-            IrSource,
-            source_capacity),
+        .sources = arena_allocate(arena, IrSource, source_capacity),
         .capacity = source_capacity,
     };
 
-    for (u32 module_index = 0;
-        module_index < analysis->module_count;
-        module_index += 1)
+    for (u32 module_index = 0; module_index < analysis->module_count; module_index += 1)
     {
-        AnalysisResult* module =
-            analysis->module_results[module_index];
+        AnalysisResult* module = analysis->module_results[module_index];
         if (!module)
         {
             continue;
         }
         IrModule* ir_module = program->modules + module_index;
         ir_module->frontend_type_count = module->types.count;
-        ir_module->frontend_symbol_count =
-            module->module.entity_count;
-        ir_module->frontend_source_count =
-            module->module.source_count;
-        ir_module->frontend_type_map = arena_allocate(
-            arena,
-            IrTypeId,
-            ir_module->frontend_type_count);
-        ir_module->frontend_symbol_map = arena_allocate(
-            arena,
-            IrSymbolId,
-            ir_module->frontend_symbol_count);
-        ir_module->frontend_source_map = arena_allocate(
-            arena,
-            IrSourceId,
-            ir_module->frontend_source_count);
-        for (u32 type_index = 0;
-            type_index < ir_module->frontend_type_count;
-            type_index += 1)
+        ir_module->frontend_symbol_count = module->module.entity_count;
+        ir_module->frontend_source_count = module->module.source_count;
+        ir_module->frontend_type_map = arena_allocate(arena, IrTypeId, ir_module->frontend_type_count);
+        ir_module->frontend_symbol_map = arena_allocate(arena, IrSymbolId, ir_module->frontend_symbol_count);
+        ir_module->frontend_source_map = arena_allocate(arena, IrSourceId, ir_module->frontend_source_count);
+        for (u32 type_index = 0; type_index < ir_module->frontend_type_count; type_index += 1)
         {
-            ir_module->frontend_type_map[type_index] =
-                IR_TYPE_ID_INVALID;
+            ir_module->frontend_type_map[type_index] = IR_TYPE_ID_INVALID;
         }
-        for (u32 source_index = 0;
-            source_index < module->module.source_count;
-            source_index += 1)
+        for (u32 source_index = 0; source_index < module->module.source_count; source_index += 1)
         {
-            AnalysisSource* source =
-                module->module.sources + source_index;
+            AnalysisSource* source = module->module.sources + source_index;
             IrSourceId id = {
                 .value = program->sources.count++,
             };
-            program->sources.sources[id.value] =
-                (IrSource){
-                    .path = source->path,
-                    .id = id,
-                };
-            ir_module->frontend_source_map[source_index] =
-                id;
+            program->sources.sources[id.value] = (IrSource){
+                .path = source->path,
+                .id = id,
+            };
+            ir_module->frontend_source_map[source_index] = id;
         }
-        for (u32 entity_index = 0;
-            entity_index < module->module.entity_count;
-            entity_index += 1)
+        for (u32 entity_index = 0; entity_index < module->module.entity_count; entity_index += 1)
         {
-            AnalysisEntity* entity =
-                module->module.entities + entity_index;
+            AnalysisEntity* entity = module->module.entities + entity_index;
             IrSourceId source =
-                entity->source.value <
-                        ir_module->frontend_source_count ?
-                    ir_module->frontend_source_map[
-                        entity->source.value] :
-                    IR_SOURCE_ID_INVALID;
+                entity->source.value < ir_module->frontend_source_count ? ir_module->frontend_source_map[entity->source.value] : IR_SOURCE_ID_INVALID;
             IrSymbolId id = {
                 .value = program->symbols.count++,
             };
-            bool exported =
-                entity->kind == ANALYSIS_ENTITY_CODE &&
-                entity->ast.code->exported;
-            program->symbols.symbols[id.value] =
-                (IrSymbol){
-                    .name = entity->name,
-                    .link_name = entity->name,
-                    .source =
-                        ir_source_range_from_parser(
-                            source,
-                            entity->range),
-                    .type = IR_TYPE_ID_INVALID,
-                    .id = id,
-                    .kind =
-                        ir_symbol_kind_from_analysis(
-                            entity->kind),
-                    .linkage = exported ?
-                        IR_LINKAGE_EXTERNAL :
-                        IR_LINKAGE_INTERNAL,
-                    .is_definition =
-                        entity->kind !=
-                            ANALYSIS_ENTITY_CODE ||
-                        entity->ast.code->has_body,
-                };
-            ir_module->frontend_symbol_map[entity_index] =
-                id;
+            bool exported = entity->kind == ANALYSIS_ENTITY_CODE && entity->ast.code->exported;
+            program->symbols.symbols[id.value] = (IrSymbol){
+                .name = entity->name,
+                .link_name = entity->name,
+                .source = ir_source_range_from_parser(source, entity->range),
+                .type = IR_TYPE_ID_INVALID,
+                .id = id,
+                .kind = ir_symbol_kind_from_analysis(entity->kind),
+                .linkage = exported ? IR_LINKAGE_EXTERNAL : IR_LINKAGE_INTERNAL,
+                .is_definition = entity->kind != ANALYSIS_ENTITY_CODE || entity->ast.code->has_body,
+            };
+            ir_module->frontend_symbol_map[entity_index] = id;
         }
-        for (u32 type_index = 0;
-            type_index < module->types.count;
-            type_index += 1)
+        for (u32 type_index = 0; type_index < module->types.count; type_index += 1)
         {
-            AnalysisType* analysis_type =
-                module->types.types + type_index;
-            IrTypeKind kind =
-                ir_type_kind_from_analysis(
-                    analysis_type->kind);
+            AnalysisType* analysis_type = module->types.types + type_index;
+            IrTypeKind kind = ir_type_kind_from_analysis(analysis_type->kind);
             if (kind == IR_TYPE_COUNT)
             {
                 continue;
@@ -3341,298 +2421,174 @@ BUSTER_GLOBAL_LOCAL void ir_program_metadata_initialize(
                 .value = program->types.count++,
             };
             ir_module->frontend_type_map[type_index] = id;
-            program->types.types[id.value] =
-                (IrType){
-                    .name = analysis_type->name,
-                    .id = id,
-                    .element_type = IR_TYPE_ID_INVALID,
-                    .return_type = IR_TYPE_ID_INVALID,
-                    .layout = {
-                        .size =
-                            analysis_type->layout.size,
-                        .alignment =
-                            analysis_type->layout.alignment,
-                        .abi_class =
-                            ir_abi_class_from_analysis(
-                                analysis_type->layout
-                                    .abi_class),
-                        .resolved =
-                            analysis_type->layout.state ==
-                            ANALYSIS_LAYOUT_RESOLVED,
+            program->types.types[id.value] = (IrType){
+                .name = analysis_type->name,
+                .id = id,
+                .element_type = IR_TYPE_ID_INVALID,
+                .return_type = IR_TYPE_ID_INVALID,
+                .layout =
+                    {
+                        .size = analysis_type->layout.size,
+                        .alignment = analysis_type->layout.alignment,
+                        .abi_class = ir_abi_class_from_analysis(analysis_type->layout.abi_class),
+                        .resolved = analysis_type->layout.state == ANALYSIS_LAYOUT_RESOLVED,
                     },
-                    .kind = kind,
-                };
+                .kind = kind,
+            };
         }
     }
 
-    for (u32 module_index = 0;
-        module_index < analysis->module_count;
-        module_index += 1)
+    for (u32 module_index = 0; module_index < analysis->module_count; module_index += 1)
     {
-        AnalysisResult* module =
-            analysis->module_results[module_index];
+        AnalysisResult* module = analysis->module_results[module_index];
         if (!module)
         {
             continue;
         }
         IrModule* ir_module = program->modules + module_index;
-        for (u32 type_index = 0;
-            type_index < module->types.count;
-            type_index += 1)
+        for (u32 type_index = 0; type_index < module->types.count; type_index += 1)
         {
-            IrTypeId id =
-                ir_module->frontend_type_map[type_index];
-            IrType* type =
-                ir_type_from_id(&program->types, id);
+            IrTypeId id = ir_module->frontend_type_map[type_index];
+            IrType* type = ir_type_from_id(&program->types, id);
             if (!type)
             {
                 continue;
             }
-            AnalysisType* analysis_type =
-                module->types.types + type_index;
+            AnalysisType* analysis_type = module->types.types + type_index;
             switch (analysis_type->kind)
             {
-                case ANALYSIS_TYPE_INTEGER:
+            case ANALYSIS_TYPE_INTEGER:
+            {
+                type->bit_width = analysis_type->as.integer.bit_width;
+                type->is_signed = analysis_type->as.integer.is_signed;
+            }
+            break;
+            case ANALYSIS_TYPE_FLOAT:
+            {
+                type->bit_width = analysis_type->as.float_bit_width;
+            }
+            break;
+            case ANALYSIS_TYPE_POINTER:
+            case ANALYSIS_TYPE_SLICE:
+            case ANALYSIS_TYPE_RANGE:
+            {
+                type->element_type = ir_program_type_map(program, module->module.id, analysis_type->as.element_type);
+            }
+            break;
+            case ANALYSIS_TYPE_ARRAY:
+            {
+                type->element_type = ir_program_type_map(program, module->module.id, analysis_type->as.array.element_type);
+                type->element_count = analysis_type->as.array.count;
+            }
+            break;
+            case ANALYSIS_TYPE_VECTOR:
+            {
+                type->element_type = ir_program_type_map(program, module->module.id, analysis_type->as.vector.element_type);
+                type->element_count = analysis_type->as.vector.count;
+            }
+            break;
+            case ANALYSIS_TYPE_FUNCTION:
+            {
+                type->parameter_count = analysis_type->as.function.argument_count;
+                type->parameter_types = arena_allocate(arena, IrTypeId, type->parameter_count);
+                for (u32 parameter_index = 0; parameter_index < type->parameter_count; parameter_index += 1)
                 {
-                    type->bit_width =
-                        analysis_type->as.integer.bit_width;
-                    type->is_signed =
-                        analysis_type->as.integer.is_signed;
-                } break;
-                case ANALYSIS_TYPE_FLOAT:
+                    type->parameter_types[parameter_index] =
+                        ir_program_type_map(program, module->module.id, analysis_type->as.function.argument_types[parameter_index]);
+                }
+                type->return_type = ir_program_type_map(program, module->module.id, analysis_type->as.function.return_type);
+                type->calling_convention = ir_calling_convention_from_ast(analysis_type->as.function.calling_convention);
+                type->is_variadic = analysis_type->as.function.is_variadic;
+            }
+            break;
+            case ANALYSIS_TYPE_STRUCT:
+            case ANALYSIS_TYPE_UNION:
+            case ANALYSIS_TYPE_ENUM:
+            {
+                AnalysisEntityId declaration = analysis_type->as.declaration;
+                if (declaration.module.value >= analysis->module_count)
                 {
-                    type->bit_width =
-                        analysis_type->as.float_bit_width;
-                } break;
-                case ANALYSIS_TYPE_POINTER:
-                case ANALYSIS_TYPE_SLICE:
-                case ANALYSIS_TYPE_RANGE:
-                {
-                    type->element_type =
-                        ir_program_type_map(
-                            program,
-                            module->module.id,
-                            analysis_type->as.element_type);
-                } break;
-                case ANALYSIS_TYPE_ARRAY:
-                {
-                    type->element_type =
-                        ir_program_type_map(
-                            program,
-                            module->module.id,
-                            analysis_type->as.array.element_type);
-                    type->element_count =
-                        analysis_type->as.array.count;
-                } break;
-                case ANALYSIS_TYPE_VECTOR:
-                {
-                    type->element_type =
-                        ir_program_type_map(
-                            program,
-                            module->module.id,
-                            analysis_type->as.vector.element_type);
-                    type->element_count =
-                        analysis_type->as.vector.count;
-                } break;
-                case ANALYSIS_TYPE_FUNCTION:
-                {
-                    type->parameter_count =
-                        analysis_type->as.function.argument_count;
-                    type->parameter_types = arena_allocate(
-                        arena,
-                        IrTypeId,
-                        type->parameter_count);
-                    for (u32 parameter_index = 0;
-                        parameter_index <
-                            type->parameter_count;
-                        parameter_index += 1)
-                    {
-                        type->parameter_types[
-                            parameter_index] =
-                            ir_program_type_map(
-                                program,
-                                module->module.id,
-                                analysis_type->as.function
-                                    .argument_types[
-                                        parameter_index]);
-                    }
-                    type->return_type =
-                        ir_program_type_map(
-                            program,
-                            module->module.id,
-                            analysis_type->as.function
-                                .return_type);
-                    type->calling_convention =
-                        ir_calling_convention_from_ast(
-                            analysis_type->as.function
-                                .calling_convention);
-                    type->is_variadic =
-                        analysis_type->as.function
-                            .is_variadic;
-                } break;
-                case ANALYSIS_TYPE_STRUCT:
-                case ANALYSIS_TYPE_UNION:
-                case ANALYSIS_TYPE_ENUM:
-                {
-                    AnalysisEntityId declaration =
-                        analysis_type->as.declaration;
-                    if (declaration.module.value >=
-                        analysis->module_count)
-                    {
-                        break;
-                    }
-                    AnalysisResult* declaration_module =
-                        analysis->module_results[
-                            declaration.module.value];
-                    if (!declaration_module ||
-                        declaration.index.value >=
-                            declaration_module->module
-                                .entity_count)
-                    {
-                        break;
-                    }
-                    IrModule* declaration_ir_module =
-                        program->modules +
-                            declaration.module.value;
-                    AnalysisEntity* declaration_entity =
-                        declaration_module->module.entities +
-                            declaration.index.value;
-                    AnalysisEntitySemantic* semantic =
-                        declaration_module->module.semantics +
-                            declaration.index.value;
-                    IrSourceId source =
-                        declaration_entity->source.value <
-                                declaration_ir_module
-                                    ->frontend_source_count ?
-                            declaration_ir_module
-                                ->frontend_source_map[
-                                    declaration_entity
-                                        ->source.value] :
-                            IR_SOURCE_ID_INVALID;
-                    type->field_count =
-                        semantic->field_count;
-                    type->fields = arena_allocate(
-                        arena,
-                        IrField,
-                        type->field_count);
-                    for (u32 field_index = 0;
-                        field_index < type->field_count;
-                        field_index += 1)
-                    {
-                        AnalysisField* field =
-                            semantic->fields + field_index;
-                        type->fields[field_index] =
-                            (IrField){
-                                .name = field->name,
-                                .source =
-                                    ir_source_range_from_parser(
-                                        source,
-                                        field->range),
-                                .type =
-                                    ir_program_type_map(
-                                        program,
-                                        declaration.module,
-                                        field->type),
-                                .offset = field->offset,
-                            };
-                    }
-                    type->enum_member_count =
-                        semantic->enum_member_count;
-                    type->enum_members = arena_allocate(
-                        arena,
-                        IrEnumMember,
-                        type->enum_member_count);
-                    for (u32 member_index = 0;
-                        member_index <
-                            type->enum_member_count;
-                        member_index += 1)
-                    {
-                        AnalysisEnumMember* member =
-                            semantic->enum_members +
-                                member_index;
-                        type->enum_members[member_index] =
-                            (IrEnumMember){
-                                .name = member->name,
-                                .source =
-                                    ir_source_range_from_parser(
-                                        source,
-                                        member->range),
-                                .value = member->value,
-                            };
-                    }
-                } break;
-                case ANALYSIS_TYPE_VOID:
-                case ANALYSIS_TYPE_BOOL:
-                case ANALYSIS_TYPE_VA_LIST:
-                case ANALYSIS_TYPE_POISON:
-                case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
-                case ANALYSIS_TYPE_INFERRED_ARRAY:
-                case ANALYSIS_TYPE_COUNT:
                     break;
+                }
+                AnalysisResult* declaration_module = analysis->module_results[declaration.module.value];
+                if (!declaration_module || declaration.index.value >= declaration_module->module.entity_count)
+                {
+                    break;
+                }
+                IrModule* declaration_ir_module = program->modules + declaration.module.value;
+                AnalysisEntity* declaration_entity = declaration_module->module.entities + declaration.index.value;
+                AnalysisEntitySemantic* semantic = declaration_module->module.semantics + declaration.index.value;
+                IrSourceId source = declaration_entity->source.value < declaration_ir_module->frontend_source_count
+                                        ? declaration_ir_module->frontend_source_map[declaration_entity->source.value]
+                                        : IR_SOURCE_ID_INVALID;
+                type->field_count = semantic->field_count;
+                type->fields = arena_allocate(arena, IrField, type->field_count);
+                for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+                {
+                    AnalysisField* field = semantic->fields + field_index;
+                    type->fields[field_index] = (IrField){
+                        .name = field->name,
+                        .source = ir_source_range_from_parser(source, field->range),
+                        .type = ir_program_type_map(program, declaration.module, field->type),
+                        .offset = field->offset,
+                    };
+                }
+                type->enum_member_count = semantic->enum_member_count;
+                type->enum_members = arena_allocate(arena, IrEnumMember, type->enum_member_count);
+                for (u32 member_index = 0; member_index < type->enum_member_count; member_index += 1)
+                {
+                    AnalysisEnumMember* member = semantic->enum_members + member_index;
+                    type->enum_members[member_index] = (IrEnumMember){
+                        .name = member->name,
+                        .source = ir_source_range_from_parser(source, member->range),
+                        .value = member->value,
+                    };
+                }
+            }
+            break;
+            case ANALYSIS_TYPE_VOID:
+            case ANALYSIS_TYPE_BOOL:
+            case ANALYSIS_TYPE_VA_LIST:
+            case ANALYSIS_TYPE_POISON:
+            case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
+            case ANALYSIS_TYPE_INFERRED_ARRAY:
+            case ANALYSIS_TYPE_COUNT:
+                break;
             }
         }
-        for (u32 entity_index = 0;
-            entity_index < module->module.entity_count;
-            entity_index += 1)
+        for (u32 entity_index = 0; entity_index < module->module.entity_count; entity_index += 1)
         {
-            AnalysisEntitySemantic* semantic =
-                module->module.semantics + entity_index;
-            IrSymbolId symbol_id =
-                ir_module->frontend_symbol_map[entity_index];
-            IrSymbol* symbol =
-                ir_symbol_from_id(
-                    &program->symbols,
-                    symbol_id);
-            symbol->type = ir_program_type_map(
-                program,
-                module->module.id,
-                semantic->type);
+            AnalysisEntitySemantic* semantic = module->module.semantics + entity_index;
+            IrSymbolId symbol_id = ir_module->frontend_symbol_map[entity_index];
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, symbol_id);
+            symbol->type = ir_program_type_map(program, module->module.id, semantic->type);
         }
     }
 }
 
-BUSTER_GLOBAL_LOCAL IrSymbolId
-ir_program_symbol_from_analysis(
-    IrProgram* program,
-    AnalysisEntityId entity,
-    AnalysisInstantiationId instantiation)
+BUSTER_GLOBAL_LOCAL IrSymbolId ir_program_symbol_from_analysis(IrProgram* program, AnalysisEntityId entity, AnalysisInstantiationId instantiation)
 {
-    if (instantiation.value ==
-        ANALYSIS_ID_UNDERLYING_INVALID)
+    if (instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID)
     {
-        if (entity.module.value >=
-            program->module_count)
+        if (entity.module.value >= program->module_count)
         {
             return IR_SYMBOL_ID_INVALID;
         }
-        IrModule* module =
-            program->modules + entity.module.value;
-        if (entity.index.value >=
-            module->frontend_symbol_count)
+        IrModule* module = program->modules + entity.module.value;
+        if (entity.index.value >= module->frontend_symbol_count)
         {
             return IR_SYMBOL_ID_INVALID;
         }
-        return module->frontend_symbol_map[
-            entity.index.value];
+        return module->frontend_symbol_map[entity.index.value];
     }
-    for (u32 module_index = 0;
-        module_index < program->module_count;
-        module_index += 1)
+    for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
     {
-        IrModule* module =
-            program->modules + module_index;
-        for (u32 function_index = 0;
-            function_index < module->function_count;
-            function_index += 1)
+        IrModule* module = program->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
         {
-            IrFunction* function =
-                module->functions + function_index;
-            if (function->entity.module.value ==
-                    entity.module.value &&
-                function->entity.index.value ==
-                    entity.index.value &&
-                function->instantiation.value ==
-                    instantiation.value)
+            IrFunction* function = module->functions + function_index;
+            if (function->entity.module.value == entity.module.value && function->entity.index.value == entity.index.value &&
+                function->instantiation.value == instantiation.value)
             {
                 return function->symbol;
             }
@@ -3641,140 +2597,67 @@ ir_program_symbol_from_analysis(
     return IR_SYMBOL_ID_INVALID;
 }
 
-BUSTER_GLOBAL_LOCAL void
-ir_program_canonicalize_module(
-    IrProgram* program,
-    AnalysisProgram* analysis,
-    u32 module_index)
+BUSTER_GLOBAL_LOCAL void ir_program_canonicalize_module(IrProgram* program, AnalysisProgram* analysis, u32 module_index)
 {
-    AnalysisResult* module_analysis =
-        analysis->module_results[module_index];
-    IrModule* module =
-        program->modules + module_index;
+    AnalysisResult* module_analysis = analysis->module_results[module_index];
+    IrModule* module = program->modules + module_index;
     if (!module_analysis)
     {
         return;
     }
-    for (u32 function_index = 0;
-        function_index < module->function_count;
-        function_index += 1)
+    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
-        IrFunction* function =
-            module->functions + function_index;
-        function->canonical_type =
-            ir_program_type_map(
-                program,
-                module_analysis->module.id,
-                function->type);
+        IrFunction* function = module->functions + function_index;
+        function->canonical_type = ir_program_type_map(program, module_analysis->module.id, function->type);
         IrSourceId source = IR_SOURCE_ID_INVALID;
-        if (function->entity.index.value <
-            module_analysis->module.entity_count)
+        if (function->entity.index.value < module_analysis->module.entity_count)
         {
-            AnalysisEntity* entity =
-                module_analysis->module.entities +
-                    function->entity.index.value;
-            if (entity->source.value <
-                module->frontend_source_count)
+            AnalysisEntity* entity = module_analysis->module.entities + function->entity.index.value;
+            if (entity->source.value < module->frontend_source_count)
             {
-                source =
-                    module->frontend_source_map[
-                        entity->source.value];
+                source = module->frontend_source_map[entity->source.value];
             }
-            function->source =
-                ir_source_range_from_parser(
-                    source,
-                    entity->range);
+            function->source = ir_source_range_from_parser(source, entity->range);
         }
-        for (u32 value_index = 0;
-            value_index < function->value_count;
-            value_index += 1)
+        for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
-            IrValue* value =
-                function->values + value_index;
-            value->canonical_type =
-                ir_program_type_map(
-                    program,
-                    module_analysis->module.id,
-                    value->type);
+            IrValue* value = function->values + value_index;
+            value->canonical_type = ir_program_type_map(program, module_analysis->module.id, value->type);
         }
-        for (u32 block_index = 0;
-            block_index < function->block_count;
-            block_index += 1)
+        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
-            IrBlock* block =
-                function->blocks + block_index;
-            for (IrBlockParameter* parameter =
-                    block->first_parameter;
-                parameter;
-                parameter = parameter->next)
+            IrBlock* block = function->blocks + block_index;
+            for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
             {
-                parameter->canonical_type =
-                    ir_program_type_map(
-                        program,
-                        module_analysis->module.id,
-                        parameter->type);
-                parameter->canonical_local =
-                    parameter->local.value ==
-                            ANALYSIS_ID_UNDERLYING_INVALID ?
-                        IR_LOCAL_ID_INVALID :
-                        (IrLocalId){
-                            .value =
-                                parameter->local.value,
-                        };
+                parameter->canonical_type = ir_program_type_map(program, module_analysis->module.id, parameter->type);
+                parameter->canonical_local = parameter->local.value == ANALYSIS_ID_UNDERLYING_INVALID ? IR_LOCAL_ID_INVALID
+                                                                                                      : (IrLocalId){
+                                                                                                            .value = parameter->local.value,
+                                                                                                        };
             }
         }
-        for (u32 instruction_index = 0;
-            instruction_index <
-                function->instruction_count;
-            instruction_index += 1)
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
-            IrInstruction* instruction =
-                function->instructions +
-                    instruction_index;
-            instruction->canonical_type =
-                ir_program_type_map(
-                    program,
-                    module_analysis->module.id,
-                    instruction->type);
-            instruction->canonical_source =
-                ir_source_range_from_parser(
-                    source,
-                    instruction->source);
-            instruction->canonical_local =
-                instruction->local.value ==
-                        ANALYSIS_ID_UNDERLYING_INVALID ?
-                    IR_LOCAL_ID_INVALID :
-                    (IrLocalId){
-                        .value =
-                            instruction->local.value,
-                    };
-            instruction->symbol =
-                ir_program_symbol_from_analysis(
-                    program,
-                    instruction->entity,
-                    instruction->instantiation);
+            IrInstruction* instruction = function->instructions + instruction_index;
+            instruction->canonical_type = ir_program_type_map(program, module_analysis->module.id, instruction->type);
+            instruction->canonical_source = ir_source_range_from_parser(source, instruction->source);
+            instruction->canonical_local = instruction->local.value == ANALYSIS_ID_UNDERLYING_INVALID ? IR_LOCAL_ID_INVALID
+                                                                                                      : (IrLocalId){
+                                                                                                            .value = instruction->local.value,
+                                                                                                        };
+            instruction->symbol = ir_program_symbol_from_analysis(program, instruction->entity, instruction->instantiation);
         }
     }
 }
 
-IrProgram ir_generate_program(
-    Arena* result_arena,
-    AnalysisProgram* analysis)
+IrProgram ir_generate_program(Arena* result_arena, AnalysisProgram* analysis)
 {
     IrProgram program = {
         .module_count = analysis->module_count,
     };
-    program.modules = arena_allocate(
-        result_arena,
-        IrModule,
-        program.module_count);
-    ir_program_metadata_initialize(
-        result_arena,
-        analysis,
-        &program);
-    for (u32 module_index = 0;
-        module_index < program.module_count;
-        module_index += 1)
+    program.modules = arena_allocate(result_arena, IrModule, program.module_count);
+    ir_program_metadata_initialize(result_arena, analysis, &program);
+    for (u32 module_index = 0; module_index < program.module_count; module_index += 1)
     {
         AnalysisResult* module = analysis->module_results[module_index];
         if (!module)
@@ -3782,108 +2665,60 @@ IrProgram ir_generate_program(
             continue;
         }
         IrModule metadata = program.modules[module_index];
-        IrModule generated = ir_generate_module(
-            result_arena,
-            module);
-        generated.frontend_type_map =
-            metadata.frontend_type_map;
-        generated.frontend_symbol_map =
-            metadata.frontend_symbol_map;
-        generated.frontend_source_map =
-            metadata.frontend_source_map;
-        generated.frontend_type_count =
-            metadata.frontend_type_count;
-        generated.frontend_symbol_count =
-            metadata.frontend_symbol_count;
-        generated.frontend_source_count =
-            metadata.frontend_source_count;
+        IrModule generated = ir_generate_module(result_arena, module);
+        generated.frontend_type_map = metadata.frontend_type_map;
+        generated.frontend_symbol_map = metadata.frontend_symbol_map;
+        generated.frontend_source_map = metadata.frontend_source_map;
+        generated.frontend_type_count = metadata.frontend_type_count;
+        generated.frontend_symbol_count = metadata.frontend_symbol_count;
+        generated.frontend_source_count = metadata.frontend_source_count;
         program.modules[module_index] = generated;
-        for (u32 function_index = 0;
-            function_index < generated.function_count;
-            function_index += 1)
+        for (u32 function_index = 0; function_index < generated.function_count; function_index += 1)
         {
-            IrFunction* function =
-                generated.functions + function_index;
-            if (function->instantiation.value ==
-                    ANALYSIS_ID_UNDERLYING_INVALID &&
-                function->entity.index.value <
-                    generated.frontend_symbol_count)
+            IrFunction* function = generated.functions + function_index;
+            if (function->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID && function->entity.index.value < generated.frontend_symbol_count)
             {
-                function->symbol =
-                    generated.frontend_symbol_map[
-                        function->entity.index.value];
+                function->symbol = generated.frontend_symbol_map[function->entity.index.value];
             }
-            else if (function->instantiation.value !=
-                ANALYSIS_ID_UNDERLYING_INVALID)
+            else if (function->instantiation.value != ANALYSIS_ID_UNDERLYING_INVALID)
             {
-                IrSourceId source =
-                    IR_SOURCE_ID_INVALID;
-                if (function->entity.index.value <
-                    module->module.entity_count)
+                IrSourceId source = IR_SOURCE_ID_INVALID;
+                if (function->entity.index.value < module->module.entity_count)
                 {
-                    AnalysisEntity* entity =
-                        module->module.entities +
-                            function->entity.index.value;
-                    if (entity->source.value <
-                        generated.frontend_source_count)
+                    AnalysisEntity* entity = module->module.entities + function->entity.index.value;
+                    if (entity->source.value < generated.frontend_source_count)
                     {
-                        source =
-                            generated.frontend_source_map[
-                                entity->source.value];
+                        source = generated.frontend_source_map[entity->source.value];
                     }
                 }
                 IrSymbolId symbol = {
                     .value = program.symbols.count++,
                 };
-                BUSTER_CHECK(
-                    symbol.value <
-                    program.symbols.capacity);
-                program.symbols.symbols[symbol.value] =
-                    (IrSymbol){
-                        .name = function->name,
-                        .link_name = function->name,
-                        .source =
-                            ir_source_range_from_parser(
-                                source,
-                                module->module.entities[
-                                    function->entity.index
-                                        .value].range),
-                        .type = ir_program_type_map(
-                            &program,
-                            module->module.id,
-                            function->type),
-                        .id = symbol,
-                        .kind = IR_SYMBOL_FUNCTION,
-                        .linkage = IR_LINKAGE_INTERNAL,
-                        .is_definition =
-                            function->state !=
-                                IR_FUNCTION_DECLARATION,
-                    };
+                BUSTER_CHECK(symbol.value < program.symbols.capacity);
+                program.symbols.symbols[symbol.value] = (IrSymbol){
+                    .name = function->name,
+                    .link_name = function->name,
+                    .source = ir_source_range_from_parser(source, module->module.entities[function->entity.index.value].range),
+                    .type = ir_program_type_map(&program, module->module.id, function->type),
+                    .id = symbol,
+                    .kind = IR_SYMBOL_FUNCTION,
+                    .linkage = IR_LINKAGE_INTERNAL,
+                    .is_definition = function->state != IR_FUNCTION_DECLARATION,
+                };
                 function->symbol = symbol;
             }
         }
-        program.lowered_function_count +=
-            program.modules[module_index].lowered_function_count;
-        program.rejected_function_count +=
-            program.modules[module_index].rejected_function_count;
+        program.lowered_function_count += program.modules[module_index].lowered_function_count;
+        program.rejected_function_count += program.modules[module_index].rejected_function_count;
     }
-    for (u32 module_index = 0;
-        module_index < program.module_count;
-        module_index += 1)
+    for (u32 module_index = 0; module_index < program.module_count; module_index += 1)
     {
-        ir_program_canonicalize_module(
-            &program,
-            analysis,
-            module_index);
+        ir_program_canonicalize_module(&program, analysis, module_index);
     }
     return program;
 }
 
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(
-    IrValidationError error,
-    IrFunction* function,
-    IrBlockId block,
-    IrInstructionId instruction)
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(IrValidationError error, IrFunction* function, IrBlockId block, IrInstructionId instruction)
 {
     return (IrValidationResult){
         .error = error,
@@ -3893,11 +2728,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(
     };
 }
 
-BUSTER_GLOBAL_LOCAL bool
-ir_canonical_conversion_valid(
-    IrType* source,
-    IrType* destination,
-    IrConversionOperation operation)
+BUSTER_GLOBAL_LOCAL bool ir_canonical_conversion_valid(IrType* source, IrType* destination, IrConversionOperation operation)
 {
     if (!source || !destination)
     {
@@ -3905,132 +2736,78 @@ ir_canonical_conversion_valid(
     }
     if (source->id.value == destination->id.value)
     {
-        return operation ==
-            IR_CONVERSION_IDENTITY;
+        return operation == IR_CONVERSION_IDENTITY;
     }
-    if (source->kind == IR_TYPE_BOOLEAN &&
-        destination->kind == IR_TYPE_INTEGER)
+    if (source->kind == IR_TYPE_BOOLEAN && destination->kind == IR_TYPE_INTEGER)
     {
-        return operation ==
-            IR_CONVERSION_INTEGER_ZERO_EXTEND;
+        return operation == IR_CONVERSION_INTEGER_ZERO_EXTEND;
     }
-    if (source->kind == IR_TYPE_INTEGER &&
-        destination->kind == IR_TYPE_INTEGER)
+    if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_INTEGER)
     {
-        IrConversionOperation expected =
-            source->bit_width <
-                    destination->bit_width ?
-                (source->is_signed ?
-                    IR_CONVERSION_INTEGER_SIGN_EXTEND :
-                    IR_CONVERSION_INTEGER_ZERO_EXTEND) :
-            source->bit_width >
-                    destination->bit_width ?
-                IR_CONVERSION_INTEGER_TRUNCATE :
-                IR_CONVERSION_INTEGER_REINTERPRET;
+        IrConversionOperation expected = source->bit_width < destination->bit_width
+                                             ? (source->is_signed ? IR_CONVERSION_INTEGER_SIGN_EXTEND : IR_CONVERSION_INTEGER_ZERO_EXTEND)
+                                         : source->bit_width > destination->bit_width ? IR_CONVERSION_INTEGER_TRUNCATE
+                                                                                      : IR_CONVERSION_INTEGER_REINTERPRET;
         return operation == expected;
     }
-    if (source->kind == IR_TYPE_FLOAT &&
-        destination->kind == IR_TYPE_FLOAT)
+    if (source->kind == IR_TYPE_FLOAT && destination->kind == IR_TYPE_FLOAT)
     {
-        return operation ==
-            (source->bit_width <
-                    destination->bit_width ?
-                IR_CONVERSION_FLOAT_EXTEND :
-             source->bit_width >
-                    destination->bit_width ?
-                IR_CONVERSION_FLOAT_TRUNCATE :
-                IR_CONVERSION_IDENTITY);
+        return operation == (source->bit_width < destination->bit_width   ? IR_CONVERSION_FLOAT_EXTEND
+                             : source->bit_width > destination->bit_width ? IR_CONVERSION_FLOAT_TRUNCATE
+                                                                          : IR_CONVERSION_IDENTITY);
     }
-    if (source->kind == IR_TYPE_INTEGER &&
-        destination->kind == IR_TYPE_FLOAT)
+    if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_FLOAT)
     {
-        return operation ==
-            (source->is_signed ?
-                IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT :
-                IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT);
+        return operation == (source->is_signed ? IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT : IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT);
     }
-    if (source->kind == IR_TYPE_FLOAT &&
-        destination->kind == IR_TYPE_INTEGER)
+    if (source->kind == IR_TYPE_FLOAT && destination->kind == IR_TYPE_INTEGER)
     {
-        return operation ==
-            (destination->is_signed ?
-                IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER :
-                IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER);
+        return operation == (destination->is_signed ? IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER : IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER);
     }
-    if (source->kind == IR_TYPE_POINTER &&
-        destination->kind == IR_TYPE_POINTER)
+    if (source->kind == IR_TYPE_POINTER && destination->kind == IR_TYPE_POINTER)
     {
-        return operation ==
-            IR_CONVERSION_POINTER_REINTERPRET;
+        return operation == IR_CONVERSION_POINTER_REINTERPRET;
     }
-    if (source->kind == IR_TYPE_POINTER &&
-        destination->kind == IR_TYPE_INTEGER)
+    if (source->kind == IR_TYPE_POINTER && destination->kind == IR_TYPE_INTEGER)
     {
-        return operation ==
-            IR_CONVERSION_POINTER_TO_INTEGER;
+        return operation == IR_CONVERSION_POINTER_TO_INTEGER;
     }
-    if (source->kind == IR_TYPE_INTEGER &&
-        destination->kind == IR_TYPE_POINTER)
+    if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_POINTER)
     {
-        return operation ==
-            IR_CONVERSION_INTEGER_TO_POINTER;
+        return operation == IR_CONVERSION_INTEGER_TO_POINTER;
     }
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(
-    AnalysisResult* analysis,
-    IrFunction* function,
-    IrInstruction* instruction)
+BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(AnalysisResult* analysis, IrFunction* function, IrInstruction* instruction)
 {
     if (instruction->opcode == IR_OPCODE_DEBUG_TRAP)
     {
-        return instruction->operand_count == 0 &&
-            instruction->immediate_count == 0 &&
-            instruction->result.value ==
-                IR_ID_UNDERLYING_INVALID &&
-            ir_type_id_equal(
-                instruction->type,
-                analysis->types.builtin.void_type);
+        return instruction->operand_count == 0 && instruction->immediate_count == 0 && instruction->result.value == IR_ID_UNDERLYING_INVALID &&
+               ir_type_id_equal(instruction->type, analysis->types.builtin.void_type);
     }
-    if (instruction->opcode == IR_OPCODE_LENGTH ||
-        instruction->opcode == IR_OPCODE_REVERSE)
+    if (instruction->opcode == IR_OPCODE_LENGTH || instruction->opcode == IR_OPCODE_REVERSE)
     {
-        if (instruction->operand_count != 1 ||
-            instruction->conversion_operation != IR_CONVERSION_COUNT ||
-            instruction->unary_operation != IR_UNARY_COUNT ||
+        if (instruction->operand_count != 1 || instruction->conversion_operation != IR_CONVERSION_COUNT || instruction->unary_operation != IR_UNARY_COUNT ||
             instruction->binary_operation != IR_BINARY_COUNT)
         {
             return false;
         }
-        AnalysisTypeId operand_type =
-            function->values[instruction->operands[0].value].type;
-        AnalysisTypeKind kind =
-            analysis_type_from_id(analysis, operand_type)->kind;
-        bool iterable = kind == ANALYSIS_TYPE_RANGE ||
-            kind == ANALYSIS_TYPE_SLICE ||
-            kind == ANALYSIS_TYPE_ARRAY ||
-            kind == ANALYSIS_TYPE_INFERRED_ARRAY;
-        return iterable &&
-            (instruction->opcode == IR_OPCODE_LENGTH ?
-                ir_type_id_equal(
-                    instruction->type,
-                    analysis->types.builtin.u64_type) :
-                ir_type_id_equal(instruction->type, operand_type));
+        AnalysisTypeId operand_type = function->values[instruction->operands[0].value].type;
+        AnalysisTypeKind kind = analysis_type_from_id(analysis, operand_type)->kind;
+        bool iterable = kind == ANALYSIS_TYPE_RANGE || kind == ANALYSIS_TYPE_SLICE || kind == ANALYSIS_TYPE_ARRAY || kind == ANALYSIS_TYPE_INFERRED_ARRAY;
+        return iterable && (instruction->opcode == IR_OPCODE_LENGTH ? ir_type_id_equal(instruction->type, analysis->types.builtin.u64_type)
+                                                                    : ir_type_id_equal(instruction->type, operand_type));
     }
     if (instruction->opcode == IR_OPCODE_INDEX)
     {
-        if (instruction->operand_count != 2 ||
-            instruction->conversion_operation != IR_CONVERSION_COUNT ||
-            instruction->unary_operation != IR_UNARY_COUNT ||
+        if (instruction->operand_count != 2 || instruction->conversion_operation != IR_CONVERSION_COUNT || instruction->unary_operation != IR_UNARY_COUNT ||
             instruction->binary_operation != IR_BINARY_COUNT)
         {
             return false;
         }
-        AnalysisTypeId base_type =
-            function->values[instruction->operands[0].value].type;
-        AnalysisTypeId index_type =
-            function->values[instruction->operands[1].value].type;
+        AnalysisTypeId base_type = function->values[instruction->operands[0].value].type;
+        AnalysisTypeId index_type = function->values[instruction->operands[1].value].type;
         AnalysisType* base = analysis_type_from_id(analysis, base_type);
         AnalysisTypeId element = ANALYSIS_TYPE_ID_INVALID;
         if (base->kind == ANALYSIS_TYPE_ARRAY)
@@ -4041,73 +2818,43 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(
         {
             element = base->as.vector.element_type;
         }
-        else if (base->kind == ANALYSIS_TYPE_RANGE ||
-            base->kind == ANALYSIS_TYPE_SLICE ||
-            base->kind == ANALYSIS_TYPE_INFERRED_ARRAY)
+        else if (base->kind == ANALYSIS_TYPE_RANGE || base->kind == ANALYSIS_TYPE_SLICE || base->kind == ANALYSIS_TYPE_INFERRED_ARRAY)
         {
             element = base->as.element_type;
         }
-        return element.value != ANALYSIS_ID_UNDERLYING_INVALID &&
-            ir_type_is_integer_domain(analysis, index_type) &&
-            ir_type_id_equal(instruction->type, element);
+        return element.value != ANALYSIS_ID_UNDERLYING_INVALID && ir_type_is_integer_domain(analysis, index_type) &&
+               ir_type_id_equal(instruction->type, element);
     }
     if (instruction->opcode == IR_OPCODE_CAST)
     {
-        if (instruction->operand_count != 1 ||
-            instruction->conversion_operation >= IR_CONVERSION_COUNT ||
-            instruction->unary_operation != IR_UNARY_COUNT ||
+        if (instruction->operand_count != 1 || instruction->conversion_operation >= IR_CONVERSION_COUNT || instruction->unary_operation != IR_UNARY_COUNT ||
             instruction->binary_operation != IR_BINARY_COUNT)
         {
             return false;
         }
-        AnalysisTypeId source =
-            function->values[instruction->operands[0].value].type;
-        return instruction->conversion_operation ==
-            ir_conversion_operation(
-                analysis,
-                source,
-                instruction->type);
+        AnalysisTypeId source = function->values[instruction->operands[0].value].type;
+        return instruction->conversion_operation == ir_conversion_operation(analysis, source, instruction->type);
     }
     if (instruction->opcode == IR_OPCODE_VA_START)
     {
-        AnalysisType* signature =
-            analysis_type_from_id(analysis, function->type);
-        return instruction->operand_count == 0 &&
-            signature->kind == ANALYSIS_TYPE_FUNCTION &&
-            signature->as.function.is_variadic &&
-            ir_type_id_equal(
-                instruction->type,
-                analysis->types.builtin.va_list_type);
+        AnalysisType* signature = analysis_type_from_id(analysis, function->type);
+        return instruction->operand_count == 0 && signature->kind == ANALYSIS_TYPE_FUNCTION && signature->as.function.is_variadic &&
+               ir_type_id_equal(instruction->type, analysis->types.builtin.va_list_type);
     }
-    if (instruction->opcode == IR_OPCODE_VA_COPY ||
-        instruction->opcode == IR_OPCODE_VA_END ||
-        instruction->opcode == IR_OPCODE_VA_ARG)
+    if (instruction->opcode == IR_OPCODE_VA_COPY || instruction->opcode == IR_OPCODE_VA_END || instruction->opcode == IR_OPCODE_VA_ARG)
     {
         if (instruction->operand_count != 1)
         {
             return false;
         }
-        AnalysisType* operand = analysis_type_from_id(
-            analysis,
-            function->values[instruction->operands[0].value].type);
-        if (operand->kind != ANALYSIS_TYPE_POINTER ||
-            !ir_type_id_equal(
-                operand->as.element_type,
-                analysis->types.builtin.va_list_type))
+        AnalysisType* operand = analysis_type_from_id(analysis, function->values[instruction->operands[0].value].type);
+        if (operand->kind != ANALYSIS_TYPE_POINTER || !ir_type_id_equal(operand->as.element_type, analysis->types.builtin.va_list_type))
         {
             return false;
         }
-        return instruction->opcode == IR_OPCODE_VA_COPY ?
-                ir_type_id_equal(
-                    instruction->type,
-                    analysis->types.builtin.va_list_type) :
-            instruction->opcode == IR_OPCODE_VA_END ?
-                ir_type_id_equal(
-                    instruction->type,
-                    analysis->types.builtin.void_type) :
-                !ir_type_id_equal(
-                    instruction->type,
-                    analysis->types.builtin.void_type);
+        return instruction->opcode == IR_OPCODE_VA_COPY  ? ir_type_id_equal(instruction->type, analysis->types.builtin.va_list_type)
+               : instruction->opcode == IR_OPCODE_VA_END ? ir_type_id_equal(instruction->type, analysis->types.builtin.void_type)
+                                                         : !ir_type_id_equal(instruction->type, analysis->types.builtin.void_type);
     }
     if (instruction->conversion_operation != IR_CONVERSION_COUNT)
     {
@@ -4115,241 +2862,113 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(
     }
     if (instruction->opcode == IR_OPCODE_UNARY)
     {
-        if (instruction->operand_count != 1 ||
-            instruction->unary_operation >= IR_UNARY_COUNT ||
-            instruction->binary_operation != IR_BINARY_COUNT)
+        if (instruction->operand_count != 1 || instruction->unary_operation >= IR_UNARY_COUNT || instruction->binary_operation != IR_BINARY_COUNT)
         {
             return false;
         }
-        AnalysisTypeId operand_type =
-            function->values[instruction->operands[0].value].type;
-        AnalysisTypeKind kind =
-            analysis_type_from_id(analysis, operand_type)->kind;
-        AnalysisTypeKind vector_element_kind =
-            ANALYSIS_TYPE_COUNT;
+        AnalysisTypeId operand_type = function->values[instruction->operands[0].value].type;
+        AnalysisTypeKind kind = analysis_type_from_id(analysis, operand_type)->kind;
+        AnalysisTypeKind vector_element_kind = ANALYSIS_TYPE_COUNT;
         if (kind == ANALYSIS_TYPE_VECTOR)
         {
-            AnalysisType* vector =
-                analysis_type_from_id(
-                    analysis,
-                    operand_type);
-            vector_element_kind =
-                analysis_type_from_id(
-                    analysis,
-                    vector->as.vector.element_type)->kind;
+            AnalysisType* vector = analysis_type_from_id(analysis, operand_type);
+            vector_element_kind = analysis_type_from_id(analysis, vector->as.vector.element_type)->kind;
         }
         bool domain_matches =
-            (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE &&
-                kind == ANALYSIS_TYPE_INTEGER) ||
-            (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE &&
-                kind == ANALYSIS_TYPE_FLOAT) ||
-            (instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT &&
-                kind == ANALYSIS_TYPE_INTEGER) ||
-            ((instruction->unary_operation ==
-                    IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
-              instruction->unary_operation ==
-                    IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS) &&
-                kind == ANALYSIS_TYPE_INTEGER) ||
-            (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT &&
-                kind == ANALYSIS_TYPE_BOOL) ||
-            (instruction->unary_operation ==
-                    IR_UNARY_VECTOR_INTEGER_NEGATE &&
-                kind == ANALYSIS_TYPE_VECTOR &&
-                vector_element_kind ==
-                    ANALYSIS_TYPE_INTEGER) ||
-            (instruction->unary_operation ==
-                    IR_UNARY_VECTOR_FLOAT_NEGATE &&
-                kind == ANALYSIS_TYPE_VECTOR &&
-                vector_element_kind ==
-                    ANALYSIS_TYPE_FLOAT) ||
-            (instruction->unary_operation ==
-                    IR_UNARY_VECTOR_INTEGER_BITWISE_NOT &&
-                kind == ANALYSIS_TYPE_VECTOR &&
-                vector_element_kind ==
-                    ANALYSIS_TYPE_INTEGER);
-        return domain_matches &&
-            ir_type_id_equal(instruction->type, operand_type) &&
-            instruction->unary_operation < IR_UNARY_COUNT &&
-            instruction->binary_operation == IR_BINARY_COUNT;
+            (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE && kind == ANALYSIS_TYPE_INTEGER) ||
+            (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE && kind == ANALYSIS_TYPE_FLOAT) ||
+            (instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT && kind == ANALYSIS_TYPE_INTEGER) ||
+            ((instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS) &&
+             kind == ANALYSIS_TYPE_INTEGER) ||
+            (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT && kind == ANALYSIS_TYPE_BOOL) ||
+            (instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_NEGATE && kind == ANALYSIS_TYPE_VECTOR && vector_element_kind == ANALYSIS_TYPE_INTEGER) ||
+            (instruction->unary_operation == IR_UNARY_VECTOR_FLOAT_NEGATE && kind == ANALYSIS_TYPE_VECTOR && vector_element_kind == ANALYSIS_TYPE_FLOAT) ||
+            (instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_BITWISE_NOT && kind == ANALYSIS_TYPE_VECTOR &&
+             vector_element_kind == ANALYSIS_TYPE_INTEGER);
+        return domain_matches && ir_type_id_equal(instruction->type, operand_type) && instruction->unary_operation < IR_UNARY_COUNT &&
+               instruction->binary_operation == IR_BINARY_COUNT;
     }
     if (instruction->opcode == IR_OPCODE_BINARY)
     {
-        if (instruction->operand_count != 2 ||
-            instruction->unary_operation != IR_UNARY_COUNT ||
-            instruction->binary_operation >= IR_BINARY_COUNT)
+        if (instruction->operand_count != 2 || instruction->unary_operation != IR_UNARY_COUNT || instruction->binary_operation >= IR_BINARY_COUNT)
         {
             return false;
         }
-        AnalysisTypeId left_type =
-            function->values[instruction->operands[0].value].type;
-        AnalysisTypeId right_type =
-            function->values[instruction->operands[1].value].type;
+        AnalysisTypeId left_type = function->values[instruction->operands[0].value].type;
+        AnalysisTypeId right_type = function->values[instruction->operands[1].value].type;
         if (!ir_type_id_equal(left_type, right_type))
         {
             return false;
         }
-        AnalysisTypeKind operand_kind =
-            analysis_type_from_id(analysis, left_type)->kind;
+        AnalysisTypeKind operand_kind = analysis_type_from_id(analysis, left_type)->kind;
         IrBinaryOperation operation = instruction->binary_operation;
-        bool integer_operation =
-            operation <= IR_BINARY_UNSIGNED_DIVIDE ||
-            (operation >= IR_BINARY_SIGNED_REMAINDER &&
-                operation <= IR_BINARY_INTEGER_BITWISE_XOR) ||
-            (operation >= IR_BINARY_SIGNED_LESS &&
-                operation <= IR_BINARY_UNSIGNED_GREATER_EQUAL);
-        bool float_operation =
-            (operation >= IR_BINARY_FLOAT_ADD &&
-                operation <= IR_BINARY_FLOAT_DIVIDE) ||
-            (operation >= IR_BINARY_FLOAT_EQUAL &&
-                operation <= IR_BINARY_FLOAT_NOT_EQUAL) ||
-            (operation >= IR_BINARY_FLOAT_LESS &&
-                operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
-        bool boolean_operation =
-            (operation >= IR_BINARY_BOOLEAN_AND &&
-                operation <= IR_BINARY_BOOLEAN_OR) ||
-            (operation >= IR_BINARY_BOOLEAN_EQUAL &&
-                operation <= IR_BINARY_BOOLEAN_NOT_EQUAL);
-        bool pointer_operation =
-            operation >= IR_BINARY_POINTER_EQUAL &&
-            operation <= IR_BINARY_POINTER_NOT_EQUAL;
-        bool integer_equality =
-            operation >= IR_BINARY_INTEGER_EQUAL &&
-            operation <= IR_BINARY_INTEGER_NOT_EQUAL;
-        bool signed_semantics =
-            operation == IR_BINARY_SIGNED_DIVIDE ||
-            operation == IR_BINARY_SIGNED_REMAINDER ||
-            operation == IR_BINARY_SIGNED_SHIFT_RIGHT ||
-            (operation >= IR_BINARY_SIGNED_LESS &&
-                operation <= IR_BINARY_SIGNED_GREATER_EQUAL);
-        bool unsigned_semantics =
-            operation == IR_BINARY_UNSIGNED_DIVIDE ||
-            operation == IR_BINARY_UNSIGNED_REMAINDER ||
-            operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT ||
-            (operation >= IR_BINARY_UNSIGNED_LESS &&
-                operation <= IR_BINARY_UNSIGNED_GREATER_EQUAL);
-        bool signedness_matches = operand_kind != ANALYSIS_TYPE_INTEGER ||
-            (!signed_semantics && !unsigned_semantics) ||
-            (signed_semantics ==
-                analysis_type_from_id(analysis, left_type)->as.integer.is_signed);
-        bool comparison = operation >= IR_BINARY_INTEGER_EQUAL &&
-            operation <= IR_BINARY_FLOAT_GREATER_EQUAL;
+        bool integer_operation = operation <= IR_BINARY_UNSIGNED_DIVIDE ||
+                                 (operation >= IR_BINARY_SIGNED_REMAINDER && operation <= IR_BINARY_INTEGER_BITWISE_XOR) ||
+                                 (operation >= IR_BINARY_SIGNED_LESS && operation <= IR_BINARY_UNSIGNED_GREATER_EQUAL);
+        bool float_operation = (operation >= IR_BINARY_FLOAT_ADD && operation <= IR_BINARY_FLOAT_DIVIDE) ||
+                               (operation >= IR_BINARY_FLOAT_EQUAL && operation <= IR_BINARY_FLOAT_NOT_EQUAL) ||
+                               (operation >= IR_BINARY_FLOAT_LESS && operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
+        bool boolean_operation = (operation >= IR_BINARY_BOOLEAN_AND && operation <= IR_BINARY_BOOLEAN_OR) ||
+                                 (operation >= IR_BINARY_BOOLEAN_EQUAL && operation <= IR_BINARY_BOOLEAN_NOT_EQUAL);
+        bool pointer_operation = operation >= IR_BINARY_POINTER_EQUAL && operation <= IR_BINARY_POINTER_NOT_EQUAL;
+        bool integer_equality = operation >= IR_BINARY_INTEGER_EQUAL && operation <= IR_BINARY_INTEGER_NOT_EQUAL;
+        bool signed_semantics = operation == IR_BINARY_SIGNED_DIVIDE || operation == IR_BINARY_SIGNED_REMAINDER || operation == IR_BINARY_SIGNED_SHIFT_RIGHT ||
+                                (operation >= IR_BINARY_SIGNED_LESS && operation <= IR_BINARY_SIGNED_GREATER_EQUAL);
+        bool unsigned_semantics = operation == IR_BINARY_UNSIGNED_DIVIDE || operation == IR_BINARY_UNSIGNED_REMAINDER ||
+                                  operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT ||
+                                  (operation >= IR_BINARY_UNSIGNED_LESS && operation <= IR_BINARY_UNSIGNED_GREATER_EQUAL);
+        bool signedness_matches = operand_kind != ANALYSIS_TYPE_INTEGER || (!signed_semantics && !unsigned_semantics) ||
+                                  (signed_semantics == analysis_type_from_id(analysis, left_type)->as.integer.is_signed);
+        bool comparison = operation >= IR_BINARY_INTEGER_EQUAL && operation <= IR_BINARY_FLOAT_GREATER_EQUAL;
         bool range = operation == IR_BINARY_RANGE;
-        bool vector_operation =
-            operation >= IR_BINARY_VECTOR_INTEGER_ADD &&
-            operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
+        bool vector_operation = operation >= IR_BINARY_VECTOR_INTEGER_ADD && operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
         AnalysisTypeKind vector_element_kind = ANALYSIS_TYPE_COUNT;
         if (operand_kind == ANALYSIS_TYPE_VECTOR)
         {
             AnalysisType* vector = analysis_type_from_id(analysis, left_type);
-            vector_element_kind = analysis_type_from_id(
-                analysis,
-                vector->as.vector.element_type)->kind;
+            vector_element_kind = analysis_type_from_id(analysis, vector->as.vector.element_type)->kind;
         }
-        bool vector_float_operation =
-            (operation >= IR_BINARY_VECTOR_FLOAT_ADD &&
-                operation <= IR_BINARY_VECTOR_FLOAT_DIVIDE) ||
-            (operation >= IR_BINARY_VECTOR_FLOAT_EQUAL &&
-                operation <=
-                    IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL);
-        bool vector_signed_semantics =
-            operation == IR_BINARY_VECTOR_SIGNED_DIVIDE ||
-            operation == IR_BINARY_VECTOR_SIGNED_REMAINDER ||
-            operation ==
-                IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT ||
-            (operation >= IR_BINARY_VECTOR_SIGNED_LESS &&
-                operation <=
-                    IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL);
-        bool vector_unsigned_semantics =
-            operation == IR_BINARY_VECTOR_UNSIGNED_DIVIDE ||
-            operation == IR_BINARY_VECTOR_UNSIGNED_REMAINDER ||
-            operation ==
-                IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT ||
-            (operation >= IR_BINARY_VECTOR_UNSIGNED_LESS &&
-                operation <=
-                    IR_BINARY_VECTOR_UNSIGNED_GREATER_EQUAL);
-        if (operand_kind == ANALYSIS_TYPE_VECTOR &&
-            vector_element_kind == ANALYSIS_TYPE_INTEGER)
+        bool vector_float_operation = (operation >= IR_BINARY_VECTOR_FLOAT_ADD && operation <= IR_BINARY_VECTOR_FLOAT_DIVIDE) ||
+                                      (operation >= IR_BINARY_VECTOR_FLOAT_EQUAL && operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL);
+        bool vector_signed_semantics = operation == IR_BINARY_VECTOR_SIGNED_DIVIDE || operation == IR_BINARY_VECTOR_SIGNED_REMAINDER ||
+                                       operation == IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT ||
+                                       (operation >= IR_BINARY_VECTOR_SIGNED_LESS && operation <= IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL);
+        bool vector_unsigned_semantics = operation == IR_BINARY_VECTOR_UNSIGNED_DIVIDE || operation == IR_BINARY_VECTOR_UNSIGNED_REMAINDER ||
+                                         operation == IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT ||
+                                         (operation >= IR_BINARY_VECTOR_UNSIGNED_LESS && operation <= IR_BINARY_VECTOR_UNSIGNED_GREATER_EQUAL);
+        if (operand_kind == ANALYSIS_TYPE_VECTOR && vector_element_kind == ANALYSIS_TYPE_INTEGER)
         {
-            AnalysisType* vector =
-                analysis_type_from_id(analysis, left_type);
-            AnalysisType* element =
-                analysis_type_from_id(
-                    analysis,
-                    vector->as.vector.element_type);
-            signedness_matches =
-                (!vector_signed_semantics &&
-                 !vector_unsigned_semantics) ||
-                (vector_signed_semantics ==
-                    element->as.integer.is_signed);
+            AnalysisType* vector = analysis_type_from_id(analysis, left_type);
+            AnalysisType* element = analysis_type_from_id(analysis, vector->as.vector.element_type);
+            signedness_matches = (!vector_signed_semantics && !vector_unsigned_semantics) || (vector_signed_semantics == element->as.integer.is_signed);
         }
-        bool domain_matches =
-            (integer_operation && operand_kind == ANALYSIS_TYPE_INTEGER) ||
-            (integer_equality &&
-                (operand_kind == ANALYSIS_TYPE_INTEGER ||
-                 operand_kind == ANALYSIS_TYPE_ENUM)) ||
-            (float_operation && operand_kind == ANALYSIS_TYPE_FLOAT) ||
-            (boolean_operation && operand_kind == ANALYSIS_TYPE_BOOL) ||
-            (pointer_operation && operand_kind == ANALYSIS_TYPE_POINTER) ||
-            (range && operand_kind == ANALYSIS_TYPE_INTEGER) ||
-            (vector_operation && operand_kind == ANALYSIS_TYPE_VECTOR &&
-                (vector_float_operation ?
-                    vector_element_kind == ANALYSIS_TYPE_FLOAT :
-                    vector_element_kind == ANALYSIS_TYPE_INTEGER));
-        AnalysisTypeKind result_kind =
-            analysis_type_from_id(analysis, instruction->type)->kind;
-        bool vector_comparison =
-            operation >= IR_BINARY_VECTOR_INTEGER_EQUAL &&
-            operation <=
-                IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
+        bool domain_matches = (integer_operation && operand_kind == ANALYSIS_TYPE_INTEGER) ||
+                              (integer_equality && (operand_kind == ANALYSIS_TYPE_INTEGER || operand_kind == ANALYSIS_TYPE_ENUM)) ||
+                              (float_operation && operand_kind == ANALYSIS_TYPE_FLOAT) || (boolean_operation && operand_kind == ANALYSIS_TYPE_BOOL) ||
+                              (pointer_operation && operand_kind == ANALYSIS_TYPE_POINTER) || (range && operand_kind == ANALYSIS_TYPE_INTEGER) ||
+                              (vector_operation && operand_kind == ANALYSIS_TYPE_VECTOR &&
+                               (vector_float_operation ? vector_element_kind == ANALYSIS_TYPE_FLOAT : vector_element_kind == ANALYSIS_TYPE_INTEGER));
+        AnalysisTypeKind result_kind = analysis_type_from_id(analysis, instruction->type)->kind;
+        bool vector_comparison = operation >= IR_BINARY_VECTOR_INTEGER_EQUAL && operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
         bool vector_mask_result = false;
-        if (vector_comparison &&
-            operand_kind == ANALYSIS_TYPE_VECTOR &&
-            result_kind == ANALYSIS_TYPE_VECTOR)
+        if (vector_comparison && operand_kind == ANALYSIS_TYPE_VECTOR && result_kind == ANALYSIS_TYPE_VECTOR)
         {
-            AnalysisType* operand_vector =
-                analysis_type_from_id(analysis, left_type);
-            AnalysisType* result_vector =
-                analysis_type_from_id(
-                    analysis,
-                    instruction->type);
-            AnalysisType* operand_element =
-                analysis_type_from_id(
-                    analysis,
-                    operand_vector->as.vector.element_type);
-            AnalysisType* result_element =
-                analysis_type_from_id(
-                    analysis,
-                    result_vector->as.vector.element_type);
-            u32 operand_width =
-                operand_element->kind ==
-                        ANALYSIS_TYPE_FLOAT ?
-                    operand_element->as.float_bit_width :
-                    operand_element->as.integer.bit_width;
-            vector_mask_result =
-                operand_vector->as.vector.count ==
-                    result_vector->as.vector.count &&
-                result_element->kind ==
-                    ANALYSIS_TYPE_INTEGER &&
-                !result_element->as.integer.is_signed &&
-                result_element->as.integer.bit_width ==
-                    operand_width;
+            AnalysisType* operand_vector = analysis_type_from_id(analysis, left_type);
+            AnalysisType* result_vector = analysis_type_from_id(analysis, instruction->type);
+            AnalysisType* operand_element = analysis_type_from_id(analysis, operand_vector->as.vector.element_type);
+            AnalysisType* result_element = analysis_type_from_id(analysis, result_vector->as.vector.element_type);
+            u32 operand_width = operand_element->kind == ANALYSIS_TYPE_FLOAT ? operand_element->as.float_bit_width : operand_element->as.integer.bit_width;
+            vector_mask_result = operand_vector->as.vector.count == result_vector->as.vector.count && result_element->kind == ANALYSIS_TYPE_INTEGER &&
+                                 !result_element->as.integer.is_signed && result_element->as.integer.bit_width == operand_width;
         }
-        bool result_matches = vector_comparison ?
-            vector_mask_result :
-            comparison ?
-            result_kind == ANALYSIS_TYPE_BOOL :
-            range ?
-                result_kind == ANALYSIS_TYPE_RANGE &&
-                    ir_type_id_equal(
-                        analysis_type_from_id(
-                            analysis,
-                            instruction->type)->as.element_type,
-                        left_type) :
-                ir_type_id_equal(instruction->type, left_type);
+        bool result_matches =
+            vector_comparison ? vector_mask_result
+            : comparison      ? result_kind == ANALYSIS_TYPE_BOOL
+            : range ? result_kind == ANALYSIS_TYPE_RANGE && ir_type_id_equal(analysis_type_from_id(analysis, instruction->type)->as.element_type, left_type)
+                    : ir_type_id_equal(instruction->type, left_type);
         return domain_matches && signedness_matches && result_matches;
     }
-    return instruction->unary_operation == IR_UNARY_COUNT &&
-        instruction->binary_operation == IR_BINARY_COUNT;
+    return instruction->unary_operation == IR_UNARY_COUNT && instruction->binary_operation == IR_BINARY_COUNT;
 }
 
 IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module)
@@ -4368,11 +2987,7 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
         }
         if (!ir_block_id_valid(function, function->entry))
         {
-            return ir_validation_error(
-                IR_VALIDATION_INVALID_ID,
-                function,
-                IR_BLOCK_ID_INVALID,
-                IR_INSTRUCTION_ID_INVALID);
+            return ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
         }
         AnalysisType* function_type = analysis_type_from_id(analysis, function->type);
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -4380,60 +2995,34 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
             IrBlock* block = function->blocks + block_index;
             if (!block->terminated)
             {
-                return ir_validation_error(
-                    IR_VALIDATION_UNTERMINATED_BLOCK,
-                    function,
-                    block->id,
-                    block->last_instruction);
+                return ir_validation_error(IR_VALIDATION_UNTERMINATED_BLOCK, function, block->id, block->last_instruction);
             }
             if (!block->sealed)
             {
-                return ir_validation_error(
-                    IR_VALIDATION_BLOCK_PARAMETER,
-                    function,
-                    block->id,
-                    IR_INSTRUCTION_ID_INVALID);
+                return ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
             }
-            for (IrBlockParameter* parameter = block->first_parameter;
-                parameter;
-                parameter = parameter->next)
+            for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
             {
-                if (!ir_value_id_valid(function, parameter->value) ||
-                    parameter->incoming_count != block->predecessor_count ||
+                if (!ir_value_id_valid(function, parameter->value) || parameter->incoming_count != block->predecessor_count ||
                     !ir_type_id_equal(function->values[parameter->value.value].type, parameter->type))
                 {
-                    return ir_validation_error(
-                        IR_VALIDATION_BLOCK_PARAMETER,
-                        function,
-                        block->id,
-                        IR_INSTRUCTION_ID_INVALID);
+                    return ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
                 }
                 IrIncoming* incoming = parameter->first_incoming;
                 IrPredecessor* predecessor = block->first_predecessor;
                 while (incoming && predecessor)
                 {
-                    if (incoming->predecessor.value != predecessor->block.value ||
-                        !ir_value_id_valid(function, incoming->value) ||
-                        !ir_type_id_equal(
-                            function->values[incoming->value.value].type,
-                            parameter->type))
+                    if (incoming->predecessor.value != predecessor->block.value || !ir_value_id_valid(function, incoming->value) ||
+                        !ir_type_id_equal(function->values[incoming->value.value].type, parameter->type))
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_BLOCK_PARAMETER,
-                            function,
-                            block->id,
-                            IR_INSTRUCTION_ID_INVALID);
+                        return ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
                     }
                     incoming = incoming->next;
                     predecessor = predecessor->next;
                 }
                 if (incoming || predecessor)
                 {
-                    return ir_validation_error(
-                        IR_VALIDATION_BLOCK_PARAMETER,
-                        function,
-                        block->id,
-                        IR_INSTRUCTION_ID_INVALID);
+                    return ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
                 }
             }
             IrInstructionId instruction_id = block->first_instruction;
@@ -4442,70 +3031,37 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
             {
                 if (instruction_id.value >= function->instruction_count)
                 {
-                    return ir_validation_error(
-                        IR_VALIDATION_INVALID_ID,
-                        function,
-                        block->id,
-                        instruction_id);
+                    return ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, instruction_id);
                 }
                 IrInstruction* instruction = function->instructions + instruction_id.value;
                 if (saw_terminator)
                 {
-                    return ir_validation_error(
-                        IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR,
-                        function,
-                        block->id,
-                        instruction_id);
+                    return ir_validation_error(IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR, function, block->id, instruction_id);
                 }
-                for (u32 operand_index = 0;
-                    operand_index < instruction->operand_count;
-                    operand_index += 1)
+                for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                 {
                     if (!ir_value_id_valid(function, instruction->operands[operand_index]))
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_INVALID_ID,
-                            function,
-                            block->id,
-                        instruction_id);
+                        return ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, instruction_id);
                     }
                 }
-                if (!ir_instruction_operation_valid(
-                        analysis,
-                        function,
-                        instruction))
+                if (!ir_instruction_operation_valid(analysis, function, instruction))
                 {
-                    return ir_validation_error(
-                        IR_VALIDATION_OPERATION,
-                        function,
-                        block->id,
-                        instruction_id);
+                    return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                 }
-                for (u32 target_index = 0;
-                    target_index < instruction->target_count;
-                    target_index += 1)
+                for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
                 {
                     if (!ir_block_id_valid(function, instruction->targets[target_index]))
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_BRANCH_TARGET,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
                     }
                 }
                 if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
                 {
                     if (!ir_value_id_valid(function, instruction->result) ||
-                        !ir_type_id_equal(
-                            function->values[instruction->result.value].type,
-                            instruction->type))
+                        !ir_type_id_equal(function->values[instruction->result.value].type, instruction->type))
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_RESULT_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_RESULT_TYPE, function, block->id, instruction_id);
                     }
                 }
                 if (instruction->opcode == IR_OPCODE_LOAD)
@@ -4513,11 +3069,7 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
                     IrValue* place = function->values + instruction->operands[0].value;
                     if (place->category != IR_VALUE_PLACE || !ir_type_id_equal(place->type, instruction->type))
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERAND_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
                     }
                 }
                 else if (instruction->opcode == IR_OPCODE_STORE)
@@ -4526,156 +3078,72 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
                     IrValue* value = function->values + instruction->operands[1].value;
                     if (place->category != IR_VALUE_PLACE || !ir_type_id_equal(place->type, value->type))
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERAND_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
                     }
                 }
                 else if (instruction->opcode == IR_OPCODE_CALL)
                 {
-                    if (!instruction->operand_count ||
-                        instruction->entity.module.value ==
-                            ANALYSIS_ID_UNDERLYING_INVALID ||
-                        instruction->entity.index.value ==
-                            ANALYSIS_ID_UNDERLYING_INVALID)
+                    if (!instruction->operand_count || instruction->entity.module.value == ANALYSIS_ID_UNDERLYING_INVALID ||
+                        instruction->entity.index.value == ANALYSIS_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_CALL_TARGET,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_CALL_TARGET, function, block->id, instruction_id);
                     }
-                    IrValue* callee =
-                        function->values + instruction->operands[0].value;
-                    AnalysisType* signature =
-                        analysis_type_from_id(analysis, callee->type);
+                    IrValue* callee = function->values + instruction->operands[0].value;
+                    AnalysisType* signature = analysis_type_from_id(analysis, callee->type);
                     u32 call_argument_count = instruction->operand_count - 1;
                     if (signature->kind != ANALYSIS_TYPE_FUNCTION ||
-                        (!signature->as.function.is_variadic &&
-                            call_argument_count !=
-                                signature->as.function.argument_count) ||
-                        (signature->as.function.is_variadic &&
-                            call_argument_count <
-                                signature->as.function.argument_count) ||
-                        !ir_type_id_equal(
-                            instruction->type,
-                            signature->as.function.return_type))
+                        (!signature->as.function.is_variadic && call_argument_count != signature->as.function.argument_count) ||
+                        (signature->as.function.is_variadic && call_argument_count < signature->as.function.argument_count) ||
+                        !ir_type_id_equal(instruction->type, signature->as.function.return_type))
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_CALL_SIGNATURE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_CALL_SIGNATURE, function, block->id, instruction_id);
                     }
-                    for (u32 argument_index = 0;
-                        argument_index <
-                            signature->as.function.argument_count;
-                        argument_index += 1)
+                    for (u32 argument_index = 0; argument_index < signature->as.function.argument_count; argument_index += 1)
                     {
-                        IrValue* argument = function->values +
-                            instruction->operands[argument_index + 1].value;
-                        if (!ir_type_id_equal(
-                                argument->type,
-                                signature->as.function
-                                    .argument_types[argument_index]))
+                        IrValue* argument = function->values + instruction->operands[argument_index + 1].value;
+                        if (!ir_type_id_equal(argument->type, signature->as.function.argument_types[argument_index]))
                         {
-                            return ir_validation_error(
-                                IR_VALIDATION_CALL_SIGNATURE,
-                                function,
-                                block->id,
-                                instruction_id);
+                            return ir_validation_error(IR_VALIDATION_CALL_SIGNATURE, function, block->id, instruction_id);
                         }
                     }
-                    if (callee->definition.value ==
-                        IR_ID_UNDERLYING_INVALID)
+                    if (callee->definition.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_CALL_TARGET,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_CALL_TARGET, function, block->id, instruction_id);
                     }
-                    IrInstruction* reference =
-                        function->instructions +
-                        callee->definition.value;
-                    if (reference->opcode != IR_OPCODE_FUNCTION ||
-                        !ir_entity_id_equal(
-                            reference->entity,
-                            instruction->entity) ||
-                        reference->instantiation.value !=
-                            instruction->instantiation.value)
+                    IrInstruction* reference = function->instructions + callee->definition.value;
+                    if (reference->opcode != IR_OPCODE_FUNCTION || !ir_entity_id_equal(reference->entity, instruction->entity) ||
+                        reference->instantiation.value != instruction->instantiation.value)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_CALL_TARGET,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_CALL_TARGET, function, block->id, instruction_id);
                     }
-                    AnalysisResult* target_module =
-                        ir_analysis_module_from_id(
-                            analysis,
-                            instruction->entity.module);
-                    if (!target_module ||
-                        instruction->entity.index.value >=
-                            target_module->module.entity_count)
+                    AnalysisResult* target_module = ir_analysis_module_from_id(analysis, instruction->entity.module);
+                    if (!target_module || instruction->entity.index.value >= target_module->module.entity_count)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_CALL_TARGET,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_CALL_TARGET, function, block->id, instruction_id);
                     }
-                    AnalysisEntity* target =
-                        target_module->module.entities +
-                        instruction->entity.index.value;
+                    AnalysisEntity* target = target_module->module.entities + instruction->entity.index.value;
                     if (target->kind != ANALYSIS_ENTITY_CODE)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_CALL_TARGET,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_CALL_TARGET, function, block->id, instruction_id);
                     }
-                    if (instruction->instantiation.value !=
-                        ANALYSIS_ID_UNDERLYING_INVALID)
+                    if (instruction->instantiation.value != ANALYSIS_ID_UNDERLYING_INVALID)
                     {
-                        AnalysisInstantiation* instantiation =
-                            ir_instantiation_from_id(
-                                target_module,
-                                instruction->instantiation);
-                        if (!instantiation ||
-                            instantiation->generic_entity.module.value !=
-                                instruction->entity.module.value ||
-                            instantiation->generic_entity.index.value !=
-                                instruction->entity.index.value ||
-                            instantiation->codegen_owner.value !=
-                                target_module->module.id.value)
+                        AnalysisInstantiation* instantiation = ir_instantiation_from_id(target_module, instruction->instantiation);
+                        if (!instantiation || instantiation->generic_entity.module.value != instruction->entity.module.value ||
+                            instantiation->generic_entity.index.value != instruction->entity.index.value ||
+                            instantiation->codegen_owner.value != target_module->module.id.value)
                         {
-                            return ir_validation_error(
-                                IR_VALIDATION_CALL_TARGET,
-                                function,
-                                block->id,
-                                instruction_id);
+                            return ir_validation_error(IR_VALIDATION_CALL_TARGET, function, block->id, instruction_id);
                         }
                     }
                     else
                     {
-                        TemporalArena validation_scratch =
-                            scratch_begin(0, 0);
-                        bool generic = analysis_entity_is_generic(
-                            validation_scratch.arena,
-                            target_module,
-                            target);
+                        TemporalArena validation_scratch = scratch_begin(0, 0);
+                        bool generic = analysis_entity_is_generic(validation_scratch.arena, target_module, target);
                         scratch_end(validation_scratch);
                         if (generic)
                         {
-                            return ir_validation_error(
-                                IR_VALIDATION_CALL_TARGET,
-                                function,
-                                block->id,
-                                instruction_id);
+                            return ir_validation_error(IR_VALIDATION_CALL_TARGET, function, block->id, instruction_id);
                         }
                     }
                 }
@@ -4683,44 +3151,31 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
                 {
                     AnalysisTypeId return_type = function_type->as.function.return_type;
                     AnalysisTypeKind return_kind = analysis_type_from_id(analysis, return_type)->kind;
-                    bool valid_return = return_kind == ANALYSIS_TYPE_VOID ?
-                        instruction->operand_count == 0 :
-                        instruction->operand_count == 1 && ir_type_id_equal(
-                            function->values[instruction->operands[0].value].type,
-                            return_type);
+                    bool valid_return =
+                        return_kind == ANALYSIS_TYPE_VOID
+                            ? instruction->operand_count == 0
+                            : instruction->operand_count == 1 && ir_type_id_equal(function->values[instruction->operands[0].value].type, return_type);
                     if (!valid_return)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_RETURN_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_RETURN_TYPE, function, block->id, instruction_id);
                     }
                 }
-                bool terminator = instruction->opcode == IR_OPCODE_BRANCH ||
-                    instruction->opcode == IR_OPCODE_BRANCH_IF ||
-                    instruction->opcode == IR_OPCODE_SWITCH ||
-                    instruction->opcode == IR_OPCODE_RETURN ||
-                    instruction->opcode == IR_OPCODE_UNREACHABLE;
+                bool terminator = instruction->opcode == IR_OPCODE_BRANCH || instruction->opcode == IR_OPCODE_BRANCH_IF ||
+                                  instruction->opcode == IR_OPCODE_SWITCH || instruction->opcode == IR_OPCODE_RETURN ||
+                                  instruction->opcode == IR_OPCODE_UNREACHABLE;
                 saw_terminator = terminator;
                 instruction_id = instruction->next;
             }
             if (!saw_terminator)
             {
-                return ir_validation_error(
-                    IR_VALIDATION_UNTERMINATED_BLOCK,
-                    function,
-                    block->id,
-                    block->last_instruction);
+                return ir_validation_error(IR_VALIDATION_UNTERMINATED_BLOCK, function, block->id, block->last_instruction);
             }
         }
     }
     return result;
 }
 
-IrValidationResult ir_validate_canonical_module(
-    IrProgram* program,
-    IrModule* module)
+IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = {
         .function = IR_FUNCTION_ID_INVALID,
@@ -4732,1948 +3187,658 @@ IrValidationResult ir_validate_canonical_module(
         result.error = IR_VALIDATION_INVALID_ID;
         return result;
     }
-    for (u32 global_index = 0;
-        global_index < module->global_count;
-        global_index += 1)
+    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
-        IrGlobal* global =
-            module->globals + global_index;
-        IrSymbol* symbol = ir_symbol_from_id(
-            &program->symbols,
-            global->symbol);
-        IrType* type = ir_type_from_id(
-            &program->types,
-            global->type);
-        if (type &&
-            global->alignment &&
-            ((global->alignment &
-                    (global->alignment - 1)) ||
-                !type->layout.resolved ||
-                global->alignment <
-                    type->layout.alignment))
+        IrGlobal* global = module->globals + global_index;
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+        IrType* type = ir_type_from_id(&program->types, global->type);
+        if (type && global->alignment &&
+            ((global->alignment & (global->alignment - 1)) || !type->layout.resolved || global->alignment < type->layout.alignment))
         {
-            result.error =
-                IR_VALIDATION_ALIGNMENT;
+            result.error = IR_VALIDATION_ALIGNMENT;
             return result;
         }
         bool initializer_valid = false;
-        if (symbol && type &&
-            type->layout.resolved &&
-            symbol->kind == IR_SYMBOL_DATA &&
-            symbol->is_definition &&
-            symbol->type.value ==
-                global->type.value)
+        if (symbol && type && type->layout.resolved && symbol->kind == IR_SYMBOL_DATA && symbol->is_definition && symbol->type.value == global->type.value)
         {
             switch (global->initializer_kind)
             {
-                case IR_GLOBAL_INITIALIZER_ZERO:
-                {
-                    initializer_valid = true;
-                } break;
-                case IR_GLOBAL_INITIALIZER_INTEGER:
-                {
-                    initializer_valid =
-                        type->kind ==
-                            IR_TYPE_INTEGER ||
-                        type->kind ==
-                            IR_TYPE_BOOLEAN ||
-                        type->kind ==
-                            IR_TYPE_ENUM;
-                } break;
-                case IR_GLOBAL_INITIALIZER_FLOAT:
-                {
-                    initializer_valid =
-                        type->kind == IR_TYPE_FLOAT;
-                } break;
-                case IR_GLOBAL_INITIALIZER_BYTES:
-                {
-                    initializer_valid =
-                        global->bytes.length ==
-                            type->layout.size;
-                } break;
-                case IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS:
-                {
-                    initializer_valid =
-                        type->kind ==
-                            IR_TYPE_POINTER &&
-                        ir_symbol_from_id(
-                            &program->symbols,
-                            global->
-                                initializer_symbol);
-                } break;
-                case IR_GLOBAL_INITIALIZER_NONE:
-                case IR_GLOBAL_INITIALIZER_COUNT:
-                {
-                    initializer_valid = false;
-                } break;
+            case IR_GLOBAL_INITIALIZER_ZERO:
+            {
+                initializer_valid = true;
+            }
+            break;
+            case IR_GLOBAL_INITIALIZER_INTEGER:
+            {
+                initializer_valid = type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM;
+            }
+            break;
+            case IR_GLOBAL_INITIALIZER_FLOAT:
+            {
+                initializer_valid = type->kind == IR_TYPE_FLOAT;
+            }
+            break;
+            case IR_GLOBAL_INITIALIZER_BYTES:
+            {
+                initializer_valid = global->bytes.length == type->layout.size;
+            }
+            break;
+            case IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS:
+            {
+                initializer_valid = type->kind == IR_TYPE_POINTER && ir_symbol_from_id(&program->symbols, global->initializer_symbol);
+            }
+            break;
+            case IR_GLOBAL_INITIALIZER_NONE:
+            case IR_GLOBAL_INITIALIZER_COUNT:
+            {
+                initializer_valid = false;
+            }
+            break;
             }
         }
         if (!initializer_valid)
         {
-            result.error =
-                IR_VALIDATION_OPERATION;
+            result.error = IR_VALIDATION_OPERATION;
             return result;
         }
     }
-    for (u32 function_index = 0;
-        function_index < module->function_count;
-        function_index += 1)
+    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
-        IrFunction* function =
-            module->functions + function_index;
+        IrFunction* function = module->functions + function_index;
         if (function->state != IR_FUNCTION_LOWERED)
         {
             continue;
         }
-        IrType* signature = ir_type_from_id(
-            &program->types,
-            function->canonical_type);
-        if (!signature ||
-            signature->kind != IR_TYPE_FUNCTION ||
-            function->entry.value >=
-                function->block_count)
+        IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+        if (!signature || signature->kind != IR_TYPE_FUNCTION || function->entry.value >= function->block_count)
         {
-            return ir_validation_error(
-                IR_VALIDATION_INVALID_ID,
-                function,
-                IR_BLOCK_ID_INVALID,
-                IR_INSTRUCTION_ID_INVALID);
+            return ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
         }
-        for (u32 value_index = 0;
-            value_index < function->value_count;
-            value_index += 1)
+        for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
-            IrValue* value =
-                function->values + value_index;
-            IrType* value_type =
-                ir_type_from_id(
-                    &program->types,
-                    value->canonical_type);
-            if (!value_type ||
-                value->definition.value >=
-                    function->instruction_count)
+            IrValue* value = function->values + value_index;
+            IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
+            if (!value_type || value->definition.value >= function->instruction_count)
             {
-                return ir_validation_error(
-                    IR_VALIDATION_INVALID_ID,
-                    function,
-                    IR_BLOCK_ID_INVALID,
-                    value->definition);
+                return ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, value->definition);
             }
             if (value->alignment &&
-                ((value->alignment &
-                        (value->alignment - 1)) ||
-                    !value_type->layout.resolved ||
-                    value->alignment <
-                        value_type->
-                            layout.alignment))
+                ((value->alignment & (value->alignment - 1)) || !value_type->layout.resolved || value->alignment < value_type->layout.alignment))
             {
-                return ir_validation_error(
-                    IR_VALIDATION_ALIGNMENT,
-                    function,
-                    IR_BLOCK_ID_INVALID,
-                    value->definition);
+                return ir_validation_error(IR_VALIDATION_ALIGNMENT, function, IR_BLOCK_ID_INVALID, value->definition);
             }
         }
-        for (u32 block_index = 0;
-            block_index < function->block_count;
-            block_index += 1)
+        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
-            IrBlock* block =
-                function->blocks + block_index;
-            if (!block->terminated ||
-                !block->sealed)
+            IrBlock* block = function->blocks + block_index;
+            if (!block->terminated || !block->sealed)
             {
-                return ir_validation_error(
-                    !block->terminated ?
-                        IR_VALIDATION_UNTERMINATED_BLOCK :
-                        IR_VALIDATION_BLOCK_PARAMETER,
-                    function,
-                    block->id,
-                    block->last_instruction);
+                return ir_validation_error(!block->terminated ? IR_VALIDATION_UNTERMINATED_BLOCK : IR_VALIDATION_BLOCK_PARAMETER, function, block->id,
+                                           block->last_instruction);
             }
-            IrInstructionId instruction_id =
-                block->first_instruction;
+            IrInstructionId instruction_id = block->first_instruction;
             bool terminated = false;
             u32 visited = 0;
-            while (instruction_id.value !=
-                IR_ID_UNDERLYING_INVALID)
+            while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
             {
-                if (instruction_id.value >=
-                        function->instruction_count ||
-                    visited++ >=
-                        function->instruction_count)
+                if (instruction_id.value >= function->instruction_count || visited++ >= function->instruction_count)
                 {
-                    return ir_validation_error(
-                        IR_VALIDATION_INVALID_ID,
-                        function,
-                        block->id,
-                        instruction_id);
+                    return ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, instruction_id);
                 }
-                IrInstruction* instruction =
-                    function->instructions +
-                        instruction_id.value;
-                if (terminated ||
-                    !ir_type_from_id(
-                        &program->types,
-                        instruction->
-                            canonical_type))
+                IrInstruction* instruction = function->instructions + instruction_id.value;
+                if (terminated || !ir_type_from_id(&program->types, instruction->canonical_type))
                 {
-                    return ir_validation_error(
-                        terminated ?
-                            IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR :
-                            IR_VALIDATION_INVALID_ID,
-                        function,
-                        block->id,
-                        instruction_id);
+                    return ir_validation_error(terminated ? IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR : IR_VALIDATION_INVALID_ID, function, block->id,
+                                               instruction_id);
                 }
-                for (u32 operand_index = 0;
-                    operand_index <
-                        instruction->operand_count;
-                    operand_index += 1)
+                for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                 {
-                    if (instruction->operands[
-                            operand_index].value >=
-                        function->value_count)
+                    if (instruction->operands[operand_index].value >= function->value_count)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_INVALID_ID,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, instruction_id);
                     }
                 }
-                if (instruction->result.value !=
-                    IR_ID_UNDERLYING_INVALID)
+                if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
                 {
-                    if (instruction->result.value >=
-                            function->value_count ||
-                        function->values[
-                            instruction->result.value].
-                            definition.value !=
-                                instruction_id.value ||
-                        function->values[
-                            instruction->result.value].
-                            canonical_type.value !=
-                                instruction->
-                                    canonical_type.value)
+                    if (instruction->result.value >= function->value_count ||
+                        function->values[instruction->result.value].definition.value != instruction_id.value ||
+                        function->values[instruction->result.value].canonical_type.value != instruction->canonical_type.value)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_RESULT_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_RESULT_TYPE, function, block->id, instruction_id);
                     }
                 }
-                if (instruction->opcode ==
-                    IR_OPCODE_ARGUMENT)
+                if (instruction->opcode == IR_OPCODE_ARGUMENT)
                 {
-                    u64 argument_index =
-                        instruction->immediate_count ==
-                                1 ?
-                            instruction->immediates[0] :
-                            UINT64_MAX;
-                    if (argument_index >=
-                            signature->parameter_count ||
-                        signature->parameter_types[
-                            argument_index].value !=
-                            instruction->
-                                canonical_type.value ||
-                        instruction->operand_count != 0 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID)
+                    u64 argument_index = instruction->immediate_count == 1 ? instruction->immediates[0] : UINT64_MAX;
+                    if (argument_index >= signature->parameter_count || signature->parameter_types[argument_index].value != instruction->canonical_type.value ||
+                        instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_LOCAL)
+                else if (instruction->opcode == IR_OPCODE_LOCAL)
                 {
-                    IrType* type = ir_type_from_id(
-                        &program->types,
-                        instruction->canonical_type);
-                    if (!type ||
-                        instruction->operand_count != 0 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID ||
-                        function->values[
-                            instruction->result.value].
-                            category != IR_VALUE_PLACE ||
-                        instruction->canonical_local.value >=
-                            function->local_count)
+                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    if (!type || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
+                        function->values[instruction->result.value].category != IR_VALUE_PLACE || instruction->canonical_local.value >= function->local_count)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_STACK_ALLOCATE)
+                else if (instruction->opcode == IR_OPCODE_STACK_ALLOCATE)
                 {
-                    IrType* pointer =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
+                    IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
                     IrType* size_type =
-                        instruction->operand_count == 1 ?
-                            ir_type_from_id(
-                                &program->types,
-                                function->values[
-                                    instruction->
-                                        operands[0].
-                                        value].
-                                    canonical_type) :
-                            0;
-                    u64 alignment =
-                        instruction->immediate_count == 1 ?
-                            instruction->
-                                immediates[0] :
-                            0;
-                    if (!pointer ||
-                        pointer->kind !=
-                            IR_TYPE_POINTER ||
-                        !size_type ||
-                        size_type->kind !=
-                            IR_TYPE_INTEGER ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID ||
-                        function->values[
-                            instruction->result.value].
-                            category !=
-                                IR_VALUE_VALUE ||
-                        !alignment ||
-                        alignment > UINT32_MAX ||
-                        (alignment &
-                            (alignment - 1)))
+                        instruction->operand_count == 1 ? ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type) : 0;
+                    u64 alignment = instruction->immediate_count == 1 ? instruction->immediates[0] : 0;
+                    if (!pointer || pointer->kind != IR_TYPE_POINTER || !size_type || size_type->kind != IR_TYPE_INTEGER ||
+                        instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE ||
+                        !alignment || alignment > UINT32_MAX || (alignment & (alignment - 1)))
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_STACK_SAVE)
+                else if (instruction->opcode == IR_OPCODE_STACK_SAVE)
                 {
-                    IrType* pointer =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    if (!pointer ||
-                        pointer->kind !=
-                            IR_TYPE_POINTER ||
-                        instruction->operand_count != 0 ||
-                        instruction->immediate_count != 0 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID ||
-                        function->values[
-                            instruction->result.value].
-                            category !=
-                                IR_VALUE_VALUE)
+                    IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
+                    if (!pointer || pointer->kind != IR_TYPE_POINTER || instruction->operand_count != 0 || instruction->immediate_count != 0 ||
+                        instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_STACK_RESTORE)
+                else if (instruction->opcode == IR_OPCODE_STACK_RESTORE)
                 {
                     IrType* restored =
-                        instruction->operand_count == 1 ?
-                            ir_type_from_id(
-                                &program->types,
-                                function->values[
-                                    instruction->
-                                        operands[0].
-                                        value].
-                                    canonical_type) :
-                            0;
-                    IrType* result_type =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    if (!restored ||
-                        restored->kind !=
-                            IR_TYPE_POINTER ||
-                        !result_type ||
-                        result_type->kind !=
-                            IR_TYPE_VOID ||
-                        instruction->immediate_count != 0 ||
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID)
+                        instruction->operand_count == 1 ? ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type) : 0;
+                    IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    if (!restored || restored->kind != IR_TYPE_POINTER || !result_type || result_type->kind != IR_TYPE_VOID ||
+                        instruction->immediate_count != 0 || instruction->result.value != IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_GLOBAL)
+                else if (instruction->opcode == IR_OPCODE_GLOBAL)
                 {
-                    IrSymbol* symbol =
-                        ir_symbol_from_id(
-                            &program->symbols,
-                            instruction->symbol);
-                    if (!symbol ||
-                        symbol->kind !=
-                            IR_SYMBOL_DATA ||
-                        symbol->type.value !=
-                            instruction->
-                                canonical_type.value ||
-                        instruction->operand_count != 0 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID ||
-                        function->values[
-                            instruction->result.value].
-                            category !=
-                                IR_VALUE_PLACE)
+                    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
+                    if (!symbol || symbol->kind != IR_SYMBOL_DATA || symbol->type.value != instruction->canonical_type.value ||
+                        instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
+                        function->values[instruction->result.value].category != IR_VALUE_PLACE)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_LOAD)
+                else if (instruction->opcode == IR_OPCODE_LOAD)
                 {
-                    IrValue* place =
-                        instruction->operand_count ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    if (!place ||
-                        place->category !=
-                            IR_VALUE_PLACE ||
-                        place->canonical_type.value !=
-                            instruction->
-                                canonical_type.value ||
-                        instruction->operand_count != 1 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID)
+                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+                    if (!place || place->category != IR_VALUE_PLACE || place->canonical_type.value != instruction->canonical_type.value ||
+                        instruction->operand_count != 1 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERAND_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_STORE)
+                else if (instruction->opcode == IR_OPCODE_STORE)
                 {
-                    IrValue* place =
-                        instruction->operand_count ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrValue* value =
-                        instruction->operand_count == 2 ?
-                            function->values +
-                                instruction->
-                                    operands[1].value :
-                            0;
-                    IrType* instruction_type =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    if (!place || !value ||
-                        place->category !=
-                            IR_VALUE_PLACE ||
-                        value->category !=
-                            IR_VALUE_VALUE ||
-                        place->canonical_type.value !=
-                            value->canonical_type.value ||
-                        !instruction_type ||
-                        instruction_type->kind !=
-                            IR_TYPE_VOID ||
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID)
+                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+                    IrValue* value = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+                    IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE ||
+                        place->canonical_type.value != value->canonical_type.value || !instruction_type || instruction_type->kind != IR_TYPE_VOID ||
+                        instruction->result.value != IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERAND_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_CONSTANT_INTEGER)
+                else if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER)
                 {
-                    IrType* type = ir_type_from_id(
-                        &program->types,
-                        instruction->canonical_type);
-                    if (!type ||
-                        (type->kind !=
-                             IR_TYPE_INTEGER &&
-                         type->kind !=
-                             IR_TYPE_BOOLEAN &&
-                         type->kind !=
-                             IR_TYPE_ENUM) ||
-                        instruction->immediate_count != 1 ||
-                        instruction->operand_count != 0 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID)
+                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    if (!type || (type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN && type->kind != IR_TYPE_ENUM) ||
+                        instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_CONSTANT_FLOAT)
+                else if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT)
                 {
-                    IrType* type = ir_type_from_id(
-                        &program->types,
-                        instruction->canonical_type);
-                    if (!type ||
-                        type->kind != IR_TYPE_FLOAT ||
-                        (type->bit_width != 32 &&
-                         type->bit_width != 64) ||
-                        instruction->immediate_count != 1 ||
-                        instruction->operand_count != 0 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID)
+                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    if (!type || type->kind != IR_TYPE_FLOAT || (type->bit_width != 32 && type->bit_width != 64) || instruction->immediate_count != 1 ||
+                        instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_FUNCTION)
+                else if (instruction->opcode == IR_OPCODE_FUNCTION)
                 {
-                    IrSymbol* symbol =
-                        ir_symbol_from_id(
-                            &program->symbols,
-                            instruction->symbol);
-                    IrType* reference_type =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
+                    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
+                    IrType* reference_type = ir_type_from_id(&program->types, instruction->canonical_type);
                     bool type_matches =
-                        symbol &&
-                        (symbol->type.value ==
-                            instruction->
-                                canonical_type.value ||
-                         (reference_type &&
-                          reference_type->kind ==
-                              IR_TYPE_POINTER &&
-                          reference_type->
-                                  element_type.value ==
-                              symbol->type.value));
-                    if (!symbol ||
-                        symbol->kind !=
-                            IR_SYMBOL_FUNCTION ||
-                        !type_matches ||
-                        instruction->operand_count != 0 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID)
+                        symbol && (symbol->type.value == instruction->canonical_type.value ||
+                                   (reference_type && reference_type->kind == IR_TYPE_POINTER && reference_type->element_type.value == symbol->type.value));
+                    if (!symbol || symbol->kind != IR_SYMBOL_FUNCTION || !type_matches || instruction->operand_count != 0 ||
+                        instruction->result.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_CALL_TARGET,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_CALL_TARGET, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_ATOMIC_LOAD)
+                else if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD)
                 {
-                    IrValue* place =
-                        instruction->operand_count ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrType* place_type = place ?
-                        ir_type_from_id(
-                            &program->types,
-                            place->canonical_type) :
-                        0;
-                    bool valid_order =
-                        instruction->memory_order ==
-                            IR_MEMORY_ORDER_RELAXED ||
-                        instruction->memory_order ==
-                            IR_MEMORY_ORDER_CONSUME ||
-                        instruction->memory_order ==
-                            IR_MEMORY_ORDER_ACQUIRE ||
-                        instruction->memory_order ==
-                            IR_MEMORY_ORDER_SEQUENTIAL;
-                    if (!place ||
-                        place->category !=
-                            IR_VALUE_PLACE ||
-                        !place_type ||
-                        !place_type->is_atomic ||
-                        place_type->
-                                unqualified_type.value !=
-                            instruction->
-                                canonical_type.value ||
-                        instruction->operand_count != 1 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID ||
-                        !valid_order)
+                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+                    IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
+                    bool valid_order = instruction->memory_order == IR_MEMORY_ORDER_RELAXED || instruction->memory_order == IR_MEMORY_ORDER_CONSUME ||
+                                       instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE || instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+                    if (!place || place->category != IR_VALUE_PLACE || !place_type || !place_type->is_atomic ||
+                        place_type->unqualified_type.value != instruction->canonical_type.value || instruction->operand_count != 1 ||
+                        instruction->result.value == IR_ID_UNDERLYING_INVALID || !valid_order)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERAND_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_ATOMIC_STORE)
+                else if (instruction->opcode == IR_OPCODE_ATOMIC_STORE)
                 {
-                    IrValue* place =
-                        instruction->operand_count ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrValue* value =
-                        instruction->operand_count == 2 ?
-                            function->values +
-                                instruction->
-                                    operands[1].value :
-                            0;
-                    IrType* place_type = place ?
-                        ir_type_from_id(
-                            &program->types,
-                            place->canonical_type) :
-                        0;
-                    IrType* instruction_type =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    bool valid_order =
-                        instruction->memory_order ==
-                            IR_MEMORY_ORDER_RELAXED ||
-                        instruction->memory_order ==
-                            IR_MEMORY_ORDER_RELEASE ||
-                        instruction->memory_order ==
-                            IR_MEMORY_ORDER_SEQUENTIAL;
-                    if (!place || !value ||
-                        place->category !=
-                            IR_VALUE_PLACE ||
-                        value->category !=
-                            IR_VALUE_VALUE ||
-                        !place_type ||
-                        !place_type->is_atomic ||
-                        place_type->
-                                unqualified_type.value !=
-                            value->canonical_type.value ||
-                        !instruction_type ||
-                        instruction_type->kind !=
-                            IR_TYPE_VOID ||
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID ||
-                        !valid_order)
+                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+                    IrValue* value = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+                    IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
+                    IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    bool valid_order = instruction->memory_order == IR_MEMORY_ORDER_RELAXED || instruction->memory_order == IR_MEMORY_ORDER_RELEASE ||
+                                       instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+                    if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE || !place_type || !place_type->is_atomic ||
+                        place_type->unqualified_type.value != value->canonical_type.value || !instruction_type || instruction_type->kind != IR_TYPE_VOID ||
+                        instruction->result.value != IR_ID_UNDERLYING_INVALID || !valid_order)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERAND_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_ATOMIC_READ_MODIFY_WRITE)
+                else if (instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE)
                 {
-                    IrValue* place =
-                        instruction->operand_count ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrValue* value =
-                        instruction->operand_count == 2 ?
-                            function->values +
-                                instruction->
-                                    operands[1].value :
-                            0;
-                    IrType* place_type = place ?
-                        ir_type_from_id(
-                            &program->types,
-                            place->canonical_type) :
-                        0;
-                    IrType* value_type = value ?
-                        ir_type_from_id(
-                            &program->types,
-                            value->canonical_type) :
-                        0;
-                    IrType* result_type =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    bool valid_order =
-                        instruction->memory_order <
-                            IR_MEMORY_ORDER_COUNT;
-                    bool pointer_arithmetic =
-                        result_type &&
-                        result_type->kind ==
-                            IR_TYPE_POINTER &&
-                        (instruction->
-                                atomic_operation ==
-                                IR_ATOMIC_ADD ||
-                            instruction->
-                                atomic_operation ==
-                                IR_ATOMIC_SUBTRACT);
-                    if (!place || !value ||
-                        place->category !=
-                            IR_VALUE_PLACE ||
-                        value->category !=
-                            IR_VALUE_VALUE ||
-                        !place_type ||
-                        !place_type->is_atomic ||
-                        place_type->
-                                unqualified_type.value !=
-                            instruction->
-                                canonical_type.value ||
-                        !value_type ||
-                        (!pointer_arithmetic &&
-                            value->
-                                    canonical_type.value !=
-                                instruction->
-                                    canonical_type.value) ||
-                        (pointer_arithmetic &&
-                            (value_type->kind !=
-                                    IR_TYPE_INTEGER ||
-                                !result_type ||
-                                value_type->
-                                        layout.size !=
-                                    result_type->
-                                        layout.size)) ||
-                        (!pointer_arithmetic &&
-                            value_type->kind !=
-                                IR_TYPE_INTEGER &&
-                            (instruction->
-                                    atomic_operation !=
-                                IR_ATOMIC_EXCHANGE ||
-                             (value_type->kind !=
-                                    IR_TYPE_BOOLEAN &&
-                                value_type->kind !=
-                                    IR_TYPE_POINTER))) ||
-                        instruction->atomic_operation >=
-                            IR_ATOMIC_OPERATION_COUNT ||
-                        instruction->operand_count != 2 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID ||
-                        !valid_order)
+                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+                    IrValue* value = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+                    IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
+                    IrType* value_type = value ? ir_type_from_id(&program->types, value->canonical_type) : 0;
+                    IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    bool valid_order = instruction->memory_order < IR_MEMORY_ORDER_COUNT;
+                    bool pointer_arithmetic = result_type && result_type->kind == IR_TYPE_POINTER &&
+                                              (instruction->atomic_operation == IR_ATOMIC_ADD || instruction->atomic_operation == IR_ATOMIC_SUBTRACT);
+                    if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE || !place_type || !place_type->is_atomic ||
+                        place_type->unqualified_type.value != instruction->canonical_type.value || !value_type ||
+                        (!pointer_arithmetic && value->canonical_type.value != instruction->canonical_type.value) ||
+                        (pointer_arithmetic && (value_type->kind != IR_TYPE_INTEGER || !result_type || value_type->layout.size != result_type->layout.size)) ||
+                        (!pointer_arithmetic && value_type->kind != IR_TYPE_INTEGER &&
+                         (instruction->atomic_operation != IR_ATOMIC_EXCHANGE ||
+                          (value_type->kind != IR_TYPE_BOOLEAN && value_type->kind != IR_TYPE_POINTER))) ||
+                        instruction->atomic_operation >= IR_ATOMIC_OPERATION_COUNT || instruction->operand_count != 2 ||
+                        instruction->result.value == IR_ID_UNDERLYING_INVALID || !valid_order)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERAND_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_ATOMIC_COMPARE_EXCHANGE)
+                else if (instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE)
                 {
-                    IrValue* place =
-                        instruction->operand_count ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrValue* expected =
-                        instruction->operand_count == 3 ?
-                            function->values +
-                                instruction->
-                                    operands[1].value :
-                            0;
-                    IrValue* desired =
-                        instruction->operand_count == 3 ?
-                            function->values +
-                                instruction->
-                                    operands[2].value :
-                            0;
-                    IrType* place_type = place ?
-                        ir_type_from_id(
-                            &program->types,
-                            place->canonical_type) :
-                        0;
-                    IrType* value_type = expected ?
-                        ir_type_from_id(
-                            &program->types,
-                            expected->canonical_type) :
-                        0;
-                    IrMemoryOrder success =
-                        instruction->memory_order;
-                    IrMemoryOrder failure =
-                        instruction->
-                            failure_memory_order;
-                    bool valid_failure =
-                        failure ==
-                            IR_MEMORY_ORDER_RELAXED ||
-                        failure ==
-                            IR_MEMORY_ORDER_CONSUME ||
-                        failure ==
-                            IR_MEMORY_ORDER_ACQUIRE ||
-                        failure ==
-                            IR_MEMORY_ORDER_SEQUENTIAL;
+                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+                    IrValue* expected = instruction->operand_count == 3 ? function->values + instruction->operands[1].value : 0;
+                    IrValue* desired = instruction->operand_count == 3 ? function->values + instruction->operands[2].value : 0;
+                    IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
+                    IrType* value_type = expected ? ir_type_from_id(&program->types, expected->canonical_type) : 0;
+                    IrMemoryOrder success = instruction->memory_order;
+                    IrMemoryOrder failure = instruction->failure_memory_order;
+                    bool valid_failure = failure == IR_MEMORY_ORDER_RELAXED || failure == IR_MEMORY_ORDER_CONSUME || failure == IR_MEMORY_ORDER_ACQUIRE ||
+                                         failure == IR_MEMORY_ORDER_SEQUENTIAL;
                     bool compatible_orders =
-                        success ==
-                            IR_MEMORY_ORDER_SEQUENTIAL ||
-                        (success ==
-                                IR_MEMORY_ORDER_ACQUIRE_RELEASE &&
-                            failure !=
-                                IR_MEMORY_ORDER_SEQUENTIAL) ||
-                        (success ==
-                                IR_MEMORY_ORDER_ACQUIRE &&
-                            failure !=
-                                IR_MEMORY_ORDER_SEQUENTIAL) ||
-                        (success ==
-                                IR_MEMORY_ORDER_CONSUME &&
-                            (failure ==
-                                    IR_MEMORY_ORDER_RELAXED ||
-                                failure ==
-                                    IR_MEMORY_ORDER_CONSUME)) ||
-                        (success ==
-                                IR_MEMORY_ORDER_RELEASE &&
-                            failure ==
-                                IR_MEMORY_ORDER_RELAXED) ||
-                        (success ==
-                                IR_MEMORY_ORDER_RELAXED &&
-                            failure ==
-                                IR_MEMORY_ORDER_RELAXED);
-                    if (!place || !expected || !desired ||
-                        place->category !=
-                            IR_VALUE_PLACE ||
-                        expected->category !=
-                            IR_VALUE_VALUE ||
-                        desired->category !=
-                            IR_VALUE_VALUE ||
-                        !place_type ||
-                        !place_type->is_atomic ||
-                        place_type->
-                                unqualified_type.value !=
-                            expected->
-                                canonical_type.value ||
-                        expected->
-                                canonical_type.value !=
-                            desired->
-                                canonical_type.value ||
-                        instruction->
-                                canonical_type.value !=
-                            expected->
-                                canonical_type.value ||
-                        !value_type ||
-                        (value_type->kind !=
-                                IR_TYPE_INTEGER &&
-                            value_type->kind !=
-                                IR_TYPE_POINTER) ||
-                        instruction->operand_count != 3 ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID ||
-                        !valid_failure ||
-                        !compatible_orders)
+                        success == IR_MEMORY_ORDER_SEQUENTIAL || (success == IR_MEMORY_ORDER_ACQUIRE_RELEASE && failure != IR_MEMORY_ORDER_SEQUENTIAL) ||
+                        (success == IR_MEMORY_ORDER_ACQUIRE && failure != IR_MEMORY_ORDER_SEQUENTIAL) ||
+                        (success == IR_MEMORY_ORDER_CONSUME && (failure == IR_MEMORY_ORDER_RELAXED || failure == IR_MEMORY_ORDER_CONSUME)) ||
+                        (success == IR_MEMORY_ORDER_RELEASE && failure == IR_MEMORY_ORDER_RELAXED) ||
+                        (success == IR_MEMORY_ORDER_RELAXED && failure == IR_MEMORY_ORDER_RELAXED);
+                    if (!place || !expected || !desired || place->category != IR_VALUE_PLACE || expected->category != IR_VALUE_VALUE ||
+                        desired->category != IR_VALUE_VALUE || !place_type || !place_type->is_atomic ||
+                        place_type->unqualified_type.value != expected->canonical_type.value ||
+                        expected->canonical_type.value != desired->canonical_type.value ||
+                        instruction->canonical_type.value != expected->canonical_type.value || !value_type ||
+                        (value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_POINTER) || instruction->operand_count != 3 ||
+                        instruction->result.value == IR_ID_UNDERLYING_INVALID || !valid_failure || !compatible_orders)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERAND_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_ATOMIC_FENCE)
+                else if (instruction->opcode == IR_OPCODE_ATOMIC_FENCE)
                 {
-                    IrType* instruction_type =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    if (!instruction_type ||
-                        instruction_type->kind !=
-                            IR_TYPE_VOID ||
-                        instruction->operand_count != 0 ||
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID ||
-                        instruction->memory_order >=
-                            IR_MEMORY_ORDER_COUNT)
+                    IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    if (!instruction_type || instruction_type->kind != IR_TYPE_VOID || instruction->operand_count != 0 ||
+                        instruction->result.value != IR_ID_UNDERLYING_INVALID || instruction->memory_order >= IR_MEMORY_ORDER_COUNT)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERAND_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_CLEAR_INSTRUCTION_CACHE)
+                else if (instruction->opcode == IR_OPCODE_CLEAR_INSTRUCTION_CACHE)
                 {
-                    IrType* instruction_type =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    IrValue* begin =
-                        instruction->operand_count == 2 ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrValue* end =
-                        instruction->operand_count == 2 ?
-                            function->values +
-                                instruction->
-                                    operands[1].value :
-                            0;
-                    IrType* begin_type = begin ?
-                        ir_type_from_id(
-                            &program->types,
-                            begin->canonical_type) :
-                        0;
-                    IrType* end_type = end ?
-                        ir_type_from_id(
-                            &program->types,
-                            end->canonical_type) :
-                        0;
-                    if (!instruction_type ||
-                        instruction_type->kind !=
-                            IR_TYPE_VOID ||
-                        !begin_type ||
-                        begin_type->kind !=
-                            IR_TYPE_POINTER ||
-                        !end_type ||
-                        end_type->kind !=
-                            IR_TYPE_POINTER ||
-                        instruction->operand_count != 2 ||
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID)
+                    IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    IrValue* begin = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
+                    IrValue* end = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+                    IrType* begin_type = begin ? ir_type_from_id(&program->types, begin->canonical_type) : 0;
+                    IrType* end_type = end ? ir_type_from_id(&program->types, end->canonical_type) : 0;
+                    if (!instruction_type || instruction_type->kind != IR_TYPE_VOID || !begin_type || begin_type->kind != IR_TYPE_POINTER || !end_type ||
+                        end_type->kind != IR_TYPE_POINTER || instruction->operand_count != 2 || instruction->result.value != IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERAND_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_CALL)
+                else if (instruction->opcode == IR_OPCODE_CALL)
                 {
-                    IrValue* callee =
-                        instruction->operand_count ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrType* callee_type =
-                        callee ?
-                            ir_type_from_id(
-                                &program->types,
-                                callee->
-                                    canonical_type) :
-                            0;
-                    bool indirect =
-                        callee_type &&
-                        callee_type->kind ==
-                            IR_TYPE_POINTER;
-                    IrType* signature_type =
-                        indirect ?
-                            ir_type_from_id(
-                                &program->types,
-                                callee_type->
-                                    element_type) :
-                            callee_type;
+                    IrValue* callee = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+                    IrType* callee_type = callee ? ir_type_from_id(&program->types, callee->canonical_type) : 0;
+                    bool indirect = callee_type && callee_type->kind == IR_TYPE_POINTER;
+                    IrType* signature_type = indirect ? ir_type_from_id(&program->types, callee_type->element_type) : callee_type;
                     IrInstruction* reference =
-                        callee &&
-                            callee->definition.value <
-                                function->
-                                    instruction_count ?
-                            function->instructions +
-                                callee->definition.value :
-                            0;
-                    if (!signature_type ||
-                        signature_type->kind !=
-                            IR_TYPE_FUNCTION ||
-                        (!signature_type->is_variadic &&
-                         instruction->operand_count !=
-                             signature_type->
-                                 parameter_count + 1) ||
-                        (signature_type->is_variadic &&
-                         instruction->operand_count <
-                             signature_type->
-                                 parameter_count + 1) ||
-                        signature_type->
-                                return_type.value !=
-                            instruction->
-                                canonical_type.value ||
-                        !reference ||
-                        (!indirect &&
-                         (reference->opcode !=
-                              IR_OPCODE_FUNCTION ||
-                          reference->symbol.value !=
-                              instruction->
-                                  symbol.value)) ||
-                        (indirect &&
-                         instruction->symbol.value !=
-                             IR_ID_UNDERLYING_INVALID) ||
-                        ((ir_type_from_id(
-                              &program->types,
-                              signature_type->
-                                  return_type)->kind ==
-                              IR_TYPE_VOID) !=
-                         (instruction->result.value ==
-                              IR_ID_UNDERLYING_INVALID)))
+                        callee && callee->definition.value < function->instruction_count ? function->instructions + callee->definition.value : 0;
+                    if (!signature_type || signature_type->kind != IR_TYPE_FUNCTION ||
+                        (!signature_type->is_variadic && instruction->operand_count != signature_type->parameter_count + 1) ||
+                        (signature_type->is_variadic && instruction->operand_count < signature_type->parameter_count + 1) ||
+                        signature_type->return_type.value != instruction->canonical_type.value || !reference ||
+                        (!indirect && (reference->opcode != IR_OPCODE_FUNCTION || reference->symbol.value != instruction->symbol.value)) ||
+                        (indirect && instruction->symbol.value != IR_ID_UNDERLYING_INVALID) ||
+                        ((ir_type_from_id(&program->types, signature_type->return_type)->kind == IR_TYPE_VOID) !=
+                         (instruction->result.value == IR_ID_UNDERLYING_INVALID)))
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_CALL_SIGNATURE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_CALL_SIGNATURE, function, block->id, instruction_id);
                     }
-                    for (u32 argument_index = 0;
-                        argument_index <
-                            signature_type->
-                                parameter_count;
-                        argument_index += 1)
+                    for (u32 argument_index = 0; argument_index < signature_type->parameter_count; argument_index += 1)
                     {
-                        if (function->values[
-                                instruction->operands[
-                                    argument_index + 1].
-                                    value].
-                                canonical_type.value !=
-                            signature_type->
-                                parameter_types[
-                                    argument_index].
-                                value)
+                        if (function->values[instruction->operands[argument_index + 1].value].canonical_type.value !=
+                            signature_type->parameter_types[argument_index].value)
                         {
-                            return ir_validation_error(
-                                IR_VALIDATION_CALL_SIGNATURE,
-                                function,
-                                block->id,
-                                instruction_id);
+                            return ir_validation_error(IR_VALIDATION_CALL_SIGNATURE, function, block->id, instruction_id);
                         }
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_ADDRESS_OF)
+                else if (instruction->opcode == IR_OPCODE_ADDRESS_OF)
                 {
-                    IrValue* object =
-                        instruction->operand_count == 1 ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrType* pointer =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    if (!object ||
-                        object->category !=
-                            IR_VALUE_PLACE ||
-                        !pointer ||
-                        pointer->kind !=
-                            IR_TYPE_POINTER ||
-                        pointer->element_type.value !=
-                            object->
-                                canonical_type.value ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID)
+                    IrValue* object = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+                    IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
+                    if (!object || object->category != IR_VALUE_PLACE || !pointer || pointer->kind != IR_TYPE_POINTER ||
+                        pointer->element_type.value != object->canonical_type.value || instruction->result.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_DEREFERENCE)
+                else if (instruction->opcode == IR_OPCODE_DEREFERENCE)
                 {
-                    IrValue* address =
-                        instruction->operand_count == 1 ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrType* pointer =
-                        address ?
-                            ir_type_from_id(
-                                &program->types,
-                                address->
-                                    canonical_type) :
-                            0;
-                    IrValue* place =
-                        instruction->result.value <
-                                function->value_count ?
-                            function->values +
-                                instruction->
-                                    result.value :
-                            0;
-                    if (!address ||
-                        address->category !=
-                            IR_VALUE_VALUE ||
-                        !pointer ||
-                        pointer->kind !=
-                            IR_TYPE_POINTER ||
-                        pointer->element_type.value !=
-                            instruction->
-                                canonical_type.value ||
-                        !place ||
-                        place->category !=
-                            IR_VALUE_PLACE)
+                    IrValue* address = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+                    IrType* pointer = address ? ir_type_from_id(&program->types, address->canonical_type) : 0;
+                    IrValue* place = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
+                    if (!address || address->category != IR_VALUE_VALUE || !pointer || pointer->kind != IR_TYPE_POINTER ||
+                        pointer->element_type.value != instruction->canonical_type.value || !place || place->category != IR_VALUE_PLACE)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_UNARY)
+                else if (instruction->opcode == IR_OPCODE_UNARY)
                 {
-                    IrType* type = ir_type_from_id(
-                        &program->types,
-                        instruction->canonical_type);
-                    IrType* vector_element =
-                        type &&
-                            type->kind ==
-                                IR_TYPE_VECTOR ?
-                            ir_type_from_id(
-                                &program->types,
-                                type->element_type) :
-                            0;
+                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    IrType* vector_element = type && type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, type->element_type) : 0;
                     bool valid_operation =
-                        (type &&
-                         type->kind ==
-                            IR_TYPE_INTEGER &&
-                         (instruction->
-                                unary_operation ==
-                              IR_UNARY_INTEGER_NEGATE ||
-                          instruction->
-                                unary_operation ==
-                              IR_UNARY_INTEGER_BITWISE_NOT ||
-                          instruction->
-                                unary_operation ==
-                              IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
-                          instruction->
-                                unary_operation ==
-                              IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)) ||
-                        (type &&
-                         type->kind ==
-                            IR_TYPE_FLOAT &&
-                         instruction->
-                            unary_operation ==
-                            IR_UNARY_FLOAT_NEGATE) ||
-                        (type &&
-                         type->kind ==
-                            IR_TYPE_BOOLEAN &&
-                         instruction->
-                            unary_operation ==
-                            IR_UNARY_BOOLEAN_NOT) ||
-                        (vector_element &&
-                         vector_element->kind ==
-                            IR_TYPE_INTEGER &&
-                         (instruction->
-                                unary_operation ==
-                              IR_UNARY_VECTOR_INTEGER_NEGATE ||
-                          instruction->
-                                unary_operation ==
-                              IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)) ||
-                        (vector_element &&
-                         vector_element->kind ==
-                            IR_TYPE_FLOAT &&
-                         instruction->
-                            unary_operation ==
-                            IR_UNARY_VECTOR_FLOAT_NEGATE);
-                    if (!type ||
-                        instruction->operand_count != 1 ||
-                        function->values[
-                            instruction->operands[0].value].
-                            canonical_type.value !=
-                            instruction->
-                                canonical_type.value ||
-                        !valid_operation ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID)
+                        (type && type->kind == IR_TYPE_INTEGER &&
+                         (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE || instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT ||
+                          instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                          instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)) ||
+                        (type && type->kind == IR_TYPE_FLOAT && instruction->unary_operation == IR_UNARY_FLOAT_NEGATE) ||
+                        (type && type->kind == IR_TYPE_BOOLEAN && instruction->unary_operation == IR_UNARY_BOOLEAN_NOT) ||
+                        (vector_element && vector_element->kind == IR_TYPE_INTEGER &&
+                         (instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_NEGATE ||
+                          instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)) ||
+                        (vector_element && vector_element->kind == IR_TYPE_FLOAT && instruction->unary_operation == IR_UNARY_VECTOR_FLOAT_NEGATE);
+                    if (!type || instruction->operand_count != 1 ||
+                        function->values[instruction->operands[0].value].canonical_type.value != instruction->canonical_type.value || !valid_operation ||
+                        instruction->result.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_BINARY)
+                else if (instruction->opcode == IR_OPCODE_BINARY)
                 {
-                    IrType* result_type = ir_type_from_id(
-                        &program->types,
-                        instruction->canonical_type);
-                    IrValue* left =
-                        instruction->operand_count == 2 ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrValue* right =
-                        instruction->operand_count == 2 ?
-                            function->values +
-                                instruction->
-                                    operands[1].value :
-                            0;
-                    IrType* operand_type =
-                        left ?
-                            ir_type_from_id(
-                                &program->types,
-                                left->canonical_type) :
-                            0;
+                    IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    IrValue* left = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
+                    IrValue* right = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+                    IrType* operand_type = left ? ir_type_from_id(&program->types, left->canonical_type) : 0;
                     bool arithmetic =
-                        instruction->binary_operation <=
-                            IR_BINARY_FLOAT_DIVIDE ||
-                        (instruction->binary_operation >=
-                                IR_BINARY_SIGNED_REMAINDER &&
-                            instruction->binary_operation <=
-                                IR_BINARY_INTEGER_BITWISE_XOR);
+                        instruction->binary_operation <= IR_BINARY_FLOAT_DIVIDE ||
+                        (instruction->binary_operation >= IR_BINARY_SIGNED_REMAINDER && instruction->binary_operation <= IR_BINARY_INTEGER_BITWISE_XOR);
                     bool comparison =
-                        instruction->binary_operation ==
-                            IR_BINARY_INTEGER_EQUAL ||
-                        instruction->binary_operation ==
-                            IR_BINARY_INTEGER_NOT_EQUAL ||
-                        instruction->binary_operation ==
-                            IR_BINARY_FLOAT_EQUAL ||
-                        instruction->binary_operation ==
-                            IR_BINARY_FLOAT_NOT_EQUAL ||
-                        (instruction->binary_operation >=
-                                IR_BINARY_SIGNED_LESS &&
-                            instruction->binary_operation <=
-                                IR_BINARY_FLOAT_GREATER_EQUAL);
+                        instruction->binary_operation == IR_BINARY_INTEGER_EQUAL || instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL ||
+                        instruction->binary_operation == IR_BINARY_FLOAT_EQUAL || instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL ||
+                        (instruction->binary_operation >= IR_BINARY_SIGNED_LESS && instruction->binary_operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
                     bool vector_operation =
-                        instruction->binary_operation >=
-                            IR_BINARY_VECTOR_INTEGER_ADD &&
-                        instruction->binary_operation <=
-                            IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
-                    bool vector_comparison =
-                        instruction->binary_operation >=
-                            IR_BINARY_VECTOR_INTEGER_EQUAL &&
-                        instruction->binary_operation <=
-                            IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
-                    bool matching_operands =
-                        left && right &&
-                        left->canonical_type.value ==
-                            right->canonical_type.value;
-                    bool valid_arithmetic =
-                        arithmetic &&
-                        result_type &&
-                        (result_type->kind ==
-                             IR_TYPE_INTEGER ||
-                         result_type->kind ==
-                             IR_TYPE_FLOAT) &&
-                        matching_operands &&
-                        left->canonical_type.value ==
-                            instruction->
-                                canonical_type.value;
-                    bool valid_comparison =
-                        comparison &&
-                        result_type &&
-                        result_type->kind ==
-                            IR_TYPE_BOOLEAN &&
-                        matching_operands &&
-                        operand_type &&
-                        (operand_type->kind ==
-                             IR_TYPE_INTEGER ||
-                         operand_type->kind ==
-                             IR_TYPE_FLOAT);
+                        instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_ADD && instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
+                    bool vector_comparison = instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL &&
+                                             instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
+                    bool matching_operands = left && right && left->canonical_type.value == right->canonical_type.value;
+                    bool valid_arithmetic = arithmetic && result_type && (result_type->kind == IR_TYPE_INTEGER || result_type->kind == IR_TYPE_FLOAT) &&
+                                            matching_operands && left->canonical_type.value == instruction->canonical_type.value;
+                    bool valid_comparison = comparison && result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type &&
+                                            (operand_type->kind == IR_TYPE_INTEGER || operand_type->kind == IR_TYPE_FLOAT);
                     IrType* operand_element =
-                        operand_type &&
-                            operand_type->kind ==
-                                IR_TYPE_VECTOR ?
-                            ir_type_from_id(
-                                &program->types,
-                                operand_type->
-                                    element_type) :
-                            0;
+                        operand_type && operand_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, operand_type->element_type) : 0;
                     IrType* result_element =
-                        result_type &&
-                            result_type->kind ==
-                                IR_TYPE_VECTOR ?
-                            ir_type_from_id(
-                                &program->types,
-                                result_type->
-                                    element_type) :
-                            0;
+                        result_type && result_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, result_type->element_type) : 0;
                     bool vector_float_operation =
-                        (instruction->binary_operation >=
-                                IR_BINARY_VECTOR_FLOAT_ADD &&
-                            instruction->binary_operation <=
-                                IR_BINARY_VECTOR_FLOAT_DIVIDE) ||
-                        (instruction->binary_operation >=
-                                IR_BINARY_VECTOR_FLOAT_EQUAL &&
-                            instruction->binary_operation <=
-                                IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL);
-                    bool valid_vector_result =
-                        !vector_comparison ?
-                            result_type == operand_type :
-                            result_type &&
-                            operand_type &&
-                            operand_element &&
-                            result_element &&
-                            result_element->kind ==
-                                IR_TYPE_INTEGER &&
-                            result_element->is_signed &&
-                            result_type->element_count ==
-                                operand_type->element_count &&
-                            result_type->layout.size ==
-                                operand_type->layout.size &&
-                            result_element->bit_width ==
-                                operand_element->bit_width;
-                    bool valid_vector_operation =
-                        vector_operation &&
-                        matching_operands &&
-                        operand_type &&
-                        operand_type->kind ==
-                            IR_TYPE_VECTOR &&
-                        operand_element &&
-                        ((vector_float_operation &&
-                            operand_element->kind ==
-                                IR_TYPE_FLOAT) ||
-                         (!vector_float_operation &&
-                            operand_element->kind ==
-                                IR_TYPE_INTEGER)) &&
-                        valid_vector_result;
+                        (instruction->binary_operation >= IR_BINARY_VECTOR_FLOAT_ADD && instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_DIVIDE) ||
+                        (instruction->binary_operation >= IR_BINARY_VECTOR_FLOAT_EQUAL &&
+                         instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL);
+                    bool valid_vector_result = !vector_comparison ? result_type == operand_type
+                                                                  : result_type && operand_type && operand_element && result_element &&
+                                                                        result_element->kind == IR_TYPE_INTEGER && result_element->is_signed &&
+                                                                        result_type->element_count == operand_type->element_count &&
+                                                                        result_type->layout.size == operand_type->layout.size &&
+                                                                        result_element->bit_width == operand_element->bit_width;
+                    bool valid_vector_operation = vector_operation && matching_operands && operand_type && operand_type->kind == IR_TYPE_VECTOR &&
+                                                  operand_element &&
+                                                  ((vector_float_operation && operand_element->kind == IR_TYPE_FLOAT) ||
+                                                   (!vector_float_operation && operand_element->kind == IR_TYPE_INTEGER)) &&
+                                                  valid_vector_result;
                     bool valid_pointer_comparison =
-                        (instruction->
-                                binary_operation ==
-                             IR_BINARY_POINTER_EQUAL ||
-                         instruction->
-                                binary_operation ==
-                             IR_BINARY_POINTER_NOT_EQUAL) &&
-                        result_type &&
-                        result_type->kind ==
-                            IR_TYPE_BOOLEAN &&
-                        matching_operands &&
-                        operand_type &&
-                        operand_type->kind ==
-                            IR_TYPE_POINTER;
-                    if ((!valid_arithmetic &&
-                            !valid_comparison &&
-                            !valid_vector_operation &&
-                            !valid_pointer_comparison) ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID)
+                        (instruction->binary_operation == IR_BINARY_POINTER_EQUAL || instruction->binary_operation == IR_BINARY_POINTER_NOT_EQUAL) &&
+                        result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type && operand_type->kind == IR_TYPE_POINTER;
+                    if ((!valid_arithmetic && !valid_comparison && !valid_vector_operation && !valid_pointer_comparison) ||
+                        instruction->result.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_CAST)
+                else if (instruction->opcode == IR_OPCODE_CAST)
                 {
-                    IrType* destination =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    IrValue* operand =
-                        instruction->operand_count == 1 ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrType* source =
-                        operand ?
-                            ir_type_from_id(
-                                &program->types,
-                                operand->
-                                    canonical_type) :
-                            0;
-                    if (!ir_canonical_conversion_valid(
-                            source,
-                            destination,
-                            instruction->
-                                conversion_operation) ||
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID)
+                    IrType* destination = ir_type_from_id(&program->types, instruction->canonical_type);
+                    IrValue* operand = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+                    IrType* source = operand ? ir_type_from_id(&program->types, operand->canonical_type) : 0;
+                    if (!ir_canonical_conversion_valid(source, destination, instruction->conversion_operation) ||
+                        instruction->result.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_ARRAY)
+                else if (instruction->opcode == IR_OPCODE_ARRAY)
                 {
-                    IrType* array =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    bool valid =
-                        array &&
-                        (array->kind ==
-                                IR_TYPE_ARRAY ||
-                         array->kind ==
-                                IR_TYPE_VECTOR) &&
-                        instruction->operand_count ==
-                            array->element_count &&
-                        instruction->immediate_count ==
-                            0 &&
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID;
-                    for (u32 operand_index = 0;
-                        valid &&
-                        operand_index <
-                            instruction->operand_count;
-                        operand_index += 1)
+                    IrType* array = ir_type_from_id(&program->types, instruction->canonical_type);
+                    bool valid = array && (array->kind == IR_TYPE_ARRAY || array->kind == IR_TYPE_VECTOR) &&
+                                 instruction->operand_count == array->element_count && instruction->immediate_count == 0 &&
+                                 instruction->result.value != IR_ID_UNDERLYING_INVALID;
+                    for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
                     {
-                        valid =
-                            function->values[
-                                instruction->operands[
-                                    operand_index].value].
-                                canonical_type.value ==
-                            array->element_type.value;
+                        valid = function->values[instruction->operands[operand_index].value].canonical_type.value == array->element_type.value;
                     }
                     if (!valid)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_AGGREGATE)
+                else if (instruction->opcode == IR_OPCODE_AGGREGATE)
                 {
-                    IrType* aggregate =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    bool valid =
-                        aggregate &&
-                        (aggregate->kind ==
-                                IR_TYPE_STRUCT ||
-                         aggregate->kind ==
-                                IR_TYPE_UNION) &&
-                        instruction->operand_count ==
-                            instruction->
-                                immediate_count &&
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID &&
-                        (aggregate->kind ==
-                                IR_TYPE_UNION ?
-                            instruction->
-                                operand_count <= 1 :
-                            instruction->
-                                operand_count ==
-                                aggregate->
-                                    field_count);
-                    for (u32 operand_index = 0;
-                        valid &&
-                        operand_index <
-                            instruction->operand_count;
-                        operand_index += 1)
+                    IrType* aggregate = ir_type_from_id(&program->types, instruction->canonical_type);
+                    bool valid = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
+                                 instruction->operand_count == instruction->immediate_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                                 (aggregate->kind == IR_TYPE_UNION ? instruction->operand_count <= 1 : instruction->operand_count == aggregate->field_count);
+                    for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
                     {
-                        u64 field_index =
-                            instruction->immediates[
-                                operand_index];
-                        valid =
-                            field_index <
-                                aggregate->
-                                    field_count &&
-                            function->values[
-                                instruction->operands[
-                                    operand_index].value].
-                                canonical_type.value ==
-                                aggregate->fields[
-                                    field_index].type.value;
-                        for (u32 previous = 0;
-                            valid &&
-                            previous < operand_index;
-                            previous += 1)
+                        u64 field_index = instruction->immediates[operand_index];
+                        valid = field_index < aggregate->field_count &&
+                                function->values[instruction->operands[operand_index].value].canonical_type.value == aggregate->fields[field_index].type.value;
+                        for (u32 previous = 0; valid && previous < operand_index; previous += 1)
                         {
-                            valid =
-                                instruction->
-                                    immediates[
-                                        previous] !=
-                                field_index;
+                            valid = instruction->immediates[previous] != field_index;
                         }
                     }
                     if (!valid)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_FIELD)
+                else if (instruction->opcode == IR_OPCODE_FIELD)
                 {
-                    IrValue* base =
-                        instruction->operand_count == 1 ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrType* base_type =
-                        base ?
-                            ir_type_from_id(
-                                &program->types,
-                                base->
-                                    canonical_type) :
-                            0;
-                    u64 field_index =
-                        instruction->immediate_count ==
-                                1 ?
-                            instruction->
-                                immediates[0] :
-                            UINT64_MAX;
-                    bool valid_field =
-                        base_type &&
-                        (base_type->kind ==
-                                IR_TYPE_STRUCT ||
-                         base_type->kind ==
-                                IR_TYPE_UNION) &&
-                        field_index <
-                            base_type->field_count &&
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID &&
-                        function->values[
-                            instruction->result.value].
-                            category ==
-                            IR_VALUE_PLACE &&
-                        instruction->
-                            canonical_type.value ==
-                            base_type->fields[
-                                field_index].type.value;
+                    IrValue* base = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+                    IrType* base_type = base ? ir_type_from_id(&program->types, base->canonical_type) : 0;
+                    u64 field_index = instruction->immediate_count == 1 ? instruction->immediates[0] : UINT64_MAX;
+                    bool valid_field = base_type && (base_type->kind == IR_TYPE_STRUCT || base_type->kind == IR_TYPE_UNION) &&
+                                       field_index < base_type->field_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                                       function->values[instruction->result.value].category == IR_VALUE_PLACE &&
+                                       instruction->canonical_type.value == base_type->fields[field_index].type.value;
                     if (!valid_field)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_INDEX)
+                else if (instruction->opcode == IR_OPCODE_INDEX)
                 {
-                    IrValue* base =
-                        instruction->operand_count == 2 ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrValue* index =
-                        instruction->operand_count == 2 ?
-                            function->values +
-                                instruction->
-                                    operands[1].value :
-                            0;
-                    IrType* base_type =
-                        base ?
-                            ir_type_from_id(
-                                &program->types,
-                                base->
-                                    canonical_type) :
-                            0;
-                    IrType* index_type =
-                        index ?
-                            ir_type_from_id(
-                                &program->types,
-                                index->
-                                    canonical_type) :
-                            0;
+                    IrValue* base = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
+                    IrValue* index = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+                    IrType* base_type = base ? ir_type_from_id(&program->types, base->canonical_type) : 0;
+                    IrType* index_type = index ? ir_type_from_id(&program->types, index->canonical_type) : 0;
                     bool valid_index =
-                        base_type &&
-                        (base_type->kind ==
-                                IR_TYPE_ARRAY ||
-                         base_type->kind ==
-                                IR_TYPE_VECTOR ||
-                         base_type->kind ==
-                                IR_TYPE_POINTER) &&
-                        index_type &&
-                        index_type->kind ==
-                            IR_TYPE_INTEGER &&
-                        instruction->immediate_count == 0 &&
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID &&
-                        function->values[
-                            instruction->result.value].
-                            category ==
-                            IR_VALUE_PLACE &&
-                        instruction->
-                            canonical_type.value ==
-                            base_type->
-                                element_type.value;
+                        base_type && (base_type->kind == IR_TYPE_ARRAY || base_type->kind == IR_TYPE_VECTOR || base_type->kind == IR_TYPE_POINTER) &&
+                        index_type && index_type->kind == IR_TYPE_INTEGER && instruction->immediate_count == 0 &&
+                        instruction->result.value != IR_ID_UNDERLYING_INVALID && function->values[instruction->result.value].category == IR_VALUE_PLACE &&
+                        instruction->canonical_type.value == base_type->element_type.value;
                     if (!valid_index)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_VA_START ||
-                    instruction->opcode ==
-                        IR_OPCODE_VA_COPY ||
-                    instruction->opcode ==
-                        IR_OPCODE_VA_END ||
-                    instruction->opcode ==
-                        IR_OPCODE_VA_ARG)
+                else if (instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY || instruction->opcode == IR_OPCODE_VA_END ||
+                         instruction->opcode == IR_OPCODE_VA_ARG)
                 {
-                    IrType* result_type =
-                        ir_type_from_id(
-                            &program->types,
-                            instruction->
-                                canonical_type);
-                    IrType* function_type =
-                        ir_type_from_id(
-                            &program->types,
-                            function->
-                                canonical_type);
-                    bool start =
-                        instruction->opcode ==
-                            IR_OPCODE_VA_START;
-                    bool end =
-                        instruction->opcode ==
-                            IR_OPCODE_VA_END;
-                    bool valid =
-                        result_type &&
-                        function_type &&
-                        function_type->kind ==
-                            IR_TYPE_FUNCTION &&
-                        instruction->immediate_count ==
-                            0;
+                    IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
+                    bool start = instruction->opcode == IR_OPCODE_VA_START;
+                    bool end = instruction->opcode == IR_OPCODE_VA_END;
+                    bool valid = result_type && function_type && function_type->kind == IR_TYPE_FUNCTION && instruction->immediate_count == 0;
                     if (start)
                     {
-                        valid &=
-                            function_type->
-                                is_variadic &&
-                            result_type->kind ==
-                                IR_TYPE_VA_LIST &&
-                            instruction->
-                                operand_count == 0 &&
-                            instruction->result.value !=
-                                IR_ID_UNDERLYING_INVALID;
+                        valid &= function_type->is_variadic && result_type->kind == IR_TYPE_VA_LIST && instruction->operand_count == 0 &&
+                                 instruction->result.value != IR_ID_UNDERLYING_INVALID;
                     }
                     else
                     {
-                        IrValue* operand =
-                            instruction->
-                                    operand_count == 1 ?
-                                &function->values[
-                                    instruction->
-                                        operands[0].
-                                        value] :
-                                0;
-                        IrType* pointer =
-                            operand ?
-                                ir_type_from_id(
-                                    &program->types,
-                                    operand->
-                                        canonical_type) :
-                                0;
-                        IrType* pointee =
-                            pointer &&
-                                    pointer->kind ==
-                                        IR_TYPE_POINTER ?
-                                ir_type_from_id(
-                                    &program->types,
-                                    pointer->
-                                        element_type) :
-                                0;
-                        valid &=
-                            operand &&
-                            pointer &&
-                            pointee &&
-                            pointee->kind ==
-                                IR_TYPE_VA_LIST;
+                        IrValue* operand = instruction->operand_count == 1 ? &function->values[instruction->operands[0].value] : 0;
+                        IrType* pointer = operand ? ir_type_from_id(&program->types, operand->canonical_type) : 0;
+                        IrType* pointee = pointer && pointer->kind == IR_TYPE_POINTER ? ir_type_from_id(&program->types, pointer->element_type) : 0;
+                        valid &= operand && pointer && pointee && pointee->kind == IR_TYPE_VA_LIST;
                         if (end)
                         {
-                            valid &=
-                                result_type->kind ==
-                                    IR_TYPE_VOID &&
-                                instruction->result.
-                                    value ==
-                                    IR_ID_UNDERLYING_INVALID;
+                            valid &= result_type->kind == IR_TYPE_VOID && instruction->result.value == IR_ID_UNDERLYING_INVALID;
                         }
                         else
                         {
-                            valid &=
-                                instruction->result.
-                                    value !=
-                                    IR_ID_UNDERLYING_INVALID;
-                            if (instruction->opcode ==
-                                IR_OPCODE_VA_COPY)
+                            valid &= instruction->result.value != IR_ID_UNDERLYING_INVALID;
+                            if (instruction->opcode == IR_OPCODE_VA_COPY)
                             {
-                                valid &=
-                                    result_type->kind ==
-                                        IR_TYPE_VA_LIST;
+                                valid &= result_type->kind == IR_TYPE_VA_LIST;
                             }
                             else
                             {
-                                valid &=
-                                    result_type->kind !=
-                                        IR_TYPE_VOID;
+                                valid &= result_type->kind != IR_TYPE_VOID;
                             }
                         }
                     }
                     if (!valid)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_INLINE_ASSEMBLY)
+                else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
                 {
-                    IrType* type = ir_type_from_id(
-                        &program->types,
-                        instruction->canonical_type);
-                    bool valid =
-                        type &&
-                        type->kind == IR_TYPE_VOID &&
-                        instruction->operand_count ==
-                            instruction->
-                                immediate_count &&
-                        instruction->result.value ==
-                            IR_ID_UNDERLYING_INVALID;
-                    for (u32 operand_index = 0;
-                        valid &&
-                            operand_index <
-                                instruction->
-                                    operand_count;
-                        operand_index += 1)
+                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    bool valid = type && type->kind == IR_TYPE_VOID && instruction->operand_count == instruction->immediate_count &&
+                                 instruction->result.value == IR_ID_UNDERLYING_INVALID;
+                    for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
                     {
-                        IrValue* operand =
-                            function->values +
-                            instruction->operands[
-                                operand_index].value;
-                        u64 constraint =
-                            instruction->immediates[
-                                operand_index];
-                        bool output =
-                            (constraint &
-                                IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) !=
-                            0;
-                        valid &=
-                            (constraint & 0xff) <
-                                IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT &&
-                            operand->category ==
-                                (output ?
-                                    IR_VALUE_PLACE :
-                                    IR_VALUE_VALUE);
+                        IrValue* operand = function->values + instruction->operands[operand_index].value;
+                        u64 constraint = instruction->immediates[operand_index];
+                        bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+                        valid &= (constraint & 0xff) < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT && operand->category == (output ? IR_VALUE_PLACE : IR_VALUE_VALUE);
                     }
                     if (!valid)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_DEBUG_TRAP)
+                else if (instruction->opcode == IR_OPCODE_DEBUG_TRAP)
                 {
-                    IrType* type = ir_type_from_id(
-                        &program->types,
-                        instruction->canonical_type);
-                    if (!type ||
-                        type->kind != IR_TYPE_VOID ||
-                        instruction->operand_count != 0 ||
-                        instruction->immediate_count != 0 ||
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID)
+                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    if (!type || type->kind != IR_TYPE_VOID || instruction->operand_count != 0 || instruction->immediate_count != 0 ||
+                        instruction->result.value != IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_OPERATION,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_BRANCH)
+                else if (instruction->opcode == IR_OPCODE_BRANCH)
                 {
-                    if (instruction->operand_count != 0 ||
-                        instruction->target_count != 1 ||
-                        instruction->targets[0].value >=
-                            function->block_count ||
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID)
+                    if (instruction->operand_count != 0 || instruction->target_count != 1 || instruction->targets[0].value >= function->block_count ||
+                        instruction->result.value != IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_BRANCH_TARGET,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_BRANCH_IF)
+                else if (instruction->opcode == IR_OPCODE_BRANCH_IF)
                 {
-                    IrValue* condition =
-                        instruction->operand_count == 1 ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrType* condition_type =
-                        condition ?
-                            ir_type_from_id(
-                                &program->types,
-                                condition->
-                                    canonical_type) :
-                            0;
-                    if (!condition_type ||
-                        condition_type->kind !=
-                            IR_TYPE_BOOLEAN ||
-                        instruction->target_count != 2 ||
-                        instruction->targets[0].value >=
-                            function->block_count ||
-                        instruction->targets[1].value >=
-                            function->block_count ||
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID)
+                    IrValue* condition = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+                    IrType* condition_type = condition ? ir_type_from_id(&program->types, condition->canonical_type) : 0;
+                    if (!condition_type || condition_type->kind != IR_TYPE_BOOLEAN || instruction->target_count != 2 ||
+                        instruction->targets[0].value >= function->block_count || instruction->targets[1].value >= function->block_count ||
+                        instruction->result.value != IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_BRANCH_TARGET,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_SWITCH)
+                else if (instruction->opcode == IR_OPCODE_SWITCH)
                 {
-                    IrValue* switched =
-                        instruction->operand_count == 1 ?
-                            function->values +
-                                instruction->
-                                    operands[0].value :
-                            0;
-                    IrType* switched_type =
-                        switched ?
-                            ir_type_from_id(
-                                &program->types,
-                                switched->
-                                    canonical_type) :
-                            0;
-                    bool valid_targets =
-                        instruction->target_count ==
-                            instruction->
-                                immediate_count + 1;
-                    for (u32 target_index = 0;
-                        valid_targets &&
-                        target_index <
-                            instruction->
-                                target_count;
-                        target_index += 1)
+                    IrValue* switched = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+                    IrType* switched_type = switched ? ir_type_from_id(&program->types, switched->canonical_type) : 0;
+                    bool valid_targets = instruction->target_count == instruction->immediate_count + 1;
+                    for (u32 target_index = 0; valid_targets && target_index < instruction->target_count; target_index += 1)
                     {
-                        valid_targets =
-                            instruction->targets[
-                                target_index].value <
-                            function->block_count;
+                        valid_targets = instruction->targets[target_index].value < function->block_count;
                     }
-                    if (!switched_type ||
-                        switched_type->kind !=
-                            IR_TYPE_INTEGER ||
-                        !valid_targets ||
-                        instruction->result.value !=
-                            IR_ID_UNDERLYING_INVALID)
+                    if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || !valid_targets || instruction->result.value != IR_ID_UNDERLYING_INVALID)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_BRANCH_TARGET,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
                     }
                 }
-                else if (instruction->opcode ==
-                    IR_OPCODE_RETURN)
+                else if (instruction->opcode == IR_OPCODE_RETURN)
                 {
-                    IrType* return_type =
-                        ir_type_from_id(
-                            &program->types,
-                            signature->return_type);
+                    IrType* return_type = ir_type_from_id(&program->types, signature->return_type);
                     bool valid_return =
-                        return_type &&
-                        (return_type->kind ==
-                                IR_TYPE_VOID ?
-                            instruction->
-                                operand_count == 0 :
-                            instruction->
-                                    operand_count == 1 &&
-                                function->values[
-                                    instruction->
-                                        operands[0].value].
-                                    canonical_type.value ==
-                                    signature->
-                                        return_type.value);
+                        return_type && (return_type->kind == IR_TYPE_VOID
+                                            ? instruction->operand_count == 0
+                                            : instruction->operand_count == 1 &&
+                                                  function->values[instruction->operands[0].value].canonical_type.value == signature->return_type.value);
                     if (!valid_return)
                     {
-                        return ir_validation_error(
-                            IR_VALIDATION_RETURN_TYPE,
-                            function,
-                            block->id,
-                            instruction_id);
+                        return ir_validation_error(IR_VALIDATION_RETURN_TYPE, function, block->id, instruction_id);
                     }
                 }
-                terminated =
-                    instruction->opcode ==
-                        IR_OPCODE_BRANCH ||
-                    instruction->opcode ==
-                        IR_OPCODE_BRANCH_IF ||
-                    instruction->opcode ==
-                        IR_OPCODE_SWITCH ||
-                    instruction->opcode ==
-                        IR_OPCODE_RETURN ||
-                    instruction->opcode ==
-                        IR_OPCODE_UNREACHABLE;
+                terminated = instruction->opcode == IR_OPCODE_BRANCH || instruction->opcode == IR_OPCODE_BRANCH_IF || instruction->opcode == IR_OPCODE_SWITCH ||
+                             instruction->opcode == IR_OPCODE_RETURN || instruction->opcode == IR_OPCODE_UNREACHABLE;
                 instruction_id = instruction->next;
             }
             if (!terminated)
             {
-                return ir_validation_error(
-                    IR_VALIDATION_UNTERMINATED_BLOCK,
-                    function,
-                    block->id,
-                    block->last_instruction);
+                return ir_validation_error(IR_VALIDATION_UNTERMINATED_BLOCK, function, block->id, block->last_instruction);
             }
         }
     }
@@ -6684,85 +3849,134 @@ BUSTER_GLOBAL_LOCAL String8 ir_opcode_name(IrOpcode opcode)
 {
     switch (opcode)
     {
-        case IR_OPCODE_ARGUMENT: return S8("argument");
-        case IR_OPCODE_LOCAL: return S8("local");
-        case IR_OPCODE_STACK_ALLOCATE:
-            return S8("stack_allocate");
-        case IR_OPCODE_STACK_SAVE:
-            return S8("stack_save");
-        case IR_OPCODE_STACK_RESTORE:
-            return S8("stack_restore");
-        case IR_OPCODE_GLOBAL: return S8("global");
-        case IR_OPCODE_LOAD: return S8("load");
-        case IR_OPCODE_STORE: return S8("store");
-        case IR_OPCODE_ATOMIC_LOAD:
-            return S8("atomic_load");
-        case IR_OPCODE_ATOMIC_STORE:
-            return S8("atomic_store");
-        case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
-            return S8("atomic_read_modify_write");
-        case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
-            return S8("atomic_compare_exchange");
-        case IR_OPCODE_ATOMIC_FENCE:
-            return S8("atomic_fence");
-        case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
-            return S8("clear_instruction_cache");
-        case IR_OPCODE_CONSTANT_INTEGER: return S8("constant_integer");
-        case IR_OPCODE_CONSTANT_FLOAT: return S8("constant_float");
-        case IR_OPCODE_CONSTANT_STRING: return S8("constant_string");
-        case IR_OPCODE_UNDEFINED: return S8("undefined");
-        case IR_OPCODE_FUNCTION: return S8("function_reference");
-        case IR_OPCODE_ARRAY: return S8("array");
-        case IR_OPCODE_AGGREGATE: return S8("aggregate");
-        case IR_OPCODE_LENGTH: return S8("length");
-        case IR_OPCODE_INDEX: return S8("index");
-        case IR_OPCODE_SLICE: return S8("slice");
-        case IR_OPCODE_FIELD: return S8("field");
-        case IR_OPCODE_ENUM: return S8("enum");
-        case IR_OPCODE_CALL: return S8("call");
-        case IR_OPCODE_CAST: return S8("cast");
-        case IR_OPCODE_ADDRESS_OF: return S8("address_of");
-        case IR_OPCODE_DEREFERENCE: return S8("dereference");
-        case IR_OPCODE_UNARY: return S8("unary");
-        case IR_OPCODE_BINARY: return S8("binary");
-        case IR_OPCODE_REVERSE: return S8("reverse");
-        case IR_OPCODE_VA_START: return S8("va_start");
-        case IR_OPCODE_VA_COPY: return S8("va_copy");
-        case IR_OPCODE_VA_END: return S8("va_end");
-        case IR_OPCODE_VA_ARG: return S8("va_arg");
-        case IR_OPCODE_INLINE_ASSEMBLY:
-            return S8("inline_assembly");
-        case IR_OPCODE_BRANCH: return S8("branch");
-        case IR_OPCODE_BRANCH_IF: return S8("branch_if");
-        case IR_OPCODE_SWITCH: return S8("switch");
-        case IR_OPCODE_RETURN: return S8("return");
-        case IR_OPCODE_DEBUG_TRAP: return S8("debug_trap");
-        case IR_OPCODE_UNREACHABLE: return S8("unreachable");
-        case IR_OPCODE_COUNT: break;
+    case IR_OPCODE_ARGUMENT:
+        return S8("argument");
+    case IR_OPCODE_LOCAL:
+        return S8("local");
+    case IR_OPCODE_STACK_ALLOCATE:
+        return S8("stack_allocate");
+    case IR_OPCODE_STACK_SAVE:
+        return S8("stack_save");
+    case IR_OPCODE_STACK_RESTORE:
+        return S8("stack_restore");
+    case IR_OPCODE_GLOBAL:
+        return S8("global");
+    case IR_OPCODE_LOAD:
+        return S8("load");
+    case IR_OPCODE_STORE:
+        return S8("store");
+    case IR_OPCODE_ATOMIC_LOAD:
+        return S8("atomic_load");
+    case IR_OPCODE_ATOMIC_STORE:
+        return S8("atomic_store");
+    case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
+        return S8("atomic_read_modify_write");
+    case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
+        return S8("atomic_compare_exchange");
+    case IR_OPCODE_ATOMIC_FENCE:
+        return S8("atomic_fence");
+    case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
+        return S8("clear_instruction_cache");
+    case IR_OPCODE_CONSTANT_INTEGER:
+        return S8("constant_integer");
+    case IR_OPCODE_CONSTANT_FLOAT:
+        return S8("constant_float");
+    case IR_OPCODE_CONSTANT_STRING:
+        return S8("constant_string");
+    case IR_OPCODE_UNDEFINED:
+        return S8("undefined");
+    case IR_OPCODE_FUNCTION:
+        return S8("function_reference");
+    case IR_OPCODE_ARRAY:
+        return S8("array");
+    case IR_OPCODE_AGGREGATE:
+        return S8("aggregate");
+    case IR_OPCODE_LENGTH:
+        return S8("length");
+    case IR_OPCODE_INDEX:
+        return S8("index");
+    case IR_OPCODE_SLICE:
+        return S8("slice");
+    case IR_OPCODE_FIELD:
+        return S8("field");
+    case IR_OPCODE_ENUM:
+        return S8("enum");
+    case IR_OPCODE_CALL:
+        return S8("call");
+    case IR_OPCODE_CAST:
+        return S8("cast");
+    case IR_OPCODE_ADDRESS_OF:
+        return S8("address_of");
+    case IR_OPCODE_DEREFERENCE:
+        return S8("dereference");
+    case IR_OPCODE_UNARY:
+        return S8("unary");
+    case IR_OPCODE_BINARY:
+        return S8("binary");
+    case IR_OPCODE_REVERSE:
+        return S8("reverse");
+    case IR_OPCODE_VA_START:
+        return S8("va_start");
+    case IR_OPCODE_VA_COPY:
+        return S8("va_copy");
+    case IR_OPCODE_VA_END:
+        return S8("va_end");
+    case IR_OPCODE_VA_ARG:
+        return S8("va_arg");
+    case IR_OPCODE_INLINE_ASSEMBLY:
+        return S8("inline_assembly");
+    case IR_OPCODE_BRANCH:
+        return S8("branch");
+    case IR_OPCODE_BRANCH_IF:
+        return S8("branch_if");
+    case IR_OPCODE_SWITCH:
+        return S8("switch");
+    case IR_OPCODE_RETURN:
+        return S8("return");
+    case IR_OPCODE_DEBUG_TRAP:
+        return S8("debug_trap");
+    case IR_OPCODE_UNREACHABLE:
+        return S8("unreachable");
+    case IR_OPCODE_COUNT:
+        break;
     }
     return S8("invalid");
 }
 
-BUSTER_GLOBAL_LOCAL String8 ir_conversion_operation_name(
-    IrConversionOperation operation)
+BUSTER_GLOBAL_LOCAL String8 ir_conversion_operation_name(IrConversionOperation operation)
 {
     switch (operation)
     {
-        case IR_CONVERSION_IDENTITY: return S8("identity");
-        case IR_CONVERSION_INTEGER_SIGN_EXTEND: return S8("integer_sign_extend");
-        case IR_CONVERSION_INTEGER_ZERO_EXTEND: return S8("integer_zero_extend");
-        case IR_CONVERSION_INTEGER_TRUNCATE: return S8("integer_truncate");
-        case IR_CONVERSION_INTEGER_REINTERPRET: return S8("integer_reinterpret");
-        case IR_CONVERSION_FLOAT_EXTEND: return S8("float_extend");
-        case IR_CONVERSION_FLOAT_TRUNCATE: return S8("float_truncate");
-        case IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT: return S8("signed_integer_to_float");
-        case IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT: return S8("unsigned_integer_to_float");
-        case IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER: return S8("float_to_signed_integer");
-        case IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER: return S8("float_to_unsigned_integer");
-        case IR_CONVERSION_POINTER_REINTERPRET: return S8("pointer_reinterpret");
-        case IR_CONVERSION_POINTER_TO_INTEGER: return S8("pointer_to_integer");
-        case IR_CONVERSION_INTEGER_TO_POINTER: return S8("integer_to_pointer");
-        case IR_CONVERSION_COUNT: break;
+    case IR_CONVERSION_IDENTITY:
+        return S8("identity");
+    case IR_CONVERSION_INTEGER_SIGN_EXTEND:
+        return S8("integer_sign_extend");
+    case IR_CONVERSION_INTEGER_ZERO_EXTEND:
+        return S8("integer_zero_extend");
+    case IR_CONVERSION_INTEGER_TRUNCATE:
+        return S8("integer_truncate");
+    case IR_CONVERSION_INTEGER_REINTERPRET:
+        return S8("integer_reinterpret");
+    case IR_CONVERSION_FLOAT_EXTEND:
+        return S8("float_extend");
+    case IR_CONVERSION_FLOAT_TRUNCATE:
+        return S8("float_truncate");
+    case IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT:
+        return S8("signed_integer_to_float");
+    case IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT:
+        return S8("unsigned_integer_to_float");
+    case IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER:
+        return S8("float_to_signed_integer");
+    case IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER:
+        return S8("float_to_unsigned_integer");
+    case IR_CONVERSION_POINTER_REINTERPRET:
+        return S8("pointer_reinterpret");
+    case IR_CONVERSION_POINTER_TO_INTEGER:
+        return S8("pointer_to_integer");
+    case IR_CONVERSION_INTEGER_TO_POINTER:
+        return S8("integer_to_pointer");
+    case IR_CONVERSION_COUNT:
+        break;
     }
     return S8("invalid");
 }
@@ -6771,19 +3985,26 @@ BUSTER_GLOBAL_LOCAL String8 ir_unary_operation_name(IrUnaryOperation operation)
 {
     switch (operation)
     {
-        case IR_UNARY_INTEGER_NEGATE: return S8("integer_negate");
-        case IR_UNARY_FLOAT_NEGATE: return S8("float_negate");
-        case IR_UNARY_INTEGER_BITWISE_NOT: return S8("integer_bitwise_not");
-        case IR_UNARY_INTEGER_COUNT_LEADING_ZEROS:
-            return S8("integer_count_leading_zeros");
-        case IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS:
-            return S8("integer_count_trailing_zeros");
-        case IR_UNARY_BOOLEAN_NOT: return S8("boolean_not");
-        case IR_UNARY_VECTOR_INTEGER_NEGATE: return S8("vector_integer_negate");
-        case IR_UNARY_VECTOR_FLOAT_NEGATE: return S8("vector_float_negate");
-        case IR_UNARY_VECTOR_INTEGER_BITWISE_NOT:
-            return S8("vector_integer_bitwise_not");
-        case IR_UNARY_COUNT: break;
+    case IR_UNARY_INTEGER_NEGATE:
+        return S8("integer_negate");
+    case IR_UNARY_FLOAT_NEGATE:
+        return S8("float_negate");
+    case IR_UNARY_INTEGER_BITWISE_NOT:
+        return S8("integer_bitwise_not");
+    case IR_UNARY_INTEGER_COUNT_LEADING_ZEROS:
+        return S8("integer_count_leading_zeros");
+    case IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS:
+        return S8("integer_count_trailing_zeros");
+    case IR_UNARY_BOOLEAN_NOT:
+        return S8("boolean_not");
+    case IR_UNARY_VECTOR_INTEGER_NEGATE:
+        return S8("vector_integer_negate");
+    case IR_UNARY_VECTOR_FLOAT_NEGATE:
+        return S8("vector_float_negate");
+    case IR_UNARY_VECTOR_INTEGER_BITWISE_NOT:
+        return S8("vector_integer_bitwise_not");
+    case IR_UNARY_COUNT:
+        break;
     }
     return S8("invalid");
 }
@@ -6792,81 +4013,154 @@ BUSTER_GLOBAL_LOCAL String8 ir_binary_operation_name(IrBinaryOperation operation
 {
     switch (operation)
     {
-        case IR_BINARY_INTEGER_ADD: return S8("integer_add");
-        case IR_BINARY_INTEGER_SUBTRACT: return S8("integer_subtract");
-        case IR_BINARY_INTEGER_MULTIPLY: return S8("integer_multiply");
-        case IR_BINARY_SIGNED_DIVIDE: return S8("signed_divide");
-        case IR_BINARY_UNSIGNED_DIVIDE: return S8("unsigned_divide");
-        case IR_BINARY_FLOAT_ADD: return S8("float_add");
-        case IR_BINARY_FLOAT_SUBTRACT: return S8("float_subtract");
-        case IR_BINARY_FLOAT_MULTIPLY: return S8("float_multiply");
-        case IR_BINARY_FLOAT_DIVIDE: return S8("float_divide");
-        case IR_BINARY_SIGNED_REMAINDER: return S8("signed_remainder");
-        case IR_BINARY_UNSIGNED_REMAINDER: return S8("unsigned_remainder");
-        case IR_BINARY_SHIFT_LEFT: return S8("shift_left");
-        case IR_BINARY_SIGNED_SHIFT_RIGHT: return S8("signed_shift_right");
-        case IR_BINARY_UNSIGNED_SHIFT_RIGHT: return S8("unsigned_shift_right");
-        case IR_BINARY_INTEGER_BITWISE_AND: return S8("integer_bitwise_and");
-        case IR_BINARY_INTEGER_BITWISE_OR: return S8("integer_bitwise_or");
-        case IR_BINARY_INTEGER_BITWISE_XOR: return S8("integer_bitwise_xor");
-        case IR_BINARY_BOOLEAN_AND: return S8("boolean_and");
-        case IR_BINARY_BOOLEAN_OR: return S8("boolean_or");
-        case IR_BINARY_INTEGER_EQUAL: return S8("integer_equal");
-        case IR_BINARY_INTEGER_NOT_EQUAL: return S8("integer_not_equal");
-        case IR_BINARY_FLOAT_EQUAL: return S8("float_equal");
-        case IR_BINARY_FLOAT_NOT_EQUAL: return S8("float_not_equal");
-        case IR_BINARY_POINTER_EQUAL: return S8("pointer_equal");
-        case IR_BINARY_POINTER_NOT_EQUAL: return S8("pointer_not_equal");
-        case IR_BINARY_BOOLEAN_EQUAL: return S8("boolean_equal");
-        case IR_BINARY_BOOLEAN_NOT_EQUAL: return S8("boolean_not_equal");
-        case IR_BINARY_SIGNED_LESS: return S8("signed_less");
-        case IR_BINARY_SIGNED_LESS_EQUAL: return S8("signed_less_equal");
-        case IR_BINARY_SIGNED_GREATER: return S8("signed_greater");
-        case IR_BINARY_SIGNED_GREATER_EQUAL: return S8("signed_greater_equal");
-        case IR_BINARY_UNSIGNED_LESS: return S8("unsigned_less");
-        case IR_BINARY_UNSIGNED_LESS_EQUAL: return S8("unsigned_less_equal");
-        case IR_BINARY_UNSIGNED_GREATER: return S8("unsigned_greater");
-        case IR_BINARY_UNSIGNED_GREATER_EQUAL: return S8("unsigned_greater_equal");
-        case IR_BINARY_FLOAT_LESS: return S8("float_less");
-        case IR_BINARY_FLOAT_LESS_EQUAL: return S8("float_less_equal");
-        case IR_BINARY_FLOAT_GREATER: return S8("float_greater");
-        case IR_BINARY_FLOAT_GREATER_EQUAL: return S8("float_greater_equal");
-        case IR_BINARY_RANGE: return S8("range");
-        case IR_BINARY_VECTOR_INTEGER_ADD: return S8("vector_integer_add");
-        case IR_BINARY_VECTOR_INTEGER_SUBTRACT: return S8("vector_integer_subtract");
-        case IR_BINARY_VECTOR_INTEGER_MULTIPLY: return S8("vector_integer_multiply");
-        case IR_BINARY_VECTOR_SIGNED_DIVIDE: return S8("vector_signed_divide");
-        case IR_BINARY_VECTOR_UNSIGNED_DIVIDE: return S8("vector_unsigned_divide");
-        case IR_BINARY_VECTOR_FLOAT_ADD: return S8("vector_float_add");
-        case IR_BINARY_VECTOR_FLOAT_SUBTRACT: return S8("vector_float_subtract");
-        case IR_BINARY_VECTOR_FLOAT_MULTIPLY: return S8("vector_float_multiply");
-        case IR_BINARY_VECTOR_FLOAT_DIVIDE: return S8("vector_float_divide");
-        case IR_BINARY_VECTOR_SIGNED_REMAINDER: return S8("vector_signed_remainder");
-        case IR_BINARY_VECTOR_UNSIGNED_REMAINDER: return S8("vector_unsigned_remainder");
-        case IR_BINARY_VECTOR_SHIFT_LEFT: return S8("vector_shift_left");
-        case IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT: return S8("vector_signed_shift_right");
-        case IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT:
-            return S8("vector_unsigned_shift_right");
-        case IR_BINARY_VECTOR_INTEGER_BITWISE_AND: return S8("vector_integer_bitwise_and");
-        case IR_BINARY_VECTOR_INTEGER_BITWISE_OR: return S8("vector_integer_bitwise_or");
-        case IR_BINARY_VECTOR_INTEGER_BITWISE_XOR: return S8("vector_integer_bitwise_xor");
-        case IR_BINARY_VECTOR_INTEGER_EQUAL: return S8("vector_integer_equal");
-        case IR_BINARY_VECTOR_INTEGER_NOT_EQUAL: return S8("vector_integer_not_equal");
-        case IR_BINARY_VECTOR_SIGNED_LESS: return S8("vector_signed_less");
-        case IR_BINARY_VECTOR_SIGNED_LESS_EQUAL: return S8("vector_signed_less_equal");
-        case IR_BINARY_VECTOR_SIGNED_GREATER: return S8("vector_signed_greater");
-        case IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL: return S8("vector_signed_greater_equal");
-        case IR_BINARY_VECTOR_UNSIGNED_LESS: return S8("vector_unsigned_less");
-        case IR_BINARY_VECTOR_UNSIGNED_LESS_EQUAL: return S8("vector_unsigned_less_equal");
-        case IR_BINARY_VECTOR_UNSIGNED_GREATER: return S8("vector_unsigned_greater");
-        case IR_BINARY_VECTOR_UNSIGNED_GREATER_EQUAL: return S8("vector_unsigned_greater_equal");
-        case IR_BINARY_VECTOR_FLOAT_EQUAL: return S8("vector_float_equal");
-        case IR_BINARY_VECTOR_FLOAT_NOT_EQUAL: return S8("vector_float_not_equal");
-        case IR_BINARY_VECTOR_FLOAT_LESS: return S8("vector_float_less");
-        case IR_BINARY_VECTOR_FLOAT_LESS_EQUAL: return S8("vector_float_less_equal");
-        case IR_BINARY_VECTOR_FLOAT_GREATER: return S8("vector_float_greater");
-        case IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL: return S8("vector_float_greater_equal");
-        case IR_BINARY_COUNT: break;
+    case IR_BINARY_INTEGER_ADD:
+        return S8("integer_add");
+    case IR_BINARY_INTEGER_SUBTRACT:
+        return S8("integer_subtract");
+    case IR_BINARY_INTEGER_MULTIPLY:
+        return S8("integer_multiply");
+    case IR_BINARY_SIGNED_DIVIDE:
+        return S8("signed_divide");
+    case IR_BINARY_UNSIGNED_DIVIDE:
+        return S8("unsigned_divide");
+    case IR_BINARY_FLOAT_ADD:
+        return S8("float_add");
+    case IR_BINARY_FLOAT_SUBTRACT:
+        return S8("float_subtract");
+    case IR_BINARY_FLOAT_MULTIPLY:
+        return S8("float_multiply");
+    case IR_BINARY_FLOAT_DIVIDE:
+        return S8("float_divide");
+    case IR_BINARY_SIGNED_REMAINDER:
+        return S8("signed_remainder");
+    case IR_BINARY_UNSIGNED_REMAINDER:
+        return S8("unsigned_remainder");
+    case IR_BINARY_SHIFT_LEFT:
+        return S8("shift_left");
+    case IR_BINARY_SIGNED_SHIFT_RIGHT:
+        return S8("signed_shift_right");
+    case IR_BINARY_UNSIGNED_SHIFT_RIGHT:
+        return S8("unsigned_shift_right");
+    case IR_BINARY_INTEGER_BITWISE_AND:
+        return S8("integer_bitwise_and");
+    case IR_BINARY_INTEGER_BITWISE_OR:
+        return S8("integer_bitwise_or");
+    case IR_BINARY_INTEGER_BITWISE_XOR:
+        return S8("integer_bitwise_xor");
+    case IR_BINARY_BOOLEAN_AND:
+        return S8("boolean_and");
+    case IR_BINARY_BOOLEAN_OR:
+        return S8("boolean_or");
+    case IR_BINARY_INTEGER_EQUAL:
+        return S8("integer_equal");
+    case IR_BINARY_INTEGER_NOT_EQUAL:
+        return S8("integer_not_equal");
+    case IR_BINARY_FLOAT_EQUAL:
+        return S8("float_equal");
+    case IR_BINARY_FLOAT_NOT_EQUAL:
+        return S8("float_not_equal");
+    case IR_BINARY_POINTER_EQUAL:
+        return S8("pointer_equal");
+    case IR_BINARY_POINTER_NOT_EQUAL:
+        return S8("pointer_not_equal");
+    case IR_BINARY_BOOLEAN_EQUAL:
+        return S8("boolean_equal");
+    case IR_BINARY_BOOLEAN_NOT_EQUAL:
+        return S8("boolean_not_equal");
+    case IR_BINARY_SIGNED_LESS:
+        return S8("signed_less");
+    case IR_BINARY_SIGNED_LESS_EQUAL:
+        return S8("signed_less_equal");
+    case IR_BINARY_SIGNED_GREATER:
+        return S8("signed_greater");
+    case IR_BINARY_SIGNED_GREATER_EQUAL:
+        return S8("signed_greater_equal");
+    case IR_BINARY_UNSIGNED_LESS:
+        return S8("unsigned_less");
+    case IR_BINARY_UNSIGNED_LESS_EQUAL:
+        return S8("unsigned_less_equal");
+    case IR_BINARY_UNSIGNED_GREATER:
+        return S8("unsigned_greater");
+    case IR_BINARY_UNSIGNED_GREATER_EQUAL:
+        return S8("unsigned_greater_equal");
+    case IR_BINARY_FLOAT_LESS:
+        return S8("float_less");
+    case IR_BINARY_FLOAT_LESS_EQUAL:
+        return S8("float_less_equal");
+    case IR_BINARY_FLOAT_GREATER:
+        return S8("float_greater");
+    case IR_BINARY_FLOAT_GREATER_EQUAL:
+        return S8("float_greater_equal");
+    case IR_BINARY_RANGE:
+        return S8("range");
+    case IR_BINARY_VECTOR_INTEGER_ADD:
+        return S8("vector_integer_add");
+    case IR_BINARY_VECTOR_INTEGER_SUBTRACT:
+        return S8("vector_integer_subtract");
+    case IR_BINARY_VECTOR_INTEGER_MULTIPLY:
+        return S8("vector_integer_multiply");
+    case IR_BINARY_VECTOR_SIGNED_DIVIDE:
+        return S8("vector_signed_divide");
+    case IR_BINARY_VECTOR_UNSIGNED_DIVIDE:
+        return S8("vector_unsigned_divide");
+    case IR_BINARY_VECTOR_FLOAT_ADD:
+        return S8("vector_float_add");
+    case IR_BINARY_VECTOR_FLOAT_SUBTRACT:
+        return S8("vector_float_subtract");
+    case IR_BINARY_VECTOR_FLOAT_MULTIPLY:
+        return S8("vector_float_multiply");
+    case IR_BINARY_VECTOR_FLOAT_DIVIDE:
+        return S8("vector_float_divide");
+    case IR_BINARY_VECTOR_SIGNED_REMAINDER:
+        return S8("vector_signed_remainder");
+    case IR_BINARY_VECTOR_UNSIGNED_REMAINDER:
+        return S8("vector_unsigned_remainder");
+    case IR_BINARY_VECTOR_SHIFT_LEFT:
+        return S8("vector_shift_left");
+    case IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT:
+        return S8("vector_signed_shift_right");
+    case IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT:
+        return S8("vector_unsigned_shift_right");
+    case IR_BINARY_VECTOR_INTEGER_BITWISE_AND:
+        return S8("vector_integer_bitwise_and");
+    case IR_BINARY_VECTOR_INTEGER_BITWISE_OR:
+        return S8("vector_integer_bitwise_or");
+    case IR_BINARY_VECTOR_INTEGER_BITWISE_XOR:
+        return S8("vector_integer_bitwise_xor");
+    case IR_BINARY_VECTOR_INTEGER_EQUAL:
+        return S8("vector_integer_equal");
+    case IR_BINARY_VECTOR_INTEGER_NOT_EQUAL:
+        return S8("vector_integer_not_equal");
+    case IR_BINARY_VECTOR_SIGNED_LESS:
+        return S8("vector_signed_less");
+    case IR_BINARY_VECTOR_SIGNED_LESS_EQUAL:
+        return S8("vector_signed_less_equal");
+    case IR_BINARY_VECTOR_SIGNED_GREATER:
+        return S8("vector_signed_greater");
+    case IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL:
+        return S8("vector_signed_greater_equal");
+    case IR_BINARY_VECTOR_UNSIGNED_LESS:
+        return S8("vector_unsigned_less");
+    case IR_BINARY_VECTOR_UNSIGNED_LESS_EQUAL:
+        return S8("vector_unsigned_less_equal");
+    case IR_BINARY_VECTOR_UNSIGNED_GREATER:
+        return S8("vector_unsigned_greater");
+    case IR_BINARY_VECTOR_UNSIGNED_GREATER_EQUAL:
+        return S8("vector_unsigned_greater_equal");
+    case IR_BINARY_VECTOR_FLOAT_EQUAL:
+        return S8("vector_float_equal");
+    case IR_BINARY_VECTOR_FLOAT_NOT_EQUAL:
+        return S8("vector_float_not_equal");
+    case IR_BINARY_VECTOR_FLOAT_LESS:
+        return S8("vector_float_less");
+    case IR_BINARY_VECTOR_FLOAT_LESS_EQUAL:
+        return S8("vector_float_less_equal");
+    case IR_BINARY_VECTOR_FLOAT_GREATER:
+        return S8("vector_float_greater");
+    case IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL:
+        return S8("vector_float_greater_equal");
+    case IR_BINARY_COUNT:
+        break;
     }
     return S8("invalid");
 }
@@ -6890,11 +4184,7 @@ String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
-        parts[part_count++] = string_format(
-            arena,
-            S8("function {S8} state={u32}\n"),
-            function->name,
-            (u32)function->state);
+        parts[part_count++] = string_format(arena, S8("function {S8} state={u32}\n"), function->name, (u32)function->state);
         if (function->state != IR_FUNCTION_LOWERED)
         {
             continue;
@@ -6903,55 +4193,28 @@ String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module
         {
             IrBlock* block = function->blocks + block_index;
             parts[part_count++] = string_format(arena, S8("  block {u32}:\n"), block_index);
-            for (IrBlockParameter* parameter = block->first_parameter;
-                parameter;
-                parameter = parameter->next)
+            for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
             {
-                parts[part_count++] = string_format(
-                    arena,
-                    S8("    %{u32} = parameter local={u32} type={u32} incoming={u32}\n"),
-                    parameter->value.value,
-                    parameter->local.value,
-                    parameter->type.value,
-                    parameter->incoming_count);
+                parts[part_count++] = string_format(arena, S8("    %{u32} = parameter local={u32} type={u32} incoming={u32}\n"), parameter->value.value,
+                                                    parameter->local.value, parameter->type.value, parameter->incoming_count);
             }
-            for (IrInstructionId id = block->first_instruction;
-                id.value != IR_ID_UNDERLYING_INVALID;
-                id = function->instructions[id.value].next)
+            for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
             {
                 IrInstruction* instruction = function->instructions + id.value;
-                String8 operation = instruction->opcode == IR_OPCODE_CAST ?
-                    ir_conversion_operation_name(
-                        instruction->conversion_operation) :
-                    instruction->opcode == IR_OPCODE_UNARY ?
-                        ir_unary_operation_name(instruction->unary_operation) :
-                    instruction->opcode == IR_OPCODE_BINARY ?
-                        ir_binary_operation_name(instruction->binary_operation) :
-                        S8("");
-                parts[part_count++] = instruction->result.value == IR_ID_UNDERLYING_INVALID ?
-                    string_format(
-                        arena,
-                        S8("    {S8} {S8} operands={u32} targets={u32}\n"),
-                        ir_opcode_name(instruction->opcode),
-                        operation,
-                        instruction->operand_count,
-                        instruction->target_count) :
-                    string_format(
-                        arena,
-                        S8("    %{u32} = {S8} {S8} type={u32} operands={u32}\n"),
-                        instruction->result.value,
-                        ir_opcode_name(instruction->opcode),
-                        operation,
-                        instruction->type.value,
-                        instruction->operand_count);
+                String8 operation = instruction->opcode == IR_OPCODE_CAST     ? ir_conversion_operation_name(instruction->conversion_operation)
+                                    : instruction->opcode == IR_OPCODE_UNARY  ? ir_unary_operation_name(instruction->unary_operation)
+                                    : instruction->opcode == IR_OPCODE_BINARY ? ir_binary_operation_name(instruction->binary_operation)
+                                                                              : S8("");
+                parts[part_count++] = instruction->result.value == IR_ID_UNDERLYING_INVALID
+                                          ? string_format(arena, S8("    {S8} {S8} operands={u32} targets={u32}\n"), ir_opcode_name(instruction->opcode),
+                                                          operation, instruction->operand_count, instruction->target_count)
+                                          : string_format(arena, S8("    %{u32} = {S8} {S8} type={u32} operands={u32}\n"), instruction->result.value,
+                                                          ir_opcode_name(instruction->opcode), operation, instruction->type.value, instruction->operand_count);
             }
         }
     }
     BUSTER_CHECK(part_count <= part_capacity);
-    return string_join_arena(
-        arena,
-        (SliceString8){ .pointer = parts, .length = part_count },
-        false);
+    return string_join_arena(arena, (SliceString8){.pointer = parts, .length = part_count}, false);
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -6961,59 +4224,58 @@ struct IrFixtureTest
     String8 path;
 };
 
-BUSTER_GLOBAL_LOCAL IrFixtureTest ir_fixture_tests[] =
-{
-    { S8_INITIALIZER("tests/basic_vector.bbb") },
-    { S8_INITIALIZER("tests/basic_vector_error.bbb") },
-    { S8_INITIALIZER("tests/basic_variadic.bbb") },
-    { S8_INITIALIZER("tests/basic_variadic_error.bbb") },
-    { S8_INITIALIZER("tests/array_slices.bbb") },
-    { S8_INITIALIZER("tests/basic_array_literal.bbb") },
-    { S8_INITIALIZER("tests/basic_assignment.bbb") },
-    { S8_INITIALIZER("tests/basic_binary_literal.bbb") },
-    { S8_INITIALIZER("tests/basic_bitwise_not.bbb") },
-    { S8_INITIALIZER("tests/basic_boolean_operators.bbb") },
-    { S8_INITIALIZER("tests/basic_break.bbb") },
-    { S8_INITIALIZER("tests/basic_character_literal.bbb") },
-    { S8_INITIALIZER("tests/basic_comment.bbb") },
-    { S8_INITIALIZER("tests/basic_compile_time.bbb") },
-    { S8_INITIALIZER("tests/compile_time_argument_error.bbb") },
-    { S8_INITIALIZER("tests/modules/core/math.bbb") },
-    { S8_INITIALIZER("tests/modules/system/platform.bbb") },
-    { S8_INITIALIZER("tests/basic_continue.bbb") },
-    { S8_INITIALIZER("tests/basic_else_if.bbb") },
-    { S8_INITIALIZER("tests/basic_enum.bbb") },
-    { S8_INITIALIZER("tests/basic_float.bbb") },
-    { S8_INITIALIZER("tests/basic_for.bbb") },
-    { S8_INITIALIZER("tests/basic_function_call.bbb") },
-    { S8_INITIALIZER("tests/basic_hexadecimal_literal.bbb") },
-    { S8_INITIALIZER("tests/basic_if_else.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_add.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_and.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_compare.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_divide.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_mod.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_multiply.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_or.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_precedence.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_shift_left.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_shift_right.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_sub.bbb") },
-    { S8_INITIALIZER("tests/basic_integer_literal_xor.bbb") },
-    { S8_INITIALIZER("tests/basic_logical_not.bbb") },
-    { S8_INITIALIZER("tests/basic_loop.bbb") },
-    { S8_INITIALIZER("tests/basic_import.bbb") },
-    { S8_INITIALIZER("tests/basic_minimal.bbb") },
-    { S8_INITIALIZER("tests/basic_octal_literal.bbb") },
-    { S8_INITIALIZER("tests/basic_pointer.bbb") },
-    { S8_INITIALIZER("tests/basic_string_literal.bbb") },
-    { S8_INITIALIZER("tests/basic_struct.bbb") },
-    { S8_INITIALIZER("tests/basic_switch.bbb") },
-    { S8_INITIALIZER("tests/basic_type_alias.bbb") },
-    { S8_INITIALIZER("tests/basic_unary_minus.bbb") },
-    { S8_INITIALIZER("tests/basic_unary_plus.bbb") },
-    { S8_INITIALIZER("tests/basic_union.bbb") },
-    { S8_INITIALIZER("tests/basic_variable.bbb") },
+BUSTER_GLOBAL_LOCAL IrFixtureTest ir_fixture_tests[] = {
+    {S8_INITIALIZER("tests/basic_vector.bbb")},
+    {S8_INITIALIZER("tests/basic_vector_error.bbb")},
+    {S8_INITIALIZER("tests/basic_variadic.bbb")},
+    {S8_INITIALIZER("tests/basic_variadic_error.bbb")},
+    {S8_INITIALIZER("tests/array_slices.bbb")},
+    {S8_INITIALIZER("tests/basic_array_literal.bbb")},
+    {S8_INITIALIZER("tests/basic_assignment.bbb")},
+    {S8_INITIALIZER("tests/basic_binary_literal.bbb")},
+    {S8_INITIALIZER("tests/basic_bitwise_not.bbb")},
+    {S8_INITIALIZER("tests/basic_boolean_operators.bbb")},
+    {S8_INITIALIZER("tests/basic_break.bbb")},
+    {S8_INITIALIZER("tests/basic_character_literal.bbb")},
+    {S8_INITIALIZER("tests/basic_comment.bbb")},
+    {S8_INITIALIZER("tests/basic_compile_time.bbb")},
+    {S8_INITIALIZER("tests/compile_time_argument_error.bbb")},
+    {S8_INITIALIZER("tests/modules/core/math.bbb")},
+    {S8_INITIALIZER("tests/modules/system/platform.bbb")},
+    {S8_INITIALIZER("tests/basic_continue.bbb")},
+    {S8_INITIALIZER("tests/basic_else_if.bbb")},
+    {S8_INITIALIZER("tests/basic_enum.bbb")},
+    {S8_INITIALIZER("tests/basic_float.bbb")},
+    {S8_INITIALIZER("tests/basic_for.bbb")},
+    {S8_INITIALIZER("tests/basic_function_call.bbb")},
+    {S8_INITIALIZER("tests/basic_hexadecimal_literal.bbb")},
+    {S8_INITIALIZER("tests/basic_if_else.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_add.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_and.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_compare.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_divide.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_mod.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_multiply.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_or.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_precedence.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_shift_left.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_shift_right.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_sub.bbb")},
+    {S8_INITIALIZER("tests/basic_integer_literal_xor.bbb")},
+    {S8_INITIALIZER("tests/basic_logical_not.bbb")},
+    {S8_INITIALIZER("tests/basic_loop.bbb")},
+    {S8_INITIALIZER("tests/basic_import.bbb")},
+    {S8_INITIALIZER("tests/basic_minimal.bbb")},
+    {S8_INITIALIZER("tests/basic_octal_literal.bbb")},
+    {S8_INITIALIZER("tests/basic_pointer.bbb")},
+    {S8_INITIALIZER("tests/basic_string_literal.bbb")},
+    {S8_INITIALIZER("tests/basic_struct.bbb")},
+    {S8_INITIALIZER("tests/basic_switch.bbb")},
+    {S8_INITIALIZER("tests/basic_type_alias.bbb")},
+    {S8_INITIALIZER("tests/basic_unary_minus.bbb")},
+    {S8_INITIALIZER("tests/basic_unary_plus.bbb")},
+    {S8_INITIALIZER("tests/basic_union.bbb")},
+    {S8_INITIALIZER("tests/basic_variable.bbb")},
 };
 
 BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opcode)
@@ -7026,30 +4288,24 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opco
     return count;
 }
 
-BUSTER_GLOBAL_LOCAL u32 ir_test_unary_operation_count(
-    IrFunction* function,
-    IrUnaryOperation operation)
+BUSTER_GLOBAL_LOCAL u32 ir_test_unary_operation_count(IrFunction* function, IrUnaryOperation operation)
 {
     u32 count = 0;
     for (u32 index = 0; index < function->instruction_count; index += 1)
     {
         IrInstruction* instruction = function->instructions + index;
-        count += instruction->opcode == IR_OPCODE_UNARY &&
-            instruction->unary_operation == operation;
+        count += instruction->opcode == IR_OPCODE_UNARY && instruction->unary_operation == operation;
     }
     return count;
 }
 
-BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(
-    IrFunction* function,
-    IrBinaryOperation operation)
+BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(IrFunction* function, IrBinaryOperation operation)
 {
     u32 count = 0;
     for (u32 index = 0; index < function->instruction_count; index += 1)
     {
         IrInstruction* instruction = function->instructions + index;
-        count += instruction->opcode == IR_OPCODE_BINARY &&
-            instruction->binary_operation == operation;
+        count += instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation == operation;
     }
     return count;
 }
@@ -7064,22 +4320,16 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_parameter_count(IrFunction* function)
     return count;
 }
 
-BUSTER_GLOBAL_LOCAL u32 ir_test_conversion_count(
-    IrModule* module,
-    IrConversionOperation operation)
+BUSTER_GLOBAL_LOCAL u32 ir_test_conversion_count(IrModule* module, IrConversionOperation operation)
 {
     u32 count = 0;
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
-        for (u32 instruction_index = 0;
-            instruction_index < function->instruction_count;
-            instruction_index += 1)
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
-            IrInstruction* instruction =
-                function->instructions + instruction_index;
-            count += instruction->opcode == IR_OPCODE_CAST &&
-                instruction->conversion_operation == operation;
+            IrInstruction* instruction = function->instructions + instruction_index;
+            count += instruction->opcode == IR_OPCODE_CAST && instruction->conversion_operation == operation;
         }
     }
     return count;
@@ -7091,54 +4341,38 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     TemporalArena temporary = arena_begin_temporal(arguments->arena);
     Arena* expression_arena = arena_create((ArenaCreation){0});
     BUSTER_CHECK(expression_arena);
-    String8 focused_source = S8(
-        "code choose : fn (a: s32, b: s32) s32\n"
-        "{\n"
-        "    data value: s32 = a;\n"
-        "    if (a < b)\n"
-        "    {\n"
-        "        value += b;\n"
-        "    }\n"
-        "    else\n"
-        "    {\n"
-        "        value -= b;\n"
-        "    }\n"
-        "    return @cast(value);\n"
-        "}\n");
-    TokenizerResult focused_tokens = tokenize(
-        arguments->arena,
-        focused_source.pointer,
-        focused_source.length);
-    ParserResult focused_parser = parser_parse(
-        arguments->arena,
-        expression_arena,
-        focused_source,
-        focused_tokens);
+    String8 focused_source = S8("code choose : fn (a: s32, b: s32) s32\n"
+                                "{\n"
+                                "    data value: s32 = a;\n"
+                                "    if (a < b)\n"
+                                "    {\n"
+                                "        value += b;\n"
+                                "    }\n"
+                                "    else\n"
+                                "    {\n"
+                                "        value -= b;\n"
+                                "    }\n"
+                                "    return @cast(value);\n"
+                                "}\n");
+    TokenizerResult focused_tokens = tokenize(arguments->arena, focused_source.pointer, focused_source.length);
+    ParserResult focused_parser = parser_parse(arguments->arena, expression_arena, focused_source, focused_tokens);
     BUSTER_TEST(arguments, focused_tokens.error_count == 0);
     BUSTER_TEST(arguments, focused_parser.diagnostic_count == 0);
     AnalysisSourceInput focused_input = {
         .path = S8("focused-ir.bbb"),
         .parser = &focused_parser,
     };
-    AnalysisResult focused_analysis = analysis_index_module(
-        arguments->arena,
-        (AnalysisModuleId){ .value = 900 },
-        S8("focused-ir"),
-        &focused_input,
-        1);
+    AnalysisResult focused_analysis = analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 900}, S8("focused-ir"), &focused_input, 1);
     analysis_resolve_module_interfaces(arguments->arena, &focused_analysis);
     IrModule focused_module = ir_analyze_and_generate_module(arguments->arena, &focused_analysis);
     BUSTER_TEST(arguments, focused_analysis.diagnostic_count == 0);
     u32 explicit_conversion_count = 0;
     AnalysisBody* focused_body = focused_analysis.module.bodies;
-    for (AnalysisTypedExpression* expression = focused_body->first_expression;
-        expression;
-        expression = expression->next)
+    for (AnalysisTypedExpression* expression = focused_body->first_expression; expression; expression = expression->next)
     {
         for (u32 node_index = 0; node_index < expression->ast.count; node_index += 1)
         {
-            explicit_conversion_count +=
-                expression->nodes[node_index].conversion == ANALYSIS_CONVERSION_EXPLICIT;
+            explicit_conversion_count += expression->nodes[node_index].conversion == ANALYSIS_CONVERSION_EXPLICIT;
         }
     }
     BUSTER_TEST(arguments, explicit_conversion_count == 1);
@@ -7155,30 +4389,15 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, ir_test_opcode_count(focused_function, IR_OPCODE_LOAD) == 0);
     BUSTER_TEST(arguments, ir_test_parameter_count(focused_function) == 1);
     BUSTER_TEST(arguments, ir_test_opcode_count(focused_function, IR_OPCODE_RETURN) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_binary_operation_count(
-            focused_function,
-            IR_BINARY_SIGNED_LESS) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_binary_operation_count(
-            focused_function,
-            IR_BINARY_INTEGER_ADD) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_binary_operation_count(
-            focused_function,
-            IR_BINARY_INTEGER_SUBTRACT) == 1);
+    BUSTER_TEST(arguments, ir_test_binary_operation_count(focused_function, IR_BINARY_SIGNED_LESS) == 1);
+    BUSTER_TEST(arguments, ir_test_binary_operation_count(focused_function, IR_BINARY_INTEGER_ADD) == 1);
+    BUSTER_TEST(arguments, ir_test_binary_operation_count(focused_function, IR_BINARY_INTEGER_SUBTRACT) == 1);
     IrValidationResult focused_validation = ir_validate_module(&focused_analysis, &focused_module);
     BUSTER_TEST(arguments, focused_validation.error == IR_VALIDATION_NONE);
     IrInstruction* focused_binary = 0;
-    for (u32 instruction_index = 0;
-        instruction_index < focused_function->instruction_count;
-        instruction_index += 1)
+    for (u32 instruction_index = 0; instruction_index < focused_function->instruction_count; instruction_index += 1)
     {
-        IrInstruction* candidate =
-            focused_function->instructions + instruction_index;
+        IrInstruction* candidate = focused_function->instructions + instruction_index;
         if (candidate->opcode == IR_OPCODE_BINARY)
         {
             focused_binary = candidate;
@@ -7188,140 +4407,70 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, focused_binary != 0);
     if (focused_binary)
     {
-        IrBinaryOperation saved_operation =
-            focused_binary->binary_operation;
+        IrBinaryOperation saved_operation = focused_binary->binary_operation;
         focused_binary->binary_operation = IR_BINARY_FLOAT_ADD;
-        IrValidationResult wrong_operation = ir_validate_module(
-            &focused_analysis,
-            &focused_module);
-        BUSTER_TEST(
-            arguments,
-            wrong_operation.error == IR_VALIDATION_OPERATION);
+        IrValidationResult wrong_operation = ir_validate_module(&focused_analysis, &focused_module);
+        BUSTER_TEST(arguments, wrong_operation.error == IR_VALIDATION_OPERATION);
         focused_binary->binary_operation = saved_operation;
-        IrValidationResult restored_operation = ir_validate_module(
-            &focused_analysis,
-            &focused_module);
-        BUSTER_TEST(
-            arguments,
-            restored_operation.error == IR_VALIDATION_NONE);
+        IrValidationResult restored_operation = ir_validate_module(&focused_analysis, &focused_module);
+        BUSTER_TEST(arguments, restored_operation.error == IR_VALIDATION_NONE);
     }
 
-    String8 typed_operation_source = S8(
-        "code typed_operations : fn (\n"
-        "    signed_value: s32,\n"
-        "    unsigned_value: u32,\n"
-        "    float_value: f32,\n"
-        "    pointer: &s32) bool\n"
-        "{\n"
-        "    data integer: s32 = -signed_value;\n"
-        "    data floating: f32 = -float_value;\n"
-        "    return signed_value < integer or\n"
-        "        unsigned_value < 1 or\n"
-        "        float_value < floating or\n"
-        "        pointer == pointer;\n"
-        "}\n");
-    TokenizerResult typed_operation_tokens = tokenize(
-        arguments->arena,
-        typed_operation_source.pointer,
-        typed_operation_source.length);
-    ParserResult typed_operation_parser = parser_parse(
-        arguments->arena,
-        expression_arena,
-        typed_operation_source,
-        typed_operation_tokens);
+    String8 typed_operation_source = S8("code typed_operations : fn (\n"
+                                        "    signed_value: s32,\n"
+                                        "    unsigned_value: u32,\n"
+                                        "    float_value: f32,\n"
+                                        "    pointer: &s32) bool\n"
+                                        "{\n"
+                                        "    data integer: s32 = -signed_value;\n"
+                                        "    data floating: f32 = -float_value;\n"
+                                        "    return signed_value < integer or\n"
+                                        "        unsigned_value < 1 or\n"
+                                        "        float_value < floating or\n"
+                                        "        pointer == pointer;\n"
+                                        "}\n");
+    TokenizerResult typed_operation_tokens = tokenize(arguments->arena, typed_operation_source.pointer, typed_operation_source.length);
+    ParserResult typed_operation_parser = parser_parse(arguments->arena, expression_arena, typed_operation_source, typed_operation_tokens);
     BUSTER_TEST(arguments, typed_operation_tokens.error_count == 0);
     BUSTER_TEST(arguments, typed_operation_parser.diagnostic_count == 0);
     AnalysisSourceInput typed_operation_input = {
         .path = S8("typed-operations-ir.bbb"),
         .parser = &typed_operation_parser,
     };
-    AnalysisResult typed_operation_analysis = analysis_index_module(
-        arguments->arena,
-        (AnalysisModuleId){ .value = 906 },
-        S8("typed-operations-ir"),
-        &typed_operation_input,
-        1);
-    analysis_resolve_module_interfaces(
-        arguments->arena,
-        &typed_operation_analysis);
-    IrModule typed_operation_module = ir_analyze_and_generate_module(
-        arguments->arena,
-        &typed_operation_analysis);
+    AnalysisResult typed_operation_analysis =
+        analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 906}, S8("typed-operations-ir"), &typed_operation_input, 1);
+    analysis_resolve_module_interfaces(arguments->arena, &typed_operation_analysis);
+    IrModule typed_operation_module = ir_analyze_and_generate_module(arguments->arena, &typed_operation_analysis);
     BUSTER_TEST(arguments, typed_operation_analysis.diagnostic_count == 0);
     BUSTER_TEST(arguments, typed_operation_module.lowered_function_count == 1);
     IrFunction* typed_operation_function = typed_operation_module.functions;
-    BUSTER_TEST(
-        arguments,
-        ir_test_unary_operation_count(
-            typed_operation_function,
-            IR_UNARY_INTEGER_NEGATE) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_unary_operation_count(
-            typed_operation_function,
-            IR_UNARY_FLOAT_NEGATE) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_binary_operation_count(
-            typed_operation_function,
-            IR_BINARY_SIGNED_LESS) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_binary_operation_count(
-            typed_operation_function,
-            IR_BINARY_UNSIGNED_LESS) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_binary_operation_count(
-            typed_operation_function,
-            IR_BINARY_FLOAT_LESS) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_binary_operation_count(
-            typed_operation_function,
-            IR_BINARY_POINTER_EQUAL) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_binary_operation_count(
-            typed_operation_function,
-            IR_BINARY_BOOLEAN_OR) == 3);
-    IrValidationResult typed_operation_validation = ir_validate_module(
-        &typed_operation_analysis,
-        &typed_operation_module);
-    BUSTER_TEST(
-        arguments,
-        typed_operation_validation.error == IR_VALIDATION_NONE);
+    BUSTER_TEST(arguments, ir_test_unary_operation_count(typed_operation_function, IR_UNARY_INTEGER_NEGATE) == 1);
+    BUSTER_TEST(arguments, ir_test_unary_operation_count(typed_operation_function, IR_UNARY_FLOAT_NEGATE) == 1);
+    BUSTER_TEST(arguments, ir_test_binary_operation_count(typed_operation_function, IR_BINARY_SIGNED_LESS) == 1);
+    BUSTER_TEST(arguments, ir_test_binary_operation_count(typed_operation_function, IR_BINARY_UNSIGNED_LESS) == 1);
+    BUSTER_TEST(arguments, ir_test_binary_operation_count(typed_operation_function, IR_BINARY_FLOAT_LESS) == 1);
+    BUSTER_TEST(arguments, ir_test_binary_operation_count(typed_operation_function, IR_BINARY_POINTER_EQUAL) == 1);
+    BUSTER_TEST(arguments, ir_test_binary_operation_count(typed_operation_function, IR_BINARY_BOOLEAN_OR) == 3);
+    IrValidationResult typed_operation_validation = ir_validate_module(&typed_operation_analysis, &typed_operation_module);
+    BUSTER_TEST(arguments, typed_operation_validation.error == IR_VALIDATION_NONE);
 
-    String8 short_source = S8(
-        "code side : fn () bool\n"
-        "{\n"
-        "    return true;\n"
-        "}\n"
-        "code lazy : fn (condition: bool) bool\n"
-        "{\n"
-        "    return condition and? side() or? condition;\n"
-        "}\n");
-    TokenizerResult short_tokens = tokenize(
-        arguments->arena,
-        short_source.pointer,
-        short_source.length);
-    ParserResult short_parser = parser_parse(
-        arguments->arena,
-        expression_arena,
-        short_source,
-        short_tokens);
+    String8 short_source = S8("code side : fn () bool\n"
+                              "{\n"
+                              "    return true;\n"
+                              "}\n"
+                              "code lazy : fn (condition: bool) bool\n"
+                              "{\n"
+                              "    return condition and? side() or? condition;\n"
+                              "}\n");
+    TokenizerResult short_tokens = tokenize(arguments->arena, short_source.pointer, short_source.length);
+    ParserResult short_parser = parser_parse(arguments->arena, expression_arena, short_source, short_tokens);
     BUSTER_TEST(arguments, short_tokens.error_count == 0);
     BUSTER_TEST(arguments, short_parser.diagnostic_count == 0);
     AnalysisSourceInput short_input = {
         .path = S8("short-circuit-ir.bbb"),
         .parser = &short_parser,
     };
-    AnalysisResult short_analysis = analysis_index_module(
-        arguments->arena,
-        (AnalysisModuleId){ .value = 901 },
-        S8("short-circuit-ir"),
-        &short_input,
-        1);
+    AnalysisResult short_analysis = analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 901}, S8("short-circuit-ir"), &short_input, 1);
     analysis_resolve_module_interfaces(arguments->arena, &short_analysis);
     IrModule short_module = ir_analyze_and_generate_module(arguments->arena, &short_analysis);
     BUSTER_TEST(arguments, short_analysis.diagnostic_count == 0);
@@ -7347,127 +4496,53 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     IrValidationResult short_validation = ir_validate_module(&short_analysis, &short_module);
     BUSTER_TEST(arguments, short_validation.error == IR_VALIDATION_NONE);
 
-    String8 conversion_source = S8(
-        "code literal : fn () u8 { return 1; }\n"
-        "code widen : fn (value: u8) s32 { return @cast(value); }\n"
-        "code sign_widen : fn (value: s8) s32 { return @cast(value); }\n"
-        "code narrow : fn (value: s32) u8 { return @cast(value); }\n"
-        "code reinterpret : fn (value: s32) u32 { return @cast(value); }\n"
-        "code float_widen : fn (value: f32) f64 { return @cast(value); }\n"
-        "code float_narrow : fn (value: f64) f32 { return @cast(value); }\n"
-        "code signed_float : fn (value: s32) f64 { return @cast(value); }\n"
-        "code unsigned_float : fn (value: u32) f64 { return @cast(value); }\n"
-        "code float_signed : fn (value: f64) s32 { return @cast(value); }\n"
-        "code float_unsigned : fn (value: f64) u32 { return @cast(value); }\n"
-        "code pointer : fn (value: &s32) &u8 { return @cast(value); }\n");
-    TokenizerResult conversion_tokens = tokenize(
-        arguments->arena,
-        conversion_source.pointer,
-        conversion_source.length);
-    ParserResult conversion_parser = parser_parse(
-        arguments->arena,
-        expression_arena,
-        conversion_source,
-        conversion_tokens);
+    String8 conversion_source = S8("code literal : fn () u8 { return 1; }\n"
+                                   "code widen : fn (value: u8) s32 { return @cast(value); }\n"
+                                   "code sign_widen : fn (value: s8) s32 { return @cast(value); }\n"
+                                   "code narrow : fn (value: s32) u8 { return @cast(value); }\n"
+                                   "code reinterpret : fn (value: s32) u32 { return @cast(value); }\n"
+                                   "code float_widen : fn (value: f32) f64 { return @cast(value); }\n"
+                                   "code float_narrow : fn (value: f64) f32 { return @cast(value); }\n"
+                                   "code signed_float : fn (value: s32) f64 { return @cast(value); }\n"
+                                   "code unsigned_float : fn (value: u32) f64 { return @cast(value); }\n"
+                                   "code float_signed : fn (value: f64) s32 { return @cast(value); }\n"
+                                   "code float_unsigned : fn (value: f64) u32 { return @cast(value); }\n"
+                                   "code pointer : fn (value: &s32) &u8 { return @cast(value); }\n");
+    TokenizerResult conversion_tokens = tokenize(arguments->arena, conversion_source.pointer, conversion_source.length);
+    ParserResult conversion_parser = parser_parse(arguments->arena, expression_arena, conversion_source, conversion_tokens);
     BUSTER_TEST(arguments, conversion_tokens.error_count == 0);
     BUSTER_TEST(arguments, conversion_parser.diagnostic_count == 0);
     AnalysisSourceInput conversion_input = {
         .path = S8("conversion-ir.bbb"),
         .parser = &conversion_parser,
     };
-    AnalysisResult conversion_analysis = analysis_index_module(
-        arguments->arena,
-        (AnalysisModuleId){ .value = 902 },
-        S8("conversion-ir"),
-        &conversion_input,
-        1);
+    AnalysisResult conversion_analysis = analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 902}, S8("conversion-ir"), &conversion_input, 1);
     analysis_resolve_module_interfaces(arguments->arena, &conversion_analysis);
-    IrModule conversion_module = ir_analyze_and_generate_module(
-        arguments->arena,
-        &conversion_analysis);
+    IrModule conversion_module = ir_analyze_and_generate_module(arguments->arena, &conversion_analysis);
     BUSTER_TEST(arguments, conversion_analysis.diagnostic_count == 0);
     BUSTER_TEST(arguments, conversion_module.lowered_function_count == 12);
-    BUSTER_TEST(
-        arguments,
-        ir_test_opcode_count(
-            conversion_module.functions,
-            IR_OPCODE_CAST) == 0);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_INTEGER_ZERO_EXTEND) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_INTEGER_SIGN_EXTEND) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_INTEGER_TRUNCATE) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_INTEGER_REINTERPRET) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_FLOAT_EXTEND) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_FLOAT_TRUNCATE) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_conversion_count(
-            &conversion_module,
-            IR_CONVERSION_POINTER_REINTERPRET) == 1);
-    IrValidationResult conversion_validation = ir_validate_module(
-        &conversion_analysis,
-        &conversion_module);
+    BUSTER_TEST(arguments, ir_test_opcode_count(conversion_module.functions, IR_OPCODE_CAST) == 0);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_INTEGER_ZERO_EXTEND) == 1);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_INTEGER_SIGN_EXTEND) == 1);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_INTEGER_TRUNCATE) == 1);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_INTEGER_REINTERPRET) == 1);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_FLOAT_EXTEND) == 1);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_FLOAT_TRUNCATE) == 1);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT) == 1);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT) == 1);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER) == 1);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER) == 1);
+    BUSTER_TEST(arguments, ir_test_conversion_count(&conversion_module, IR_CONVERSION_POINTER_REINTERPRET) == 1);
+    IrValidationResult conversion_validation = ir_validate_module(&conversion_analysis, &conversion_module);
     BUSTER_TEST(arguments, conversion_validation.error == IR_VALIDATION_NONE);
     IrInstruction* sign_extension = 0;
-    for (u32 function_index = 0;
-        function_index < conversion_module.function_count &&
-            !sign_extension;
-        function_index += 1)
+    for (u32 function_index = 0; function_index < conversion_module.function_count && !sign_extension; function_index += 1)
     {
-        IrFunction* function =
-            conversion_module.functions + function_index;
-        for (u32 instruction_index = 0;
-            instruction_index < function->instruction_count;
-            instruction_index += 1)
+        IrFunction* function = conversion_module.functions + function_index;
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
-            IrInstruction* candidate =
-                function->instructions + instruction_index;
-            if (candidate->opcode == IR_OPCODE_CAST &&
-                candidate->conversion_operation ==
-                    IR_CONVERSION_INTEGER_SIGN_EXTEND)
+            IrInstruction* candidate = function->instructions + instruction_index;
+            if (candidate->opcode == IR_OPCODE_CAST && candidate->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND)
             {
                 sign_extension = candidate;
                 break;
@@ -7477,145 +4552,74 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, sign_extension != 0);
     if (sign_extension)
     {
-        sign_extension->conversion_operation =
-            IR_CONVERSION_INTEGER_ZERO_EXTEND;
-        IrValidationResult wrong_conversion = ir_validate_module(
-            &conversion_analysis,
-            &conversion_module);
-        BUSTER_TEST(
-            arguments,
-            wrong_conversion.error == IR_VALIDATION_OPERATION);
-        sign_extension->conversion_operation =
-            IR_CONVERSION_INTEGER_SIGN_EXTEND;
-        IrValidationResult restored_conversion = ir_validate_module(
-            &conversion_analysis,
-            &conversion_module);
-        BUSTER_TEST(
-            arguments,
-            restored_conversion.error == IR_VALIDATION_NONE);
+        sign_extension->conversion_operation = IR_CONVERSION_INTEGER_ZERO_EXTEND;
+        IrValidationResult wrong_conversion = ir_validate_module(&conversion_analysis, &conversion_module);
+        BUSTER_TEST(arguments, wrong_conversion.error == IR_VALIDATION_OPERATION);
+        sign_extension->conversion_operation = IR_CONVERSION_INTEGER_SIGN_EXTEND;
+        IrValidationResult restored_conversion = ir_validate_module(&conversion_analysis, &conversion_module);
+        BUSTER_TEST(arguments, restored_conversion.error == IR_VALIDATION_NONE);
     }
 
-    String8 loop_lowering_source = S8(
-        "code sum : fn () s32\n"
-        "{\n"
-        "    data total: s32 = 0;\n"
-        "    for (data value = 0 .. 3)\n"
-        "    {\n"
-        "        total += value;\n"
-        "    }\n"
-        "    for (data value = @reverse(0 .. 3))\n"
-        "    {\n"
-        "        total += value;\n"
-        "    }\n"
-        "    return total;\n"
-        "}\n");
-    TokenizerResult loop_lowering_tokens = tokenize(
-        arguments->arena,
-        loop_lowering_source.pointer,
-        loop_lowering_source.length);
-    ParserResult loop_lowering_parser = parser_parse(
-        arguments->arena,
-        expression_arena,
-        loop_lowering_source,
-        loop_lowering_tokens);
+    String8 loop_lowering_source = S8("code sum : fn () s32\n"
+                                      "{\n"
+                                      "    data total: s32 = 0;\n"
+                                      "    for (data value = 0 .. 3)\n"
+                                      "    {\n"
+                                      "        total += value;\n"
+                                      "    }\n"
+                                      "    for (data value = @reverse(0 .. 3))\n"
+                                      "    {\n"
+                                      "        total += value;\n"
+                                      "    }\n"
+                                      "    return total;\n"
+                                      "}\n");
+    TokenizerResult loop_lowering_tokens = tokenize(arguments->arena, loop_lowering_source.pointer, loop_lowering_source.length);
+    ParserResult loop_lowering_parser = parser_parse(arguments->arena, expression_arena, loop_lowering_source, loop_lowering_tokens);
     BUSTER_TEST(arguments, loop_lowering_tokens.error_count == 0);
     BUSTER_TEST(arguments, loop_lowering_parser.diagnostic_count == 0);
     AnalysisSourceInput loop_lowering_input = {
         .path = S8("loop-lowering-ir.bbb"),
         .parser = &loop_lowering_parser,
     };
-    AnalysisResult loop_lowering_analysis = analysis_index_module(
-        arguments->arena,
-        (AnalysisModuleId){ .value = 907 },
-        S8("loop-lowering-ir"),
-        &loop_lowering_input,
-        1);
-    analysis_resolve_module_interfaces(
-        arguments->arena,
-        &loop_lowering_analysis);
-    IrModule loop_lowering_module = ir_analyze_and_generate_module(
-        arguments->arena,
-        &loop_lowering_analysis);
+    AnalysisResult loop_lowering_analysis =
+        analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 907}, S8("loop-lowering-ir"), &loop_lowering_input, 1);
+    analysis_resolve_module_interfaces(arguments->arena, &loop_lowering_analysis);
+    IrModule loop_lowering_module = ir_analyze_and_generate_module(arguments->arena, &loop_lowering_analysis);
     BUSTER_TEST(arguments, loop_lowering_analysis.diagnostic_count == 0);
     BUSTER_TEST(arguments, loop_lowering_module.lowered_function_count == 1);
-    IrFunction* loop_lowering_function =
-        loop_lowering_module.functions;
+    IrFunction* loop_lowering_function = loop_lowering_module.functions;
     BUSTER_TEST(arguments, loop_lowering_function->block_count == 10);
-    BUSTER_TEST(
-        arguments,
-        ir_test_opcode_count(
-            loop_lowering_function,
-            IR_OPCODE_LENGTH) == 2);
-    BUSTER_TEST(
-        arguments,
-        ir_test_opcode_count(
-            loop_lowering_function,
-            IR_OPCODE_INDEX) == 2);
-    BUSTER_TEST(
-        arguments,
-        ir_test_opcode_count(
-            loop_lowering_function,
-            IR_OPCODE_REVERSE) == 1);
-    BUSTER_TEST(
-        arguments,
-        ir_test_binary_operation_count(
-            loop_lowering_function,
-            IR_BINARY_UNSIGNED_LESS) == 2);
-    IrValidationResult loop_lowering_validation = ir_validate_module(
-        &loop_lowering_analysis,
-        &loop_lowering_module);
-    BUSTER_TEST(
-        arguments,
-        loop_lowering_validation.error == IR_VALIDATION_NONE);
+    BUSTER_TEST(arguments, ir_test_opcode_count(loop_lowering_function, IR_OPCODE_LENGTH) == 2);
+    BUSTER_TEST(arguments, ir_test_opcode_count(loop_lowering_function, IR_OPCODE_INDEX) == 2);
+    BUSTER_TEST(arguments, ir_test_opcode_count(loop_lowering_function, IR_OPCODE_REVERSE) == 1);
+    BUSTER_TEST(arguments, ir_test_binary_operation_count(loop_lowering_function, IR_BINARY_UNSIGNED_LESS) == 2);
+    IrValidationResult loop_lowering_validation = ir_validate_module(&loop_lowering_analysis, &loop_lowering_module);
+    BUSTER_TEST(arguments, loop_lowering_validation.error == IR_VALIDATION_NONE);
 
-    String8 namespace_math_source = S8(
-        "code add : fn (a: s32, b: s32) s32\n"
-        "{\n"
-        "    return a + b;\n"
-        "}\n"
-        "code identity : fn ($value: $T) $T\n"
-        "{\n"
-        "    return value;\n"
-        "}\n");
-    String8 namespace_app_source = S8(
-        "import math = \"core/math\";\n"
-        "code use : fn () s32\n"
-        "{\n"
-        "    return math.add(2, 3) + math.identity(5);\n"
-        "}\n");
-    String8 namespace_app_two_source = S8(
-        "import math = \"core/math\";\n"
-        "code use_again : fn () s32\n"
-        "{\n"
-        "    return math.identity(5);\n"
-        "}\n");
-    TokenizerResult namespace_math_tokens = tokenize(
-            arguments->arena,
-            namespace_math_source.pointer,
-            namespace_math_source.length);
-    ParserResult namespace_math_parser = parser_parse(
-            arguments->arena,
-            expression_arena,
-            namespace_math_source,
-            namespace_math_tokens);
-    TokenizerResult namespace_app_tokens = tokenize(
-            arguments->arena,
-            namespace_app_source.pointer,
-            namespace_app_source.length);
-    ParserResult namespace_app_parser = parser_parse(
-            arguments->arena,
-            expression_arena,
-            namespace_app_source,
-            namespace_app_tokens);
-    TokenizerResult namespace_app_two_tokens = tokenize(
-            arguments->arena,
-            namespace_app_two_source.pointer,
-            namespace_app_two_source.length);
-    ParserResult namespace_app_two_parser = parser_parse(
-            arguments->arena,
-            expression_arena,
-            namespace_app_two_source,
-            namespace_app_two_tokens);
+    String8 namespace_math_source = S8("code add : fn (a: s32, b: s32) s32\n"
+                                       "{\n"
+                                       "    return a + b;\n"
+                                       "}\n"
+                                       "code identity : fn ($value: $T) $T\n"
+                                       "{\n"
+                                       "    return value;\n"
+                                       "}\n");
+    String8 namespace_app_source = S8("import math = \"core/math\";\n"
+                                      "code use : fn () s32\n"
+                                      "{\n"
+                                      "    return math.add(2, 3) + math.identity(5);\n"
+                                      "}\n");
+    String8 namespace_app_two_source = S8("import math = \"core/math\";\n"
+                                          "code use_again : fn () s32\n"
+                                          "{\n"
+                                          "    return math.identity(5);\n"
+                                          "}\n");
+    TokenizerResult namespace_math_tokens = tokenize(arguments->arena, namespace_math_source.pointer, namespace_math_source.length);
+    ParserResult namespace_math_parser = parser_parse(arguments->arena, expression_arena, namespace_math_source, namespace_math_tokens);
+    TokenizerResult namespace_app_tokens = tokenize(arguments->arena, namespace_app_source.pointer, namespace_app_source.length);
+    ParserResult namespace_app_parser = parser_parse(arguments->arena, expression_arena, namespace_app_source, namespace_app_tokens);
+    TokenizerResult namespace_app_two_tokens = tokenize(arguments->arena, namespace_app_two_source.pointer, namespace_app_two_source.length);
+    ParserResult namespace_app_two_parser = parser_parse(arguments->arena, expression_arena, namespace_app_two_source, namespace_app_two_tokens);
     AnalysisSourceInput namespace_math_input = {
         .path = S8("math.bbb"),
         .parser = &namespace_math_parser,
@@ -7628,52 +4632,24 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         .path = S8("app-two.bbb"),
         .parser = &namespace_app_two_parser,
     };
-    AnalysisResult namespace_math = analysis_index_module(
-            arguments->arena,
-            (AnalysisModuleId){ .value = 910 },
-            S8("core/math"),
-            &namespace_math_input,
-            1);
-    AnalysisResult namespace_app = analysis_index_module(
-            arguments->arena,
-            (AnalysisModuleId){ .value = 911 },
-            S8("app"),
-            &namespace_app_input,
-            1);
-    AnalysisResult namespace_app_two = analysis_index_module(
-            arguments->arena,
-            (AnalysisModuleId){ .value = 912 },
-            S8("app-two"),
-            &namespace_app_two_input,
-            1);
+    AnalysisResult namespace_math = analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 910}, S8("core/math"), &namespace_math_input, 1);
+    AnalysisResult namespace_app = analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 911}, S8("app"), &namespace_app_input, 1);
+    AnalysisResult namespace_app_two = analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 912}, S8("app-two"), &namespace_app_two_input, 1);
     AnalysisResult* namespace_modules[] = {
         &namespace_app_two,
         &namespace_app,
         &namespace_math,
     };
-    analysis_resolve_program_interfaces(
-            arguments->arena,
-            namespace_modules,
-            BUSTER_ARRAY_LENGTH(namespace_modules));
-    IrModule namespace_module = ir_analyze_and_generate_module(
-            arguments->arena,
-            &namespace_app);
-    IrModule namespace_math_module = ir_analyze_and_generate_module(
-            arguments->arena,
-            &namespace_math);
-    IrModule namespace_app_two_module = ir_analyze_and_generate_module(
-            arguments->arena,
-            &namespace_app_two);
+    analysis_resolve_program_interfaces(arguments->arena, namespace_modules, BUSTER_ARRAY_LENGTH(namespace_modules));
+    IrModule namespace_module = ir_analyze_and_generate_module(arguments->arena, &namespace_app);
+    IrModule namespace_math_module = ir_analyze_and_generate_module(arguments->arena, &namespace_math);
+    IrModule namespace_app_two_module = ir_analyze_and_generate_module(arguments->arena, &namespace_app_two);
     BUSTER_TEST(arguments, namespace_app.diagnostic_count == 0);
     BUSTER_TEST(arguments, namespace_app_two.diagnostic_count == 0);
     BUSTER_TEST(arguments, namespace_math.diagnostic_count == 0);
     BUSTER_TEST(arguments, namespace_math.instantiation_count == 1);
-    BUSTER_TEST(arguments,
-            namespace_math.first_instantiation &&
-            namespace_math.first_instantiation->requester_count == 2);
-    BUSTER_TEST(arguments,
-            namespace_math.first_instantiation &&
-            namespace_math.first_instantiation->codegen_owner.value == 910);
+    BUSTER_TEST(arguments, namespace_math.first_instantiation && namespace_math.first_instantiation->requester_count == 2);
+    BUSTER_TEST(arguments, namespace_math.first_instantiation && namespace_math.first_instantiation->codegen_owner.value == 910);
     BUSTER_TEST(arguments, namespace_module.lowered_function_count == 1);
     BUSTER_TEST(arguments, namespace_module.function_count == 1);
     BUSTER_TEST(arguments, namespace_app_two_module.lowered_function_count == 1);
@@ -7681,58 +4657,38 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, namespace_math_module.lowered_function_count == 2);
     BUSTER_TEST(arguments, namespace_math_module.function_count == 2);
     IrFunction* namespace_use = namespace_module.functions;
-    BUSTER_TEST(arguments,
-            ir_test_opcode_count(namespace_use, IR_OPCODE_FUNCTION) == 2);
-    BUSTER_TEST(arguments,
-            ir_test_opcode_count(namespace_use, IR_OPCODE_CALL) == 2);
+    BUSTER_TEST(arguments, ir_test_opcode_count(namespace_use, IR_OPCODE_FUNCTION) == 2);
+    BUSTER_TEST(arguments, ir_test_opcode_count(namespace_use, IR_OPCODE_CALL) == 2);
     bool found_external_reference = false;
-    for (u32 instruction_index = 0;
-         instruction_index < namespace_use->instruction_count;
-         instruction_index += 1)
+    for (u32 instruction_index = 0; instruction_index < namespace_use->instruction_count; instruction_index += 1)
     {
-        IrInstruction* instruction =
-                namespace_use->instructions + instruction_index;
+        IrInstruction* instruction = namespace_use->instructions + instruction_index;
         if (instruction->opcode == IR_OPCODE_FUNCTION)
         {
-            found_external_reference |=
-                instruction->entity.module.value == 910;
+            found_external_reference |= instruction->entity.module.value == 910;
         }
     }
     BUSTER_TEST(arguments, found_external_reference);
-    IrValidationResult namespace_validation = ir_validate_module(
-            &namespace_app,
-            &namespace_module);
+    IrValidationResult namespace_validation = ir_validate_module(&namespace_app, &namespace_module);
     BUSTER_TEST(arguments, namespace_validation.error == IR_VALIDATION_NONE);
-    IrValidationResult namespace_app_two_validation = ir_validate_module(
-            &namespace_app_two,
-            &namespace_app_two_module);
-    BUSTER_TEST(arguments,
-            namespace_app_two_validation.error == IR_VALIDATION_NONE);
-    IrValidationResult namespace_math_validation = ir_validate_module(
-            &namespace_math,
-            &namespace_math_module);
+    IrValidationResult namespace_app_two_validation = ir_validate_module(&namespace_app_two, &namespace_app_two_module);
+    BUSTER_TEST(arguments, namespace_app_two_validation.error == IR_VALIDATION_NONE);
+    IrValidationResult namespace_math_validation = ir_validate_module(&namespace_math, &namespace_math_module);
     BUSTER_TEST(arguments, namespace_math_validation.error == IR_VALIDATION_NONE);
     AnalysisProgram namespace_program_analysis = {
         .module_results = namespace_modules,
         .module_count = BUSTER_ARRAY_LENGTH(namespace_modules),
     };
-    IrProgram namespace_program = ir_generate_program(
-            arguments->arena,
-            &namespace_program_analysis);
+    IrProgram namespace_program = ir_generate_program(arguments->arena, &namespace_program_analysis);
     u32 namespace_specialized_function_count = 0;
     String8 namespace_specialized_name = {0};
-    for (u32 module_index = 0;
-        module_index < namespace_program.module_count;
-        module_index += 1)
+    for (u32 module_index = 0; module_index < namespace_program.module_count; module_index += 1)
     {
         IrModule* program_module = namespace_program.modules + module_index;
-        for (u32 function_index = 0;
-            function_index < program_module->function_count;
-            function_index += 1)
+        for (u32 function_index = 0; function_index < program_module->function_count; function_index += 1)
         {
             IrFunction* function = program_module->functions + function_index;
-            if (function->instantiation.value !=
-                ANALYSIS_ID_UNDERLYING_INVALID)
+            if (function->instantiation.value != ANALYSIS_ID_UNDERLYING_INVALID)
             {
                 namespace_specialized_function_count += 1;
                 namespace_specialized_name = function->name;
@@ -7740,75 +4696,42 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         }
     }
     BUSTER_TEST(arguments, namespace_specialized_function_count == 1);
-    BUSTER_TEST(arguments,
-            namespace_math.first_instantiation &&
-            string_equal(
-                namespace_specialized_name,
-                namespace_math.first_instantiation->symbol_name));
+    BUSTER_TEST(arguments, namespace_math.first_instantiation && string_equal(namespace_specialized_name, namespace_math.first_instantiation->symbol_name));
 
-    for (u32 fixture_index = 0;
-        fixture_index < BUSTER_ARRAY_LENGTH(ir_fixture_tests);
-        fixture_index += 1)
+    for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(ir_fixture_tests); fixture_index += 1)
     {
         TemporalArena fixture_temporary = arena_begin_temporal(arguments->arena);
         IrFixtureTest fixture = ir_fixture_tests[fixture_index];
-        String8 source = BYTE_SLICE_TO_STRING(
-            8,
-            file_read(arguments->arena, fixture.path, (FileReadOptions){0}));
+        String8 source = BYTE_SLICE_TO_STRING(8, file_read(arguments->arena, fixture.path, (FileReadOptions){0}));
         BUSTER_TEST(arguments, source.pointer != 0);
         TokenizerResult tokenizer = tokenize(arguments->arena, source.pointer, source.length);
-        ParserResult parser = parser_parse(
-            arguments->arena,
-            expression_arena,
-            source,
-            tokenizer);
+        ParserResult parser = parser_parse(arguments->arena, expression_arena, source, tokenizer);
         BUSTER_TEST(arguments, tokenizer.error_count == 0);
         BUSTER_TEST(arguments, parser.diagnostic_count == 0);
-        AnalysisSourceInput input = { .path = fixture.path, .parser = &parser };
-        AnalysisResult analysis = analysis_index_module(
-            arguments->arena,
-            (AnalysisModuleId){ .value = 1000 + fixture_index },
-            S8("ir-fixture"),
-            &input,
-            1);
+        AnalysisSourceInput input = {.path = fixture.path, .parser = &parser};
+        AnalysisResult analysis = analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 1000 + fixture_index}, S8("ir-fixture"), &input, 1);
         analysis_resolve_module_interfaces(arguments->arena, &analysis);
         IrModule module = ir_analyze_and_generate_module(arguments->arena, &analysis);
         u32 generic_code_count = 0;
-        for (u32 entity_index = 0;
-            entity_index < analysis.module.entity_count;
-            entity_index += 1)
+        for (u32 entity_index = 0; entity_index < analysis.module.entity_count; entity_index += 1)
         {
             AnalysisEntity* entity = analysis.module.entities + entity_index;
-            if (entity->kind == ANALYSIS_ENTITY_CODE &&
-                analysis_entity_is_generic(
-                    fixture_temporary.arena,
-                    &analysis,
-                    entity))
+            if (entity->kind == ANALYSIS_ENTITY_CODE && analysis_entity_is_generic(fixture_temporary.arena, &analysis, entity))
             {
                 generic_code_count += 1;
             }
         }
-        BUSTER_TEST(arguments,
-            module.function_count ==
-                parser.code_count - generic_code_count +
-                analysis.instantiation_count);
-        BUSTER_TEST(arguments, module.lowered_function_count + module.rejected_function_count <=
-            module.function_count);
+        BUSTER_TEST(arguments, module.function_count == parser.code_count - generic_code_count + analysis.instantiation_count);
+        BUSTER_TEST(arguments, module.lowered_function_count + module.rejected_function_count <= module.function_count);
         IrValidationResult validation = ir_validate_module(&analysis, &module);
         BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
-        if (string_equal(
-                fixture.path,
-                S8("tests/basic_vector.bbb")))
+        if (string_equal(fixture.path, S8("tests/basic_vector.bbb")))
         {
             AnalysisEntity* main_entity = 0;
-            for (u32 entity_index = 0;
-                entity_index < analysis.module.entity_count;
-                entity_index += 1)
+            for (u32 entity_index = 0; entity_index < analysis.module.entity_count; entity_index += 1)
             {
-                AnalysisEntity* candidate =
-                    analysis.module.entities + entity_index;
-                if (candidate->kind == ANALYSIS_ENTITY_CODE &&
-                    string_equal(candidate->name, S8("main")))
+                AnalysisEntity* candidate = analysis.module.entities + entity_index;
+                if (candidate->kind == ANALYSIS_ENTITY_CODE && string_equal(candidate->name, S8("main")))
                 {
                     main_entity = candidate;
                     break;
@@ -7817,16 +4740,10 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             IrFunction* main_function = 0;
             if (main_entity)
             {
-                for (u32 function_index = 0;
-                    function_index < module.function_count;
-                    function_index += 1)
+                for (u32 function_index = 0; function_index < module.function_count; function_index += 1)
                 {
-                    IrFunction* candidate =
-                        module.functions + function_index;
-                    if (candidate->entity.module.value ==
-                            main_entity->id.module.value &&
-                        candidate->entity.index.value ==
-                            main_entity->id.index.value)
+                    IrFunction* candidate = module.functions + function_index;
+                    if (candidate->entity.module.value == main_entity->id.module.value && candidate->entity.index.value == main_entity->id.index.value)
                     {
                         main_function = candidate;
                         break;
@@ -7836,31 +4753,11 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, main_function != 0);
             if (main_function)
             {
-                BUSTER_TEST(
-                    arguments,
-                    ir_test_binary_operation_count(
-                        main_function,
-                        IR_BINARY_VECTOR_FLOAT_ADD) == 1);
-                BUSTER_TEST(
-                    arguments,
-                    ir_test_binary_operation_count(
-                        main_function,
-                        IR_BINARY_VECTOR_FLOAT_LESS) == 1);
-                BUSTER_TEST(
-                    arguments,
-                    ir_test_binary_operation_count(
-                        main_function,
-                        IR_BINARY_VECTOR_FLOAT_EQUAL) == 1);
-                BUSTER_TEST(
-                    arguments,
-                    ir_test_opcode_count(
-                        main_function,
-                        IR_OPCODE_UNARY) == 1);
-                BUSTER_TEST(
-                    arguments,
-                    ir_test_opcode_count(
-                        main_function,
-                        IR_OPCODE_INDEX) == 1);
+                BUSTER_TEST(arguments, ir_test_binary_operation_count(main_function, IR_BINARY_VECTOR_FLOAT_ADD) == 1);
+                BUSTER_TEST(arguments, ir_test_binary_operation_count(main_function, IR_BINARY_VECTOR_FLOAT_LESS) == 1);
+                BUSTER_TEST(arguments, ir_test_binary_operation_count(main_function, IR_BINARY_VECTOR_FLOAT_EQUAL) == 1);
+                BUSTER_TEST(arguments, ir_test_opcode_count(main_function, IR_OPCODE_UNARY) == 1);
+                BUSTER_TEST(arguments, ir_test_opcode_count(main_function, IR_OPCODE_INDEX) == 1);
             }
         }
         if (string_equal(fixture.path, S8("tests/basic_pointer.bbb")))
@@ -7885,27 +4782,13 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_LOAD) >= 1);
             BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_STORE) >= 1);
         }
-        else if (string_equal(
-                fixture.path,
-                S8("tests/basic_variadic.bbb")))
+        else if (string_equal(fixture.path, S8("tests/basic_variadic.bbb")))
         {
             BUSTER_TEST(arguments, module.function_count == 5);
-            BUSTER_TEST(arguments,
-                ir_test_opcode_count(
-                    module.functions,
-                    IR_OPCODE_VA_START) == 1);
-            BUSTER_TEST(arguments,
-                ir_test_opcode_count(
-                    module.functions,
-                    IR_OPCODE_VA_COPY) == 1);
-            BUSTER_TEST(arguments,
-                ir_test_opcode_count(
-                    module.functions,
-                    IR_OPCODE_VA_ARG) == 1);
-            BUSTER_TEST(arguments,
-                ir_test_opcode_count(
-                    module.functions,
-                    IR_OPCODE_VA_END) == 2);
+            BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_VA_START) == 1);
+            BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_VA_COPY) == 1);
+            BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_VA_ARG) == 1);
+            BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_VA_END) == 2);
         }
         else if (string_equal(fixture.path, S8("tests/basic_for.bbb")))
         {
@@ -7915,45 +4798,28 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_LOAD) == 0);
             BUSTER_TEST(arguments, ir_test_opcode_count(module.functions, IR_OPCODE_STORE) == 0);
         }
-        else if (string_equal(
-                fixture.path,
-                S8("tests/basic_compile_time.bbb")))
+        else if (string_equal(fixture.path, S8("tests/basic_compile_time.bbb")))
         {
             BUSTER_TEST(arguments, analysis.instantiation_count == 3);
             BUSTER_TEST(arguments, module.function_count == 4);
             BUSTER_TEST(arguments, module.lowered_function_count == 4);
             IrFunction* main_function = 0;
             u32 specialized_count = 0;
-            for (u32 function_index = 0;
-                function_index < module.function_count;
-                function_index += 1)
+            for (u32 function_index = 0; function_index < module.function_count; function_index += 1)
             {
                 IrFunction* function = module.functions + function_index;
                 if (string_equal(function->name, S8("main")))
                 {
                     main_function = function;
                 }
-                if (function->instantiation.value !=
-                    ANALYSIS_ID_UNDERLYING_INVALID)
+                if (function->instantiation.value != ANALYSIS_ID_UNDERLYING_INVALID)
                 {
-                    AnalysisInstantiation* instantiation =
-                        ir_instantiation_from_id(
-                            &analysis,
-                            function->instantiation);
-                    AnalysisType* concrete = analysis_type_from_id(
-                        &analysis,
-                        function->type);
+                    AnalysisInstantiation* instantiation = ir_instantiation_from_id(&analysis, function->instantiation);
+                    AnalysisType* concrete = analysis_type_from_id(&analysis, function->type);
                     BUSTER_TEST(arguments, instantiation != 0);
-                    BUSTER_TEST(arguments,
-                        instantiation &&
-                        string_equal(
-                            function->name,
-                            instantiation->symbol_name));
-                    BUSTER_TEST(arguments,
-                        concrete->kind == ANALYSIS_TYPE_FUNCTION);
-                    BUSTER_TEST(arguments,
-                        concrete->kind != ANALYSIS_TYPE_FUNCTION ||
-                        concrete->as.function.argument_count == 0);
+                    BUSTER_TEST(arguments, instantiation && string_equal(function->name, instantiation->symbol_name));
+                    BUSTER_TEST(arguments, concrete->kind == ANALYSIS_TYPE_FUNCTION);
+                    BUSTER_TEST(arguments, concrete->kind != ANALYSIS_TYPE_FUNCTION || concrete->as.function.argument_count == 0);
                     specialized_count += 1;
                 }
             }
@@ -7965,20 +4831,15 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                 IrInstruction* first_call = 0;
                 AnalysisInstantiationId first = ANALYSIS_INSTANTIATION_ID_INVALID;
                 AnalysisInstantiationId second = ANALYSIS_INSTANTIATION_ID_INVALID;
-                for (u32 instruction_index = 0;
-                    instruction_index < main_function->instruction_count;
-                    instruction_index += 1)
+                for (u32 instruction_index = 0; instruction_index < main_function->instruction_count; instruction_index += 1)
                 {
-                    IrInstruction* instruction =
-                        main_function->instructions + instruction_index;
+                    IrInstruction* instruction = main_function->instructions + instruction_index;
                     if (instruction->opcode != IR_OPCODE_CALL)
                     {
                         continue;
                     }
                     BUSTER_TEST(arguments, instruction->operand_count == 1);
-                    BUSTER_TEST(arguments,
-                        instruction->instantiation.value !=
-                            ANALYSIS_ID_UNDERLYING_INVALID);
+                    BUSTER_TEST(arguments, instruction->instantiation.value != ANALYSIS_ID_UNDERLYING_INVALID);
                     if (call_count == 0)
                     {
                         first_call = instruction;
@@ -7997,60 +4858,36 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                 {
                     u32 saved_operand_count = first_call->operand_count;
                     first_call->operand_count = 0;
-                    IrValidationResult missing_target = ir_validate_module(
-                        &analysis,
-                        &module);
-                    BUSTER_TEST(arguments,
-                        missing_target.error == IR_VALIDATION_CALL_TARGET);
+                    IrValidationResult missing_target = ir_validate_module(&analysis, &module);
+                    BUSTER_TEST(arguments, missing_target.error == IR_VALIDATION_CALL_TARGET);
                     first_call->operand_count = saved_operand_count;
 
-                    IrValue* call_target = main_function->values +
-                        first_call->operands[0].value;
-                    AnalysisType* call_signature = analysis_type_from_id(
-                        &analysis,
-                        call_target->type);
-                    AnalysisTypeId saved_return_type =
-                        call_signature->as.function.return_type;
-                    call_signature->as.function.return_type =
-                        analysis.types.builtin.bool_type;
-                    IrValidationResult wrong_signature = ir_validate_module(
-                        &analysis,
-                        &module);
-                    BUSTER_TEST(arguments,
-                        wrong_signature.error ==
-                            IR_VALIDATION_CALL_SIGNATURE);
-                    call_signature->as.function.return_type =
-                        saved_return_type;
+                    IrValue* call_target = main_function->values + first_call->operands[0].value;
+                    AnalysisType* call_signature = analysis_type_from_id(&analysis, call_target->type);
+                    AnalysisTypeId saved_return_type = call_signature->as.function.return_type;
+                    call_signature->as.function.return_type = analysis.types.builtin.bool_type;
+                    IrValidationResult wrong_signature = ir_validate_module(&analysis, &module);
+                    BUSTER_TEST(arguments, wrong_signature.error == IR_VALIDATION_CALL_SIGNATURE);
+                    call_signature->as.function.return_type = saved_return_type;
 
-                    AnalysisInstantiationId saved_instantiation =
-                        first_call->instantiation;
-                    first_call->instantiation =
-                        ANALYSIS_INSTANTIATION_ID_INVALID;
-                    IrValidationResult wrong_specialization =
-                        ir_validate_module(&analysis, &module);
-                    BUSTER_TEST(arguments,
-                        wrong_specialization.error ==
-                            IR_VALIDATION_CALL_TARGET);
+                    AnalysisInstantiationId saved_instantiation = first_call->instantiation;
+                    first_call->instantiation = ANALYSIS_INSTANTIATION_ID_INVALID;
+                    IrValidationResult wrong_specialization = ir_validate_module(&analysis, &module);
+                    BUSTER_TEST(arguments, wrong_specialization.error == IR_VALIDATION_CALL_TARGET);
                     first_call->instantiation = saved_instantiation;
 
-                    IrValidationResult restored = ir_validate_module(
-                        &analysis,
-                        &module);
-                    BUSTER_TEST(arguments,
-                        restored.error == IR_VALIDATION_NONE);
+                    IrValidationResult restored = ir_validate_module(&analysis, &module);
+                    BUSTER_TEST(arguments, restored.error == IR_VALIDATION_NONE);
                 }
             }
         }
-        else if (string_equal(
-                fixture.path,
-                S8("tests/compile_time_argument_error.bbb")))
+        else if (string_equal(fixture.path, S8("tests/compile_time_argument_error.bbb")))
         {
             BUSTER_TEST(arguments, analysis.instantiation_count == 0);
             BUSTER_TEST(arguments, module.function_count == 1);
             BUSTER_TEST(arguments, module.lowered_function_count == 0);
             BUSTER_TEST(arguments, module.rejected_function_count == 1);
-            BUSTER_TEST(arguments,
-                module.functions[0].state == IR_FUNCTION_REJECTED);
+            BUSTER_TEST(arguments, module.functions[0].state == IR_FUNCTION_REJECTED);
         }
         for (u32 function_index = 0; function_index < module.function_count; function_index += 1)
         {
@@ -8059,8 +4896,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             {
                 BUSTER_TEST(arguments, function->block_count >= 2);
                 BUSTER_TEST(arguments, function->instruction_count > 0);
-                BUSTER_TEST(arguments, function->value_count > 0 ||
-                    analysis_type_from_id(&analysis, function->type)->as.function.argument_count == 0);
+                BUSTER_TEST(arguments, function->value_count > 0 || analysis_type_from_id(&analysis, function->type)->as.function.argument_count == 0);
             }
             else if (function->state == IR_FUNCTION_REJECTED)
             {
@@ -8074,123 +4910,61 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         arena_set_position(fixture_temporary.arena, fixture_temporary.position);
     }
 
-    AnalysisProgram loaded_program = analysis_program_load(
-        arguments->arena,
-        expression_arena,
-        (AnalysisProgramOptions){
-            .root_path = S8("tests/basic_import.bbb"),
-            .root_module_name = S8("app"),
-            .module_root = S8("tests/modules"),
-            .pointer_size = 8,
-            .pointer_alignment = 8,
-        });
+    AnalysisProgram loaded_program = analysis_program_load(arguments->arena, expression_arena,
+                                                           (AnalysisProgramOptions){
+                                                               .root_path = S8("tests/basic_import.bbb"),
+                                                               .root_module_name = S8("app"),
+                                                               .module_root = S8("tests/modules"),
+                                                               .pointer_size = 8,
+                                                               .pointer_alignment = 8,
+                                                           });
     BUSTER_TEST(arguments, !loaded_program.load_failed);
     BUSTER_TEST(arguments, loaded_program.analysis_diagnostic_count == 0);
-    IrProgram generated_program = ir_generate_program(
-        arguments->arena,
-        &loaded_program);
+    IrProgram generated_program = ir_generate_program(arguments->arena, &loaded_program);
     BUSTER_TEST(arguments, generated_program.module_count == 3);
     BUSTER_TEST(arguments, generated_program.lowered_function_count == 3);
     BUSTER_TEST(arguments, generated_program.rejected_function_count == 0);
     BUSTER_TEST(arguments, generated_program.types.count > 0);
     BUSTER_TEST(arguments, generated_program.symbols.count >= 3);
     BUSTER_TEST(arguments, generated_program.sources.count == 3);
-    BUSTER_TEST(arguments,
-        ir_type_from_id(
-            &generated_program.types,
-            IR_TYPE_ID_INVALID) == 0);
-    BUSTER_TEST(arguments,
-        ir_symbol_from_id(
-            &generated_program.symbols,
-            IR_SYMBOL_ID_INVALID) == 0);
-    for (u32 module_index = 0;
-        module_index < loaded_program.module_count;
-        module_index += 1)
+    BUSTER_TEST(arguments, ir_type_from_id(&generated_program.types, IR_TYPE_ID_INVALID) == 0);
+    BUSTER_TEST(arguments, ir_symbol_from_id(&generated_program.symbols, IR_SYMBOL_ID_INVALID) == 0);
+    for (u32 module_index = 0; module_index < loaded_program.module_count; module_index += 1)
     {
         AnalysisResult* analysis = loaded_program.module_results[module_index];
         if (analysis)
         {
-            IrModule* generated_module =
-                generated_program.modules + module_index;
-            BUSTER_TEST(arguments,
-                generated_module->frontend_type_count ==
-                    analysis->types.count);
-            BUSTER_TEST(arguments,
-                generated_module->frontend_symbol_count ==
-                    analysis->module.entity_count);
-            BUSTER_TEST(arguments,
-                generated_module->frontend_source_count ==
-                    analysis->module.source_count);
-            for (u32 function_index = 0;
-                function_index <
-                    generated_module->function_count;
-                function_index += 1)
+            IrModule* generated_module = generated_program.modules + module_index;
+            BUSTER_TEST(arguments, generated_module->frontend_type_count == analysis->types.count);
+            BUSTER_TEST(arguments, generated_module->frontend_symbol_count == analysis->module.entity_count);
+            BUSTER_TEST(arguments, generated_module->frontend_source_count == analysis->module.source_count);
+            for (u32 function_index = 0; function_index < generated_module->function_count; function_index += 1)
             {
-                IrFunction* function =
-                    generated_module->functions +
-                    function_index;
-                BUSTER_TEST(arguments,
-                    function->canonical_type.value !=
-                        IR_ID_UNDERLYING_INVALID);
-                BUSTER_TEST(arguments,
-                    ir_type_from_id(
-                        &generated_program.types,
-                        function->canonical_type) != 0);
-                BUSTER_TEST(arguments,
-                    ir_symbol_from_id(
-                        &generated_program.symbols,
-                        function->symbol) != 0);
-                if (function->instantiation.value ==
-                    ANALYSIS_ID_UNDERLYING_INVALID)
+                IrFunction* function = generated_module->functions + function_index;
+                BUSTER_TEST(arguments, function->canonical_type.value != IR_ID_UNDERLYING_INVALID);
+                BUSTER_TEST(arguments, ir_type_from_id(&generated_program.types, function->canonical_type) != 0);
+                BUSTER_TEST(arguments, ir_symbol_from_id(&generated_program.symbols, function->symbol) != 0);
+                if (function->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID)
                 {
-                    IrSymbol* symbol = ir_symbol_from_id(
-                        &generated_program.symbols,
-                        function->symbol);
+                    IrSymbol* symbol = ir_symbol_from_id(&generated_program.symbols, function->symbol);
                     BUSTER_TEST(arguments, symbol != 0);
-                    BUSTER_TEST(arguments,
-                        !symbol ||
-                        symbol->kind ==
-                            IR_SYMBOL_FUNCTION);
-                    BUSTER_TEST(arguments,
-                        !symbol ||
-                        symbol->type.value !=
-                            IR_ID_UNDERLYING_INVALID);
+                    BUSTER_TEST(arguments, !symbol || symbol->kind == IR_SYMBOL_FUNCTION);
+                    BUSTER_TEST(arguments, !symbol || symbol->type.value != IR_ID_UNDERLYING_INVALID);
                 }
-                if (function->state ==
-                    IR_FUNCTION_LOWERED)
+                if (function->state == IR_FUNCTION_LOWERED)
                 {
-                    for (u32 value_index = 0;
-                        value_index <
-                            function->value_count;
-                        value_index += 1)
+                    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
                     {
-                        BUSTER_TEST(arguments,
-                            function->values[value_index]
-                                .canonical_type.value !=
-                                IR_ID_UNDERLYING_INVALID);
+                        BUSTER_TEST(arguments, function->values[value_index].canonical_type.value != IR_ID_UNDERLYING_INVALID);
                     }
-                    for (u32 instruction_index = 0;
-                        instruction_index <
-                            function->instruction_count;
-                        instruction_index += 1)
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
                     {
-                        BUSTER_TEST(arguments,
-                            function->instructions[
-                                instruction_index]
-                                .canonical_type.value !=
-                                IR_ID_UNDERLYING_INVALID);
-                        BUSTER_TEST(arguments,
-                            function->instructions[
-                                instruction_index]
-                                .canonical_source
-                                .source.value !=
-                                IR_ID_UNDERLYING_INVALID);
+                        BUSTER_TEST(arguments, function->instructions[instruction_index].canonical_type.value != IR_ID_UNDERLYING_INVALID);
+                        BUSTER_TEST(arguments, function->instructions[instruction_index].canonical_source.source.value != IR_ID_UNDERLYING_INVALID);
                     }
                 }
             }
-            IrValidationResult validation = ir_validate_module(
-                analysis,
-                generated_module);
+            IrValidationResult validation = ir_validate_module(analysis, generated_module);
             BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
         }
     }

@@ -3,15 +3,10 @@ typedef unsigned char test_u8;
 
 struct TestAlignofConditional
 {
-    char padding[
-        __alignof__(void*) < sizeof(short) ?
-            sizeof(short) :
-            __alignof__(void*)];
+    char padding[__alignof__(void*) < sizeof(short) ? sizeof(short) : __alignof__(void*)];
 };
 
-_Static_assert(
-    sizeof(struct TestAlignofConditional) == 8,
-    "sizeof and GNU alignof are constant array-bound operands");
+_Static_assert(sizeof(struct TestAlignofConditional) == 8, "sizeof and GNU alignof are constant array-bound operands");
 
 struct TestSigcontext
 {
@@ -23,9 +18,7 @@ struct TestSigcontext
     test_u8 reserved[4096] __attribute__((aligned(16)));
 };
 
-_Static_assert(
-    _Alignof(struct TestSigcontext) == 16,
-    "GNU aligned member controls aggregate alignment");
+_Static_assert(_Alignof(struct TestSigcontext) == 16, "GNU aligned member controls aggregate alignment");
 
 typedef struct TestSigcontext TestMcontext;
 
@@ -76,42 +69,28 @@ void* fault_address(TestSiginfo* info)
     return info->fields.fault.address;
 }
 
-typedef int TestGetEnv(
-    void* table,
-    void** environment,
-    int version);
+typedef int TestGetEnv(void* table, void** environment, int version);
 
 struct TestInvokeTable
 {
     TestGetEnv* get_env;
 };
 
-int invoke_get_env(
-    struct TestInvokeTable** table,
-    void** environment)
+int invoke_get_env(struct TestInvokeTable** table, void** environment)
 {
-    return (*table)->get_env(
-        table,
-        environment,
-        6);
+    return (*table)->get_env(table, environment, 6);
 }
 
 struct TestForwardInvokeTable;
-typedef const struct TestForwardInvokeTable*
-    TestForwardEnvironment;
+typedef const struct TestForwardInvokeTable* TestForwardEnvironment;
 
 struct TestForwardInvokeTable
 {
-    int (*get_version)(
-        TestForwardEnvironment*);
-    const unsigned short* (*get_chars)(
-        TestForwardEnvironment*,
-        void*);
+    int (*get_version)(TestForwardEnvironment*);
+    const unsigned short* (*get_chars)(TestForwardEnvironment*, void*);
 };
 
-int invoke_forward_get_version(
-    TestForwardEnvironment* environment)
+int invoke_forward_get_version(TestForwardEnvironment* environment)
 {
-    return (*environment)->get_version(
-        environment);
+    return (*environment)->get_version(environment);
 }

@@ -78,7 +78,7 @@ void wm_deinitialize(WmHandle* windowing)
 
 WmOffset offset_from_rect(WmRect rect)
 {
-    return (WmOffset) {
+    return (WmOffset){
         .x = rect.right - rect.left,
         .y = rect.bottom - rect.top,
     };

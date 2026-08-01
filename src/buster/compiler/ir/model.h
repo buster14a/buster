@@ -29,10 +29,10 @@ struct IrSourceId
 };
 
 #define IR_ID_UNDERLYING_INVALID UINT32_MAX
-#define IR_TYPE_ID_INVALID ((IrTypeId){ .value = IR_ID_UNDERLYING_INVALID })
-#define IR_SYMBOL_ID_INVALID ((IrSymbolId){ .value = IR_ID_UNDERLYING_INVALID })
-#define IR_LOCAL_ID_INVALID ((IrLocalId){ .value = IR_ID_UNDERLYING_INVALID })
-#define IR_SOURCE_ID_INVALID ((IrSourceId){ .value = IR_ID_UNDERLYING_INVALID })
+#define IR_TYPE_ID_INVALID ((IrTypeId){.value = IR_ID_UNDERLYING_INVALID})
+#define IR_SYMBOL_ID_INVALID ((IrSymbolId){.value = IR_ID_UNDERLYING_INVALID})
+#define IR_LOCAL_ID_INVALID ((IrLocalId){.value = IR_ID_UNDERLYING_INVALID})
+#define IR_SOURCE_ID_INVALID ((IrSourceId){.value = IR_ID_UNDERLYING_INVALID})
 
 BUSTER_CT_CHECK(sizeof(IrTypeId) == sizeof(IrIdUnderlying));
 BUSTER_CT_CHECK(sizeof(IrSymbolId) == sizeof(IrIdUnderlying));
@@ -206,12 +206,6 @@ struct IrSourceTable
     u32 capacity;
 };
 
-BUSTER_F_DECL IrType* ir_type_from_id(
-    IrTypeTable* table,
-    IrTypeId id);
-BUSTER_F_DECL IrSymbol* ir_symbol_from_id(
-    IrSymbolTable* table,
-    IrSymbolId id);
-BUSTER_F_DECL IrSource* ir_source_from_id(
-    IrSourceTable* table,
-    IrSourceId id);
+BUSTER_F_DECL IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id);
+BUSTER_F_DECL IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id);
+BUSTER_F_DECL IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id);

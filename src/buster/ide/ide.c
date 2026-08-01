@@ -128,10 +128,11 @@ BUSTER_GLOBAL_LOCAL void ide_window_queue_font_update(IdeWindow* window, f32 dpi
     }
 
     String8 font_path = font_file_get_path(ide_state.state.arena, FONT_INDEX_MONO);
-    FontTextureAtlas font = rendering_font_create(ide_state.state.arena, ide_state.rendering, (FontTextureAtlasCreate) {
-            .font_path = font_path,
-            .text_height = font_height,
-            });
+    FontTextureAtlas font = rendering_font_create(ide_state.state.arena, ide_state.rendering,
+                                                  (FontTextureAtlasCreate){
+                                                      .font_path = font_path,
+                                                      .text_height = font_height,
+                                                  });
     rendering_queue_font_update(ide_state.rendering, window->render, RENDER_FONT_TYPE_MONOSPACE, font);
 
     window->dpi = dpi;
@@ -187,84 +188,60 @@ ProcessResult process_arguments(void)
         }
         else if (string_equal(arg, S8("compile")))
         {
-            if (ide_state.compile ||
-                i + 1 >= arguments.length)
+            if (ide_state.compile || i + 1 >= arguments.length)
             {
-                string_print(S8(
-                    "usage: ide compile <source.bbb> "
-                    "[-o <output>] [--module-root=<path>] "
-                    "[--linker=<path>]\n"));
+                string_print(S8("usage: ide compile <source.bbb> "
+                                "[-o <output>] [--module-root=<path>] "
+                                "[--linker=<path>]\n"));
                 result = PROCESS_RESULT_FAILED;
                 break;
             }
             ide_state.compile = true;
             i += 1;
-            ide_state.compile_source_path =
-                arguments.pointer[i];
+            ide_state.compile_source_path = arguments.pointer[i];
         }
         else if (string_equal(arg, S8("cc")))
         {
             ide_state.cc = true;
             ide_state.cc_arguments = (SliceString8){
-                .pointer =
-                    arguments.pointer + i + 1,
-                .length =
-                    arguments.length - i - 1,
+                .pointer = arguments.pointer + i + 1,
+                .length = arguments.length - i - 1,
             };
             break;
         }
-        else if (string_equal(arg, S8("-o")) &&
-            ide_state.compile)
+        else if (string_equal(arg, S8("-o")) && ide_state.compile)
         {
             if (i + 1 >= arguments.length)
             {
-                string_print(S8(
-                    "expected an output path after -o\n"));
+                string_print(S8("expected an output path after -o\n"));
                 result = PROCESS_RESULT_FAILED;
                 break;
             }
             i += 1;
-            ide_state.compile_output_path =
-                arguments.pointer[i];
+            ide_state.compile_output_path = arguments.pointer[i];
         }
-        else if (ide_state.compile &&
-            string_starts_with_sequence(
-                arg,
-                S8("--module-root=")))
+        else if (ide_state.compile && string_starts_with_sequence(arg, S8("--module-root=")))
         {
             ide_state.compile_module_root = (String8){
-                .pointer =
-                    arg.pointer +
-                    S8("--module-root=").length,
-                .length =
-                    arg.length -
-                    S8("--module-root=").length,
+                .pointer = arg.pointer + S8("--module-root=").length,
+                .length = arg.length - S8("--module-root=").length,
             };
             if (!ide_state.compile_module_root.length)
             {
-                string_print(S8(
-                    "expected a module root after --module-root=\n"));
+                string_print(S8("expected a module root after --module-root=\n"));
                 result = PROCESS_RESULT_FAILED;
                 break;
             }
         }
-        else if (ide_state.compile &&
-            string_starts_with_sequence(
-                arg,
-                S8("--linker=")))
+        else if (ide_state.compile && string_starts_with_sequence(arg, S8("--linker=")))
         {
             ide_state.compile_linker = (String8){
-                .pointer =
-                    arg.pointer +
-                    S8("--linker=").length,
-                .length =
-                    arg.length -
-                    S8("--linker=").length,
+                .pointer = arg.pointer + S8("--linker=").length,
+                .length = arg.length - S8("--linker=").length,
             };
             if (!ide_state.compile_linker.length)
             {
-                string_print(S8(
-                    "expected a linker path after --linker=\n"));
+                string_print(S8("expected a linker path after --linker=\n"));
                 result = PROCESS_RESULT_FAILED;
                 break;
             }
@@ -289,7 +266,7 @@ BUSTER_GLOBAL_LOCAL void ui_top_bar(void)
     ui_push(pref_height, ui_em(1, 1));
     {
         ui_push(child_layout_axis, AXIS2_X);
-        UI_Box* top_bar = ui_box_make((UI_BoxFlags) {0}, S8("top_bar"));
+        UI_Box* top_bar = ui_box_make((UI_BoxFlags){0}, S8("top_bar"));
         ui_push(parent, top_bar);
         {
             if (ui_button(S8("Button 123")).clicked_left)
@@ -343,49 +320,54 @@ bool frame(void)
     {
         switch (event->kind)
         {
-            break; case WM_EVENT_WINDOW_CLOSE:
+            break;
+        case WM_EVENT_WINDOW_CLOSE:
+        {
+            for (IdeWindow* window = ide_state.first_window; window; window = window->next)
             {
-                for (IdeWindow* window = ide_state.first_window; window; window = window->next)
+                if (window->wm == event->window)
                 {
-                    if (window->wm == event->window)
+                    if (window->previous)
                     {
-                        if (window->previous)
-                        {
-                            window->previous->next = window->next;
-                        }
-
-                        if (window->next)
-                        {
-                            window->next->previous = window->previous;
-                        }
-
-                        if (ide_state.first_window == window)
-                        {
-                            ide_state.first_window = window->next;
-                        }
-
-                        if (ide_state.last_window == window)
-                        {
-                            ide_state.last_window = window->previous;
-                        }
-
-                        ui_state_deinitialize(window->ui);
-                        window->ui = 0;
-                        rendering_window_deinitialize(ide_state.rendering, window->render);
-                        window->render = 0;
-
-                        break;
+                        window->previous->next = window->next;
                     }
+
+                    if (window->next)
+                    {
+                        window->next->previous = window->previous;
+                    }
+
+                    if (ide_state.first_window == window)
+                    {
+                        ide_state.first_window = window->next;
+                    }
+
+                    if (ide_state.last_window == window)
+                    {
+                        ide_state.last_window = window->previous;
+                    }
+
+                    ui_state_deinitialize(window->ui);
+                    window->ui = 0;
+                    rendering_window_deinitialize(ide_state.rendering, window->render);
+                    window->render = 0;
+
+                    break;
                 }
             }
-            break; case WM_EVENT_TEXT_INPUT:
-            {
-                string_print(S8("User wrote \"{S8}\"\n"), event->text);
-            }
-            break; default:
-            {
-            }
-            break; case WM_EVENT_COUNT: BUSTER_UNREACHABLE();
+        }
+        break;
+        case WM_EVENT_TEXT_INPUT:
+        {
+            string_print(S8("User wrote \"{S8}\"\n"), event->text);
+        }
+        break;
+        default:
+        {
+        }
+        break;
+        case WM_EVENT_COUNT:
+            BUSTER_UNREACHABLE();
         }
     }
 
@@ -434,7 +416,7 @@ bool frame(void)
 
         ui_top_bar();
         ui_push(child_layout_axis, AXIS2_X);
-        UI_Box* workspace_widget = ui_box_make_format((UI_BoxFlags) {0}, S8("workspace{u64}"), window->wm);
+        UI_Box* workspace_widget = ui_box_make_format((UI_BoxFlags){0}, S8("workspace{u64}"), window->wm);
         ui_push(parent, workspace_widget);
         {
             // Node visualizer
@@ -443,14 +425,14 @@ bool frame(void)
 
             ui_push(parent, node_visualizer_widget);
             {
-                ui_node((UI_Node) {
+                ui_node((UI_Node){
                     .name = S8("a"),
                     .type = S8("s32"),
                     .value = S8("1"),
                     .name_space = S8("foo"),
                     .function = S8("main"),
                 });
-                ui_node((UI_Node) {
+                ui_node((UI_Node){
                     .name = S8("b"),
                     .type = S8("s32"),
                     .value = S8("2"),
@@ -554,10 +536,10 @@ BUSTER_GLOBAL_LOCAL u32 machine_size_to_int(MachineSize size)
 typedef struct MachineOperandFlags MachineOperandFlags;
 struct MachineOperandFlags
 {
-    u8 def:1;
-    u8 use:1;
-    u8 implicit:1;
-    u8 reserved:5;
+    u8 def : 1;
+    u8 use : 1;
+    u8 implicit : 1;
+    u8 reserved : 5;
 };
 
 enum RegisterBase
@@ -734,15 +716,16 @@ BUSTER_GLOBAL_LOCAL OperandValue new_virtual_register(FunctionISel* isel, Regist
         .physical = physical_not_assigned,
         .size = size,
     };
-    return (OperandValue){ .index = index };
+    return (OperandValue){.index = index};
 }
 
-BUSTER_GLOBAL_LOCAL void instruction_new_virtual_register(FunctionISel* isel, MachineInstruction* i, RegisterClassX86_64 register_class, MachineSize size, u8 index)
+BUSTER_GLOBAL_LOCAL void instruction_new_virtual_register(FunctionISel* isel, MachineInstruction* i, RegisterClassX86_64 register_class, MachineSize size,
+                                                          u8 index)
 {
     OperandValue virtual_register = new_virtual_register(isel, register_class, size);
     i->operand_values[index] = virtual_register;
     i->operand_ids[index] = MACHINE_OPERAND_VIRTUAL_REGISTER;
-    i->operand_flags[index] = (MachineOperandFlags){ .def = 1 };
+    i->operand_flags[index] = (MachineOperandFlags){.def = 1};
 }
 
 BUSTER_GLOBAL_LOCAL MachineInstruction mov_imm(FunctionISel* isel, u64 immediate, MachineSize size)
@@ -751,12 +734,12 @@ BUSTER_GLOBAL_LOCAL MachineInstruction mov_imm(FunctionISel* isel, u64 immediate
     MachineInstruction i = {0};
 
     instruction_new_virtual_register(isel, &i, REGISTER_CLASS_GPR, size, 0);
-    
+
     bool is_zero = immediate == 0;
 
     if (!is_zero)
     {
-        i.operand_values[1] = (OperandValue){ .integer = immediate };
+        i.operand_values[1] = (OperandValue){.integer = immediate};
         i.operand_ids[1] = MACHINE_OPERAND_IMMEDIATE;
     }
 
@@ -770,14 +753,14 @@ BUSTER_GLOBAL_LOCAL MachineInstruction copy(FunctionISel* isel, PhysicalRegister
     BUSTER_UNUSED(isel);
 
     MachineInstruction i = {0};
-    
-    i.operand_values[0] = (OperandValue){ .index = (u64)physical_register };
-    i.operand_ids[0] = MACHINE_OPERAND_PHYSICAL_REGISTER;
-    i.operand_flags[0] = (MachineOperandFlags){ .def = 1 };
 
-    i.operand_values[1] = (OperandValue){ .index = virtual_register };
+    i.operand_values[0] = (OperandValue){.index = (u64)physical_register};
+    i.operand_ids[0] = MACHINE_OPERAND_PHYSICAL_REGISTER;
+    i.operand_flags[0] = (MachineOperandFlags){.def = 1};
+
+    i.operand_values[1] = (OperandValue){.index = virtual_register};
     i.operand_ids[1] = MACHINE_OPERAND_VIRTUAL_REGISTER;
-    i.operand_flags[1] = (MachineOperandFlags){ .use = 1 };
+    i.operand_flags[1] = (MachineOperandFlags){.use = 1};
 
     i.id = (MachineInstructionId)((u64)size + (u64)(MACHINE_INSTRUCTION_COPY_08));
 
@@ -789,10 +772,10 @@ BUSTER_GLOBAL_LOCAL MachineInstruction ret(FunctionISel* isel, PhysicalRegisterX
     BUSTER_UNUSED(isel);
 
     MachineInstruction i = {0};
-    
-    i.operand_values[0] = (OperandValue){ .index = (u64)physical_register };
+
+    i.operand_values[0] = (OperandValue){.index = (u64)physical_register};
     i.operand_ids[0] = MACHINE_OPERAND_PHYSICAL_REGISTER;
-    i.operand_flags[0] = (MachineOperandFlags){ .use = 1, .implicit = 1 };
+    i.operand_flags[0] = (MachineOperandFlags){.use = 1, .implicit = 1};
 
     i.id = (MachineInstructionId)((u64)size + (u64)(MACHINE_INSTRUCTION_RET_08));
 
@@ -803,13 +786,13 @@ BUSTER_GLOBAL_LOCAL MachineInstruction consume_spill(PhysicalRegisterX8664 physi
 {
     MachineInstruction i = {0};
 
-    i.operand_values[0] = (OperandValue){ .index = (u64)physical_register };
+    i.operand_values[0] = (OperandValue){.index = (u64)physical_register};
     i.operand_ids[0] = MACHINE_OPERAND_PHYSICAL_REGISTER;
-    i.operand_flags[0] = (MachineOperandFlags){ .def = 1 };
+    i.operand_flags[0] = (MachineOperandFlags){.def = 1};
 
-    i.operand_values[1] = (OperandValue){ .memory = { .offset = offset, .base = REGISTER_BASE_BASE_POINTER } };
+    i.operand_values[1] = (OperandValue){.memory = {.offset = offset, .base = REGISTER_BASE_BASE_POINTER}};
     i.operand_ids[1] = MACHINE_OPERAND_MEMORY;
-    i.operand_flags[1] = (MachineOperandFlags){ .use = 1 };
+    i.operand_flags[1] = (MachineOperandFlags){.use = 1};
 
     i.id = (MachineInstructionId)((u64)MACHINE_INSTRUCTION_LOAD_08 + (u64)size);
 
@@ -820,13 +803,13 @@ BUSTER_GLOBAL_LOCAL MachineInstruction produce_spill(s32 offset, PhysicalRegiste
 {
     MachineInstruction i = {0};
 
-    i.operand_values[0] = (OperandValue){ .memory = { .offset = offset, .base = REGISTER_BASE_BASE_POINTER } };
+    i.operand_values[0] = (OperandValue){.memory = {.offset = offset, .base = REGISTER_BASE_BASE_POINTER}};
     i.operand_ids[0] = MACHINE_OPERAND_MEMORY;
-    i.operand_flags[0] = (MachineOperandFlags){ .def = 1 };
+    i.operand_flags[0] = (MachineOperandFlags){.def = 1};
 
-    i.operand_values[1] = (OperandValue){ .index = (u64)physical_register };
+    i.operand_values[1] = (OperandValue){.index = (u64)physical_register};
     i.operand_ids[1] = MACHINE_OPERAND_PHYSICAL_REGISTER;
-    i.operand_flags[1] = (MachineOperandFlags){ .use = 1 };
+    i.operand_flags[1] = (MachineOperandFlags){.use = 1};
 
     i.id = (MachineInstructionId)((u64)MACHINE_INSTRUCTION_STORE_08 + (u64)size);
 
@@ -847,13 +830,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
         if (r)
         {
             ide_state.first_window = ide_state.last_window = arena_allocate(arena, IdeWindow, 1);
-            WmWindowHandle* wm_window = wm_window_create(windowing, (WmWindowCreate) {
-                    .name = S8("Ide"),
-                    .size = {
-                    .width = 1600,
-                    .height= 900,
-                    },
-                    });
+            WmWindowHandle* wm_window = wm_window_create(windowing, (WmWindowCreate){
+                                                                        .name = S8("Ide"),
+                                                                        .size =
+                                                                            {
+                                                                                .width = 1600,
+                                                                                .height = 900,
+                                                                            },
+                                                                    });
             ide_state.first_window->wm = wm_window;
 
             if (wm_window)
@@ -953,19 +937,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_benchmarks(void)
     Arena* arena = arena_create((ArenaCreation){0});
 
     ParserBenchResult parse_result = parser_parse_bench(arena, 200);
-    string_print(S8("BENCH parse_all_tests iterations={u64} files={u64} min_ns={u64} median_ns={u64}\n"),
-            parse_result.iterations, parse_result.file_count, parse_result.min_ns, parse_result.median_ns);
+    string_print(S8("BENCH parse_all_tests iterations={u64} files={u64} min_ns={u64} median_ns={u64}\n"), parse_result.iterations, parse_result.file_count,
+                 parse_result.min_ns, parse_result.median_ns);
 
 #if BUSTER_INSTRUMENT
-    string_print(S8("BENCH_PHASE tokenize min_ns={u64} median_ns={u64}\n"),
-            parse_result.tokenize_min_ns, parse_result.tokenize_median_ns);
-    string_print(S8("BENCH_PHASE parse min_ns={u64} median_ns={u64}\n"),
-            parse_result.parse_min_ns, parse_result.parse_median_ns);
+    string_print(S8("BENCH_PHASE tokenize min_ns={u64} median_ns={u64}\n"), parse_result.tokenize_min_ns, parse_result.tokenize_median_ns);
+    string_print(S8("BENCH_PHASE parse min_ns={u64} median_ns={u64}\n"), parse_result.parse_min_ns, parse_result.parse_median_ns);
     for (u64 i = 0; i < parse_result.file_count; i += 1)
     {
         ParserBenchFileResult file_result = parse_result.files[i];
-        string_print(S8("BENCH_FILE path={S8} min_ns={u64} median_ns={u64}\n"),
-                file_result.path, file_result.min_ns, file_result.median_ns);
+        string_print(S8("BENCH_FILE path={S8} min_ns={u64} median_ns={u64}\n"), file_result.path, file_result.min_ns, file_result.median_ns);
     }
 #endif
 
@@ -979,7 +960,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
     if (ide_state.test)
     {
         Arena* arena = arena_create((ArenaCreation){0});
-        UnitTestArguments arguments = { arena, &default_show };
+        UnitTestArguments arguments = {arena, &default_show};
 
         u64 position = arena->position;
         BatchTestResult batch_test_result = library_tests(&arguments);
@@ -1005,16 +986,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
 
 BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
 {
-    Arena* arena = arena_create(
-        (ArenaCreation){
-            .reserved_size = BUSTER_GB(1),
-        });
+    Arena* arena = arena_create((ArenaCreation){
+        .reserved_size = BUSTER_GB(1),
+    });
     if (!arena)
     {
         return PROCESS_RESULT_FAILED;
     }
-    String8 output_path =
-        ide_state.compile_output_path;
+    String8 output_path = ide_state.compile_output_path;
     if (!output_path.length)
     {
 #if BUSTER_WINDOWS
@@ -1023,32 +1002,21 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
         output_path = S8("a.out");
 #endif
     }
-    CompilerDriverResult compile =
-        compiler_driver_compile(
-            arena,
-            (CompilerDriverOptions){
-                .source_path =
-                    ide_state.compile_source_path,
-                .output_path = output_path,
-                .module_root =
-                    ide_state.compile_module_root,
-                .target = target_native,
-            });
+    CompilerDriverResult compile = compiler_driver_compile(arena, (CompilerDriverOptions){
+                                                                      .source_path = ide_state.compile_source_path,
+                                                                      .output_path = output_path,
+                                                                      .module_root = ide_state.compile_module_root,
+                                                                      .target = target_native,
+                                                                  });
     ProcessResult result = PROCESS_RESULT_SUCCESS;
-    if (compile.error !=
-        COMPILER_DRIVER_ERROR_NONE)
+    if (compile.error != COMPILER_DRIVER_ERROR_NONE)
     {
-        string_print(
-            S8("compile failed: {S8}\n"),
-            compile.diagnostic);
+        string_print(S8("compile failed: {S8}\n"), compile.diagnostic);
         result = PROCESS_RESULT_FAILED;
     }
     else
     {
-        string_print(
-            S8("compiled {S8} -> {S8}\n"),
-            ide_state.compile_source_path,
-            output_path);
+        string_print(S8("compiled {S8} -> {S8}\n"), ide_state.compile_source_path, output_path);
     }
     arena_destroy(arena, 1);
     return result;
@@ -1056,68 +1024,39 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
 
 BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 {
-    Arena* arena = arena_create(
-        (ArenaCreation){
-            // A unity translation unit retains preprocessing, binding,
-            // typed IR, and object data through the driver call. This is
-            // virtual address space; pages are committed on demand.
-            .reserved_size = BUSTER_GB(4),
-        });
+    Arena* arena = arena_create((ArenaCreation){
+        // A unity translation unit retains preprocessing, binding,
+        // typed IR, and object data through the driver call. This is
+        // virtual address space; pages are committed on demand.
+        .reserved_size = BUSTER_GB(4),
+    });
     if (!arena)
     {
         return PROCESS_RESULT_FAILED;
     }
-    CompilerDriverInvocation invocation =
-        compiler_driver_parse_arguments(
-            arena,
-            ide_state.cc_arguments);
-    CompilerDriverResult compile =
-        compiler_driver_execute_invocation(
-            arena,
-            invocation);
+    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, ide_state.cc_arguments);
+    CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
-    if (compile.error !=
-        COMPILER_DRIVER_ERROR_NONE)
+    if (compile.error != COMPILER_DRIVER_ERROR_NONE)
     {
-        string_print(
-            S8("cc: error: {S8}\n"),
-            compile.diagnostic);
+        string_print(S8("cc: error: {S8}\n"), compile.diagnostic);
         result = PROCESS_RESULT_FAILED;
     }
     else if (!invocation.output_path.length)
     {
         string_print(S8("{S8}"), compile.output);
     }
-    if (compile.error ==
-            COMPILER_DRIVER_ERROR_NONE &&
-        invocation.verbose &&
-        compile.codegen_statistics.function_count)
+    if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose && compile.codegen_statistics.function_count)
     {
-        string_print(
-            S8("CODEGEN cpu={S8} vector_bits={u32} functions={u32} instructions={u64} values={u64} stack_value_bytes={u64} stack_frame_bytes={u64} max_stack_frame_bytes={u32} code_bytes={u64} forwarded_wide_vector_loads={u64} native_vector_operations={u64} split_vector_operations={u64} vzeroupper={u64}\n"),
-            cpu_model_to_string_os(
-                invocation.target.cpu_model),
-            target_vector_register_size(
-                invocation.target) * 8,
-            compile.codegen_statistics.function_count,
-            compile.codegen_statistics.
-                instruction_count,
-            compile.codegen_statistics.value_count,
-            compile.codegen_statistics.
-                stack_value_bytes,
-            compile.codegen_statistics.
-                stack_frame_bytes,
-            compile.codegen_statistics.
-                maximum_stack_frame_bytes,
-            compile.codegen_statistics.code_bytes,
-            compile.codegen_statistics.
-                forwarded_wide_vector_load_count,
-            compile.codegen_statistics.
-                native_vector_operation_count,
-            compile.codegen_statistics.
-                split_vector_operation_count,
-            compile.codegen_statistics.
-                vzeroupper_count);
+        string_print(S8("CODEGEN cpu={S8} vector_bits={u32} functions={u32} instructions={u64} values={u64} stack_value_bytes={u64} stack_frame_bytes={u64} "
+                        "max_stack_frame_bytes={u32} code_bytes={u64} forwarded_wide_vector_loads={u64} native_vector_operations={u64} "
+                        "split_vector_operations={u64} vzeroupper={u64}\n"),
+                     cpu_model_to_string_os(invocation.target.cpu_model), target_vector_register_size(invocation.target) * 8,
+                     compile.codegen_statistics.function_count, compile.codegen_statistics.instruction_count, compile.codegen_statistics.value_count,
+                     compile.codegen_statistics.stack_value_bytes, compile.codegen_statistics.stack_frame_bytes,
+                     compile.codegen_statistics.maximum_stack_frame_bytes, compile.codegen_statistics.code_bytes,
+                     compile.codegen_statistics.forwarded_wide_vector_load_count, compile.codegen_statistics.native_vector_operation_count,
+                     compile.codegen_statistics.split_vector_operation_count, compile.codegen_statistics.vzeroupper_count);
     }
     arena_destroy(arena, 1);
     return result;

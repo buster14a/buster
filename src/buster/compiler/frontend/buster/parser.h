@@ -119,10 +119,7 @@ enum
 
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 token_length_get(Token* restrict token)
 {
-    u32 result =
-        ((u32)token->length_bytes[0] << 0) |
-        ((u32)token->length_bytes[1] << 8) |
-        ((u32)token->length_bytes[2] << 16);
+    u32 result = ((u32)token->length_bytes[0] << 0) | ((u32)token->length_bytes[1] << 8) | ((u32)token->length_bytes[2] << 16);
     return result;
 }
 

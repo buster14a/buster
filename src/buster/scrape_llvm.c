@@ -143,35 +143,35 @@ STRUCT(ScrapeLlvmLoweringCostSpec)
 static ScrapeLlvmLoweringCostSpec scrape_llvm_lowering_cost_specs[] = {
     {
         .lowering_name = S8("X86_SELECTOR_LOWERING_XOR_ZERO_GPR32"),
-        .instruction_names = { S8("XOR32rr") },
+        .instruction_names = {S8("XOR32rr")},
         .instruction_name_count = 1,
     },
     {
         .lowering_name = S8("X86_SELECTOR_LOWERING_MOV_IMMEDIATE_GPR"),
-        .instruction_names = { S8("MOV64ri"), S8("MOV64ri32") },
+        .instruction_names = {S8("MOV64ri"), S8("MOV64ri32")},
         .instruction_name_count = 2,
-        .schedule_write_names = { S8("WriteMove") },
+        .schedule_write_names = {S8("WriteMove")},
         .schedule_write_name_count = 1,
     },
     {
         .lowering_name = S8("X86_SELECTOR_LOWERING_MOV_REGISTER_GPR"),
-        .instruction_names = { S8("MOV64rr") },
+        .instruction_names = {S8("MOV64rr")},
         .instruction_name_count = 1,
-        .schedule_write_names = { S8("WriteMove") },
+        .schedule_write_names = {S8("WriteMove")},
         .schedule_write_name_count = 1,
     },
     {
         .lowering_name = S8("X86_SELECTOR_LOWERING_ADD_REGISTER_GPR"),
-        .instruction_names = { S8("ADD64rr") },
+        .instruction_names = {S8("ADD64rr")},
         .instruction_name_count = 1,
-        .schedule_write_names = { S8("WriteALU") },
+        .schedule_write_names = {S8("WriteALU")},
         .schedule_write_name_count = 1,
     },
     {
         .lowering_name = S8("X86_SELECTOR_LOWERING_ADD_IMMEDIATE_GPR"),
-        .instruction_names = { S8("ADD64ri8"), S8("ADD64ri32") },
+        .instruction_names = {S8("ADD64ri8"), S8("ADD64ri32")},
         .instruction_name_count = 2,
-        .schedule_write_names = { S8("WriteALU") },
+        .schedule_write_names = {S8("WriteALU")},
         .schedule_write_name_count = 1,
     },
 };
@@ -203,14 +203,8 @@ STRUCT(ScrapeLlvmProgramState)
     u8 reserved[6];
 };
 
-ENUM(ScrapeLlvmJsonKind,
-    SCRAPE_LLVM_JSON_KIND_NULL,
-    SCRAPE_LLVM_JSON_KIND_BOOL,
-    SCRAPE_LLVM_JSON_KIND_INTEGER,
-    SCRAPE_LLVM_JSON_KIND_STRING,
-    SCRAPE_LLVM_JSON_KIND_ARRAY,
-    SCRAPE_LLVM_JSON_KIND_OBJECT,
-);
+ENUM(ScrapeLlvmJsonKind, SCRAPE_LLVM_JSON_KIND_NULL, SCRAPE_LLVM_JSON_KIND_BOOL, SCRAPE_LLVM_JSON_KIND_INTEGER, SCRAPE_LLVM_JSON_KIND_STRING,
+     SCRAPE_LLVM_JSON_KIND_ARRAY, SCRAPE_LLVM_JSON_KIND_OBJECT, );
 
 STRUCT(ScrapeLlvmJsonValue);
 
@@ -283,12 +277,8 @@ BUSTER_IMPL ProgramState* program_state = &scrape_llvm_program_state.general_pro
 BUSTER_GLOBAL_LOCAL bool scrape_llvm_ascii_is_space(u8 character);
 BUSTER_GLOBAL_LOCAL bool scrape_llvm_ascii_is_digit(u8 character);
 BUSTER_GLOBAL_LOCAL String8 scrape_llvm_name_string8(char const* text);
-BUSTER_GLOBAL_LOCAL void scrape_llvm_add_instruction_schedule(ScrapeLlvmDatabase* database,
-                                                              u32 model_index,
-                                                              String8 instruction_name,
-                                                              String8 schedule_write_name,
-                                                              String8* read_advance_names,
-                                                              u32 read_advance_count);
+BUSTER_GLOBAL_LOCAL void scrape_llvm_add_instruction_schedule(ScrapeLlvmDatabase* database, u32 model_index, String8 instruction_name,
+                                                              String8 schedule_write_name, String8* read_advance_names, u32 read_advance_count);
 
 BUSTER_GLOBAL_LOCAL StringOs scrape_llvm_default_tblgen_path()
 {
@@ -319,7 +309,7 @@ BUSTER_GLOBAL_LOCAL ScrapeLlvmJsonValue* scrape_llvm_json_parse_value(ScrapeLlvm
 
 BUSTER_GLOBAL_LOCAL String8 scrape_llvm_json_parse_string(ScrapeLlvmJsonParser* parser)
 {
-    String8 result = { 0 };
+    String8 result = {0};
 
     if (parser->cursor < parser->text.length && parser->text.pointer[parser->cursor] == '"')
     {
@@ -365,15 +355,33 @@ BUSTER_GLOBAL_LOCAL String8 scrape_llvm_json_parse_string(ScrapeLlvmJsonParser* 
                         u8 escaped = parser->text.pointer[read_index];
                         switch (escaped)
                         {
-                            case '"': buffer[write_index] = '"'; break;
-                            case '\\': buffer[write_index] = '\\'; break;
-                            case '/': buffer[write_index] = '/'; break;
-                            case 'b': buffer[write_index] = '\b'; break;
-                            case 'f': buffer[write_index] = '\f'; break;
-                            case 'n': buffer[write_index] = '\n'; break;
-                            case 'r': buffer[write_index] = '\r'; break;
-                            case 't': buffer[write_index] = '\t'; break;
-                            default: buffer[write_index] = (char8)escaped; break;
+                        case '"':
+                            buffer[write_index] = '"';
+                            break;
+                        case '\\':
+                            buffer[write_index] = '\\';
+                            break;
+                        case '/':
+                            buffer[write_index] = '/';
+                            break;
+                        case 'b':
+                            buffer[write_index] = '\b';
+                            break;
+                        case 'f':
+                            buffer[write_index] = '\f';
+                            break;
+                        case 'n':
+                            buffer[write_index] = '\n';
+                            break;
+                        case 'r':
+                            buffer[write_index] = '\r';
+                            break;
+                        case 't':
+                            buffer[write_index] = '\t';
+                            break;
+                        default:
+                            buffer[write_index] = (char8)escaped;
+                            break;
                         }
                     }
                     else
@@ -583,7 +591,7 @@ BUSTER_GLOBAL_LOCAL ScrapeLlvmJsonValue* scrape_llvm_json_array_at(ScrapeLlvmJso
 
 BUSTER_GLOBAL_LOCAL String8 scrape_llvm_json_string(ScrapeLlvmJsonValue* value)
 {
-    String8 result = { 0 };
+    String8 result = {0};
     if (value && value->kind == SCRAPE_LLVM_JSON_KIND_STRING)
     {
         result = value->string_value;
@@ -603,7 +611,7 @@ BUSTER_GLOBAL_LOCAL s64 scrape_llvm_json_integer(ScrapeLlvmJsonValue* value, s64
 
 BUSTER_GLOBAL_LOCAL String8 scrape_llvm_json_def_name(ScrapeLlvmJsonValue* value)
 {
-    String8 result = { 0 };
+    String8 result = {0};
     if (value && value->kind == SCRAPE_LLVM_JSON_KIND_OBJECT)
     {
         result = scrape_llvm_json_string(scrape_llvm_json_object_find(value, S8("def")));
@@ -613,7 +621,7 @@ BUSTER_GLOBAL_LOCAL String8 scrape_llvm_json_def_name(ScrapeLlvmJsonValue* value
 
 BUSTER_GLOBAL_LOCAL ScrapeLlvmRecordMap scrape_llvm_build_record_map(Arena* arena, ScrapeLlvmJsonValue* root)
 {
-    ScrapeLlvmRecordMap result = { 0 };
+    ScrapeLlvmRecordMap result = {0};
     if (root && root->kind == SCRAPE_LLVM_JSON_KIND_OBJECT)
     {
         u32 capacity = 1;
@@ -690,7 +698,7 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_json_array_collect_def_names(ScrapeLlvmJson
 
 BUSTER_GLOBAL_LOCAL ByteSlice scrape_llvm_run_tblgen_dump_json(Arena* arena, StringOs llvm_root, StringOs llvm_tblgen_path)
 {
-    ByteSlice result = { 0 };
+    ByteSlice result = {0};
 
     StringOs x86_td_parts[] = {
         llvm_root,
@@ -715,19 +723,12 @@ BUSTER_GLOBAL_LOCAL ByteSlice scrape_llvm_run_tblgen_dump_json(Arena* arena, Str
     StringOs include_target_path = string_os_join_arena(arena, (StringOsSlice)BUSTER_ARRAY_TO_SLICE(include_target_parts), true);
 
     StringOs arguments[] = {
-        llvm_tblgen_path,
-        S8("--dump-json"),
-        S8("-I"),
-        include_x86_path,
-        S8("-I"),
-        include_llvm_path,
-        S8("-I"),
-        include_target_path,
-        x86_td_path,
+        llvm_tblgen_path, S8("--dump-json"), S8("-I"), include_x86_path, S8("-I"), include_llvm_path, S8("-I"), include_target_path, x86_td_path,
     };
 
     StringOsList argv = string_os_list_create_from(arena, (StringOsSlice)BUSTER_ARRAY_TO_SLICE(arguments));
-    ProcessSpawnResult spawn = os_process_spawn(llvm_tblgen_path, argv, program_state->input.envp, (ProcessSpawnOptions){ .capture = ((1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR)) });
+    ProcessSpawnResult spawn = os_process_spawn(llvm_tblgen_path, argv, program_state->input.envp,
+                                                (ProcessSpawnOptions){.capture = ((1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR))});
     ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
     if (wait.result == PROCESS_RESULT_SUCCESS)
     {
@@ -742,12 +743,8 @@ BUSTER_GLOBAL_LOCAL ByteSlice scrape_llvm_run_tblgen_dump_json(Arena* arena, Str
 }
 
 #if !defined(_WIN32)
-BUSTER_GLOBAL_LOCAL void scrape_llvm_add_instruction_schedules_for_regex(ScrapeLlvmDatabase* database,
-                                                                         u32 model_index,
-                                                                         String8 pattern,
-                                                                         String8 schedule_write_name,
-                                                                         String8* read_advance_names,
-                                                                         u32 read_advance_count)
+BUSTER_GLOBAL_LOCAL void scrape_llvm_add_instruction_schedules_for_regex(ScrapeLlvmDatabase* database, u32 model_index, String8 pattern,
+                                                                         String8 schedule_write_name, String8* read_advance_names, u32 read_advance_count)
 {
     char8* regex_text = arena_allocate(thread_arena(), char8, pattern.length + 3);
     regex_text[0] = '^';
@@ -755,7 +752,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_add_instruction_schedules_for_regex(ScrapeL
     regex_text[pattern.length + 1] = '$';
     regex_text[pattern.length + 2] = 0;
 
-    regex_t compiled = { 0 };
+    regex_t compiled = {0};
     if (regcomp(&compiled, (char const*)regex_text, REG_EXTENDED | REG_NOSUB) == 0)
     {
         for (u32 instruction_i = 0; instruction_i < database->instruction_count; instruction_i += 1)
@@ -773,22 +770,14 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_add_instruction_schedules_for_regex(ScrapeL
 
 BUSTER_GLOBAL_LOCAL bool scrape_llvm_ascii_is_space(u8 character)
 {
-    bool result = character == ' ' ||
-                  character == '\t' ||
-                  character == '\n' ||
-                  character == '\r' ||
-                  character == '\v' ||
-                  character == '\f';
+    bool result = character == ' ' || character == '\t' || character == '\n' || character == '\r' || character == '\v' || character == '\f';
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool scrape_llvm_ascii_is_identifier(u8 character)
 {
-    bool result = (character >= 'a' && character <= 'z') ||
-                  (character >= 'A' && character <= 'Z') ||
-                  (character >= '0' && character <= '9') ||
-                  character == '_' ||
-                  character == '.';
+    bool result = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') ||
+                  character == '_' || character == '.';
     return result;
 }
 
@@ -908,7 +897,7 @@ BUSTER_GLOBAL_LOCAL u32 scrape_llvm_find_read_advance_index(ScrapeLlvmDatabase* 
 
 BUSTER_GLOBAL_LOCAL String8 scrape_llvm_first_identifier(String8 text)
 {
-    String8 result = { 0 };
+    String8 result = {0};
     u64 index = 0;
     while (index < text.length && !scrape_llvm_ascii_is_identifier(text.pointer[index]))
     {
@@ -931,7 +920,7 @@ BUSTER_GLOBAL_LOCAL String8 scrape_llvm_first_identifier(String8 text)
 
 BUSTER_GLOBAL_LOCAL String8 scrape_llvm_next_identifier_or_sign(String8 text, u64* in_out_cursor)
 {
-    String8 result = { 0 };
+    String8 result = {0};
     u64 index = *in_out_cursor;
     while (index < text.length && !scrape_llvm_ascii_is_identifier_or_sign(text.pointer[index]))
     {
@@ -955,7 +944,7 @@ BUSTER_GLOBAL_LOCAL String8 scrape_llvm_next_identifier_or_sign(String8 text, u6
 
 BUSTER_GLOBAL_LOCAL String8 scrape_llvm_identifier_after_keyword(String8 line, String8 keyword)
 {
-    String8 result = { 0 };
+    String8 result = {0};
     u64 match = string8_first_sequence(line, keyword);
     if (match != BUSTER_STRING_NO_MATCH)
     {
@@ -1148,10 +1137,10 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_find_files_recursive(Arena* arena, StringOs
         }
 
         String8 entry_name = string8_from_pointer((char8*)entry->d_name);
-        StringOs parts[] = { directory, S8("/"), entry_name };
+        StringOs parts[] = {directory, S8("/"), entry_name};
         StringOs full_path = string_os_join_arena(arena, (StringOsSlice)BUSTER_ARRAY_TO_SLICE(parts), true);
 
-        struct stat stat_buffer = { 0 };
+        struct stat stat_buffer = {0};
         if (stat((char*)full_path.pointer, &stat_buffer) != 0)
         {
             continue;
@@ -1220,14 +1209,8 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_add_instruction(ScrapeLlvmDatabase* databas
     }
 }
 
-BUSTER_GLOBAL_LOCAL void scrape_llvm_add_processor_resource(ScrapeLlvmDatabase* database,
-                                                            u32 model_index,
-                                                            String8 name,
-                                                            bool is_group,
-                                                            u32 units,
-                                                            u32 buffer_size,
-                                                            String8* member_names,
-                                                            u32 member_count)
+BUSTER_GLOBAL_LOCAL void scrape_llvm_add_processor_resource(ScrapeLlvmDatabase* database, u32 model_index, String8 name, bool is_group, u32 units,
+                                                            u32 buffer_size, String8* member_names, u32 member_count)
 {
     if (name.length == 0 || model_index == 0xffffffffu)
     {
@@ -1279,17 +1262,9 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_add_read_advance(ScrapeLlvmDatabase* databa
     }
 }
 
-BUSTER_GLOBAL_LOCAL void scrape_llvm_add_schedule_write(ScrapeLlvmDatabase* database,
-                                                        u32 model_index,
-                                                        String8 name,
-                                                        u32 latency,
-                                                        u32 micro_op_count,
-                                                        bool has_metrics,
-                                                        bool is_variant,
-                                                        String8 primary_write_name,
-                                                        String8* resource_names,
-                                                        u32* release_cycles,
-                                                        u32 resource_name_count)
+BUSTER_GLOBAL_LOCAL void scrape_llvm_add_schedule_write(ScrapeLlvmDatabase* database, u32 model_index, String8 name, u32 latency, u32 micro_op_count,
+                                                        bool has_metrics, bool is_variant, String8 primary_write_name, String8* resource_names,
+                                                        u32* release_cycles, u32 resource_name_count)
 {
     if (name.length == 0 || model_index == 0xffffffffu)
     {
@@ -1347,12 +1322,8 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_add_schedule_write(ScrapeLlvmDatabase* data
     }
 }
 
-BUSTER_GLOBAL_LOCAL void scrape_llvm_add_instruction_schedule(ScrapeLlvmDatabase* database,
-                                                              u32 model_index,
-                                                              String8 instruction_name,
-                                                              String8 schedule_write_name,
-                                                              String8* read_advance_names,
-                                                              u32 read_advance_count)
+BUSTER_GLOBAL_LOCAL void scrape_llvm_add_instruction_schedule(ScrapeLlvmDatabase* database, u32 model_index, String8 instruction_name,
+                                                              String8 schedule_write_name, String8* read_advance_names, u32 read_advance_count)
 {
     if (instruction_name.length == 0 || schedule_write_name.length == 0 || model_index == 0xffffffffu)
     {
@@ -1395,8 +1366,7 @@ BUSTER_GLOBAL_LOCAL u32 scrape_llvm_find_schedule_write_index_for_model(ScrapeLl
     for (u32 i = database->schedule_write_count; i > 0; i -= 1)
     {
         u32 index = i - 1;
-        if (database->schedule_writes[index].model_index == model_index &&
-            scrape_llvm_name_equals(database->schedule_writes[index].name, name))
+        if (database->schedule_writes[index].model_index == model_index && scrape_llvm_name_equals(database->schedule_writes[index].name, name))
         {
             result = index;
             break;
@@ -1417,7 +1387,7 @@ BUSTER_GLOBAL_LOCAL ScrapeLlvmScheduleWrite* scrape_llvm_schedule_write_by_index
 
 BUSTER_GLOBAL_LOCAL ScrapeLlvmResolvedCost scrape_llvm_resolve_schedule_write_index(ScrapeLlvmDatabase* database, u32 schedule_write_index)
 {
-    ScrapeLlvmResolvedCost result = { 0 };
+    ScrapeLlvmResolvedCost result = {0};
     ScrapeLlvmScheduleWrite* write = scrape_llvm_schedule_write_by_index(database, schedule_write_index);
     if (write)
     {
@@ -1458,7 +1428,7 @@ BUSTER_GLOBAL_LOCAL ScrapeLlvmResolvedCost scrape_llvm_resolve_schedule_write_in
 
 BUSTER_GLOBAL_LOCAL ScrapeLlvmResolvedCost scrape_llvm_find_instruction_cost_for_model(ScrapeLlvmDatabase* database, u32 model_index, String8 instruction_name)
 {
-    ScrapeLlvmResolvedCost result = { 0 };
+    ScrapeLlvmResolvedCost result = {0};
     for (u32 i = database->instruction_schedule_count; i > 0; i -= 1)
     {
         u32 index = i - 1;
@@ -1482,9 +1452,10 @@ BUSTER_GLOBAL_LOCAL ScrapeLlvmResolvedCost scrape_llvm_find_instruction_cost_for
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ScrapeLlvmResolvedCost scrape_llvm_find_schedule_write_cost_for_model(ScrapeLlvmDatabase* database, u32 model_index, String8 schedule_write_name)
+BUSTER_GLOBAL_LOCAL ScrapeLlvmResolvedCost scrape_llvm_find_schedule_write_cost_for_model(ScrapeLlvmDatabase* database, u32 model_index,
+                                                                                          String8 schedule_write_name)
 {
-    ScrapeLlvmResolvedCost result = { 0 };
+    ScrapeLlvmResolvedCost result = {0};
     for (u32 i = database->schedule_write_count; i > 0; i -= 1)
     {
         u32 index = i - 1;
@@ -1500,7 +1471,7 @@ BUSTER_GLOBAL_LOCAL ScrapeLlvmResolvedCost scrape_llvm_find_schedule_write_cost_
 
 BUSTER_GLOBAL_LOCAL ScrapeLlvmResolvedCost scrape_llvm_resolve_lowering_cost(ScrapeLlvmDatabase* database, ScrapeLlvmLoweringCostSpec spec)
 {
-    ScrapeLlvmResolvedCost result = { 0 };
+    ScrapeLlvmResolvedCost result = {0};
     u32 preferred_model_index = scrape_llvm_find_processor_model_index(database, scrape_llvm_preferred_model_name());
 
     for (u32 instruction_i = 0; !result.has_metrics && instruction_i < spec.instruction_name_count; instruction_i += 1)
@@ -1549,7 +1520,8 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_instructions(ScrapeLlvmDataba
     }
 }
 
-BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_processor_models(ScrapeLlvmDatabase* database, ScrapeLlvmJsonValue* instanceof_value, ScrapeLlvmRecordMap record_map)
+BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_processor_models(ScrapeLlvmDatabase* database, ScrapeLlvmJsonValue* instanceof_value,
+                                                                    ScrapeLlvmRecordMap record_map)
 {
     ScrapeLlvmJsonValue* model_names = scrape_llvm_json_object_find(instanceof_value, S8("SchedMachineModel"));
     if (model_names && model_names->kind == SCRAPE_LLVM_JSON_KIND_ARRAY)
@@ -1563,20 +1535,24 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_processor_models(ScrapeLlvmDa
             {
                 ScrapeLlvmProcessorModel* model = &database->processor_models[model_index];
                 model->issue_width = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("IssueWidth")), 0), 0);
-                model->micro_op_buffer_size = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("MicroOpBufferSize")), 0), 0);
-                model->loop_micro_op_buffer_size = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("LoopMicroOpBufferSize")), 0), 0);
+                model->micro_op_buffer_size =
+                    (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("MicroOpBufferSize")), 0), 0);
+                model->loop_micro_op_buffer_size =
+                    (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("LoopMicroOpBufferSize")), 0), 0);
                 model->load_latency = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("LoadLatency")), 0), 0);
                 model->vector_load_latency = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("VecLoadLatency")), 0), 0);
                 model->store_latency = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("StoreLatency")), 0), 0);
                 model->high_latency = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("HighLatency")), 0), 0);
-                model->mispredict_penalty = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("MispredictPenalty")), 0), 0);
+                model->mispredict_penalty =
+                    (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("MispredictPenalty")), 0), 0);
                 model->complete_model = scrape_llvm_json_integer(scrape_llvm_json_object_find(model_record, S8("CompleteModel")), 0) != 0;
             }
         }
     }
 }
 
-BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_processor_resources(ScrapeLlvmDatabase* database, ScrapeLlvmJsonValue* instanceof_value, ScrapeLlvmRecordMap record_map)
+BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_processor_resources(ScrapeLlvmDatabase* database, ScrapeLlvmJsonValue* instanceof_value,
+                                                                       ScrapeLlvmRecordMap record_map)
 {
     String8 class_names[] = {
         S8("ProcResource"),
@@ -1597,17 +1573,14 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_processor_resources(ScrapeLlv
                 u32 units = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(resource_record, S8("NumUnits")), 0), 0);
                 s64 buffer_size_signed = scrape_llvm_json_integer(scrape_llvm_json_object_find(resource_record, S8("BufferSize")), 0);
                 u32 buffer_size = (u32)BUSTER_MAX(buffer_size_signed, 0);
-                String8 member_names[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_GROUP] = { 0 };
+                String8 member_names[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_GROUP] = {0};
                 u32 member_count = 0;
                 bool is_group = string_equal(class_names[class_i], S8("ProcResGroup"));
 
                 if (is_group)
                 {
-                    scrape_llvm_json_array_collect_def_names(
-                        scrape_llvm_json_object_find(resource_record, S8("Resources")),
-                        member_names,
-                        BUSTER_ARRAY_LENGTH(member_names),
-                        &member_count);
+                    scrape_llvm_json_array_collect_def_names(scrape_llvm_json_object_find(resource_record, S8("Resources")), member_names,
+                                                             BUSTER_ARRAY_LENGTH(member_names), &member_count);
                 }
 
                 scrape_llvm_add_processor_resource(database, model_index, resource_name, is_group, units, buffer_size, member_names, member_count);
@@ -1616,7 +1589,8 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_processor_resources(ScrapeLlv
     }
 }
 
-BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_read_advances(ScrapeLlvmDatabase* database, ScrapeLlvmJsonValue* instanceof_value, ScrapeLlvmRecordMap record_map)
+BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_read_advances(ScrapeLlvmDatabase* database, ScrapeLlvmJsonValue* instanceof_value,
+                                                                 ScrapeLlvmRecordMap record_map)
 {
     ScrapeLlvmJsonValue* read_advance_names = scrape_llvm_json_object_find(instanceof_value, S8("ReadAdvance"));
     if (read_advance_names && read_advance_names->kind == SCRAPE_LLVM_JSON_KIND_ARRAY)
@@ -1636,7 +1610,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_read_advances(ScrapeLlvmDatab
 
 BUSTER_GLOBAL_LOCAL String8 scrape_llvm_tblgen_resolve_variant_primary_write(ScrapeLlvmRecordMap record_map, ScrapeLlvmJsonValue* variant_record)
 {
-    String8 result = { 0 };
+    String8 result = {0};
     ScrapeLlvmJsonValue* variants = scrape_llvm_json_object_find(variant_record, S8("Variants"));
     if (variants && variants->kind == SCRAPE_LLVM_JSON_KIND_ARRAY)
     {
@@ -1646,7 +1620,7 @@ BUSTER_GLOBAL_LOCAL String8 scrape_llvm_tblgen_resolve_variant_primary_write(Scr
             ScrapeLlvmJsonValue* sched_var_record = scrape_llvm_record_map_find(record_map, variant_name);
             String8 predicate_name = scrape_llvm_json_def_name(scrape_llvm_json_object_find(sched_var_record, S8("Predicate")));
             ScrapeLlvmJsonValue* selected = scrape_llvm_json_object_find(sched_var_record, S8("Selected"));
-            String8 selected_name = { 0 };
+            String8 selected_name = {0};
             if (selected && selected->kind == SCRAPE_LLVM_JSON_KIND_ARRAY && selected->array_value.first)
             {
                 selected_name = scrape_llvm_json_def_name(selected->array_value.first->value);
@@ -1665,7 +1639,8 @@ BUSTER_GLOBAL_LOCAL String8 scrape_llvm_tblgen_resolve_variant_primary_write(Scr
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_schedule_writes(ScrapeLlvmDatabase* database, ScrapeLlvmJsonValue* instanceof_value, ScrapeLlvmRecordMap record_map)
+BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_schedule_writes(ScrapeLlvmDatabase* database, ScrapeLlvmJsonValue* instanceof_value,
+                                                                   ScrapeLlvmRecordMap record_map)
 {
     u32 preferred_model_index = scrape_llvm_find_processor_model_index(database, scrape_llvm_preferred_model_name());
     ScrapeLlvmJsonValue* write_res_names = scrape_llvm_json_object_find(instanceof_value, S8("SchedWriteRes"));
@@ -1679,29 +1654,26 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_schedule_writes(ScrapeLlvmDat
             u32 model_index = scrape_llvm_find_processor_model_index(database, model_name);
             u32 latency = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(write_record, S8("Latency")), 0), 0);
             u32 micro_op_count = (u32)BUSTER_MAX(scrape_llvm_json_integer(scrape_llvm_json_object_find(write_record, S8("NumMicroOps")), 0), 0);
-            String8 resource_names[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = { 0 };
-            u32 release_cycles[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = { 0 };
+            String8 resource_names[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = {0};
+            u32 release_cycles[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = {0};
             u32 resource_name_count = 0;
 
-            scrape_llvm_json_array_collect_def_names(
-                scrape_llvm_json_object_find(write_record, S8("ProcResources")),
-                resource_names,
-                BUSTER_ARRAY_LENGTH(resource_names),
-                &resource_name_count);
+            scrape_llvm_json_array_collect_def_names(scrape_llvm_json_object_find(write_record, S8("ProcResources")), resource_names,
+                                                     BUSTER_ARRAY_LENGTH(resource_names), &resource_name_count);
 
             ScrapeLlvmJsonValue* release_at_cycles = scrape_llvm_json_object_find(write_record, S8("ReleaseAtCycles"));
             if (release_at_cycles && release_at_cycles->kind == SCRAPE_LLVM_JSON_KIND_ARRAY)
             {
                 u32 release_i = 0;
-                for (ScrapeLlvmJsonArrayItem* release_item = release_at_cycles->array_value.first;
-                     release_item && release_i < resource_name_count;
+                for (ScrapeLlvmJsonArrayItem* release_item = release_at_cycles->array_value.first; release_item && release_i < resource_name_count;
                      release_item = release_item->next, release_i += 1)
                 {
                     release_cycles[release_i] = (u32)BUSTER_MAX(scrape_llvm_json_integer(release_item->value, 0), 0);
                 }
             }
 
-            scrape_llvm_add_schedule_write(database, model_index, write_name, latency, micro_op_count, latency != 0 || micro_op_count != 0, false, (String8){ 0 }, resource_names, release_cycles, resource_name_count);
+            scrape_llvm_add_schedule_write(database, model_index, write_name, latency, micro_op_count, latency != 0 || micro_op_count != 0, false, (String8){0},
+                                           resource_names, release_cycles, resource_name_count);
         }
     }
 
@@ -1727,7 +1699,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_schedule_writes(ScrapeLlvmDat
             String8 write_name = scrape_llvm_json_string(item->value);
             ScrapeLlvmJsonValue* write_record = scrape_llvm_record_map_find(record_map, write_name);
             ScrapeLlvmJsonValue* writes = scrape_llvm_json_object_find(write_record, S8("Writes"));
-            String8 primary_write_name = { 0 };
+            String8 primary_write_name = {0};
             if (writes && writes->kind == SCRAPE_LLVM_JSON_KIND_ARRAY && writes->array_value.first)
             {
                 primary_write_name = scrape_llvm_json_def_name(writes->array_value.first->value);
@@ -1740,7 +1712,8 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_schedule_writes(ScrapeLlvmDat
     }
 }
 
-BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_instrw_entries(ScrapeLlvmDatabase* database, ScrapeLlvmJsonValue* instanceof_value, ScrapeLlvmRecordMap record_map)
+BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_instrw_entries(ScrapeLlvmDatabase* database, ScrapeLlvmJsonValue* instanceof_value,
+                                                                  ScrapeLlvmRecordMap record_map)
 {
     ScrapeLlvmJsonValue* instrw_names = scrape_llvm_json_object_find(instanceof_value, S8("InstRW"));
     if (instrw_names && instrw_names->kind == SCRAPE_LLVM_JSON_KIND_ARRAY)
@@ -1751,16 +1724,13 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_instrw_entries(ScrapeLlvmData
             ScrapeLlvmJsonValue* instrw_record = scrape_llvm_record_map_find(record_map, instrw_name);
             String8 model_name = scrape_llvm_json_def_name(scrape_llvm_json_object_find(instrw_record, S8("SchedModel")));
             u32 model_index = scrape_llvm_find_processor_model_index(database, model_name);
-            String8 list_names[1 + SCRAPE_LLVM_MAX_READ_ADVANCE_COUNT_PER_SCHEDULE] = { 0 };
+            String8 list_names[1 + SCRAPE_LLVM_MAX_READ_ADVANCE_COUNT_PER_SCHEDULE] = {0};
             u32 list_name_count = 0;
-            scrape_llvm_json_array_collect_def_names(
-                scrape_llvm_json_object_find(instrw_record, S8("OperandReadWrites")),
-                list_names,
-                BUSTER_ARRAY_LENGTH(list_names),
-                &list_name_count);
+            scrape_llvm_json_array_collect_def_names(scrape_llvm_json_object_find(instrw_record, S8("OperandReadWrites")), list_names,
+                                                     BUSTER_ARRAY_LENGTH(list_names), &list_name_count);
 
-            String8 schedule_write_name = list_name_count > 0 ? list_names[0] : (String8){ 0 };
-            String8 read_advance_names[SCRAPE_LLVM_MAX_READ_ADVANCE_COUNT_PER_SCHEDULE] = { 0 };
+            String8 schedule_write_name = list_name_count > 0 ? list_names[0] : (String8){0};
+            String8 read_advance_names[SCRAPE_LLVM_MAX_READ_ADVANCE_COUNT_PER_SCHEDULE] = {0};
             u32 read_advance_count = 0;
             for (u32 list_name_i = 1; list_name_i < list_name_count && read_advance_count < BUSTER_ARRAY_LENGTH(read_advance_names); list_name_i += 1)
             {
@@ -1779,14 +1749,15 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_instrw_entries(ScrapeLlvmData
                     for (ScrapeLlvmJsonArrayItem* arg_item = args->array_value.first; arg_item; arg_item = arg_item->next)
                     {
                         ScrapeLlvmJsonValue* arg_pair = arg_item->value;
-                        String8 instruction_name = { 0 };
+                        String8 instruction_name = {0};
                         if (arg_pair && arg_pair->kind == SCRAPE_LLVM_JSON_KIND_ARRAY)
                         {
                             instruction_name = scrape_llvm_json_def_name(scrape_llvm_json_array_at(arg_pair, 0));
                         }
                         if (instruction_name.length > 0)
                         {
-                            scrape_llvm_add_instruction_schedule(database, model_index, instruction_name, schedule_write_name, read_advance_names, read_advance_count);
+                            scrape_llvm_add_instruction_schedule(database, model_index, instruction_name, schedule_write_name, read_advance_names,
+                                                                 read_advance_count);
                         }
                     }
                 }
@@ -1796,14 +1767,15 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_import_tblgen_instrw_entries(ScrapeLlvmData
                     for (ScrapeLlvmJsonArrayItem* arg_item = args->array_value.first; arg_item; arg_item = arg_item->next)
                     {
                         ScrapeLlvmJsonValue* arg_pair = arg_item->value;
-                        String8 regex_pattern = { 0 };
+                        String8 regex_pattern = {0};
                         if (arg_pair && arg_pair->kind == SCRAPE_LLVM_JSON_KIND_ARRAY)
                         {
                             regex_pattern = scrape_llvm_json_string(scrape_llvm_json_array_at(arg_pair, 0));
                         }
                         if (regex_pattern.length > 0)
                         {
-                            scrape_llvm_add_instruction_schedules_for_regex(database, model_index, regex_pattern, schedule_write_name, read_advance_names, read_advance_count);
+                            scrape_llvm_add_instruction_schedules_for_regex(database, model_index, regex_pattern, schedule_write_name, read_advance_names,
+                                                                            read_advance_count);
                         }
                     }
                 }
@@ -1889,13 +1861,12 @@ BUSTER_GLOBAL_LOCAL u32 scrape_llvm_collect_identifiers(String8 text, String8* o
 
 BUSTER_GLOBAL_LOCAL String8 scrape_llvm_first_model_name_in_file(String8 text)
 {
-    String8 result = { 0 };
+    String8 result = {0};
     u64 match = string8_first_sequence(text, S8("let SchedModel = "));
     if (match != BUSTER_STRING_NO_MATCH)
     {
-        String8 remainder = string8_from_pointer_length(
-            text.pointer + match + BUSTER_COMPILE_TIME_STRING_LENGTH("let SchedModel = "),
-            text.length - match - BUSTER_COMPILE_TIME_STRING_LENGTH("let SchedModel = "));
+        String8 remainder = string8_from_pointer_length(text.pointer + match + BUSTER_COMPILE_TIME_STRING_LENGTH("let SchedModel = "),
+                                                        text.length - match - BUSTER_COMPILE_TIME_STRING_LENGTH("let SchedModel = "));
         result = scrape_llvm_first_identifier(remainder);
     }
     return result;
@@ -1958,15 +1929,24 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_model_defs(ScrapeLlvmDatabase* databa
         String8 segment = string8_from_pointer_length(text.pointer + block_start, block_end - block_start + 1);
         ScrapeLlvmProcessorModel* model = &database->processor_models[model_index];
         u32 value = 0;
-        if (scrape_llvm_extract_u32_after(segment, S8("IssueWidth = "), &value)) model->issue_width = value;
-        if (scrape_llvm_extract_u32_after(segment, S8("MicroOpBufferSize = "), &value)) model->micro_op_buffer_size = value;
-        if (scrape_llvm_extract_u32_after(segment, S8("LoopMicroOpBufferSize = "), &value)) model->loop_micro_op_buffer_size = value;
-        if (scrape_llvm_extract_u32_after(segment, S8("LoadLatency = "), &value)) model->load_latency = value;
-        if (scrape_llvm_extract_u32_after(segment, S8("VecLoadLatency = "), &value)) model->vector_load_latency = value;
-        if (scrape_llvm_extract_u32_after(segment, S8("StoreLatency = "), &value)) model->store_latency = value;
-        if (scrape_llvm_extract_u32_after(segment, S8("HighLatency = "), &value)) model->high_latency = value;
-        if (scrape_llvm_extract_u32_after(segment, S8("MispredictPenalty = "), &value)) model->mispredict_penalty = value;
-        if (scrape_llvm_extract_u32_after(segment, S8("CompleteModel = "), &value)) model->complete_model = value != 0;
+        if (scrape_llvm_extract_u32_after(segment, S8("IssueWidth = "), &value))
+            model->issue_width = value;
+        if (scrape_llvm_extract_u32_after(segment, S8("MicroOpBufferSize = "), &value))
+            model->micro_op_buffer_size = value;
+        if (scrape_llvm_extract_u32_after(segment, S8("LoopMicroOpBufferSize = "), &value))
+            model->loop_micro_op_buffer_size = value;
+        if (scrape_llvm_extract_u32_after(segment, S8("LoadLatency = "), &value))
+            model->load_latency = value;
+        if (scrape_llvm_extract_u32_after(segment, S8("VecLoadLatency = "), &value))
+            model->vector_load_latency = value;
+        if (scrape_llvm_extract_u32_after(segment, S8("StoreLatency = "), &value))
+            model->store_latency = value;
+        if (scrape_llvm_extract_u32_after(segment, S8("HighLatency = "), &value))
+            model->high_latency = value;
+        if (scrape_llvm_extract_u32_after(segment, S8("MispredictPenalty = "), &value))
+            model->mispredict_penalty = value;
+        if (scrape_llvm_extract_u32_after(segment, S8("CompleteModel = "), &value))
+            model->complete_model = value != 0;
 
         cursor = block_end + 1;
     }
@@ -2024,7 +2004,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_processor_resources(ScrapeLlvmDatabas
 
         u32 units = 0;
         u32 buffer_size = 0;
-        String8 member_names[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_GROUP] = { 0 };
+        String8 member_names[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_GROUP] = {0};
         u32 member_count = 0;
         if (is_group)
         {
@@ -2116,7 +2096,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedwrite_defs(ScrapeLlvmDatabase* d
         }
 
         String8 prefix = string8_from_pointer_length(text.pointer + line_start, global_match - line_start);
-        String8 name = { 0 };
+        String8 name = {0};
         if (string8_first_sequence(prefix, S8("def ")) != BUSTER_STRING_NO_MATCH)
         {
             name = scrape_llvm_identifier_after_keyword(prefix, S8("def "));
@@ -2156,11 +2136,11 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedwrite_defs(ScrapeLlvmDatabase* d
         bool has_metrics = false;
         has_metrics |= scrape_llvm_extract_u32_after(segment, S8("Latency = "), &latency);
         has_metrics |= scrape_llvm_extract_u32_after(segment, S8("NumMicroOps = "), &micro_op_count);
-        String8 resource_names[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = { 0 };
-        u32 release_cycles[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = { 0 };
+        String8 resource_names[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = {0};
+        u32 release_cycles[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = {0};
         u32 resource_name_count = 0;
 
-        String8 primary_write_name = { 0 };
+        String8 primary_write_name = {0};
         if (is_variant)
         {
             u64 first_bracket = string8_first_sequence(segment, S8("["));
@@ -2205,7 +2185,8 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedwrite_defs(ScrapeLlvmDatabase* d
             }
         }
 
-        scrape_llvm_add_schedule_write(database, model_index, name, latency, micro_op_count, has_metrics, is_variant, primary_write_name, resource_names, release_cycles, resource_name_count);
+        scrape_llvm_add_schedule_write(database, model_index, name, latency, micro_op_count, has_metrics, is_variant, primary_write_name, resource_names,
+                                       release_cycles, resource_name_count);
         cursor = global_match + 1;
     }
 
@@ -2226,7 +2207,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedwrite_defs(ScrapeLlvmDatabase* d
             String8 named_write = scrape_llvm_identifier_after_keyword(trimmed, S8("defm "));
             if (string8_starts_with_sequence(named_write, S8("Write")))
             {
-                scrape_llvm_add_schedule_write(database, model_index, named_write, 0, 0, false, false, (String8){ 0 }, 0, 0, 0);
+                scrape_llvm_add_schedule_write(database, model_index, named_write, 0, 0, false, false, (String8){0}, 0, 0, 0);
             }
             else if (string8_starts_with_sequence(trimmed, S8("defm :")))
             {
@@ -2238,7 +2219,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedwrite_defs(ScrapeLlvmDatabase* d
                     String8 write_name = scrape_llvm_first_identifier(args);
                     if (string8_starts_with_sequence(write_name, S8("Write")))
                     {
-                        u32 numbers[8] = { 0 };
+                        u32 numbers[8] = {0};
                         u32 number_count = 0;
                         for (u64 char_i = 0; char_i < args.length && number_count < BUSTER_ARRAY_LENGTH(numbers); char_i += 1)
                         {
@@ -2258,7 +2239,8 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedwrite_defs(ScrapeLlvmDatabase* d
                         u32 parsed_latency = number_count >= 1 ? numbers[0] : 0;
                         u32 parsed_micro_op_count = number_count >= 2 ? numbers[number_count - 1] : 0;
                         bool parsed_has_metrics = number_count >= 2;
-                        scrape_llvm_add_schedule_write(database, model_index, write_name, parsed_latency, parsed_micro_op_count, parsed_has_metrics, false, (String8){ 0 }, 0, 0, 0);
+                        scrape_llvm_add_schedule_write(database, model_index, write_name, parsed_latency, parsed_micro_op_count, parsed_has_metrics, false,
+                                                       (String8){0}, 0, 0, 0);
                     }
                 }
             }
@@ -2271,10 +2253,10 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedwrite_defs(ScrapeLlvmDatabase* d
             if (angle_start != BUSTER_STRING_NO_MATCH && angle_end != BUSTER_STRING_NO_MATCH && angle_end > angle_start)
             {
                 String8 args = string8_from_pointer_length(trimmed.pointer + angle_start + 1, angle_end - angle_start - 1);
-                String8 fields[8] = { 0 };
+                String8 fields[8] = {0};
                 u32 field_count = scrape_llvm_collect_identifiers(args, fields, BUSTER_ARRAY_LENGTH(fields));
-                String8 resource_names[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = { 0 };
-                u32 release_cycles[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = { 0 };
+                String8 resource_names[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = {0};
+                u32 release_cycles[SCRAPE_LLVM_MAX_RESOURCE_NAME_COUNT_PER_WRITE] = {0};
                 u32 resource_name_count = 0;
                 u32 parsed_latency = 0;
                 u32 parsed_micro_op_count = 0;
@@ -2292,7 +2274,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedwrite_defs(ScrapeLlvmDatabase* d
                         }
                     }
 
-                    u32 numbers[32] = { 0 };
+                    u32 numbers[32] = {0};
                     u32 number_count = 0;
                     for (u64 args_i = 0; args_i < args.length && number_count < BUSTER_ARRAY_LENGTH(numbers); args_i += 1)
                     {
@@ -2319,7 +2301,8 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedwrite_defs(ScrapeLlvmDatabase* d
                         }
                     }
 
-                    scrape_llvm_add_schedule_write(database, model_index, fields[0], parsed_latency, parsed_micro_op_count, parsed_has_metrics, false, (String8){ 0 }, resource_names, release_cycles, resource_name_count);
+                    scrape_llvm_add_schedule_write(database, model_index, fields[0], parsed_latency, parsed_micro_op_count, parsed_has_metrics, false,
+                                                   (String8){0}, resource_names, release_cycles, resource_name_count);
                 }
             }
         }
@@ -2353,10 +2336,10 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_instrw_entries(ScrapeLlvmDatabase* da
         }
 
         String8 write_list = string8_from_pointer_length(text.pointer + write_start, write_end - write_start);
-        String8 list_names[1 + SCRAPE_LLVM_MAX_READ_ADVANCE_COUNT_PER_SCHEDULE] = { 0 };
+        String8 list_names[1 + SCRAPE_LLVM_MAX_READ_ADVANCE_COUNT_PER_SCHEDULE] = {0};
         u32 list_name_count = scrape_llvm_collect_identifiers(write_list, list_names, BUSTER_ARRAY_LENGTH(list_names));
-        String8 schedule_write_name = list_name_count > 0 ? list_names[0] : (String8){ 0 };
-        String8 read_advance_names[SCRAPE_LLVM_MAX_READ_ADVANCE_COUNT_PER_SCHEDULE] = { 0 };
+        String8 schedule_write_name = list_name_count > 0 ? list_names[0] : (String8){0};
+        String8 read_advance_names[SCRAPE_LLVM_MAX_READ_ADVANCE_COUNT_PER_SCHEDULE] = {0};
         u32 read_advance_count = 0;
         for (u32 list_name_i = 1; list_name_i < list_name_count && read_advance_count < BUSTER_ARRAY_LENGTH(read_advance_names); list_name_i += 1)
         {
@@ -2396,7 +2379,7 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_instrw_entries(ScrapeLlvmDatabase* da
 
 BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedrw_contexts(ScrapeLlvmDatabase* database, String8 text, u32 model_index)
 {
-    char inherited_writes[SCRAPE_LLVM_SCOPE_DEPTH][SCRAPE_LLVM_NAME_CAPACITY] = { 0 };
+    char inherited_writes[SCRAPE_LLVM_SCOPE_DEPTH][SCRAPE_LLVM_NAME_CAPACITY] = {0};
     u32 depth = 0;
     u64 cursor = 0;
 
@@ -2415,11 +2398,12 @@ BUSTER_GLOBAL_LOCAL void scrape_llvm_parse_schedrw_contexts(ScrapeLlvmDatabase* 
         if (string8_starts_with_sequence(trimmed, S8("def ")))
         {
             String8 instruction_name = scrape_llvm_identifier_after_keyword(trimmed, S8("def "));
-            String8 explicit_sched = { 0 };
+            String8 explicit_sched = {0};
             u64 sched_start = string8_first_sequence(trimmed, S8("Sched<["));
             if (sched_start != BUSTER_STRING_NO_MATCH)
             {
-                String8 sched_text = string8_from_pointer_length(trimmed.pointer + sched_start + BUSTER_COMPILE_TIME_STRING_LENGTH("Sched<["), trimmed.length - sched_start - BUSTER_COMPILE_TIME_STRING_LENGTH("Sched<["));
+                String8 sched_text = string8_from_pointer_length(trimmed.pointer + sched_start + BUSTER_COMPILE_TIME_STRING_LENGTH("Sched<["),
+                                                                 trimmed.length - sched_start - BUSTER_COMPILE_TIME_STRING_LENGTH("Sched<["));
                 explicit_sched = scrape_llvm_first_identifier(sched_text);
             }
 
@@ -2530,7 +2514,7 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_string(OsFileDescriptor* file, String
 BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_format(OsFileDescriptor* file, String8 format, ...)
 {
     char8 buffer[4096];
-    String8 buffer_slice = { .pointer = buffer, .length = sizeof(buffer) - 1 };
+    String8 buffer_slice = {.pointer = buffer, .length = sizeof(buffer) - 1};
     va_list variable_arguments;
     va_start(variable_arguments, format);
     StringFormatResult format_result = string8_format_va(buffer_slice, format, variable_arguments);
@@ -2553,7 +2537,7 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_c_string_literal(OsFileDescriptor* fi
         u8 character = text.pointer[i];
         if (character == '\\' || character == '"')
         {
-            char8 escaped[] = { '\\', (char8)character };
+            char8 escaped[] = {'\\', (char8)character};
             result = scrape_llvm_write_string(file, string8_from_pointer_length(escaped, 2));
         }
         else if (character == '\n')
@@ -2570,7 +2554,7 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_c_string_literal(OsFileDescriptor* fi
         }
         else
         {
-            char8 plain[] = { (char8)character };
+            char8 plain[] = {(char8)character};
             result = scrape_llvm_write_string(file, string8_from_pointer_length(plain, 1));
         }
     }
@@ -2616,9 +2600,7 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_identifier_suffix(OsFileDescriptor* f
     {
         u8 character = text.pointer[i];
         char8 output = '_';
-        if ((character >= 'a' && character <= 'z') ||
-            (character >= 'A' && character <= 'Z') ||
-            (character >= '0' && character <= '9'))
+        if ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9'))
         {
             output = (char8)character;
         }
@@ -2748,11 +2730,9 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_schedule_write_id(OsFileDescriptor* f
 
 BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path, ScrapeLlvmDatabase* database)
 {
-    u32 scheduled_instruction_indices[SCRAPE_LLVM_MAX_INSTRUCTION_SCHEDULE_COUNT] = { 0 };
-    u32 scheduled_instruction_count = scrape_llvm_collect_unique_scheduled_instruction_indices(
-        database,
-        scheduled_instruction_indices,
-        BUSTER_ARRAY_LENGTH(scheduled_instruction_indices));
+    u32 scheduled_instruction_indices[SCRAPE_LLVM_MAX_INSTRUCTION_SCHEDULE_COUNT] = {0};
+    u32 scheduled_instruction_count =
+        scrape_llvm_collect_unique_scheduled_instruction_indices(database, scheduled_instruction_indices, BUSTER_ARRAY_LENGTH(scheduled_instruction_indices));
     u32 preferred_model_index = scrape_llvm_find_processor_model_index(database, scrape_llvm_preferred_model_name());
     u32 processor_resource_member_count = 0;
     u32 schedule_write_resource_usage_count = 0;
@@ -2771,7 +2751,7 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         instruction_schedule_read_advance_index_count += database->instruction_schedules[schedule_i].read_advance_count;
     }
 
-    OsFileDescriptor* file = os_file_open(output_path, (OpenFlags){ .write = 1, .create = 1, .truncate = 1 }, (OpenPermissions){ .read = 1, .write = 1 });
+    OsFileDescriptor* file = os_file_open(output_path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
     bool result = file != 0;
 
     if (result)
@@ -2786,16 +2766,23 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         result = result && scrape_llvm_write_string(file, S8("    u8 reserved[3];\n"));
         result = result && scrape_llvm_write_string(file, S8("};\n\n"));
         result = result && scrape_llvm_write_string(file, S8("STRUCT(X86SelectorLlvmProcessorModel)\n{\n"));
-        result = result && scrape_llvm_write_string(file, S8("    u32 issue_width;\n    u32 micro_op_buffer_size;\n    u32 loop_micro_op_buffer_size;\n    u32 load_latency;\n    u32 vector_load_latency;\n    u32 store_latency;\n    u32 high_latency;\n    u32 mispredict_penalty;\n    bool complete_model;\n    u8 reserved[3];\n};\n\n"));
+        result = result && scrape_llvm_write_string(file, S8("    u32 issue_width;\n    u32 micro_op_buffer_size;\n    u32 loop_micro_op_buffer_size;\n    u32 "
+                                                             "load_latency;\n    u32 vector_load_latency;\n    u32 store_latency;\n    u32 high_latency;\n    "
+                                                             "u32 mispredict_penalty;\n    bool complete_model;\n    u8 reserved[3];\n};\n\n"));
         result = result && scrape_llvm_write_string(file, S8("STRUCT(X86SelectorLlvmProcessorResource)\n{\n"));
-        result = result && scrape_llvm_write_string(file, S8("    u32 processor_model_id;\n    u32 units;\n    u32 buffer_size;\n    u32 member_index_start;\n    u16 member_count;\n    bool is_group;\n    u8 reserved;\n};\n\n"));
+        result = result && scrape_llvm_write_string(file, S8("    u32 processor_model_id;\n    u32 units;\n    u32 buffer_size;\n    u32 member_index_start;\n "
+                                                             "   u16 member_count;\n    bool is_group;\n    u8 reserved;\n};\n\n"));
         result = result && scrape_llvm_write_string(file, S8("STRUCT(X86SelectorLlvmProcessorResourceMember)\n{\n    u32 processor_resource_id;\n};\n\n"));
         result = result && scrape_llvm_write_string(file, S8("STRUCT(X86SelectorLlvmReadAdvance)\n{\n    u32 processor_model_id;\n    s32 cycles;\n};\n\n"));
-        result = result && scrape_llvm_write_string(file, S8("STRUCT(X86SelectorLlvmWriteResourceUsage)\n{\n    u32 processor_resource_id;\n    u32 release_at_cycle;\n};\n\n"));
+        result = result && scrape_llvm_write_string(
+                               file, S8("STRUCT(X86SelectorLlvmWriteResourceUsage)\n{\n    u32 processor_resource_id;\n    u32 release_at_cycle;\n};\n\n"));
         result = result && scrape_llvm_write_string(file, S8("STRUCT(X86SelectorLlvmScheduleWrite)\n{\n"));
-        result = result && scrape_llvm_write_string(file, S8("    u32 processor_model_id;\n    u32 primary_write_index;\n    u32 resource_usage_start;\n    u16 resource_usage_count;\n    bool is_variant;\n    u8 reserved;\n    X86SelectorLlvmCost cost;\n};\n\n"));
+        result = result &&
+                 scrape_llvm_write_string(file, S8("    u32 processor_model_id;\n    u32 primary_write_index;\n    u32 resource_usage_start;\n    u16 "
+                                                   "resource_usage_count;\n    bool is_variant;\n    u8 reserved;\n    X86SelectorLlvmCost cost;\n};\n\n"));
         result = result && scrape_llvm_write_string(file, S8("STRUCT(X86SelectorLlvmInstructionSchedule)\n{\n"));
-        result = result && scrape_llvm_write_string(file, S8("    u32 processor_model_id;\n    u32 instruction_id;\n    u32 schedule_write_id;\n    u32 read_advance_index_start;\n    u16 read_advance_index_count;\n    u16 reserved;\n};\n\n"));
+        result = result && scrape_llvm_write_string(file, S8("    u32 processor_model_id;\n    u32 instruction_id;\n    u32 schedule_write_id;\n    u32 "
+                                                             "read_advance_index_start;\n    u16 read_advance_index_count;\n    u16 reserved;\n};\n\n"));
         result = result && scrape_llvm_write_string(file, S8("typedef X86SelectorLlvmCost X86SelectorLlvmLoweringCost;\n\n"));
     }
 
@@ -2826,7 +2813,9 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_processor_model_names) == X86_SELECTOR_LLVM_PROCESSOR_MODEL_COUNT);\n\n"));
+        result = result &&
+                 scrape_llvm_write_string(
+                     file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_processor_model_names) == X86_SELECTOR_LLVM_PROCESSOR_MODEL_COUNT);\n\n"));
         result = result && scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmProcessorModel x86_selector_llvm_processor_models[] = {\n"));
     }
     for (u32 model_i = 0; result && model_i < database->processor_model_count; model_i += 1)
@@ -2835,21 +2824,32 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         result = result && scrape_llvm_write_string(file, S8("    ["));
         result = result && scrape_llvm_write_processor_model_id(file, database, model_i);
         result = result && scrape_llvm_write_string(file, S8("] = {"));
-        if (model->issue_width) result = result && scrape_llvm_write_format(file, S8(" .issue_width = {u32},"), model->issue_width);
-        if (model->micro_op_buffer_size) result = result && scrape_llvm_write_format(file, S8(" .micro_op_buffer_size = {u32},"), model->micro_op_buffer_size);
-        if (model->loop_micro_op_buffer_size) result = result && scrape_llvm_write_format(file, S8(" .loop_micro_op_buffer_size = {u32},"), model->loop_micro_op_buffer_size);
-        if (model->load_latency) result = result && scrape_llvm_write_format(file, S8(" .load_latency = {u32},"), model->load_latency);
-        if (model->vector_load_latency) result = result && scrape_llvm_write_format(file, S8(" .vector_load_latency = {u32},"), model->vector_load_latency);
-        if (model->store_latency) result = result && scrape_llvm_write_format(file, S8(" .store_latency = {u32},"), model->store_latency);
-        if (model->high_latency) result = result && scrape_llvm_write_format(file, S8(" .high_latency = {u32},"), model->high_latency);
-        if (model->mispredict_penalty) result = result && scrape_llvm_write_format(file, S8(" .mispredict_penalty = {u32},"), model->mispredict_penalty);
-        if (model->complete_model) result = result && scrape_llvm_write_string(file, S8(" .complete_model = true,"));
+        if (model->issue_width)
+            result = result && scrape_llvm_write_format(file, S8(" .issue_width = {u32},"), model->issue_width);
+        if (model->micro_op_buffer_size)
+            result = result && scrape_llvm_write_format(file, S8(" .micro_op_buffer_size = {u32},"), model->micro_op_buffer_size);
+        if (model->loop_micro_op_buffer_size)
+            result = result && scrape_llvm_write_format(file, S8(" .loop_micro_op_buffer_size = {u32},"), model->loop_micro_op_buffer_size);
+        if (model->load_latency)
+            result = result && scrape_llvm_write_format(file, S8(" .load_latency = {u32},"), model->load_latency);
+        if (model->vector_load_latency)
+            result = result && scrape_llvm_write_format(file, S8(" .vector_load_latency = {u32},"), model->vector_load_latency);
+        if (model->store_latency)
+            result = result && scrape_llvm_write_format(file, S8(" .store_latency = {u32},"), model->store_latency);
+        if (model->high_latency)
+            result = result && scrape_llvm_write_format(file, S8(" .high_latency = {u32},"), model->high_latency);
+        if (model->mispredict_penalty)
+            result = result && scrape_llvm_write_format(file, S8(" .mispredict_penalty = {u32},"), model->mispredict_penalty);
+        if (model->complete_model)
+            result = result && scrape_llvm_write_string(file, S8(" .complete_model = true,"));
         result = result && scrape_llvm_write_string(file, S8(" },\n"));
     }
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_processor_models) == X86_SELECTOR_LLVM_PROCESSOR_MODEL_COUNT);\n\n"));
+        result =
+            result && scrape_llvm_write_string(
+                          file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_processor_models) == X86_SELECTOR_LLVM_PROCESSOR_MODEL_COUNT);\n\n"));
     }
 
     if (result)
@@ -2879,8 +2879,12 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_processor_resource_names) == X86_SELECTOR_LLVM_PROCESSOR_RESOURCE_COUNT);\n\n"));
-        result = result && scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmProcessorResourceMember x86_selector_llvm_processor_resource_members[] = {\n"));
+        result =
+            result &&
+            scrape_llvm_write_string(
+                file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_processor_resource_names) == X86_SELECTOR_LLVM_PROCESSOR_RESOURCE_COUNT);\n\n"));
+        result = result && scrape_llvm_write_string(
+                               file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmProcessorResourceMember x86_selector_llvm_processor_resource_members[] = {\n"));
     }
     u32 member_cursor = 0;
     for (u32 resource_i = 0; result && resource_i < database->processor_resource_count; resource_i += 1)
@@ -2888,7 +2892,8 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         ScrapeLlvmProcessorResource* resource = &database->processor_resources[resource_i];
         for (u32 member_i = 0; result && member_i < resource->member_count; member_i += 1)
         {
-            u32 member_resource_index = scrape_llvm_find_processor_resource_index(database, resource->model_index, scrape_llvm_name_string8(resource->member_names[member_i]));
+            u32 member_resource_index =
+                scrape_llvm_find_processor_resource_index(database, resource->model_index, scrape_llvm_name_string8(resource->member_names[member_i]));
             result = result && scrape_llvm_write_string(file, S8("    ["));
             result = result && scrape_llvm_write_u32(file, member_cursor);
             result = result && scrape_llvm_write_string(file, S8("] = { .processor_resource_id = "));
@@ -2907,7 +2912,8 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n\n"));
-        result = result && scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmProcessorResource x86_selector_llvm_processor_resources[] = {\n"));
+        result =
+            result && scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmProcessorResource x86_selector_llvm_processor_resources[] = {\n"));
     }
     member_cursor = 0;
     for (u32 resource_i = 0; result && resource_i < database->processor_resource_count; resource_i += 1)
@@ -2917,17 +2923,24 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         result = result && scrape_llvm_write_processor_resource_id(file, database, resource_i);
         result = result && scrape_llvm_write_string(file, S8("] = { .processor_model_id = "));
         result = result && scrape_llvm_write_processor_model_id(file, database, resource->model_index);
-        if (resource->units) result = result && scrape_llvm_write_format(file, S8(", .units = {u32}"), resource->units);
-        if (resource->buffer_size) result = result && scrape_llvm_write_format(file, S8(", .buffer_size = {u32}"), resource->buffer_size);
-        if (resource->member_count) result = result && scrape_llvm_write_format(file, S8(", .member_index_start = {u32}, .member_count = {u32}"), member_cursor, resource->member_count);
-        if (resource->is_group) result = result && scrape_llvm_write_string(file, S8(", .is_group = true"));
+        if (resource->units)
+            result = result && scrape_llvm_write_format(file, S8(", .units = {u32}"), resource->units);
+        if (resource->buffer_size)
+            result = result && scrape_llvm_write_format(file, S8(", .buffer_size = {u32}"), resource->buffer_size);
+        if (resource->member_count)
+            result =
+                result && scrape_llvm_write_format(file, S8(", .member_index_start = {u32}, .member_count = {u32}"), member_cursor, resource->member_count);
+        if (resource->is_group)
+            result = result && scrape_llvm_write_string(file, S8(", .is_group = true"));
         result = result && scrape_llvm_write_string(file, S8(" },\n"));
         member_cursor += resource->member_count;
     }
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_processor_resources) == X86_SELECTOR_LLVM_PROCESSOR_RESOURCE_COUNT);\n\n"));
+        result = result &&
+                 scrape_llvm_write_string(
+                     file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_processor_resources) == X86_SELECTOR_LLVM_PROCESSOR_RESOURCE_COUNT);\n\n"));
     }
 
     if (result)
@@ -2957,7 +2970,9 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_read_advance_names) == X86_SELECTOR_LLVM_READ_ADVANCE_COUNT);\n\n"));
+        result =
+            result && scrape_llvm_write_string(
+                          file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_read_advance_names) == X86_SELECTOR_LLVM_READ_ADVANCE_COUNT);\n\n"));
         result = result && scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmReadAdvance x86_selector_llvm_read_advances[] = {\n"));
     }
     for (u32 read_advance_i = 0; result && read_advance_i < database->read_advance_count; read_advance_i += 1)
@@ -2974,7 +2989,8 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_read_advances) == X86_SELECTOR_LLVM_READ_ADVANCE_COUNT);\n\n"));
+        result = result && scrape_llvm_write_string(
+                               file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_read_advances) == X86_SELECTOR_LLVM_READ_ADVANCE_COUNT);\n\n"));
     }
 
     if (result)
@@ -3006,14 +3022,15 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_instruction_names) == X86_SELECTOR_LLVM_INSTRUCTION_COUNT);\n\n"));
+        result = result && scrape_llvm_write_string(
+                               file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_instruction_names) == X86_SELECTOR_LLVM_INSTRUCTION_COUNT);\n\n"));
         result = result && scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmCost x86_selector_llvm_instruction_costs[] = {\n"));
     }
     for (u32 instruction_i = 0; result && instruction_i < scheduled_instruction_count; instruction_i += 1)
     {
         ScrapeLlvmInstructionSchedule* instruction_schedule = &database->instruction_schedules[scheduled_instruction_indices[instruction_i]];
         String8 instruction_name = scrape_llvm_name_string8(instruction_schedule->instruction_name);
-        ScrapeLlvmResolvedCost cost = { 0 };
+        ScrapeLlvmResolvedCost cost = {0};
         if (preferred_model_index != 0xffffffffu)
         {
             cost = scrape_llvm_find_instruction_cost_for_model(database, preferred_model_index, instruction_name);
@@ -3028,15 +3045,19 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         result = result && scrape_llvm_write_string(file, S8("    ["));
         result = result && scrape_llvm_write_instruction_id(file, instruction_i, instruction_name);
         result = result && scrape_llvm_write_string(file, S8("] = {"));
-        if (cost.latency) result = result && scrape_llvm_write_format(file, S8(" .latency = {u32},"), cost.latency);
-        if (cost.micro_op_count) result = result && scrape_llvm_write_format(file, S8(" .micro_op_count = {u32},"), cost.micro_op_count);
-        if (cost.has_metrics) result = result && scrape_llvm_write_string(file, S8(" .has_metrics = true,"));
+        if (cost.latency)
+            result = result && scrape_llvm_write_format(file, S8(" .latency = {u32},"), cost.latency);
+        if (cost.micro_op_count)
+            result = result && scrape_llvm_write_format(file, S8(" .micro_op_count = {u32},"), cost.micro_op_count);
+        if (cost.has_metrics)
+            result = result && scrape_llvm_write_string(file, S8(" .has_metrics = true,"));
         result = result && scrape_llvm_write_string(file, S8(" },\n"));
     }
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_instruction_costs) == X86_SELECTOR_LLVM_INSTRUCTION_COUNT);\n\n"));
+        result = result && scrape_llvm_write_string(
+                               file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_instruction_costs) == X86_SELECTOR_LLVM_INSTRUCTION_COUNT);\n\n"));
     }
 
     if (result)
@@ -3068,7 +3089,9 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_schedule_write_names) == X86_SELECTOR_LLVM_SCHEDULE_WRITE_COUNT);\n\n"));
+        result = result &&
+                 scrape_llvm_write_string(
+                     file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_schedule_write_names) == X86_SELECTOR_LLVM_SCHEDULE_WRITE_COUNT);\n\n"));
         result = result && scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmCost x86_selector_llvm_schedule_write_costs[] = {\n"));
     }
     for (u32 write_i = 0; result && write_i < database->schedule_write_count; write_i += 1)
@@ -3078,16 +3101,22 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         result = result && scrape_llvm_write_string(file, S8("    ["));
         result = result && scrape_llvm_write_schedule_write_id(file, database, write_i, scrape_llvm_name_string8(write->name));
         result = result && scrape_llvm_write_string(file, S8("] = {"));
-        if (cost.latency) result = result && scrape_llvm_write_format(file, S8(" .latency = {u32},"), cost.latency);
-        if (cost.micro_op_count) result = result && scrape_llvm_write_format(file, S8(" .micro_op_count = {u32},"), cost.micro_op_count);
-        if (cost.has_metrics) result = result && scrape_llvm_write_string(file, S8(" .has_metrics = true,"));
+        if (cost.latency)
+            result = result && scrape_llvm_write_format(file, S8(" .latency = {u32},"), cost.latency);
+        if (cost.micro_op_count)
+            result = result && scrape_llvm_write_format(file, S8(" .micro_op_count = {u32},"), cost.micro_op_count);
+        if (cost.has_metrics)
+            result = result && scrape_llvm_write_string(file, S8(" .has_metrics = true,"));
         result = result && scrape_llvm_write_string(file, S8(" },\n"));
     }
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_schedule_write_costs) == X86_SELECTOR_LLVM_SCHEDULE_WRITE_COUNT);\n\n"));
-        result = result && scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmWriteResourceUsage x86_selector_llvm_write_resource_usages[] = {\n"));
+        result = result &&
+                 scrape_llvm_write_string(
+                     file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_schedule_write_costs) == X86_SELECTOR_LLVM_SCHEDULE_WRITE_COUNT);\n\n"));
+        result = result &&
+                 scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmWriteResourceUsage x86_selector_llvm_write_resource_usages[] = {\n"));
     }
     u32 write_usage_cursor = 0;
     for (u32 write_i = 0; result && write_i < database->schedule_write_count; write_i += 1)
@@ -3095,7 +3124,8 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         ScrapeLlvmScheduleWrite* write = &database->schedule_writes[write_i];
         for (u32 resource_i = 0; result && resource_i < write->resource_name_count; resource_i += 1)
         {
-            u32 processor_resource_index = scrape_llvm_find_processor_resource_index(database, write->model_index, scrape_llvm_name_string8(write->resource_names[resource_i]));
+            u32 processor_resource_index =
+                scrape_llvm_find_processor_resource_index(database, write->model_index, scrape_llvm_name_string8(write->resource_names[resource_i]));
             result = result && scrape_llvm_write_string(file, S8("    ["));
             result = result && scrape_llvm_write_u32(file, write_usage_cursor);
             result = result && scrape_llvm_write_string(file, S8("] = { .processor_resource_id = "));
@@ -3107,7 +3137,8 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
             {
                 result = result && scrape_llvm_write_string(file, S8("0"));
             }
-            if (write->release_cycles[resource_i] != 0) result = result && scrape_llvm_write_format(file, S8(", .release_at_cycle = {u32}"), write->release_cycles[resource_i]);
+            if (write->release_cycles[resource_i] != 0)
+                result = result && scrape_llvm_write_format(file, S8(", .release_at_cycle = {u32}"), write->release_cycles[resource_i]);
             result = result && scrape_llvm_write_string(file, S8(" },\n"));
             write_usage_cursor += 1;
         }
@@ -3127,21 +3158,29 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         result = result && scrape_llvm_write_processor_model_id(file, database, write->model_index);
         if (write->primary_write_name[0] != 0)
         {
-            u32 primary_write_index = scrape_llvm_find_schedule_write_index_for_model(database, write->model_index, scrape_llvm_name_string8(write->primary_write_name));
+            u32 primary_write_index =
+                scrape_llvm_find_schedule_write_index_for_model(database, write->model_index, scrape_llvm_name_string8(write->primary_write_name));
             if (primary_write_index != 0xffffffffu)
             {
                 result = result && scrape_llvm_write_string(file, S8(", .primary_write_index = "));
-                result = result && scrape_llvm_write_schedule_write_id(file, database, primary_write_index, scrape_llvm_name_string8(database->schedule_writes[primary_write_index].name));
+                result = result && scrape_llvm_write_schedule_write_id(file, database, primary_write_index,
+                                                                       scrape_llvm_name_string8(database->schedule_writes[primary_write_index].name));
             }
         }
-        if (write->resource_name_count != 0) result = result && scrape_llvm_write_format(file, S8(", .resource_usage_start = {u32}, .resource_usage_count = {u32}"), write_usage_cursor, write->resource_name_count);
-        if (write->is_variant) result = result && scrape_llvm_write_string(file, S8(", .is_variant = true"));
+        if (write->resource_name_count != 0)
+            result = result && scrape_llvm_write_format(file, S8(", .resource_usage_start = {u32}, .resource_usage_count = {u32}"), write_usage_cursor,
+                                                        write->resource_name_count);
+        if (write->is_variant)
+            result = result && scrape_llvm_write_string(file, S8(", .is_variant = true"));
         if (write->latency || write->micro_op_count || write->has_metrics)
         {
             result = result && scrape_llvm_write_string(file, S8(", .cost = {"));
-            if (write->latency) result = result && scrape_llvm_write_format(file, S8(" .latency = {u32},"), write->latency);
-            if (write->micro_op_count) result = result && scrape_llvm_write_format(file, S8(" .micro_op_count = {u32},"), write->micro_op_count);
-            if (write->has_metrics) result = result && scrape_llvm_write_string(file, S8(" .has_metrics = true,"));
+            if (write->latency)
+                result = result && scrape_llvm_write_format(file, S8(" .latency = {u32},"), write->latency);
+            if (write->micro_op_count)
+                result = result && scrape_llvm_write_format(file, S8(" .micro_op_count = {u32},"), write->micro_op_count);
+            if (write->has_metrics)
+                result = result && scrape_llvm_write_string(file, S8(" .has_metrics = true,"));
             result = result && scrape_llvm_write_string(file, S8(" }"));
         }
         result = result && scrape_llvm_write_string(file, S8(" },\n"));
@@ -3150,7 +3189,9 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_schedule_writes) == X86_SELECTOR_LLVM_SCHEDULE_WRITE_COUNT);\n\n"));
+        result =
+            result && scrape_llvm_write_string(
+                          file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_schedule_writes) == X86_SELECTOR_LLVM_SCHEDULE_WRITE_COUNT);\n\n"));
         result = result && scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL u32 x86_selector_llvm_instruction_schedule_read_advance_indices[] = {\n"));
     }
     u32 read_advance_cursor = 0;
@@ -3159,7 +3200,8 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         ScrapeLlvmInstructionSchedule* schedule = &database->instruction_schedules[schedule_i];
         for (u32 read_advance_i = 0; result && read_advance_i < schedule->read_advance_count; read_advance_i += 1)
         {
-            u32 resolved_read_advance_index = scrape_llvm_find_read_advance_index(database, schedule->model_index, scrape_llvm_name_string8(schedule->read_advance_names[read_advance_i]));
+            u32 resolved_read_advance_index =
+                scrape_llvm_find_read_advance_index(database, schedule->model_index, scrape_llvm_name_string8(schedule->read_advance_names[read_advance_i]));
             result = result && scrape_llvm_write_string(file, S8("    ["));
             result = result && scrape_llvm_write_u32(file, read_advance_cursor);
             result = result && scrape_llvm_write_string(file, S8("] = "));
@@ -3178,7 +3220,8 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n\n"));
-        result = result && scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmInstructionSchedule x86_selector_llvm_instruction_schedules[] = {\n"));
+        result = result &&
+                 scrape_llvm_write_string(file, S8("BUSTER_GLOBAL_LOCAL X86SelectorLlvmInstructionSchedule x86_selector_llvm_instruction_schedules[] = {\n"));
     }
     read_advance_cursor = 0;
     for (u32 schedule_i = 0; result && schedule_i < database->instruction_schedule_count; schedule_i += 1)
@@ -3194,7 +3237,8 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
                 break;
             }
         }
-        u32 schedule_write_id = scrape_llvm_find_schedule_write_index_for_model(database, schedule->model_index, scrape_llvm_name_string8(schedule->schedule_write_name));
+        u32 schedule_write_id =
+            scrape_llvm_find_schedule_write_index_for_model(database, schedule->model_index, scrape_llvm_name_string8(schedule->schedule_write_name));
         result = result && scrape_llvm_write_string(file, S8("    ["));
         result = result && scrape_llvm_write_u32(file, schedule_i);
         result = result && scrape_llvm_write_string(file, S8("] = { .processor_model_id = "));
@@ -3207,9 +3251,12 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         if (schedule_write_id != 0xffffffffu)
         {
             result = result && scrape_llvm_write_string(file, S8(", .schedule_write_id = "));
-            result = result && scrape_llvm_write_schedule_write_id(file, database, schedule_write_id, scrape_llvm_name_string8(database->schedule_writes[schedule_write_id].name));
+            result = result && scrape_llvm_write_schedule_write_id(file, database, schedule_write_id,
+                                                                   scrape_llvm_name_string8(database->schedule_writes[schedule_write_id].name));
         }
-        if (schedule->read_advance_count != 0) result = result && scrape_llvm_write_format(file, S8(", .read_advance_index_start = {u32}, .read_advance_index_count = {u32}"), read_advance_cursor, schedule->read_advance_count);
+        if (schedule->read_advance_count != 0)
+            result = result && scrape_llvm_write_format(file, S8(", .read_advance_index_start = {u32}, .read_advance_index_count = {u32}"), read_advance_cursor,
+                                                        schedule->read_advance_count);
         result = result && scrape_llvm_write_string(file, S8(" },\n"));
         read_advance_cursor += schedule->read_advance_count;
     }
@@ -3229,15 +3276,19 @@ BUSTER_GLOBAL_LOCAL bool scrape_llvm_write_generated_source(StringOs output_path
         result = result && scrape_llvm_write_string(file, S8("    ["));
         result = result && scrape_llvm_write_string(file, spec.lowering_name);
         result = result && scrape_llvm_write_string(file, S8("] = {"));
-        if (cost.latency) result = result && scrape_llvm_write_format(file, S8(" .latency = {u32},"), cost.latency);
-        if (cost.micro_op_count) result = result && scrape_llvm_write_format(file, S8(" .micro_op_count = {u32},"), cost.micro_op_count);
-        if (cost.has_metrics) result = result && scrape_llvm_write_string(file, S8(" .has_metrics = true,"));
+        if (cost.latency)
+            result = result && scrape_llvm_write_format(file, S8(" .latency = {u32},"), cost.latency);
+        if (cost.micro_op_count)
+            result = result && scrape_llvm_write_format(file, S8(" .micro_op_count = {u32},"), cost.micro_op_count);
+        if (cost.has_metrics)
+            result = result && scrape_llvm_write_string(file, S8(" .has_metrics = true,"));
         result = result && scrape_llvm_write_string(file, S8(" },\n"));
     }
     if (result)
     {
         result = result && scrape_llvm_write_string(file, S8("};\n"));
-        result = result && scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_lowering_costs) == X86_SELECTOR_LOWERING_COUNT);\n"));
+        result = result &&
+                 scrape_llvm_write_string(file, S8("static_assert(BUSTER_ARRAY_LENGTH(x86_selector_llvm_lowering_costs) == X86_SELECTOR_LOWERING_COUNT);\n"));
     }
 
     if (file)
@@ -3322,9 +3373,8 @@ BUSTER_IMPL ProcessResult thread_entry_point()
     Arena* arena = thread_arena();
     ScrapeLlvmDatabase* database = arena_allocate(arena, ScrapeLlvmDatabase, 1);
     memset(database, 0, sizeof(*database));
-    StringOs llvm_tblgen_path = scrape_llvm_program_state.llvm_tblgen_path.pointer ?
-        scrape_llvm_program_state.llvm_tblgen_path :
-        scrape_llvm_default_tblgen_path();
+    StringOs llvm_tblgen_path =
+        scrape_llvm_program_state.llvm_tblgen_path.pointer ? scrape_llvm_program_state.llvm_tblgen_path : scrape_llvm_default_tblgen_path();
 
     bool parsed = scrape_llvm_build_database_from_tblgen_json(arena, database, scrape_llvm_program_state.llvm_root, llvm_tblgen_path);
     if (!parsed)
@@ -3333,9 +3383,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         return PROCESS_RESULT_FAILED;
     }
 
-    StringOs output_path = scrape_llvm_program_state.generate_output.pointer ?
-        scrape_llvm_program_state.generate_output :
-        S8("src/buster/x86_64_llvm.c");
+    StringOs output_path = scrape_llvm_program_state.generate_output.pointer ? scrape_llvm_program_state.generate_output : S8("src/buster/x86_64_llvm.c");
 
     bool wrote = scrape_llvm_write_generated_source(output_path, database);
     if (!wrote)
@@ -3344,10 +3392,7 @@ BUSTER_IMPL ProcessResult thread_entry_point()
         return PROCESS_RESULT_FAILED;
     }
 
-    string8_print(S8("Generated {S8} with {u32} instructions, {u32} schedule writes, {u32} instruction schedules\n"),
-                  output_path,
-                  database->instruction_count,
-                  database->schedule_write_count,
-                  database->instruction_schedule_count);
+    string8_print(S8("Generated {S8} with {u32} instructions, {u32} schedule writes, {u32} instruction schedules\n"), output_path, database->instruction_count,
+                  database->schedule_write_count, database->instruction_schedule_count);
     return PROCESS_RESULT_SUCCESS;
 }

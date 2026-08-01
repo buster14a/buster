@@ -86,8 +86,7 @@ struct CLexResult
     u64 diagnostic_count;
 };
 
-typedef struct CPreprocessorDefinition
-    CPreprocessorDefinition;
+typedef struct CPreprocessorDefinition CPreprocessorDefinition;
 struct CPreprocessorDefinition
 {
     String8 name;
@@ -161,10 +160,10 @@ struct CScopeId
 };
 
 #define C_ID_UNDERLYING_INVALID UINT32_MAX
-#define C_NODE_ID_INVALID ((CNodeId){ .value = C_ID_UNDERLYING_INVALID })
-#define C_TYPE_ID_INVALID ((CTypeId){ .value = C_ID_UNDERLYING_INVALID })
-#define C_ENTITY_ID_INVALID ((CEntityId){ .value = C_ID_UNDERLYING_INVALID })
-#define C_SCOPE_ID_INVALID ((CScopeId){ .value = C_ID_UNDERLYING_INVALID })
+#define C_NODE_ID_INVALID ((CNodeId){.value = C_ID_UNDERLYING_INVALID})
+#define C_TYPE_ID_INVALID ((CTypeId){.value = C_ID_UNDERLYING_INVALID})
+#define C_ENTITY_ID_INVALID ((CEntityId){.value = C_ID_UNDERLYING_INVALID})
+#define C_SCOPE_ID_INVALID ((CScopeId){.value = C_ID_UNDERLYING_INVALID})
 #define C_ARRAY_BOUND_INVALID UINT32_MAX
 
 BUSTER_CT_CHECK(sizeof(CNodeId) == sizeof(CIdUnderlying));
@@ -260,8 +259,7 @@ struct CMember
     u8 reserved[3];
 };
 
-typedef struct CAlignmentSpecifier
-    CAlignmentSpecifier;
+typedef struct CAlignmentSpecifier CAlignmentSpecifier;
 struct CAlignmentSpecifier
 {
     CTypeId type;
@@ -420,27 +418,13 @@ struct CIRLowerResult
     u32 diagnostic_count;
 };
 
-BUSTER_F_DECL CLexResult c_lex(
-    Arena* arena,
-    String8 source);
-BUSTER_F_DECL CPreprocessResult c_preprocess(
-    Arena* arena,
-    String8 source,
-    CPreprocessOptions options);
-BUSTER_F_DECL CParseResult c_parse(
-    Arena* arena,
-    CPreprocessResult preprocess);
-BUSTER_F_DECL CIRLowerResult c_lower_to_ir(
-    Arena* arena,
-    String8 source_path,
-    CPreprocessResult preprocess,
-    CParseResult parse,
-    Target target);
-BUSTER_F_DECL String8 c_token_kind_name(
-    CTokenKind kind);
+BUSTER_F_DECL CLexResult c_lex(Arena* arena, String8 source);
+BUSTER_F_DECL CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options);
+BUSTER_F_DECL CParseResult c_parse(Arena* arena, CPreprocessResult preprocess);
+BUSTER_F_DECL CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParseResult parse, Target target);
+BUSTER_F_DECL String8 c_token_kind_name(CTokenKind kind);
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
-BUSTER_F_DECL UnitTestResult c_frontend_tests(
-    UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments);
 #endif

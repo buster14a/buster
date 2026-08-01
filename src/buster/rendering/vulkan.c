@@ -1,9 +1,10 @@
 #include <buster/rendering/internal.h>
 
-#define BUSTER_VULKAN_FUNCTION_POINTER(n) PFN_ ## n n
+#define BUSTER_VULKAN_FUNCTION_POINTER(n) PFN_##n n
 #define BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(n) BUSTER_GLOBAL_LOCAL __attribute__((used)) BUSTER_VULKAN_FUNCTION_POINTER(n)
-#define BUSTER_VULKAN_OS_LOAD_FUNCTION(vulkan_library, function) function = (__typeof__(function)) os_dynamic_library_function_load(vulkan_library, S8(#function));
-#define BUSTER_VULKAN_FUNCTION_LOAD_GENERIC(context, load_function, function) function = (__typeof__(function)) load_function(context, #function)
+#define BUSTER_VULKAN_OS_LOAD_FUNCTION(vulkan_library, function)                                                                                               \
+    function = (__typeof__(function))os_dynamic_library_function_load(vulkan_library, S8(#function));
+#define BUSTER_VULKAN_FUNCTION_LOAD_GENERIC(context, load_function, function) function = (__typeof__(function))load_function(context, #function)
 #define BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(instance, function) BUSTER_VULKAN_FUNCTION_LOAD_GENERIC(instance, vkGetInstanceProcAddr, function)
 #define BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(device, function) BUSTER_VULKAN_FUNCTION_LOAD_GENERIC(device, vkGetDeviceProcAddr, function)
 
@@ -31,9 +32,9 @@
 #include <vulkan/vulkan_core.h>
 
 /* When VK_USE_PLATFORM_WIN32_KHR is defined, instead of including vulkan.h directly, we include individual parts of the SDK
-* This is necessary to avoid including <windows.h> which is very heavy - it takes 200ms to parse without WIN32_LEAN_AND_MEAN
-* and 100ms to parse with it. vulkan_win32.h only needs a few symbols that are easy to redefine ourselves.
-*/
+ * This is necessary to avoid including <windows.h> which is very heavy - it takes 200ms to parse without WIN32_LEAN_AND_MEAN
+ * and 100ms to parse with it. vulkan_win32.h only needs a few symbols that are easy to redefine ourselves.
+ */
 
 typedef unsigned long DWORD;
 typedef const wchar_t* LPCWSTR;
@@ -278,7 +279,8 @@ BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkQueuePresentKHR);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCmdCopyBufferToImage);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkUpdateDescriptorSets);
 
-BUSTER_GLOBAL_LOCAL VkBool32 buster_vulkan_debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT message_severity, VkDebugUtilsMessageTypeFlagsEXT message_type, const VkDebugUtilsMessengerCallbackDataEXT* callback_data, void* user_data)
+BUSTER_GLOBAL_LOCAL VkBool32 buster_vulkan_debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT message_severity, VkDebugUtilsMessageTypeFlagsEXT message_type,
+                                                          const VkDebugUtilsMessengerCallbackDataEXT* callback_data, void* user_data)
 {
     BUSTER_UNUSED(user_data);
 
@@ -286,11 +288,21 @@ BUSTER_GLOBAL_LOCAL VkBool32 buster_vulkan_debug_callback(VkDebugUtilsMessageSev
 
     switch (message_severity)
     {
-            break; case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT: severity_string = S8("VERBOSE");
-            break; case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT: severity_string = S8("INFORMATION");
-            break; case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT: severity_string = S8("WARNING");
-            break; case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT: severity_string = S8("ERROR");
-            break; default: severity_string = S8("UNKNOWN");
+        break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT:
+        severity_string = S8("VERBOSE");
+        break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
+        severity_string = S8("INFORMATION");
+        break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
+        severity_string = S8("WARNING");
+        break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
+        severity_string = S8("ERROR");
+        break;
+    default:
+        severity_string = S8("UNKNOWN");
     }
 
     bool is_general = (message_type & (VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT)) != 0;
@@ -392,14 +404,16 @@ BUSTER_GLOBAL_LOCAL VkDescriptorType vulkan_descriptor_type(DescriptorType type)
 
     switch (type)
     {
-        case DESCRIPTOR_TYPE_IMAGE_PLUS_SAMPLER:
-            result = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            break;
-        case DESCRIPTOR_TYPE_STORAGE_BUFFER:
-            result = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            break;
-        case DESCRIPTOR_TYPE_COUNT: BUSTER_UNREACHABLE();
-        default: BUSTER_UNREACHABLE();
+    case DESCRIPTOR_TYPE_IMAGE_PLUS_SAMPLER:
+        result = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        break;
+    case DESCRIPTOR_TYPE_STORAGE_BUFFER:
+        result = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        break;
+    case DESCRIPTOR_TYPE_COUNT:
+        BUSTER_UNREACHABLE();
+    default:
+        BUSTER_UNREACHABLE();
     }
 
     return result;
@@ -411,9 +425,15 @@ BUSTER_GLOBAL_LOCAL VkShaderStageFlags vulkan_shader_stage(ShaderStage shader_st
 
     switch (shader_stage)
     {
-        break; case SHADER_STAGE_VERTEX: result = VK_SHADER_STAGE_VERTEX_BIT;
-        break; case SHADER_STAGE_FRAGMENT: result = VK_SHADER_STAGE_FRAGMENT_BIT;
-        break; case SHADER_STAGE_COUNT: BUSTER_UNREACHABLE();
+        break;
+    case SHADER_STAGE_VERTEX:
+        result = VK_SHADER_STAGE_VERTEX_BIT;
+        break;
+    case SHADER_STAGE_FRAGMENT:
+        result = VK_SHADER_STAGE_FRAGMENT_BIT;
+        break;
+    case SHADER_STAGE_COUNT:
+        BUSTER_UNREACHABLE();
     }
 
     return result;
@@ -474,7 +494,9 @@ struct VulkanImageCreate
     VkImageUsageFlags usage;
 };
 
-BUSTER_GLOBAL_LOCAL GPUMemory vk_allocate_memory(VkDevice device, const VkAllocationCallbacks* allocation_callbacks, const VkPhysicalDeviceMemoryProperties* memory_properties, VkMemoryRequirements memory_requirements, VkMemoryPropertyFlags flags, u8 use_device_address_bit)
+BUSTER_GLOBAL_LOCAL GPUMemory vk_allocate_memory(VkDevice device, const VkAllocationCallbacks* allocation_callbacks,
+                                                 const VkPhysicalDeviceMemoryProperties* memory_properties, VkMemoryRequirements memory_requirements,
+                                                 VkMemoryPropertyFlags flags, u8 use_device_address_bit)
 {
     u32 memory_type_index;
     u32 memory_type_count = memory_properties->memoryTypeCount;
@@ -521,10 +543,11 @@ BUSTER_GLOBAL_LOCAL GPUMemory vk_allocate_memory(VkDevice device, const VkAlloca
         }
     }
 
-    return (GPUMemory) { .handle = memory, .size = allocate_info.allocationSize };
+    return (GPUMemory){.handle = memory, .size = allocate_info.allocationSize};
 }
 
-BUSTER_GLOBAL_LOCAL VulkanImage vk_image_create(VkDevice device, const VkAllocationCallbacks* allocation_callbacks, const VkPhysicalDeviceMemoryProperties* memory_properties, VulkanImageCreate create)
+BUSTER_GLOBAL_LOCAL VulkanImage vk_image_create(VkDevice device, const VkAllocationCallbacks* allocation_callbacks,
+                                                const VkPhysicalDeviceMemoryProperties* memory_properties, VulkanImageCreate create)
 {
     BUSTER_CHECK(create.width);
     BUSTER_CHECK(create.height);
@@ -537,11 +560,12 @@ BUSTER_GLOBAL_LOCAL VulkanImage vk_image_create(VkDevice device, const VkAllocat
         .flags = 0,
         .imageType = VK_IMAGE_TYPE_2D,
         .format = create.format,
-        .extent = {
-            .width = create.width,
-            .height = create.height,
-            .depth = 1,
-        },
+        .extent =
+            {
+                .width = create.width,
+                .height = create.height,
+                .depth = 1,
+            },
         .mipLevels = create.mip_levels,
         .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -573,13 +597,14 @@ BUSTER_GLOBAL_LOCAL VulkanImage vk_image_create(VkDevice device, const VkAllocat
                     .image = result.handle,
                     .viewType = VK_IMAGE_VIEW_TYPE_2D,
                     .format = create_info.format,
-                    .subresourceRange = {
-                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                        .baseMipLevel = 0,
-                        .levelCount = create.mip_levels,
-                        .baseArrayLayer = 0,
-                        .layerCount = 1,
-                    },
+                    .subresourceRange =
+                        {
+                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                            .baseMipLevel = 0,
+                            .levelCount = create.mip_levels,
+                            .baseArrayLayer = 0,
+                            .layerCount = 1,
+                        },
                 };
 
                 VkImageView image_view;
@@ -667,9 +692,15 @@ BUSTER_GLOBAL_LOCAL DescriptorType descriptor_type_from_vulkan(VkDescriptorType 
 
     switch (descriptor_type)
     {
-        break; case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: result = DESCRIPTOR_TYPE_IMAGE_PLUS_SAMPLER;
-        break; case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: result = DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        break; default: BUSTER_UNREACHABLE();
+        break;
+    case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+        result = DESCRIPTOR_TYPE_IMAGE_PLUS_SAMPLER;
+        break;
+    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+        result = DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        break;
+    default:
+        BUSTER_UNREACHABLE();
     }
 
     return result;
@@ -750,7 +781,7 @@ BUSTER_GLOBAL_LOCAL void rendering_window_texture_update_begin(RenderingWindowHa
     BUSTER_CHECK(descriptor_count);
     BUSTER_CHECK(pipeline_instantiation->descriptor_sets[0]);
 
-    pipeline_instantiation->descriptor_set_update = (VkWriteDescriptorSet) {
+    pipeline_instantiation->descriptor_set_update = (VkWriteDescriptorSet){
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .pNext = 0,
         .dstSet = pipeline_instantiation->descriptor_sets[0],
@@ -856,7 +887,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                             layer_result = vkEnumerateInstanceLayerProperties(&instance_layer_property_count, instance_layer_properties);
                             if (layer_result == VK_SUCCESS)
                             {
-                                validation_layer_supported = vulkan_instance_layer_supported(instance_layer_properties, instance_layer_property_count, validation_layer_name);
+                                validation_layer_supported =
+                                    vulkan_instance_layer_supported(instance_layer_properties, instance_layer_property_count, validation_layer_name);
                             }
                         }
                     }
@@ -867,9 +899,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         string_print(S8("Vulkan validation layer unavailable; continuing without validation\n"));
                     }
 
-                    const char* instance_layer_names[] = {
-                        "VK_LAYER_KHRONOS_validation"
-                    };
+                    const char* instance_layer_names[] = {"VK_LAYER_KHRONOS_validation"};
                     const char* const* enabled_layer_names = 0;
                     u32 enabled_layer_count = 0;
                     if (enable_validation_layer)
@@ -900,25 +930,29 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                     bool enable_shader_debug_printf = false;
                     VkInstanceCreateFlags instance_create_flags = 0;
 
-#define BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(extension_name) do { \
-                        if (vulkan_instance_extension_supported(instance_extension_properties, instance_extension_property_count, (extension_name))) \
-                        { \
-                            enabled_extension_names[enabled_extension_count++] = (extension_name); \
-                        } \
-                        else \
-                        { \
-                            missing_required_instance_extension = true; \
-                            string_print(S8("Vulkan required instance extension unavailable: {S8}\n"), string_from_pointer((char8*)(extension_name))); \
-                        } \
-                    } while (0)
+#define BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(extension_name)                                                                                       \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        if (vulkan_instance_extension_supported(instance_extension_properties, instance_extension_property_count, (extension_name)))                           \
+        {                                                                                                                                                      \
+            enabled_extension_names[enabled_extension_count++] = (extension_name);                                                                             \
+        }                                                                                                                                                      \
+        else                                                                                                                                                   \
+        {                                                                                                                                                      \
+            missing_required_instance_extension = true;                                                                                                        \
+            string_print(S8("Vulkan required instance extension unavailable: {S8}\n"), string_from_pointer((char8*)(extension_name)));                         \
+        }                                                                                                                                                      \
+    } while (0)
 
-#define BUSTER_VULKAN_ENABLE_OPTIONAL_INSTANCE_EXTENSION(extension_name, enabled_variable) do { \
-                        if (vulkan_instance_extension_supported(instance_extension_properties, instance_extension_property_count, (extension_name))) \
-                        { \
-                            enabled_extension_names[enabled_extension_count++] = (extension_name); \
-                            (enabled_variable) = true; \
-                        } \
-                    } while (0)
+#define BUSTER_VULKAN_ENABLE_OPTIONAL_INSTANCE_EXTENSION(extension_name, enabled_variable)                                                                     \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        if (vulkan_instance_extension_supported(instance_extension_properties, instance_extension_property_count, (extension_name)))                           \
+        {                                                                                                                                                      \
+            enabled_extension_names[enabled_extension_count++] = (extension_name);                                                                             \
+            (enabled_variable) = true;                                                                                                                         \
+        }                                                                                                                                                      \
+    } while (0)
 
                     if (result == VK_SUCCESS)
                     {
@@ -928,7 +962,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 #endif
 #ifdef VK_USE_PLATFORM_XLIB_KHR
                         BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
-#endif 
+#endif
 #ifdef VK_USE_PLATFORM_XCB_KHR
                         BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(VK_KHR_XCB_SURFACE_EXTENSION_NAME);
 #endif
@@ -937,7 +971,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 #endif
 #ifdef VK_USE_PLATFORM_METAL_EXT
                         BUSTER_VULKAN_ENABLE_REQUIRED_INSTANCE_EXTENSION(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
-                        if (vulkan_instance_extension_supported(instance_extension_properties, instance_extension_property_count, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+                        if (vulkan_instance_extension_supported(instance_extension_properties, instance_extension_property_count,
+                                                                VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
                         {
                             enabled_extension_names[enabled_extension_count++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
                             instance_create_flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
@@ -972,13 +1007,15 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                     VkDebugUtilsMessengerCreateInfoEXT messenger_create_info = {
                         .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
                         .pNext = 0,
-                        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-                        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+                        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
+                                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+                        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
                         .pfnUserCallback = &buster_vulkan_debug_callback,
                         .pUserData = 0,
                     };
 
-                    VkValidationFeaturesEXT validation_features = { 
+                    VkValidationFeaturesEXT validation_features = {
                         .sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
                         .enabledValidationFeatureCount = BUSTER_ARRAY_LENGTH(enabled_validation_features),
                         .pEnabledValidationFeatures = enabled_validation_features,
@@ -997,13 +1034,10 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 #if defined(VK_USE_PLATFORM_METAL_EXT)
                         portability_enabled = (u32)((instance_create_flags & VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR) != 0);
 #endif
-                        string_print(S8("Vulkan instance creation: extensions={u32}, layers_enabled={u32}, validation_layer_supported={u32}, debug_utils={u32}, validation_features={u32}, portability={u32}\n"),
-                                     enabled_extension_count,
-                                     enabled_layer_count,
-                                     (u32)validation_layer_supported,
-                                     (u32)enable_debug_utils,
-                                     (u32)enable_shader_debug_printf,
-                                     portability_enabled);
+                        string_print(S8("Vulkan instance creation: extensions={u32}, layers_enabled={u32}, validation_layer_supported={u32}, "
+                                        "debug_utils={u32}, validation_features={u32}, portability={u32}\n"),
+                                     enabled_extension_count, enabled_layer_count, (u32)validation_layer_supported, (u32)enable_debug_utils,
+                                     (u32)enable_shader_debug_printf, portability_enabled);
 
                         VkInstanceCreateInfo instance_create_info = {
                             .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -1017,7 +1051,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         };
 
                         result = vkCreateInstance(&instance_create_info, allocator, &rendering_handle.instance);
-                        string_print(S8("Vulkan instance creation: vkCreateInstance={u64:x}, instance={u64:x}\n"), (u64)(u32)result, (u64)rendering_handle.instance);
+                        string_print(S8("Vulkan instance creation: vkCreateInstance={u64:x}, instance={u64:x}\n"), (u64)(u32)result,
+                                     (u64)rendering_handle.instance);
 
                         if (result == VK_SUCCESS && enable_debug_utils)
                         {
@@ -1025,8 +1060,10 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                             BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkDestroyDebugUtilsMessengerEXT);
                             if (vkCreateDebugUtilsMessengerEXT)
                             {
-                                VkResult messenger_result = vkCreateDebugUtilsMessengerEXT(rendering_handle.instance, &messenger_create_info, allocator, &rendering_handle.messenger);
-                                string_print(S8("Vulkan debug messenger creation: vkCreateDebugUtilsMessengerEXT={u64:x}, messenger={u64:x}\n"), (u64)(u32)messenger_result, (u64)rendering_handle.messenger);
+                                VkResult messenger_result =
+                                    vkCreateDebugUtilsMessengerEXT(rendering_handle.instance, &messenger_create_info, allocator, &rendering_handle.messenger);
+                                string_print(S8("Vulkan debug messenger creation: vkCreateDebugUtilsMessengerEXT={u64:x}, messenger={u64:x}\n"),
+                                             (u64)(u32)messenger_result, (u64)rendering_handle.messenger);
                             }
                         }
                     }
@@ -1100,16 +1137,19 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 
                             u32 queue_count;
                             vkGetPhysicalDeviceQueueFamilyProperties(rendering_handle.physical_device, &queue_count, 0);
-                            string_print(S8("Vulkan physical device properties: name={S8}, queue_families={u32}\n"), string_from_pointer(properties.deviceName), queue_count);
+                            string_print(S8("Vulkan physical device properties: name={S8}, queue_families={u32}\n"), string_from_pointer(properties.deviceName),
+                                         queue_count);
 
                             VkQueueFamilyProperties queue_family_property_buffer[64];
                             if (queue_count <= BUSTER_ARRAY_LENGTH(queue_family_property_buffer))
                             {
                                 vkGetPhysicalDeviceQueueFamilyProperties(rendering_handle.physical_device, &queue_count, queue_family_property_buffer);
 
-                                for (rendering_handle.graphics_queue_family_index = 0; rendering_handle.graphics_queue_family_index < queue_count; rendering_handle.graphics_queue_family_index += 1)
+                                for (rendering_handle.graphics_queue_family_index = 0; rendering_handle.graphics_queue_family_index < queue_count;
+                                     rendering_handle.graphics_queue_family_index += 1)
                                 {
-                                    VkQueueFamilyProperties* queue_family_properties = &queue_family_property_buffer[rendering_handle.graphics_queue_family_index];
+                                    VkQueueFamilyProperties* queue_family_properties =
+                                        &queue_family_property_buffer[rendering_handle.graphics_queue_family_index];
                                     if (queue_family_properties->queueFlags & VK_QUEUE_GRAPHICS_BIT)
                                     {
                                         break;
@@ -1120,15 +1160,14 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                                 {
                                     present_queue_family_index = 0;
                                     string_print(S8("Vulkan queue selection: graphics={u32}, present={u32}, queue_flags={u32}\n"),
-                                                 rendering_handle.graphics_queue_family_index,
-                                                 present_queue_family_index,
+                                                 rendering_handle.graphics_queue_family_index, present_queue_family_index,
                                                  queue_family_property_buffer[rendering_handle.graphics_queue_family_index].queueFlags);
 
                                     // for (present_queue_family_index = 0; present_queue_family_index < queue_count; present_queue_family_index += 1)
                                     // {
                                     //     VkBool32 support;
-                                    //     VkResult success = vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, present_queue_family_index, surface, &support);
-                                    //     if (support)
+                                    //     VkResult success = vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, present_queue_family_index, surface,
+                                    //     &support); if (support)
                                     //     {
                                     //         break;
                                     //     }
@@ -1136,7 +1175,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 
                                     if (present_queue_family_index != queue_count && present_queue_family_index == rendering_handle.graphics_queue_family_index)
                                     {
-                                        f32 queue_priorities[] = { 1.0f };
+                                        f32 queue_priorities[] = {1.0f};
                                         VkDeviceQueueCreateInfo queue_create_infos[] = {
                                             {
                                                 .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -1155,10 +1194,12 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 
                                         if (vkEnumerateDeviceExtensionProperties)
                                         {
-                                            result = vkEnumerateDeviceExtensionProperties(rendering_handle.physical_device, 0, &device_extension_property_count, 0);
+                                            result =
+                                                vkEnumerateDeviceExtensionProperties(rendering_handle.physical_device, 0, &device_extension_property_count, 0);
                                             if (result == VK_SUCCESS && device_extension_property_count <= BUSTER_ARRAY_LENGTH(device_extension_properties))
                                             {
-                                                result = vkEnumerateDeviceExtensionProperties(rendering_handle.physical_device, 0, &device_extension_property_count, device_extension_properties);
+                                                result = vkEnumerateDeviceExtensionProperties(rendering_handle.physical_device, 0,
+                                                                                              &device_extension_property_count, device_extension_properties);
                                             }
                                             else if (result == VK_SUCCESS)
                                             {
@@ -1172,7 +1213,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 
                                         if (result == VK_SUCCESS)
                                         {
-                                            if (vulkan_device_extension_supported(device_extension_properties, device_extension_property_count, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
+                                            if (vulkan_device_extension_supported(device_extension_properties, device_extension_property_count,
+                                                                                  VK_KHR_SWAPCHAIN_EXTENSION_NAME))
                                             {
                                                 extensions[extension_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
                                             }
@@ -1183,7 +1225,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                                             }
 
 #ifdef VK_USE_PLATFORM_METAL_EXT
-                                            if (vulkan_device_extension_supported(device_extension_properties, device_extension_property_count, "VK_KHR_portability_subset"))
+                                            if (vulkan_device_extension_supported(device_extension_properties, device_extension_property_count,
+                                                                                  "VK_KHR_portability_subset"))
                                             {
                                                 extensions[extension_count++] = "VK_KHR_portability_subset";
                                                 portability_subset_enabled = true;
@@ -1243,7 +1286,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                                         {
                                             result = vkCreateDevice(rendering_handle.physical_device, &ci, allocator, &device);
                                         }
-                                        string_print(S8("Vulkan logical device creation: vkCreateDevice={u64:x}, extensions={u32}, portability_subset={u32}\n"), (u64)(u32)result, extension_count, (u32)portability_subset_enabled);
+                                        string_print(S8("Vulkan logical device creation: vkCreateDevice={u64:x}, extensions={u32}, portability_subset={u32}\n"),
+                                                     (u64)(u32)result, extension_count, (u32)portability_subset_enabled);
 
                                         if (result == VK_SUCCESS)
                                         {
@@ -1324,7 +1368,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering_handle.device, vkFreeMemory);
 
                         vkGetDeviceQueue(rendering_handle.device, rendering_handle.graphics_queue_family_index, 0, &rendering_handle.graphics_queue);
-                        string_print(S8("Vulkan graphics queue: family={u32}, queue={u64:x}\n"), rendering_handle.graphics_queue_family_index, (u64)rendering_handle.graphics_queue);
+                        string_print(S8("Vulkan graphics queue: family={u32}, queue={u64:x}\n"), rendering_handle.graphics_queue_family_index,
+                                     (u64)rendering_handle.graphics_queue);
 
                         rendering_handle.immediate.device = rendering_handle.device;
                         rendering_handle.immediate.queue = rendering_handle.graphics_queue;
@@ -1335,7 +1380,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                             .queueFamilyIndex = rendering_handle.graphics_queue_family_index,
                         };
                         result = vkCreateCommandPool(rendering_handle.device, &create_info, allocator, &rendering_handle.immediate.command_pool);
-                        string_print(S8("Vulkan immediate command pool creation: vkCreateCommandPool={u64:x}, command_pool={u64:x}\n"), (u64)(u32)result, (u64)rendering_handle.immediate.command_pool);
+                        string_print(S8("Vulkan immediate command pool creation: vkCreateCommandPool={u64:x}, command_pool={u64:x}\n"), (u64)(u32)result,
+                                     (u64)rendering_handle.immediate.command_pool);
 
                         if (result == VK_SUCCESS)
                         {
@@ -1346,8 +1392,10 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                                 .commandBufferCount = 1,
                             };
 
-                            result = vkAllocateCommandBuffers(rendering_handle.device, &command_buffer_allocate_info, &rendering_handle.immediate.command_buffer);
-                            string_print(S8("Vulkan immediate command buffer allocation: vkAllocateCommandBuffers={u64:x}, command_buffer={u64:x}\n"), (u64)(u32)result, (u64)rendering_handle.immediate.command_buffer);
+                            result =
+                                vkAllocateCommandBuffers(rendering_handle.device, &command_buffer_allocate_info, &rendering_handle.immediate.command_buffer);
+                            string_print(S8("Vulkan immediate command buffer allocation: vkAllocateCommandBuffers={u64:x}, command_buffer={u64:x}\n"),
+                                         (u64)(u32)result, (u64)rendering_handle.immediate.command_buffer);
 
                             if (result == VK_SUCCESS)
                             {
@@ -1357,7 +1405,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                                 };
 
                                 result = vkCreateFence(rendering_handle.device, &fence_create_info, allocator, &rendering_handle.immediate.fence);
-                                string_print(S8("Vulkan immediate fence creation: vkCreateFence={u64:x}, fence={u64:x}\n"), (u64)(u32)result, (u64)rendering_handle.immediate.fence);
+                                string_print(S8("Vulkan immediate fence creation: vkCreateFence={u64:x}, fence={u64:x}\n"), (u64)(u32)result,
+                                             (u64)rendering_handle.immediate.fence);
                             }
                         }
 
@@ -1398,7 +1447,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 
                     if (result != VK_SUCCESS || !rendering_handle.device)
                     {
-                        string_print(S8("Vulkan rendering initialization failed before pipeline setup: result={u64:x}, device={u64:x}\n"), (u64)(u32)result, (u64)rendering_handle.device);
+                        string_print(S8("Vulkan rendering initialization failed before pipeline setup: result={u64:x}, device={u64:x}\n"), (u64)(u32)result,
+                                     (u64)rendering_handle.device);
                         return rendering;
                     }
 
@@ -1414,7 +1464,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                     };
 
                     PushConstantRange rect_push_constant_ranges[] = {
-                        (PushConstantRange) {
+                        (PushConstantRange){
                             .offset = 0,
 #if BUSTER_ANDROID
                             .size = sizeof(DrawConstants),
@@ -1443,21 +1493,21 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                     };
 
                     DescriptorSetLayoutCreate rect_descriptor_set_layouts[] = {
-                        (DescriptorSetLayoutCreate) {
+                        (DescriptorSetLayoutCreate){
                             .bindings = BUSTER_ARRAY_TO_SLICE(rect_descriptor_set_layout_bindings),
                         },
                     };
 
                     PipelineLayoutCreate pipeline_layouts[] = {
-                        (PipelineLayoutCreate) {
+                        (PipelineLayoutCreate){
                             .push_constant_ranges = BUSTER_ARRAY_TO_SLICE(rect_push_constant_ranges),
                             .descriptor_set_layouts = BUSTER_ARRAY_TO_SLICE(rect_descriptor_set_layouts),
                         },
                     };
 
-                    u16 rect_pipeline_shader_source_indices[] = { 0, 1 };
+                    u16 rect_pipeline_shader_source_indices[] = {0, 1};
                     PipelineCreate pipeline_create[] = {
-                        (PipelineCreate) {
+                        (PipelineCreate){
                             .shader_source_indices = BUSTER_ARRAY_TO_SLICE(rect_pipeline_shader_source_indices),
                             .layout_index = 0,
                         },
@@ -1570,7 +1620,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         .blendConstants = {0},
                     };
 
-                    VkDynamicState states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+                    VkDynamicState states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
 
                     VkPipelineDynamicStateCreateInfo dynamic_state_create_info = {
                         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -1616,11 +1666,13 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         if (result == VK_SUCCESS)
                         {
                             shader_modules[i] = shader_module;
-                            string_print(S8("Vulkan shader module creation {u32}: vkCreateShaderModule={u64:x}, module={u64:x}, bytes={u64}\n"), (u32)i, (u64)(u32)result, (u64)shader_module, binary.length);
+                            string_print(S8("Vulkan shader module creation {u32}: vkCreateShaderModule={u64:x}, module={u64:x}, bytes={u64}\n"), (u32)i,
+                                         (u64)(u32)result, (u64)shader_module, binary.length);
                         }
                         else
                         {
-                            string_print(S8("Vulkan shader module creation failed {u32}: vkCreateShaderModule={u64:x}, bytes={u64}\n"), (u32)i, (u64)(u32)result, binary.length);
+                            string_print(S8("Vulkan shader module creation failed {u32}: vkCreateShaderModule={u64:x}, bytes={u64}\n"), (u32)i,
+                                         (u64)(u32)result, binary.length);
                             return rendering;
                         }
                     }
@@ -1646,7 +1698,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         {
                             DescriptorSetLayoutCreate set_layout_create = create.descriptor_set_layouts.pointer[descriptor_set_layout_index];
                             u64 binding_count = set_layout_create.bindings.length;
-                            DescriptorSetLayoutBindings* descriptor_set_layout_bindings = &pipeline->descriptor_set_layout_bindings[descriptor_set_layout_index];
+                            DescriptorSetLayoutBindings* descriptor_set_layout_bindings =
+                                &pipeline->descriptor_set_layout_bindings[descriptor_set_layout_index];
                             descriptor_set_layout_bindings->count = (u32)binding_count;
 
                             for (u64 binding_index = 0; binding_index < binding_count; binding_index += 1)
@@ -1657,12 +1710,12 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 
                                 VkShaderStageFlags shader_stage = vulkan_shader_stage(binding_descriptor.stage);
 
-                                descriptor_set_layout_bindings->buffer[binding_index] = (VkDescriptorSetLayoutBinding) {
+                                descriptor_set_layout_bindings->buffer[binding_index] = (VkDescriptorSetLayoutBinding){
                                     .binding = binding_descriptor.binding,
-                                        .descriptorType = descriptor_type,
-                                        .descriptorCount = binding_descriptor.count,
-                                        .stageFlags = shader_stage,
-                                        .pImmutableSamplers = 0,
+                                    .descriptorType = descriptor_type,
+                                    .descriptorCount = binding_descriptor.count,
+                                    .stageFlags = shader_stage,
+                                    .pImmutableSamplers = 0,
                                 };
                             }
 
@@ -1679,20 +1732,15 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                             if (result == VK_SUCCESS)
                             {
                                 pipeline->descriptor_set_layouts[descriptor_set_layout_index] = layout;
-                                string_print(S8("Vulkan descriptor set layout creation {u32}:{u32}: vkCreateDescriptorSetLayout={u64:x}, layout={u64:x}, bindings={u32}\n"),
-                                             (u32)pipeline_index,
-                                             (u32)descriptor_set_layout_index,
-                                             (u64)(u32)result,
-                                             (u64)layout,
-                                             (u32)binding_count);
+                                string_print(S8("Vulkan descriptor set layout creation {u32}:{u32}: vkCreateDescriptorSetLayout={u64:x}, layout={u64:x}, "
+                                                "bindings={u32}\n"),
+                                             (u32)pipeline_index, (u32)descriptor_set_layout_index, (u64)(u32)result, (u64)layout, (u32)binding_count);
                             }
                             else
                             {
-                                string_print(S8("Vulkan descriptor set layout creation failed {u32}:{u32}: vkCreateDescriptorSetLayout={u64:x}, bindings={u32}\n"),
-                                             (u32)pipeline_index,
-                                             (u32)descriptor_set_layout_index,
-                                             (u64)(u32)result,
-                                             (u32)binding_count);
+                                string_print(
+                                    S8("Vulkan descriptor set layout creation failed {u32}:{u32}: vkCreateDescriptorSetLayout={u64:x}, bindings={u32}\n"),
+                                    (u32)pipeline_index, (u32)descriptor_set_layout_index, (u64)(u32)result, (u32)binding_count);
                                 return rendering;
                             }
                         }
@@ -1705,10 +1753,10 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         for (u64 push_constant_index = 0; push_constant_index < push_constant_range_count; push_constant_index += 1)
                         {
                             PushConstantRange push_constant_descriptor = create.push_constant_ranges.pointer[push_constant_index];
-                            pipeline->push_constant_ranges[push_constant_index] = (VkPushConstantRange) {
+                            pipeline->push_constant_ranges[push_constant_index] = (VkPushConstantRange){
                                 .stageFlags = vulkan_shader_stage(push_constant_descriptor.stage),
-                                    .offset = push_constant_descriptor.offset,
-                                    .size = push_constant_descriptor.size,
+                                .offset = push_constant_descriptor.offset,
+                                .size = push_constant_descriptor.size,
                             };
                         }
 
@@ -1728,20 +1776,15 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         if (result == VK_SUCCESS)
                         {
                             pipeline->layout = layout;
-                            string_print(S8("Vulkan pipeline layout creation {u32}: vkCreatePipelineLayout={u64:x}, layout={u64:x}, descriptor_sets={u32}, push_constants={u32}\n"),
-                                         (u32)pipeline_index,
-                                         (u64)(u32)result,
-                                         (u64)layout,
-                                         (u32)descriptor_set_layout_count,
-                                         (u32)push_constant_range_count);
+                            string_print(S8("Vulkan pipeline layout creation {u32}: vkCreatePipelineLayout={u64:x}, layout={u64:x}, descriptor_sets={u32}, "
+                                            "push_constants={u32}\n"),
+                                         (u32)pipeline_index, (u64)(u32)result, (u64)layout, (u32)descriptor_set_layout_count, (u32)push_constant_range_count);
                         }
                         else
                         {
-                            string_print(S8("Vulkan pipeline layout creation failed {u32}: vkCreatePipelineLayout={u64:x}, descriptor_sets={u32}, push_constants={u32}\n"),
-                                         (u32)pipeline_index,
-                                         (u64)(u32)result,
-                                         (u32)descriptor_set_layout_count,
-                                         (u32)push_constant_range_count);
+                            string_print(S8("Vulkan pipeline layout creation failed {u32}: vkCreatePipelineLayout={u64:x}, descriptor_sets={u32}, "
+                                            "push_constants={u32}\n"),
+                                         (u32)pipeline_index, (u64)(u32)result, (u32)descriptor_set_layout_count, (u32)push_constant_range_count);
                             return rendering;
                         }
                     }
@@ -1761,44 +1804,45 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                             u16 shader_index = create.shader_source_indices.pointer[shader_i];
                             String8 shader_source_path = create_data.shader_binaries.pointer[shader_index];
 
-                            shader_create_infos[shader_i] = (VkPipelineShaderStageCreateInfo) {
+                            shader_create_infos[shader_i] = (VkPipelineShaderStageCreateInfo){
                                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                                    .pNext = 0,
-                                    .flags = 0,
-                                    .stage = vulkan_shader_stage_from_path(shader_source_path),
-                                    .module = shader_modules[shader_i],
-                                    .pName = "main",
-                                    .pSpecializationInfo = 0,
+                                .pNext = 0,
+                                .flags = 0,
+                                .stage = vulkan_shader_stage_from_path(shader_source_path),
+                                .module = shader_modules[shader_i],
+                                .pName = "main",
+                                .pSpecializationInfo = 0,
                             };
                         }
 
-                        graphics_pipeline_create_infos[pipeline_i] = (VkGraphicsPipelineCreateInfo)
-                        {
+                        graphics_pipeline_create_infos[pipeline_i] = (VkGraphicsPipelineCreateInfo){
                             .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-                                .pNext = &rendering_create_info,
-                                .flags = 0,
-                                .stageCount = (u32)shader_count,
-                                .pStages = shader_create_infos,
-                                .pVertexInputState = &vertex_input_state_create_info,
-                                .pInputAssemblyState = &input_assembly_state_create_info,
-                                .pTessellationState = 0,
-                                .pViewportState = &viewport_state_create_info,
-                                .pRasterizationState = &rasterization_state_create_info,
-                                .pMultisampleState = &multisample_state_create_info,
-                                .pDepthStencilState = &depth_stencil_state_create_info,
-                                .pColorBlendState = &color_blend_state_create_info,
-                                .pDynamicState = &dynamic_state_create_info,
-                                .layout = pipeline->layout,
-                                .renderPass = 0,
-                                .subpass = 0,
-                                .basePipelineHandle = 0,
-                                .basePipelineIndex = 0,
+                            .pNext = &rendering_create_info,
+                            .flags = 0,
+                            .stageCount = (u32)shader_count,
+                            .pStages = shader_create_infos,
+                            .pVertexInputState = &vertex_input_state_create_info,
+                            .pInputAssemblyState = &input_assembly_state_create_info,
+                            .pTessellationState = 0,
+                            .pViewportState = &viewport_state_create_info,
+                            .pRasterizationState = &rasterization_state_create_info,
+                            .pMultisampleState = &multisample_state_create_info,
+                            .pDepthStencilState = &depth_stencil_state_create_info,
+                            .pColorBlendState = &color_blend_state_create_info,
+                            .pDynamicState = &dynamic_state_create_info,
+                            .layout = pipeline->layout,
+                            .renderPass = 0,
+                            .subpass = 0,
+                            .basePipelineHandle = 0,
+                            .basePipelineIndex = 0,
                         };
                     }
 
                     VkPipelineCache pipeline_cache = 0;
-                    result = vkCreateGraphicsPipelines(rendering_handle.device, pipeline_cache, (u32)graphics_pipeline_count, graphics_pipeline_create_infos, allocator, pipeline_handles);
-                    string_print(S8("Vulkan graphics pipeline creation: vkCreateGraphicsPipelines={u64:x}, pipeline_count={u32}\n"), (u64)(u32)result, (u32)graphics_pipeline_count);
+                    result = vkCreateGraphicsPipelines(rendering_handle.device, pipeline_cache, (u32)graphics_pipeline_count, graphics_pipeline_create_infos,
+                                                       allocator, pipeline_handles);
+                    string_print(S8("Vulkan graphics pipeline creation: vkCreateGraphicsPipelines={u64:x}, pipeline_count={u32}\n"), (u64)(u32)result,
+                                 (u32)graphics_pipeline_count);
 
                     if (result == VK_SUCCESS)
                     {
@@ -1821,12 +1865,8 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
     }
 
     string_print(S8("Vulkan rendering initialization {S8}: rendering={u64:x}, instance={u64:x}, physical_device={u64:x}, device={u64:x}, queue={u64:x}\n"),
-                 rendering ? S8("succeeded") : S8("failed"),
-                 (u64)rendering,
-                 (u64)rendering_handle.instance,
-                 (u64)rendering_handle.physical_device,
-                 (u64)rendering_handle.device,
-                 (u64)rendering_handle.graphics_queue);
+                 rendering ? S8("succeeded") : S8("failed"), (u64)rendering, (u64)rendering_handle.instance, (u64)rendering_handle.physical_device,
+                 (u64)rendering_handle.device, (u64)rendering_handle.graphics_queue);
 
     return rendering;
 }
@@ -1836,9 +1876,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
     VkSurfaceCapabilitiesKHR surface_capabilities;
     VkResult capabilities_result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(rendering->physical_device, window->surface, &surface_capabilities);
     string_print(S8("Vulkan swapchain recreate: surface={u64:x}, old_swapchain={u64:x}, vkGetPhysicalDeviceSurfaceCapabilitiesKHR={u64:x}\n"),
-                 (u64)window->surface,
-                 (u64)window->swapchain,
-                 (u64)(u32)capabilities_result);
+                 (u64)window->surface, (u64)window->swapchain, (u64)(u32)capabilities_result);
 
     if (capabilities_result == VK_SUCCESS)
     {
@@ -1856,7 +1894,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
             }
         }
 
-        u32 queue_family_indices[] = { rendering->graphics_queue_family_index };
+        u32 queue_family_indices[] = {rendering->graphics_queue_family_index};
         VkImageUsageFlags swapchain_image_usage_flags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 #if BUSTER_ANDROID
         window->swapchain_image_format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -1867,19 +1905,17 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
         window->last_height = window->height;
         window->width = surface_capabilities.currentExtent.width;
         window->height = surface_capabilities.currentExtent.height;
-        string_print(S8("Vulkan surface capabilities: current={u32}x{u32}, min_images={u32}, max_images={u32}, current_transform={u32}\n"),
-                     window->width,
-                     window->height,
-                     surface_capabilities.minImageCount,
-                     surface_capabilities.maxImageCount,
-                     surface_capabilities.currentTransform);
+        string_print(S8("Vulkan surface capabilities: current={u32}x{u32}, min_images={u32}, max_images={u32}, current_transform={u32}\n"), window->width,
+                     window->height, surface_capabilities.minImageCount, surface_capabilities.maxImageCount, surface_capabilities.currentTransform);
 
         VkPresentModeKHR preferred_present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
         VkPresentModeKHR present_modes[16];
         u32 present_mode_count = BUSTER_ARRAY_LENGTH(present_modes);
 
-        VkResult present_modes_result = vkGetPhysicalDeviceSurfacePresentModesKHR(rendering->physical_device, window->surface, &present_mode_count, present_modes);
-        string_print(S8("Vulkan surface present modes: vkGetPhysicalDeviceSurfacePresentModesKHR={u64:x}, count={u32}\n"), (u64)(u32)present_modes_result, present_mode_count);
+        VkResult present_modes_result =
+            vkGetPhysicalDeviceSurfacePresentModesKHR(rendering->physical_device, window->surface, &present_mode_count, present_modes);
+        string_print(S8("Vulkan surface present modes: vkGetPhysicalDeviceSurfacePresentModesKHR={u64:x}, count={u32}\n"), (u64)(u32)present_modes_result,
+                     present_mode_count);
         if (present_modes_result == VK_SUCCESS)
         {
             for (u32 i = 0; i < present_mode_count; i += 1)
@@ -1913,13 +1949,10 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
             };
 
             VkResult create_swapchain_result = vkCreateSwapchainKHR(rendering->device, &swapchain_create_info, rendering->allocator, &window->swapchain);
-            string_print(S8("Vulkan swapchain creation: vkCreateSwapchainKHR={u64:x}, swapchain={u64:x}, extent={u32}x{u32}, min_images={u32}, present_mode={u32}\n"),
-                         (u64)(u32)create_swapchain_result,
-                         (u64)window->swapchain,
-                         swapchain_create_info.imageExtent.width,
-                         swapchain_create_info.imageExtent.height,
-                         swapchain_create_info.minImageCount,
-                         swapchain_create_info.presentMode);
+            string_print(
+                S8("Vulkan swapchain creation: vkCreateSwapchainKHR={u64:x}, swapchain={u64:x}, extent={u32}x{u32}, min_images={u32}, present_mode={u32}\n"),
+                (u64)(u32)create_swapchain_result, (u64)window->swapchain, swapchain_create_info.imageExtent.width, swapchain_create_info.imageExtent.height,
+                swapchain_create_info.minImageCount, swapchain_create_info.presentMode);
             if (create_swapchain_result == VK_SUCCESS)
             {
                 BUSTER_CHECK(window->swapchain != old_swapchain);
@@ -1933,11 +1966,13 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
 
                     vkDestroySwapchainKHR(rendering->device, old_swapchain, rendering->allocator);
 
-                    destroy_image(rendering->device, rendering->allocator, window->render_image.view, window->render_image.handle, window->render_image.memory.handle);
+                    destroy_image(rendering->device, rendering->allocator, window->render_image.view, window->render_image.handle,
+                                  window->render_image.memory.handle);
                 }
 
                 VkResult get_swapchain_image_count_result = vkGetSwapchainImagesKHR(rendering->device, window->swapchain, &window->swapchain_image_count, 0);
-                string_print(S8("Vulkan swapchain image count: vkGetSwapchainImagesKHR={u64:x}, count={u32}\n"), (u64)(u32)get_swapchain_image_count_result, window->swapchain_image_count);
+                string_print(S8("Vulkan swapchain image count: vkGetSwapchainImagesKHR={u64:x}, count={u32}\n"), (u64)(u32)get_swapchain_image_count_result,
+                             window->swapchain_image_count);
                 if (get_swapchain_image_count_result == VK_SUCCESS)
                 {
                     if (window->swapchain_image_count == 0)
@@ -1950,8 +1985,10 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
                         os_fail();
                     }
 
-                    VkResult get_swapchain_images_result = vkGetSwapchainImagesKHR(rendering->device, window->swapchain, &window->swapchain_image_count, window->swapchain_images);
-                    string_print(S8("Vulkan swapchain images: vkGetSwapchainImagesKHR={u64:x}, count={u32}\n"), (u64)(u32)get_swapchain_images_result, window->swapchain_image_count);
+                    VkResult get_swapchain_images_result =
+                        vkGetSwapchainImagesKHR(rendering->device, window->swapchain, &window->swapchain_image_count, window->swapchain_images);
+                    string_print(S8("Vulkan swapchain images: vkGetSwapchainImagesKHR={u64:x}, count={u32}\n"), (u64)(u32)get_swapchain_images_result,
+                                 window->swapchain_image_count);
                     if (get_swapchain_images_result == VK_SUCCESS)
                     {
                         // VkImageViewUsageCreateInfo image_view_usage_create_info = {
@@ -1969,27 +2006,27 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
                                 .image = window->swapchain_images[i],
                                 .viewType = VK_IMAGE_VIEW_TYPE_2D,
                                 .format = swapchain_create_info.imageFormat,
-                                .components = {
-                                    .r = VK_COMPONENT_SWIZZLE_IDENTITY,
-                                    .g = VK_COMPONENT_SWIZZLE_IDENTITY,
-                                    .b = VK_COMPONENT_SWIZZLE_IDENTITY,
-                                    .a = VK_COMPONENT_SWIZZLE_IDENTITY,
-                                },
-                                .subresourceRange = {
-                                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                                    .baseMipLevel = 0,
-                                    .levelCount = 1,
-                                    .baseArrayLayer = 0,
-                                    .layerCount = 1,
-                                },
+                                .components =
+                                    {
+                                        .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                                        .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                                        .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                                        .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+                                    },
+                                .subresourceRange =
+                                    {
+                                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                        .baseMipLevel = 0,
+                                        .levelCount = 1,
+                                        .baseArrayLayer = 0,
+                                        .layerCount = 1,
+                                    },
                             };
 
-                            VkResult image_view_creation = vkCreateImageView(rendering->device, &create_info, rendering->allocator, &window->swapchain_image_views[i]);
-                            string_print(S8("Vulkan swapchain image view {u32}: vkCreateImageView={u64:x}, image={u64:x}, view={u64:x}\n"),
-                                         i,
-                                         (u64)(u32)image_view_creation,
-                                         (u64)window->swapchain_images[i],
-                                         (u64)window->swapchain_image_views[i]);
+                            VkResult image_view_creation =
+                                vkCreateImageView(rendering->device, &create_info, rendering->allocator, &window->swapchain_image_views[i]);
+                            string_print(S8("Vulkan swapchain image view {u32}: vkCreateImageView={u64:x}, image={u64:x}, view={u64:x}\n"), i,
+                                         (u64)(u32)image_view_creation, (u64)window->swapchain_images[i], (u64)window->swapchain_image_views[i]);
                             if (image_view_creation != VK_SUCCESS)
                             {
                                 os_fail();
@@ -1998,18 +2035,17 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
                     }
                 }
 
-                window->render_image = vk_image_create(rendering->device, rendering->allocator, &rendering->device_memory_properties, (VulkanImageCreate) {
-                    .width = surface_capabilities.currentExtent.width,
-                    .height = surface_capabilities.currentExtent.height,
-                    .mip_levels = 1,
-                    .format = window->swapchain_image_format,
-                    .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                });
+                window->render_image =
+                    vk_image_create(rendering->device, rendering->allocator, &rendering->device_memory_properties,
+                                    (VulkanImageCreate){
+                                        .width = surface_capabilities.currentExtent.width,
+                                        .height = surface_capabilities.currentExtent.height,
+                                        .mip_levels = 1,
+                                        .format = window->swapchain_image_format,
+                                        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                    });
                 string_print(S8("Vulkan render image creation: image={u64:x}, view={u64:x}, memory={u64:x}, extent={u32}x{u32}\n"),
-                             (u64)window->render_image.handle,
-                             (u64)window->render_image.view,
-                             (u64)window->render_image.memory.handle,
-                             window->width,
+                             (u64)window->render_image.handle, (u64)window->render_image.view, (u64)window->render_image.memory.handle, window->width,
                              window->height);
             }
         }
@@ -2027,8 +2063,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_XCB);
     xcb_connection_t* native_connection = (xcb_connection_t*)native_surface.display;
     xcb_window_t native_window = (xcb_window_t)(u64)native_surface.window;
-    string_print(S8("Vulkan render window initialization: platform=xcb, native_window={u64:x}, connection={u64:x}\n"),
-                 (u64)native_window,
+    string_print(S8("Vulkan render window initialization: platform=xcb, native_window={u64:x}, connection={u64:x}\n"), (u64)native_window,
                  (u64)native_connection);
     VkXcbSurfaceCreateInfoKHR surface_create_info = {
         .sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
@@ -2048,9 +2083,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_WIN32);
     HINSTANCE native_instance = (HINSTANCE)native_surface.display;
     HWND native_window = (HWND)native_surface.window;
-    string_print(S8("Vulkan render window initialization: platform=win32, hwnd={u64:x}, hinstance={u64:x}\n"),
-                 (u64)native_window,
-                 (u64)native_instance);
+    string_print(S8("Vulkan render window initialization: platform=win32, hwnd={u64:x}, hinstance={u64:x}\n"), (u64)native_window, (u64)native_instance);
     VkWin32SurfaceCreateInfoKHR surface_create_info = {
         .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
         .pNext = 0,
@@ -2068,8 +2101,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 #elif defined(VK_USE_PLATFORM_ANDROID_KHR)
     BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_ANDROID);
     struct ANativeWindow* native_window = (struct ANativeWindow*)native_surface.window;
-    string_print(S8("Vulkan render window initialization: platform=android, native_window={u64:x}\n"),
-                 (u64)native_window);
+    string_print(S8("Vulkan render window initialization: platform=android, native_window={u64:x}\n"), (u64)native_window);
     VkAndroidSurfaceCreateInfoKHR surface_create_info = {
         .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
         .pNext = 0,
@@ -2096,7 +2128,8 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 #endif
 
     swapchain_recreate(rendering, result);
-    string_print(S8("Vulkan swapchain ready: swapchain={u64:x}, extent={u32}x{u32}, images={u32}\n"), result->swapchain, result->width, result->height, result->swapchain_image_count);
+    string_print(S8("Vulkan swapchain ready: swapchain={u64:x}, extent={u32}x{u32}, images={u32}\n"), result->swapchain, result->width, result->height,
+                 result->swapchain_image_count);
 
     for (u64 frame_index = 0; frame_index < result->frame_count; frame_index += 1)
     {
@@ -2146,9 +2179,9 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
                 VkDescriptorPoolSize* pool_size = &pool_sizes[pool_size_count];
                 pool_size_count += 1;
 
-                *pool_size = (VkDescriptorPoolSize) {
+                *pool_size = (VkDescriptorPoolSize){
                     .type = vulkan_descriptor_type((DescriptorType)i),
-                        .descriptorCount = count,
+                    .descriptorCount = count,
                 };
             }
         }
@@ -2225,11 +2258,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
             }
             frame->bound_pipeline = BUSTER_PIPELINE_COUNT;
             string_print(S8("Vulkan frame resources {u32}: command_pool={u64:x}, command_buffer={u64:x}, render_fence={u64:x}, swapchain_semaphore={u64:x}\n"),
-                         frame_i,
-                         (u64)frame->command_pool,
-                         (u64)frame->command_buffer,
-                         (u64)frame->render_fence,
-                         (u64)frame->swapchain_semaphore);
+                         frame_i, (u64)frame->command_pool, (u64)frame->command_buffer, (u64)frame->render_fence, (u64)frame->swapchain_semaphore);
         }
     }
 
@@ -2243,10 +2272,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     }
 
     string_print(S8("Vulkan render window initialization succeeded: surface={u64:x}, swapchain={u64:x}, frame_count={u32}, image_count={u32}\n"),
-                 (u64)result->surface,
-                 (u64)result->swapchain,
-                 result->frame_count,
-                 result->swapchain_image_count);
+                 (u64)result->surface, (u64)result->swapchain, result->frame_count, result->swapchain_image_count);
 
     return result;
 }
@@ -2299,12 +2325,13 @@ void rendering_window_surface_recreate(RenderingHandle* rendering, WmHandle* win
 }
 #endif
 
-void rendering_window_queue_pipeline_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, BusterPipeline pipeline_index, u32 resource_slot, TextureIndex texture_index)
+void rendering_window_queue_pipeline_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, BusterPipeline pipeline_index, u32 resource_slot,
+                                                    TextureIndex texture_index)
 {
     PipelineInstantiation* pipeline_instantiation = &window->pipeline_instantiations[(u64)pipeline_index];
     VkDescriptorImageInfo* descriptor_image = &pipeline_instantiation->texture_descriptors[resource_slot];
     VulkanTexture* texture = &rendering->textures[texture_index.value];
-    *descriptor_image = (VkDescriptorImageInfo) {
+    *descriptor_image = (VkDescriptorImageInfo){
         .sampler = texture->sampler,
         .imageView = texture->image.view,
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, // TODO: specify
@@ -2326,9 +2353,15 @@ BUSTER_GLOBAL_LOCAL VkFormat vk_texture_format(TextureFormat format)
     VkFormat result = {0};
     switch (format)
     {
-        break; case TEXTURE_FORMAT_R8_UNORM: result = VK_FORMAT_R8_UNORM;
-        break; case TEXTURE_FORMAT_R8G8B8A8_SRGB: result = VK_FORMAT_R8G8B8A8_SRGB;
-        break; case TEXTURE_FORMAT_COUNT: BUSTER_UNREACHABLE();
+        break;
+    case TEXTURE_FORMAT_R8_UNORM:
+        result = VK_FORMAT_R8_UNORM;
+        break;
+    case TEXTURE_FORMAT_R8G8B8A8_SRGB:
+        result = VK_FORMAT_R8G8B8A8_SRGB;
+        break;
+    case TEXTURE_FORMAT_COUNT:
+        BUSTER_UNREACHABLE();
     }
 
     return result;
@@ -2338,15 +2371,23 @@ BUSTER_GLOBAL_LOCAL u32 format_channel_count(TextureFormat format)
 {
     switch (format)
     {
-        break; case TEXTURE_FORMAT_R8_UNORM: return 1;
-        break; case TEXTURE_FORMAT_R8G8B8A8_SRGB: return 4;
-        break; case TEXTURE_FORMAT_COUNT: BUSTER_UNREACHABLE();
+        break;
+    case TEXTURE_FORMAT_R8_UNORM:
+        return 1;
+        break;
+    case TEXTURE_FORMAT_R8G8B8A8_SRGB:
+        return 4;
+        break;
+    case TEXTURE_FORMAT_COUNT:
+        BUSTER_UNREACHABLE();
     }
 
     BUSTER_UNREACHABLE();
 }
 
-BUSTER_GLOBAL_LOCAL VulkanBuffer vk_buffer_create(VkDevice device, const VkAllocationCallbacks* allocation_callbacks, const VkPhysicalDeviceMemoryProperties* physical_device_memory_properties, VkDeviceSize buffer_size, VkBufferUsageFlags usage_flags, VkMemoryPropertyFlags memory_flags)
+BUSTER_GLOBAL_LOCAL VulkanBuffer vk_buffer_create(VkDevice device, const VkAllocationCallbacks* allocation_callbacks,
+                                                  const VkPhysicalDeviceMemoryProperties* physical_device_memory_properties, VkDeviceSize buffer_size,
+                                                  VkBufferUsageFlags usage_flags, VkMemoryPropertyFlags memory_flags)
 {
     VulkanBuffer result = {
         .size = buffer_size,
@@ -2368,7 +2409,8 @@ BUSTER_GLOBAL_LOCAL VulkanBuffer vk_buffer_create(VkDevice device, const VkAlloc
         vkGetBufferMemoryRequirements(device, result.handle, &memory_requirements);
 
         u8 use_device_address_bit = !!(create_info.usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-        result.memory = vk_allocate_memory(device, allocation_callbacks, physical_device_memory_properties, memory_requirements, memory_flags, use_device_address_bit);
+        result.memory =
+            vk_allocate_memory(device, allocation_callbacks, physical_device_memory_properties, memory_requirements, memory_flags, use_device_address_bit);
 
         VkDeviceSize memory_offset = 0;
         if (vkBindBufferMemory(device, result.handle, result.memory.handle, memory_offset) == VK_SUCCESS)
@@ -2403,7 +2445,7 @@ BUSTER_GLOBAL_LOCAL VulkanBuffer vk_buffer_create(VkDevice device, const VkAlloc
 
 BUSTER_GLOBAL_LOCAL bool immediate_start(ImmediateContext context)
 {
-    VkFence fences[] = { context.fence };
+    VkFence fences[] = {context.fence};
     VkCommandBufferResetFlags reset_flags = 0;
 
     VkResult reset_fences = vkResetFences(context.device, BUSTER_ARRAY_LENGTH(fences), fences);
@@ -2420,36 +2462,32 @@ BUSTER_GLOBAL_LOCAL bool immediate_start(ImmediateContext context)
 
 BUSTER_GLOBAL_LOCAL bool immediate_end(ImmediateContext context)
 {
-    VkFence fences[] = { context.fence };
+    VkFence fences[] = {context.fence};
 
     bool result = false;
 
     if (vkEndCommandBuffer(context.command_buffer) == VK_SUCCESS)
     {
-        VkCommandBufferSubmitInfo command_buffer_submit_infos[] = {
-            {
-                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-                .pNext = 0,
-                .deviceMask = 0,
-                .commandBuffer = context.command_buffer,
-            }
-        };
+        VkCommandBufferSubmitInfo command_buffer_submit_infos[] = {{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+            .pNext = 0,
+            .deviceMask = 0,
+            .commandBuffer = context.command_buffer,
+        }};
 
         VkSubmitFlags submit_flags = 0;
 
-        VkSubmitInfo2 submit_info[] = {
-            {
-                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-                .pNext = 0,
-                .flags = submit_flags,
-                .waitSemaphoreInfoCount = 0,
-                .pWaitSemaphoreInfos = 0,
-                .commandBufferInfoCount = BUSTER_ARRAY_LENGTH(command_buffer_submit_infos),
-                .pCommandBufferInfos = command_buffer_submit_infos,
-                .signalSemaphoreInfoCount = 0,
-                .pSignalSemaphoreInfos = 0,
-            }
-        };
+        VkSubmitInfo2 submit_info[] = {{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+            .pNext = 0,
+            .flags = submit_flags,
+            .waitSemaphoreInfoCount = 0,
+            .pWaitSemaphoreInfos = 0,
+            .commandBufferInfoCount = BUSTER_ARRAY_LENGTH(command_buffer_submit_infos),
+            .pCommandBufferInfos = command_buffer_submit_infos,
+            .signalSemaphoreInfoCount = 0,
+            .pSignalSemaphoreInfos = 0,
+        }};
 
         VkResult submit_result = vkQueueSubmit2(context.queue, BUSTER_ARRAY_LENGTH(submit_info), submit_info, context.fence);
         if (submit_result == VK_SUCCESS)
@@ -2476,13 +2514,14 @@ BUSTER_GLOBAL_LOCAL void vk_image_transition(VkCommandBuffer command_buffer, VkI
         .oldLayout = old_layout,
         .newLayout = new_layout,
         .image = image,
-        .subresourceRange = {
-            .aspectMask = (new_layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0,
-            .levelCount = VK_REMAINING_MIP_LEVELS,
-            .baseArrayLayer = 0,
-            .layerCount = VK_REMAINING_ARRAY_LAYERS,
-        },
+        .subresourceRange =
+            {
+                .aspectMask = (new_layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = VK_REMAINING_MIP_LEVELS,
+                .baseArrayLayer = 0,
+                .layerCount = VK_REMAINING_ARRAY_LAYERS,
+            },
     };
 
     VkDependencyInfo dependency_info = {
@@ -2521,21 +2560,25 @@ BUSTER_GLOBAL_LOCAL void vk_image_copy(VkCommandBuffer command_buffer, VulkanCop
             .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
             .pNext = 0,
             .srcSubresource = subresource_layers,
-            .srcOffsets = {
-                [1] = {
-                    .x = (s32)args.source.extent.width,
-                    .y = (s32)args.source.extent.height,
-                    .z = 1,
+            .srcOffsets =
+                {
+                    [1] =
+                        {
+                            .x = (s32)args.source.extent.width,
+                            .y = (s32)args.source.extent.height,
+                            .z = 1,
+                        },
                 },
-            },
             .dstSubresource = subresource_layers,
-            .dstOffsets = {
-                [1] = {
-                    .x = (s32)args.destination.extent.width,
-                    .y = (s32)args.destination.extent.height,
-                    .z = 1,
+            .dstOffsets =
+                {
+                    [1] =
+                        {
+                            .x = (s32)args.destination.extent.width,
+                            .y = (s32)args.destination.extent.height,
+                            .z = 1,
+                        },
                 },
-            },
         },
     };
 
@@ -2576,52 +2619,57 @@ TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory 
     u32 texture_index = rendering->texture_count;
     rendering->texture_count += 1;
     VulkanTexture* texture = &rendering->textures[texture_index];
-    texture->image = vk_image_create(rendering->device, rendering->allocator, &rendering->device_memory_properties, (VulkanImageCreate) {
-        .width = texture_memory.width,
-        .height = texture_memory.height,
-        .mip_levels = 1,
-        .format = vk_texture_format(texture_memory.format),
-        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-    });
+    texture->image = vk_image_create(rendering->device, rendering->allocator, &rendering->device_memory_properties,
+                                     (VulkanImageCreate){
+                                         .width = texture_memory.width,
+                                         .height = texture_memory.height,
+                                         .mip_levels = 1,
+                                         .format = vk_texture_format(texture_memory.format),
+                                         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                     });
     texture->sampler = rendering->sampler;
 
     u64 image_size = (u64)texture_memory.depth * texture_memory.width * texture_memory.height * format_channel_count(texture_memory.format);
     VkBufferUsageFlags buffer_usage_flags = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     VkMemoryPropertyFlags buffer_memory_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    texture->transfer_buffer = vk_buffer_create(rendering->device, rendering->allocator, &rendering->device_memory_properties, image_size, buffer_usage_flags, buffer_memory_flags);
+    texture->transfer_buffer =
+        vk_buffer_create(rendering->device, rendering->allocator, &rendering->device_memory_properties, image_size, buffer_usage_flags, buffer_memory_flags);
     memcpy((void*)texture->transfer_buffer.address, texture_memory.pointer, image_size);
 
     immediate_start(rendering->immediate);
 
     vk_image_transition(rendering->immediate.command_buffer, texture->image.handle, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-    VkBufferImageCopy copy_regions[] = {
-        {
-            .bufferOffset = 0,
-            .bufferRowLength = 0,
-            .bufferImageHeight = 0,
-            .imageSubresource = {
+    VkBufferImageCopy copy_regions[] = {{
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource =
+            {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .mipLevel = 0,
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-            .imageOffset = {
+        .imageOffset =
+            {
                 .x = 0,
                 .y = 0,
                 .z = 0,
             },
-            .imageExtent = {
+        .imageExtent =
+            {
                 .width = texture_memory.width,
                 .height = texture_memory.height,
                 .depth = texture_memory.depth,
             },
-        }
-    };
+    }};
 
-    vkCmdCopyBufferToImage(rendering->immediate.command_buffer, texture->transfer_buffer.handle, texture->image.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, BUSTER_ARRAY_LENGTH(copy_regions), copy_regions);
+    vkCmdCopyBufferToImage(rendering->immediate.command_buffer, texture->transfer_buffer.handle, texture->image.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           BUSTER_ARRAY_LENGTH(copy_regions), copy_regions);
 
-    vk_image_transition(rendering->immediate.command_buffer, texture->image.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vk_image_transition(rendering->immediate.command_buffer, texture->image.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     // Swiftshader's JIT compiler allocates internal state on first queue submission
     // that it never frees on vkDestroyDevice. Disable LSAN for this call so those
@@ -2630,7 +2678,7 @@ TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory 
     immediate_end(rendering->immediate);
     BUSTER_LSAN_ENABLE();
 
-    return (TextureIndex) { .value = texture_index };
+    return (TextureIndex){.value = texture_index};
 }
 
 BUSTER_GLOBAL_LOCAL WindowFrame* rendering_window_frame(RenderingWindowHandle* window)
@@ -2646,12 +2694,7 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
     if (log_frame_begin)
     {
         string_print(S8("Vulkan frame begin {u32}: swapchain={u64:x}, extent={u32}x{u32}, frame_index={u32}, swapchain_image_index={u32}\n"),
-                     vulkan_frame_begin_log_count,
-                     (u64)window->swapchain,
-                     window->width,
-                     window->height,
-                     window->frame_index,
-                     window->swapchain_image_index);
+                     vulkan_frame_begin_log_count, (u64)window->swapchain, window->width, window->height, window->frame_index, window->swapchain_image_index);
         vulkan_frame_begin_log_count += 1;
     }
 
@@ -2663,11 +2706,8 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         u32 surface_height = surface_capabilities.currentExtent.height;
         if (surface_width && surface_height && (surface_width != window->width || surface_height != window->height))
         {
-            string_print(S8("Vulkan frame begin detected surface resize: stored={u32}x{u32}, current={u32}x{u32}\n"),
-                         window->width,
-                         window->height,
-                         surface_width,
-                         surface_height);
+            string_print(S8("Vulkan frame begin detected surface resize: stored={u32}x{u32}, current={u32}x{u32}\n"), window->width, window->height,
+                         surface_width, surface_height);
             swapchain_recreate(rendering, window);
             frame = rendering_window_frame(window);
         }
@@ -2680,7 +2720,8 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
     if (wait_result == VK_SUCCESS)
     {
         VkFence image_fence = 0;
-        VkResult next_image_result = vkAcquireNextImageKHR(rendering->device, window->swapchain, timeout, frame->swapchain_semaphore, image_fence, &window->swapchain_image_index);
+        VkResult next_image_result =
+            vkAcquireNextImageKHR(rendering->device, window->swapchain, timeout, frame->swapchain_semaphore, image_fence, &window->swapchain_image_index);
         u32 acquired_image_index = window->swapchain_image_index;
 
         if (next_image_result == VK_ERROR_OUT_OF_DATE_KHR)
@@ -2688,7 +2729,8 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
             string_print(S8("Vulkan frame begin acquire out of date: vkAcquireNextImageKHR={u64:x}\n"), (u64)(u32)next_image_result);
             swapchain_recreate(rendering, window);
             frame = rendering_window_frame(window);
-            next_image_result = vkAcquireNextImageKHR(rendering->device, window->swapchain, timeout, frame->swapchain_semaphore, image_fence, &window->swapchain_image_index);
+            next_image_result =
+                vkAcquireNextImageKHR(rendering->device, window->swapchain, timeout, frame->swapchain_semaphore, image_fence, &window->swapchain_image_index);
             acquired_image_index = window->swapchain_image_index;
         }
 
@@ -2704,16 +2746,15 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         bool success = reset_fence_result == VK_SUCCESS && reset_command_buffer_result == VK_SUCCESS;
         if (!success)
         {
-            string_print(S8("Vulkan frame begin reset failed: vkResetFences={u64:x}, vkResetCommandBuffer={u64:x}\n"), (u64)(u32)reset_fence_result, (u64)(u32)reset_command_buffer_result);
+            string_print(S8("Vulkan frame begin reset failed: vkResetFences={u64:x}, vkResetCommandBuffer={u64:x}\n"), (u64)(u32)reset_fence_result,
+                         (u64)(u32)reset_command_buffer_result);
             os_fail();
         }
 
         if (log_frame_begin)
         {
-            string_print(S8("Vulkan frame begin acquire: vkWaitForFences={u64:x}, vkAcquireNextImageKHR={u64:x}, image_index={u32}\n"),
-                         (u64)(u32)wait_result,
-                         (u64)(u32)next_image_result,
-                         acquired_image_index);
+            string_print(S8("Vulkan frame begin acquire: vkWaitForFences={u64:x}, vkAcquireNextImageKHR={u64:x}, image_index={u32}\n"), (u64)(u32)wait_result,
+                         (u64)(u32)next_image_result, acquired_image_index);
         }
     }
     else
@@ -2755,14 +2796,11 @@ BUSTER_GLOBAL_LOCAL VulkanBuffer buffer_create(RenderingHandle* rendering, u64 s
     u8 is_dst = (type == BUFFER_TYPE_VERTEX) | (type == BUFFER_TYPE_INDEX);
     u8 is_src = type == BUFFER_TYPE_STAGING;
 
-    VkBufferUsageFlags usage = 
-        (VK_BUFFER_USAGE_TRANSFER_DST_BIT * is_dst) |
-        (VK_BUFFER_USAGE_TRANSFER_SRC_BIT * is_src) |
-        ((VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) * (type == BUFFER_TYPE_VERTEX)) |
-        (VK_BUFFER_USAGE_INDEX_BUFFER_BIT * (type == BUFFER_TYPE_INDEX));
+    VkBufferUsageFlags usage = (VK_BUFFER_USAGE_TRANSFER_DST_BIT * is_dst) | (VK_BUFFER_USAGE_TRANSFER_SRC_BIT * is_src) |
+                               ((VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) * (type == BUFFER_TYPE_VERTEX)) |
+                               (VK_BUFFER_USAGE_INDEX_BUFFER_BIT * (type == BUFFER_TYPE_INDEX));
     VkMemoryPropertyFlags memory_flags =
-        (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT * is_dst) |
-        ((VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) * is_src);
+        (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT * is_dst) | ((VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) * is_src);
     VulkanBuffer result = vk_buffer_create(rendering->device, rendering->allocator, &rendering->device_memory_properties, size, usage, memory_flags);
     result.type = type;
     return result;
@@ -2851,7 +2889,7 @@ BUSTER_GLOBAL_LOCAL void buffer_copy_to_local_command(VkCommandBuffer command_bu
         for (u64 copy_region_i = 0; copy_region_i < copy.regions.length; copy_region_i += 1)
         {
             LocalBufferCopyRegion copy_region = copy.regions.pointer[copy_region_i];
-            buffer_copies[copy_region_i] = (VkBufferCopy2) {
+            buffer_copies[copy_region_i] = (VkBufferCopy2){
                 .sType = VK_STRUCTURE_TYPE_BUFFER_COPY_2,
                 .pNext = 0,
                 .srcOffset = copy_region.source_offset,
@@ -2878,13 +2916,8 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
     WindowFrame* frame = rendering_window_frame(window);
     if (vulkan_frame_end_log_count < 3)
     {
-        string_print(S8("Vulkan frame end {u32}: swapchain={u64:x}, render_image={u64:x}, image_index={u32}, extent={u32}x{u32}\n"),
-                     vulkan_frame_end_log_count,
-                     (u64)window->swapchain,
-                     (u64)window->render_image.handle,
-                     window->swapchain_image_index,
-                     window->width,
-                     window->height);
+        string_print(S8("Vulkan frame end {u32}: swapchain={u64:x}, render_image={u64:x}, image_index={u32}, extent={u32}x{u32}\n"), vulkan_frame_end_log_count,
+                     (u64)window->swapchain, (u64)window->render_image.handle, window->swapchain_image_index, window->width, window->height);
     }
 
     VkCommandBufferBeginInfo command_buffer_begin_info = {
@@ -2908,78 +2941,79 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
                 buffer_ensure_capacity(rendering, &frame_pipeline_instantiation->vertex_buffer.gpu, new_vertex_buffer_size);
                 buffer_ensure_capacity(rendering, &frame_pipeline_instantiation->index_buffer.gpu, new_index_buffer_size);
 
-                buffer_copy_to_host(frame_pipeline_instantiation->transient_buffer, (SliceHostBufferCopy) BUSTER_ARRAY_TO_SLICE(((HostBufferCopy[]) {
-                                (HostBufferCopy) {
-                                .source = (ByteSlice) {
-                                .pointer = arena_buffer_start(frame_pipeline_instantiation->vertex_buffer.cpu),
-                                .length = new_vertex_buffer_size,
-                                },
-                                .destination_offset = 0,
-                                },
-                                (HostBufferCopy) {
-                                .source = (ByteSlice) {
-                                .pointer = arena_buffer_start(frame_pipeline_instantiation->index_buffer.cpu),
-                                .length = new_index_buffer_size,
-                                },
-                                .destination_offset = new_vertex_buffer_size,
-                                },
-                                })));
+                buffer_copy_to_host(frame_pipeline_instantiation->transient_buffer,
+                                    (SliceHostBufferCopy)BUSTER_ARRAY_TO_SLICE(((HostBufferCopy[]){
+                                        (HostBufferCopy){
+                                            .source =
+                                                (ByteSlice){
+                                                    .pointer = arena_buffer_start(frame_pipeline_instantiation->vertex_buffer.cpu),
+                                                    .length = new_vertex_buffer_size,
+                                                },
+                                            .destination_offset = 0,
+                                        },
+                                        (HostBufferCopy){
+                                            .source =
+                                                (ByteSlice){
+                                                    .pointer = arena_buffer_start(frame_pipeline_instantiation->index_buffer.cpu),
+                                                    .length = new_index_buffer_size,
+                                                },
+                                            .destination_offset = new_vertex_buffer_size,
+                                        },
+                                    })));
 
-                buffer_copy_to_local_command(frame->command_buffer, (SliceLocalBufferCopy) BUSTER_ARRAY_TO_SLICE(((LocalBufferCopy[]) {
-                                {
-                                .destination = frame_pipeline_instantiation->vertex_buffer.gpu,
-                                .source = frame_pipeline_instantiation->transient_buffer,
-                                .regions = BUSTER_ARRAY_TO_SLICE(((LocalBufferCopyRegion[]) {
-                                            {
-                                            .source_offset = 0,
-                                            .destination_offset = 0,
-                                            .size = new_vertex_buffer_size,
-                                            },
-                                            })),
-                                },
-                                {
-                                .destination = frame_pipeline_instantiation->index_buffer.gpu,
-                                .source = frame_pipeline_instantiation->transient_buffer,
-                                .regions = BUSTER_ARRAY_TO_SLICE(((LocalBufferCopyRegion[]) {
-                                            {
-                                            .source_offset = new_vertex_buffer_size,
-                                            .destination_offset = 0,
-                                            .size = new_index_buffer_size,
-                                            },
-                                            })),
-                                },
-                })));
+                buffer_copy_to_local_command(frame->command_buffer, (SliceLocalBufferCopy)BUSTER_ARRAY_TO_SLICE(((LocalBufferCopy[]){
+                                                                        {
+                                                                            .destination = frame_pipeline_instantiation->vertex_buffer.gpu,
+                                                                            .source = frame_pipeline_instantiation->transient_buffer,
+                                                                            .regions = BUSTER_ARRAY_TO_SLICE(((LocalBufferCopyRegion[]){
+                                                                                {
+                                                                                    .source_offset = 0,
+                                                                                    .destination_offset = 0,
+                                                                                    .size = new_vertex_buffer_size,
+                                                                                },
+                                                                            })),
+                                                                        },
+                                                                        {
+                                                                            .destination = frame_pipeline_instantiation->index_buffer.gpu,
+                                                                            .source = frame_pipeline_instantiation->transient_buffer,
+                                                                            .regions = BUSTER_ARRAY_TO_SLICE(((LocalBufferCopyRegion[]){
+                                                                                {
+                                                                                    .source_offset = new_vertex_buffer_size,
+                                                                                    .destination_offset = 0,
+                                                                                    .size = new_index_buffer_size,
+                                                                                },
+                                                                            })),
+                                                                        },
+                                                                    })));
             }
         }
 
         vk_image_transition(frame->command_buffer, window->render_image.handle, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-        VkViewport viewports[] = {
-            {
-                .x = 0,
-                .y = 0,
-                .width = (f32)window->width,
-                .height = (f32)window->height,
-                .minDepth = 0.0f,
-                .maxDepth = 1.0f,
-            }
-        };
+        VkViewport viewports[] = {{
+            .x = 0,
+            .y = 0,
+            .width = (f32)window->width,
+            .height = (f32)window->height,
+            .minDepth = 0.0f,
+            .maxDepth = 1.0f,
+        }};
 
         u32 first_viewport = 0;
         vkCmdSetViewport(frame->command_buffer, first_viewport, BUSTER_ARRAY_LENGTH(viewports), viewports);
 
-        VkRect2D scissors[] = {
-            {
-                .offset = {
+        VkRect2D scissors[] = {{
+            .offset =
+                {
                     .x = 0,
                     .y = 0,
                 },
-                .extent = {
+            .extent =
+                {
                     .width = window->width,
                     .height = window->height,
                 },
-            }
-        };
+        }};
 
         u32 first_scissor = 0;
         vkCmdSetScissor(frame->command_buffer, first_scissor, BUSTER_ARRAY_LENGTH(scissors), scissors);
@@ -2991,18 +3025,20 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
                 .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
                 .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
                 .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                .clearValue = { .color = { .float32 = { 255.0f, 0.0f, 255.0f, 1.0f } } },
+                .clearValue = {.color = {.float32 = {255.0f, 0.0f, 255.0f, 1.0f}}},
             },
         };
 
         VkRenderingInfo rendering_info = {
             .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-            .renderArea = {
-                .extent = {
-                    .width = window->width,
-                    .height = window->height,
+            .renderArea =
+                {
+                    .extent =
+                        {
+                            .width = window->width,
+                            .height = window->height,
+                        },
                 },
-            },
             .layerCount = 1,
             .colorAttachmentCount = BUSTER_ARRAY_LENGTH(color_attachments),
             .pColorAttachments = color_attachments,
@@ -3025,7 +3061,8 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
                     u32 dynamic_offset_count = 0;
                     u32* dynamic_offsets = 0;
                     u32 first_set = 0;
-                    vkCmdBindDescriptorSets(frame->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout, first_set, pipeline->descriptor_set_count, pipeline_instantiation->descriptor_sets, dynamic_offset_count, dynamic_offsets);
+                    vkCmdBindDescriptorSets(frame->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout, first_set, pipeline->descriptor_set_count,
+                                            pipeline_instantiation->descriptor_sets, dynamic_offset_count, dynamic_offsets);
                     // print("Binding descriptor sets: 0x{u64}\n", pipeline_instantiation->descriptor_sets);
                     frame->bound_pipeline = (BusterPipeline)pipeline_index;
                 }
@@ -3067,7 +3104,8 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
 
                 {
                     VkPushConstantRange push_constant_range = pipeline->push_constant_ranges[0];
-                    vkCmdPushConstants(frame->command_buffer, pipeline->layout, push_constant_range.stageFlags, push_constant_range.offset, push_constant_range.size, &push_constants);
+                    vkCmdPushConstants(frame->command_buffer, pipeline->layout, push_constant_range.stageFlags, push_constant_range.offset,
+                                       push_constant_range.size, &push_constants);
                 }
 #else
                 // Send vertex buffer and screen dimensions to the shader
@@ -3079,7 +3117,8 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
 
                 {
                     VkPushConstantRange push_constant_range = pipeline->push_constant_ranges[0];
-                    vkCmdPushConstants(frame->command_buffer, pipeline->layout, push_constant_range.stageFlags, push_constant_range.offset, push_constant_range.size, &push_constants);
+                    vkCmdPushConstants(frame->command_buffer, pipeline->layout, push_constant_range.stageFlags, push_constant_range.offset,
+                                       push_constant_range.size, &push_constants);
                     frame->push_constants = push_constants;
                 }
 #endif
@@ -3095,22 +3134,26 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
         VkImage swapchain_image = window->swapchain_images[window->swapchain_image_index];
         vk_image_transition(frame->command_buffer, swapchain_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-        vk_image_copy(frame->command_buffer, (VulkanCopyImageArgs) {
-                .source = {
-                .handle = window->render_image.handle,
-                .extent = {
-                .width = window->width,
-                .height = window->height,
-                },
-                },
-                .destination = {
-                .handle = swapchain_image,
-                .extent = {
-                .width = window->width,
-                .height = window->height,
-                },
-                },
-                });
+        vk_image_copy(frame->command_buffer, (VulkanCopyImageArgs){
+                                                 .source =
+                                                     {
+                                                         .handle = window->render_image.handle,
+                                                         .extent =
+                                                             {
+                                                                 .width = window->width,
+                                                                 .height = window->height,
+                                                             },
+                                                     },
+                                                 .destination =
+                                                     {
+                                                         .handle = swapchain_image,
+                                                         .extent =
+                                                             {
+                                                                 .width = window->width,
+                                                                 .height = window->height,
+                                                             },
+                                                     },
+                                             });
 
         vk_image_transition(frame->command_buffer, swapchain_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
@@ -3162,10 +3205,10 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
             VkResult submit_result = vkQueueSubmit2(rendering->graphics_queue, BUSTER_ARRAY_LENGTH(submit_info), submit_info, frame->render_fence);
             if (submit_result == VK_SUCCESS)
             {
-                const VkSwapchainKHR swapchains[] = { window->swapchain };
-                const u32 swapchain_image_indices[] = { window->swapchain_image_index };
-                const VkSemaphore wait_semaphores[] = { render_semaphore };
-                VkResult results[BUSTER_ARRAY_LENGTH(swapchains)] = { VK_SUCCESS };
+                const VkSwapchainKHR swapchains[] = {window->swapchain};
+                const u32 swapchain_image_indices[] = {window->swapchain_image_index};
+                const VkSemaphore wait_semaphores[] = {render_semaphore};
+                VkResult results[BUSTER_ARRAY_LENGTH(swapchains)] = {VK_SUCCESS};
 
                 VkPresentInfoKHR present_info = {
                     .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -3181,12 +3224,9 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
 
                 if (vulkan_frame_end_log_count < 3)
                 {
-                    string_print(S8("Vulkan frame end present {u32}: vkQueueSubmit2={u64:x}, vkQueuePresentKHR={u64:x}, result0={u64:x}, render_semaphore={u64:x}\n"),
-                                 vulkan_frame_end_log_count,
-                                 (u64)(u32)submit_result,
-                                 (u64)(u32)present_result,
-                                 (u64)(u32)results[0],
-                                 (u64)render_semaphore);
+                    string_print(
+                        S8("Vulkan frame end present {u32}: vkQueueSubmit2={u64:x}, vkQueuePresentKHR={u64:x}, result0={u64:x}, render_semaphore={u64:x}\n"),
+                        vulkan_frame_end_log_count, (u64)(u32)submit_result, (u64)(u32)present_result, (u64)(u32)results[0], (u64)render_semaphore);
                     vulkan_frame_end_log_count += 1;
                 }
 
@@ -3234,11 +3274,8 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
 // TODO: support gradient
 void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
-    string_print(S8("Vulkan render window deinitialize: surface={u64:x}, swapchain={u64:x}, frame_count={u32}, image_count={u32}\n"),
-                 (u64)window->surface,
-                 (u64)window->swapchain,
-                 window->frame_count,
-                 window->swapchain_image_count);
+    string_print(S8("Vulkan render window deinitialize: surface={u64:x}, swapchain={u64:x}, frame_count={u32}, image_count={u32}\n"), (u64)window->surface,
+                 (u64)window->swapchain, window->frame_count, window->swapchain_image_count);
     if (vkDeviceWaitIdle(rendering->device) == VK_SUCCESS)
     {
         for (u32 i = 0; i < window->frame_count; i += 1)
@@ -3314,9 +3351,7 @@ void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHa
 
 void rendering_deinitialize(RenderingHandle* rendering)
 {
-    string_print(S8("Vulkan rendering deinitialize: texture_count={u32}, device={u64:x}, instance={u64:x}\n"),
-                 rendering->texture_count,
-                 (u64)rendering->device,
+    string_print(S8("Vulkan rendering deinitialize: texture_count={u32}, device={u64:x}, instance={u64:x}\n"), rendering->texture_count, (u64)rendering->device,
                  (u64)rendering->instance);
     if (vkDeviceWaitIdle(rendering->device) == VK_SUCCESS)
     {

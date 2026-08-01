@@ -62,7 +62,8 @@ BUSTER_F_DECL void rendering_window_surface_recreate(RenderingHandle* rendering,
 BUSTER_F_DECL RenderingWindowSize rendering_window_get_size(RenderingWindowHandle* window);
 BUSTER_F_DECL void rendering_window_rect_texture_update_begin(RenderingWindowHandle* window);
 BUSTER_F_DECL TextureIndex white_texture_create(Arena* arena, RenderingHandle* rendering);
-BUSTER_F_DECL void rendering_window_queue_rect_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, RectTextureSlot slot, TextureIndex texture_index);
+BUSTER_F_DECL void rendering_window_queue_rect_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, RectTextureSlot slot,
+                                                              TextureIndex texture_index);
 BUSTER_F_DECL void rendering_queue_font_update(RenderingHandle* rendering, RenderingWindowHandle* window, RenderFontType type, FontTextureAtlas atlas);
 BUSTER_F_DECL void rendering_window_rect_texture_update_end(RenderingHandle* rendering, RenderingWindowHandle* window);
 BUSTER_F_DECL TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory);
@@ -70,6 +71,7 @@ BUSTER_F_DECL FontTextureAtlas rendering_font_create(Arena* arena, RenderingHand
 BUSTER_F_DECL void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHandle* window);
 BUSTER_F_DECL void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandle* window);
 BUSTER_F_DECL void rendering_window_render_rect(RenderingWindowHandle* window, RectDraw draw);
-BUSTER_F_DECL void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHandle* window, String8 string, float4 color, RenderFontType font_type, f32 x_offset, f32 y_offset);
+BUSTER_F_DECL void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHandle* window, String8 string, float4 color,
+                                                RenderFontType font_type, f32 x_offset, f32 y_offset);
 BUSTER_F_DECL void rendering_deinitialize(RenderingHandle* rendering);
 BUSTER_F_DECL void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHandle* window);

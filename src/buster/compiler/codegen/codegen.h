@@ -155,8 +155,7 @@ struct CodegenModuleRelocation
     u8 reserved;
 };
 
-typedef struct CodegenModuleDataRelocation
-    CodegenModuleDataRelocation;
+typedef struct CodegenModuleDataRelocation CodegenModuleDataRelocation;
 struct CodegenModuleDataRelocation
 {
     u32 code_offset;
@@ -226,31 +225,12 @@ struct CodegenExecutable
 };
 
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
-BUSTER_F_DECL CodegenAbiSignature codegen_classify_signature(
-    Arena* arena,
-    AnalysisResult* analysis,
-    AnalysisTypeId function_type,
-    CodegenAbi abi);
-BUSTER_F_DECL CodegenFunction codegen_generate_function(
-    Arena* arena,
-    AnalysisResult* analysis,
-    IrFunction* function,
-    Target target);
-BUSTER_F_DECL CodegenModule codegen_generate_module(
-    Arena* arena,
-    AnalysisResult* analysis,
-    IrModule* module,
-    Target target);
-BUSTER_F_DECL CodegenModule
-codegen_generate_canonical_module(
-    Arena* arena,
-    IrProgram* program,
-    IrModule* module,
-    Target target);
-BUSTER_F_DECL CodegenExecutable codegen_make_executable(
-    CodegenFunction function);
-BUSTER_F_DECL void codegen_release_executable(
-    CodegenExecutable executable);
+BUSTER_F_DECL CodegenAbiSignature codegen_classify_signature(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type, CodegenAbi abi);
+BUSTER_F_DECL CodegenFunction codegen_generate_function(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target);
+BUSTER_F_DECL CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, IrModule* module, Target target);
+BUSTER_F_DECL CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target);
+BUSTER_F_DECL CodegenExecutable codegen_make_executable(CodegenFunction function);
+BUSTER_F_DECL void codegen_release_executable(CodegenExecutable executable);
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments);

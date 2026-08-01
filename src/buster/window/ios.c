@@ -51,12 +51,12 @@ BUSTER_GLOBAL_LOCAL bool buster_ios_input_pop(WmEvent* out_event)
 BUSTER_GLOBAL_LOCAL WmOffset buster_ios_touch_position(id self, id touches)
 {
     id touch = buster_msg_id(touches, "anyObject");
-    BusterCGPoint point = { .x = 0, .y = 0 };
+    BusterCGPoint point = {.x = 0, .y = 0};
     if (touch)
     {
         point = ((BusterCGPoint (*)(id, SEL, id))objc_msgSend)(touch, buster_sel("locationInView:"), self);
     }
-    return (WmOffset) {
+    return (WmOffset){
         .x = (WmUnit)((f32)point.x * buster_ios_scale),
         .y = (WmUnit)((f32)point.y * buster_ios_scale),
     };
@@ -67,8 +67,8 @@ BUSTER_GLOBAL_LOCAL void buster_ios_touches_began(id self, SEL _cmd, id touches,
     BUSTER_UNUSED(_cmd);
     BUSTER_UNUSED(event);
     WmOffset position = buster_ios_touch_position(self, touches);
-    buster_ios_input_push((WmEvent){ .kind = WM_EVENT_MOUSE_MOVE, .position = position });
-    buster_ios_input_push((WmEvent){ .kind = WM_EVENT_BUTTON_PRESS, .key = WM_KEY_MOUSE_LEFT, .position = position });
+    buster_ios_input_push((WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
+    buster_ios_input_push((WmEvent){.kind = WM_EVENT_BUTTON_PRESS, .key = WM_KEY_MOUSE_LEFT, .position = position});
 }
 
 BUSTER_GLOBAL_LOCAL void buster_ios_touches_moved(id self, SEL _cmd, id touches, id event)
@@ -76,7 +76,7 @@ BUSTER_GLOBAL_LOCAL void buster_ios_touches_moved(id self, SEL _cmd, id touches,
     BUSTER_UNUSED(_cmd);
     BUSTER_UNUSED(event);
     WmOffset position = buster_ios_touch_position(self, touches);
-    buster_ios_input_push((WmEvent){ .kind = WM_EVENT_MOUSE_MOVE, .position = position });
+    buster_ios_input_push((WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
 }
 
 BUSTER_GLOBAL_LOCAL void buster_ios_touches_ended(id self, SEL _cmd, id touches, id event)
@@ -84,8 +84,8 @@ BUSTER_GLOBAL_LOCAL void buster_ios_touches_ended(id self, SEL _cmd, id touches,
     BUSTER_UNUSED(_cmd);
     BUSTER_UNUSED(event);
     WmOffset position = buster_ios_touch_position(self, touches);
-    buster_ios_input_push((WmEvent){ .kind = WM_EVENT_MOUSE_MOVE, .position = position });
-    buster_ios_input_push((WmEvent){ .kind = WM_EVENT_BUTTON_RELEASE, .key = WM_KEY_MOUSE_LEFT, .position = position });
+    buster_ios_input_push((WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
+    buster_ios_input_push((WmEvent){.kind = WM_EVENT_BUTTON_RELEASE, .key = WM_KEY_MOUSE_LEFT, .position = position});
 }
 
 // +[BusterMetalView layerClass] -> CAMetalLayer, so the view is backed directly
@@ -213,9 +213,9 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
             for (u64 i = 0; i < windows.length; i += 1)
             {
                 wm_event_push(windowing, (WmEvent){
-                    .window = &windows.pointer[i],
-                    .kind = WM_EVENT_WINDOW_CLOSE,
-                });
+                                             .window = &windows.pointer[i],
+                                             .kind = WM_EVENT_WINDOW_CLOSE,
+                                         });
             }
         }
     }
@@ -245,7 +245,7 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
     BUSTER_UNUSED(create);
     while (!buster_ios_window_ready && !buster_ios_quit)
     {
-        struct timespec sleep_time = { .tv_sec = 0, .tv_nsec = 1000000 };
+        struct timespec sleep_time = {.tv_sec = 0, .tv_nsec = 1000000};
         nanosleep(&sleep_time, 0);
     }
     if (buster_ios_window_ready)
@@ -253,14 +253,15 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
         id layer = buster_ios_metal_layer;
         BusterCGRect bounds = ((BusterCGRect (*)(id, SEL))objc_msgSend)(buster_ios_view, buster_sel("bounds"));
         result = arena_allocate(windowing->window_arena, WmWindowHandle, 1);
-        *result = (WmWindowHandle) {
+        *result = (WmWindowHandle){
             .owner = windowing,
             .view = buster_ios_view,
             .metal_layer = layer,
-            .size = {
-                .width = (WmUnit)((f32)bounds.size.width * buster_ios_scale),
-                .height = (WmUnit)((f32)bounds.size.height * buster_ios_scale),
-            },
+            .size =
+                {
+                    .width = (WmUnit)((f32)bounds.size.width * buster_ios_scale),
+                    .height = (WmUnit)((f32)bounds.size.height * buster_ios_scale),
+                },
         };
     }
     return result;

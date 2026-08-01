@@ -26,7 +26,8 @@ ProcessResult buster_argument_process(u64 argument_index)
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(flag_string_starts) == PROGRAM_FLAG_COUNT);
 
     ProcessResult result = PROCESS_RESULT_FAILED;
-    BooleanArgumentProcessResult process_result = boolean_argument_process(flag_string_starts, BUSTER_ARRAY_LENGTH(flag_string_starts), program_state->input.flags, PROGRAM_FLAG_COUNT, argument);
+    BooleanArgumentProcessResult process_result =
+        boolean_argument_process(flag_string_starts, BUSTER_ARRAY_LENGTH(flag_string_starts), program_state->input.flags, PROGRAM_FLAG_COUNT, argument);
     if (process_result.valid && process_result.index < (u64)PROGRAM_FLAG_COUNT)
     {
         result = PROCESS_RESULT_SUCCESS;
@@ -73,18 +74,26 @@ BUSTER_GLOBAL_LOCAL String8 crash_signal_name(int sig)
 {
     switch (sig)
     {
-        case SIGILL: return S8("SIGILL");
-        case SIGTRAP: return S8("SIGTRAP");
-        case SIGABRT: return S8("SIGABRT");
-        case SIGFPE: return S8("SIGFPE");
-        case SIGBUS: return S8("SIGBUS");
-        case SIGSEGV: return S8("SIGSEGV");
-        case SIGQUIT: return S8("SIGQUIT");
-        default: return S8("signal");
+    case SIGILL:
+        return S8("SIGILL");
+    case SIGTRAP:
+        return S8("SIGTRAP");
+    case SIGABRT:
+        return S8("SIGABRT");
+    case SIGFPE:
+        return S8("SIGFPE");
+    case SIGBUS:
+        return S8("SIGBUS");
+    case SIGSEGV:
+        return S8("SIGSEGV");
+    case SIGQUIT:
+        return S8("SIGQUIT");
+    default:
+        return S8("signal");
     }
 }
 
-BUSTER_GLOBAL_LOCAL void signal_handler(int sig, siginfo_t *info, void *arg)
+BUSTER_GLOBAL_LOCAL void signal_handler(int sig, siginfo_t* info, void* arg)
 {
     u64 pc = 0;
 #if BUSTER_CPU_ARCH_X86_64
@@ -124,18 +133,21 @@ BUSTER_GLOBAL_LOCAL void signal_handler(int sig, siginfo_t *info, void *arg)
 BUSTER_GLOBAL_LOCAL void install_signal_handlers(void)
 {
 #if defined(__linux__)
-      // install signal handler for the crash call stacks
-  {
-    struct sigaction handler = { .sa_sigaction = &signal_handler, .sa_flags = SA_SIGINFO, };
-    sigfillset(&handler.sa_mask);
-    sigaction(SIGILL, &handler, NULL);
-    sigaction(SIGTRAP, &handler, NULL);
-    sigaction(SIGABRT, &handler, NULL);
-    sigaction(SIGFPE, &handler, NULL);
-    sigaction(SIGBUS, &handler, NULL);
-    sigaction(SIGSEGV, &handler, NULL);
-    sigaction(SIGQUIT, &handler, NULL);
-  }
+    // install signal handler for the crash call stacks
+    {
+        struct sigaction handler = {
+            .sa_sigaction = &signal_handler,
+            .sa_flags = SA_SIGINFO,
+        };
+        sigfillset(&handler.sa_mask);
+        sigaction(SIGILL, &handler, NULL);
+        sigaction(SIGTRAP, &handler, NULL);
+        sigaction(SIGABRT, &handler, NULL);
+        sigaction(SIGFPE, &handler, NULL);
+        sigaction(SIGBUS, &handler, NULL);
+        sigaction(SIGSEGV, &handler, NULL);
+        sigaction(SIGQUIT, &handler, NULL);
+    }
 #else
 #endif
 }
@@ -157,8 +169,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     environments_raw = slice_string_from_posix_string_list(os_state.arena, envp);
 #endif
 
-    SliceString8 environment_keys = { .pointer = arena_allocate(os_state.arena, String8, environments_raw.length), .length = environments_raw.length };
-    SliceString8 environment_values = { .pointer = arena_allocate(os_state.arena, String8, environments_raw.length), .length = environments_raw.length };
+    SliceString8 environment_keys = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length), .length = environments_raw.length};
+    SliceString8 environment_values = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length), .length = environments_raw.length};
 
     for (u64 i = 0; i < environments_raw.length; i += 1)
     {
@@ -177,7 +189,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
             environment_values.pointer[i] = (String8){0};
         }
     }
-    
+
 #if defined(_WIN32)
     {
         LARGE_INTEGER i;
@@ -273,8 +285,8 @@ int main(int argc, char* argv[], char* envp[])
 // the test result (the IDE loop is otherwise expected to run indefinitely).
 ProcessResult buster_ios_worker_entry(void)
 {
-    char* fallback_argv[] = { (char*)"buster-ide", 0 };
-    char* fallback_envp[] = { 0 };
+    char* fallback_argv[] = {(char*)"buster-ide", 0};
+    char* fallback_envp[] = {0};
     char** ios_argv = buster_ios_argv ? buster_ios_argv : fallback_argv;
     char** ios_envp = buster_ios_envp ? buster_ios_envp : fallback_envp;
 
@@ -397,11 +409,26 @@ BUSTER_GLOBAL_LOCAL String8 buster_android_intent_string_extra(Arena* arena, str
             }
         }
 
-        if (value_string) { (*env)->DeleteLocalRef(env, value_string); }
-        if (key_string) { (*env)->DeleteLocalRef(env, key_string); }
-        if (intent_class) { (*env)->DeleteLocalRef(env, intent_class); }
-        if (intent) { (*env)->DeleteLocalRef(env, intent); }
-        if (activity_class) { (*env)->DeleteLocalRef(env, activity_class); }
+        if (value_string)
+        {
+            (*env)->DeleteLocalRef(env, value_string);
+        }
+        if (key_string)
+        {
+            (*env)->DeleteLocalRef(env, key_string);
+        }
+        if (intent_class)
+        {
+            (*env)->DeleteLocalRef(env, intent_class);
+        }
+        if (intent)
+        {
+            (*env)->DeleteLocalRef(env, intent);
+        }
+        if (activity_class)
+        {
+            (*env)->DeleteLocalRef(env, activity_class);
+        }
     }
 
     if (detach)
@@ -449,18 +476,13 @@ void android_main(struct android_app* app)
 
     buster_android_app = app;
     buster_android_asset_manager = app->activity->assetManager;
-    buster_android_internal_data_path =
-        app->activity->internalDataPath ?
-            string_from_pointer(
-                (char8 const*)
-                    app->activity->internalDataPath) :
-            (String8){0};
+    buster_android_internal_data_path = app->activity->internalDataPath ? string_from_pointer((char8 const*)app->activity->internalDataPath) : (String8){0};
 
     Arena* android_arg_arena = arena_create((ArenaCreation){0});
     String8 android_args = buster_android_intent_string_extra(android_arg_arena, app, "buster_args");
-    char* android_argv[32] = { (char*)"buster-ide" };
+    char* android_argv[32] = {(char*)"buster-ide"};
     buster_android_append_argv(android_args, android_argv, BUSTER_ARRAY_LENGTH(android_argv));
-    char* android_envp[] = { 0 };
+    char* android_envp[] = {0};
 
     ProcessResult result = buster_entry_point((StringOsList)android_argv, (StringOsList)android_envp);
 
@@ -494,7 +516,7 @@ BUSTER_NORETURN BUSTER_EXPORT void mainCRTStartup(void)
 }
 #endif
 
-BUSTER_EXPORT void *memset(void* pointer, int c, size_t n)
+BUSTER_EXPORT void* memset(void* pointer, int c, size_t n)
 {
     u8* restrict p = (u8*)pointer;
 
@@ -525,7 +547,7 @@ BUSTER_EXPORT int memcmp(const void* s1, const void* s2, size_t n)
     return result;
 }
 
-BUSTER_EXPORT void *memcpy(void* restrict destination, const void* restrict source, size_t n)
+BUSTER_EXPORT void* memcpy(void* restrict destination, const void* restrict source, size_t n)
 {
     for (u64 i = 0; i < n; i += 1)
     {
@@ -631,7 +653,7 @@ BUSTER_NORETURN BUSTER_EXPORT void longjmp(jmp_buf env, int val)
     BUSTER_TRAP();
 }
 
-BUSTER_EXPORT void *memchr(const void* s, int c, size_t n)
+BUSTER_EXPORT void* memchr(const void* s, int c, size_t n)
 {
     const u8* pointer = (const u8*)s;
     u8 ch = (u8)c;

@@ -41,9 +41,9 @@ BUSTER_GLOBAL_LOCAL void wm_win32_initialize_dpi_awareness(void)
     HMODULE user32 = LoadLibraryA("user32.dll");
     if (user32)
     {
-        WmWin32Procedure set_process_dpi_awareness_context_procedure = { .procedure = GetProcAddress(user32, "SetProcessDpiAwarenessContext") };
+        WmWin32Procedure set_process_dpi_awareness_context_procedure = {.procedure = GetProcAddress(user32, "SetProcessDpiAwarenessContext")};
         WmWin32SetProcessDpiAwarenessContext* set_process_dpi_awareness_context = set_process_dpi_awareness_context_procedure.set_process_dpi_awareness_context;
-        WmWin32Procedure get_dpi_for_window_procedure = { .procedure = GetProcAddress(user32, "GetDpiForWindow") };
+        WmWin32Procedure get_dpi_for_window_procedure = {.procedure = GetProcAddress(user32, "GetDpiForWindow")};
         wm_win32_get_dpi_for_window = get_dpi_for_window_procedure.get_dpi_for_window;
         if (set_process_dpi_awareness_context)
         {
@@ -56,7 +56,7 @@ BUSTER_GLOBAL_LOCAL void wm_win32_initialize_dpi_awareness(void)
         HMODULE shcore = LoadLibraryA("shcore.dll");
         if (shcore)
         {
-            WmWin32Procedure set_process_dpi_awareness_procedure = { .procedure = GetProcAddress(shcore, "SetProcessDpiAwareness") };
+            WmWin32Procedure set_process_dpi_awareness_procedure = {.procedure = GetProcAddress(shcore, "SetProcessDpiAwareness")};
             WmWin32SetProcessDpiAwareness* set_process_dpi_awareness = set_process_dpi_awareness_procedure.set_process_dpi_awareness;
             if (set_process_dpi_awareness)
             {
@@ -107,117 +107,128 @@ BUSTER_GLOBAL_LOCAL LRESULT window_callback(HWND window_handle, UINT message, WP
 
         switch (message)
         {
-            break; case WM_ENTERSIZEMOVE:
-            {
-                windowing_handle.resizing = true;
-            }
-            break; case WM_EXITSIZEMOVE:
-            {
-                windowing_handle.resizing = false;
-            }
             break;
-            case WM_SIZE:
-            case WM_PAINT:
-            {
-                PAINTSTRUCT paint = {0};
-                BeginPaint(window_handle, &paint);
+        case WM_ENTERSIZEMOVE:
+        {
+            windowing_handle.resizing = true;
+        }
+        break;
+        case WM_EXITSIZEMOVE:
+        {
+            windowing_handle.resizing = false;
+        }
+        break;
+        case WM_SIZE:
+        case WM_PAINT:
+        {
+            PAINTSTRUCT paint = {0};
+            BeginPaint(window_handle, &paint);
 #if BUSTER_LINK_LIBC && !BUSTER_FUZZ
-                update();
+            update();
 #endif
-                EndPaint(window_handle, &paint);
-                DwmFlush();
-            }
-            break; case WM_CLOSE:
+            EndPaint(window_handle, &paint);
+            DwmFlush();
+        }
+        break;
+        case WM_CLOSE:
+        {
+            wm_event_push(&windowing_handle, (WmEvent){
+                                                 .kind = WM_EVENT_WINDOW_CLOSE,
+                                                 .window = window,
+                                             });
+        }
+        break;
+        case WM_LBUTTONUP:
+        case WM_MBUTTONUP:
+        case WM_RBUTTONUP:
+        {
+            os_fail();
+        }
+        break;
+        case WM_LBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        {
+            os_fail();
+        }
+        break;
+        case WM_MOUSEMOVE:
+        {
+            os_fail();
+        }
+        break;
+        case WM_MOUSEWHEEL:
+        {
+            os_fail();
+        }
+        break;
+        case WM_MOUSEHWHEEL:
+        {
+            os_fail();
+        }
+        break;
+        case WM_SYSKEYDOWN:
+        case WM_SYSKEYUP:
+        {
+            os_fail();
+        }
+        case WM_KEYDOWN:
+        case WM_KEYUP:
+        {
+            os_fail();
+        }
+        break;
+        case WM_SYSCHAR:
+        {
+            os_fail();
+        }
+        break;
+        case WM_CHAR:
+        {
+            os_fail();
+        }
+        break;
+        case WM_KILLFOCUS:
+        {
+            os_fail();
+        }
+        break;
+        case WM_SETCURSOR:
+        {
+            WmRect rect = wm_window_get_framebuffer_rect(&windowing_handle, window);
+            WmOffset mouse_point = {0};
+            POINT p;
+            if (GetCursorPos(&p))
             {
-                wm_event_push(&windowing_handle, (WmEvent) {
-                    .kind = WM_EVENT_WINDOW_CLOSE,
-                    .window = window,
-                });
-            }
-            break;
-            case WM_LBUTTONUP:
-            case WM_MBUTTONUP:
-            case WM_RBUTTONUP:
-            {
-                os_fail();
-            }
-            break;
-            case WM_LBUTTONDOWN:
-            case WM_MBUTTONDOWN:
-            case WM_RBUTTONDOWN:
-            {
-                os_fail();
-            }
-            break; case WM_MOUSEMOVE:
-            {
-                os_fail();
-            }
-            break; case WM_MOUSEWHEEL:
-            {
-                os_fail();
-            }
-            break; case WM_MOUSEHWHEEL:
-            {
-                os_fail();
-            }
-            break;
-            case WM_SYSKEYDOWN:
-            case WM_SYSKEYUP:
-            {
-                os_fail();
-            }
-            case WM_KEYDOWN:
-            case WM_KEYUP:
-            {
-                os_fail();
-            }
-            break; case WM_SYSCHAR:
-            {
-                os_fail();
-            }
-            break; case WM_CHAR:
-            {
-                os_fail();
-            }
-            break; case WM_KILLFOCUS:
-            {
-                os_fail();
-            }
-            break; case WM_SETCURSOR:
-            {
-                WmRect rect = wm_window_get_framebuffer_rect(&windowing_handle, window);
-                WmOffset mouse_point = {0};
-                POINT p;
-                if (GetCursorPos(&p))
+                if (ScreenToClient(window_handle, &p))
                 {
-                    if (ScreenToClient(window_handle, &p))
-                    {
-                        mouse_point.x = (WmUnit)p.x;
-                        mouse_point.y = (WmUnit)p.y;
-                    }
+                    mouse_point.x = (WmUnit)p.x;
+                    mouse_point.y = (WmUnit)p.y;
                 }
+            }
 
-                bool is_fullscreen = is_fullscreen_window(window_handle);
-                bool on_border = false;
+            bool is_fullscreen = is_fullscreen_window(window_handle);
+            bool on_border = false;
 
-                if (window && window->custom_border && !is_fullscreen)
-                {
-                    BUSTER_TODO();
-                }
-                if (!windowing_handle.resizing && !on_border && wm_rect_contains(rect, mouse_point))
-                {
-                    // TODO
-                    // SetCursor();
-                }
-                else
-                {
-                    BUSTER_TODO();
-                }
-
-                os_fail();
-            }
-            break; case WM_DPICHANGED:
+            if (window && window->custom_border && !is_fullscreen)
             {
+                BUSTER_TODO();
+            }
+            if (!windowing_handle.resizing && !on_border && wm_rect_contains(rect, mouse_point))
+            {
+                // TODO
+                // SetCursor();
+            }
+            else
+            {
+                BUSTER_TODO();
+            }
+
+            os_fail();
+        }
+        break;
+        case WM_DPICHANGED:
+        {
 #if 0
                 RECT* suggested = (RECT*)lparam;
                 SetWindowPos(window_handle, 0,
@@ -227,54 +238,62 @@ BUSTER_GLOBAL_LOCAL LRESULT window_callback(HWND window_handle, UINT message, WP
                         suggested->bottom - suggested->top,
                         SWP_NOZORDER | SWP_NOACTIVATE);
 #else
-                os_fail();
+            os_fail();
 #endif
-            }
-            break; case WM_DROPFILES:
-            {
-                os_fail();
-            }
-            break; case WM_NCPAINT:
-            {
-                os_fail();
-            }
-            break; case WM_DWMCOMPOSITIONCHANGED:
-            {
-                os_fail();
-            }
-            break; case WM_WINDOWPOSCHANGED:
-            {
-                os_fail();
-            }
-            // TODO: undocumented messages
-            // break;
-            // case WM_NCUAHDRAWCAPTION:
-            // case WM_NCUAHDRAWFRAME:
-            // {
-            // }
-            break;
-            case WM_SETICON:
-            case WM_SETTEXT:
-            {
-                os_fail();
-            }
-            break; case WM_NCACTIVATE:
-            {
-                os_fail();
-            }
-            break; case WM_NCCALCSIZE:
-            {
-                os_fail();
-            }
-            break; case WM_NCHITTEST:
-            {
-                // TODO: improve
-                call_default_window_proc = true;
-            }
-            break; default:
-            {
-                call_default_window_proc = true;
-            }
+        }
+        break;
+        case WM_DROPFILES:
+        {
+            os_fail();
+        }
+        break;
+        case WM_NCPAINT:
+        {
+            os_fail();
+        }
+        break;
+        case WM_DWMCOMPOSITIONCHANGED:
+        {
+            os_fail();
+        }
+        break;
+        case WM_WINDOWPOSCHANGED:
+        {
+            os_fail();
+        }
+        // TODO: undocumented messages
+        // break;
+        // case WM_NCUAHDRAWCAPTION:
+        // case WM_NCUAHDRAWFRAME:
+        // {
+        // }
+        break;
+        case WM_SETICON:
+        case WM_SETTEXT:
+        {
+            os_fail();
+        }
+        break;
+        case WM_NCACTIVATE:
+        {
+            os_fail();
+        }
+        break;
+        case WM_NCCALCSIZE:
+        {
+            os_fail();
+        }
+        break;
+        case WM_NCHITTEST:
+        {
+            // TODO: improve
+            call_default_window_proc = true;
+        }
+        break;
+        default:
+        {
+            call_default_window_proc = true;
+        }
         }
     }
 
@@ -317,7 +336,7 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
         wndclass.lpszClassName = graphical_window_class_name;
         wndclass.hCursor = LoadCursorW(0, IDC_ARROW);
         wndclass.hIcon = LoadIcon(windowing_handle.instance, MAKEINTRESOURCE(1));
-        wndclass.style = CS_VREDRAW|CS_HREDRAW;
+        wndclass.style = CS_VREDRAW | CS_HREDRAW;
         ATOM wndatom = RegisterClassExW(&wndclass);
         (void)wndatom;
     }
@@ -340,23 +359,13 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
     TemporalArena temp = scratch_begin(0, 0);
     u32 use_default_position = true;
     DWORD style_flags = WS_EX_APPWINDOW;
-    HWND window_handle = CreateWindowExW(
-            style_flags,
-            graphical_window_class_name,
-            string16_from_string8(temp.arena, create.name, true).pointer,
-            WS_OVERLAPPEDWINDOW | WS_SIZEBOX,
-            use_default_position ? CW_USEDEFAULT : 0,
-            use_default_position ? CW_USEDEFAULT : 0,
-            create.size.width,
-            create.size.height,
-            0,
-            0,
-            windowing->instance,
-            0);
+    HWND window_handle = CreateWindowExW(style_flags, graphical_window_class_name, string16_from_string8(temp.arena, create.name, true).pointer,
+                                         WS_OVERLAPPEDWINDOW | WS_SIZEBOX, use_default_position ? CW_USEDEFAULT : 0, use_default_position ? CW_USEDEFAULT : 0,
+                                         create.size.width, create.size.height, 0, 0, windowing->instance, 0);
     if (window_handle)
     {
         result = arena_allocate(windowing->window_arena, WmWindowHandle, 1);
-        *result = (WmWindowHandle) {
+        *result = (WmWindowHandle){
             .owner = windowing,
             .handle = window_handle,
         };

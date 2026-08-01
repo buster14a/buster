@@ -48,7 +48,7 @@ void rendering_window_rect_texture_update_begin(RenderingWindowHandle* window)
 TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory)
 {
     BUSTER_UNUSED(texture_memory);
-    TextureIndex result = { .value = rendering->texture_count };
+    TextureIndex result = {.value = rendering->texture_count};
     rendering->texture_count += 1;
     return result;
 }
@@ -106,7 +106,8 @@ void rendering_window_render_rect(RenderingWindowHandle* window, RectDraw draw)
     BUSTER_UNUSED(draw);
 }
 
-void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHandle* window, String8 string, float4 color, RenderFontType font_type, f32 x_offset, f32 y_offset)
+void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHandle* window, String8 string, float4 color, RenderFontType font_type,
+                                  f32 x_offset, f32 y_offset)
 {
     BUSTER_UNUSED(rendering);
     BUSTER_UNUSED(window);

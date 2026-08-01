@@ -51,15 +51,9 @@ struct IrExecutionResult
     u8 reserved[3];
 };
 
-BUSTER_F_DECL IrExecutionResult ir_execute(
-    Arena* execution_arena,
-    AnalysisProgram* analysis,
-    IrProgram* program,
-    AnalysisEntityId entry,
-    AnalysisInstantiationId instantiation,
-    IrExecutionArgument* arguments,
-    u32 argument_count,
-    IrExecutionOptions options);
+BUSTER_F_DECL IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, IrProgram* program, AnalysisEntityId entry,
+                                           AnalysisInstantiationId instantiation, IrExecutionArgument* arguments, u32 argument_count,
+                                           IrExecutionOptions options);
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments);

@@ -21,7 +21,7 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
 {
     WmWindowHandle* result = {0};
     result = arena_allocate(windowing->window_arena, WmWindowHandle, 1);
-    *result = (WmWindowHandle) {
+    *result = (WmWindowHandle){
         .owner = windowing,
         .size = create.size,
     };

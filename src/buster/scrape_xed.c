@@ -57,7 +57,7 @@ BUSTER_GLOBAL_LOCAL String8 scrape_tokenizer_next_whitespace(ScrapeTokenizer* to
         remaining.length -= 1;
     }
 
-    String8 result = { .pointer = remaining.pointer, .length = 0 };
+    String8 result = {.pointer = remaining.pointer, .length = 0};
     while (remaining.length > 0 && remaining.pointer[0] != ' ' && remaining.pointer[0] != '\t')
     {
         result.length += 1;
@@ -94,7 +94,7 @@ BUSTER_GLOBAL_LOCAL String8 scrape_str_trim(String8 string)
 BUSTER_GLOBAL_LOCAL String8 scrape_tokenizer_next_delimiter(ScrapeTokenizer* tokenizer, char8 delimiter)
 {
     String8 remaining = tokenizer->remaining;
-    String8 result = { .pointer = remaining.pointer, .length = 0 };
+    String8 result = {.pointer = remaining.pointer, .length = 0};
 
     while (remaining.length > 0 && remaining.pointer[0] != delimiter)
     {
@@ -145,13 +145,21 @@ BUSTER_GLOBAL_LOCAL bool scrape_parse_hex_byte(String8 token, u8* out)
         {
             char8 ch = token.pointer[i];
             u8 digit = 0;
-            if (ch >= '0' && ch <= '9') digit = (u8)(ch - '0');
-            else if (ch >= 'a' && ch <= 'f') digit = (u8)(ch - 'a' + 10);
-            else if (ch >= 'A' && ch <= 'F') digit = (u8)(ch - 'A' + 10);
-            else { result = false; break; }
+            if (ch >= '0' && ch <= '9')
+                digit = (u8)(ch - '0');
+            else if (ch >= 'a' && ch <= 'f')
+                digit = (u8)(ch - 'a' + 10);
+            else if (ch >= 'A' && ch <= 'F')
+                digit = (u8)(ch - 'A' + 10);
+            else
+            {
+                result = false;
+                break;
+            }
             value = (u8)(value * 16 + digit);
         }
-        if (result) *out = value;
+        if (result)
+            *out = value;
     }
     return result;
 }
@@ -265,11 +273,11 @@ STRUCT(ScrapeInstructionForm)
     String8 pattern;
     String8 iform;
     String8 exceptions;
-    String8 prefix_type;        // "", "VEX", "EVEX", "XOP"
-    String8 vex_pp;             // V66, VF2, VF3, VNP
-    String8 vex_map;            // V0F, V0F38, V0F3A
-    String8 vector_length;      // VL128, VL256, VL512
-    String8 rex_w;              // W0, W1
+    String8 prefix_type;   // "", "VEX", "EVEX", "XOP"
+    String8 vex_pp;        // V66, VF2, VF3, VNP
+    String8 vex_map;       // V0F, V0F38, V0F3A
+    String8 vector_length; // VL128, VL256, VL512
+    String8 rex_w;         // W0, W1
     String8 attributes[SCRAPE_MAX_ATTRIBUTE_COUNT];
     ScrapeOperand operands[SCRAPE_MAX_OPERAND_COUNT];
 
@@ -280,7 +288,7 @@ STRUCT(ScrapeInstructionForm)
     u32 attribute_count;
     u32 operand_count;
     bool has_modrm;
-    s8 modrm_reg_value;         // -1 if not fixed
+    s8 modrm_reg_value; // -1 if not fixed
     u8 reserved[2];
 };
 
@@ -334,8 +342,10 @@ BUSTER_GLOBAL_LOCAL bool scrape_str_equal_case_insensitive(String8 a, String8 b)
         {
             char8 ca = a.pointer[i];
             char8 cb = b.pointer[i];
-            if (ca >= 'a' && ca <= 'z') ca -= 32;
-            if (cb >= 'a' && cb <= 'z') cb -= 32;
+            if (ca >= 'a' && ca <= 'z')
+                ca -= 32;
+            if (cb >= 'a' && cb <= 'z')
+                cb -= 32;
             if (ca != cb)
             {
                 result = false;
@@ -360,7 +370,7 @@ STRUCT(ScrapeLineIterator)
 BUSTER_GLOBAL_LOCAL String8 scrape_line_iterator_next(ScrapeLineIterator* iterator)
 {
     String8 remaining = iterator->remaining;
-    String8 result = { .pointer = remaining.pointer, .length = 0 };
+    String8 result = {.pointer = remaining.pointer, .length = 0};
 
     while (remaining.length > 0 && remaining.pointer[0] != '\n')
     {
@@ -411,7 +421,7 @@ BUSTER_GLOBAL_LOCAL ScrapeOperand scrape_parse_operand(Arena* arena, String8 tok
 {
     ScrapeOperand result = {};
 
-    ScrapeTokenizer colon_tokenizer = { .remaining = token };
+    ScrapeTokenizer colon_tokenizer = {.remaining = token};
     String8 head = scrape_tokenizer_next_delimiter(&colon_tokenizer, ':');
 
     // Split name=register
@@ -420,8 +430,8 @@ BUSTER_GLOBAL_LOCAL ScrapeOperand scrape_parse_operand(Arena* arena, String8 tok
     {
         if (head.pointer[i] == '=')
         {
-            String8 name_part = { .pointer = head.pointer, .length = i };
-            String8 register_part = { .pointer = head.pointer + i + 1, .length = head.length - i - 1 };
+            String8 name_part = {.pointer = head.pointer, .length = i};
+            String8 register_part = {.pointer = head.pointer + i + 1, .length = head.length - i - 1};
             result.name = string8_duplicate_arena(arena, name_part, true);
             result.register_name = string8_duplicate_arena(arena, register_part, true);
             found_equals = true;
@@ -438,11 +448,11 @@ BUSTER_GLOBAL_LOCAL ScrapeOperand scrape_parse_operand(Arena* arena, String8 tok
     while (colon_tokenizer.remaining.length > 0)
     {
         String8 part = scrape_tokenizer_next_delimiter(&colon_tokenizer, ':');
-        if (part.length == 0) continue;
+        if (part.length == 0)
+            continue;
 
-        if (string8_equal(part, S8("r")) || string8_equal(part, S8("w")) || string8_equal(part, S8("rw")) ||
-            string8_equal(part, S8("cr")) || string8_equal(part, S8("cw")) || string8_equal(part, S8("rcw")) ||
-            string8_equal(part, S8("crw")))
+        if (string8_equal(part, S8("r")) || string8_equal(part, S8("w")) || string8_equal(part, S8("rw")) || string8_equal(part, S8("cr")) ||
+            string8_equal(part, S8("cw")) || string8_equal(part, S8("rcw")) || string8_equal(part, S8("crw")))
         {
             result.read_write = string8_duplicate_arena(arena, part, true);
         }
@@ -489,13 +499,14 @@ BUSTER_GLOBAL_LOCAL ScrapeOperand scrape_parse_operand(Arena* arena, String8 tok
 
 BUSTER_GLOBAL_LOCAL void scrape_analyze_pattern(ScrapeInstructionForm* form)
 {
-    ScrapeTokenizer tokenizer = { .remaining = form->pattern };
+    ScrapeTokenizer tokenizer = {.remaining = form->pattern};
     form->modrm_reg_value = -1;
 
     while (tokenizer.remaining.length > 0)
     {
         String8 token = scrape_tokenizer_next_whitespace(&tokenizer);
-        if (token.length == 0) continue;
+        if (token.length == 0)
+            continue;
 
         u8 byte_value = 0;
         if (scrape_parse_hex_byte(token, &byte_value))
@@ -526,9 +537,8 @@ BUSTER_GLOBAL_LOCAL void scrape_analyze_pattern(ScrapeInstructionForm* form)
             else if (string8_starts_with_sequence(token, S8("REG[0b")))
             {
                 // Extract binary value from REG[0bNNN]
-                String8 binary_part = { .pointer = token.pointer + 6, .length = 0 };
-                while (binary_part.pointer + binary_part.length < token.pointer + token.length &&
-                       binary_part.pointer[binary_part.length] != ']')
+                String8 binary_part = {.pointer = token.pointer + 6, .length = 0};
+                while (binary_part.pointer + binary_part.length < token.pointer + token.length && binary_part.pointer[binary_part.length] != ']')
                 {
                     binary_part.length += 1;
                 }
@@ -546,18 +556,15 @@ BUSTER_GLOBAL_LOCAL void scrape_analyze_pattern(ScrapeInstructionForm* form)
             {
                 form->prefix_type = S8("XOP");
             }
-            else if (string8_equal(token, S8("V66")) || string8_equal(token, S8("VF2")) ||
-                     string8_equal(token, S8("VF3")) || string8_equal(token, S8("VNP")))
+            else if (string8_equal(token, S8("V66")) || string8_equal(token, S8("VF2")) || string8_equal(token, S8("VF3")) || string8_equal(token, S8("VNP")))
             {
                 form->vex_pp = token;
             }
-            else if (string8_equal(token, S8("V0F")) || string8_equal(token, S8("V0F38")) ||
-                     string8_equal(token, S8("V0F3A")))
+            else if (string8_equal(token, S8("V0F")) || string8_equal(token, S8("V0F38")) || string8_equal(token, S8("V0F3A")))
             {
                 form->vex_map = token;
             }
-            else if (string8_equal(token, S8("VL128")) || string8_equal(token, S8("VL256")) ||
-                     string8_equal(token, S8("VL512")))
+            else if (string8_equal(token, S8("VL128")) || string8_equal(token, S8("VL256")) || string8_equal(token, S8("VL512")))
             {
                 form->vector_length = token;
             }
@@ -581,9 +588,10 @@ BUSTER_GLOBAL_LOCAL void scrape_parse_instruction_file(Arena* arena, ScrapeInstr
 {
     let content = file_read(arena, path, (FileReadOptions){});
     String8 text = BYTE_SLICE_TO_STRING(8, content);
-    if (text.length == 0) return;
+    if (text.length == 0)
+        return;
 
-    ScrapeLineIterator lines = { .remaining = text };
+    ScrapeLineIterator lines = {.remaining = text};
     bool in_block = false;
     ScrapeInstructionForm current = {};
 
@@ -592,8 +600,10 @@ BUSTER_GLOBAL_LOCAL void scrape_parse_instruction_file(Arena* arena, ScrapeInstr
         String8 line = scrape_line_iterator_next(&lines);
         String8 trimmed = scrape_str_trim(line);
 
-        if (trimmed.length == 0 || trimmed.pointer[0] == '#') continue;
-        if (string8_starts_with_sequence(trimmed, S8("INSTRUCTIONS()"))) continue;
+        if (trimmed.length == 0 || trimmed.pointer[0] == '#')
+            continue;
+        if (string8_starts_with_sequence(trimmed, S8("INSTRUCTIONS()")))
+            continue;
 
         if (string8_equal(trimmed, S8("{")))
         {
@@ -622,11 +632,13 @@ BUSTER_GLOBAL_LOCAL void scrape_parse_instruction_file(Arena* arena, ScrapeInstr
             continue;
         }
 
-        if (!in_block) continue;
+        if (!in_block)
+            continue;
 
         // Strip inline comments
         trimmed = scrape_str_strip_comment(trimmed);
-        if (trimmed.length == 0) continue;
+        if (trimmed.length == 0)
+            continue;
 
         // Find first colon to split key:value
         u64 colon_index = BUSTER_STRING_NO_MATCH;
@@ -638,7 +650,8 @@ BUSTER_GLOBAL_LOCAL void scrape_parse_instruction_file(Arena* arena, ScrapeInstr
                 break;
             }
         }
-        if (colon_index == BUSTER_STRING_NO_MATCH) continue;
+        if (colon_index == BUSTER_STRING_NO_MATCH)
+            continue;
 
         String8 key = scrape_str_trim(string8_from_pointer_length(trimmed.pointer, colon_index));
         String8 value = scrape_str_trim(string8_from_pointer_length(trimmed.pointer + colon_index + 1, trimmed.length - colon_index - 1));
@@ -681,7 +694,7 @@ BUSTER_GLOBAL_LOCAL void scrape_parse_instruction_file(Arena* arena, ScrapeInstr
         }
         else if (string8_equal(key, S8("ATTRIBUTES")))
         {
-            ScrapeTokenizer attribute_tokenizer = { .remaining = value };
+            ScrapeTokenizer attribute_tokenizer = {.remaining = value};
             while (attribute_tokenizer.remaining.length > 0 && current.attribute_count < SCRAPE_MAX_ATTRIBUTE_COUNT)
             {
                 String8 attribute = scrape_tokenizer_next_whitespace(&attribute_tokenizer);
@@ -699,7 +712,7 @@ BUSTER_GLOBAL_LOCAL void scrape_parse_instruction_file(Arena* arena, ScrapeInstr
         }
         else if (string8_equal(key, S8("OPERANDS")))
         {
-            ScrapeTokenizer operand_tokenizer = { .remaining = value };
+            ScrapeTokenizer operand_tokenizer = {.remaining = value};
             while (operand_tokenizer.remaining.length > 0 && current.operand_count < SCRAPE_MAX_OPERAND_COUNT)
             {
                 String8 operand_token = scrape_tokenizer_next_whitespace(&operand_tokenizer);
@@ -723,7 +736,8 @@ BUSTER_GLOBAL_LOCAL u32 scrape_parse_u32_decimal(String8 s)
     for (u64 i = 0; i < s.length; i += 1)
     {
         char8 ch = s.pointer[i];
-        if (ch < '0' || ch > '9') break;
+        if (ch < '0' || ch > '9')
+            break;
         result = result * 10 + (u32)(ch - '0');
     }
     return result;
@@ -731,7 +745,8 @@ BUSTER_GLOBAL_LOCAL u32 scrape_parse_u32_decimal(String8 s)
 
 BUSTER_GLOBAL_LOCAL s32 scrape_parse_s32_decimal(String8 s)
 {
-    if (s.length == 0) return -1;
+    if (s.length == 0)
+        return -1;
     bool negative = false;
     u64 start = 0;
     if (s.pointer[0] == '-')
@@ -743,7 +758,8 @@ BUSTER_GLOBAL_LOCAL s32 scrape_parse_s32_decimal(String8 s)
     for (u64 i = start; i < s.length; i += 1)
     {
         char8 ch = s.pointer[i];
-        if (ch < '0' || ch > '9') break;
+        if (ch < '0' || ch > '9')
+            break;
         result = result * 10 + (s32)(ch - '0');
     }
     return negative ? -result : result;
@@ -753,17 +769,19 @@ BUSTER_GLOBAL_LOCAL void scrape_parse_registers(Arena* arena, ScrapeInstructionD
 {
     let content = file_read(arena, path, (FileReadOptions){});
     String8 text = BYTE_SLICE_TO_STRING(8, content);
-    if (text.length == 0) return;
+    if (text.length == 0)
+        return;
 
-    ScrapeLineIterator lines = { .remaining = text };
+    ScrapeLineIterator lines = {.remaining = text};
 
     while (scrape_line_iterator_has_more(&lines))
     {
         String8 line = scrape_line_iterator_next(&lines);
         String8 stripped = scrape_str_strip_comment(line);
-        if (stripped.length == 0) continue;
+        if (stripped.length == 0)
+            continue;
 
-        ScrapeTokenizer tokenizer = { .remaining = stripped };
+        ScrapeTokenizer tokenizer = {.remaining = stripped};
         String8 name = scrape_tokenizer_next_whitespace(&tokenizer);
         String8 register_class = scrape_tokenizer_next_whitespace(&tokenizer);
         String8 width_str = scrape_tokenizer_next_whitespace(&tokenizer);
@@ -775,7 +793,8 @@ BUSTER_GLOBAL_LOCAL void scrape_parse_registers(Arena* arena, ScrapeInstructionD
         }
 
         u32 width = scrape_parse_u32_decimal(width_str);
-        if (width == 0 && width_str.pointer[0] != '0') continue;
+        if (width == 0 && width_str.pointer[0] != '0')
+            continue;
 
         if (database->register_count >= database->register_capacity)
         {
@@ -797,8 +816,8 @@ BUSTER_GLOBAL_LOCAL void scrape_parse_registers(Arena* arena, ScrapeInstructionD
         {
             if (enclosing.pointer[i] == '/')
             {
-                String8 enc64 = { .pointer = enclosing.pointer, .length = i };
-                String8 enc32 = { .pointer = enclosing.pointer + i + 1, .length = enclosing.length - i - 1 };
+                String8 enc64 = {.pointer = enclosing.pointer, .length = i};
+                String8 enc32 = {.pointer = enclosing.pointer + i + 1, .length = enclosing.length - i - 1};
                 entry->enclosing_64 = string8_duplicate_arena(arena, enc64, true);
                 entry->enclosing_32 = string8_duplicate_arena(arena, enc32, true);
                 found_slash = true;
@@ -829,25 +848,29 @@ BUSTER_GLOBAL_LOCAL void scrape_parse_operand_widths(Arena* arena, ScrapeInstruc
 {
     let content = file_read(arena, path, (FileReadOptions){});
     String8 text = BYTE_SLICE_TO_STRING(8, content);
-    if (text.length == 0) return;
+    if (text.length == 0)
+        return;
 
-    ScrapeLineIterator lines = { .remaining = text };
+    ScrapeLineIterator lines = {.remaining = text};
 
     while (scrape_line_iterator_has_more(&lines))
     {
         String8 line = scrape_line_iterator_next(&lines);
         String8 stripped = scrape_str_strip_comment(line);
-        if (stripped.length == 0) continue;
+        if (stripped.length == 0)
+            continue;
 
-        ScrapeTokenizer tokenizer = { .remaining = stripped };
+        ScrapeTokenizer tokenizer = {.remaining = stripped};
         String8 name = scrape_tokenizer_next_whitespace(&tokenizer);
         String8 element_type = scrape_tokenizer_next_whitespace(&tokenizer);
         String8 width1_str = scrape_tokenizer_next_whitespace(&tokenizer);
 
-        if (name.length == 0 || element_type.length == 0 || width1_str.length == 0) continue;
+        if (name.length == 0 || element_type.length == 0 || width1_str.length == 0)
+            continue;
 
         u32 width1 = scrape_parse_u32_decimal(width1_str);
-        if (width1 == 0 && (width1_str.length == 0 || width1_str.pointer[0] != '0')) continue;
+        if (width1 == 0 && (width1_str.length == 0 || width1_str.pointer[0] != '0'))
+            continue;
 
         if (database->operand_width_count >= database->operand_width_capacity)
         {
@@ -907,19 +930,22 @@ BUSTER_GLOBAL_LOCAL void scrape_find_instruction_files_recursive(Arena* arena, S
     char* dir_cstr = (char*)directory.pointer;
 
     DIR* dir = opendir(dir_cstr);
-    if (!dir) return;
+    if (!dir)
+        return;
 
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL)
     {
-        if (entry->d_name[0] == '.') continue;
+        if (entry->d_name[0] == '.')
+            continue;
 
         String8 entry_name = string8_from_pointer((char8*)entry->d_name);
-        String8 parts[] = { directory, S8("/"), entry_name };
+        String8 parts[] = {directory, S8("/"), entry_name};
         String8 full_path = string8_join_arena(arena, BUSTER_ARRAY_TO_SLICE(parts), true);
 
         struct stat statbuf;
-        if (stat((char*)full_path.pointer, &statbuf) != 0) continue;
+        if (stat((char*)full_path.pointer, &statbuf) != 0)
+            continue;
 
         if (S_ISDIR(statbuf.st_mode))
         {
@@ -927,8 +953,7 @@ BUSTER_GLOBAL_LOCAL void scrape_find_instruction_files_recursive(Arena* arena, S
         }
         else if (S_ISREG(statbuf.st_mode))
         {
-            bool is_instruction_file = string8_ends_with_sequence(entry_name, S8("-isa.xed.txt")) ||
-                                       string8_ends_with_sequence(entry_name, S8("-isa.txt")) ||
+            bool is_instruction_file = string8_ends_with_sequence(entry_name, S8("-isa.xed.txt")) || string8_ends_with_sequence(entry_name, S8("-isa.txt")) ||
                                        string8_equal(entry_name, S8("xed-isa.txt"));
             if (is_instruction_file && list->count < list->capacity)
             {
@@ -951,7 +976,8 @@ BUSTER_GLOBAL_LOCAL void scrape_print_instruction_form(ScrapeInstructionForm* fo
     string8_print(S8("    ISA set:    {S8}\n"), form->isa_set);
     string8_print(S8("    Extension:  {S8}\n"), form->extension);
     string8_print(S8("    Category:   {S8}\n"), form->category);
-    if (form->iform.length > 0) string8_print(S8("    IFORM:      {S8}\n"), form->iform);
+    if (form->iform.length > 0)
+        string8_print(S8("    IFORM:      {S8}\n"), form->iform);
     string8_print(S8("    Pattern:    {S8}\n"), form->pattern);
 
     string8_print(S8("    Opcode:    "));
@@ -971,11 +997,16 @@ BUSTER_GLOBAL_LOCAL void scrape_print_instruction_form(ScrapeInstructionForm* fo
         string8_print(S8("\n"));
     }
 
-    if (form->prefix_type.length > 0)   string8_print(S8("    Prefix:     {S8}\n"), form->prefix_type);
-    if (form->vex_pp.length > 0)        string8_print(S8("    VEX.pp:     {S8}\n"), form->vex_pp);
-    if (form->vex_map.length > 0)       string8_print(S8("    VEX.map:    {S8}\n"), form->vex_map);
-    if (form->vector_length.length > 0)  string8_print(S8("    VL:         {S8}\n"), form->vector_length);
-    if (form->rex_w.length > 0)         string8_print(S8("    REX.W:      {S8}\n"), form->rex_w);
+    if (form->prefix_type.length > 0)
+        string8_print(S8("    Prefix:     {S8}\n"), form->prefix_type);
+    if (form->vex_pp.length > 0)
+        string8_print(S8("    VEX.pp:     {S8}\n"), form->vex_pp);
+    if (form->vex_map.length > 0)
+        string8_print(S8("    VEX.map:    {S8}\n"), form->vex_map);
+    if (form->vector_length.length > 0)
+        string8_print(S8("    VL:         {S8}\n"), form->vector_length);
+    if (form->rex_w.length > 0)
+        string8_print(S8("    REX.W:      {S8}\n"), form->rex_w);
 
     if (form->attribute_count > 0)
     {
@@ -992,10 +1023,14 @@ BUSTER_GLOBAL_LOCAL void scrape_print_instruction_form(ScrapeInstructionForm* fo
     {
         ScrapeOperand* operand = &form->operands[i];
         string8_print(S8("      {S8}"), operand->name);
-        if (operand->register_name.length > 0) string8_print(S8(" = {S8}"), operand->register_name);
-        if (operand->read_write.length > 0)    string8_print(S8(" [{S8}]"), operand->read_write);
-        if (!string8_equal(operand->visibility, S8("EXPLICIT"))) string8_print(S8(" ({S8})"), operand->visibility);
-        if (operand->width.length > 0)         string8_print(S8(" width={S8}"), operand->width);
+        if (operand->register_name.length > 0)
+            string8_print(S8(" = {S8}"), operand->register_name);
+        if (operand->read_write.length > 0)
+            string8_print(S8(" [{S8}]"), operand->read_write);
+        if (!string8_equal(operand->visibility, S8("EXPLICIT")))
+            string8_print(S8(" ({S8})"), operand->visibility);
+        if (operand->width.length > 0)
+            string8_print(S8(" width={S8}"), operand->width);
         string8_print(S8("\n"));
     }
 
@@ -1036,9 +1071,7 @@ BUSTER_GLOBAL_LOCAL s64 scrape_string_table_find_index(ScrapeStringTable* table,
 BUSTER_GLOBAL_LOCAL u64 scrape_string_table_intern(ScrapeStringTable* table, String8 value)
 {
     String8 normalized = value;
-    if (normalized.length == 0 ||
-        scrape_str_equal_case_insensitive(normalized, S8("INVALID")) ||
-        scrape_str_equal_case_insensitive(normalized, S8("EMPTY")) ||
+    if (normalized.length == 0 || scrape_str_equal_case_insensitive(normalized, S8("INVALID")) || scrape_str_equal_case_insensitive(normalized, S8("EMPTY")) ||
         scrape_str_equal_case_insensitive(normalized, S8("N/A")))
     {
         normalized = S8("NONE");
@@ -1067,9 +1100,7 @@ BUSTER_GLOBAL_LOCAL u64 scrape_string_table_intern(ScrapeStringTable* table, Str
 BUSTER_GLOBAL_LOCAL u64 scrape_string_table_enum_index(ScrapeStringTable* table, String8 value)
 {
     String8 normalized = value;
-    if (normalized.length == 0 ||
-        scrape_str_equal_case_insensitive(normalized, S8("INVALID")) ||
-        scrape_str_equal_case_insensitive(normalized, S8("EMPTY")) ||
+    if (normalized.length == 0 || scrape_str_equal_case_insensitive(normalized, S8("INVALID")) || scrape_str_equal_case_insensitive(normalized, S8("EMPTY")) ||
         scrape_str_equal_case_insensitive(normalized, S8("N/A")))
     {
         normalized = S8("NONE");
@@ -1086,7 +1117,7 @@ BUSTER_GLOBAL_LOCAL u64 scrape_string_table_enum_index(ScrapeStringTable* table,
 
 BUSTER_GLOBAL_LOCAL String8 scrape_enum_token_from_value(Arena* arena, String8 value)
 {
-    String8 result = { 0 };
+    String8 result = {0};
     u64 capacity = value.length * 2 + 16;
     char8* buffer = arena_allocate(arena, char8, capacity);
     u64 length = 0;
@@ -1174,7 +1205,7 @@ BUSTER_GLOBAL_LOCAL void scrape_build_enum_tokens(Arena* arena, ScrapeStringTabl
         String8 base = scrape_enum_token_from_value(arena, table->values[i]);
         if (string8_equal(base, S8("COUNT")))
         {
-            String8 parts[] = { base, S8("_VALUE") };
+            String8 parts[] = {base, S8("_VALUE")};
             base = string8_join_arena(arena, BUSTER_ARRAY_TO_SLICE(parts), true);
         }
 
@@ -1197,21 +1228,17 @@ BUSTER_GLOBAL_LOCAL String8 scrape_operand_kind_string(ScrapeOperand* operand)
     {
         result = S8("REGISTER");
     }
-    else if (string8_starts_with_sequence(operand->name, S8("MEM")) ||
-             string8_starts_with_sequence(operand->name, S8("AGEN")) ||
+    else if (string8_starts_with_sequence(operand->name, S8("MEM")) || string8_starts_with_sequence(operand->name, S8("AGEN")) ||
              string8_starts_with_sequence(operand->name, S8("PTR")))
     {
         result = S8("MEMORY");
     }
-    else if (string8_starts_with_sequence(operand->name, S8("IMM")) ||
-             string8_starts_with_sequence(operand->name, S8("UIMM")) ||
-             string8_starts_with_sequence(operand->name, S8("SIMM")) ||
-             string8_first_sequence(operand->name, S8("IMM")) != BUSTER_STRING_NO_MATCH)
+    else if (string8_starts_with_sequence(operand->name, S8("IMM")) || string8_starts_with_sequence(operand->name, S8("UIMM")) ||
+             string8_starts_with_sequence(operand->name, S8("SIMM")) || string8_first_sequence(operand->name, S8("IMM")) != BUSTER_STRING_NO_MATCH)
     {
         result = S8("IMMEDIATE");
     }
-    else if (string8_starts_with_sequence(operand->name, S8("RELBR")) ||
-             string8_starts_with_sequence(operand->name, S8("ABSBR")) ||
+    else if (string8_starts_with_sequence(operand->name, S8("RELBR")) || string8_starts_with_sequence(operand->name, S8("ABSBR")) ||
              string8_first_sequence(operand->name, S8("BRDISP")) != BUSTER_STRING_NO_MATCH)
     {
         result = S8("BRANCH");
@@ -1234,8 +1261,7 @@ BUSTER_GLOBAL_LOCAL String8 scrape_operand_action_string(ScrapeOperand* operand)
     {
         result = S8("WRITE");
     }
-    else if (string8_equal(operand->read_write, S8("rw")) || string8_equal(operand->read_write, S8("rcw")) ||
-             string8_equal(operand->read_write, S8("crw")))
+    else if (string8_equal(operand->read_write, S8("rw")) || string8_equal(operand->read_write, S8("rcw")) || string8_equal(operand->read_write, S8("crw")))
     {
         result = S8("READ_WRITE");
     }
@@ -1287,26 +1313,31 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
 {
     String8 parts[4096];
     u64 part_count = 0;
-    String8 accumulated = { 0 };
+    String8 accumulated = {0};
 
-#define SCRAPE_FLUSH_PARTS() \
-    do { \
-        let chunk = string8_join_arena(arena, { .pointer = parts, .length = part_count }, true); \
-        if (accumulated.length == 0) \
-        { \
-            accumulated = chunk; \
-        } \
-        else \
-        { \
-            String8 both[2] = { accumulated, chunk }; \
-            accumulated = string8_join_arena(arena, { .pointer = both, .length = 2 }, true); \
-        } \
-        part_count = 0; \
+#define SCRAPE_FLUSH_PARTS()                                                                                                                                   \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        let chunk = string8_join_arena(arena, {.pointer = parts, .length = part_count}, true);                                                                 \
+        if (accumulated.length == 0)                                                                                                                           \
+        {                                                                                                                                                      \
+            accumulated = chunk;                                                                                                                               \
+        }                                                                                                                                                      \
+        else                                                                                                                                                   \
+        {                                                                                                                                                      \
+            String8 both[2] = {accumulated, chunk};                                                                                                            \
+            accumulated = string8_join_arena(arena, {.pointer = both, .length = 2}, true);                                                                     \
+        }                                                                                                                                                      \
+        part_count = 0;                                                                                                                                        \
     } while (0)
 
-#define SCRAPE_FLUSH_IF_NEEDED() \
-    do { \
-        if (part_count > 3800) { SCRAPE_FLUSH_PARTS(); } \
+#define SCRAPE_FLUSH_IF_NEEDED()                                                                                                                               \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        if (part_count > 3800)                                                                                                                                 \
+        {                                                                                                                                                      \
+            SCRAPE_FLUSH_PARTS();                                                                                                                              \
+        }                                                                                                                                                      \
     } while (0)
 
     parts[part_count++] = S8("// Auto-generated x86-64 instruction data from Intel XED.\n");
@@ -1463,25 +1494,26 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
     scrape_build_enum_tokens(arena, &operand_width_name_table, operand_width_name_tokens);
     scrape_build_enum_tokens(arena, &operand_element_type_table, operand_element_type_tokens);
 
-#define SCRAPE_EMIT_ENUM_AND_LOOKUPS(type_name, enum_prefix, table, tokens, lookup_name) \
-    do { \
-        parts[part_count++] = S8("ENUM(" #type_name ",\n"); \
-        for (u64 value_i = 0; value_i < (table).count; value_i += 1) \
-        { \
-            parts[part_count++] = string8_format_z(arena, S8("    " #enum_prefix "_{S8} = {u64},\n"), (tokens)[value_i], value_i); \
-            SCRAPE_FLUSH_IF_NEEDED(); \
-        } \
-        parts[part_count++] = string8_format_z(arena, S8("    " #enum_prefix "_COUNT = {u64},\n"), (table).count); \
-        parts[part_count++] = S8(");\n\n"); \
-        parts[part_count++] = S8("BUSTER_GLOBAL_LOCAL String8 " #lookup_name "_strings[" #enum_prefix "_COUNT] = {\n"); \
-        for (u64 value_i = 0; value_i < (table).count; value_i += 1) \
-        { \
-            String8 lower_value = scrape_string8_to_lower_arena(arena, (table).values[value_i]); \
-            parts[part_count++] = string8_format_z(arena, S8("    [" #enum_prefix "_{S8}] = S8(\"{S8}\"),\n"), (tokens)[value_i], lower_value); \
-            SCRAPE_FLUSH_IF_NEEDED(); \
-        } \
-        parts[part_count++] = S8("};\n\n"); \
-        parts[part_count++] = S8("static_assert(BUSTER_ARRAY_LENGTH(" #lookup_name "_strings) == " #enum_prefix "_COUNT);\n\n"); \
+#define SCRAPE_EMIT_ENUM_AND_LOOKUPS(type_name, enum_prefix, table, tokens, lookup_name)                                                                       \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        parts[part_count++] = S8("ENUM(" #type_name ",\n");                                                                                                    \
+        for (u64 value_i = 0; value_i < (table).count; value_i += 1)                                                                                           \
+        {                                                                                                                                                      \
+            parts[part_count++] = string8_format_z(arena, S8("    " #enum_prefix "_{S8} = {u64},\n"), (tokens)[value_i], value_i);                             \
+            SCRAPE_FLUSH_IF_NEEDED();                                                                                                                          \
+        }                                                                                                                                                      \
+        parts[part_count++] = string8_format_z(arena, S8("    " #enum_prefix "_COUNT = {u64},\n"), (table).count);                                             \
+        parts[part_count++] = S8(");\n\n");                                                                                                                    \
+        parts[part_count++] = S8("BUSTER_GLOBAL_LOCAL String8 " #lookup_name "_strings[" #enum_prefix "_COUNT] = {\n");                                        \
+        for (u64 value_i = 0; value_i < (table).count; value_i += 1)                                                                                           \
+        {                                                                                                                                                      \
+            String8 lower_value = scrape_string8_to_lower_arena(arena, (table).values[value_i]);                                                               \
+            parts[part_count++] = string8_format_z(arena, S8("    [" #enum_prefix "_{S8}] = S8(\"{S8}\"),\n"), (tokens)[value_i], lower_value);                \
+            SCRAPE_FLUSH_IF_NEEDED();                                                                                                                          \
+        }                                                                                                                                                      \
+        parts[part_count++] = S8("};\n\n");                                                                                                                    \
+        parts[part_count++] = S8("static_assert(BUSTER_ARRAY_LENGTH(" #lookup_name "_strings) == " #enum_prefix "_COUNT);\n\n");                               \
     } while (0)
 
     SCRAPE_EMIT_ENUM_AND_LOOKUPS(X86Iclass, X86_ICLASS, iclass_table, iclass_tokens, x86_iclass);
@@ -1499,9 +1531,11 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
     SCRAPE_EMIT_ENUM_AND_LOOKUPS(X86OperandVisibility, X86_OPERAND_VISIBILITY, operand_visibility_table, operand_visibility_tokens, x86_operand_visibility);
     SCRAPE_EMIT_ENUM_AND_LOOKUPS(X86OperandAction, X86_OPERAND_ACTION, operand_action_table, operand_action_tokens, x86_operand_action);
     SCRAPE_EMIT_ENUM_AND_LOOKUPS(X86OperandKind, X86_OPERAND_KIND, operand_kind_table, operand_kind_tokens, x86_operand_kind);
-    SCRAPE_EMIT_ENUM_AND_LOOKUPS(X86OperandRegisterConstraint, X86_OPERAND_REGISTER_CONSTRAINT, operand_register_constraint_table, operand_register_constraint_tokens, x86_operand_register_constraint);
+    SCRAPE_EMIT_ENUM_AND_LOOKUPS(X86OperandRegisterConstraint, X86_OPERAND_REGISTER_CONSTRAINT, operand_register_constraint_table,
+                                 operand_register_constraint_tokens, x86_operand_register_constraint);
     SCRAPE_EMIT_ENUM_AND_LOOKUPS(X86OperandWidthName, X86_OPERAND_WIDTH, operand_width_name_table, operand_width_name_tokens, x86_operand_width_name);
-    SCRAPE_EMIT_ENUM_AND_LOOKUPS(X86OperandElementType, X86_OPERAND_ELEMENT_TYPE, operand_element_type_table, operand_element_type_tokens, x86_operand_element_type);
+    SCRAPE_EMIT_ENUM_AND_LOOKUPS(X86OperandElementType, X86_OPERAND_ELEMENT_TYPE, operand_element_type_table, operand_element_type_tokens,
+                                 x86_operand_element_type);
 
 #undef SCRAPE_EMIT_ENUM_AND_LOOKUPS
 
@@ -1531,9 +1565,11 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
         String8 class_token = class_id < register_class_table.count ? register_class_tokens[class_id] : S8("NONE");
         String8 enclosing_64_token = enclosing_64_id < register_name_table.count ? register_name_tokens[enclosing_64_id] : S8("NONE");
         String8 enclosing_32_token = enclosing_32_id < register_name_table.count ? register_name_tokens[enclosing_32_id] : S8("NONE");
-        parts[part_count++] = string8_format_z(arena,
-            S8("    [X86_REGISTER_{S8}] = {{ .register_class = X86_REGISTER_CLASS_{S8}, .width = {u32}, .enclosing_64 = X86_REGISTER_{S8}, .enclosing_32 = X86_REGISTER_{S8}, .register_id = {s32}, .is_high_byte = {S8}, .reserved = {{ 0 }} }},\n"),
-            name_token, class_token, reg->width, enclosing_64_token, enclosing_32_token, reg->register_id, is_high_byte);
+        parts[part_count++] =
+            string8_format_z(arena,
+                             S8("    [X86_REGISTER_{S8}] = {{ .register_class = X86_REGISTER_CLASS_{S8}, .width = {u32}, .enclosing_64 = X86_REGISTER_{S8}, "
+                                ".enclosing_32 = X86_REGISTER_{S8}, .register_id = {s32}, .is_high_byte = {S8}, .reserved = {{ 0 }} }},\n"),
+                             name_token, class_token, reg->width, enclosing_64_token, enclosing_32_token, reg->register_id, is_high_byte);
         SCRAPE_FLUSH_IF_NEEDED();
     }
 
@@ -1559,7 +1595,7 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
             .width_16 = 0,
             .width_32 = 0,
             .width_64 = 0,
-            .reserved = { 0 },
+            .reserved = {0},
         };
         ScrapeOperandWidth* ow = &fallback;
         for (u64 i = 0; i < database->operand_width_count; i += 1)
@@ -1575,8 +1611,9 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
         String8 name_token = operand_width_name_tokens[name_i];
         String8 element_token = element_id < operand_element_type_table.count ? operand_element_type_tokens[element_id] : S8("NONE");
         parts[part_count++] = string8_format_z(arena,
-            S8("    [X86_OPERAND_WIDTH_{S8}] = {{ .element_type = X86_OPERAND_ELEMENT_TYPE_{S8}, .width_16 = {u32}, .width_32 = {u32}, .width_64 = {u32} }},\n"),
-            name_token, element_token, ow->width_16, ow->width_32, ow->width_64);
+                                               S8("    [X86_OPERAND_WIDTH_{S8}] = {{ .element_type = X86_OPERAND_ELEMENT_TYPE_{S8}, .width_16 = {u32}, "
+                                                  ".width_32 = {u32}, .width_64 = {u32} }},\n"),
+                                               name_token, element_token, ow->width_16, ow->width_32, ow->width_64);
         SCRAPE_FLUSH_IF_NEEDED();
     }
 
@@ -1678,7 +1715,8 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
             u64 kind_id = scrape_string_table_enum_index(&operand_kind_table, operand_kind);
             u64 width_name_id = scrape_string_table_enum_index(&operand_width_name_table, operand->width);
 
-            String8 register_constraint_token = register_constraint_id < operand_register_constraint_table.count ? operand_register_constraint_tokens[register_constraint_id] : S8("NONE");
+            String8 register_constraint_token =
+                register_constraint_id < operand_register_constraint_table.count ? operand_register_constraint_tokens[register_constraint_id] : S8("NONE");
             String8 visibility_token = visibility_id < operand_visibility_table.count ? operand_visibility_tokens[visibility_id] : S8("NONE");
             String8 action_token = action_id < operand_action_table.count ? operand_action_tokens[action_id] : S8("NONE");
             String8 kind_token = kind_id < operand_kind_table.count ? operand_kind_tokens[kind_id] : S8("SPECIAL");
@@ -1742,9 +1780,8 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
     parts[part_count++] = S8("BUSTER_GLOBAL_LOCAL X86IclassFormRange x86_iclass_form_ranges[X86_ICLASS_COUNT] = {\n");
     for (u64 i = 0; i < iclass_table.count; i += 1)
     {
-        parts[part_count++] = string8_format_z(arena,
-            S8("    [X86_ICLASS_{S8}] = {{ .start = {u16}, .count = {u16} }},\n"),
-            iclass_tokens[i], iclass_form_starts[i], iclass_form_counts[i]);
+        parts[part_count++] = string8_format_z(arena, S8("    [X86_ICLASS_{S8}] = {{ .start = {u16}, .count = {u16} }},\n"), iclass_tokens[i],
+                                               iclass_form_starts[i], iclass_form_counts[i]);
         SCRAPE_FLUSH_IF_NEEDED();
     }
     parts[part_count++] = S8("};\n\n");
@@ -1781,12 +1818,14 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
         String8 rex_w_token = rex_w_id < rex_w_table.count ? rex_w_tokens[rex_w_id] : S8("NONE");
 
         parts[part_count++] = string8_format_z(arena,
-            S8("    [{u64}] = {{ .iclass = X86_ICLASS_{S8}, .iform = X86_IFORM_{S8}, .category = X86_CATEGORY_{S8}, .extension = X86_EXTENSION_{S8}, .isa_set = X86_ISA_SET_{S8}, .opcode_bytes = {{ "),
-            i, iclass_token, iform_token, category_token, extension_token, isa_set_token);
+                                               S8("    [{u64}] = {{ .iclass = X86_ICLASS_{S8}, .iform = X86_IFORM_{S8}, .category = X86_CATEGORY_{S8}, "
+                                                  ".extension = X86_EXTENSION_{S8}, .isa_set = X86_ISA_SET_{S8}, .opcode_bytes = {{ "),
+                                               i, iclass_token, iform_token, category_token, extension_token, isa_set_token);
 
         for (u32 j = 0; j < SCRAPE_MAX_OPCODE_BYTE_COUNT; j += 1)
         {
-            if (j > 0) parts[part_count++] = S8(", ");
+            if (j > 0)
+                parts[part_count++] = S8(", ");
             parts[part_count++] = string8_format_z(arena, S8("[{u32}] = 0x{u8:x,width=[0,2],no_prefix}"), j, form->opcode_bytes[j]);
         }
 
@@ -1794,15 +1833,17 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
 
         for (u32 j = 0; j < SCRAPE_MAX_OPCODE_BYTE_COUNT; j += 1)
         {
-            if (j > 0) parts[part_count++] = S8(", ");
+            if (j > 0)
+                parts[part_count++] = S8(", ");
             parts[part_count++] = string8_format_z(arena, S8("[{u32}] = 0x{u8:x,width=[0,2],no_prefix}"), j, form->opcode_masks[j]);
         }
 
         parts[part_count++] = string8_format_z(arena,
-            S8(" }, .opcode_byte_count = {u32}, .operand_start = {u32}, .has_modrm = {S8}, .modrm_reg_value = {s32}, .prefix_type = X86_PREFIX_TYPE_{S8}, .vex_pp = X86_VEX_PP_{S8}, .vex_map = X86_VEX_MAP_{S8}, .vector_length = X86_VECTOR_LENGTH_{S8}, .rex_w = X86_REX_W_{S8}, .operand_count = {u32}, .reserved = {{ 0 }} }},\n"),
-            form->opcode_byte_count, operand_cursor, has_modrm, form->modrm_reg_value,
-            prefix_type_token, vex_pp_token, vex_map_token, vector_length_token, rex_w_token,
-            form->operand_count);
+                                               S8(" }, .opcode_byte_count = {u32}, .operand_start = {u32}, .has_modrm = {S8}, .modrm_reg_value = {s32}, "
+                                                  ".prefix_type = X86_PREFIX_TYPE_{S8}, .vex_pp = X86_VEX_PP_{S8}, .vex_map = X86_VEX_MAP_{S8}, .vector_length "
+                                                  "= X86_VECTOR_LENGTH_{S8}, .rex_w = X86_REX_W_{S8}, .operand_count = {u32}, .reserved = {{ 0 }} }},\n"),
+                                               form->opcode_byte_count, operand_cursor, has_modrm, form->modrm_reg_value, prefix_type_token, vex_pp_token,
+                                               vex_map_token, vector_length_token, rex_w_token, form->operand_count);
 
         operand_cursor += form->operand_count;
         SCRAPE_FLUSH_IF_NEEDED();
@@ -1811,7 +1852,7 @@ BUSTER_GLOBAL_LOCAL void scrape_generate_c_source(Arena* arena, ScrapeInstructio
     parts[part_count++] = S8("};\n");
 
     SCRAPE_FLUSH_PARTS();
-    file_write(output_path, (ByteSlice){ .pointer = (u8*)accumulated.pointer, .length = accumulated.length });
+    file_write(output_path, (ByteSlice){.pointer = (u8*)accumulated.pointer, .length = accumulated.length});
 
 #undef SCRAPE_FLUSH_PARTS
 #undef SCRAPE_FLUSH_IF_NEEDED
@@ -1937,7 +1978,6 @@ BUSTER_V_IMPL ProcessResult process_arguments()
         }
     }
 
-
     return result;
 }
 
@@ -1947,7 +1987,7 @@ BUSTER_F_IMPL void async_user_tick()
 
 BUSTER_F_IMPL ProcessResult entry_point()
 {
-    let arena = arena_create((ArenaCreation){ .reserved_size = BUSTER_GB(4)});
+    let arena = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(4)});
 
     StringOs xed_root = scrape_xed_program_state.xed_root;
 
@@ -1962,7 +2002,7 @@ BUSTER_F_IMPL ProcessResult entry_point()
     };
 
     // Find and parse all instruction files
-    String8 datafiles_parts[] = { xed_root, S8("/datafiles") };
+    String8 datafiles_parts[] = {xed_root, S8("/datafiles")};
     String8 datafiles_path = string8_join_arena(arena, BUSTER_ARRAY_TO_SLICE(datafiles_parts), true);
 
     ScrapeFileList file_list = {
@@ -1992,11 +2032,11 @@ BUSTER_F_IMPL ProcessResult entry_point()
     string8_print(S8("\nTotal: {u64} instruction forms\n"), database.form_count);
 
     // Parse supporting data
-    String8 reg_parts[] = { xed_root, S8("/datafiles/xed-regs.txt") };
+    String8 reg_parts[] = {xed_root, S8("/datafiles/xed-regs.txt")};
     String8 registers_path = string8_join_arena(arena, BUSTER_ARRAY_TO_SLICE(reg_parts), true);
     scrape_parse_registers(arena, &database, registers_path);
 
-    String8 width_parts[] = { xed_root, S8("/datafiles/xed-operand-width.txt") };
+    String8 width_parts[] = {xed_root, S8("/datafiles/xed-operand-width.txt")};
     String8 widths_path = string8_join_arena(arena, BUSTER_ARRAY_TO_SLICE(width_parts), true);
     scrape_parse_operand_widths(arena, &database, widths_path);
 
@@ -2025,9 +2065,7 @@ BUSTER_F_IMPL ProcessResult entry_point()
     // --generate
     if (scrape_xed_program_state.generate)
     {
-        StringOs output_path = scrape_xed_program_state.generate_output.pointer
-            ? scrape_xed_program_state.generate_output
-            : S8("build/x86_64_instructions.c");
+        StringOs output_path = scrape_xed_program_state.generate_output.pointer ? scrape_xed_program_state.generate_output : S8("build/x86_64_instructions.c");
         string8_print(S8("Generating C source: {S8}\n"), output_path);
         scrape_generate_c_source(arena, &database, output_path);
         string8_print(S8("Done.\n"));
@@ -2128,10 +2166,14 @@ BUSTER_F_IMPL ProcessResult entry_point()
             scrape_count_unique_insert(extensions, &extension_count, 512, form->extension);
             scrape_count_unique_insert(categories, &category_count, 512, form->category);
 
-            if (form->prefix_type.length == 0) legacy_count += 1;
-            else if (string8_equal(form->prefix_type, S8("VEX"))) vex_count += 1;
-            else if (string8_equal(form->prefix_type, S8("EVEX"))) evex_count += 1;
-            else if (string8_equal(form->prefix_type, S8("XOP"))) xop_count += 1;
+            if (form->prefix_type.length == 0)
+                legacy_count += 1;
+            else if (string8_equal(form->prefix_type, S8("VEX")))
+                vex_count += 1;
+            else if (string8_equal(form->prefix_type, S8("EVEX")))
+                evex_count += 1;
+            else if (string8_equal(form->prefix_type, S8("XOP")))
+                xop_count += 1;
         }
 
         // Count unique iclasses
@@ -2172,7 +2214,8 @@ BUSTER_F_IMPL ProcessResult entry_point()
 
     // Default: print first 100 forms as a table
     string8_print(S8("\n{S8:w=20} {S8:w=12} {S8:w=16} {S8}\n"), S8("ICLASS"), S8("EXT"), S8("OPCODE"), S8("PATTERN (short)"));
-    for (u32 i = 0; i < 80; i += 1) string8_print(S8("-"));
+    for (u32 i = 0; i < 80; i += 1)
+        string8_print(S8("-"));
     string8_print(S8("\n"));
 
     u64 display_count = database.form_count < 100 ? database.form_count : 100;
@@ -2185,7 +2228,8 @@ BUSTER_F_IMPL ProcessResult entry_point()
         u64 opcode_part_count = 0;
         for (u32 j = 0; j < form->opcode_byte_count; j += 1)
         {
-            if (j > 0) opcode_parts[opcode_part_count++] = S8(" ");
+            if (j > 0)
+                opcode_parts[opcode_part_count++] = S8(" ");
             opcode_parts[opcode_part_count++] = string8_format_z(arena, S8("{u8:x,width=[0,2],no_prefix}"), form->opcode_bytes[j]);
         }
         String8 opcode_string;
@@ -2195,7 +2239,7 @@ BUSTER_F_IMPL ProcessResult entry_point()
         }
         else
         {
-            opcode_string = string8_join_arena(arena, { .pointer = opcode_parts, .length = opcode_part_count }, true);
+            opcode_string = string8_join_arena(arena, {.pointer = opcode_parts, .length = opcode_part_count}, true);
         }
 
         // Truncate pattern to 40 chars

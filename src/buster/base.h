@@ -198,7 +198,7 @@
 #define BUSTER_EXPORT
 #endif
 
-#define BUSTER_CONCAT_HELPER(a, b) a ## b
+#define BUSTER_CONCAT_HELPER(a, b) a##b
 #define BUSTER_CONCAT(a, b) BUSTER_CONCAT_HELPER(a, b)
 #define BUSTER_COUNTER_NAME(x) BUSTER_CONCAT(x, __COUNTER__)
 #define BUSTER_STRINGIFY(x) #x
@@ -249,11 +249,23 @@
 #include <intrin.h>
 #define BUSTER_TRAP() __fastfail(~0)
 #elif defined(__TINYC__) && BUSTER_LINK_LIBC
-#define BUSTER_TRAP() do { abort(); } while (1)
+#define BUSTER_TRAP()                                                                                                                                          \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        abort();                                                                                                                                               \
+    } while (1)
 #elif BUSTER_CPU_ARCH_X86_64
-#define BUSTER_TRAP() do { __asm__ __volatile__("ud2"); } while (1)
+#define BUSTER_TRAP()                                                                                                                                          \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        __asm__ __volatile__("ud2");                                                                                                                           \
+    } while (1)
 #elif BUSTER_CPU_ARCH_AARCH64
-#define BUSTER_TRAP() do { __asm__ volatile("brk #0"); } while (1)
+#define BUSTER_TRAP()                                                                                                                                          \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        __asm__ volatile("brk #0");                                                                                                                            \
+    } while (1)
 #endif
 
 #if __has_builtin(__builtin_prefetch)
@@ -289,12 +301,12 @@
 
 #define BUSTER_UNUSED(x) ((void)(x))
 
-#define BUSTER_MIN(a,b) (((a) < (b)) ? (a) : (b))
-#define BUSTER_MAX(a,b) (((a) > (b)) ? (a) : (b))
+#define BUSTER_MIN(a, b) (((a) < (b)) ? (a) : (b))
+#define BUSTER_MAX(a, b) (((a) > (b)) ? (a) : (b))
 
-#define BUSTER_CLAMP_TOP(a,x) BUSTER_MIN(a, x)
-#define BUSTER_CLAMP_BOT(x,b) BUSTER_MAX(x, b)
-#define BUSTER_CLAMP(a,x,b) (((x) < (a)) ? (a) : ((x) > (b)) ? (b) : (x))
+#define BUSTER_CLAMP_TOP(a, x) BUSTER_MIN(a, x)
+#define BUSTER_CLAMP_BOT(x, b) BUSTER_MAX(x, b)
+#define BUSTER_CLAMP(a, x, b) (((x) < (a)) ? (a) : ((x) > (b)) ? (b) : (x))
 
 #if defined(__APPLE__) && BUSTER_CPU_ARCH_AARCH64
 #define BUSTER_CACHE_LINE_GUESS (128)
@@ -315,18 +327,23 @@
 #elif __has_builtin(__builtin_assume)
 #define BUSTER_ASSUME(x) __builtin_assume(x)
 #elif BUSTER_COMPILER_CLANG || BUSTER_COMPILER_GCC
-#define BUSTER_ASSUME(x) do { if (!(x)) __builtin_unreachable(); } while (0)
+#define BUSTER_ASSUME(x)                                                                                                                                       \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        if (!(x))                                                                                                                                              \
+            __builtin_unreachable();                                                                                                                           \
+    } while (0)
 #else
 #define BUSTER_ASSUME(x) BUSTER_UNUSED(x)
 #endif
 #if BUSTER_OPTIMIZE
 #define BUSTER_UNREACHABLE() BUSTER_RAW_UNREACHABLE()
 #else
-#define BUSTER_UNREACHABLE() \
-    do \
-    { \
-        BUSTER_TRAP(); \
-        BUSTER_RAW_UNREACHABLE(); \
+#define BUSTER_UNREACHABLE()                                                                                                                                   \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        BUSTER_TRAP();                                                                                                                                         \
+        BUSTER_RAW_UNREACHABLE();                                                                                                                              \
     } while (0)
 #endif
 
@@ -344,10 +361,15 @@
 #if defined __clang__
 #define DECLARE_VECTOR(name, T, count) typedef T name __attribute__((ext_vector_type(count)))
 #else
-#define DECLARE_VECTOR(name, T, count) typedef struct name name; struct name { T v[(count)]; }
+#define DECLARE_VECTOR(name, T, count)                                                                                                                         \
+    typedef struct name name;                                                                                                                                  \
+    struct name                                                                                                                                                \
+    {                                                                                                                                                          \
+        T v[(count)];                                                                                                                                          \
+    }
 #endif
 
-typedef uint8_t  u8;
+typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
@@ -362,7 +384,7 @@ struct u128
 };
 #endif
 
-typedef int8_t  s8;
+typedef int8_t s8;
 typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
@@ -384,7 +406,7 @@ typedef double f64;
 DECLARE_VECTOR(float2, f32, 2);
 DECLARE_VECTOR(float3, f32, 3);
 DECLARE_VECTOR(float4, f32, 4);
-#if defined (__SIZEOF_FLOAT128__)
+#if defined(__SIZEOF_FLOAT128__)
 typedef __float128 f128;
 #endif
 
@@ -398,7 +420,7 @@ typedef float4 vec4;
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE float2 float2_make(f32 x, f32 y)
 {
     float2 result = (float2){0};
-    f32 elements[] = { x, y };
+    f32 elements[] = {x, y};
     memcpy(&result, elements, sizeof(result));
     return result;
 }
@@ -406,13 +428,19 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE float2 float2_make(f32 x, f32 y)
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE float4 float4_make(f32 x, f32 y, f32 z, f32 w)
 {
     float4 result = (float4){0};
-    f32 elements[] = { x, y, z, w };
+    f32 elements[] = {x, y, z, w};
     memcpy(&result, elements, sizeof(result));
     return result;
 }
 
-#define EACH_SLICE_INT(i, s) u64 i = 0; i < (s).length; i += 1
-#define EACH_ARRAY_INDEX(i, a) u64 i = 0; i < BUSTER_ARRAY_LENGTH(a); i += 1
+#define EACH_SLICE_INT(i, s)                                                                                                                                   \
+    u64 i = 0;                                                                                                                                                 \
+    i < (s).length;                                                                                                                                            \
+    i += 1
+#define EACH_ARRAY_INDEX(i, a)                                                                                                                                 \
+    u64 i = 0;                                                                                                                                                 \
+    i < BUSTER_ARRAY_LENGTH(a);                                                                                                                                \
+    i += 1
 
 typedef struct Sliceu8 Sliceu8;
 struct Sliceu8
@@ -445,8 +473,8 @@ struct Sliceu64
 };
 
 #define BUSTER_SLICE_SIZE(slice) ((slice).length * sizeof(*((slice).pointer)))
-#define BUSTER_ARRAY_TO_SLICE(arr) { .pointer = (arr), .length = BUSTER_ARRAY_LENGTH(arr) }
-#define BUSTER_ARRAY_TO_BYTE_SLICE(arr) ((ByteSlice) { .pointer = (u8*)(arr), .length = sizeof(arr) })
+#define BUSTER_ARRAY_TO_SLICE(arr) {.pointer = (arr), .length = BUSTER_ARRAY_LENGTH(arr)}
+#define BUSTER_ARRAY_TO_BYTE_SLICE(arr) ((ByteSlice){.pointer = (u8*)(arr), .length = sizeof(arr)})
 
 #define BUSTER_GB(x) (u64)(1024) * BUSTER_MB(x)
 #define BUSTER_MB(x) (u64)(1024) * BUSTER_KB(x)
@@ -468,10 +496,15 @@ typedef enum IntegerFormat
     INTEGER_FORMAT_COUNT,
 } IntegerFormat;
 
-#define BUSTER_SLICE_TO_BYTE_SLICE(s) (ByteSlice){ .pointer = (u8*)((s).pointer), .length = BUSTER_SLICE_SIZE(s) }
-#define BYTE_SLICE_TO_STRING(char_byte_count, bs) ((String ## char_byte_count) { .pointer = (char ## char_byte_count*)(bs).pointer, .length = ((bs).length / sizeof(char ## char_byte_count)) })
+#define BUSTER_SLICE_TO_BYTE_SLICE(s)                                                                                                                          \
+    (ByteSlice)                                                                                                                                                \
+    {                                                                                                                                                          \
+        .pointer = (u8*)((s).pointer), .length = BUSTER_SLICE_SIZE(s)                                                                                          \
+    }
+#define BYTE_SLICE_TO_STRING(char_byte_count, bs)                                                                                                              \
+    ((String##char_byte_count){.pointer = (char##char_byte_count*)(bs).pointer, .length = ((bs).length / sizeof(char##char_byte_count))})
 #define BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) (BUSTER_ARRAY_LENGTH(strlit) - 1)
-#define BUSTER_SLICE_START(s, start) ((__typeof__(s)) { (s).pointer + (start), (s).length - (start) })
+#define BUSTER_SLICE_START(s, start) ((__typeof__(s)){(s).pointer + (start), (s).length - (start)})
 #define BUSTER_STRING_NO_MATCH UINT64_MAX
 
 #define BUSTER_SLICE_IS_ZERO_TERMINATED(s) (((s).pointer[(s).length]) == 0)
@@ -530,8 +563,8 @@ struct SliceString16
     u64 length;
 };
 
-#define S8_INITIALIZER(strlit) { .pointer = (char8*)(strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) }
-#define S8(strlit) ((String8) S8_INITIALIZER(strlit))
+#define S8_INITIALIZER(strlit) {.pointer = (char8*)(strlit), .length = BUSTER_COMPILE_TIME_STRING_LENGTH(strlit)}
+#define S8(strlit) ((String8)S8_INITIALIZER(strlit))
 
 // Math types and enums for UI
 typedef enum Axis2
@@ -553,9 +586,20 @@ typedef enum Corner
 typedef union F32Interval2 F32Interval2;
 union F32Interval2
 {
-    struct { float2 min; float2 max; };
-    struct { float2 p0; float2 p1; };
-    struct { f32 x0, y0, x1, y1; };
+    struct
+    {
+        float2 min;
+        float2 max;
+    };
+    struct
+    {
+        float2 p0;
+        float2 p1;
+    };
+    struct
+    {
+        f32 x0, y0, x1, y1;
+    };
     float2 v[2];
 };
 BUSTER_CT_CHECK(sizeof(F32Interval2) == 4 * sizeof(f32));
@@ -711,7 +755,7 @@ struct FontTextureAtlas
 #if defined(__SANITIZE_ADDRESS__)
 #include <sanitizer/lsan_interface.h>
 #define BUSTER_LSAN_DISABLE() __lsan_disable()
-#define BUSTER_LSAN_ENABLE()  __lsan_enable()
+#define BUSTER_LSAN_ENABLE() __lsan_enable()
 #else
 #define BUSTER_LSAN_DISABLE()
 #define BUSTER_LSAN_ENABLE()
@@ -724,18 +768,24 @@ typedef enum ScratchArenaId
     SCRATCH_ARENA_COUNT,
 } ScratchArenaId;
 
-#define EACH_ENUM_FREE(E, e) e = (E)0; e < E::Count; e = (E)((BUSTER_UNDERLYING_TYPE(E))e + 1)
+#define EACH_ENUM_FREE(E, e)                                                                                                                                   \
+    e = (E)0;                                                                                                                                                  \
+    e < E::Count;                                                                                                                                              \
+    e = (E)((BUSTER_UNDERLYING_TYPE(E))e + 1)
 #define EACH_ENUM(E, e) E EACH_ENUM_FREE(E, e)
-#define EACH_ENUM_INT_FREE(E, e) e = 0; e < (BUSTER_UNDERLYING_TYPE(E))(E::Count); e += 1
+#define EACH_ENUM_INT_FREE(E, e)                                                                                                                               \
+    e = 0;                                                                                                                                                     \
+    e < (BUSTER_UNDERLYING_TYPE(E))(E::Count);                                                                                                                 \
+    e += 1
 #define EACH_ENUM_INT(E, e) BUSTER_UNDERLYING_TYPE(E) EACH_ENUM_INT_FREE(E, e)
 
 typedef void ThreadReturnType;
 typedef ThreadReturnType ThreadCallback(void*);
 
-#if defined (__clang__)
-#define BUSTER_FUNCTION ((String8){ .pointer = (char8*)__func__, .length = __builtin_strlen(__func__) })
+#if defined(__clang__)
+#define BUSTER_FUNCTION ((String8){.pointer = (char8*)__func__, .length = __builtin_strlen(__func__)})
 #else
-#define BUSTER_FUNCTION ((String8){ .pointer = (char8*)__func__, .length = strlen(__func__) })
+#define BUSTER_FUNCTION ((String8){.pointer = (char8*)__func__, .length = strlen(__func__)})
 #endif
 
 #if BUSTER_COMPILER_MSVC
@@ -764,88 +814,90 @@ typedef ThreadReturnType ThreadCallback(void*);
 #define BUSTER_ALIGN_OF(T) alignof(T)
 #endif
 
-#define BUSTER_SWITCH_ALPHA_UPPER \
-                case 'A':\
-                case 'B':\
-                case 'C':\
-                case 'D':\
-                case 'E':\
-                case 'F':\
-                case 'G':\
-                case 'H':\
-                case 'I':\
-                case 'J':\
-                case 'K':\
-                case 'L':\
-                case 'M':\
-                case 'N':\
-                case 'O':\
-                case 'P':\
-                case 'Q':\
-                case 'R':\
-                case 'S':\
-                case 'T':\
-                case 'U':\
-                case 'V':\
-                case 'W':\
-                case 'X':\
-                case 'Y':\
-                case 'Z'
+#define BUSTER_SWITCH_ALPHA_UPPER                                                                                                                              \
+    case 'A':                                                                                                                                                  \
+    case 'B':                                                                                                                                                  \
+    case 'C':                                                                                                                                                  \
+    case 'D':                                                                                                                                                  \
+    case 'E':                                                                                                                                                  \
+    case 'F':                                                                                                                                                  \
+    case 'G':                                                                                                                                                  \
+    case 'H':                                                                                                                                                  \
+    case 'I':                                                                                                                                                  \
+    case 'J':                                                                                                                                                  \
+    case 'K':                                                                                                                                                  \
+    case 'L':                                                                                                                                                  \
+    case 'M':                                                                                                                                                  \
+    case 'N':                                                                                                                                                  \
+    case 'O':                                                                                                                                                  \
+    case 'P':                                                                                                                                                  \
+    case 'Q':                                                                                                                                                  \
+    case 'R':                                                                                                                                                  \
+    case 'S':                                                                                                                                                  \
+    case 'T':                                                                                                                                                  \
+    case 'U':                                                                                                                                                  \
+    case 'V':                                                                                                                                                  \
+    case 'W':                                                                                                                                                  \
+    case 'X':                                                                                                                                                  \
+    case 'Y':                                                                                                                                                  \
+    case 'Z'
 
-#define BUSTER_SWITCH_ALPHA_LOWER \
-                case 'a':\
-                case 'b':\
-                case 'c':\
-                case 'd':\
-                case 'e':\
-                case 'f':\
-                case 'g':\
-                case 'h':\
-                case 'i':\
-                case 'j':\
-                case 'k':\
-                case 'l':\
-                case 'm':\
-                case 'n':\
-                case 'o':\
-                case 'p':\
-                case 'q':\
-                case 'r':\
-                case 's':\
-                case 't':\
-                case 'u':\
-                case 'v':\
-                case 'w':\
-                case 'x':\
-                case 'y':\
-                case 'z'
+#define BUSTER_SWITCH_ALPHA_LOWER                                                                                                                              \
+    case 'a':                                                                                                                                                  \
+    case 'b':                                                                                                                                                  \
+    case 'c':                                                                                                                                                  \
+    case 'd':                                                                                                                                                  \
+    case 'e':                                                                                                                                                  \
+    case 'f':                                                                                                                                                  \
+    case 'g':                                                                                                                                                  \
+    case 'h':                                                                                                                                                  \
+    case 'i':                                                                                                                                                  \
+    case 'j':                                                                                                                                                  \
+    case 'k':                                                                                                                                                  \
+    case 'l':                                                                                                                                                  \
+    case 'm':                                                                                                                                                  \
+    case 'n':                                                                                                                                                  \
+    case 'o':                                                                                                                                                  \
+    case 'p':                                                                                                                                                  \
+    case 'q':                                                                                                                                                  \
+    case 'r':                                                                                                                                                  \
+    case 's':                                                                                                                                                  \
+    case 't':                                                                                                                                                  \
+    case 'u':                                                                                                                                                  \
+    case 'v':                                                                                                                                                  \
+    case 'w':                                                                                                                                                  \
+    case 'x':                                                                                                                                                  \
+    case 'y':                                                                                                                                                  \
+    case 'z'
 
-#define BUSTER_SWITCH_DECIMAL_DIGIT \
-    case '0':\
-    case '1':\
-    case '2':\
-    case '3':\
-    case '4':\
-    case '5':\
-    case '6':\
-    case '7':\
-    case '8':\
+#define BUSTER_SWITCH_DECIMAL_DIGIT                                                                                                                            \
+    case '0':                                                                                                                                                  \
+    case '1':                                                                                                                                                  \
+    case '2':                                                                                                                                                  \
+    case '3':                                                                                                                                                  \
+    case '4':                                                                                                                                                  \
+    case '5':                                                                                                                                                  \
+    case '6':                                                                                                                                                  \
+    case '7':                                                                                                                                                  \
+    case '8':                                                                                                                                                  \
     case '9'
 
-#define BUSTER_SWITCH_HEX_ALPHA_LOWER \
-                case 'a':\
-                case 'b':\
-                case 'c':\
-                case 'd':\
-                case 'e':\
-                case 'f'
+#define BUSTER_SWITCH_HEX_ALPHA_LOWER                                                                                                                          \
+    case 'a':                                                                                                                                                  \
+    case 'b':                                                                                                                                                  \
+    case 'c':                                                                                                                                                  \
+    case 'd':                                                                                                                                                  \
+    case 'e':                                                                                                                                                  \
+    case 'f'
 
-#define BUSTER_SWITCH_HEX_ALPHA_UPPER \
-                case 'A':\
-                case 'B':\
-                case 'C':\
-                case 'D':\
-                case 'E':\
-                case 'F'
+#define BUSTER_SWITCH_HEX_ALPHA_UPPER                                                                                                                          \
+    case 'A':                                                                                                                                                  \
+    case 'B':                                                                                                                                                  \
+    case 'C':                                                                                                                                                  \
+    case 'D':                                                                                                                                                  \
+    case 'E':                                                                                                                                                  \
+    case 'F'
 
-#define BUSTER_SWITCH_HEX_ALPHA BUSTER_SWITCH_HEX_ALPHA_UPPER: BUSTER_SWITCH_HEX_ALPHA_LOWER
+#define BUSTER_SWITCH_HEX_ALPHA                                                                                                                                \
+    BUSTER_SWITCH_HEX_ALPHA_UPPER:                                                                                                                             \
+    BUSTER_SWITCH_HEX_ALPHA_LOWER

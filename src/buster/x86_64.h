@@ -32,14 +32,9 @@ struct X86_64EncodedInstruction
 
 BUSTER_F_DECL CpuModel cpu_detect_model_x86_64(void);
 BUSTER_F_DECL TargetCpuFeatures cpu_detect_features_x86_64(void);
-BUSTER_F_DECL X86_64EncodedInstruction
-x86_64_encode_register_operation(
-    X86_64RegisterOperation operation,
-    u32 target_register,
-    u32 source_register);
+BUSTER_F_DECL X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperation operation, u32 target_register, u32 source_register);
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
-BUSTER_F_DECL UnitTestResult x86_64_tests(
-    UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult x86_64_tests(UnitTestArguments* arguments);
 #endif

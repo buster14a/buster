@@ -8,8 +8,7 @@ static double unsigned_to_double(unsigned int value)
     return value;
 }
 
-static double unsigned_long_long_to_double(
-    unsigned long long value)
+static double unsigned_long_long_to_double(unsigned long long value)
 {
     return value;
 }
@@ -24,8 +23,7 @@ static unsigned int double_to_unsigned(double value)
     return (unsigned int)value;
 }
 
-static unsigned long long double_to_unsigned_long_long(
-    double value)
+static unsigned long long double_to_unsigned_long_long(double value)
 {
     return (unsigned long long)value;
 }
@@ -69,8 +67,7 @@ int main(void)
     {
         return 6;
     }
-    if (unsigned_to_double(4000000000U) !=
-        4000000000.0)
+    if (unsigned_to_double(4000000000U) != 4000000000.0)
     {
         return 7;
     }
@@ -78,8 +75,7 @@ int main(void)
     {
         return 8;
     }
-    if (double_to_unsigned(4000000000.0) !=
-        4000000000U)
+    if (double_to_unsigned(4000000000.0) != 4000000000U)
     {
         return 9;
     }
@@ -95,20 +91,15 @@ int main(void)
     {
         return 12;
     }
-    if (0xffffffffffffffffULL !=
-        18446744073709551615ULL)
+    if (0xffffffffffffffffULL != 18446744073709551615ULL)
     {
         return 13;
     }
-    if (unsigned_long_long_to_double(
-            9223372036854775808ULL) !=
-        0x1p63)
+    if (unsigned_long_long_to_double(9223372036854775808ULL) != 0x1p63)
     {
         return 14;
     }
-    if (double_to_unsigned_long_long(
-            0x1.0000000000001p63) !=
-        9223372036854777856ULL)
+    if (double_to_unsigned_long_long(0x1.0000000000001p63) != 9223372036854777856ULL)
     {
         return 15;
     }

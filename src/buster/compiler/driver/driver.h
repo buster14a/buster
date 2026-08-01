@@ -47,8 +47,7 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
-typedef struct CompilerDriverInvocation
-    CompilerDriverInvocation;
+typedef struct CompilerDriverInvocation CompilerDriverInvocation;
 struct CompilerDriverInvocation
 {
     String8* input_paths;
@@ -111,21 +110,11 @@ struct CompilerDriverResult
     u8 reserved[3];
 };
 
-BUSTER_F_DECL CompilerDriverResult
-compiler_driver_compile(
-    Arena* arena,
-    CompilerDriverOptions options);
-BUSTER_F_DECL CompilerDriverInvocation
-compiler_driver_parse_arguments(
-    Arena* arena,
-    SliceString8 arguments);
-BUSTER_F_DECL CompilerDriverResult
-compiler_driver_execute_invocation(
-    Arena* arena,
-    CompilerDriverInvocation invocation);
+BUSTER_F_DECL CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions options);
+BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
+BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
-BUSTER_F_DECL UnitTestResult compiler_driver_tests(
-    UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* arguments);
 #endif

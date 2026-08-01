@@ -53,40 +53,18 @@ void buster_test_error(u32 line, String8 function, String8 file_path, String8 fo
     }
 }
 
-String8 buster_test_temporary_path(
-    Arena* arena,
-    String8 name,
-    String8 suffix)
+String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix)
 {
 #if BUSTER_WINDOWS
     String8 prefix = S8("build/");
 #elif BUSTER_ANDROID
-    String8 prefix =
-        buster_android_internal_data_path.length ?
-            buster_android_internal_data_path :
-            S8(".");
-    String8 separator =
-        prefix.pointer[prefix.length - 1] == '/' ?
-            S8("") :
-            S8("/");
-    return string_format_z(
-        arena,
-        S8("{S8}{S8}{S8}-{u64}{S8}"),
-        prefix,
-        separator,
-        name,
-        os_get_current_process_id(),
-        suffix);
+    String8 prefix = buster_android_internal_data_path.length ? buster_android_internal_data_path : S8(".");
+    String8 separator = prefix.pointer[prefix.length - 1] == '/' ? S8("") : S8("/");
+    return string_format_z(arena, S8("{S8}{S8}{S8}-{u64}{S8}"), prefix, separator, name, os_get_current_process_id(), suffix);
 #else
     String8 prefix = S8("/tmp/");
 #endif
-    return string_format_z(
-        arena,
-        S8("{S8}{S8}-{u64}{S8}"),
-        prefix,
-        name,
-        os_get_current_process_id(),
-        suffix);
+    return string_format_z(arena, S8("{S8}{S8}-{u64}{S8}"), prefix, name, os_get_current_process_id(), suffix);
 }
 
 void default_show(UnitTestArguments* arguments, String8 format, ...)
@@ -157,9 +135,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         u64 arena_position = arguments->arena->position;
         UnitTestResult unit_test_result = test_functions[i](arguments);
         consume_unit_tests(&result, unit_test_result);
-        arena_set_position(
-            arguments->arena,
-            arena_position);
+        arena_set_position(arguments->arena, arena_position);
     }
 
     return result;

@@ -95,10 +95,7 @@ u64 buster_hash_64(u8* pointer, u64 length)
             i += 8;
         } while (length - i >= 32);
 
-        hash = buster_hash_rotl64(v1, 1) +
-               buster_hash_rotl64(v2, 7) +
-               buster_hash_rotl64(v3, 12) +
-               buster_hash_rotl64(v4, 18);
+        hash = buster_hash_rotl64(v1, 1) + buster_hash_rotl64(v2, 7) + buster_hash_rotl64(v3, 12) + buster_hash_rotl64(v4, 18);
 
         hash = buster_hash_merge_round(hash, v1);
         hash = buster_hash_merge_round(hash, v2);
@@ -149,7 +146,7 @@ UnitTestResult hash_tests(UnitTestArguments* arguments)
     // hash to it, and equal inputs must hash equally.
     BUSTER_TEST(arguments, buster_hash_64(0, 0) != 0);
 
-    u8 zero_byte[] = { 0 };
+    u8 zero_byte[] = {0};
     BUSTER_TEST(arguments, buster_hash_64(zero_byte, sizeof(zero_byte)) != 0);
 
     String8 sample = S8("sample");

@@ -39,58 +39,49 @@ BUSTER_V_IMPL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions = {0};
 #endif
 
 //- rjf: doubly-linked-lists
-#define DLLInsert_NPZ(nil,f,l,p,n,next,prev) (CheckNil(nil,f) ? \
-((f) = (l) = (n), SetNil(nil,(n)->next), SetNil(nil,(n)->prev)) :\
-CheckNil(nil,p) ? \
-((n)->next = (f), (f)->prev = (n), (f) = (n), SetNil(nil,(n)->prev)) :\
-((p)==(l)) ? \
-((l)->next = (n), (n)->prev = (l), (l) = (n), SetNil(nil, (n)->next)) :\
-(((!CheckNil(nil,p) && CheckNil(nil,(p)->next)) ? (0) : ((p)->next->prev = (n))), ((n)->next = (p)->next), ((p)->next = (n)), ((n)->prev = (p))))
-#define DLLPushBack_NPZ(nil,f,l,n,next,prev) DLLInsert_NPZ(nil,f,l,l,n,next,prev)
-#define DLLPushFront_NPZ(nil,f,l,n,next,prev) DLLInsert_NPZ(nil,l,f,f,n,prev,next)
-#define DLLRemove_NPZ(nil,f,l,n,next,prev) (((n) == (f) ? (f) = (n)->next : (0)),\
-((n) == (l) ? (l) = (l)->prev : (0)),\
-(CheckNil(nil,(n)->prev) ? (0) :\
-((n)->prev->next = (n)->next)),\
-(CheckNil(nil,(n)->next) ? (0) :\
-((n)->next->prev = (n)->prev)))
+#define DLLInsert_NPZ(nil, f, l, p, n, next, prev)                                                                                                             \
+    (CheckNil(nil, f)   ? ((f) = (l) = (n), SetNil(nil, (n)->next), SetNil(nil, (n)->prev))                                                                    \
+     : CheckNil(nil, p) ? ((n)->next = (f), (f)->prev = (n), (f) = (n), SetNil(nil, (n)->prev))                                                                \
+     : ((p) == (l))                                                                                                                                            \
+         ? ((l)->next = (n), (n)->prev = (l), (l) = (n), SetNil(nil, (n)->next))                                                                               \
+         : (((!CheckNil(nil, p) && CheckNil(nil, (p)->next)) ? (0) : ((p)->next->prev = (n))), ((n)->next = (p)->next), ((p)->next = (n)), ((n)->prev = (p))))
+#define DLLPushBack_NPZ(nil, f, l, n, next, prev) DLLInsert_NPZ(nil, f, l, l, n, next, prev)
+#define DLLPushFront_NPZ(nil, f, l, n, next, prev) DLLInsert_NPZ(nil, l, f, f, n, prev, next)
+#define DLLRemove_NPZ(nil, f, l, n, next, prev)                                                                                                                \
+    (((n) == (f) ? (f) = (n)->next : (0)), ((n) == (l) ? (l) = (l)->prev : (0)), (CheckNil(nil, (n)->prev) ? (0) : ((n)->prev->next = (n)->next)),             \
+     (CheckNil(nil, (n)->next) ? (0) : ((n)->next->prev = (n)->prev)))
 
 //- rjf: singly-linked, doubly-headed lists (queues)
-#define SLLQueuePush_NZ(nil,f,l,n,next) (CheckNil(nil,f)?\
-((f)=(l)=(n),SetNil(nil,(n)->next)):\
-((l)->next=(n),(l)=(n),SetNil(nil,(n)->next)))
-#define SLLQueuePushFront_NZ(nil,f,l,n,next) (CheckNil(nil,f)?\
-((f)=(l)=(n),SetNil(nil,(n)->next)):\
-((n)->next=(f),(f)=(n)))
-#define SLLQueuePop_NZ(nil,f,l,next) ((f)==(l)?\
-(SetNil(nil,f),SetNil(nil,l)):\
-((f)=(f)->next))
+#define SLLQueuePush_NZ(nil, f, l, n, next)                                                                                                                    \
+    (CheckNil(nil, f) ? ((f) = (l) = (n), SetNil(nil, (n)->next)) : ((l)->next = (n), (l) = (n), SetNil(nil, (n)->next)))
+#define SLLQueuePushFront_NZ(nil, f, l, n, next) (CheckNil(nil, f) ? ((f) = (l) = (n), SetNil(nil, (n)->next)) : ((n)->next = (f), (f) = (n)))
+#define SLLQueuePop_NZ(nil, f, l, next) ((f) == (l) ? (SetNil(nil, f), SetNil(nil, l)) : ((f) = (f)->next))
 
 //- rjf: singly-linked, singly-headed lists (stacks)
-#define SLLStackPush_N(f,n,next) ((n)->next=(f), (f)=(n))
-#define SLLStackPop_N(f,next) ((f)=(f)->next)
+#define SLLStackPush_N(f, n, next) ((n)->next = (f), (f) = (n))
+#define SLLStackPop_N(f, next) ((f) = (f)->next)
 
 //- rjf: doubly-linked-list helpers
-#define DLLInsert_NP(f,l,p,n,next,prev) DLLInsert_NPZ(0,f,l,p,n,next,prev)
-#define DLLPushBack_NP(f,l,n,next,prev) DLLPushBack_NPZ(0,f,l,n,next,prev)
-#define DLLPushFront_NP(f,l,n,next,prev) DLLPushFront_NPZ(0,f,l,n,next,prev)
-#define DLLRemove_NP(f,l,n,next,prev) DLLRemove_NPZ(0,f,l,n,next,prev)
-#define DLLInsert(f,l,p,n) DLLInsert_NPZ(0,f,l,p,n,next,prev)
-#define DLLPushBack(f,l,n) DLLPushBack_NPZ(0,f,l,n,next,prev)
-#define DLLPushFront(f,l,n) DLLPushFront_NPZ(0,f,l,n,next,prev)
-#define DLLRemove(f,l,n) DLLRemove_NPZ(0,f,l,n,next,prev)
+#define DLLInsert_NP(f, l, p, n, next, prev) DLLInsert_NPZ(0, f, l, p, n, next, prev)
+#define DLLPushBack_NP(f, l, n, next, prev) DLLPushBack_NPZ(0, f, l, n, next, prev)
+#define DLLPushFront_NP(f, l, n, next, prev) DLLPushFront_NPZ(0, f, l, n, next, prev)
+#define DLLRemove_NP(f, l, n, next, prev) DLLRemove_NPZ(0, f, l, n, next, prev)
+#define DLLInsert(f, l, p, n) DLLInsert_NPZ(0, f, l, p, n, next, prev)
+#define DLLPushBack(f, l, n) DLLPushBack_NPZ(0, f, l, n, next, prev)
+#define DLLPushFront(f, l, n) DLLPushFront_NPZ(0, f, l, n, next, prev)
+#define DLLRemove(f, l, n) DLLRemove_NPZ(0, f, l, n, next, prev)
 
 //- rjf: singly-linked, doubly-headed list helpers
-#define SLLQueuePush_N(f,l,n,next) SLLQueuePush_NZ(0,f,l,n,next)
-#define SLLQueuePushFront_N(f,l,n,next) SLLQueuePushFront_NZ(0,f,l,n,next)
-#define SLLQueuePop_N(f,l,next) SLLQueuePop_NZ(0,f,l,next)
-#define SLLQueuePush(f,l,n) SLLQueuePush_NZ(0,f,l,n,next)
-#define SLLQueuePushFront(f,l,n) SLLQueuePushFront_NZ(0,f,l,n,next)
-#define SLLQueuePop(f,l) SLLQueuePop_NZ(0,f,l,next)
+#define SLLQueuePush_N(f, l, n, next) SLLQueuePush_NZ(0, f, l, n, next)
+#define SLLQueuePushFront_N(f, l, n, next) SLLQueuePushFront_NZ(0, f, l, n, next)
+#define SLLQueuePop_N(f, l, next) SLLQueuePop_NZ(0, f, l, next)
+#define SLLQueuePush(f, l, n) SLLQueuePush_NZ(0, f, l, n, next)
+#define SLLQueuePushFront(f, l, n) SLLQueuePushFront_NZ(0, f, l, n, next)
+#define SLLQueuePop(f, l) SLLQueuePop_NZ(0, f, l, next)
 
 //- rjf: singly-linked, singly-headed list helpers
-#define SLLStackPush(f,n) SLLStackPush_N(f,n,next)
-#define SLLStackPop(f) SLLStackPop_N(f,next)
+#define SLLStackPush(f, n) SLLStackPush_N(f, n, next)
+#define SLLStackPop(f) SLLStackPop_N(f, next)
 
 #if defined(_WIN32)
 BUSTER_GLOBAL_LOCAL u64 w32_file_size_from_file_information(BY_HANDLE_FILE_INFORMATION file_information)
@@ -183,7 +174,7 @@ BUSTER_COLD bool is_debugger_present(void)
             close(status_fd);
             if (read_byte_count > 0)
             {
-                String8 contents = { .pointer = status_buffer, .length = (u64)read_byte_count };
+                String8 contents = {.pointer = status_buffer, .length = (u64)read_byte_count};
                 String8 key = S8("TracerPid:");
                 u64 key_index = string_first_sequence(contents, key);
                 if (key_index != BUSTER_STRING_NO_MATCH)
@@ -203,7 +194,7 @@ BUSTER_COLD bool is_debugger_present(void)
         BOOL os_result = IsDebuggerPresent();
         program_state->_is_debugger_present = os_result != 0;
 #else
-    BUSTER_TODO();
+        BUSTER_TODO();
 #endif
     }
 
@@ -241,27 +232,21 @@ BUSTER_NORETURN BUSTER_COLD void os_exit(u32 code)
 #endif
 }
 
-#if defined (__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__)
 BUSTER_GLOBAL_LOCAL int os_posix_protection_flags(ProtectionFlags flags)
 {
-    int result = 
-        PROT_READ * flags.read |
-        PROT_WRITE * flags.write |
-        PROT_EXEC * flags.execute
-    ;
+    int result = PROT_READ * flags.read | PROT_WRITE * flags.write | PROT_EXEC * flags.execute;
 
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL int os_posix_map_flags(MapFlags flags)
 {
-    int result = 
+    int result =
 #ifdef __linux__
         MAP_POPULATE * flags.populate |
 #endif
-        MAP_PRIVATE * flags.priv |
-        MAP_ANON * flags.anonymous |
-        MAP_NORESERVE * flags.no_reserve;
+        MAP_PRIVATE * flags.priv | MAP_ANON * flags.anonymous | MAP_NORESERVE * flags.no_reserve;
 
     return result;
 }
@@ -429,18 +414,13 @@ void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
 bool os_flush_instruction_cache(void* address, u64 size)
 {
 #if defined(_WIN32)
-    return FlushInstructionCache(
-        GetCurrentProcess(),
-        address,
-        (SIZE_T)size) != 0;
+    return FlushInstructionCache(GetCurrentProcess(), address, (SIZE_T)size) != 0;
 #elif BUSTER_COMPILER_TCC
     BUSTER_UNUSED(address);
     BUSTER_UNUSED(size);
     return true;
 #elif defined(__GNUC__) || defined(__clang__)
-    __builtin___clear_cache(
-        (char*)address,
-        (char*)address + size);
+    __builtin___clear_cache((char*)address, (char*)address + size);
     return true;
 #else
     BUSTER_UNUSED(address);
@@ -526,7 +506,7 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
     OsEntity* result = os_entity_allocate(OS_ENTITY_KIND_THREAD);
     result->thread.callback = options.callback;
     result->thread.argument = options.argument;
-#if defined (__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__)
     int create_result = pthread_create(&result->thread.handle, 0, &pthread_entry_point, result);
     bool os_result = create_result == 0;
     if (!os_result)
@@ -534,7 +514,7 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
         os_entity_release(result);
         result = 0;
     }
-#elif defined (_WIN32)
+#elif defined(_WIN32)
     HANDLE handle = CreateThread(0, 0, &windows_thread_entry_point, result, 0, 0);
     if (handle)
     {
@@ -594,7 +574,7 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
         DWORD new_length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, length_plus_null_termination, os_result, 0);
         BUSTER_CHECK(new_length_plus_null_termination == length_plus_null_termination);
 
-        String16 string16 = { .pointer = os_result, .length = new_length_plus_null_termination - 1 };
+        String16 string16 = {.pointer = os_result, .length = new_length_plus_null_termination - 1};
         result = string8_from_string16(arena, string16, null_terminate);
     }
 
@@ -620,7 +600,7 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
     OsFileDescriptor* result = 0;
     if (path.pointer)
     {
-#if defined (__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__)
         BUSTER_CHECK(!path.pointer[path.length]);
 
         int o = 0;
@@ -657,7 +637,7 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
 
         DWORD desired_access = 0;
         DWORD shared_mode = 0;
-        SECURITY_ATTRIBUTES security_attributes = { sizeof(security_attributes), 0, 0 };
+        SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, 0};
         DWORD creation_disposition = 0;
         DWORD flags_and_attributes = 0;
         HANDLE template_file = 0;
@@ -881,7 +861,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     {
         if (options.capture & ((u64)1 << stream))
         {
-            SECURITY_ATTRIBUTES security_attributes = { sizeof(security_attributes), 0, TRUE };
+            SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, TRUE};
             BUSTER_CT_CHECK(sizeof(HANDLE) == sizeof(OsFileDescriptor*));
             BOOL pipe_creation_result = CreatePipe((PHANDLE)&result.pipes[stream][0], (PHANDLE)&result.pipes[stream][1], &security_attributes, 0) != 0;
             pipe_creation_results[stream] = pipe_creation_result;
@@ -912,7 +892,8 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         {
             startup_info.dwFlags |= STARTF_USESTDHANDLES;
             startup_info.hStdInput = options.capture & (1 << STANDARD_STREAM_INPUT) ? result.pipes[STANDARD_STREAM_INPUT][0] : GetStdHandle(STD_INPUT_HANDLE);
-            startup_info.hStdOutput = options.capture & (1 << STANDARD_STREAM_OUTPUT) ? result.pipes[STANDARD_STREAM_OUTPUT][1] : GetStdHandle(STD_OUTPUT_HANDLE);
+            startup_info.hStdOutput =
+                options.capture & (1 << STANDARD_STREAM_OUTPUT) ? result.pipes[STANDARD_STREAM_OUTPUT][1] : GetStdHandle(STD_OUTPUT_HANDLE);
             startup_info.hStdError = options.capture & (1 << STANDARD_STREAM_ERROR) ? result.pipes[STANDARD_STREAM_ERROR][1] : GetStdHandle(STD_ERROR_HANDLE);
         }
 
@@ -923,7 +904,8 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         }
 
         WindowsStringList argv = windows_string_list_from_slice_string(temp.arena, arguments);
-        WindowsStringList envp = options.use_process_environment ? program_state->input.raw_environment : windows_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
+        WindowsStringList envp = options.use_process_environment ? program_state->input.raw_environment
+                                                                 : windows_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
         DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT;
 
         if (CreateProcessW(first_argument.pointer, argv, 0, 0, 1, creation_flags, envp, 0, &startup_info, &process_information))
@@ -1019,7 +1001,8 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     if (file_actions_init == 0 && attribute_init == 0 && pipe_result)
     {
         PosixStringList argv = slice_string8_to_null_terminated_array_char(temp.arena, arguments);
-        PosixStringList envp = options.use_process_environment ? program_state->input.raw_environment : posix_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
+        PosixStringList envp = options.use_process_environment ? program_state->input.raw_environment
+                                                               : posix_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
         int spawn_result = posix_spawnp(&pid, argv[0], &file_actions, &attributes, argv, envp);
 
         if (spawn_result != 0)
@@ -1128,7 +1111,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* ca
         offset += chunk->length;
     }
     BUSTER_CHECK(offset == capture->total_length);
-    return (ByteSlice) { pointer, capture->total_length };
+    return (ByteSlice){pointer, capture->total_length};
 }
 
 ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
@@ -1271,7 +1254,7 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
             {
                 if (read_pipes[stream] >= 0)
                 {
-                    poll_fds[poll_count] = (struct pollfd) { .fd = read_pipes[stream], .events = POLLIN };
+                    poll_fds[poll_count] = (struct pollfd){.fd = read_pipes[stream], .events = POLLIN};
                     poll_streams[poll_count] = stream;
                     poll_count += 1;
                 }
@@ -1335,7 +1318,10 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
 
         if (program_flag_get(PROGRAM_FLAG_VERBOSE))
         {
-            string_print(S8("Process [{s32}]: Time (user): {s64}:{s64} s,us, (system): {s64}:{s64} s,us. Max RSS: {s64} KB. PF (soft): {s64}, (hard): {s64}. Block (input): {s64}, (output): {s64}. CTX SW (vol): {s64}, (invol): {s64}\n"), pid, usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, usage.ru_stime.tv_sec, usage.ru_stime.tv_usec, usage.ru_maxrss, usage.ru_minflt, usage.ru_majflt, usage.ru_inblock, usage.ru_oublock, usage.ru_nvcsw, usage.ru_nivcsw);
+            string_print(S8("Process [{s32}]: Time (user): {s64}:{s64} s,us, (system): {s64}:{s64} s,us. Max RSS: {s64} KB. PF (soft): {s64}, (hard): {s64}. "
+                            "Block (input): {s64}, (output): {s64}. CTX SW (vol): {s64}, (invol): {s64}\n"),
+                         pid, usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, usage.ru_stime.tv_sec, usage.ru_stime.tv_usec, usage.ru_maxrss, usage.ru_minflt,
+                         usage.ru_majflt, usage.ru_inblock, usage.ru_oublock, usage.ru_nvcsw, usage.ru_nivcsw);
         }
 
         if (wait_result == pid && WIFEXITED(status))
@@ -1381,7 +1367,8 @@ String8 string8_from_os_error(Arena* arena, OsError error, bool null_terminate)
     TemporalArena temp = scratch_begin(&arena, 1);
     DWORD buffer_size = 64 * 1024 / 2;
     char16* buffer = arena_allocate(temp.arena, char16, buffer_size);
-    DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)error.v, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer, buffer_size, 0);
+    DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)error.v, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                                  buffer, buffer_size, 0);
     if (length != 0)
     {
         // Strip the trailing "\r\n" FormatMessage usually appends, but do not
@@ -1391,7 +1378,7 @@ String8 string8_from_os_error(Arena* arena, OsError error, bool null_terminate)
             length -= 1;
         }
 
-        String16 string16 = (String16){ .pointer = buffer, .length = length };
+        String16 string16 = (String16){.pointer = buffer, .length = length};
         result = string8_from_string16(arena, string16, null_terminate);
     }
 
@@ -1486,7 +1473,7 @@ OsModuleHandle* os_dynamic_library_load(String8 library)
     result = (OsModuleHandle*)LoadLibraryW(library_w.pointer);
     scratch_end(temp);
 #else
-    result = (OsModuleHandle*) dlopen(library.pointer, RTLD_NOW | RTLD_LOCAL);
+    result = (OsModuleHandle*)dlopen(library.pointer, RTLD_NOW | RTLD_LOCAL);
 #endif
 
     return result;
@@ -1568,11 +1555,11 @@ OsProcessHandle* os_get_current_process_handle(void)
 {
     OsProcessHandle* result;
 #if defined(__linux__) || defined(__APPLE__)
-     result = (OsProcessHandle*)os_get_current_process_id();
+    result = (OsProcessHandle*)os_get_current_process_id();
 #else
-     result = (OsProcessHandle*)GetCurrentProcess();
+    result = (OsProcessHandle*)GetCurrentProcess();
 #endif
-     return result;
+    return result;
 }
 
 OsThreadHandle* os_get_current_thread_handle(void)
@@ -1688,7 +1675,7 @@ u64 os_now_microseconds(void)
 #if defined(_WIN32)
     u64 result = 0;
     LARGE_INTEGER os_counter;
-    if(QueryPerformanceCounter(&os_counter))
+    if (QueryPerformanceCounter(&os_counter))
     {
         // Split the conversion so counter * 1e6 cannot overflow 64 bits
         // (a 10 MHz counter would overflow after ~10 days of uptime).
@@ -1700,10 +1687,10 @@ u64 os_now_microseconds(void)
     }
     return result;
 #else
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  u64 result = (u64)(ts.tv_sec * (1000 * 1000) + (ts.tv_nsec / 1000));
-  return result;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    u64 result = (u64)(ts.tv_sec * (1000 * 1000) + (ts.tv_nsec / 1000));
+    return result;
 #endif
 }
 
@@ -1725,12 +1712,13 @@ bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index)
     return (flag_pointer[element_index] & ((u64)1 << bit_index)) != 0;
 }
 
-BooleanArgumentProcessResult boolean_argument_process(String8* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer, u64 flag_count, String8 argument)
+BooleanArgumentProcessResult boolean_argument_process(String8* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer, u64 flag_count,
+                                                      String8 argument)
 {
     BUSTER_CHECK(flag_string_start_count == flag_count);
 
     BooleanArgumentProcessResult result = {0};
-    
+
     for (result.index = 0; result.index < flag_string_start_count; result.index += 1)
     {
         String8 flag_start = flag_string_start_pointer[result.index];
@@ -1741,13 +1729,18 @@ BooleanArgumentProcessResult boolean_argument_process(String8* flag_string_start
                 CharOs v = argument.pointer[flag_start.length];
                 switch (v)
                 {
-                    break; case '0': case '1':
-                    {
-                        bool flag_value = v == '1';
-                        flag_set_ex(flag_pointer, flag_count, result.index, flag_value);
-                        result.valid = true;
-                    }
-                    break; default: {}
+                    break;
+                case '0':
+                case '1':
+                {
+                    bool flag_value = v == '1';
+                    flag_set_ex(flag_pointer, flag_count, result.index, flag_value);
+                    result.valid = true;
+                }
+                break;
+                default:
+                {
+                }
                 }
             }
 
@@ -1832,9 +1825,7 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
             // access(X_OK) alone also matches directories (e.g. a "cmake/"
             // directory in a "." PATH component); require a regular file.
             struct stat file_stat;
-            found = access(full_path.pointer, X_OK) == 0 &&
-                stat(full_path.pointer, &file_stat) == 0 &&
-                S_ISREG(file_stat.st_mode);
+            found = access(full_path.pointer, X_OK) == 0 && stat(full_path.pointer, &file_stat) == 0 && S_ISREG(file_stat.st_mode);
 #endif
             if (found)
             {
@@ -1871,7 +1862,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         u64 flags[FLAG_ARRAY_LENGTH(u64, 100)] = {0};
         BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(flags) == 2);
 
-        u64 set_indices[] = { 0, 1, 63, 64, 99 };
+        u64 set_indices[] = {0, 1, 63, 64, 99};
         for (EACH_ARRAY_INDEX(i, set_indices))
         {
             flag_set_ex(flags, 100, set_indices[i], true);
@@ -1978,8 +1969,8 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             String8 script;
             ProcessResult expected;
         } exit_cases[] = {
-            { S8("exit 200"), PROCESS_RESULT_FAILED },
-            { S8("kill -SEGV $$"), PROCESS_RESULT_CRASH },
+            {S8("exit 200"), PROCESS_RESULT_FAILED},
+            {S8("kill -SEGV $$"), PROCESS_RESULT_CRASH},
         };
 
         for (EACH_ARRAY_INDEX(i, exit_cases))

@@ -4,41 +4,41 @@
 typedef struct ProtectionFlags ProtectionFlags;
 struct ProtectionFlags
 {
-    u64 read:1;
-    u64 write:1;
-    u64 execute:1;
-    u64 reserved:61;
+    u64 read : 1;
+    u64 write : 1;
+    u64 execute : 1;
+    u64 reserved : 61;
 };
 
 typedef struct MapFlags MapFlags;
 struct MapFlags
 {
-    u64 priv:1;
-    u64 anonymous:1;
-    u64 no_reserve:1;
-    u64 populate:1;
-    u64 reserved:60;
+    u64 priv : 1;
+    u64 anonymous : 1;
+    u64 no_reserve : 1;
+    u64 populate : 1;
+    u64 reserved : 60;
 };
 
 typedef struct OpenFlags OpenFlags;
 struct OpenFlags
 {
-    u64 truncate:1;
-    u64 execute:1;
-    u64 write:1;
-    u64 read:1;
-    u64 create:1;
-    u64 directory:1;
-    u64 reserved:58;
+    u64 truncate : 1;
+    u64 execute : 1;
+    u64 write : 1;
+    u64 read : 1;
+    u64 create : 1;
+    u64 directory : 1;
+    u64 reserved : 58;
 };
 
 typedef struct OpenPermissions OpenPermissions;
 struct OpenPermissions
 {
-    u64 read:1;
-    u64 write:1;
-    u64 execute:1;
-    u64 reserved:61;
+    u64 read : 1;
+    u64 write : 1;
+    u64 execute : 1;
+    u64 reserved : 61;
 };
 
 typedef struct FileStats FileStats;
@@ -57,9 +57,9 @@ struct FileStatsOptions
         u64 raw;
         struct
         {
-            u64 size:1;
-            u64 modified_time:1;
-            u64 reserved:62;
+            u64 size : 1;
+            u64 modified_time : 1;
+            u64 reserved : 62;
         };
     };
 };
@@ -73,13 +73,13 @@ struct ThreadCreateOptions
     void* argument;
 };
 
-typedef 
+typedef
 #ifdef _WIN32
-u64
+    u64
 #else
-u128
+    u128
 #endif
-TimeDataType;
+        TimeDataType;
 #endif
 
 typedef struct ThreadInitialization ThreadInitialization;
@@ -106,9 +106,9 @@ struct ProcessSpawnResult
 typedef struct ProcessSpawnOptions ProcessSpawnOptions;
 struct ProcessSpawnOptions
 {
-    u64 capture:(size_t)STANDARD_STREAM_COUNT;
-    u64 use_process_environment:1;
-    u64 reserved:sizeof(u64)*8-(size_t)STANDARD_STREAM_COUNT-1;
+    u64 capture : (size_t)STANDARD_STREAM_COUNT;
+    u64 use_process_environment : 1;
+    u64 reserved : sizeof(u64) * 8 - (size_t)STANDARD_STREAM_COUNT - 1;
 };
 
 typedef struct ProcessWaitResult ProcessWaitResult;
@@ -129,7 +129,8 @@ struct OsError
 
 BUSTER_F_DECL OsError os_get_last_error(void);
 BUSTER_F_DECL String8 string8_from_os_error(Arena* arena, OsError error, bool null_terminate);
-BUSTER_F_DECL ProcessSpawnResult os_process_spawn(SliceString8 argv, SliceString8 environment_keys, SliceString8 environment_values, ProcessSpawnOptions options);
+BUSTER_F_DECL ProcessSpawnResult os_process_spawn(SliceString8 argv, SliceString8 environment_keys, SliceString8 environment_values,
+                                                  ProcessSpawnOptions options);
 BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
 BUSTER_F_DECL String8 os_get_environment_variable(String8 variable);
 
@@ -172,9 +173,9 @@ struct ProgramState
 {
     ProgramInput input;
     Arena* arena;
-    u64 is_debugger_present_called:1;
-    u64 _is_debugger_present:1;
-    u64 reserved:62;
+    u64 is_debugger_present_called : 1;
+    u64 _is_debugger_present : 1;
+    u64 reserved : 62;
 };
 
 typedef struct LaneContext LaneContext;
@@ -197,12 +198,22 @@ BUSTER_V_DECL ProgramState* program_state;
 
 BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_va(u32 line, String8 function, String8 file, String8 context, ...);
 
-#define os_fail_message(message) (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_va((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message))
-#define os_fail_message_format(message, ...) (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_va((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message, __VA_ARGS__))
+#define os_fail_message(message)                                                                                                                               \
+    (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_va((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message))
+#define os_fail_message_format(message, ...)                                                                                                                   \
+    (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_va((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message, __VA_ARGS__))
 #define os_fail() os_fail_message(S8("internal error"))
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
-#define BUSTER_TODO_MESSAGE(message, ...) do { os_fail_message_format(message, __VA_ARGS__); } while (1)
-#define BUSTER_TODO() do { os_fail_message(S8("TODO")); } while (1)
+#define BUSTER_TODO_MESSAGE(message, ...)                                                                                                                      \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        os_fail_message_format(message, __VA_ARGS__);                                                                                                          \
+    } while (1)
+#define BUSTER_TODO()                                                                                                                                          \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        os_fail_message(S8("TODO"));                                                                                                                           \
+    } while (1)
 
 BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);
 
@@ -244,7 +255,8 @@ struct BooleanArgumentProcessResult
     bool valid;
     u8 reserved[7];
 };
-BUSTER_F_DECL BooleanArgumentProcessResult boolean_argument_process(String8* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer, u64 flag_count, String8 argument);
+BUSTER_F_DECL BooleanArgumentProcessResult boolean_argument_process(String8* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer,
+                                                                    u64 flag_count, String8 argument);
 
 BUSTER_F_DECL bool program_flag_get(ProgramFlag flag);
 BUSTER_F_DECL String8 executable_resolve_in_path(Arena* arena, String8 file);

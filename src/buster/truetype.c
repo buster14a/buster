@@ -106,18 +106,16 @@ BUSTER_GLOBAL_LOCAL u32 ttf_u32(ByteSlice data, u64 offset)
     u32 result = 0;
     if (ttf_range_is_valid(data, offset, 4))
     {
-        result = ((u32)data.pointer[offset] << 24u) | ((u32)data.pointer[offset + 1] << 16u) | ((u32)data.pointer[offset + 2] << 8u) | (u32)data.pointer[offset + 3];
+        result =
+            ((u32)data.pointer[offset] << 24u) | ((u32)data.pointer[offset + 1] << 16u) | ((u32)data.pointer[offset + 2] << 8u) | (u32)data.pointer[offset + 3];
     }
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool ttf_tag_equal(ByteSlice data, u64 offset, char8 a, char8 b, char8 c, char8 d)
 {
-    bool result = ttf_range_is_valid(data, offset, 4) &&
-        data.pointer[offset + 0] == (u8)a &&
-        data.pointer[offset + 1] == (u8)b &&
-        data.pointer[offset + 2] == (u8)c &&
-        data.pointer[offset + 3] == (u8)d;
+    bool result = ttf_range_is_valid(data, offset, 4) && data.pointer[offset + 0] == (u8)a && data.pointer[offset + 1] == (u8)b &&
+                  data.pointer[offset + 2] == (u8)c && data.pointer[offset + 3] == (u8)d;
     return result;
 }
 
@@ -262,7 +260,8 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
 
     if (!have_cmap || !have_loca || !have_head || !have_glyf || !have_hhea || !have_hmtx || !have_maxp)
     {
-        string_print(S8("cmap: {u32}. loca: {u32}. head: {u32}. glyf: {u32}. hhea: {u32}. hmtx: {u32}. maxp: {u32}\n"), have_cmap, have_loca, have_head, have_glyf, have_hhea, have_hmtx, have_maxp);
+        string_print(S8("cmap: {u32}. loca: {u32}. head: {u32}. glyf: {u32}. hhea: {u32}. hmtx: {u32}. maxp: {u32}\n"), have_cmap, have_loca, have_head,
+                     have_glyf, have_hhea, have_hmtx, have_maxp);
         result.result = TTF_FONT_INITIALIZATION_FAILED;
         return result;
     }
@@ -601,9 +600,11 @@ BUSTER_GLOBAL_LOCAL void ttf_append_quadratic(TTF_RasterPath* path, TTF_Point fr
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool ttf_append_glyph_path(Arena* arena, const TTF_FontInformation* information, u32 glyph, TTF_Transform transform, f32 scale_x, f32 scale_y, s32 x0, s32 y0, u32 recursion_depth, TTF_RasterPath* path);
+BUSTER_GLOBAL_LOCAL bool ttf_append_glyph_path(Arena* arena, const TTF_FontInformation* information, u32 glyph, TTF_Transform transform, f32 scale_x,
+                                               f32 scale_y, s32 x0, s32 y0, u32 recursion_depth, TTF_RasterPath* path);
 
-BUSTER_GLOBAL_LOCAL bool ttf_append_simple_glyph_path(Arena* arena, const TTF_FontInformation* information, TTF_GlyphRange range, s32 contour_count, TTF_Transform transform, f32 scale_x, f32 scale_y, s32 x0, s32 y0, TTF_RasterPath* path)
+BUSTER_GLOBAL_LOCAL bool ttf_append_simple_glyph_path(Arena* arena, const TTF_FontInformation* information, TTF_GlyphRange range, s32 contour_count,
+                                                      TTF_Transform transform, f32 scale_x, f32 scale_y, s32 x0, s32 y0, TTF_RasterPath* path)
 {
     ByteSlice data = information->data;
     if (contour_count <= 0)
@@ -785,7 +786,8 @@ BUSTER_GLOBAL_LOCAL bool ttf_append_simple_glyph_path(Arena* arena, const TTF_Fo
     return !path->overflowed;
 }
 
-BUSTER_GLOBAL_LOCAL bool ttf_append_compound_glyph_path(Arena* arena, const TTF_FontInformation* information, TTF_GlyphRange range, TTF_Transform transform, f32 scale_x, f32 scale_y, s32 x0, s32 y0, u32 recursion_depth, TTF_RasterPath* path)
+BUSTER_GLOBAL_LOCAL bool ttf_append_compound_glyph_path(Arena* arena, const TTF_FontInformation* information, TTF_GlyphRange range, TTF_Transform transform,
+                                                        f32 scale_x, f32 scale_y, s32 x0, s32 y0, u32 recursion_depth, TTF_RasterPath* path)
 {
     ByteSlice data = information->data;
     u64 cursor = range.offset + 10u;
@@ -887,7 +889,8 @@ BUSTER_GLOBAL_LOCAL bool ttf_append_compound_glyph_path(Arena* arena, const TTF_
     return !path->overflowed;
 }
 
-BUSTER_GLOBAL_LOCAL bool ttf_append_glyph_path(Arena* arena, const TTF_FontInformation* information, u32 glyph, TTF_Transform transform, f32 scale_x, f32 scale_y, s32 x0, s32 y0, u32 recursion_depth, TTF_RasterPath* path)
+BUSTER_GLOBAL_LOCAL bool ttf_append_glyph_path(Arena* arena, const TTF_FontInformation* information, u32 glyph, TTF_Transform transform, f32 scale_x,
+                                               f32 scale_y, s32 x0, s32 y0, u32 recursion_depth, TTF_RasterPath* path)
 {
     if (recursion_depth > TTF_GLYPH_RECURSION_LIMIT)
     {
@@ -1004,7 +1007,7 @@ TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation
         .contour_capacity = max_contours,
     };
 
-    TTF_Transform identity = { .m00 = 1.0f, .m11 = 1.0f };
+    TTF_Transform identity = {.m00 = 1.0f, .m11 = 1.0f};
     if (!ttf_append_glyph_path(arena, information, glyph, identity, scale_x, scale_y, x0, y0, 0, &path) || path.overflowed)
     {
         return result;

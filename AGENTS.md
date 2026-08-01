@@ -198,7 +198,9 @@ enabled.
 - **Idioms**: arena allocation (`arena.h`) — no malloc/free churn;
   `String8`/`S8("...")` (defined in `base.h`) — no C strings; `STRUCT(Name)`
   declarations; `BUSTER_`-prefixed macros; 4-space indent, snake_case, braces
-  on their own line. Match the surrounding file.
+  on their own line. Prefer function headers, declarations, statements, and
+  similar constructs on one line; split them only when doing so is clearer.
+  Match the surrounding file.
 - **Adding a module** (`foo.c`/`foo.h` under `src/buster/`) takes three
   edits: (1) `buster_register_module(foo ...)` in `CMakeLists.txt`;
   (2) add `foo` to the `MODULES` list of `buster_add_executable(ide ...)`;

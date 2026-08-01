@@ -27,10 +27,10 @@ struct IrValueId
     IrIdUnderlying value;
 };
 
-#define IR_FUNCTION_ID_INVALID ((IrFunctionId){ .value = IR_ID_UNDERLYING_INVALID })
-#define IR_BLOCK_ID_INVALID ((IrBlockId){ .value = IR_ID_UNDERLYING_INVALID })
-#define IR_INSTRUCTION_ID_INVALID ((IrInstructionId){ .value = IR_ID_UNDERLYING_INVALID })
-#define IR_VALUE_ID_INVALID ((IrValueId){ .value = IR_ID_UNDERLYING_INVALID })
+#define IR_FUNCTION_ID_INVALID ((IrFunctionId){.value = IR_ID_UNDERLYING_INVALID})
+#define IR_BLOCK_ID_INVALID ((IrBlockId){.value = IR_ID_UNDERLYING_INVALID})
+#define IR_INSTRUCTION_ID_INVALID ((IrInstructionId){.value = IR_ID_UNDERLYING_INVALID})
+#define IR_VALUE_ID_INVALID ((IrValueId){.value = IR_ID_UNDERLYING_INVALID})
 
 BUSTER_CT_CHECK(sizeof(IrFunctionId) == sizeof(IrIdUnderlying));
 BUSTER_CT_CHECK(sizeof(IrBlockId) == sizeof(IrIdUnderlying));
@@ -353,8 +353,7 @@ typedef enum IrGlobalInitializerKind
     IR_GLOBAL_INITIALIZER_COUNT,
 } IrGlobalInitializerKind;
 
-typedef struct IrGlobalRelocation
-    IrGlobalRelocation;
+typedef struct IrGlobalRelocation IrGlobalRelocation;
 struct IrGlobalRelocation
 {
     IrSymbolId symbol;
@@ -480,50 +479,18 @@ struct IrValidationResult
 
 BUSTER_F_DECL IrModule ir_generate_module(Arena* result_arena, AnalysisResult* analysis);
 BUSTER_F_DECL IrModule ir_analyze_and_generate_module(Arena* result_arena, AnalysisResult* analysis);
-BUSTER_F_DECL IrProgram ir_generate_program(
-    Arena* result_arena,
-    AnalysisProgram* analysis);
-BUSTER_F_DECL IrProgram ir_program_initialize(
-    Arena* arena,
-    u32 module_count,
-    u32 type_capacity,
-    u32 symbol_capacity,
-    u32 source_capacity);
-BUSTER_F_DECL IrTypeId ir_program_add_type(
-    IrProgram* program,
-    IrType type);
-BUSTER_F_DECL IrSymbolId ir_program_add_symbol(
-    IrProgram* program,
-    IrSymbol symbol);
-BUSTER_F_DECL IrSourceId ir_program_add_source(
-    IrProgram* program,
-    IrSource source);
-BUSTER_F_DECL IrFunction* ir_module_add_function(
-    Arena* arena,
-    IrModule* module,
-    IrFunction function);
-BUSTER_F_DECL IrGlobal* ir_module_add_global(
-    Arena* arena,
-    IrModule* module,
-    IrGlobal global);
-BUSTER_F_DECL IrBlock* ir_function_add_block(
-    Arena* arena,
-    IrFunction* function,
-    IrBlock block);
-BUSTER_F_DECL IrValueId ir_function_add_value(
-    Arena* arena,
-    IrFunction* function,
-    IrValue value);
-BUSTER_F_DECL IrInstructionId
-ir_function_add_instruction(
-    Arena* arena,
-    IrFunction* function,
-    IrInstruction instruction);
+BUSTER_F_DECL IrProgram ir_generate_program(Arena* result_arena, AnalysisProgram* analysis);
+BUSTER_F_DECL IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacity, u32 symbol_capacity, u32 source_capacity);
+BUSTER_F_DECL IrTypeId ir_program_add_type(IrProgram* program, IrType type);
+BUSTER_F_DECL IrSymbolId ir_program_add_symbol(IrProgram* program, IrSymbol symbol);
+BUSTER_F_DECL IrSourceId ir_program_add_source(IrProgram* program, IrSource source);
+BUSTER_F_DECL IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction function);
+BUSTER_F_DECL IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global);
+BUSTER_F_DECL IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block);
+BUSTER_F_DECL IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue value);
+BUSTER_F_DECL IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction);
 BUSTER_F_DECL IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module);
-BUSTER_F_DECL IrValidationResult
-ir_validate_canonical_module(
-    IrProgram* program,
-    IrModule* module);
+BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
 BUSTER_F_DECL String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module);
 
 #if BUSTER_INCLUDE_TESTS

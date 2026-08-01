@@ -12,20 +12,20 @@ BUSTER_GLOBAL_LOCAL void buster_android_on_app_cmd(struct android_app* app, int3
 
     switch (cmd)
     {
-        case APP_CMD_INIT_WINDOW:
-            // A (new) native window is available; rendering can resume.
-            handle->window_lost = false;
-            break;
-        case APP_CMD_TERM_WINDOW:
-            // Backgrounded/locked/rotated: the native window is going away.
-            // Stop rendering but keep running; do NOT treat this as a quit.
-            handle->window_lost = true;
-            break;
-        case APP_CMD_DESTROY:
-            handle->quit = true;
-            break;
-        default:
-            break;
+    case APP_CMD_INIT_WINDOW:
+        // A (new) native window is available; rendering can resume.
+        handle->window_lost = false;
+        break;
+    case APP_CMD_TERM_WINDOW:
+        // Backgrounded/locked/rotated: the native window is going away.
+        // Stop rendering but keep running; do NOT treat this as a quit.
+        handle->window_lost = true;
+        break;
+    case APP_CMD_DESTROY:
+        handle->quit = true;
+        break;
+    default:
+        break;
     }
 }
 
@@ -48,20 +48,20 @@ BUSTER_GLOBAL_LOCAL int32_t buster_android_on_input_event(struct android_app* ap
 
     switch (action)
     {
-        case AMOTION_EVENT_ACTION_DOWN:
-            wm_event_push(windowing, (WmEvent){ .kind = WM_EVENT_MOUSE_MOVE, .position = position });
-            wm_event_push(windowing, (WmEvent){ .kind = WM_EVENT_BUTTON_PRESS, .key = WM_KEY_MOUSE_LEFT, .position = position });
-            break;
-        case AMOTION_EVENT_ACTION_MOVE:
-            wm_event_push(windowing, (WmEvent){ .kind = WM_EVENT_MOUSE_MOVE, .position = position });
-            break;
-        case AMOTION_EVENT_ACTION_UP:
-        case AMOTION_EVENT_ACTION_CANCEL:
-            wm_event_push(windowing, (WmEvent){ .kind = WM_EVENT_MOUSE_MOVE, .position = position });
-            wm_event_push(windowing, (WmEvent){ .kind = WM_EVENT_BUTTON_RELEASE, .key = WM_KEY_MOUSE_LEFT, .position = position });
-            break;
-        default:
-            break;
+    case AMOTION_EVENT_ACTION_DOWN:
+        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
+        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_BUTTON_PRESS, .key = WM_KEY_MOUSE_LEFT, .position = position});
+        break;
+    case AMOTION_EVENT_ACTION_MOVE:
+        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
+        break;
+    case AMOTION_EVENT_ACTION_UP:
+    case AMOTION_EVENT_ACTION_CANCEL:
+        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
+        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_BUTTON_RELEASE, .key = WM_KEY_MOUSE_LEFT, .position = position});
+        break;
+    default:
+        break;
     }
 
     return 1;
@@ -108,9 +108,9 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
             for (u64 i = 0; i < windows.length; i += 1)
             {
                 wm_event_push(windowing, (WmEvent){
-                    .window = &windows.pointer[i],
-                    .kind = WM_EVENT_WINDOW_CLOSE,
-                });
+                                             .window = &windows.pointer[i],
+                                             .kind = WM_EVENT_WINDOW_CLOSE,
+                                         });
             }
         }
     }
@@ -159,13 +159,14 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
     if (app && app->window)
     {
         result = arena_allocate(windowing->window_arena, WmWindowHandle, 1);
-        *result = (WmWindowHandle) {
+        *result = (WmWindowHandle){
             .owner = windowing,
             .native_window = app->window,
-            .size = {
-                .width = (WmUnit)ANativeWindow_getWidth(app->window),
-                .height = (WmUnit)ANativeWindow_getHeight(app->window),
-            },
+            .size =
+                {
+                    .width = (WmUnit)ANativeWindow_getWidth(app->window),
+                    .height = (WmUnit)ANativeWindow_getHeight(app->window),
+                },
         };
     }
     return result;

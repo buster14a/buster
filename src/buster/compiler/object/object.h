@@ -131,36 +131,15 @@ struct ObjectExecutable
 };
 
 BUSTER_F_DECL ObjectFormat object_format_for_target(Target target);
-BUSTER_F_DECL ObjectFile object_from_codegen_module(
-    Arena* arena,
-    AnalysisResult* analysis,
-    CodegenModule* module,
-    Target target);
-BUSTER_F_DECL ObjectFile
-object_from_canonical_codegen_module(
-    Arena* arena,
-    IrProgram* program,
-    CodegenModule* module,
-    Target target);
-BUSTER_F_DECL ObjectArtifact object_write(
-    Arena* arena,
-    ObjectFile* object,
-    ObjectFormat format);
-BUSTER_F_DECL ObjectFile object_read(
-    Arena* arena,
-    ByteSlice bytes,
-    Target target);
-BUSTER_F_DECL ObjectArchive object_archive_read(
-    Arena* arena,
-    ByteSlice bytes,
-    Target target);
-BUSTER_F_DECL ObjectExecutable object_link_executable(
-    ObjectFile* object);
-BUSTER_F_DECL void object_release_executable(
-    ObjectExecutable executable);
+BUSTER_F_DECL ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, CodegenModule* module, Target target);
+BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target);
+BUSTER_F_DECL ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format);
+BUSTER_F_DECL ObjectFile object_read(Arena* arena, ByteSlice bytes, Target target);
+BUSTER_F_DECL ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target);
+BUSTER_F_DECL ObjectExecutable object_link_executable(ObjectFile* object);
+BUSTER_F_DECL void object_release_executable(ObjectExecutable executable);
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/test.h>
-BUSTER_F_DECL UnitTestResult object_tests(
-    UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments);
 #endif

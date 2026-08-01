@@ -14,8 +14,5 @@ enum FixedByte : unsigned char
 
 int main(void)
 {
-    return !(
-        sizeof(enum FixedByte) == 1 &&
-        (unsigned long)FIXED_ENUM_NEGATIVE_ONE ==
-            (unsigned long)-1);
+    return !(sizeof(enum FixedByte) == 1 && (unsigned long)FIXED_ENUM_NEGATIVE_ONE == (unsigned long)-1);
 }

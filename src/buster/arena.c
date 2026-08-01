@@ -27,7 +27,7 @@ void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
         u64 size_to_commit = target_committed_size - os_position;
         u8* commit_pointer = arena_byte_pointer + os_position;
 
-        if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags) { .read = 1, .write = 1, .execute = arena->flags.execute }, arena_lock_pages))
+        if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena_lock_pages))
         {
             arena->os_position = target_committed_size;
         }
@@ -121,8 +121,8 @@ Arena* arena_create(ArenaCreation original_creation)
     BUSTER_CHECK(creation.initial_size >= arena_minimum_position);
     BUSTER_CHECK(creation.initial_size <= individual_reserved_size);
 
-    ProtectionFlags protection_flags = { .read = 1, .write = 1, .execute = creation.flags.execute };
-    MapFlags map_flags = { .priv = 1, .anonymous = 1, .no_reserve = 1, .populate = 0 };
+    ProtectionFlags protection_flags = {.read = 1, .write = 1, .execute = creation.flags.execute};
+    MapFlags map_flags = {.priv = 1, .anonymous = 1, .no_reserve = 1, .populate = 0};
     u8* result = (u8*)os_reserve(0, total_reserved_size, protection_flags, map_flags);
 
     if (result)
@@ -134,7 +134,7 @@ Arena* arena_create(ArenaCreation original_creation)
             bool commit_result = os_commit(arena, creation.initial_size, protection_flags, arena_lock_pages);
             if (commit_result)
             {
-                *arena = (Arena){ 
+                *arena = (Arena){
                     .reserved_size = individual_reserved_size,
                     .position = arena_minimum_position,
                     .os_position = creation.initial_size,
@@ -157,7 +157,7 @@ Arena* arena_create(ArenaCreation original_creation)
 
 TemporalArena arena_begin_temporal(Arena* arena)
 {
-    TemporalArena result = { .arena = arena, .position = arena->position };
+    TemporalArena result = {.arena = arena, .position = arena->position};
     return result;
 }
 
@@ -189,7 +189,7 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
     // reserved_size abort via BUSTER_CHECK, so they cannot be observed
     // in-process.
     {
-        Arena* arena = arena_create((ArenaCreation){ .reserved_size = BUSTER_MB(1) });
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
         BUSTER_TEST(arguments, arena != 0);
         if (arena)
         {

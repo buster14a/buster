@@ -9,7 +9,7 @@ BUSTER_V_IMPL UI_State* ui_state;
 
 BUSTER_GLOBAL_LOCAL F32Interval2 ui_rect_make(f32 x0, f32 y0, f32 x1, f32 y1)
 {
-    return (F32Interval2){ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 };
+    return (F32Interval2){.x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1};
 }
 
 BUSTER_GLOBAL_LOCAL float2 ui_rect_dim(F32Interval2 rect)
@@ -46,50 +46,50 @@ BUSTER_GLOBAL_LOCAL void ui_stack_reset(UI_State* state)
     memset(&state->stacks, 0, sizeof(state->stacks));
 }
 
-#define UI_STACK_TOP_IMPL(name, type) \
-    type ui_top_##name(void) \
-    { \
-        type result = ui_state->stack_nulls.name; \
-        if (ui_state->stacks.name##_length != 0) \
-        { \
-            result = ui_state->stacks.name[ui_state->stacks.name##_length - 1]; \
-        } \
-        return result; \
+#define UI_STACK_TOP_IMPL(name, type)                                                                                                                          \
+    type ui_top_##name(void)                                                                                                                                   \
+    {                                                                                                                                                          \
+        type result = ui_state->stack_nulls.name;                                                                                                              \
+        if (ui_state->stacks.name##_length != 0)                                                                                                               \
+        {                                                                                                                                                      \
+            result = ui_state->stacks.name[ui_state->stacks.name##_length - 1];                                                                                \
+        }                                                                                                                                                      \
+        return result;                                                                                                                                         \
     }
 
-#define UI_STACK_PUSH_IMPL(name, type) \
-    type ui_push_##name(type v) \
-    { \
-        type old = ui_top_##name(); \
-        BUSTER_CHECK(ui_state->stacks.name##_length < UI_STACK_CAPACITY); \
-        ui_state->stacks.name[ui_state->stacks.name##_length++] = v; \
-        ui_state->stacks.name##_auto_pop = 0; \
-        return old; \
+#define UI_STACK_PUSH_IMPL(name, type)                                                                                                                         \
+    type ui_push_##name(type v)                                                                                                                                \
+    {                                                                                                                                                          \
+        type old = ui_top_##name();                                                                                                                            \
+        BUSTER_CHECK(ui_state->stacks.name##_length < UI_STACK_CAPACITY);                                                                                      \
+        ui_state->stacks.name[ui_state->stacks.name##_length++] = v;                                                                                           \
+        ui_state->stacks.name##_auto_pop = 0;                                                                                                                  \
+        return old;                                                                                                                                            \
     }
 
-#define UI_STACK_POP_IMPL(name, type) \
-    type ui_pop_##name(void) \
-    { \
-        BUSTER_CHECK(ui_state->stacks.name##_length != 0); \
-        type result = ui_state->stacks.name[--ui_state->stacks.name##_length]; \
-        ui_state->stacks.name##_auto_pop = 0; \
-        return result; \
+#define UI_STACK_POP_IMPL(name, type)                                                                                                                          \
+    type ui_pop_##name(void)                                                                                                                                   \
+    {                                                                                                                                                          \
+        BUSTER_CHECK(ui_state->stacks.name##_length != 0);                                                                                                     \
+        type result = ui_state->stacks.name[--ui_state->stacks.name##_length];                                                                                 \
+        ui_state->stacks.name##_auto_pop = 0;                                                                                                                  \
+        return result;                                                                                                                                         \
     }
 
-#define UI_STACK_SET_NEXT_IMPL(name, type) \
-    type ui_set_next_##name(type v) \
-    { \
-        type old = ui_top_##name(); \
-        BUSTER_CHECK(ui_state->stacks.name##_length < UI_STACK_CAPACITY); \
-        ui_state->stacks.name[ui_state->stacks.name##_length++] = v; \
-        ui_state->stacks.name##_auto_pop = 1; \
-        return old; \
+#define UI_STACK_SET_NEXT_IMPL(name, type)                                                                                                                     \
+    type ui_set_next_##name(type v)                                                                                                                            \
+    {                                                                                                                                                          \
+        type old = ui_top_##name();                                                                                                                            \
+        BUSTER_CHECK(ui_state->stacks.name##_length < UI_STACK_CAPACITY);                                                                                      \
+        ui_state->stacks.name[ui_state->stacks.name##_length++] = v;                                                                                           \
+        ui_state->stacks.name##_auto_pop = 1;                                                                                                                  \
+        return old;                                                                                                                                            \
     }
 
-#define UI_STACK_IMPL(name, type) \
-    UI_STACK_TOP_IMPL(name, type) \
-    UI_STACK_PUSH_IMPL(name, type) \
-    UI_STACK_POP_IMPL(name, type) \
+#define UI_STACK_IMPL(name, type)                                                                                                                              \
+    UI_STACK_TOP_IMPL(name, type)                                                                                                                              \
+    UI_STACK_PUSH_IMPL(name, type)                                                                                                                             \
+    UI_STACK_POP_IMPL(name, type)                                                                                                                              \
     UI_STACK_SET_NEXT_IMPL(name, type)
 
 UI_STACK_IMPL(parent, UI_Box*)
@@ -112,7 +112,15 @@ UI_STACK_IMPL(text_alignment, UI_TextAlign)
 
 BUSTER_GLOBAL_LOCAL void ui_stack_auto_pop_all(UI_State* state)
 {
-#define UI_STACK_AUTO_POP(name) do { if (state->stacks.name##_auto_pop && state->stacks.name##_length != 0) { state->stacks.name##_length -= 1; state->stacks.name##_auto_pop = 0; } } while (0)
+#define UI_STACK_AUTO_POP(name)                                                                                                                                \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        if (state->stacks.name##_auto_pop && state->stacks.name##_length != 0)                                                                                 \
+        {                                                                                                                                                      \
+            state->stacks.name##_length -= 1;                                                                                                                  \
+            state->stacks.name##_auto_pop = 0;                                                                                                                 \
+        }                                                                                                                                                      \
+    } while (0)
     UI_STACK_AUTO_POP(parent);
     UI_STACK_AUTO_POP(child_layout_axis);
     UI_STACK_AUTO_POP(fixed_x);
@@ -182,11 +190,26 @@ void ui_eat_event_node(UI_EventList* list, UI_EventNode* node)
 {
     if (node)
     {
-        if (node->prev) { node->prev->next = node->next; }
-        if (node->next) { node->next->prev = node->prev; }
-        if (list->first == node) { list->first = node->next; }
-        if (list->last == node) { list->last = node->prev; }
-        if (list->count != 0) { list->count -= 1; }
+        if (node->prev)
+        {
+            node->prev->next = node->next;
+        }
+        if (node->next)
+        {
+            node->next->prev = node->prev;
+        }
+        if (list->first == node)
+        {
+            list->first = node->next;
+        }
+        if (list->last == node)
+        {
+            list->last = node->prev;
+        }
+        if (list->count != 0)
+        {
+            list->count -= 1;
+        }
     }
 }
 
@@ -228,7 +251,7 @@ UI_Key ui_key_zero(void)
 
 UI_Key ui_key_make(u64 value)
 {
-    UI_Key result = { value };
+    UI_Key result = {value};
     return result;
 }
 
@@ -277,7 +300,7 @@ bool ui_key_match(UI_Key a, UI_Key b)
 
 UI_Size ui_size(UI_SizeKind kind, f32 value, f32 strictness)
 {
-    UI_Size result = { .kind = kind, .value = value, .strictness = strictness };
+    UI_Size result = {.kind = kind, .value = value, .strictness = strictness};
     return result;
 }
 
@@ -338,8 +361,8 @@ UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* w
         .fixed_y = 0,
         .fixed_width = 0,
         .fixed_height = 0,
-        .pref_width = { .kind = UI_SizeKind_Null, .value = 0, .strictness = 1 },
-        .pref_height = { .kind = UI_SizeKind_Null, .value = 0, .strictness = 1 },
+        .pref_width = {.kind = UI_SizeKind_Null, .value = 0, .strictness = 1},
+        .pref_height = {.kind = UI_SizeKind_Null, .value = 0, .strictness = 1},
         .min_width = 0,
         .min_height = 0,
         .flags = (UI_BoxFlags){0},
@@ -421,10 +444,22 @@ BUSTER_GLOBAL_LOCAL void ui_box_hash_push(UI_Box* box)
 BUSTER_GLOBAL_LOCAL void ui_box_hash_remove(UI_Box* box, u64 slot_index)
 {
     UI_BoxHashSlot* slot = &ui_state->box_table[slot_index];
-    if (box->hash_prev) { box->hash_prev->hash_next = box->hash_next; }
-    if (box->hash_next) { box->hash_next->hash_prev = box->hash_prev; }
-    if (slot->first == box) { slot->first = box->hash_next; }
-    if (slot->last == box) { slot->last = box->hash_prev; }
+    if (box->hash_prev)
+    {
+        box->hash_prev->hash_next = box->hash_next;
+    }
+    if (box->hash_next)
+    {
+        box->hash_next->hash_prev = box->hash_prev;
+    }
+    if (slot->first == box)
+    {
+        slot->first = box->hash_next;
+    }
+    if (slot->last == box)
+    {
+        slot->last = box->hash_prev;
+    }
     box->hash_next = 0;
     box->hash_prev = 0;
 }
@@ -622,7 +657,7 @@ BUSTER_GLOBAL_LOCAL void ui_prune_untouched_boxes(void)
     for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
     {
         UI_BoxHashSlot* slot = &ui_state->box_table[slot_index];
-        for (UI_Box* box = slot->first, *next = 0; box; box = next)
+        for (UI_Box *box = slot->first, *next = 0; box; box = next)
         {
             next = box->hash_next;
             if (box->last_touched_build_index < ui_state->build_index)
@@ -658,43 +693,63 @@ UI_EventList ui_event_list_from_wm_events(Arena* arena, WmWindowHandle* window, 
 
         switch (event->kind)
         {
-            case WM_EVENT_KEY_PRESS:
+        case WM_EVENT_KEY_PRESS:
+        {
+            ui_event.kind = UI_EventKind_Press;
+        }
+        break;
+        case WM_EVENT_KEY_RELEASE:
+        {
+            ui_event.kind = UI_EventKind_Release;
+        }
+        break;
+        case WM_EVENT_BUTTON_PRESS:
+        {
+            if (event->key == WM_KEY_MOUSE_WHEEL_UP || event->key == WM_KEY_MOUSE_WHEEL_DOWN || event->key == WM_KEY_MOUSE_WHEEL_LEFT ||
+                event->key == WM_KEY_MOUSE_WHEEL_RIGHT)
+            {
+                ui_event.kind = UI_EventKind_Scroll;
+                if (event->key == WM_KEY_MOUSE_WHEEL_UP)
+                {
+                    ui_event.delta = float2_make(0.0f, 1.0f);
+                }
+                else if (event->key == WM_KEY_MOUSE_WHEEL_DOWN)
+                {
+                    ui_event.delta = float2_make(0.0f, -1.0f);
+                }
+                else if (event->key == WM_KEY_MOUSE_WHEEL_LEFT)
+                {
+                    ui_event.delta = float2_make(-1.0f, 0.0f);
+                }
+                else if (event->key == WM_KEY_MOUSE_WHEEL_RIGHT)
+                {
+                    ui_event.delta = float2_make(1.0f, 0.0f);
+                }
+            }
+            else
             {
                 ui_event.kind = UI_EventKind_Press;
-            } break;
-            case WM_EVENT_KEY_RELEASE:
-            {
-                ui_event.kind = UI_EventKind_Release;
-            } break;
-            case WM_EVENT_BUTTON_PRESS:
-            {
-                if (event->key == WM_KEY_MOUSE_WHEEL_UP || event->key == WM_KEY_MOUSE_WHEEL_DOWN || event->key == WM_KEY_MOUSE_WHEEL_LEFT || event->key == WM_KEY_MOUSE_WHEEL_RIGHT)
-                {
-                    ui_event.kind = UI_EventKind_Scroll;
-                    if (event->key == WM_KEY_MOUSE_WHEEL_UP) { ui_event.delta = float2_make(0.0f, 1.0f); }
-                    else if (event->key == WM_KEY_MOUSE_WHEEL_DOWN) { ui_event.delta = float2_make(0.0f, -1.0f); }
-                    else if (event->key == WM_KEY_MOUSE_WHEEL_LEFT) { ui_event.delta = float2_make(-1.0f, 0.0f); }
-                    else if (event->key == WM_KEY_MOUSE_WHEEL_RIGHT) { ui_event.delta = float2_make(1.0f, 0.0f); }
-                }
-                else
-                {
-                    ui_event.kind = UI_EventKind_Press;
-                }
-            } break;
-            case WM_EVENT_BUTTON_RELEASE:
-            {
-                ui_event.kind = UI_EventKind_Release;
-            } break;
-            case WM_EVENT_TEXT_INPUT:
-            {
-                ui_event.kind = UI_EventKind_Text;
-                ui_event.string = event->text;
-            } break;
-            case WM_EVENT_MOUSE_MOVE:
-            {
-                ui_event.kind = UI_EventKind_MouseMove;
-            } break;
-            default: break;
+            }
+        }
+        break;
+        case WM_EVENT_BUTTON_RELEASE:
+        {
+            ui_event.kind = UI_EventKind_Release;
+        }
+        break;
+        case WM_EVENT_TEXT_INPUT:
+        {
+            ui_event.kind = UI_EventKind_Text;
+            ui_event.string = event->text;
+        }
+        break;
+        case WM_EVENT_MOUSE_MOVE:
+        {
+            ui_event.kind = UI_EventKind_MouseMove;
+        }
+        break;
+        default:
+            break;
         }
 
         if (ui_event.kind != UI_EventKind_Null)
@@ -723,20 +778,23 @@ void ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time,
     {
         switch (event->v.kind)
         {
-            case UI_EventKind_MouseMove:
-            case UI_EventKind_Scroll:
+        case UI_EventKind_MouseMove:
+        case UI_EventKind_Scroll:
+        {
+            ui_state->mouse = event->v.pos;
+        }
+        break;
+        case UI_EventKind_Press:
+        case UI_EventKind_Release:
+        {
+            if (ui_wm_key_is_mouse(event->v.key))
             {
                 ui_state->mouse = event->v.pos;
-            } break;
-            case UI_EventKind_Press:
-            case UI_EventKind_Release:
-            {
-                if (ui_wm_key_is_mouse(event->v.key))
-                {
-                    ui_state->mouse = event->v.pos;
-                }
-            } break;
-            default: break;
+            }
+        }
+        break;
+        default:
+            break;
         }
     }
 
@@ -808,15 +866,18 @@ BUSTER_GLOBAL_LOCAL void ui_calc_sizes_standalone(UI_Box* box, Axis2 axis)
     {
         switch (b->pref_size[axis].kind)
         {
-            default: break;
-            case UI_SizeKind_Pixels:
-            {
-                float2_element(b->fixed_size, axis) = floor_f32(b->pref_size[axis].value);
-            } break;
-            case UI_SizeKind_TextContent:
-            {
-                float2_element(b->fixed_size, axis) = floor_f32(ui_text_size_for_axis(b, axis));
-            } break;
+        default:
+            break;
+        case UI_SizeKind_Pixels:
+        {
+            float2_element(b->fixed_size, axis) = floor_f32(b->pref_size[axis].value);
+        }
+        break;
+        case UI_SizeKind_TextContent:
+        {
+            float2_element(b->fixed_size, axis) = floor_f32(ui_text_size_for_axis(b, axis));
+        }
+        break;
         }
     }
 }
@@ -830,7 +891,8 @@ BUSTER_GLOBAL_LOCAL void ui_calc_sizes_upwards_dependent(UI_Box* box, Axis2 axis
             UI_Box* fixed_parent = 0;
             for (UI_Box* p = b->parent; p; p = p->parent)
             {
-                if (float2_element(p->fixed_size, axis) > 0 || p->pref_size[axis].kind == UI_SizeKind_Pixels || p->pref_size[axis].kind == UI_SizeKind_TextContent || p->pref_size[axis].kind == UI_SizeKind_ParentPct)
+                if (float2_element(p->fixed_size, axis) > 0 || p->pref_size[axis].kind == UI_SizeKind_Pixels ||
+                    p->pref_size[axis].kind == UI_SizeKind_TextContent || p->pref_size[axis].kind == UI_SizeKind_ParentPct)
                 {
                     fixed_parent = p;
                     break;
@@ -1041,16 +1103,28 @@ BUSTER_GLOBAL_LOCAL UI_MouseButtonKind ui_mouse_button_kind_from_key(WmKey key, 
 {
     UI_MouseButtonKind result = UI_MouseButtonKind_Left;
     *is_mouse = true;
-    if (key == WM_KEY_MOUSE_LEFT) { result = UI_MouseButtonKind_Left; }
-    else if (key == WM_KEY_MOUSE_MIDDLE) { result = UI_MouseButtonKind_Middle; }
-    else if (key == WM_KEY_MOUSE_RIGHT) { result = UI_MouseButtonKind_Right; }
-    else { *is_mouse = false; }
+    if (key == WM_KEY_MOUSE_LEFT)
+    {
+        result = UI_MouseButtonKind_Left;
+    }
+    else if (key == WM_KEY_MOUSE_MIDDLE)
+    {
+        result = UI_MouseButtonKind_Middle;
+    }
+    else if (key == WM_KEY_MOUSE_RIGHT)
+    {
+        result = UI_MouseButtonKind_Right;
+    }
+    else
+    {
+        *is_mouse = false;
+    }
     return result;
 }
 
 UI_Signal ui_signal_from_box(UI_Box* box)
 {
-    UI_Signal sig = { .box = box };
+    UI_Signal sig = {.box = box};
     if (!box || (box->flags & UI_BoxFlag_Disabled))
     {
         return sig;
@@ -1064,7 +1138,8 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         sig.mouse_over = 1;
     }
 
-    if ((box->flags & UI_BoxFlag_MouseClickable) && mouse_over && (ui_key_match(ui_state->hot_box_key, ui_key_zero()) || ui_key_match(ui_state->hot_box_key, box->key)))
+    if ((box->flags & UI_BoxFlag_MouseClickable) && mouse_over &&
+        (ui_key_match(ui_state->hot_box_key, ui_key_zero()) || ui_key_match(ui_state->hot_box_key, box->key)))
     {
         ui_state->hot_box_key = box->key;
         sig.f |= UI_SignalFlag_Hovering;
@@ -1089,7 +1164,8 @@ UI_Signal ui_signal_from_box(UI_Box* box)
             }
             ui_eat_event(event);
         }
-        else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Release && ui_key_match(ui_state->active_box_key[button], box->key))
+        else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Release &&
+                 ui_key_match(ui_state->active_box_key[button], box->key))
         {
             ui_state->active_box_key[button] = ui_key_zero();
             if (button == UI_MouseButtonKind_Left)
@@ -1104,7 +1180,8 @@ UI_Signal ui_signal_from_box(UI_Box* box)
             }
             ui_eat_event(event);
         }
-        else if ((box->flags & UI_BoxFlag_KeyboardClickable) && event->kind == UI_EventKind_Press && event->key == WM_KEY_RETURN && ui_key_match(ui_state->hot_box_key, box->key))
+        else if ((box->flags & UI_BoxFlag_KeyboardClickable) && event->kind == UI_EventKind_Press && event->key == WM_KEY_RETURN &&
+                 ui_key_match(ui_state->hot_box_key, box->key))
         {
             sig.f |= UI_SignalFlag_KeyboardPressed;
             sig.clicked_left = 1;
@@ -1137,9 +1214,9 @@ BUSTER_GLOBAL_LOCAL float2 ui_box_text_position(UI_Box* box)
 BUSTER_GLOBAL_LOCAL void ui_draw_rect(F32Interval2 rect, float4 color)
 {
     rendering_window_render_rect(ui_state->rendering_window, (RectDraw){
-        .vertex = rect,
-        .colors = { color, color, color, color },
-    });
+                                                                 .vertex = rect,
+                                                                 .colors = {color, color, color, color},
+                                                             });
 }
 
 BUSTER_GLOBAL_LOCAL void ui_draw_border(F32Interval2 rect, float4 color, f32 thickness)
@@ -1212,7 +1289,8 @@ void ui_draw(void)
         if (box->flags & UI_BoxFlag_DrawText)
         {
             float2 p = ui_box_text_position(box);
-            rendering_window_render_text(ui_state->rendering, ui_state->rendering_window, box->string, box->text_color, RENDER_FONT_TYPE_MONOSPACE, float2_element(p, AXIS2_X), float2_element(p, AXIS2_Y));
+            rendering_window_render_text(ui_state->rendering, ui_state->rendering_window, box->string, box->text_color, RENDER_FONT_TYPE_MONOSPACE,
+                                         float2_element(p, AXIS2_X), float2_element(p, AXIS2_Y));
         }
 
         if (box->flags & UI_BoxFlag_DrawBorder)
