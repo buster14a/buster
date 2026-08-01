@@ -67,7 +67,7 @@ jobs:
           ./.forgejo/scripts/perf_step.sh
       - name: Test (Linux)
         shell: bash
-        if: ${{ contains(matrix.runner, 'x86_64-linux') }}
+        if: ${{ matrix.runner == 'x86_64-linux' }}
         run: |
           ./build.sh test_all_combinations_ci --verbose=1
       - name: Perf (macOS)

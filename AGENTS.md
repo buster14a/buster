@@ -73,6 +73,11 @@ shell, CMake, and utility subprocesses.
 `build/build` commands: `generate`, `build` (default), `clang_analyze`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `test_self_host`, `test_all_combinations`, `test_all_combinations_ci`.
+The combination matrix generates one multi-config build tree per compiler and
+sanitizer mode, then builds Debug and Release from that shared tree. Sanitizer
+rows are Clang-only; GCC and Zig still cover unsanitized Debug and Release,
+while TCC covers Debug. Clang static analysis runs only against unsanitized
+Release.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|tcc|zig|cl>` are accepted **only by
 `generate`**; `build` rejects them with an explicit diagnostic.

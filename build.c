@@ -3026,62 +3026,61 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
         }
 
         bool fuzz_available = compiler == BUILD_COMPILER_CLANG && !BUSTER_APPLE;
-        bool support_sanitize = compiler != BUILD_COMPILER_TCC && (!BUSTER_WINDOWS || compiler != BUILD_COMPILER_GCC);
+        bool support_sanitize = compiler == BUILD_COMPILER_CLANG;
         bool support_optimize = compiler != BUILD_COMPILER_TCC;
 
         for (u32 sanitize = 0; sanitize < 1 + support_sanitize; sanitize += 1)
         {
+            String8 build_directory_parts[] = {
+                build_prefix,
+                S8("ci_"),
+                ci ? S8("on") : S8("off"),
+                S8("-cc_"),
+                build_compilers[compiler],
+                S8("-sanitize_"),
+                sanitize ? S8("on") : S8("off"),
+                S8("-fuzz_available_"),
+                fuzz_available ? S8("on") : S8("off"),
+            };
+
+            String8 build_directory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_directory_parts), true);
+            String8 cmake_profile_path = path_join(arena, build_directory, S8("cmake-profile.json"));
+
+            Generate generate = {
+                .build_directory = build_directory,
+                .cmake_profile = cmake_profile_path,
+                .cmake_profile_summary_limit = cmake_profile_summary_limit,
+                .compiler = compiler,
+                .fuzz_available = fuzz_available,
+                .sanitize = sanitize,
+                .ci = ci,
+                .optimize = false,
+                .optimize_set = true,
+                .link_libc = true,
+                .time_trace = false,
+                .lto = false,
+                .include_tests = true,
+                .check_optional_warnings = false,
+                .developer_targets = false,
+                .profile_cmake = false,
+                .cmake_profile_set = cmake_profile,
+                .cmake_profile_summary = cmake_profile,
+                .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
+            };
+
+            generate_add(arena, generate_step, generate);
+            if (cmake_profile)
+            {
+                cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
+            }
+
             for (u32 optimize = 0; optimize < 1 + support_optimize; optimize += 1)
             {
-                String8 build_directory_parts[] = {
-                    build_prefix,
-                    S8("ci_"),
-                    ci ? S8("on") : S8("off"),
-                    S8("-cc_"),
-                    build_compilers[compiler],
-                    S8("-optimize_"),
-                    optimize ? S8("on") : S8("off"),
-                    S8("-sanitize_"),
-                    sanitize ? S8("on") : S8("off"),
-                    S8("-fuzz_available_"),
-                    fuzz_available ? S8("on") : S8("off"),
-                };
-
-                String8 build_directory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_directory_parts), true);
-                String8 cmake_profile_path = path_join(arena, build_directory, S8("cmake-profile.json"));
-
-                Generate generate = {
-                    .build_directory = build_directory,
-                    .cmake_profile = cmake_profile_path,
-                    .cmake_profile_summary_limit = cmake_profile_summary_limit,
-                    .compiler = compiler,
-                    .fuzz_available = fuzz_available,
-                    .sanitize = sanitize,
-                    .ci = ci,
-                    .optimize = optimize,
-                    .optimize_set = true,
-                    .link_libc = true,
-                    .time_trace = false,
-                    .lto = false,
-                    .include_tests = true,
-                    .check_optional_warnings = false,
-                    .developer_targets = false,
-                    .profile_cmake = false,
-                    .cmake_profile_set = cmake_profile,
-                    .cmake_profile_summary = cmake_profile,
-                    .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
-                };
-
                 CmakeBuildOptions options = {
                     .optimize = optimize,
+                    .optimize_set = true,
                     .quiet = base_options.quiet,
                 };
-
-                generate_add(arena, generate_step, generate);
-                if (cmake_profile)
-                {
-                    cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
-                }
 
                 build_add(arena, build_directory, (SliceString8){0}, (SliceString8){0}, options);
 
@@ -3090,7 +3089,7 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
                 };
                 build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(test_targets), (SliceString8){0}, options);
 
-                if (compiler == BUILD_COMPILER_CLANG && !sanitize)
+                if (compiler == BUILD_COMPILER_CLANG && !sanitize && optimize)
                 {
                     clang_analyze_command_add(arena, build_directory, options);
                 }
