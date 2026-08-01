@@ -2146,6 +2146,7 @@ IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacit
     {
         return program;
     }
+    program.arena = arena;
     program.modules = arena_allocate(arena, IrModule, module_count);
     program.module_count = module_count;
     program.types = (IrTypeTable){
@@ -2165,6 +2166,338 @@ IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacit
         program.modules[index] = (IrModule){0};
     }
     return program;
+}
+
+typedef struct IrAbiClassificationTask IrAbiClassificationTask;
+struct IrAbiClassificationTask
+{
+    IrTypeId type;
+    u64 offset;
+};
+
+BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId root_type, IrAbiClass classes[2])
+{
+    IrType* root = ir_type_from_id(&program->types, root_type);
+    if (!root || !root->layout.resolved || !root->layout.size || root->layout.size > 16)
+    {
+        return false;
+    }
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 capacity = BUSTER_MAX(program->types.count * 16, 16);
+    IrAbiClassificationTask* tasks = arena_allocate(temporary.arena, IrAbiClassificationTask, capacity);
+    u32 count = 1;
+    tasks[0] = (IrAbiClassificationTask){
+        .type = root_type,
+    };
+    bool valid = true;
+    while (count && valid)
+    {
+        IrAbiClassificationTask task = tasks[--count];
+        IrType* type = ir_type_from_id(&program->types, task.type);
+        if (!type || !type->layout.resolved || task.offset + type->layout.size > 16 || (type->layout.alignment && task.offset % type->layout.alignment))
+        {
+            valid = false;
+            break;
+        }
+        if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+        {
+            if (count + type->field_count > capacity)
+            {
+                valid = false;
+                break;
+            }
+            for (u32 index = 0; index < type->field_count; index += 1)
+            {
+                IrField* field = type->fields + index;
+                tasks[count++] = (IrAbiClassificationTask){
+                    .type = field->type,
+                    .offset = task.offset + field->offset,
+                };
+            }
+            continue;
+        }
+        if (type->kind == IR_TYPE_ARRAY)
+        {
+            IrType* element = ir_type_from_id(&program->types, type->element_type);
+            if (!element || !element->layout.resolved || type->element_count > capacity - count)
+            {
+                valid = false;
+                break;
+            }
+            for (u64 index = 0; index < type->element_count; index += 1)
+            {
+                tasks[count++] = (IrAbiClassificationTask){
+                    .type = type->element_type,
+                    .offset = task.offset + index * element->layout.size,
+                };
+            }
+            continue;
+        }
+        IrAbiClass abi_class = type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_VECTOR ? IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER;
+        bool scalar = type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_POINTER ||
+                      type->kind == IR_TYPE_FUNCTION || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_ENUM;
+        if (!scalar)
+        {
+            valid = false;
+            break;
+        }
+        u32 first = (u32)(task.offset / 8);
+        u32 last = (u32)((task.offset + BUSTER_MAX(type->layout.size, (u64)1) - 1) / 8);
+        for (u32 part = first; part <= last; part += 1)
+        {
+            if (part >= 2)
+            {
+                valid = false;
+                break;
+            }
+            if (classes[part] == IR_ABI_CLASS_NONE)
+            {
+                classes[part] = abi_class;
+            }
+            else if (classes[part] != abi_class)
+            {
+                classes[part] = IR_ABI_CLASS_INTEGER;
+            }
+        }
+    }
+    scratch_end(temporary);
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId root_type, IrTypeId* element_out, u32* count_out)
+{
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 capacity = BUSTER_MAX(program->types.count * 16, 16);
+    IrTypeId* tasks = arena_allocate(temporary.arena, IrTypeId, capacity);
+    u32 task_count = 1;
+    u32 count = 0;
+    IrTypeId element = IR_TYPE_ID_INVALID;
+    tasks[0] = root_type;
+    bool valid = true;
+    while (task_count && valid)
+    {
+        IrTypeId type_id = tasks[--task_count];
+        IrType* type = ir_type_from_id(&program->types, type_id);
+        if (!type)
+        {
+            valid = false;
+        }
+        else if (type->kind == IR_TYPE_FLOAT || (type->kind == IR_TYPE_VECTOR && (type->layout.size == 8 || type->layout.size == 16)))
+        {
+            if (element.value != IR_ID_UNDERLYING_INVALID && element.value != type_id.value)
+            {
+                valid = false;
+                break;
+            }
+            element = type_id;
+            count += 1;
+            if (count > IR_ABI_MAX_PARTS)
+            {
+                valid = false;
+            }
+        }
+        else if (type->kind == IR_TYPE_ARRAY)
+        {
+            if (!type->element_count || type->element_count > capacity - task_count)
+            {
+                valid = false;
+                break;
+            }
+            for (u64 index = 0; index < type->element_count; index += 1)
+            {
+                tasks[task_count++] = type->element_type;
+            }
+        }
+        else if (type->kind == IR_TYPE_STRUCT && type->field_count && type->field_count <= capacity - task_count)
+        {
+            for (u32 index = 0; index < type->field_count; index += 1)
+            {
+                tasks[task_count++] = type->fields[index].type;
+            }
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+    scratch_end(temporary);
+    if (!valid || !count)
+    {
+        return false;
+    }
+    *element_out = element;
+    *count_out = count;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, bool is_result,
+                                                      bool variadic_argument)
+{
+    IrAbiValue value = {0};
+    IrType* type = ir_type_from_id(&program->types, type_id);
+    if (!type || !type->layout.resolved ||
+        (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR))
+    {
+        return value;
+    }
+    u64 size = type->layout.size;
+    if (type->kind == IR_TYPE_VECTOR)
+    {
+        bool short_vector = size == 8 || size == 16;
+        if (convention == IR_ABI_CONVENTION_WIN64_X86_64 && !is_result)
+        {
+            value.part_count = 1;
+            value.indirect = true;
+            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
+            return value;
+        }
+        if (short_vector)
+        {
+            value.part_count = 1;
+            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_FLOAT, .size = (u32)size};
+            return value;
+        }
+        value.part_count = 1;
+        value.indirect = is_result;
+        value.memory = !is_result;
+        value.parts[0] = (IrAbiPart){
+            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+            .size = is_result ? 8 : (u32)size,
+        };
+        return value;
+    }
+    if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
+    {
+        value.part_count = 1;
+        if (size == 1 || size == 2 || size == 4 || size == 8)
+        {
+            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
+        }
+        else
+        {
+            value.indirect = true;
+            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
+        }
+        return value;
+    }
+    bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
+                   convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
+    if (aarch64)
+    {
+        IrTypeId element = IR_TYPE_ID_INVALID;
+        u32 count = 0;
+        if (!(convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument) && ir_homogeneous_float_abi(program, type_id, &element, &count))
+        {
+            IrType* element_type = ir_type_from_id(&program->types, element);
+            value.part_count = count;
+            for (u32 part = 0; part < count; part += 1)
+            {
+                value.parts[part] = (IrAbiPart){
+                    .abi_class = IR_ABI_CLASS_FLOAT,
+                    .value_offset = part * (u32)element_type->layout.size,
+                    .size = (u32)element_type->layout.size,
+                };
+            }
+        }
+        else if (size <= 16)
+        {
+            value.part_count = (u32)((size + 7) / 8);
+            for (u32 part = 0; part < value.part_count; part += 1)
+            {
+                value.parts[part] = (IrAbiPart){
+                    .abi_class = IR_ABI_CLASS_INTEGER,
+                    .value_offset = part * 8,
+                    .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                };
+            }
+        }
+        else
+        {
+            value.part_count = 1;
+            value.indirect = true;
+            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
+        }
+        return value;
+    }
+    if (size > 16)
+    {
+        value.part_count = 1;
+        value.indirect = is_result;
+        value.memory = !is_result;
+        value.parts[0] = (IrAbiPart){
+            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+            .size = is_result ? 8 : (u32)size,
+        };
+        return value;
+    }
+    IrAbiClass classes[2] = {0};
+    if (!ir_system_v_abi_classes(program, type_id, classes))
+    {
+        value.part_count = 1;
+        value.indirect = is_result;
+        value.memory = !is_result;
+        value.parts[0] = (IrAbiPart){
+            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+            .size = is_result ? 8 : (u32)size,
+        };
+        return value;
+    }
+    value.part_count = (u32)((size + 7) / 8);
+    for (u32 part = 0; part < value.part_count; part += 1)
+    {
+        value.parts[part] = (IrAbiPart){
+            .abi_class = classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
+            .value_offset = part * 8,
+            .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+        };
+    }
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL void ir_resolve_type_abi(IrProgram* program, IrTypeId type_id, IrAbiConvention convention)
+{
+    IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
+    if (!type || !program->arena || convention >= IR_ABI_CONVENTION_COUNT || !type->layout.resolved ||
+        (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR))
+    {
+        return;
+    }
+    if (!type->abi)
+    {
+        type->abi = arena_allocate(program->arena, IrTypeAbi, 1);
+    }
+    type->abi->values[convention][IR_ABI_USE_ARGUMENT] = ir_classify_abi_value(program, type_id, convention, false, false);
+    type->abi->values[convention][IR_ABI_USE_RESULT] = ir_classify_abi_value(program, type_id, convention, true, false);
+    type->abi->values[convention][IR_ABI_USE_VARIADIC_ARGUMENT] =
+        convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 ? ir_classify_abi_value(program, type_id, convention, false, true)
+                                                        : type->abi->values[convention][IR_ABI_USE_ARGUMENT];
+    type->abi->resolved[convention] = true;
+}
+
+void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention)
+{
+    if (!program || convention >= IR_ABI_CONVENTION_COUNT)
+    {
+        return;
+    }
+    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
+    {
+        IrType* type = program->types.types + type_index;
+        if (!type->abi || !type->abi->resolved[convention])
+        {
+            ir_resolve_type_abi(program, type->id, convention);
+        }
+    }
+}
+
+IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, IrAbiUse use)
+{
+    IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
+    if (!type || convention >= IR_ABI_CONVENTION_COUNT || use >= IR_ABI_USE_COUNT)
+    {
+        return (IrAbiValue){0};
+    }
+    return type->abi && type->abi->resolved[convention] ? type->abi->values[convention][use] : (IrAbiValue){0};
 }
 
 IrTypeId ir_program_add_type(IrProgram* program, IrType type)
@@ -2653,6 +2986,7 @@ BUSTER_GLOBAL_LOCAL void ir_program_canonicalize_module(IrProgram* program, Anal
 IrProgram ir_generate_program(Arena* result_arena, AnalysisProgram* analysis)
 {
     IrProgram program = {
+        .arena = result_arena,
         .module_count = analysis->module_count,
     };
     program.modules = arena_allocate(result_arena, IrModule, program.module_count);

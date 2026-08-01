@@ -88,6 +88,55 @@ typedef enum IrAbiClass
     IR_ABI_CLASS_COUNT,
 } IrAbiClass;
 
+typedef enum IrAbiConvention
+{
+    IR_ABI_CONVENTION_SYSTEMV_X86_64,
+    IR_ABI_CONVENTION_WIN64_X86_64,
+    IR_ABI_CONVENTION_AAPCS64,
+    IR_ABI_CONVENTION_DARWIN_AARCH64,
+    IR_ABI_CONVENTION_WINDOWS_AARCH64,
+    IR_ABI_CONVENTION_COUNT,
+} IrAbiConvention;
+
+typedef enum IrAbiUse
+{
+    IR_ABI_USE_ARGUMENT,
+    IR_ABI_USE_RESULT,
+    IR_ABI_USE_VARIADIC_ARGUMENT,
+    IR_ABI_USE_COUNT,
+} IrAbiUse;
+
+enum
+{
+    IR_ABI_MAX_PARTS = 4,
+};
+
+typedef struct IrAbiPart IrAbiPart;
+struct IrAbiPart
+{
+    IrAbiClass abi_class;
+    u32 value_offset;
+    u32 size;
+};
+
+typedef struct IrAbiValue IrAbiValue;
+struct IrAbiValue
+{
+    IrAbiPart parts[IR_ABI_MAX_PARTS];
+    u32 part_count;
+    bool indirect;
+    bool memory;
+    u8 reserved[2];
+};
+
+typedef struct IrTypeAbi IrTypeAbi;
+struct IrTypeAbi
+{
+    IrAbiValue values[IR_ABI_CONVENTION_COUNT][IR_ABI_USE_COUNT];
+    bool resolved[IR_ABI_CONVENTION_COUNT];
+    u8 reserved[3];
+};
+
 typedef struct IrTypeLayout IrTypeLayout;
 struct IrTypeLayout
 {
@@ -131,6 +180,7 @@ struct IrType
     IrTypeId return_type;
     IrTypeId unqualified_type;
     IrTypeLayout layout;
+    IrTypeAbi* abi;
     IrTypeKind kind;
     IrCallingConvention calling_convention;
     u64 element_count;

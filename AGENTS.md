@@ -281,10 +281,12 @@ has hard design constraints:
   excess live values retain stack slots as spill storage; block parameters are
   resolved with parallel edge copies. Executable tests use writable memory
   only while copying code, then switch it to read/execute before calling it.
-- Standalone code generation must compute target layouts before allocating
-  locals or aggregate backing storage. ABI decisions come from
-  `analysis_classify_function_abi`; backends translate that canonical
-  multi-part classification rather than maintaining a second classifier.
+- Standalone code generation must consume target layouts before allocating
+  locals or aggregate backing storage. Analysis-backed IR ABI decisions come
+  from `analysis_classify_function_abi`; canonical IR types own convention-
+  indexed multi-part ABI metadata populated as each type layout is completed.
+  Backends translate that IR-owned classification rather than maintaining a
+  second classifier.
   System V x86-64, Win64, AAPCS64, and Darwin AArch64 classifications include
   split integer/float aggregates, homogeneous floating aggregates, stack
   placement, caller-owned copies for indirect arguments, and hidden result

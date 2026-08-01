@@ -441,6 +441,7 @@ struct IrModule
 typedef struct IrProgram IrProgram;
 struct IrProgram
 {
+    Arena* arena;
     IrModule* modules;
     IrTypeTable types;
     IrSymbolTable symbols;
@@ -482,6 +483,8 @@ BUSTER_F_DECL IrModule ir_analyze_and_generate_module(Arena* result_arena, Analy
 BUSTER_F_DECL IrProgram ir_generate_program(Arena* result_arena, AnalysisProgram* analysis);
 BUSTER_F_DECL IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacity, u32 symbol_capacity, u32 source_capacity);
 BUSTER_F_DECL IrTypeId ir_program_add_type(IrProgram* program, IrType type);
+BUSTER_F_DECL void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention);
+BUSTER_F_DECL IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use);
 BUSTER_F_DECL IrSymbolId ir_program_add_symbol(IrProgram* program, IrSymbol symbol);
 BUSTER_F_DECL IrSourceId ir_program_add_source(IrProgram* program, IrSource source);
 BUSTER_F_DECL IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction function);

@@ -9118,11 +9118,6 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind
                                                                   {
                                                                       .size = size,
                                                                       .alignment = alignment,
-                                                                      .abi_class = ir_kind == IR_TYPE_VOID      ? IR_ABI_CLASS_NONE
-                                                                                   : ir_kind == IR_TYPE_FLOAT   ? IR_ABI_CLASS_FLOAT
-                                                                                   : ir_kind == IR_TYPE_VA_LIST ? IR_ABI_CLASS_AGGREGATE
-                                                                                   : kind == C_TYPE_NULLPTR     ? IR_ABI_CLASS_POINTER
-                                                                                                                : IR_ABI_CLASS_INTEGER,
                                                                       .resolved = true,
                                                                   },
                                                               .kind = ir_kind,
@@ -9152,7 +9147,6 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_pointer_type(IrProgram* program, IrTypeId 
                                                 {
                                                     .size = 8,
                                                     .alignment = 8,
-                                                    .abi_class = IR_ABI_CLASS_POINTER,
                                                     .resolved = true,
                                                 },
                                             .kind = IR_TYPE_POINTER,
@@ -9183,7 +9177,6 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_array_type(IrProgram* program, IrTypeId el
                                                 {
                                                     .size = element_type->layout.size * element_count,
                                                     .alignment = element_type->layout.alignment,
-                                                    .abi_class = IR_ABI_CLASS_AGGREGATE,
                                                     .resolved = true,
                                                 },
                                             .kind = IR_TYPE_ARRAY,
@@ -11944,7 +11937,6 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_string_contents_typed(CIntegerIrBuilder*
                                                                    {
                                                                        .size = byte_length,
                                                                        .alignment = literal_element->layout.alignment,
-                                                                       .abi_class = IR_ABI_CLASS_AGGREGATE,
                                                                        .resolved = true,
                                                                    },
                                                                .kind = IR_TYPE_ARRAY,
@@ -12364,7 +12356,6 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CT
                                                                       {
                                                                           .size = 8,
                                                                           .alignment = 8,
-                                                                          .abi_class = IR_ABI_CLASS_POINTER,
                                                                           .resolved = true,
                                                                       },
                                                                   .kind = IR_TYPE_FUNCTION,
@@ -21290,7 +21281,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                                                                                    {
                                                                                        .size = element_count * element->layout.size,
                                                                                        .alignment = element->layout.alignment,
-                                                                                       .abi_class = IR_ABI_CLASS_AGGREGATE,
                                                                                        .resolved = true,
                                                                                    },
                                                                                .kind = IR_TYPE_ARRAY,
@@ -22232,7 +22222,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(Arena* arena, IrProgram
                                                                              {
                                                                                  .size = length,
                                                                                  .alignment = pointee->layout.alignment,
-                                                                                 .abi_class = IR_ABI_CLASS_AGGREGATE,
                                                                                  .resolved = true,
                                                                              },
                                                                          .kind = IR_TYPE_ARRAY,
@@ -23455,7 +23444,6 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                                  {
                                                                                      .size = 8,
                                                                                      .alignment = 8,
-                                                                                     .abi_class = IR_ABI_CLASS_POINTER,
                                                                                      .resolved = true,
                                                                                  },
                                                                              .kind = IR_TYPE_FUNCTION,
@@ -23609,7 +23597,6 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 aggregate_type->layout = (IrTypeLayout){
                     .size = size,
                     .alignment = alignment,
-                    .abi_class = IR_ABI_CLASS_AGGREGATE,
                     .resolved = true,
                 };
                 progress = true;
@@ -23651,7 +23638,6 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                                  {
                                                                                      .size = c_type->vector_byte_size,
                                                                                      .alignment = c_type->vector_byte_size,
-                                                                                     .abi_class = IR_ABI_CLASS_VECTOR,
                                                                                      .resolved = true,
                                                                                  },
                                                                              .kind = IR_TYPE_VECTOR,
@@ -23718,7 +23704,6 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                                  {
                                                                                      .size = element_type->layout.size * element_count,
                                                                                      .alignment = element_type->layout.alignment,
-                                                                                     .abi_class = IR_ABI_CLASS_AGGREGATE,
                                                                                      .resolved = true,
                                                                                  },
                                                                              .kind = IR_TYPE_ARRAY,
@@ -24038,7 +24023,6 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                              {
                                                                                  .size = length,
                                                                                  .alignment = pointee->layout.alignment,
-                                                                                 .abi_class = IR_ABI_CLASS_AGGREGATE,
                                                                                  .resolved = true,
                                                                              },
                                                                          .kind = IR_TYPE_ARRAY,
