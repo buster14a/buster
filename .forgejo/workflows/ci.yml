@@ -127,6 +127,9 @@ jobs:
           ./build.ps1 test_all_combinations_ci --verbose=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          ./build.ps1 test_self_host --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
           # --- Perf: compile-time + parse-bench tracking ---------------------
           # Appended to this same step (rather than a separate one) so it
           # inherits the VsDevShell environment (INCLUDE/LIB/PATH) set up

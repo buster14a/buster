@@ -941,6 +941,11 @@ set(GNU_FAMILY_DISABLE_WARNINGS
 )
 
 set(GNU_FAMILY_NATIVE_TARGET -march=native)
+if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    # Win64 guarantees only 16-byte stack alignment. MinGW GCC 15 can emit
+    # 32-byte-aligned AVX spills without realigning the incoming stack.
+    list(APPEND GNU_FAMILY_NATIVE_TARGET -mno-avx)
+endif()
 
 set(MSVC_FAMILY_OPTIONS )
 set(MSVC_FAMILY_WARNINGS )
@@ -1597,12 +1602,12 @@ buster_add_executable(ide src/buster/ide/ide.c
     hash
 )
 
-if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+if ((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
     CMAKE_SYSTEM_PROCESSOR MATCHES
         "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
     add_custom_target(test_self_host
         COMMAND
-            "${CMAKE_BINARY_DIR}/build"
+            "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}"
             test_self_host
             --build-directory "${CMAKE_BINARY_DIR}"
             --config "$<CONFIG>"

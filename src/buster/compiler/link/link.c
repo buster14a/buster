@@ -1354,6 +1354,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     return result;
 }
 
+enum
+{
+    LINK_PE_STACK_RESERVE = 8 * 1024 * 1024,
+};
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -1919,7 +1924,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     link_write_u32(bytes, optional + 60, (u32)header_size);
     link_write_u16(bytes, optional + 68, 3);
     link_write_u16(bytes, optional + 70, 0x100);
-    link_write_u64(bytes, optional + 72, 1024 * 1024);
+    link_write_u64(bytes, optional + 72, LINK_PE_STACK_RESERVE);
     link_write_u64(bytes, optional + 80, 4096);
     link_write_u64(bytes, optional + 88, 1024 * 1024);
     link_write_u64(bytes, optional + 96, 4096);
@@ -3106,6 +3111,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     bool pe_header_valid = pe_executable.executable.length > 0x84 && pe_executable.executable.pointer[0] == 'M' && pe_executable.executable.pointer[1] == 'Z' &&
                            memcmp(pe_executable.executable.pointer + 0x80, "PE\0\0", 4) == 0 && (pe_executable.executable.pointer[0x96] & 0x01) != 0;
     BUSTER_TEST(arguments, pe_header_valid);
+    BUSTER_TEST(arguments, pe_executable.executable.length > 0xe8 && link_read_u64(pe_executable.executable.pointer, 0xe0) == LINK_PE_STACK_RESERVE);
     u8 const pe_argv_mode_prefix[] = {
         0x48, 0x83, 0xec, 0x38, 0x31, 0xc9, 0xff, 0xc1,
     };

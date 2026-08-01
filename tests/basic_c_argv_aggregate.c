@@ -18,6 +18,24 @@ struct ParsedArguments
     unsigned int input_count;
 };
 
+struct AbiLarge
+{
+    unsigned long long first;
+    unsigned long long second;
+    unsigned long long third;
+};
+
+struct AbiPair
+{
+    unsigned long long left;
+    unsigned long long right;
+};
+
+static unsigned long long indirect_argument_position_sum(unsigned long long prefix, struct AbiLarge large, struct AbiPair pair)
+{
+    return prefix + large.first + large.second + large.third + pair.left + pair.right;
+}
+
 struct Text
 {
     char* pointer;
@@ -264,6 +282,10 @@ int main(int argc, char** argv)
     if (!repeated_stack_argument_calls())
     {
         return 35;
+    }
+    if (indirect_argument_position_sum(13, (struct AbiLarge){2, 3, 5}, (struct AbiPair){7, 11}) != 41)
+    {
+        return 36;
     }
     struct LargeInvocation large = parse_large_arguments((struct TextSlice){
         .pointer = large_arguments,

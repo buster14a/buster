@@ -5129,13 +5129,13 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(AnalysisBodyCon
             analysis_expression_expect(context, expression, operands[first_operand + 1], left);
             bool comparison = node->id >= AST_NODE_BINARY_EQUAL && node->id <= AST_NODE_BINARY_GREATER_EQUAL;
             bool equality = node->id == AST_NODE_BINARY_EQUAL || node->id == AST_NODE_BINARY_NOT_EQUAL;
-            bool boolean = node->id >= AST_NODE_BINARY_BOOLEAN_AND && node->id <= AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT;
+            bool boolean_operation = node->id >= AST_NODE_BINARY_BOOLEAN_AND && node->id <= AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT;
             bool bitwise = node->id == AST_NODE_BINARY_PERCENT || (node->id >= AST_NODE_BINARY_SHIFT_LEFT && node->id <= AST_NODE_BINARY_SHIFT_RIGHT) ||
                            (node->id >= AST_NODE_BINARY_AMPERSAND && node->id <= AST_NODE_BINARY_CARET);
             AnalysisTypeKind left_kind = analysis_type_from_id(context->result, left)->kind;
             bool equality_type = left_kind == ANALYSIS_TYPE_INTEGER || left_kind == ANALYSIS_TYPE_FLOAT || left_kind == ANALYSIS_TYPE_BOOL ||
                                  left_kind == ANALYSIS_TYPE_POINTER || left_kind == ANALYSIS_TYPE_ENUM;
-            bool valid = boolean                                        ? analysis_type_id_equal(left, context->result->types.builtin.bool_type)
+            bool valid = boolean_operation                              ? analysis_type_id_equal(left, context->result->types.builtin.bool_type)
                          : bitwise || node->id == AST_NODE_BINARY_RANGE ? analysis_type_is_integer(context->result, left)
                          : equality                                     ? equality_type
                                                                         : analysis_type_is_numeric(context->result, left);
@@ -5168,7 +5168,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(AnalysisBodyCon
                 {
                     typed.type = comparison ? context->result->types.builtin.bool_type : left;
                 }
-                if (boolean)
+                if (boolean_operation)
                 {
                     typed.type = context->result->types.builtin.bool_type;
                 }
@@ -5238,7 +5238,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(AnalysisBodyCon
                     .kind = ANALYSIS_CONSTANT_BOOLEAN,
                 };
             }
-            else if (boolean && left_constant.kind == ANALYSIS_CONSTANT_BOOLEAN && right_constant.kind == ANALYSIS_CONSTANT_BOOLEAN)
+            else if (boolean_operation && left_constant.kind == ANALYSIS_CONSTANT_BOOLEAN && right_constant.kind == ANALYSIS_CONSTANT_BOOLEAN)
             {
                 bool is_and = node->id == AST_NODE_BINARY_BOOLEAN_AND || node->id == AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT;
                 typed.constant = (AnalysisConstant){
@@ -5246,7 +5246,7 @@ BUSTER_GLOBAL_LOCAL AnalysisTypedExpression* analysis_expression(AnalysisBodyCon
                     .kind = ANALYSIS_CONSTANT_BOOLEAN,
                 };
             }
-            else if (!comparison && !boolean && node->id != AST_NODE_BINARY_RANGE)
+            else if (!comparison && !boolean_operation && node->id != AST_NODE_BINARY_RANGE)
             {
                 typed.constant = left_constant.kind == ANALYSIS_CONSTANT_FLOAT ? analysis_constant_float_binary(node->id, left_constant, right_constant)
                                                                                : analysis_constant_integer_binary(node->id, left_constant, right_constant);

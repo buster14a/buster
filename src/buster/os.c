@@ -1585,6 +1585,8 @@ void os_thread_set_name(String8 thread_name)
     String16 string = string16_from_string8(scratch.arena, thread_name, true);
     SetThreadDescription(GetCurrentThread(), string.pointer);
     scratch_end(scratch);
+#else
+    BUSTER_UNUSED(thread_name);
 #endif
 #else
 #error unsupported platform

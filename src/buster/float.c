@@ -114,12 +114,24 @@ f64 acos_f64(f64 v)
 
 f32 fabs_f32(f32 v)
 {
-    return BUILTIN_FABSF(v);
+    union
+    {
+        f32 value;
+        u32 bits;
+    } representation = {.value = v};
+    representation.bits &= UINT32_C(0x7fffffff);
+    return representation.value;
 }
 
 f64 fabs_f64(f64 v)
 {
-    return BUILTIN_FABS(v);
+    union
+    {
+        f64 value;
+        u64 bits;
+    } representation = {.value = v};
+    representation.bits &= UINT64_C(0x7fffffffffffffff);
+    return representation.value;
 }
 
 f32 round_f32(f32 v)

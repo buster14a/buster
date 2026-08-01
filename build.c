@@ -948,6 +948,24 @@ BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, S
     os_argument_builder_append(&builder, S8("cc"));
     os_argument_builder_append(&builder, S8("-Isrc"));
     os_argument_builder_append(&builder, generated_include);
+#if BUSTER_WINDOWS
+    os_argument_builder_append(&builder, S8("-nostdinc"));
+    String8 system_includes = os_get_environment_variable(S8("INCLUDE"));
+    for (u64 start = 0; start < system_includes.length;)
+    {
+        u64 end = start;
+        while (end < system_includes.length && system_includes.pointer[end] != ';')
+        {
+            end += 1;
+        }
+        if (end != start)
+        {
+            os_argument_builder_append(&builder, S8("-isystem"));
+            os_argument_builder_append(&builder, string_slice(system_includes, start, end));
+        }
+        start = end + 1;
+    }
+#endif
     os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
     os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
     os_argument_builder_append(&builder, S8("src/buster/ide/ide.c"));
@@ -964,16 +982,22 @@ BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, S
     };
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_directory, CmakeBuildOptions options, Generate generate)
 {
-#if !BUSTER_LINUX || !BUSTER_CPU_ARCH_X86_64
+#if (!BUSTER_LINUX && !BUSTER_WINDOWS) || !BUSTER_CPU_ARCH_X86_64
     BUSTER_UNUSED(arena);
     BUSTER_UNUSED(build_directory);
     BUSTER_UNUSED(options);
-    string_print(S8("error: deterministic self-hosting is currently supported only on Linux x86-64\n"));
+    string_print(S8("error: deterministic self-hosting is currently supported only on Linux and Windows x86-64\n"));
     return PROCESS_RESULT_FAILED;
 #else
     String8 config = cmake_build_config(options);
+    String8 cmake_cache = path_join(arena, build_directory, S8("CMakeCache.txt"));
+    if (!path_exists(arena, cmake_cache))
+    {
+        generate.build_directory = build_directory;
+        generate_add(arena, step_add(arena), generate);
+    }
     String8 ide_name =
 #if BUSTER_WINDOWS
         S8("ide.exe");
@@ -995,6 +1019,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
 #else
                                S8("ide-stage2"));
 #endif
+    remove_path_recursive(arena, stage1);
+    remove_path_recursive(arena, stage2);
     String8 targets[] = {S8("ide")};
     build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
     self_host_compile_add(arena, bootstrap, build_directory, stage1, S8("Self-host stage 1"));
@@ -3839,7 +3865,7 @@ ProcessResult process_arguments(void)
         break;
         case BUILD_COMMAND_TEST_SELF_HOST:
         {
-            result = self_host_add(arena, build_directory, options);
+            result = self_host_add(arena, build_directory, options, generate);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

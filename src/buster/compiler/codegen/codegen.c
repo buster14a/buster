@@ -8012,7 +8012,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 }
                                 continue;
                             }
-                            bool prior_memory = prior_aggregate && prior_type && prior_type->layout.size > 16;
+                            bool prior_memory = prior_aggregate && prior_type && prior_type->layout.size > 16 &&
+                                                result.abi == CODEGEN_ABI_X86_64_SYSTEM_V;
                             if (prior_aggregate && result.abi == CODEGEN_ABI_X86_64_WINDOWS)
                             {
                                 prior_parts = 1;
@@ -8121,13 +8122,23 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 codegen_emit_u32(&buffer, first_stack_offset + prior_stack_parts * 8);
                                 for (u32 part_index = 0; part_index < part_count; part_index += 1)
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                    codegen_emit_u8(&buffer, 0x8b);
-                                    codegen_emit_u8(&buffer, part_index ? 0x50 : 0x10);
-                                    if (part_index)
-                                    {
-                                        codegen_emit_u8(&buffer, (u8)(part_index * 8));
-                                    }
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x8b);
+                                u32 part_offset = part_index * 8;
+                                if (!part_offset)
+                                {
+                                    codegen_emit_u8(&buffer, 0x10);
+                                }
+                                else if (part_offset <= INT8_MAX)
+                                {
+                                    codegen_emit_u8(&buffer, 0x50);
+                                    codegen_emit_u8(&buffer, (u8)part_offset);
+                                }
+                                else
+                                {
+                                    codegen_emit_u8(&buffer, 0x90);
+                                    codegen_emit_u32(&buffer, part_offset);
+                                }
                                     codegen_emit_u8(&buffer, 0x48);
                                     codegen_emit_u8(&buffer, 0x89);
                                     codegen_emit_u8(&buffer, 0x95);
@@ -8155,12 +8166,22 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             u8 source_reg = registers[register_index];
                             for (u32 part_index = 0; part_index < part_count; part_index += 1)
                             {
+                                u32 part_offset = part_index * 8;
                                 codegen_emit_u8(&buffer, source_reg >= 8 ? 0x49 : 0x48);
                                 codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, (u8)((part_index ? 0x40 : 0x00) | (source_reg & 7)));
-                                if (part_index)
+                                if (!part_offset)
                                 {
-                                    codegen_emit_u8(&buffer, (u8)(part_index * 8));
+                                    codegen_emit_u8(&buffer, (u8)(source_reg & 7));
+                                }
+                                else if (part_offset <= INT8_MAX)
+                                {
+                                    codegen_emit_u8(&buffer, (u8)(0x40 | (source_reg & 7)));
+                                    codegen_emit_u8(&buffer, (u8)part_offset);
+                                }
+                                else
+                                {
+                                    codegen_emit_u8(&buffer, (u8)(0x80 | (source_reg & 7)));
+                                    codegen_emit_u32(&buffer, part_offset);
                                 }
                                 codegen_emit_u8(&buffer, 0x48);
                                 codegen_emit_u8(&buffer, 0x89);
@@ -9382,6 +9403,12 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             codegen_emit_u8(&buffer, 0x83);
                             codegen_emit_u8(&buffer, 0x00);
                             codegen_emit_u8(&buffer, 8);
+                            if (aggregate_abi.indirect)
+                            {
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x8b);
+                                codegen_emit_u8(&buffer, 0x12);
+                            }
                         }
                         else
                         {

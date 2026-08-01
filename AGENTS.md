@@ -42,7 +42,7 @@ cmp build/ide-self build/ide-self-stage2
 build/ide-self-stage2 bench
 ```
 
-The target and fixed point are currently available on Linux x86-64. Preserve
+The target and fixed point are currently available on Linux and Windows x86-64. Preserve
 them when changing preprocessing, C semantics, IR, code generation, object
 writing, or linking, and report both self-hosting failures and benchmark
 regressions.

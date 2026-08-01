@@ -362,6 +362,7 @@ struct CDeclaration
     u32 alignment_start;
     u32 alignment_count;
     CTypeId type;
+    CTypeId base_type;
     CEntityId entity;
     CScopeId scope;
     CDeclarationKind kind;

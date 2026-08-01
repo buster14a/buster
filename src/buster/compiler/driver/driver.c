@@ -111,7 +111,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     }
     invocation.input_paths = arena_allocate(arena, String8, arguments.length);
     invocation.include_paths = arena_allocate(arena, String8, arguments.length);
-    invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + 8);
+    invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + 64);
     invocation.definitions = arena_allocate(arena, String8, arguments.length);
     invocation.undefinitions = arena_allocate(arena, String8, arguments.length);
     invocation.library_paths = arena_allocate(arena, String8, arguments.length);
@@ -407,6 +407,22 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
 #endif
             invocation.system_include_paths[invocation.system_include_path_count++] = S8("/usr/include");
 #endif
+#if BUSTER_WINDOWS
+            String8 system_includes = os_get_environment_variable(S8("INCLUDE"));
+            for (u64 start = 0; start < system_includes.length;)
+            {
+                u64 end = start;
+                while (end < system_includes.length && system_includes.pointer[end] != ';')
+                {
+                    end += 1;
+                }
+                if (end != start)
+                {
+                    invocation.system_include_paths[invocation.system_include_path_count++] = string_slice(system_includes, start, end);
+                }
+                start = end + 1;
+            }
+#endif
         }
     }
     if (invocation.framework_count && invocation.target.os != OPERATING_SYSTEM_MACOS && invocation.target.os != OPERATING_SYSTEM_IOS)
@@ -654,8 +670,23 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
 BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libraries(Arena* arena, CompilerDriverInvocation invocation, bool* static_libraries)
 {
     CompilerDriverDynamicLibraries result = {0};
-    NativeDynamicLibrary* libraries = arena_allocate(arena, NativeDynamicLibrary, invocation.library_count + invocation.framework_count);
+    static String8 const windows_system_libraries[] = {
+        S8_INITIALIZER("kernel32.dll"),
+        S8_INITIALIZER("user32.dll"),
+        S8_INITIALIZER("gdi32.dll"),
+        S8_INITIALIZER("ws2_32.dll"),
+        S8_INITIALIZER("dwmapi.dll"),
+    };
+    u32 default_library_count = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? BUSTER_ARRAY_LENGTH(windows_system_libraries) : 0;
+    NativeDynamicLibrary* libraries =
+        arena_allocate(arena, NativeDynamicLibrary, invocation.library_count + invocation.framework_count + default_library_count);
     u32 count = 0;
+    for (u32 index = 0; index < default_library_count; index += 1)
+    {
+        libraries[count++] = (NativeDynamicLibrary){
+            .name = windows_system_libraries[index],
+        };
+    }
     for (u32 index = 0; index < invocation.library_count; index += 1)
     {
         if (static_libraries && static_libraries[index])

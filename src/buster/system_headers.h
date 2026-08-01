@@ -7,6 +7,10 @@
 #include <limits.h>
 #include <setjmp.h>
 
+#if defined(__MINGW32__)
+WINBASEAPI HRESULT WINAPI SetThreadDescription(HANDLE thread, PCWSTR description);
+#endif
+
 #if defined(_MSC_VER)
 #include <mswsock.h>
 BUSTER_V_DECL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions;
