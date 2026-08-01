@@ -97,10 +97,13 @@ enabled.
 
 ## Tests
 
-- All tests are **in-process**: `test_all` runs `ide test --verbose=1`, which
-  calls `library_tests()` in `src/buster/test.c` and then runs the IDE
-  window/rendering path as a counted app smoke test. No ctest, no external
-  framework.
+- All tests use the `ide` executable with no external test framework.
+  `test_all` runs `ide test --verbose=1`, which calls `library_tests()` in
+  `src/buster/test.c`; fuzz-capable builds then run their bounded fuzz session
+  in that process. Desktop CI runs the IDE window/rendering path separately as
+  `ide test_app --verbose=1 --ci=1`, so external Vulkan/LLVM sanitizer policy
+  cannot weaken unit-test or fuzz coverage. Android and iOS retain the combined
+  in-app test and counted graphical smoke-test flow.
 - Run from the **repo root**: parser tests open `tests/*.bbb` by relative
   path.
 - To add a language test: drop a `.bbb` file in `tests/` **and** append it to

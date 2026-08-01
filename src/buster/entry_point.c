@@ -7,12 +7,32 @@
 BUSTER_V_IMPL OsState os_state;
 
 #if BUSTER_LINK_LIBC
-#if BUSTER_FUZZ
-BUSTER_EXPORT s32 LLVMFuzzerTestOneInput(const u8* pointer, size_t size)
+#if BUSTER_FUZZ_AVAILABLE
+extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const u8* pointer, size_t size));
+ProcessResult buster_fuzz_run(SliceString8 fuzz_arguments)
 {
-    return buster_fuzz(pointer, size);
+    if (fuzz_arguments.length > (u64)INT32_MAX - 1)
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    u64 argument_count = fuzz_arguments.length + 1;
+    char** arguments = arena_allocate(program_state->arena, char*, argument_count + 1);
+    String8 executable = string_duplicate_arena(program_state->arena, program_state->input.arguments.pointer[0], true);
+    arguments[0] = (char*)executable.pointer;
+    for (u64 i = 0; i < fuzz_arguments.length; i += 1)
+    {
+        String8 argument = string_duplicate_arena(program_state->arena, fuzz_arguments.pointer[i], true);
+        arguments[i + 1] = (char*)argument.pointer;
+    }
+    arguments[argument_count] = 0;
+
+    int argc = (int)argument_count;
+    int result = LLVMFuzzerRunDriver(&argc, &arguments, &buster_fuzz_test_input);
+    return result == 0 ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
-#else
+#endif
+
 ProcessResult buster_argument_process(u64 argument_index)
 {
     String8 argument = program_state->input.arguments.pointer[argument_index];
@@ -490,7 +510,6 @@ void android_main(struct android_app* app)
     __android_log_write(ANDROID_LOG_INFO, "buster", "android_main returning (entry point finished)");
     arena_destroy(android_arg_arena, 1);
 }
-#endif
 #endif
 #else
 #include <setjmp.h>

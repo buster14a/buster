@@ -125,10 +125,41 @@ option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
 option(BUSTER_SANITIZE "Enable sanitizers" OFF)
 option(BUSTER_TIME_TRACE "Enable time tracing" OFF)
 option(BUSTER_INSTRUMENT "Enable fine-grained timing instrumentation for ide bench" OFF)
-option(BUSTER_FUZZ "Enable fuzzing" OFF)
+option(BUSTER_FUZZ_AVAILABLE "Build with runtime fuzzing support" OFF)
 option(BUSTER_LTO "Enable LTO" OFF)
 option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warning flags" ON)
 option(BUSTER_DEVELOPER_TARGETS "Enable convenience run/test/debug targets" ON)
+
+set(BUSTER_FUZZ_NO_MAIN_RUNTIME "")
+if (BUSTER_FUZZ_AVAILABLE)
+    if (NOT C_COMPILER_CLANG OR C_COMPILER_ZIG OR APPLE)
+        message(FATAL_ERROR "BUSTER_FUZZ_AVAILABLE requires Clang on Linux or Windows")
+    endif()
+
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
+        set(BUSTER_FUZZ_RUNTIME_ARCH x86_64)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
+        set(BUSTER_FUZZ_RUNTIME_ARCH aarch64)
+    else()
+        message(FATAL_ERROR "Unsupported fuzz runtime architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+
+    if (WIN32)
+        set(BUSTER_FUZZ_RUNTIME_NAME "clang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.lib")
+    else()
+        set(BUSTER_FUZZ_RUNTIME_NAME "libclang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.a")
+    endif()
+
+    execute_process(
+        COMMAND "${CMAKE_C_COMPILER}" "--print-file-name=${BUSTER_FUZZ_RUNTIME_NAME}"
+        OUTPUT_VARIABLE BUSTER_FUZZ_NO_MAIN_RUNTIME
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE BUSTER_FUZZ_RUNTIME_RESULT
+    )
+    if (NOT BUSTER_FUZZ_RUNTIME_RESULT EQUAL 0 OR NOT IS_ABSOLUTE "${BUSTER_FUZZ_NO_MAIN_RUNTIME}" OR NOT EXISTS "${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
+        message(FATAL_ERROR "Could not find the Clang no-main fuzz runtime '${BUSTER_FUZZ_RUNTIME_NAME}': ${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
+    endif()
+endif()
 
 set(BUSTER_USE_VULKAN_DEFAULT OFF)
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR C_COMPILER_TCC)
@@ -645,7 +676,7 @@ message(STATUS "BUSTER_INCLUDE_TESTS: ${BUSTER_INCLUDE_TESTS}")
 message(STATUS "BUSTER_SANITIZE: ${BUSTER_SANITIZE}")
 message(STATUS "BUSTER_TIME_TRACE: ${BUSTER_TIME_TRACE}")
 message(STATUS "BUSTER_INSTRUMENT: ${BUSTER_INSTRUMENT}")
-message(STATUS "BUSTER_FUZZ: ${BUSTER_FUZZ}")
+message(STATUS "BUSTER_FUZZ_AVAILABLE: ${BUSTER_FUZZ_AVAILABLE}")
 message(STATUS "BUSTER_LTO: ${BUSTER_LTO}")
 message(STATUS "BUSTER_CHECK_OPTIONAL_WARNINGS: ${BUSTER_CHECK_OPTIONAL_WARNINGS}")
 message(STATUS "BUSTER_DEVELOPER_TARGETS: ${BUSTER_DEVELOPER_TARGETS}")
@@ -915,14 +946,12 @@ set(MSVC_FAMILY_OPTIONS )
 set(MSVC_FAMILY_WARNINGS )
 set(MSVC_FAMILY_DISABLE_WARNINGS )
 
-if (BUSTER_FUZZ)
-    set(TEST_ARGUMENTS -max_len=4096;-max_total_time=2)
-else()
-    set(TEST_ARGUMENTS test --verbose=1)
-    if (BUSTER_CI)
-        list(APPEND TEST_ARGUMENTS --ci=1)
-    endif()
+set(TEST_ARGUMENTS test --verbose=1)
+if (BUSTER_CI)
+    list(APPEND TEST_ARGUMENTS --ci=1)
 endif()
+set(UNIT_TEST_ARGUMENTS test --verbose=1)
+set(APP_TEST_ARGUMENTS test_app --verbose=1 --ci=1)
 
 set(BUSTER_TEST_ENV)
 
@@ -982,6 +1011,16 @@ if (NOT WIN32)
             list(APPEND BUSTER_TEST_ENV "LD_PRELOAD=${BUSTER_LD_PRELOAD}")
         endif()
     endif()
+endif()
+
+set(BUSTER_APP_TEST_ENV ${BUSTER_TEST_ENV})
+if (NOT WIN32 AND BUSTER_SANITIZE)
+    # The Vulkan validation layer loads an unsanitized C++ libLLVM whose
+    # allocator pairing is outside buster's control. Keep mismatch detection
+    # enabled for unit tests and fuzzing, and disable it only for this external
+    # graphical smoke-test process.
+    list(FILTER BUSTER_APP_TEST_ENV EXCLUDE REGEX "^ASAN_OPTIONS=")
+    list(APPEND BUSTER_APP_TEST_ENV "ASAN_OPTIONS=${BUSTER_ASAN_OPTIONS}:alloc_dealloc_mismatch=0")
 endif()
 
 set(BUSTER_SHADER_SOURCE_DIR "${CMAKE_SOURCE_DIR}/src/buster/shaders")
@@ -1276,7 +1315,7 @@ function(executable_add name is_buster_program main_file)
         BUSTER_OPTIMIZE=${BUSTER_OPTIMIZE_DEFINE}
         BUSTER_INCLUDE_TESTS=$<IF:$<BOOL:${BUSTER_INCLUDE_TESTS}>,1,0>
         BUSTER_SANITIZE=$<IF:$<BOOL:${BUSTER_SANITIZE}>,1,0>
-        BUSTER_FUZZ=$<IF:$<BOOL:${BUSTER_FUZZ}>,1,0>
+        BUSTER_FUZZ_AVAILABLE=$<IF:$<BOOL:${BUSTER_FUZZ_AVAILABLE}>,1,0>
         BUSTER_LINK_LIBC=$<IF:$<BOOL:${BUSTER_LINK_LIBC}>,1,0>
         BUSTER_SINGLE_THREADED=$<IF:$<BOOL:${BUSTER_SINGLE_THREADED}>,1,0>
         BUSTER_USE_VULKAN=$<IF:$<BOOL:${BUSTER_USE_VULKAN}>,1,0>
@@ -1370,7 +1409,7 @@ function(executable_add name is_buster_program main_file)
     endif()
 
     set(uses_windows_clang_runtime_helpers ${BUSTER_SANITIZE})
-    if (${is_buster_program} AND ${BUSTER_FUZZ})
+    if (${is_buster_program} AND ${BUSTER_FUZZ_AVAILABLE})
         set(uses_windows_clang_runtime_helpers ON)
     endif()
 
@@ -1387,13 +1426,14 @@ function(executable_add name is_buster_program main_file)
         )
     endif()
 
-    if (${is_buster_program} AND ${BUSTER_FUZZ})
+    if (${is_buster_program} AND ${BUSTER_FUZZ_AVAILABLE})
         if (WIN32 AND C_COMPILER_CLANG AND NOT MINGW)
             # LLVM's Windows libFuzzer runtime is built against the static release CRT.
             set_property(TARGET ${name} PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
         endif()
-        target_compile_options(${name} PRIVATE -fsanitize=fuzzer)
-        target_link_options(${name} PRIVATE -fsanitize=fuzzer)
+        target_compile_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
+        target_link_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
+        target_link_libraries(${name} PRIVATE "${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
     endif()
 
     if (${BUSTER_TIME_TRACE})
@@ -1478,13 +1518,24 @@ function(executable_add name is_buster_program main_file)
             COMMENT "Running ${name}"
             VERBATIM)
 
-        add_custom_target(test_${name}
-            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:${name}>" ${TEST_ARGUMENTS}
-            DEPENDS ${name}
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            USES_TERMINAL
-            COMMENT "Running ${name}"
-            VERBATIM)
+        if (${is_buster_program} AND BUSTER_CI AND NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            add_custom_target(test_${name}
+                COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:${name}>" ${UNIT_TEST_ARGUMENTS}
+                COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_APP_TEST_ENV} "$<TARGET_FILE:${name}>" ${APP_TEST_ARGUMENTS}
+                DEPENDS ${name}
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                USES_TERMINAL
+                COMMENT "Running ${name} tests and graphical smoke test"
+                VERBATIM)
+        else()
+            add_custom_target(test_${name}
+                COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:${name}>" ${TEST_ARGUMENTS}
+                DEPENDS ${name}
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                USES_TERMINAL
+                COMMENT "Running ${name}"
+                VERBATIM)
+        endif()
 
         if(gdb_executable)
             add_custom_target(debug_${name}
@@ -1693,15 +1744,30 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
         VERBATIM
     )
 else()
-    add_custom_target(test_all
-        COMMAND
-        ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
-        "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
-        DEPENDS ide
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMENT "Test all"
-        VERBATIM
-    )
+    if (BUSTER_CI)
+        add_custom_target(test_all
+            COMMAND
+            ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+            "$<TARGET_FILE:ide>" ${UNIT_TEST_ARGUMENTS}
+            COMMAND
+            ${CMAKE_COMMAND} -E env ${BUSTER_APP_TEST_ENV}
+            "$<TARGET_FILE:ide>" ${APP_TEST_ARGUMENTS}
+            DEPENDS ide
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Test all and run graphical smoke test"
+            VERBATIM
+        )
+    else()
+        add_custom_target(test_all
+            COMMAND
+            ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+            "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
+            DEPENDS ide
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Test all"
+            VERBATIM
+        )
+    endif()
 
     # Desktop-only performance benchmark, tracked by CI perf steps. Not wired
     # up for Android/iOS: emulator/simulator numbers are too noisy to be

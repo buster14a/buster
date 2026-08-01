@@ -346,7 +346,7 @@ struct Generate
     SliceString8 cmake_arguments;
     u64 cmake_profile_summary_limit;
     BuildCompiler compiler;
-    u32 fuzz : 1;
+    u32 fuzz_available : 1;
     u32 sanitize : 1;
     u32 ci : 1;
     u32 optimize : 1;
@@ -762,7 +762,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     String8 lto = cmake_flag(arena, S8("BUSTER_LTO"), generate.lto);
     String8 time_trace = cmake_flag(arena, S8("BUSTER_TIME_TRACE"), generate.time_trace);
     String8 instrument = cmake_flag(arena, S8("BUSTER_INSTRUMENT"), generate.instrument);
-    String8 fuzz = cmake_flag(arena, S8("BUSTER_FUZZ"), generate.fuzz);
+    String8 fuzz_available = cmake_flag(arena, S8("BUSTER_FUZZ_AVAILABLE"), generate.fuzz_available);
     String8 sanitize = cmake_flag(arena, S8("BUSTER_SANITIZE"), generate.sanitize);
     String8 include_tests = cmake_flag(arena, S8("BUSTER_INCLUDE_TESTS"), generate.include_tests);
     String8 link_libc = cmake_flag(arena, S8("BUSTER_LINK_LIBC"), generate.link_libc);
@@ -779,8 +779,8 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
         };
         profiling_output_argument = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(profile_parts), true);
     }
-    String8 timing_configuration = string_format(arena, S8(" (cc={S8}, fuzz={S8}, sanitize={S8})"), cc_command, generate.fuzz ? S8("ON") : S8("OFF"),
-                                                 generate.sanitize ? S8("ON") : S8("OFF"));
+    String8 timing_configuration = string_format(arena, S8(" (cc={S8}, fuzz_available={S8}, sanitize={S8})"), cc_command,
+                                                 generate.fuzz_available ? S8("ON") : S8("OFF"), generate.sanitize ? S8("ON") : S8("OFF"));
 
     GenericRun r = generic_tool_run_add_start(arena, step, &cmake_path, S8("cmake"));
     OsArgumentBuilder* b = &r.builder;
@@ -790,7 +790,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     os_argument_builder_append(b, generate.build_directory);
     os_argument_builder_append(b, ci);
     os_argument_builder_append(b, cc);
-    os_argument_builder_append(b, fuzz);
+    os_argument_builder_append(b, fuzz_available);
     os_argument_builder_append(b, sanitize);
     os_argument_builder_append(b, linker_argument);
 
@@ -808,7 +808,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
         os_argument_builder_append(b, S8("-DCMAKE_C_LINK_DEPENDS_USE_LINKER=FALSE"));
     }
 
-    if (generate_cc_contains(generate, cc_command, S8("clang")) && !generate.fuzz && !generate.sanitize)
+    if (generate_cc_contains(generate, cc_command, S8("clang")) && !generate.sanitize)
     {
         os_argument_builder_append(b, S8("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"));
     }
@@ -3025,77 +3025,74 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
             continue;
         }
 
-        bool support_fuzz = (compiler == BUILD_COMPILER_CLANG || compiler == BUILD_COMPILER_CL) && !BUSTER_APPLE;
+        bool fuzz_available = compiler == BUILD_COMPILER_CLANG && !BUSTER_APPLE;
         bool support_sanitize = compiler != BUILD_COMPILER_TCC && (!BUSTER_WINDOWS || compiler != BUILD_COMPILER_GCC);
         bool support_optimize = compiler != BUILD_COMPILER_TCC;
 
-        for (u32 fuzz = 0; fuzz < 1 + support_fuzz; fuzz += 1)
+        for (u32 sanitize = 0; sanitize < 1 + support_sanitize; sanitize += 1)
         {
-            for (u32 sanitize = 0; sanitize < 1 + support_sanitize; sanitize += 1)
+            for (u32 optimize = 0; optimize < 1 + support_optimize; optimize += 1)
             {
-                for (u32 optimize = 0; optimize < 1 + support_optimize; optimize += 1)
+                String8 build_directory_parts[] = {
+                    build_prefix,
+                    S8("ci_"),
+                    ci ? S8("on") : S8("off"),
+                    S8("-cc_"),
+                    build_compilers[compiler],
+                    S8("-optimize_"),
+                    optimize ? S8("on") : S8("off"),
+                    S8("-sanitize_"),
+                    sanitize ? S8("on") : S8("off"),
+                    S8("-fuzz_available_"),
+                    fuzz_available ? S8("on") : S8("off"),
+                };
+
+                String8 build_directory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_directory_parts), true);
+                String8 cmake_profile_path = path_join(arena, build_directory, S8("cmake-profile.json"));
+
+                Generate generate = {
+                    .build_directory = build_directory,
+                    .cmake_profile = cmake_profile_path,
+                    .cmake_profile_summary_limit = cmake_profile_summary_limit,
+                    .compiler = compiler,
+                    .fuzz_available = fuzz_available,
+                    .sanitize = sanitize,
+                    .ci = ci,
+                    .optimize = optimize,
+                    .optimize_set = true,
+                    .link_libc = true,
+                    .time_trace = false,
+                    .lto = false,
+                    .include_tests = true,
+                    .check_optional_warnings = false,
+                    .developer_targets = false,
+                    .profile_cmake = false,
+                    .cmake_profile_set = cmake_profile,
+                    .cmake_profile_summary = cmake_profile,
+                    .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
+                };
+
+                CmakeBuildOptions options = {
+                    .optimize = optimize,
+                    .quiet = base_options.quiet,
+                };
+
+                generate_add(arena, generate_step, generate);
+                if (cmake_profile)
                 {
-                    String8 build_directory_parts[] = {
-                        build_prefix,
-                        S8("ci_"),
-                        ci ? S8("on") : S8("off"),
-                        S8("-cc_"),
-                        build_compilers[compiler],
-                        S8("-optimize_"),
-                        optimize ? S8("on") : S8("off"),
-                        S8("-sanitize_"),
-                        sanitize ? S8("on") : S8("off"),
-                        S8("-fuzz_"),
-                        fuzz ? S8("on") : S8("off"),
-                    };
+                    cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
+                }
 
-                    String8 build_directory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_directory_parts), true);
-                    String8 cmake_profile_path = path_join(arena, build_directory, S8("cmake-profile.json"));
+                build_add(arena, build_directory, (SliceString8){0}, (SliceString8){0}, options);
 
-                    Generate generate = {
-                        .build_directory = build_directory,
-                        .cmake_profile = cmake_profile_path,
-                        .cmake_profile_summary_limit = cmake_profile_summary_limit,
-                        .compiler = compiler,
-                        .fuzz = fuzz,
-                        .sanitize = sanitize,
-                        .ci = ci,
-                        .optimize = optimize,
-                        .optimize_set = true,
-                        .link_libc = true,
-                        .time_trace = false,
-                        .lto = false,
-                        .include_tests = true,
-                        .check_optional_warnings = false,
-                        .developer_targets = false,
-                        .profile_cmake = false,
-                        .cmake_profile_set = cmake_profile,
-                        .cmake_profile_summary = cmake_profile,
-                        .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
-                    };
+                String8 test_targets[] = {
+                    S8("test_all"),
+                };
+                build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(test_targets), (SliceString8){0}, options);
 
-                    CmakeBuildOptions options = {
-                        .optimize = optimize,
-                        .quiet = base_options.quiet,
-                    };
-
-                    generate_add(arena, generate_step, generate);
-                    if (cmake_profile)
-                    {
-                        cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
-                    }
-
-                    build_add(arena, build_directory, (SliceString8){0}, (SliceString8){0}, options);
-
-                    String8 test_targets[] = {
-                        S8("test_all"),
-                    };
-                    build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(test_targets), (SliceString8){0}, options);
-
-                    if (compiler == BUILD_COMPILER_CLANG && !sanitize && !fuzz)
-                    {
-                        clang_analyze_command_add(arena, build_directory, options);
-                    }
+                if (compiler == BUILD_COMPILER_CLANG && !sanitize)
+                {
+                    clang_analyze_command_add(arena, build_directory, options);
                 }
             }
         }
@@ -3528,7 +3525,7 @@ ProcessResult process_arguments(void)
                     generate.ci = value;
                     break;
                 case BUILD_ARGUMENT_FUZZ:
-                    generate.fuzz = value;
+                    generate.fuzz_available = value;
                     break;
                 case BUILD_ARGUMENT_OPTIMIZE:
                     generate.optimize = value;
@@ -3595,7 +3592,7 @@ ProcessResult process_arguments(void)
                     generate.ci = false;
                     break;
                 case BUILD_ARGUMENT_NO_FUZZ:
-                    generate.fuzz = false;
+                    generate.fuzz_available = false;
                     break;
                 case BUILD_ARGUMENT_NO_OPTIMIZE:
                     generate.optimize = false;

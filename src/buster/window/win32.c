@@ -123,7 +123,7 @@ BUSTER_GLOBAL_LOCAL LRESULT window_callback(HWND window_handle, UINT message, WP
         {
             PAINTSTRUCT paint = {0};
             BeginPaint(window_handle, &paint);
-#if BUSTER_LINK_LIBC && !BUSTER_FUZZ
+#if BUSTER_LINK_LIBC
             update();
 #endif
             EndPaint(window_handle, &paint);

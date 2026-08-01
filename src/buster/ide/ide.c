@@ -93,11 +93,14 @@ struct IdeProgram
     String8 compile_linker;
     String8 compile_module_root;
     SliceString8 cc_arguments;
+    SliceString8 fuzz_arguments;
     bool test;
     bool bench;
     bool compile;
     bool cc;
-    u8 reserved[4];
+    bool fuzz;
+    bool test_app;
+    u8 reserved[2];
     TimeDataType last_frame_timestamp;
 };
 
@@ -156,14 +159,15 @@ BUSTER_GLOBAL_LOCAL void ide_window_update_font_for_dpi(IdeWindow* window)
     }
 }
 
-#if BUSTER_FUZZ
-BUSTER_EXPORT s32 buster_fuzz(const u8* pointer, size_t size)
+#if BUSTER_FUZZ_AVAILABLE
+BUSTER_EXPORT s32 buster_fuzz_test_input(const u8* pointer, size_t size)
 {
     BUSTER_UNUSED(pointer);
     BUSTER_UNUSED(size);
     return 0;
 }
-#else
+#endif
+
 ProcessResult process_arguments(void)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
@@ -181,6 +185,11 @@ ProcessResult process_arguments(void)
         if (string_equal(arg, S8("test")))
         {
             ide_state.test = true;
+        }
+        else if (string_equal(arg, S8("test_app")))
+        {
+            ide_state.test = true;
+            ide_state.test_app = true;
         }
         else if (string_equal(arg, S8("bench")))
         {
@@ -208,6 +217,21 @@ ProcessResult process_arguments(void)
                 .length = arguments.length - i - 1,
             };
             break;
+        }
+        else if (string_equal(arg, S8("--fuzz")))
+        {
+#if BUSTER_FUZZ_AVAILABLE
+            ide_state.fuzz = true;
+            ide_state.fuzz_arguments = (SliceString8){
+                .pointer = arguments.pointer + i + 1,
+                .length = arguments.length - i - 1,
+            };
+            break;
+#else
+            string_print(S8("fuzzing is not available in this build\n"));
+            result = PROCESS_RESULT_FAILED;
+            break;
+#endif
         }
         else if (string_equal(arg, S8("-o")) && ide_state.compile)
         {
@@ -1064,6 +1088,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 
 ProcessResult entry_point(void)
 {
+#if BUSTER_FUZZ_AVAILABLE
+    if (ide_state.fuzz)
+    {
+        return buster_fuzz_run(ide_state.fuzz_arguments);
+    }
+#endif
     if (ide_state.cc)
     {
         return run_c_compiler();
@@ -1076,7 +1106,25 @@ ProcessResult entry_point(void)
     {
         return run_benchmarks();
     }
+    if (ide_state.test_app)
+    {
+        return run_graphical_app();
+    }
 
-    return run_app();
-}
+    ProcessResult result = run_app();
+#if BUSTER_FUZZ_AVAILABLE
+    if (ide_state.test)
+    {
+        String8 fuzz_arguments[] = {
+            S8("-max_len=4096"),
+            S8("-max_total_time=2"),
+        };
+        ProcessResult fuzz_result = buster_fuzz_run((SliceString8)BUSTER_ARRAY_TO_SLICE(fuzz_arguments));
+        if (result == PROCESS_RESULT_SUCCESS)
+        {
+            result = fuzz_result;
+        }
+    }
 #endif
+    return result;
+}

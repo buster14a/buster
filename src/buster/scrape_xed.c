@@ -1881,8 +1881,8 @@ BUSTER_GLOBAL_LOCAL ScrapeXedProgramState scrape_xed_program_state = {};
 
 BUSTER_V_IMPL ProgramState* program_state = &scrape_xed_program_state.general_program_state;
 
-#if BUSTER_FUZZ
-BUSTER_IMPL s32 buster_fuzz(const u8* pointer, size_t size)
+#if BUSTER_FUZZ_AVAILABLE
+BUSTER_IMPL s32 buster_fuzz_test_input(const u8* pointer, size_t size)
 {
     BUSTER_UNUSED(pointer);
     BUSTER_UNUSED(size);

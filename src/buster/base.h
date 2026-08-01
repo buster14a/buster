@@ -42,8 +42,8 @@
 #define BUSTER_LINK_LIBC 1
 #endif
 
-#ifndef BUSTER_FUZZ
-#define BUSTER_FUZZ 0
+#ifndef BUSTER_FUZZ_AVAILABLE
+#define BUSTER_FUZZ_AVAILABLE 0
 #endif
 
 #if defined(__ANDROID__)
