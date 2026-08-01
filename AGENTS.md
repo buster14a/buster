@@ -208,8 +208,8 @@ enabled.
   edits: (1) `buster_register_module(foo ...)` in `CMakeLists.txt`;
   (2) add `foo` to the `MODULES` list of `buster_add_executable(ide ...)`;
   (3) add `#include <buster/foo.c>` to the `BUSTER_UNITY_BUILD` block at the
-  top of `src/buster/ide/ide.c` — optimized configs compile as unity builds,
-  so forgetting this breaks Release.
+  top of `src/buster/ide/ide.c` — optimized non-sanitized configs compile as
+  unity builds, so forgetting this breaks ordinary Release builds.
 - Headers are included as `<buster/...>` (include root is `src/`).
   `compile_commands.json` is exported to `build/` by default.
 

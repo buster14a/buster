@@ -70,11 +70,6 @@ jobs:
         if: ${{ contains(matrix.runner, 'x86_64-linux') }}
         run: |
           ./build.sh test_all_combinations_ci --verbose=1
-      - name: Test (macOS)
-        shell: bash
-        if: ${{ contains(matrix.runner, 'macos') }}
-        run: |
-          ./build.sh test_all_combinations_ci --verbose=1
       - name: Perf (macOS)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
@@ -86,6 +81,11 @@ jobs:
         run: |
           source /opt/vulkan-sdk/current/setup-env.sh
           ./.forgejo/scripts/perf_step.sh
+      - name: Test (macOS)
+        shell: bash
+        if: ${{ contains(matrix.runner, 'macos') }}
+        run: |
+          ./build.sh test_all_combinations_ci --verbose=1
       - name: Test (iOS simulator)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}

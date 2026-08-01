@@ -120,7 +120,7 @@ endif()
 
 option(BUSTER_CI "Enable CI mode" OFF)
 option(BUSTER_LINK_LIBC "Link libc" ON)
-option(BUSTER_UNITY_BUILD "Enable unity builds for optimized configurations" ON)
+option(BUSTER_UNITY_BUILD "Enable unity builds for optimized non-sanitized configurations" ON)
 option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
 option(BUSTER_SANITIZE "Enable sanitizers" OFF)
 option(BUSTER_TIME_TRACE "Enable time tracing" OFF)
@@ -312,7 +312,7 @@ else()
 endif()
 
 set(BUSTER_OPTIMIZE_DEFINE "$<IF:${BUSTER_OPTIMIZE_CONDITION},1,0>")
-set(BUSTER_UNITY_BUILD_CONDITION "$<AND:$<BOOL:${BUSTER_UNITY_BUILD}>,${BUSTER_OPTIMIZE_CONDITION}>")
+set(BUSTER_UNITY_BUILD_CONDITION "$<AND:$<BOOL:${BUSTER_UNITY_BUILD}>,${BUSTER_OPTIMIZE_CONDITION},$<NOT:$<BOOL:${BUSTER_SANITIZE}>>>")
 set(BUSTER_UNITY_BUILD_DEFINE "$<IF:${BUSTER_UNITY_BUILD_CONDITION},1,0>")
 set(BUSTER_NON_UNITY_SOURCE_CONDITION "$<NOT:${BUSTER_UNITY_BUILD_CONDITION}>")
 
