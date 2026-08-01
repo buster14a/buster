@@ -31,8 +31,8 @@ self-hosting fixed point from the repository root before changing the compiler:
 `test_self_host` builds the trusted bootstrap compiler, compiles the complete
 unity-build IDE twice with buster, requires both generations to be
 byte-identical, and runs the stage-2 benchmark. The same build.c-owned workflow
-is also exposed as the `test_self_host` Ninja target. Its expanded equivalent
-is:
+is also exposed as the `test_self_host` Ninja target. On Linux x86-64, its
+expanded equivalent is:
 
 ```sh
 ./build.sh build --config Release -t ide
@@ -42,9 +42,13 @@ cmp build/ide-self build/ide-self-stage2
 build/ide-self-stage2 bench
 ```
 
-The target and fixed point are currently available on Linux and Windows x86-64. Preserve
-them when changing preprocessing, C semantics, IR, code generation, object
-writing, or linking, and report both self-hosting failures and benchmark
+On macOS, both `ide cc` invocations additionally receive the SDK returned by
+`xcrun --sdk macosx --show-sdk-path` through `-isysroot`, plus `-framework`
+arguments for AppKit, Metal, QuartzCore, and Foundation.
+
+The target and fixed point are currently available on Linux and Windows x86-64,
+and on macOS. Preserve them when changing preprocessing, C semantics, IR, code
+generation, object writing, or linking, and report both self-hosting failures and benchmark
 regressions.
 
 ## Build
@@ -99,7 +103,7 @@ diagnosed. `-v` reports the selected CPU and maximum native vector width.
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),
-`test_self_host` (Linux x86-64 only), `run_ide`, `test_ide`, `debug_ide`,
+`test_self_host` (Linux x86-64 and macOS), `run_ide`, `test_ide`, `debug_ide`,
 `buster_shaders`, `apk` (Android), `clang_analyze`. The Vulkan SDK
 (`VULKAN_SDK` env) is required whenever Vulkan or Slang shader compilation is
 enabled.

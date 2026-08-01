@@ -938,7 +938,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* d
     return PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 output, String8 timing_description)
+BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
+                                               String8 timing_description)
 {
     BuildStep* step = step_add(arena);
     ProcessRun* run = run_add(arena, step);
@@ -968,7 +969,26 @@ BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, S
 #endif
     os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
     os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
+#if BUSTER_MACOS
+    os_argument_builder_append(&builder, S8("-isysroot"));
+    os_argument_builder_append(&builder, sysroot);
+#else
+    BUSTER_UNUSED(sysroot);
+#endif
     os_argument_builder_append(&builder, S8("src/buster/ide/ide.c"));
+#if BUSTER_MACOS
+    String8 frameworks[] = {
+        S8("AppKit"),
+        S8("Metal"),
+        S8("QuartzCore"),
+        S8("Foundation"),
+    };
+    for (u32 framework_index = 0; framework_index < BUSTER_ARRAY_LENGTH(frameworks); framework_index += 1)
+    {
+        os_argument_builder_append(&builder, S8("-framework"));
+        os_argument_builder_append(&builder, frameworks[framework_index]);
+    }
+#endif
     os_argument_builder_append(&builder, S8("-o"));
     os_argument_builder_append(&builder, output);
     *run = (ProcessRun){
@@ -982,21 +1002,78 @@ BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, S
     };
 }
 
+#if BUSTER_MACOS
+BUSTER_GLOBAL_LOCAL String8 self_host_macos_sdk_path(Arena* arena)
+{
+    String8 arguments[] = {
+        S8("xcrun"),
+        S8("--sdk"),
+        S8("macosx"),
+        S8("--show-sdk-path"),
+    };
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), (SliceString8){0}, (SliceString8){0},
+                                                 (ProcessSpawnOptions){
+                                                     .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                     .use_process_environment = 1,
+                                                 });
+    if (!spawn.handle)
+    {
+        string_print(S8("error: could not run xcrun to locate the macOS SDK\n"));
+        return (String8){0};
+    }
+    ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
+    if (wait.result != PROCESS_RESULT_SUCCESS)
+    {
+        if (wait.streams[STANDARD_STREAM_ERROR].length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), wait.streams[STANDARD_STREAM_ERROR]);
+        }
+        string_print(S8("error: xcrun could not locate the macOS SDK\n"));
+        return (String8){0};
+    }
+    String8 result = {
+        .pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+        .length = wait.streams[STANDARD_STREAM_OUTPUT].length,
+    };
+    while (result.length && (u8)result.pointer[result.length - 1] <= ' ')
+    {
+        result.length -= 1;
+    }
+    if (!result.length)
+    {
+        string_print(S8("error: xcrun returned an empty macOS SDK path\n"));
+    }
+    return result;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_directory, CmakeBuildOptions options, Generate generate)
 {
-#if (!BUSTER_LINUX && !BUSTER_WINDOWS) || !BUSTER_CPU_ARCH_X86_64
+#if (!(BUSTER_LINUX || BUSTER_WINDOWS) || !BUSTER_CPU_ARCH_X86_64) && !BUSTER_MACOS
     BUSTER_UNUSED(arena);
     BUSTER_UNUSED(build_directory);
     BUSTER_UNUSED(options);
-    string_print(S8("error: deterministic self-hosting is currently supported only on Linux and Windows x86-64\n"));
+    BUSTER_UNUSED(generate);
+    string_print(S8("error: deterministic self-hosting is currently supported only on Linux and Windows x86-64, and macOS\n"));
     return PROCESS_RESULT_FAILED;
 #else
     String8 config = cmake_build_config(options);
+    String8 sysroot = {0};
+#if BUSTER_MACOS
+    sysroot = self_host_macos_sdk_path(arena);
+    if (!sysroot.length)
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+#endif
     String8 cmake_cache = path_join(arena, build_directory, S8("CMakeCache.txt"));
     if (!path_exists(arena, cmake_cache))
     {
         generate.build_directory = build_directory;
-        generate_add(arena, step_add(arena), generate);
+        generate.config = config;
+        generate.config_set = true;
+        BuildStep* generate_step = step_add(arena);
+        generate_add(arena, generate_step, generate);
     }
     String8 ide_name =
 #if BUSTER_WINDOWS
@@ -1019,12 +1096,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
 #else
                                S8("ide-stage2"));
 #endif
+    // Replacing an executable in place can leave macOS with a stale vnode code-signature cache.
+    // Unlink both outputs before either compiler recreates them.
     remove_path_recursive(arena, stage1);
     remove_path_recursive(arena, stage2);
     String8 targets[] = {S8("ide")};
     build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
-    self_host_compile_add(arena, bootstrap, build_directory, stage1, S8("Self-host stage 1"));
-    self_host_compile_add(arena, stage1, build_directory, stage2, S8("Self-host stage 2"));
+    self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"));
+    self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"));
     SelfHostCompare* compare = arena_allocate(arena, SelfHostCompare, 1);
     *compare = (SelfHostCompare){
         .stage1 = stage1,

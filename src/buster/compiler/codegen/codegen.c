@@ -6189,15 +6189,20 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_adjust_stack(CodegenBuffer* buffe
 
 BUSTER_GLOBAL_LOCAL void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset)
 {
-    bool first = true;
-    do
+    if (byte_offset <= 4095)
     {
-        u32 chunk = BUSTER_MIN(byte_offset, 4095u);
-        u32 chunk_base = first ? base_register : register_number;
-        codegen_emit_u32(buffer, 0x91000000 | (chunk << 10) | (chunk_base << 5) | register_number);
-        byte_offset -= chunk;
-        first = false;
-    } while (byte_offset);
+        codegen_emit_u32(buffer, 0x91000000 | (byte_offset << 10) | (base_register << 5) | register_number);
+        return;
+    }
+    u32 offset_register = register_number == base_register ? (register_number == 16 ? 17 : 16) : register_number;
+    a64_emit_constant(buffer, offset_register, byte_offset);
+    if (base_register == 31)
+    {
+        u32 stack_register = register_number == 16 || offset_register == 16 ? 17 : 16;
+        codegen_emit_u32(buffer, 0x910003e0 | stack_register);
+        base_register = stack_register;
+    }
+    codegen_emit_u32(buffer, 0x8b000000 | (offset_register << 16) | (base_register << 5) | register_number);
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_canonical_a64_stack_address(CodegenBuffer* buffer, u32 register_number, u32 byte_offset)
@@ -7045,6 +7050,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_frame_memory_operation(CodegenBuf
     return codegen_canonical_a64_memory_operation_base(buffer, register_number, offset, size, store, sign_extend, 28);
 }
 
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_a64_remainder_divide_instruction(bool signed_remainder, bool wide)
+{
+    return (signed_remainder ? 0x1aca0d2b : 0x1aca092b) | (wide ? 0x80000000 : 0);
+}
+
 BUSTER_GLOBAL_LOCAL u32 codegen_canonical_copy_chunk(u64 remaining, u64 source_offset, u64 destination_offset)
 {
     if (remaining >= 8 && source_offset % 8 == 0 && destination_offset % 8 == 0)
@@ -7546,7 +7556,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             };
         }
     }
-    u64 capacity = (u64)instruction_count * 48 + (u64)module->function_count * 64 + stack_probe_capacity + assembly_capacity * 4 + 64;
+    u64 instruction_capacity = target.cpu_arch == CPU_ARCH_AARCH64 ? 128 : 48;
+    u64 capacity = (u64)instruction_count * instruction_capacity + (u64)module->function_count * 64 + stack_probe_capacity + assembly_capacity * 4 + 64;
     CodegenBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
@@ -7668,7 +7679,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         bool aarch64_indirect_return = target.cpu_arch == CPU_ARCH_AARCH64 && canonical_return_abi.indirect;
         u64 frame_size_64 = (value_bytes + 7) & ~(u64)7;
         u32 aarch64_va_save_offset = 0;
-        if (target.cpu_arch == CPU_ARCH_AARCH64 && canonical_variadic)
+        bool aarch64_darwin = target.cpu_arch == CPU_ARCH_AARCH64 &&
+                              (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS);
+        bool aarch64_darwin_variadic = canonical_variadic && aarch64_darwin;
+        if (target.cpu_arch == CPU_ARCH_AARCH64 && canonical_variadic && !aarch64_darwin_variadic)
         {
             aarch64_va_save_offset = (u32)frame_size_64;
             frame_size_64 += 64;
@@ -7784,7 +7798,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     return result;
                 }
             }
-            if (canonical_variadic)
+            if (canonical_variadic && !aarch64_darwin_variadic)
             {
                 for (u32 register_index = 0; register_index < 8; register_index += 1)
                 {
@@ -10917,18 +10931,20 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             if (float_register_index < 8)
                             {
                                 u32 scale = argument_type->bit_width == 32 ? 4 : 8;
-                                if (result_offset / scale > 4095)
+                                if (!codegen_canonical_a64_frame_float_memory_operation(&buffer, float_register_index, result_offset, scale, true))
                                 {
                                     result.error = CODEGEN_ERROR_CAPACITY;
                                     return result;
                                 }
-                                codegen_emit_u32(&buffer, (argument_type->bit_width == 32 ? 0xbd000000 : 0xfd000000) | ((result_offset / scale) << 10) |
-                                                              (28 << 5) | float_register_index);
                             }
                             else
                             {
-                                codegen_emit_u32(&buffer, 0xf9400009 | (((16 + prior_stack_parts * 8) / 8) << 10) | (29 << 5));
-                                C_A64_STORE(9);
+                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, 16 + prior_stack_parts * 8, 8, false, false, 29) ||
+                                    !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
                             }
                             instruction_id = instruction->next;
                             continue;
@@ -10956,14 +10972,12 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                         u32 chunk = remaining >= 8 ? 8 : 4;
                                         u32 source_offset = 16 + prior_stack_parts * 8 + abi_part->value_offset + copied;
                                         u32 destination_offset = result_offset + abi_part->value_offset + copied;
-                                        u32 scale = chunk == 4 ? 4 : 8;
-                                        if (source_offset / scale > 4095 || destination_offset / scale > 4095)
+                                        if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, source_offset, chunk, false, false, 29) ||
+                                            !codegen_canonical_a64_frame_memory_operation(&buffer, 9, destination_offset, chunk, true, false))
                                         {
                                             result.error = CODEGEN_ERROR_CAPACITY;
                                             return result;
                                         }
-                                        codegen_emit_u32(&buffer, (chunk == 4 ? 0xb9400009 : 0xf9400009) | ((source_offset / scale) << 10) | (29 << 5));
-                                        codegen_emit_u32(&buffer, (chunk == 4 ? 0xb9000009 : 0xf9000009) | ((destination_offset / scale) << 10) | (28 << 5));
                                         copied += chunk;
                                     }
                                 }
@@ -10975,19 +10989,31 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         {
                             if (indirect)
                             {
-                                codegen_emit_u32(&buffer, 0xf940000a | (((16 + prior_stack_parts * 8) / 8) << 10) | (29 << 5));
+                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 10, 16 + prior_stack_parts * 8, 8, false, false, 29))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
                                 for (u32 part_index = 0; part_index < part_count; part_index += 1)
                                 {
-                                    codegen_emit_u32(&buffer, 0xf9400149 | (part_index << 10));
-                                    codegen_emit_u32(&buffer, 0xf9000009 | (((result_offset + part_index * 8) / 8) << 10) | (28 << 5));
+                                    if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, part_index * 8, 8, false, false, 10) ||
+                                        !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + part_index * 8, 8, true, false))
+                                    {
+                                        result.error = CODEGEN_ERROR_CAPACITY;
+                                        return result;
+                                    }
                                 }
                                 instruction_id = instruction->next;
                                 continue;
                             }
                             for (u32 part_index = 0; part_index < part_count; part_index += 1)
                             {
-                                codegen_emit_u32(&buffer, 0xf9400009 | (((16 + (prior_stack_parts + part_index) * 8) / 8) << 10) | (29 << 5));
-                                codegen_emit_u32(&buffer, 0xf9000009 | (((result_offset + part_index * 8) / 8) << 10) | (28 << 5));
+                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, 16 + (prior_stack_parts + part_index) * 8, 8, false, false, 29) ||
+                                    !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + part_index * 8, 8, true, false))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
                             }
                             instruction_id = instruction->next;
                             continue;
@@ -10997,15 +11023,24 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             u32 source_register = register_index;
                             for (u32 part_index = 0; part_index < part_count; part_index += 1)
                             {
-                                codegen_emit_u32(&buffer, 0xf9400009 | (part_index << 10) | (source_register << 5));
-                                codegen_emit_u32(&buffer, 0xf9000009 | (((result_offset + part_index * 8) / 8) << 10) | (28 << 5));
+                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, part_index * 8, 8, false, false, source_register) ||
+                                    !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + part_index * 8, 8, true, false))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
                             }
                             instruction_id = instruction->next;
                             continue;
                         }
                         for (u32 part_index = 0; part_index < abi_part_count; part_index += 1)
                         {
-                            codegen_emit_u32(&buffer, 0xf9000000 | (((result_offset + part_index * 8) / 8) << 10) | (28 << 5) | (register_index + part_index));
+                            if (!codegen_canonical_a64_frame_memory_operation(&buffer, register_index + part_index, result_offset + part_index * 8, 8, true,
+                                                                             false))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_GLOBAL || instruction->opcode == IR_OPCODE_FUNCTION)
@@ -11122,7 +11157,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 .absolute = true,
                             };
                         }
-                        codegen_emit_u32(&buffer, 0xf9000009 | ((result_offset / 8) << 10) | (28 << 5));
+                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
+                        {
+                            result.error = CODEGEN_ERROR_CAPACITY;
+                            return result;
+                        }
                     }
                     else if (instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_ATOMIC_LOAD)
                     {
@@ -11315,12 +11354,21 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         }
                         IrType* aggregate = ir_type_from_id(&program->types, function->values[base.value].canonical_type);
                         u64 field_index = instruction->immediates[0];
-                        if (!aggregate || field_index >= aggregate->field_count || aggregate->fields[field_index].offset > 4095)
+                        if (!aggregate || field_index >= aggregate->field_count)
                         {
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
-                        codegen_emit_u32(&buffer, 0x91000129 | ((u32)aggregate->fields[field_index].offset << 10));
+                        u64 field_offset = aggregate->fields[field_index].offset;
+                        if (field_offset <= 4095)
+                        {
+                            codegen_emit_u32(&buffer, 0x91000129 | ((u32)field_offset << 10));
+                        }
+                        else
+                        {
+                            a64_emit_constant(&buffer, 10, field_offset);
+                            codegen_emit_u32(&buffer, 0x8b0a0129);
+                        }
                         C_A64_STORE(9);
                     }
                     else if (instruction->opcode == IR_OPCODE_CAST)
@@ -11511,7 +11559,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         {
                             C_A64_LOAD(9, instruction->operands[1]);
                             u32 place_offset = value_offsets[instruction->operands[0].value];
-                            codegen_emit_u32(&buffer, 0xf9000000 | ((place_offset / 8) << 10) | (28 << 5) | 9);
+                            if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, place_offset, 8, true, false))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE)
@@ -11710,8 +11762,23 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 stack_parts += part_count;
                             }
                         }
+                        if (aarch64_darwin)
+                        {
+                            codegen_canonical_a64_base_address(&buffer, 9, 29, 16 + stack_parts * 8);
+                            if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         a64_emit_constant(&buffer, 9, gp_count * 8);
-                        codegen_emit_u32(&buffer, 0xf9000009 | ((result_offset / 8) << 10) | (28 << 5));
+                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
+                        {
+                            result.error = CODEGEN_ERROR_CAPACITY;
+                            return result;
+                        }
                         u32 overflow_offset = 16 + stack_parts * 8;
                         if (overflow_offset > 4095)
                         {
@@ -11719,22 +11786,50 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             return result;
                         }
                         codegen_emit_u32(&buffer, 0x910003a9 | (overflow_offset << 10));
-                        codegen_emit_u32(&buffer, 0xf9000009 | (((result_offset + 8) / 8) << 10) | (28 << 5));
+                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + 8, 8, true, false))
+                        {
+                            result.error = CODEGEN_ERROR_CAPACITY;
+                            return result;
+                        }
                         codegen_canonical_a64_base_address(&buffer, 9, 28, aarch64_va_save_offset);
-                        codegen_emit_u32(&buffer, 0xf9000009 | (((result_offset + 16) / 8) << 10) | (28 << 5));
-                        codegen_emit_u32(&buffer, 0xf900001f | (((result_offset + 24) / 8) << 10) | (28 << 5));
+                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + 16, 8, true, false) ||
+                            !codegen_canonical_a64_frame_memory_operation(&buffer, 31, result_offset + 24, 8, true, false))
+                        {
+                            result.error = CODEGEN_ERROR_CAPACITY;
+                            return result;
+                        }
                     }
                     else if (instruction->opcode == IR_OPCODE_VA_COPY)
                     {
                         C_A64_LOAD(10, instruction->operands[0]);
+                        if (aarch64_darwin)
+                        {
+                            codegen_emit_u32(&buffer, 0xf9400149);
+                            if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         for (u32 component = 0; component < 4; component += 1)
                         {
                             codegen_emit_u32(&buffer, 0xf9400149 | (component << 10));
-                            codegen_emit_u32(&buffer, 0xf9000009 | (((result_offset + component * 8) / 8) << 10) | (28 << 5));
+                            if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + component * 8, 8, true, false))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_VA_END)
                     {
+                        if (aarch64_darwin)
+                        {
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         C_A64_LOAD(10, instruction->operands[0]);
                         a64_emit_constant(&buffer, 9, 1);
                         codegen_emit_u32(&buffer, 0xf9000d49);
@@ -11752,6 +11847,24 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             return result;
                         }
                         C_A64_LOAD(10, instruction->operands[0]);
+                        if (aarch64_darwin)
+                        {
+                            codegen_emit_u32(&buffer, 0xf940014b);
+                            for (u32 part_index = 0; part_index < part_count; part_index += 1)
+                            {
+                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, part_index * 8, 8, false, false, 11) ||
+                                    !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + part_index * 8, 8, true, false))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                            }
+                            a64_emit_constant(&buffer, 9, part_count * 8);
+                            codegen_emit_u32(&buffer, 0x8b09016b);
+                            codegen_emit_u32(&buffer, 0xf900014b);
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         codegen_emit_u32(&buffer, 0xf940014b);
                         u32 increment = part_count * 8;
                         u32 limit = 64 - increment;
@@ -11763,7 +11876,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         for (u32 part_index = 0; part_index < part_count; part_index += 1)
                         {
                             codegen_emit_u32(&buffer, 0xf9400189 | (part_index << 10));
-                            codegen_emit_u32(&buffer, 0xf9000009 | (((result_offset + part_index * 8) / 8) << 10) | (28 << 5));
+                            if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + part_index * 8, 8, true, false))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
                         }
                         codegen_emit_u32(&buffer, 0x9100016b | (increment << 10));
                         codegen_emit_u32(&buffer, 0xf900014b);
@@ -11774,7 +11891,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         for (u32 part_index = 0; part_index < part_count; part_index += 1)
                         {
                             codegen_emit_u32(&buffer, 0xf9400189 | (part_index << 10));
-                            codegen_emit_u32(&buffer, 0xf9000009 | (((result_offset + part_index * 8) / 8) << 10) | (28 << 5));
+                            if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + part_index * 8, 8, true, false))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
                         }
                         codegen_emit_u32(&buffer, 0x9100018c | (increment << 10));
                         codegen_emit_u32(&buffer, 0xf900054c);
@@ -11787,6 +11908,12 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     else if (instruction->opcode == IR_OPCODE_CALL)
                     {
                         u32 argument_count = instruction->operand_count - 1;
+                        IrType* callee_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+                        IrType* callee_function_type = callee_type && callee_type->kind == IR_TYPE_POINTER
+                                                           ? ir_type_from_id(&program->types, callee_type->element_type)
+                                                           : callee_type;
+                        bool darwin_variadic_call = result.abi == CODEGEN_ABI_AARCH64_DARWIN && callee_function_type &&
+                                                    callee_function_type->kind == IR_TYPE_FUNCTION && callee_function_type->is_variadic;
                         bool* argument_on_stack = arena_allocate(arena, bool, argument_count);
                         u32* argument_stack_offset = arena_allocate(arena, u32, argument_count);
                         bool* argument_indirect = arena_allocate(arena, bool, argument_count);
@@ -11815,9 +11942,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                 return result;
                             }
+                            bool unnamed_variadic = darwin_variadic_call && argument_array_index >= callee_function_type->parameter_count;
                             if (type->kind == IR_TYPE_FLOAT)
                             {
-                                if (simulated_float_registers < 8)
+                                if (!unnamed_variadic && simulated_float_registers < 8)
                                 {
                                     argument_float_register[argument_array_index] = (u8)simulated_float_registers++;
                                 }
@@ -11831,14 +11959,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             }
                             if (argument_hfa)
                             {
-                                if (simulated_float_registers + argument_abi.part_count <= 8)
+                                if (!unnamed_variadic && simulated_float_registers + argument_abi.part_count <= 8)
                                 {
                                     argument_float_register[argument_array_index] = (u8)simulated_float_registers;
                                     simulated_float_registers += argument_abi.part_count;
                                 }
                                 else
                                 {
-                                    simulated_float_registers = 8;
+                                    if (!unnamed_variadic)
+                                    {
+                                        simulated_float_registers = 8;
+                                    }
                                     argument_on_stack[argument_array_index] = true;
                                     argument_stack_offset[argument_array_index] = stack_part_count;
                                     stack_part_count += (u32)((type->layout.size + 7) / 8);
@@ -11851,7 +11982,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 part_count = 1;
                                 argument_indirect[argument_array_index] = true;
                             }
-                            if (simulated_registers + part_count <= 8)
+                            if (!unnamed_variadic && simulated_registers + part_count <= 8)
                             {
                                 simulated_registers += part_count;
                             }
@@ -11987,7 +12118,6 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             u32 return_offset = result_offset;
                             codegen_canonical_a64_base_address(&buffer, 8, 28, return_offset);
                         }
-                        IrType* callee_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
                         bool indirect_call = callee_type && callee_type->kind == IR_TYPE_POINTER;
                         if (indirect_call)
                         {
@@ -12328,14 +12458,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             operation = 0x1aca0d29;
                             break;
                         case IR_BINARY_SIGNED_REMAINDER:
-                            codegen_emit_u32(&buffer, 0x1aca0d2b | wide_mask);
+                            codegen_emit_u32(&buffer, codegen_canonical_a64_remainder_divide_instruction(true, wide_mask != 0));
                             operation = 0x1b0aa569;
                             break;
                         case IR_BINARY_UNSIGNED_DIVIDE:
                             operation = 0x1aca0929;
                             break;
                         case IR_BINARY_UNSIGNED_REMAINDER:
-                            codegen_emit_u32(&buffer, 0x1aca096b | wide_mask);
+                            codegen_emit_u32(&buffer, codegen_canonical_a64_remainder_divide_instruction(false, wide_mask != 0));
                             operation = 0x1b0aa569;
                             break;
                         case IR_BINARY_SHIFT_LEFT:
@@ -12418,13 +12548,13 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     {
                         C_A64_LOAD(9, instruction->operands[0]);
                         codegen_emit_u32(&buffer, 0xf100013f);
+                        codegen_emit_u32(&buffer, 0x54000040);
                         branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
                             .target = instruction->targets[0],
                             .offset = (u32)buffer.count,
                             .aarch64 = true,
-                            .conditional = true,
                         };
-                        codegen_emit_u32(&buffer, 0x54000001);
+                        codegen_emit_u32(&buffer, 0x14000000);
                         branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
                             .target = instruction->targets[1],
                             .offset = (u32)buffer.count,
@@ -12443,13 +12573,13 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             codegen_emit_u32(&buffer, 0xf2c0000a | ((u32)((immediate >> 32) & 0xffff) << 5));
                             codegen_emit_u32(&buffer, 0xf2e0000a | ((u32)((immediate >> 48) & 0xffff) << 5));
                             codegen_emit_u32(&buffer, 0xeb0a013f);
+                            codegen_emit_u32(&buffer, 0x54000041);
                             branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
                                 .target = instruction->targets[case_index],
                                 .offset = (u32)buffer.count,
                                 .aarch64 = true,
-                                .conditional = true,
                             };
-                            codegen_emit_u32(&buffer, 0x54000000);
+                            codegen_emit_u32(&buffer, 0x14000000);
                         }
                         branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
                             .target = instruction->targets[instruction->target_count - 1],
@@ -12823,6 +12953,22 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     a64_emit_store_pointer_offset(&large_frame_operation, 9, 28, 40008, 4);
     BUSTER_TEST(arguments, large_frame_operation.error == CODEGEN_ERROR_NONE);
     BUSTER_TEST(arguments, large_frame_operation.count > 8);
+    u32 large_stack_address_words[6] = {0};
+    CodegenBuffer large_stack_address = {
+        .bytes = (u8*)large_stack_address_words,
+        .capacity = sizeof(large_stack_address_words),
+    };
+    codegen_canonical_a64_base_address(&large_stack_address, 16, 31, 40000);
+    u32 expected_large_stack_address[] = {
+        0xd2800000 | (40000u << 5) | 16, 0xf2a00010, 0xf2c00010, 0xf2e00010, 0x910003f1, 0x8b100230,
+    };
+    BUSTER_TEST(arguments, large_stack_address.error == CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments, large_stack_address.count == sizeof(expected_large_stack_address));
+    BUSTER_TEST(arguments, !memcmp(large_stack_address_words, expected_large_stack_address, sizeof(expected_large_stack_address)));
+    u32 unsigned_remainder_divide = codegen_canonical_a64_remainder_divide_instruction(false, false);
+    BUSTER_TEST(arguments, ((unsigned_remainder_divide >> 5) & 31) == 9);
+    BUSTER_TEST(arguments, ((unsigned_remainder_divide >> 16) & 31) == 10);
+    BUSTER_TEST(arguments, (unsigned_remainder_divide & 31) == 11);
     TemporalArena temporary = arena_begin_temporal(arguments->arena);
     Arena* expression_arena = arena_create((ArenaCreation){0});
     BUSTER_CHECK(expression_arena);

@@ -1602,9 +1602,10 @@ buster_add_executable(ide src/buster/ide/ide.c
     hash
 )
 
-if ((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
-    CMAKE_SYSTEM_PROCESSOR MATCHES
-        "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
+if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
+     CMAKE_SYSTEM_PROCESSOR MATCHES
+        "^(x86_64|amd64|X86_64|X86-64|AMD64)$") OR
+    (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS"))
     add_custom_target(test_self_host
         COMMAND
             "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}"

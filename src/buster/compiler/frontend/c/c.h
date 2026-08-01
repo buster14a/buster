@@ -30,7 +30,7 @@ struct CToken
     String8 spelling;
     CSourceLocation location;
     CTokenKind kind;
-    u32 reserved;
+    u32 pack_alignment;
 };
 
 typedef enum CDiagnosticKind

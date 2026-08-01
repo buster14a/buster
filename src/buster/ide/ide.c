@@ -983,7 +983,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
 #if BUSTER_INCLUDE_TESTS
     if (ide_state.test)
     {
-        Arena* arena = arena_create((ArenaCreation){0});
+        // Driver tests intentionally retain several native and cross-target
+        // artifacts until their module finishes. Reserve enough virtual
+        // address space for platforms whose native artifacts are larger.
+        Arena* arena = arena_create((ArenaCreation){
+            .reserved_size = BUSTER_MB(256),
+        });
         UnitTestArguments arguments = {arena, &default_show};
 
         u64 position = arena->position;

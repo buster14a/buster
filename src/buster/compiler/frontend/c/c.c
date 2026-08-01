@@ -976,6 +976,7 @@ BUSTER_GLOBAL_LOCAL bool c_preprocess_expand(Arena* arena, CMacro* first_macro, 
             {
                 CToken replacement = replacement_tokens[replacement_index - 1];
                 replacement.location = invocation.location;
+                replacement.pack_alignment = invocation.pack_alignment;
                 c_macro_expansion_task_push(arena, &parent->top, replacement, 0, C_MACRO_EXPANSION_TOKEN);
             }
             context = parent;
@@ -1051,6 +1052,7 @@ BUSTER_GLOBAL_LOCAL bool c_preprocess_expand(Arena* arena, CMacro* first_macro, 
         {
             CToken replacement = replacement_tokens[replacement_index - 1];
             replacement.location = token.location;
+            replacement.pack_alignment = token.pack_alignment;
             c_macro_expansion_task_push(arena, &context->top, replacement, 0, C_MACRO_EXPANSION_TOKEN);
         }
     }
@@ -1387,6 +1389,8 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_builtin_supported(String8 name)
         "__builtin_unreachable",   "__builtin_c23_va_start",
         "__builtin_va_arg",        "__builtin_va_copy",
         "__builtin_va_end",        "__builtin_va_start",
+        "__is_target_arch",        "__is_target_environment",
+        "__is_target_os",          "__is_target_vendor",
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(supported); index += 1)
     {
@@ -1404,11 +1408,36 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_attribute_supported(String8 name)
     return string_equal(name, S8("vector_size")) || string_equal(name, S8("__vector_size")) || string_equal(name, S8("__vector_size__"));
 }
 
-BUSTER_GLOBAL_LOCAL bool c_conditional_feature_operators(Arena* arena, CPreprocessTokenNode* first, CPreprocessOptions* options, String8 including_path)
+BUSTER_GLOBAL_LOCAL bool c_conditional_feature_operators(Arena* arena, CMacro* first_macro, CPreprocessTokenNode* first, CPreprocessOptions* options,
+                                                         String8 including_path)
 {
     for (CPreprocessTokenNode* node = first; node; node = node->next)
     {
         CToken token = node->token;
+        if (token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("defined")))
+        {
+            CPreprocessTokenNode* name = node->next;
+            bool parenthesized = name && c_token_is_punctuator(name->token, S8("("));
+            name = parenthesized ? name->next : name;
+            if (!name || name->token.kind != C_TOKEN_IDENTIFIER)
+            {
+                return false;
+            }
+            CPreprocessTokenNode* after = name->next;
+            if (parenthesized)
+            {
+                if (!after || !c_token_is_punctuator(after->token, S8(")")))
+                {
+                    return false;
+                }
+                after = after->next;
+            }
+            CMacro* macro = c_macro_find(first_macro, name->token.spelling);
+            node->token.kind = C_TOKEN_PREPROCESSING_NUMBER;
+            node->token.spelling = macro && macro->defined ? S8("1") : S8("0");
+            node->next = after;
+            continue;
+        }
         bool has_include = token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("__has_include"));
         bool has_include_next = token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("__has_include_next"));
         bool has_builtin = token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("__has_builtin"));
@@ -1417,7 +1446,12 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_feature_operators(Arena* arena, CPreproce
         bool has_feature =
             token.kind == C_TOKEN_IDENTIFIER && (string_equal(token.spelling, S8("__has_feature")) || string_equal(token.spelling, S8("__has_extension")) ||
                                                  string_equal(token.spelling, S8("__building_module")));
-        if (!has_include && !has_include_next && !has_builtin && !has_attribute && !has_feature)
+        bool is_target_arch = token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("__is_target_arch"));
+        bool is_target_environment = token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("__is_target_environment"));
+        bool is_target_os = token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("__is_target_os"));
+        bool is_target_vendor = token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("__is_target_vendor"));
+        if (!has_include && !has_include_next && !has_builtin && !has_attribute && !has_feature && !is_target_arch && !is_target_environment && !is_target_os &&
+            !is_target_vendor)
         {
             continue;
         }
@@ -1471,6 +1505,21 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_feature_operators(Arena* arena, CPreproce
         else if ((has_builtin || has_attribute) && argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER)
         {
             supported = has_builtin ? c_conditional_builtin_supported(arguments[0].spelling) : c_conditional_attribute_supported(arguments[0].spelling);
+        }
+        else if ((is_target_arch || is_target_environment || is_target_os || is_target_vendor) && argument_count == 1 &&
+                 arguments[0].kind == C_TOKEN_IDENTIFIER && options)
+        {
+            String8 argument = arguments[0].spelling;
+            supported = is_target_arch        ? (options->target.cpu_arch == CPU_ARCH_AARCH64
+                                                      ? string_equal(argument, S8("arm64")) || string_equal(argument, S8("aarch64"))
+                                                      : string_equal(argument, S8("x86_64")))
+                        : is_target_os          ? (options->target.os == OPERATING_SYSTEM_MACOS
+                                                       ? string_equal(argument, S8("macos"))
+                                                       : options->target.os == OPERATING_SYSTEM_IOS && string_equal(argument, S8("ios")))
+                        : is_target_vendor      ? (options->target.os == OPERATING_SYSTEM_MACOS || options->target.os == OPERATING_SYSTEM_IOS) &&
+                                                      string_equal(argument, S8("apple"))
+                        : is_target_environment ? false
+                                                : false;
         }
         else if (!has_feature)
         {
@@ -1528,7 +1577,7 @@ BUSTER_GLOBAL_LOCAL bool c_integer_expression_evaluate_with_features(Arena* aren
     {
         return false;
     }
-    if (!c_conditional_feature_operators(arena, first_expanded, options, including_path))
+    if (!c_conditional_feature_operators(arena, first_macro, first_expanded, options, including_path))
     {
         return false;
     }
@@ -1749,6 +1798,13 @@ struct CPreprocessSourceFrame
     u64 token_index;
     u32 depth;
     bool line_start;
+};
+
+typedef struct CPragmaPackStack CPragmaPackStack;
+struct CPragmaPackStack
+{
+    CPragmaPackStack* previous;
+    u32 alignment;
 };
 
 BUSTER_GLOBAL_LOCAL CSourceLocation c_preprocess_logical_location(CPreprocessSourceFrame* frame, CSourceLocation location)
@@ -2334,6 +2390,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     feature_parameters[0] = S8("feature");
     static char const* feature_macro_names[] = {
         "__building_module", "__has_attribute", "__has_builtin", "__has_c_attribute", "__has_extension", "__has_feature", "__has_include", "__has_include_next",
+        "__is_target_arch", "__is_target_environment", "__is_target_os", "__is_target_vendor",
     };
     for (u32 feature_index = 0; feature_index < BUSTER_ARRAY_LENGTH(feature_macro_names); feature_index += 1)
     {
@@ -2460,7 +2517,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         C_DEFINE_TYPE_MACRO("__ANDROID_API__", S8("__ANDROID_MIN_SDK_VERSION__"));
     }
 #undef C_DEFINE_TYPE_MACRO
-    String8 operating_system_macros[6] = {0};
+    String8 operating_system_macros[7] = {0};
     u32 operating_system_macro_count = 0;
     switch (options.target.os)
     {
@@ -2470,6 +2527,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     }
     break;
     case OPERATING_SYSTEM_MACOS:
+    {
+        operating_system_macros[operating_system_macro_count++] = S8("__APPLE__");
+        operating_system_macros[operating_system_macro_count++] = S8("__MACH__");
+        operating_system_macros[operating_system_macro_count++] = S8("__BUSTER_TARGET_MACOS__");
+    }
+    break;
     case OPERATING_SYSTEM_IOS:
     {
         operating_system_macros[operating_system_macro_count++] = S8("__APPLE__");
@@ -2507,13 +2570,23 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     {
         c_macro_define(arena, &first_macro, &last_macro, operating_system_macros[macro_index], standard_replacement, 1, 0, 0, false, false);
     }
+    if (options.target.os == OPERATING_SYSTEM_MACOS || options.target.os == OPERATING_SYSTEM_IOS)
+    {
+        c_macro_define_object_text(arena, &first_macro, &last_macro, S8("__APPLE_CC__"), S8("6000"));
+    }
     String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__") : S8("__x86_64__");
     c_macro_define(arena, &first_macro, &last_macro, architecture_macro, standard_replacement, 1, 0, 0, false, false);
+    if ((options.target.os == OPERATING_SYSTEM_MACOS || options.target.os == OPERATING_SYSTEM_IOS) && options.target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        c_macro_define(arena, &first_macro, &last_macro, S8("__arm64__"), standard_replacement, 1, 0, 0, false, false);
+    }
     c_macro_define(arena, &first_macro, &last_macro, S8("__STDC_HOSTED__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
     CPreprocessTokenNode* first_output = 0;
     CPreprocessTokenNode* last_output = 0;
     u64 output_count = 0;
+    CPragmaPackStack* pack_stack = 0;
+    u32 pack_alignment = 0;
     u32 expansion_limit = options.expansion_limit ? options.expansion_limit : 65536;
     bool expansion_ok = true;
     CConditionalFrame* conditional = 0;
@@ -2579,6 +2652,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 bool is_endif = c_token_spelling_equal(directive, S8("endif"));
                 bool is_include = c_token_spelling_equal(directive, S8("include"));
                 bool is_include_next = c_token_spelling_equal(directive, S8("include_next"));
+                bool is_import = c_token_spelling_equal(directive, S8("import"));
                 bool is_line = is_line_marker || c_token_spelling_equal(directive, S8("line"));
                 bool is_pragma = c_token_spelling_equal(directive, S8("pragma"));
                 if (is_if || is_ifdef || is_ifndef)
@@ -2736,7 +2810,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                         token_index += 1;
                     }
                 }
-                else if (active && (is_include || is_include_next))
+                else if (active && (is_include || is_include_next || is_import))
                 {
                     CPreprocessTokenNode* first_include = 0;
                     CPreprocessTokenNode* last_include = 0;
@@ -2785,6 +2859,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                             {
                                 include_once |= string_equal(once_paths[once_index], include_path);
                             }
+                            if (is_import && !include_once)
+                            {
+                                once_paths[once_path_count++] = include_path;
+                            }
                             CLexResult include_lex = include_once ? (CLexResult){0} : c_lex(arena, include_source);
                             for (u64 index = 0; index < include_lex.diagnostic_count; index += 1)
                             {
@@ -2820,6 +2898,46 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                         if (!found)
                         {
                             once_paths[once_path_count++] = source_frame->path;
+                        }
+                    }
+                    else if (token_index + 3 <= line_end && c_token_spelling_equal(lex.tokens[token_index], S8("pack")) &&
+                             c_token_is_punctuator(lex.tokens[token_index + 1], S8("(")) && c_token_is_punctuator(lex.tokens[line_end - 1], S8(")")))
+                    {
+                        u32 argument_count = (u32)(line_end - token_index - 3);
+                        CToken* arguments = lex.tokens + token_index + 2;
+                        bool push = argument_count >= 1 && arguments[0].kind == C_TOKEN_IDENTIFIER && string_equal(arguments[0].spelling, S8("push"));
+                        bool pop = argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER && string_equal(arguments[0].spelling, S8("pop"));
+                        u32 value_index = push ? 2 : 0;
+                        bool comma = !push || (argument_count == 3 && c_token_is_punctuator(arguments[1], S8(",")));
+                        bool has_value = value_index < argument_count && arguments[value_index].kind == C_TOKEN_PREPROCESSING_NUMBER;
+                        u64 value = 0;
+                        bool valid_value = has_value && c_conditional_number(arguments[value_index].spelling, &value) && value <= UINT32_MAX && value &&
+                                           !(value & (value - 1));
+                        if (push && (argument_count == 1 || (comma && valid_value)))
+                        {
+                            CPragmaPackStack* entry = arena_allocate(arena, CPragmaPackStack, 1);
+                            *entry = (CPragmaPackStack){
+                                .previous = pack_stack,
+                                .alignment = pack_alignment,
+                            };
+                            pack_stack = entry;
+                            if (valid_value)
+                            {
+                                pack_alignment = (u32)value;
+                            }
+                        }
+                        else if (pop && pack_stack)
+                        {
+                            pack_alignment = pack_stack->alignment;
+                            pack_stack = pack_stack->previous;
+                        }
+                        else if (!argument_count)
+                        {
+                            pack_alignment = 0;
+                        }
+                        else if (argument_count == 1 && valid_value)
+                        {
+                            pack_alignment = (u32)value;
                         }
                     }
                 }
@@ -2894,6 +3012,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 logical_tokens[logical_token_count++] = lex.tokens[scan];
                 logical_tokens[logical_token_count - 1].location =
                     c_preprocess_logical_location(source_frame, logical_tokens[logical_token_count - 1].location);
+                logical_tokens[logical_token_count - 1].pack_alignment = pack_alignment;
             }
         }
         expansion_ok =
@@ -3067,7 +3186,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_alignment_specifiers(CParseResult* result, CPre
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_parenthesized_declaration_type(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32 declarator_start,
-                                                                   u32 name_index, u32 suffix_end);
+                                                                   u32 name_index, u32 suffix_end, bool has_name);
 BUSTER_GLOBAL_LOCAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index);
 
 BUSTER_GLOBAL_LOCAL bool c_parse_type_word(String8 spelling);
@@ -3530,6 +3649,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(Arena* arena, CPreprocessResult pre
             }
             u64 size = 0;
             u32 alignment = 1;
+            u32 pack_alignment = type.definition_start < preprocess.token_count ? preprocess.tokens[type.definition_start].pack_alignment : 0;
             bool fields_resolved = true;
             u64 bit_field_unit_bits = 0;
             u64 bit_field_used_bits = 0;
@@ -3551,6 +3671,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(Arena* arena, CPreprocessResult pre
                 }
                 u64 member_size = flexible ? 0 : sizes[layout_type.value];
                 u32 member_alignment = alignments[layout_type.value];
+                if (pack_alignment)
+                {
+                    member_alignment = BUSTER_MIN(member_alignment, pack_alignment);
+                }
                 bool alignment_resolved = true;
                 for (u32 specifier_index = 0; specifier_index < member.alignment_count; specifier_index += 1)
                 {
@@ -5812,7 +5936,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_aggregate_member_segment(CParseResult* result, 
                 return false;
             }
             name = preprocess.tokens[name_index];
-            declarator_type = c_parse_parenthesized_declaration_type(result, preprocess, declarator_type, declarator, name_index, declarator_end);
+            declarator_type = c_parse_parenthesized_declaration_type(result, preprocess, declarator_type, declarator, name_index, declarator_end, true);
             declarator = declarator_end;
         }
         if (!name.spelling.length && declarator < declarator_end && preprocess.tokens[declarator].kind == C_TOKEN_IDENTIFIER)
@@ -6314,6 +6438,8 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_core(CParseResult* result, CPrep
         aggregate->element_type = enum_underlying_type;
     }
     aggregate->member_start = result->member_count;
+    aggregate->definition_start = open + 1;
+    aggregate->definition_token_count = close - (open + 1);
     if (kind == C_TYPE_ENUM)
     {
         aggregate->enum_member_start = result->enum_member_count;
@@ -6610,7 +6736,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_core(CParseResult* result, CPrep
                     return C_TYPE_ID_INVALID;
                 }
                 name = preprocess.tokens[name_index];
-                member_type = c_parse_parenthesized_declaration_type(result, preprocess, member_type, member_declarator, name_index, token_index);
+                member_type = c_parse_parenthesized_declaration_type(result, preprocess, member_type, member_declarator, name_index, token_index, true);
                 member_declarator = token_index;
             }
             if (member_declarator == token_index && member_type.value < result->type_count &&
@@ -6852,12 +6978,31 @@ BUSTER_GLOBAL_LOCAL bool c_parse_parameter_segment(CParseResult* result, CPrepro
     if (declarator_start < end && c_token_is_punctuator(preprocess.tokens[declarator_start], S8("(")))
     {
         u32 name_index = 0;
-        if (!c_parse_parenthesized_declarator_name(preprocess, declarator_start, end, &name_index))
+        bool has_name = c_parse_parenthesized_declarator_name(preprocess, declarator_start, end, &name_index);
+        if (!has_name)
         {
-            return false;
+            u32 close_index = declarator_start + 1;
+            CType ignored = {0};
+            while (close_index < end && c_token_is_punctuator(preprocess.tokens[close_index], S8("*")))
+            {
+                close_index += 1;
+                while (close_index < end && preprocess.tokens[close_index].kind == C_TOKEN_IDENTIFIER &&
+                       c_parse_type_qualifier_word(preprocess.tokens[close_index].spelling, &ignored))
+                {
+                    close_index += 1;
+                }
+            }
+            if (close_index == declarator_start + 1 || close_index >= end || !c_token_is_punctuator(preprocess.tokens[close_index], S8(")")))
+            {
+                return false;
+            }
+            name_index = close_index;
         }
-        name = preprocess.tokens[name_index];
-        type = c_parse_parenthesized_declaration_type(result, preprocess, type, declarator_start, name_index, end);
+        if (has_name)
+        {
+            name = preprocess.tokens[name_index];
+        }
+        type = c_parse_parenthesized_declaration_type(result, preprocess, type, declarator_start, name_index, end, has_name);
         if (type.value == C_ID_UNDERLYING_INVALID)
         {
             return false;
@@ -6887,10 +7032,11 @@ BUSTER_GLOBAL_LOCAL bool c_parse_parameter_segment(CParseResult* result, CPrepro
 }
 
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_parenthesized_declaration_type(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32 declarator_start,
-                                                                   u32 name_index, u32 suffix_end)
+                                                                   u32 name_index, u32 suffix_end, bool has_name)
 {
-    if (!c_token_is_punctuator(preprocess.tokens[declarator_start], S8("(")) || name_index + 1 >= suffix_end ||
-        !c_token_is_punctuator(preprocess.tokens[name_index + 1], S8(")")))
+    u32 close_index = name_index + (has_name ? 1 : 0);
+    if (!c_token_is_punctuator(preprocess.tokens[declarator_start], S8("(")) || close_index >= suffix_end ||
+        !c_token_is_punctuator(preprocess.tokens[close_index], S8(")")))
     {
         return C_TYPE_ID_INVALID;
     }
@@ -6899,7 +7045,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_parenthesized_declaration_type(CParseResult*
     {
         return C_TYPE_ID_INVALID;
     }
-    u32 index = name_index + 2;
+    u32 index = close_index + 1;
     if (index < suffix_end && c_token_is_punctuator(preprocess.tokens[index], S8("(")))
     {
         u32 parameter_start = result->parameter_count;
@@ -7060,7 +7206,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_declaration_type(CParseResult* result, CPreproc
     if (parenthesized && declaration->kind != C_DECLARATION_FUNCTION)
     {
         u32 suffix_end = c_parse_declarator_segment_end(preprocess, declarator_start, end);
-        declaration->type = c_parse_parenthesized_declaration_type(result, preprocess, base, declarator_start, name_index, suffix_end);
+        declaration->type = c_parse_parenthesized_declaration_type(result, preprocess, base, declarator_start, name_index, suffix_end, true);
         return;
     }
     if (declarator_start != name_index)
@@ -7970,7 +8116,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(Arena* arena, CParseResult* 
             }
             name_index = close - 1;
             name = preprocess.tokens[name_index];
-            type = c_parse_parenthesized_declaration_type(result, preprocess, type, index, name_index, suffix_end);
+            type = c_parse_parenthesized_declaration_type(result, preprocess, type, index, name_index, suffix_end, true);
             index = suffix_end;
         }
         else
@@ -9605,6 +9751,7 @@ struct CIrPreparedCall
     bool builtin_va_arg;
     bool builtin_generic;
     bool indirect;
+    bool parenthesized_callee;
 };
 
 typedef struct CIrFunctionNameResolution CIrFunctionNameResolution;
@@ -12441,8 +12588,14 @@ BUSTER_GLOBAL_LOCAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, 
 
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_function_pointer(CIntegerIrBuilder* builder, CToken token, u32 declaration_index)
 {
-    if (declaration_index == UINT32_MAX || !builder->declaration_functions[declaration_index])
+    if (declaration_index == UINT32_MAX)
     {
+        builder->failure_message = string_format(builder->arena, S8("could not resolve function '{S8}'"), token.spelling);
+        return IR_VALUE_ID_INVALID;
+    }
+    if (!builder->declaration_functions[declaration_index])
+    {
+        builder->failure_message = string_format(builder->arena, S8("function '{S8}' was not emitted"), token.spelling);
         return IR_VALUE_ID_INVALID;
     }
     IrFunction* target = builder->declaration_functions[declaration_index];
@@ -13251,6 +13404,33 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
         bool indirect = indirect_function_type.value != C_ID_UNDERLYING_INVALID;
         u32 callee_start = index;
         bool indexed_callee = false;
+        bool parenthesized_callee = false;
+        if (c_token_is_punctuator(token, S8(")")) && c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("(")))
+        {
+            u32 depth = 1;
+            for (u32 cursor = index; cursor > start;)
+            {
+                cursor -= 1;
+                CToken current = builder->preprocess.tokens[cursor];
+                if (c_token_is_punctuator(current, S8(")")))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(current, S8("(")) && --depth == 0)
+                {
+                    callee_start = cursor;
+                    parenthesized_callee = true;
+                    break;
+                }
+            }
+        }
+        if (parenthesized_callee &&
+            (callee_start + 1 >= index || c_token_is_punctuator(builder->preprocess.tokens[callee_start + 1], S8("*")) ||
+             c_ir_type_name(builder, callee_start + 1, index).value != IR_ID_UNDERLYING_INVALID))
+        {
+            callee_start = index;
+            parenthesized_callee = false;
+        }
         if (c_token_is_punctuator(token, S8("]")))
         {
             u32 depth = 0;
@@ -13318,8 +13498,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
         {
             callee_start -= 2;
         }
-        indirect |= callee_start != index || indexed_callee;
-        if ((!indexed_callee && token.kind != C_TOKEN_IDENTIFIER) || !c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("(")) ||
+        indirect |= callee_start != index || indexed_callee || parenthesized_callee;
+        if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
+            !c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("(")) ||
             (!builtin_identity && !builtin_debugtrap && !builtin_unreachable && !builtin_strlen && !builtin_clear_cache && !builtin_va_start &&
              !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
              !builtin_math_link_name.length && builtin_unary == IR_UNARY_COUNT && !indirect &&
@@ -13359,6 +13540,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             .builtin_unary = builtin_unary,
             .indirect_function_type = indirect_function_type,
             .indirect = indirect,
+            .parenthesized_callee = parenthesized_callee,
         };
         if (parent_index != UINT32_MAX)
         {
@@ -14111,13 +14293,25 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
         CIrSignature signature = {0};
         if (selected->indirect)
         {
-            IrValueId callee_place = c_ir_emit_simple_place_expression(builder, selected->token_index, selected->open_index);
-            if (callee_place.value >= builder->function->value_count)
+            IrValueId callee = IR_VALUE_ID_INVALID;
+            if (selected->parenthesized_callee)
+            {
+                if (!c_ir_lower_expression(builder, selected->token_index + 1, selected->open_index - 1, &callee))
+                {
+                    builder->failure_token_index = selected->open_index;
+                    return false;
+                }
+            }
+            else
+            {
+                callee = c_ir_emit_simple_place_expression(builder, selected->token_index, selected->open_index);
+            }
+            if (callee.value >= builder->function->value_count)
             {
                 builder->failure_token_index = selected->open_index;
                 return false;
             }
-            IrTypeId pointer_type_id = builder->function->values[callee_place.value].canonical_type;
+            IrTypeId pointer_type_id = builder->function->values[callee.value].canonical_type;
             IrType* pointer_type = ir_type_from_id(&builder->program->types, pointer_type_id);
             IrType* function_type =
                 pointer_type && pointer_type->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, pointer_type->element_type) : 0;
@@ -14128,8 +14322,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 builder->failure_token_index = selected->open_index - 1;
                 return false;
             }
-            indirect_callee =
-                c_ir_emit_load_place(builder, callee_place, pointer_type_id, c_ir_source_range(builder->source, token.location, token.spelling.length));
+            indirect_callee = builder->function->values[callee.value].category == IR_VALUE_PLACE
+                                  ? c_ir_emit_load_place(builder, callee, pointer_type_id,
+                                                         c_ir_source_range(builder->source, token.location, token.spelling.length))
+                                  : callee;
             signature = (CIrSignature){
                 .parameter_types = function_type->parameter_types,
                 .return_type = function_type->return_type,
@@ -15527,7 +15723,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_assignment_operator(CToken token)
     return c_token_is_punctuator(token, S8("=")) || c_ir_compound_assignment_operator(token, &operation);
 }
 
-BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name_internal(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer)
 {
     if (start >= end)
     {
@@ -15711,6 +15907,101 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 star
         type = c_ir_add_pointer_type(builder->program, type);
         index += 1;
         while (index < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+               c_parse_type_qualifier_word(builder->preprocess.tokens[index].spelling, &qualifiers))
+        {
+            index += 1;
+        }
+    }
+    if (allow_function_pointer && index < end && c_token_is_punctuator(builder->preprocess.tokens[index], S8("(")))
+    {
+        u32 pointer_close = c_ir_matching_delimiter_cached(builder, index, end, S8("("), S8(")"));
+        u32 pointer_index = index + 1;
+        u32 pointer_count = 0;
+        while (pointer_index < pointer_close && c_token_is_punctuator(builder->preprocess.tokens[pointer_index], S8("*")))
+        {
+            pointer_count += 1;
+            pointer_index += 1;
+            while (pointer_index < pointer_close && builder->preprocess.tokens[pointer_index].kind == C_TOKEN_IDENTIFIER &&
+                   c_parse_type_qualifier_word(builder->preprocess.tokens[pointer_index].spelling, &qualifiers))
+            {
+                pointer_index += 1;
+            }
+        }
+        u32 parameters_open = pointer_close + 1;
+        u32 parameters_close = parameters_open < end ? c_ir_matching_delimiter_cached(builder, parameters_open, end, S8("("), S8(")")) : end;
+        if (pointer_count && pointer_index == pointer_close && parameters_open < end && parameters_close + 1 == end &&
+            c_token_is_punctuator(builder->preprocess.tokens[parameters_open], S8("(")))
+        {
+            IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, parameters_close - parameters_open);
+            u32 parameter_count = 0;
+            bool variadic = false;
+            u32 parameter_start = parameters_open + 1;
+            u32 depth = 0;
+            for (u32 parameter_end = parameter_start; parameter_end <= parameters_close; parameter_end += 1)
+            {
+                bool at_end = parameter_end == parameters_close;
+                CToken token = builder->preprocess.tokens[parameter_end];
+                if (!at_end && (c_token_is_punctuator(token, S8("(")) || c_token_is_punctuator(token, S8("["))))
+                {
+                    depth += 1;
+                }
+                else if (!at_end && (c_token_is_punctuator(token, S8(")")) || c_token_is_punctuator(token, S8("]"))) && depth)
+                {
+                    depth -= 1;
+                }
+                if (!at_end && (depth || !c_token_is_punctuator(token, S8(","))))
+                {
+                    continue;
+                }
+                u32 parameter_token_count = parameter_end - parameter_start;
+                if (at_end && !parameter_token_count && parameter_start == parameters_open + 1)
+                {
+                    break;
+                }
+                bool void_list = !parameter_count && at_end && parameter_token_count == 1 &&
+                                 string_equal(builder->preprocess.tokens[parameter_start].spelling, S8("void"));
+                if (!parameter_token_count || (void_list && parameter_start != parameters_open + 1))
+                {
+                    return IR_TYPE_ID_INVALID;
+                }
+                if (parameter_token_count == 1 && c_token_is_punctuator(builder->preprocess.tokens[parameter_start], S8("...")))
+                {
+                    variadic = true;
+                }
+                else if (!void_list)
+                {
+                    IrTypeId parameter = c_ir_type_name_internal(builder, parameter_start, parameter_end, false);
+                    if (parameter.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        return IR_TYPE_ID_INVALID;
+                    }
+                    parameter_types[parameter_count++] = parameter;
+                }
+                parameter_start = parameter_end + 1;
+            }
+            type = ir_program_add_type(builder->program, (IrType){
+                                                               .name = S8("C function"),
+                                                               .element_type = IR_TYPE_ID_INVALID,
+                                                               .return_type = type,
+                                                               .layout = {.size = 8, .alignment = 8, .resolved = true},
+                                                               .kind = IR_TYPE_FUNCTION,
+                                                               .parameter_types = parameter_types,
+                                                               .parameter_count = parameter_count,
+                                                               .calling_convention = IR_CALLING_CONVENTION_C,
+                                                               .is_variadic = variadic,
+                                                           });
+            while (pointer_count--)
+            {
+                type = c_ir_add_pointer_type(builder->program, type);
+            }
+            return type;
+        }
+    }
+    while (index < end && c_token_is_punctuator(builder->preprocess.tokens[index], S8("*")))
+    {
+        type = c_ir_add_pointer_type(builder->program, type);
+        index += 1;
+        while (index < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
                (string_equal(builder->preprocess.tokens[index].spelling, S8("const")) ||
                 string_equal(builder->preprocess.tokens[index].spelling, S8("volatile")) ||
                 string_equal(builder->preprocess.tokens[index].spelling, S8("restrict"))))
@@ -15746,6 +16037,11 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 star
         }
     }
     return index == end ? type : IR_TYPE_ID_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_type_name_internal(builder, start, end, true);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_compound_literal_element_count(CIntegerIrBuilder* builder, u32 open, u32 close, u64* count_out)
@@ -24955,6 +25251,50 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, directive_in_expression_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, directive_in_expression_parse.declaration_count == 1);
 
+    CPreprocessResult macro_introduced_defined = c_preprocess(arguments->arena,
+                                                              S8("#define IS_DRIVERKIT() defined(__DRIVERKIT_VERSION_MIN_REQUIRED)\n"
+                                                                 "#if !IS_DRIVERKIT()\n"
+                                                                 "int not_driverkit;\n"
+                                                                 "#endif\n"),
+                                                              (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, macro_introduced_defined.diagnostic_count == 0);
+    CParseResult macro_introduced_defined_parse = c_parse(arguments->arena, macro_introduced_defined);
+    BUSTER_TEST(arguments, macro_introduced_defined_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, macro_introduced_defined_parse.declaration_count == 1);
+
+    CPreprocessResult inactive_objective_c = c_preprocess(arguments->arena,
+                                                          S8("#if 0\n"
+                                                             "@class Protocol;\n"
+                                                             "#endif\n"
+                                                             "int plain_c;\n"),
+                                                          (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, inactive_objective_c.diagnostic_count == 0);
+    CParseResult inactive_objective_c_parse = c_parse(arguments->arena, inactive_objective_c);
+    BUSTER_TEST(arguments, inactive_objective_c_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, inactive_objective_c_parse.declaration_count == 1);
+
+    CPreprocessResult pragma_pack = c_preprocess(arguments->arena,
+                                                 S8("#pragma pack(push, 4)\n"
+                                                    "typedef struct { char byte; long long value; } Packed;\n"
+                                                    "#pragma pack(pop)\n"
+                                                    "typedef struct { char byte; long long value; } Natural;\n"
+                                                    "_Static_assert(sizeof(Packed) == 12, \"packed layout\");\n"
+                                                    "_Static_assert(sizeof(Natural) == 16, \"natural layout\");\n"),
+                                                 (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, pragma_pack.diagnostic_count == 0);
+    bool packed_alignment_seen = false;
+    bool natural_alignment_seen = false;
+    for (u32 token_index = 0; token_index < pragma_pack.token_count; token_index += 1)
+    {
+        CToken token = pragma_pack.tokens[token_index];
+        packed_alignment_seen |= string_equal(token.spelling, S8("Packed")) && token.pack_alignment == 4;
+        natural_alignment_seen |= string_equal(token.spelling, S8("Natural")) && token.pack_alignment == 0;
+    }
+    BUSTER_TEST(arguments, packed_alignment_seen);
+    BUSTER_TEST(arguments, natural_alignment_seen);
+    CParseResult pragma_pack_parse = c_parse(arguments->arena, pragma_pack);
+    BUSTER_TEST(arguments, pragma_pack_parse.diagnostic_count == 0);
+
     CPreprocessResult unmatched_conditional = c_preprocess(arguments->arena, S8("#if 1\nvalue\n"), (CPreprocessOptions){0});
     BUSTER_TEST(arguments, unmatched_conditional.diagnostic_count == 1);
     if (unmatched_conditional.diagnostic_count)
@@ -25039,6 +25379,34 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     CParseResult x64_windows_builtins_parse = c_parse(arguments->arena, x64_windows_builtins);
     BUSTER_TEST(arguments, x64_windows_builtins_parse.diagnostic_count == 0);
 
+    CPreprocessResult aarch64_macos_builtins = c_preprocess(arguments->arena,
+                                                            S8("#if defined(__APPLE__) && "
+                                                               "defined(__MACH__) && "
+                                                               "defined(__BUSTER__) && "
+                                                               "defined(__BUSTER_TARGET_MACOS__) && "
+                                                               "__APPLE_CC__ >= 6000 && "
+                                                               "defined(__arm64__) && "
+                                                               "__has_builtin(__is_target_arch) && "
+                                                               "__is_target_arch(arm64) && "
+                                                               "__is_target_vendor(apple) && "
+                                                               "__is_target_os(macos) && "
+                                                               "!__is_target_os(ios) && "
+                                                               "!__is_target_environment(simulator)\n"
+                                                               "int macos_target;\n"
+                                                               "#else\n"
+                                                               "_Static_assert(0, \"macOS target macros\");\n"
+                                                               "#endif\n"),
+                                                            (CPreprocessOptions){
+                                                                .target =
+                                                                    {
+                                                                        .cpu_arch = CPU_ARCH_AARCH64,
+                                                                        .os = OPERATING_SYSTEM_MACOS,
+                                                                    },
+                                                            });
+    BUSTER_TEST(arguments, aarch64_macos_builtins.diagnostic_count == 0);
+    CParseResult aarch64_macos_builtins_parse = c_parse(arguments->arena, aarch64_macos_builtins);
+    BUSTER_TEST(arguments, aarch64_macos_builtins_parse.diagnostic_count == 0);
+
     CPreprocessResult include = c_preprocess(arguments->arena,
                                              S8("#include \"basic_c_include.h\"\n"
                                                 "INCLUDED_VALUE\n"),
@@ -25048,6 +25416,16 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, include.diagnostic_count == 0);
     BUSTER_TEST(arguments, include.token_count == 2);
     c_test_preprocessed_token(arguments, &result, include, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("37"));
+    CPreprocessResult import = c_preprocess(arguments->arena,
+                                            S8("#import \"basic_c_include.h\"\n"
+                                               "#import \"basic_c_include.h\"\n"
+                                               "INCLUDED_VALUE\n"),
+                                            (CPreprocessOptions){
+                                                .source_path = S8("tests/import_test.c"),
+                                            });
+    BUSTER_TEST(arguments, import.diagnostic_count == 0);
+    BUSTER_TEST(arguments, import.token_count == 2);
+    c_test_preprocessed_token(arguments, &result, import, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("37"));
     CPreprocessResult builtin_headers = c_preprocess(arguments->arena,
                                                      S8("#include <stdbool.h>\n"
                                                         "#include <stdalign.h>\n"
@@ -26117,6 +26495,50 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, address_count == 1);
         BUSTER_TEST(arguments, dereference_count == 1);
         BUSTER_TEST(arguments, ir_validate_canonical_module(pointer_body_ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    CPreprocessResult function_pointer_tokens =
+        c_preprocess(scalar_arena,
+                     S8("extern int launch(void *(*)(void *), void *);\n"
+                        "static void *worker(void *argument) { return argument; }\n"
+                        "int run(void *argument) { return launch(worker, argument); }\n"
+                        "void *invoke(void *argument) { return ((void *(*)(void *))worker)(argument); }\n"),
+                     (CPreprocessOptions){0});
+    CParseResult function_pointer_parse = c_parse(scalar_arena, function_pointer_tokens);
+    CIRLowerResult function_pointer_ir =
+        c_lower_to_ir(scalar_arena, S8("function-pointer.c"), function_pointer_tokens, function_pointer_parse, lp64_target);
+    BUSTER_TEST(arguments, function_pointer_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, function_pointer_ir.diagnostic_count == 0);
+    if (function_pointer_ir.program)
+    {
+        IrModule* module = &function_pointer_ir.program->modules[0];
+        BUSTER_TEST(arguments, module->function_count == 4);
+        if (module->function_count == 4)
+        {
+            IrType* launch_type = ir_type_from_id(&function_pointer_ir.program->types, module->functions[0].canonical_type);
+            IrType* entry_pointer = launch_type ? ir_type_from_id(&function_pointer_ir.program->types, launch_type->parameter_types[0]) : 0;
+            IrType* entry_function =
+                entry_pointer && entry_pointer->kind == IR_TYPE_POINTER ? ir_type_from_id(&function_pointer_ir.program->types, entry_pointer->element_type) : 0;
+            BUSTER_TEST(arguments, entry_pointer && entry_pointer->kind == IR_TYPE_POINTER);
+            BUSTER_TEST(arguments, entry_function && entry_function->kind == IR_TYPE_FUNCTION);
+            BUSTER_TEST(arguments, module->functions[1].state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, module->functions[2].state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, module->functions[3].state == IR_FUNCTION_LOWERED);
+        }
+    }
+    CPreprocessResult typedef_shadow_tokens = c_preprocess(scalar_arena,
+                                                           S8("typedef void *id;\n"
+                                                              "typedef int TokenId;\n"
+                                                              "void tokenize(void) { TokenId id = 0; id = 1; }\n"),
+                                                           (CPreprocessOptions){0});
+    CParseResult typedef_shadow_parse = c_parse(scalar_arena, typedef_shadow_tokens);
+    CIRLowerResult typedef_shadow_ir = c_lower_to_ir(scalar_arena, S8("typedef-shadow.c"), typedef_shadow_tokens, typedef_shadow_parse, lp64_target);
+    BUSTER_TEST(arguments, typedef_shadow_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, typedef_shadow_ir.diagnostic_count == 0);
+    if (typedef_shadow_ir.program)
+    {
+        IrModule* module = &typedef_shadow_ir.program->modules[0];
+        BUSTER_TEST(arguments, module->function_count == 1);
+        BUSTER_TEST(arguments, module->function_count == 1 && module->functions[0].state == IR_FUNCTION_LOWERED);
     }
     CPreprocessResult array_type_tokens = c_preprocess(scalar_arena, S8("int sum_four(int values[4]);\n"), (CPreprocessOptions){0});
     CParseResult array_type_parse = c_parse(scalar_arena, array_type_tokens);
