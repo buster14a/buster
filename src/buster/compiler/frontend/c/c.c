@@ -5461,6 +5461,8 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_apply_vector_attribute(CParseResult* result,
                                     });
 }
 
+BUSTER_GLOBAL_LOCAL CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
+
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_qualified_typedef_type(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start)
 {
     CType qualifiers = {
@@ -5480,16 +5482,8 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_qualified_typedef_type(CParseResult* result,
     {
         return C_TYPE_ID_INVALID;
     }
-    CTypeId type = C_TYPE_ID_INVALID;
-    for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
-    {
-        CEntity* entity = &result->entities[entity_index];
-        if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, preprocess.tokens[typedef_index].spelling))
-        {
-            type = entity->type;
-            break;
-        }
-    }
+    CEntityId typedef_entity = c_parse_lookup_typedef_name(result, preprocess.tokens[typedef_index].spelling, true);
+    CTypeId type = typedef_entity.value < result->entity_count ? result->entities[typedef_entity.value].type : C_TYPE_ID_INVALID;
     if (type.value == C_ID_UNDERLYING_INVALID)
     {
         for (u32 declaration_index = result->declaration_count; declaration_index != 0; declaration_index -= 1)
@@ -7403,6 +7397,12 @@ BUSTER_GLOBAL_LOCAL void c_parse_scope_add_entity(CParseResult* result, CScopeId
     u32 bucket = (u32)hash & (result->entity_lookup_bucket_count - 1);
     added->next_in_lookup = result->entity_lookup_buckets[bucket];
     result->entity_lookup_buckets[bucket] = entity;
+    if (added->kind == C_ENTITY_TYPEDEF)
+    {
+        u32 typedef_bucket = (u32)c_macro_name_hash(added->name) & (result->entity_lookup_bucket_count - 1);
+        added->next_typedef_in_lookup = result->typedef_lookup_buckets[typedef_bucket];
+        result->typedef_lookup_buckets[typedef_bucket] = entity;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name)
@@ -7425,6 +7425,25 @@ BUSTER_GLOBAL_LOCAL CEntityId c_parse_lookup_entity(CParseResult* result, CScope
         scope = result->scopes[scope.value].parent;
     }
     return C_ENTITY_ID_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest)
+{
+    u32 bucket = (u32)c_macro_name_hash(name) & (result->entity_lookup_bucket_count - 1);
+    CEntityId found = C_ENTITY_ID_INVALID;
+    for (CEntityId entity = result->typedef_lookup_buckets[bucket]; entity.value != C_ID_UNDERLYING_INVALID;
+         entity = result->entities[entity.value].next_typedef_in_lookup)
+    {
+        if (string_equal(result->entities[entity.value].name, name))
+        {
+            found = entity;
+            if (!oldest)
+            {
+                break;
+            }
+        }
+    }
+    return found;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_parse_type_start(CParseResult* result, CScopeId scope, String8 spelling, CPreprocessDialect dialect)
@@ -7805,6 +7824,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(Arena* arena, CParseResult* 
         u32 index = segment_start;
         CTypeId type = c_parse_pointer_chain(result, preprocess, base, &index, suffix_end);
         CToken name = {0};
+        u32 name_index = UINT32_MAX;
         bool parenthesized = index < suffix_end && c_token_is_punctuator(preprocess.tokens[index], S8("("));
         if (parenthesized)
         {
@@ -7830,7 +7850,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(Arena* arena, CParseResult* 
             {
                 return false;
             }
-            u32 name_index = close - 1;
+            name_index = close - 1;
             name = preprocess.tokens[name_index];
             type = c_parse_parenthesized_declaration_type(result, preprocess, type, index, name_index, suffix_end);
             index = suffix_end;
@@ -7841,6 +7861,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(Arena* arena, CParseResult* 
             {
                 return false;
             }
+            name_index = index;
             name = preprocess.tokens[index++];
             index = c_parse_skip_attributes(preprocess, index, suffix_end);
             type = c_parse_array_suffixes(result, preprocess, type, &index, suffix_end);
@@ -7886,6 +7907,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(Arena* arena, CParseResult* 
             .scope = scope,
             .next_in_scope = C_ENTITY_ID_INVALID,
             .declaration_index = declaration_index,
+            .declaration_token_plus_one = name_index + 1,
             .alignment_start = alignment_start,
             .alignment_count = alignment_count,
             .kind = is_typedef ? C_ENTITY_TYPEDEF : C_ENTITY_LOCAL,
@@ -8421,6 +8443,8 @@ CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)
     }
     result.entity_lookup_buckets = arena_allocate(arena, CEntityId, result.entity_lookup_bucket_count);
     memset(result.entity_lookup_buckets, 0xff, sizeof(*result.entity_lookup_buckets) * result.entity_lookup_bucket_count);
+    result.typedef_lookup_buckets = arena_allocate(arena, CEntityId, result.entity_lookup_bucket_count);
+    memset(result.typedef_lookup_buckets, 0xff, sizeof(*result.typedef_lookup_buckets) * result.entity_lookup_bucket_count);
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     BUSTER_CHECK(result.scope_count < result.scope_capacity);
@@ -9725,29 +9749,10 @@ BUSTER_GLOBAL_LOCAL CEntityId c_ir_identifier_entity(CIntegerIrBuilder* builder,
 
 BUSTER_GLOBAL_LOCAL CEntityId c_ir_local_entity_at(CIntegerIrBuilder* builder, u32 token_index)
 {
-    if (token_index >= builder->preprocess.token_count)
-    {
-        return C_ENTITY_ID_INVALID;
-    }
     CEntityId bound = c_ir_identifier_entity(builder, token_index);
     if (bound.value < builder->parse.entity_count && builder->parse.entities[bound.value].kind == C_ENTITY_LOCAL)
     {
         return bound;
-    }
-    CToken name = builder->preprocess.tokens[token_index];
-    for (u32 entity_index = 0; entity_index < builder->parse.entity_count; entity_index += 1)
-    {
-        CEntity* entity = &builder->parse.entities[entity_index];
-        if (entity->kind == C_ENTITY_LOCAL && entity->declaration_index == builder->declaration_index && entity->location.offset == name.location.offset &&
-            entity->location.line == name.location.line && entity->location.column == name.location.column && string_equal(entity->name, name.spelling) &&
-            !c_ir_find_local_by_entity(builder, (CEntityId){
-                                                    .value = entity_index,
-                                                }))
-        {
-            return (CEntityId){
-                .value = entity_index,
-            };
-        }
     }
     return C_ENTITY_ID_INVALID;
 }
@@ -15325,19 +15330,10 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 star
     }
     CToken first = builder->preprocess.tokens[index];
     CEntityId entity = first.kind == C_TOKEN_IDENTIFIER ? c_ir_identifier_entity(builder, index) : C_ENTITY_ID_INVALID;
-    if (entity.value == C_ID_UNDERLYING_INVALID && first.kind == C_TOKEN_IDENTIFIER)
+    if (entity.value == C_ID_UNDERLYING_INVALID && first.kind == C_TOKEN_IDENTIFIER &&
+        !c_parse_type_word_for_dialect(first.spelling, builder->preprocess.dialect))
     {
-        for (u32 entity_index = builder->parse.entity_count; entity_index != 0; entity_index -= 1)
-        {
-            CEntity* candidate = &builder->parse.entities[entity_index - 1];
-            if (candidate->kind == C_ENTITY_TYPEDEF && string_equal(candidate->name, first.spelling))
-            {
-                entity = (CEntityId){
-                    .value = entity_index - 1,
-                };
-                break;
-            }
-        }
+        entity = c_parse_lookup_typedef_name(&builder->parse, first.spelling, false);
     }
     if (first.kind == C_TOKEN_IDENTIFIER &&
         (string_equal(first.spelling, S8("__typeof__")) ||
@@ -23781,69 +23777,67 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                           .is_thread_local = is_thread_local,
                                                                       });
     }
-    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    u32* token_function_declarations = arena_allocate(arena, u32, preprocess.token_count);
+    memset(token_function_declarations, 0xff, sizeof(*token_function_declarations) * preprocess.token_count);
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
-        CEntity* entity = parse.entities + entity_index;
-        if (entity->kind != C_ENTITY_FUNCTION || entity->type.value >= parse.type_count)
+        CDeclaration declaration = parse.declarations[declaration_index];
+        if (declaration.kind != C_DECLARATION_FUNCTION || !declaration.is_definition)
         {
             continue;
         }
-        bool referenced_outside_function = false;
-        for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
+        u64 body_end = (u64)declaration.body_start + declaration.body_token_count;
+        if (body_end > preprocess.token_count)
         {
-            CIdentifierUse use = parse.identifier_uses[use_index];
-            if (use.entity.value != entity_index)
+            body_end = preprocess.token_count;
+        }
+        for (u64 token_index = declaration.body_start; token_index < body_end; token_index += 1)
+        {
+            token_function_declarations[token_index] = declaration_index;
+        }
+    }
+    bool* function_referenced_outside = arena_allocate(arena, bool, parse.entity_count);
+    memset(function_referenced_outside, 0, sizeof(*function_referenced_outside) * parse.entity_count);
+    for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
+    {
+        CIdentifierUse use = parse.identifier_uses[use_index];
+        if (use.entity.value < parse.entity_count && parse.entities[use.entity.value].kind == C_ENTITY_FUNCTION &&
+            (use.token_index >= preprocess.token_count || token_function_declarations[use.token_index] == UINT32_MAX))
+        {
+            function_referenced_outside[use.entity.value] = true;
+        }
+    }
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration declaration = parse.declarations[declaration_index];
+        if (declaration.kind != C_DECLARATION_OBJECT)
+        {
+            continue;
+        }
+        u32 initializer_start = 0;
+        u32 initializer_end = 0;
+        if (!c_ir_declaration_initializer_range(preprocess, declaration, &initializer_start, &initializer_end))
+        {
+            continue;
+        }
+        for (u32 token_index = initializer_start; token_index < initializer_end; token_index += 1)
+        {
+            CToken token = preprocess.tokens[token_index];
+            if (token.kind != C_TOKEN_IDENTIFIER || !parse.scope_count)
             {
                 continue;
             }
-            bool in_function = false;
-            for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+            CEntityId referenced = c_parse_lookup_entity(&parse, (CScopeId){.value = 0}, token.spelling);
+            if (referenced.value < parse.entity_count && parse.entities[referenced.value].kind == C_ENTITY_FUNCTION)
             {
-                CDeclaration declaration = parse.declarations[declaration_index];
-                if (declaration.kind == C_DECLARATION_FUNCTION && declaration.body_token_count && use.token_index >= declaration.body_start &&
-                    use.token_index < declaration.body_start + declaration.body_token_count)
-                {
-                    in_function = true;
-                    break;
-                }
-            }
-            if (!in_function)
-            {
-                referenced_outside_function = true;
-                break;
+                function_referenced_outside[referenced.value] = true;
             }
         }
-        if (!referenced_outside_function)
-        {
-            for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
-            {
-                CDeclaration declaration = parse.declarations[declaration_index];
-                if (declaration.kind != C_DECLARATION_OBJECT)
-                {
-                    continue;
-                }
-                u32 initializer_start = 0;
-                u32 initializer_end = 0;
-                if (!c_ir_declaration_initializer_range(preprocess, declaration, &initializer_start, &initializer_end))
-                {
-                    continue;
-                }
-                for (u32 token_index = initializer_start; token_index < initializer_end; token_index += 1)
-                {
-                    CToken token = preprocess.tokens[token_index];
-                    if (token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, entity->name))
-                    {
-                        referenced_outside_function = true;
-                        break;
-                    }
-                }
-                if (referenced_outside_function)
-                {
-                    break;
-                }
-            }
-        }
-        if (!referenced_outside_function)
+    }
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = parse.entities + entity_index;
+        if (entity->kind != C_ENTITY_FUNCTION || entity->type.value >= parse.type_count || !function_referenced_outside[entity_index])
         {
             continue;
         }
@@ -24096,6 +24090,16 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             token_entities[use.token_index] = use.entity;
         }
     }
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = &parse.entities[entity_index];
+        if (entity->declaration_token_plus_one && entity->declaration_token_plus_one <= preprocess.token_count)
+        {
+            token_entities[entity->declaration_token_plus_one - 1] = (CEntityId){
+                .value = entity_index,
+            };
+        }
+    }
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -24106,56 +24110,71 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     }
     bool* function_needed = arena_allocate(arena, bool, parse.declaration_count);
     memset(function_needed, 0, sizeof(*function_needed) * parse.declaration_count);
+    u32* entity_function_declarations = arena_allocate(arena, u32, parse.entity_count);
+    memset(entity_function_declarations, 0xff, sizeof(*entity_function_declarations) * parse.entity_count);
+    u32* function_dependency_heads = arena_allocate(arena, u32, parse.declaration_count);
+    memset(function_dependency_heads, 0xff, sizeof(*function_dependency_heads) * parse.declaration_count);
+    u32* function_dependency_next = arena_allocate(arena, u32, parse.identifier_use_count);
+    u32* function_dependency_targets = arena_allocate(arena, u32, parse.identifier_use_count);
+    u32 function_dependency_count = 0;
+    u32* function_worklist = arena_allocate(arena, u32, parse.declaration_count);
+    u32 function_worklist_count = 0;
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
-        bool internal =
-            declaration.kind == C_DECLARATION_FUNCTION && declaration.is_definition && c_declaration_has_token(preprocess, declaration, S8("static"));
-        function_needed[declaration_index] = declaration.kind == C_DECLARATION_FUNCTION && declaration.is_definition && !internal;
-    }
-    for (u32 pass = 0; pass < parse.declaration_count; pass += 1)
-    {
-        bool progress = false;
-        for (u32 candidate_index = 0; candidate_index < parse.declaration_count; candidate_index += 1)
+        if (declaration.kind != C_DECLARATION_FUNCTION || !declaration.is_definition)
         {
-            CDeclaration candidate = parse.declarations[candidate_index];
-            if (function_needed[candidate_index] || candidate.kind != C_DECLARATION_FUNCTION || !candidate.is_definition ||
-                candidate.entity.value == C_ID_UNDERLYING_INVALID)
-            {
-                continue;
-            }
-            for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
-            {
-                CIdentifierUse use = parse.identifier_uses[use_index];
-                if (use.entity.value != candidate.entity.value)
-                {
-                    continue;
-                }
-                bool owner_found = false;
-                bool owner_needed = false;
-                for (u32 owner_index = 0; owner_index < parse.declaration_count; owner_index += 1)
-                {
-                    CDeclaration owner = parse.declarations[owner_index];
-                    if (owner.kind != C_DECLARATION_FUNCTION || !owner.body_token_count || use.token_index < owner.body_start ||
-                        use.token_index >= owner.body_start + owner.body_token_count)
-                    {
-                        continue;
-                    }
-                    owner_found = true;
-                    owner_needed = function_needed[owner_index];
-                    break;
-                }
-                if (!owner_found || owner_needed)
-                {
-                    function_needed[candidate_index] = true;
-                    progress = true;
-                    break;
-                }
-            }
+            continue;
         }
-        if (!progress)
+        if (declaration.entity.value < parse.entity_count)
         {
-            break;
+            entity_function_declarations[declaration.entity.value] = declaration_index;
+        }
+        bool internal = c_declaration_has_token(preprocess, declaration, S8("static"));
+        if (!internal)
+        {
+            function_needed[declaration_index] = true;
+            function_worklist[function_worklist_count++] = declaration_index;
+        }
+    }
+    for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
+    {
+        CIdentifierUse use = parse.identifier_uses[use_index];
+        if (use.entity.value >= parse.entity_count)
+        {
+            continue;
+        }
+        u32 candidate_index = entity_function_declarations[use.entity.value];
+        if (candidate_index == UINT32_MAX)
+        {
+            continue;
+        }
+        u32 owner_index = use.token_index < preprocess.token_count ? token_function_declarations[use.token_index] : UINT32_MAX;
+        if (owner_index == UINT32_MAX)
+        {
+            if (!function_needed[candidate_index])
+            {
+                function_needed[candidate_index] = true;
+                function_worklist[function_worklist_count++] = candidate_index;
+            }
+            continue;
+        }
+        function_dependency_targets[function_dependency_count] = candidate_index;
+        function_dependency_next[function_dependency_count] = function_dependency_heads[owner_index];
+        function_dependency_heads[owner_index] = function_dependency_count++;
+    }
+    while (function_worklist_count)
+    {
+        u32 owner_index = function_worklist[--function_worklist_count];
+        for (u32 dependency_index = function_dependency_heads[owner_index]; dependency_index != UINT32_MAX;
+             dependency_index = function_dependency_next[dependency_index])
+        {
+            u32 candidate_index = function_dependency_targets[dependency_index];
+            if (!function_needed[candidate_index])
+            {
+                function_needed[candidate_index] = true;
+                function_worklist[function_worklist_count++] = candidate_index;
+            }
         }
     }
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)

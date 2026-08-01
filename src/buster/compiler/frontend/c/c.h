@@ -306,7 +306,9 @@ struct CEntity
     CScopeId scope;
     CEntityId next_in_scope;
     CEntityId next_in_lookup;
+    CEntityId next_typedef_in_lookup;
     u32 declaration_index;
+    u32 declaration_token_plus_one;
     u32 alignment_start;
     u32 alignment_count;
     CEntityKind kind;
@@ -382,6 +384,7 @@ struct CParseResult
     CEntity* entities;
     CScope* scopes;
     CEntityId* entity_lookup_buckets;
+    CEntityId* typedef_lookup_buckets;
     CIdentifierUse* identifier_uses;
     CDiagnostic* diagnostics;
     u32 declaration_count;

@@ -7298,26 +7298,31 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_vector_operation(CodegenBuffer* b
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_function_only_direct_calls(IrFunction* function, IrValueId value, IrSymbolId symbol)
+BUSTER_GLOBAL_LOCAL u8* codegen_canonical_direct_call_uses(Arena* arena, IrFunction* function)
 {
-    bool used = false;
+    u8* uses = arena_allocate(arena, u8, function->value_count);
+    memset(uses, 0, sizeof(*uses) * function->value_count);
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
         IrInstruction* instruction = function->instructions + instruction_index;
         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
         {
-            if (instruction->operands[operand_index].value != value.value)
+            IrValueId operand = instruction->operands[operand_index];
+            if (operand.value >= function->value_count || uses[operand.value] == 2)
             {
                 continue;
             }
-            used = true;
-            if (instruction->opcode != IR_OPCODE_CALL || operand_index != 0 || instruction->symbol.value != symbol.value)
+            bool direct = instruction->opcode == IR_OPCODE_CALL && operand_index == 0;
+            if (direct)
             {
-                return false;
+                IrInstructionId definition = function->values[operand.value].definition;
+                IrInstruction* reference = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+                direct = reference && reference->opcode == IR_OPCODE_FUNCTION && reference->symbol.value == instruction->symbol.value;
             }
+            uses[operand.value] = direct ? 1 : 2;
         }
     }
-    return used;
+    return uses;
 }
 
 CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target)
@@ -7583,6 +7588,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             return result;
         }
         u32* value_offsets = arena_allocate(arena, u32, function->value_count);
+        u8* direct_call_uses = codegen_canonical_direct_call_uses(arena, function);
         u64 value_bytes = 0;
         for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
@@ -8201,8 +8207,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     }
                     else if (instruction->opcode == IR_OPCODE_GLOBAL || instruction->opcode == IR_OPCODE_FUNCTION)
                     {
-                        if (instruction->opcode == IR_OPCODE_FUNCTION &&
-                            codegen_canonical_function_only_direct_calls(function, instruction->result, instruction->symbol))
+                        if (instruction->opcode == IR_OPCODE_FUNCTION && direct_call_uses[instruction->result.value] == 1)
                         {
                             codegen_emit_u8(&buffer, 0x31);
                             codegen_emit_u8(&buffer, 0xc0);
@@ -10978,8 +10983,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     }
                     else if (instruction->opcode == IR_OPCODE_GLOBAL || instruction->opcode == IR_OPCODE_FUNCTION)
                     {
-                        if (instruction->opcode == IR_OPCODE_FUNCTION &&
-                            codegen_canonical_function_only_direct_calls(function, instruction->result, instruction->symbol))
+                        if (instruction->opcode == IR_OPCODE_FUNCTION && direct_call_uses[instruction->result.value] == 1)
                         {
                             codegen_emit_u32(&buffer, 0xaa1f03e9);
                             C_A64_STORE(9);
