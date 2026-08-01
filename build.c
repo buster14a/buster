@@ -865,9 +865,9 @@ BUSTER_GLOBAL_LOCAL String8 cmake_build_config(CmakeBuildOptions options)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceString8 targets, SliceString8 native_arguments, CmakeBuildOptions options)
+BUSTER_GLOBAL_LOCAL void build_run_add(Arena* arena, BuildStep* step, String8 build_directory, SliceString8 targets, SliceString8 native_arguments,
+                                       CmakeBuildOptions options)
 {
-    BuildStep* step = step_add(arena);
     GenericRun r = generic_tool_run_add_start(arena, step, &cmake_path, S8("cmake"));
     OsArgumentBuilder* b = &r.builder;
     os_argument_builder_append(b, S8("--build"));
@@ -910,6 +910,12 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
     }
 
     generic_tool_run_add_end(r);
+}
+
+BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceString8 targets, SliceString8 native_arguments, CmakeBuildOptions options)
+{
+    BuildStep* step = step_add(arena);
+    build_run_add(arena, step, build_directory, targets, native_arguments, options);
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* data)
@@ -3004,6 +3010,18 @@ BUSTER_GLOBAL_LOCAL void time_trace_summary_action_add(Arena* arena, TimeTraceSu
 
 BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
+    typedef struct TestCombination TestCombination;
+    struct TestCombination
+    {
+        String8 build_directory;
+        CmakeBuildOptions options;
+        BuildCompiler compiler;
+        u32 sanitize : 1;
+        u32 run_app_tests : 1;
+    };
+
+    TestCombination combinations[BUILD_COMPILER_COUNT * 4] = {0};
+    u64 combination_count = 0;
     BuildStep* generate_step = step_add(arena);
     bool cmake_profile = environment_flag_is_on(S8("BUSTER_CMAKE_PROFILE"));
     u64 cmake_profile_summary_limit = environment_positive_u64_or(S8("BUSTER_CMAKE_PROFILE_SUMMARY_LIMIT"), 15);
@@ -3025,75 +3043,109 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
             continue;
         }
 
-        bool fuzz_available = compiler == BUILD_COMPILER_CLANG && !BUSTER_APPLE;
+        bool fuzz_supported = compiler == BUILD_COMPILER_CLANG && !BUSTER_APPLE;
         bool support_sanitize = compiler == BUILD_COMPILER_CLANG;
         bool support_optimize = compiler != BUILD_COMPILER_TCC;
 
         for (u32 sanitize = 0; sanitize < 1 + support_sanitize; sanitize += 1)
         {
-            String8 build_directory_parts[] = {
-                build_prefix,
-                S8("ci_"),
-                ci ? S8("on") : S8("off"),
-                S8("-cc_"),
-                build_compilers[compiler],
-                S8("-sanitize_"),
-                sanitize ? S8("on") : S8("off"),
-                S8("-fuzz_available_"),
-                fuzz_available ? S8("on") : S8("off"),
-            };
-
-            String8 build_directory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_directory_parts), true);
-            String8 cmake_profile_path = path_join(arena, build_directory, S8("cmake-profile.json"));
-
-            Generate generate = {
-                .build_directory = build_directory,
-                .cmake_profile = cmake_profile_path,
-                .cmake_profile_summary_limit = cmake_profile_summary_limit,
-                .compiler = compiler,
-                .fuzz_available = fuzz_available,
-                .sanitize = sanitize,
-                .ci = ci,
-                .optimize = false,
-                .optimize_set = true,
-                .link_libc = true,
-                .time_trace = false,
-                .lto = false,
-                .include_tests = true,
-                .check_optional_warnings = false,
-                .developer_targets = false,
-                .profile_cmake = false,
-                .cmake_profile_set = cmake_profile,
-                .cmake_profile_summary = cmake_profile,
-                .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
-            };
-
-            generate_add(arena, generate_step, generate);
-            if (cmake_profile)
+            u32 tree_count = fuzz_supported ? 1 + support_optimize : 1;
+            for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
             {
-                cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
-            }
+                u32 first_optimize = fuzz_supported ? tree_i : 0;
+                u32 optimize_count = fuzz_supported ? 1 : 1 + support_optimize;
+                bool fuzz_available = fuzz_supported && ((sanitize && !first_optimize) || (!sanitize && first_optimize));
+                String8 build_directory_parts[] = {
+                    build_prefix,
+                    S8("ci_"),
+                    ci ? S8("on") : S8("off"),
+                    S8("-cc_"),
+                    build_compilers[compiler],
+                    S8("-sanitize_"),
+                    sanitize ? S8("on") : S8("off"),
+                    S8("-fuzz_available_"),
+                    fuzz_available ? S8("on") : S8("off"),
+                    S8("-configs_"),
+                    fuzz_supported ? (first_optimize ? S8("Release") : S8("Debug")) : S8("shared"),
+                };
 
-            for (u32 optimize = 0; optimize < 1 + support_optimize; optimize += 1)
-            {
-                CmakeBuildOptions options = {
-                    .optimize = optimize,
+                String8 build_directory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_directory_parts), true);
+                String8 cmake_profile_path = path_join(arena, build_directory, S8("cmake-profile.json"));
+
+                Generate generate = {
+                    .build_directory = build_directory,
+                    .cmake_profile = cmake_profile_path,
+                    .cmake_profile_summary_limit = cmake_profile_summary_limit,
+                    .compiler = compiler,
+                    .fuzz_available = fuzz_available,
+                    .sanitize = sanitize,
+                    .ci = ci,
+                    .optimize = first_optimize,
                     .optimize_set = true,
-                    .quiet = base_options.quiet,
+                    .link_libc = true,
+                    .time_trace = false,
+                    .lto = false,
+                    .include_tests = true,
+                    .check_optional_warnings = false,
+                    .developer_targets = false,
+                    .profile_cmake = false,
+                    .cmake_profile_set = cmake_profile,
+                    .cmake_profile_summary = cmake_profile,
+                    .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
                 };
 
-                build_add(arena, build_directory, (SliceString8){0}, (SliceString8){0}, options);
-
-                String8 test_targets[] = {
-                    S8("test_all"),
-                };
-                build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(test_targets), (SliceString8){0}, options);
-
-                if (compiler == BUILD_COMPILER_CLANG && !sanitize && optimize)
+                generate_add(arena, generate_step, generate);
+                if (cmake_profile)
                 {
-                    clang_analyze_command_add(arena, build_directory, options);
+                    cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
+                }
+
+                for (u32 optimize_i = 0; optimize_i < optimize_count; optimize_i += 1)
+                {
+                    u32 optimize = first_optimize + optimize_i;
+                    combinations[combination_count++] = (TestCombination){
+                        .build_directory = build_directory,
+                        .options =
+                            {
+                                .optimize = optimize,
+                                .optimize_set = true,
+                                .quiet = base_options.quiet,
+                            },
+                        .compiler = compiler,
+                        .sanitize = sanitize,
+                        .run_app_tests = (sanitize && !optimize) || (!sanitize && optimize),
+                    };
                 }
             }
+        }
+    }
+
+    BuildStep* release_build_step = step_add(arena);
+    for (u64 combination_i = 0; combination_i < combination_count; combination_i += 1)
+    {
+        TestCombination combination = combinations[combination_i];
+        if (!combination.sanitize && combination.options.optimize)
+        {
+            build_run_add(arena, release_build_step, combination.build_directory, (SliceString8){0}, (SliceString8){0}, combination.options);
+        }
+    }
+
+    for (u64 combination_i = 0; combination_i < combination_count; combination_i += 1)
+    {
+        TestCombination combination = combinations[combination_i];
+        if (combination.sanitize || !combination.options.optimize)
+        {
+            build_add(arena, combination.build_directory, (SliceString8){0}, (SliceString8){0}, combination.options);
+        }
+
+        String8 test_targets[] = {
+            combination.run_app_tests ? S8("test_all") : S8("test_units"),
+        };
+        build_add(arena, combination.build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(test_targets), (SliceString8){0}, combination.options);
+
+        if (combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize)
+        {
+            clang_analyze_command_add(arena, combination.build_directory, combination.options);
         }
     }
 }

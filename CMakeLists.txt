@@ -1334,6 +1334,9 @@ function(executable_add name is_buster_program main_file)
         target_compile_options(${name} PRIVATE ${GNU_FAMILY_OPTIONS})
         target_compile_options(${name} PRIVATE ${GNU_FAMILY_WARNINGS})
         target_compile_options(${name} PRIVATE ${GNU_FAMILY_DISABLE_WARNINGS})
+        if (BUSTER_CI)
+            target_compile_options(${name} PRIVATE "$<$<CONFIG:Release>:-O2>")
+        endif()
     endif()
 
     if (C_COMPILER_CLANG_FAMILY)
@@ -1744,6 +1747,15 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
         VERBATIM
     )
 else()
+    add_custom_target(test_units
+        COMMAND
+        ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+        "$<TARGET_FILE:ide>" ${UNIT_TEST_ARGUMENTS}
+        DEPENDS ide
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Run unit tests"
+        VERBATIM
+    )
     if (BUSTER_CI)
         add_custom_target(test_all
             COMMAND

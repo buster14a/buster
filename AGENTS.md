@@ -73,11 +73,15 @@ shell, CMake, and utility subprocesses.
 `build/build` commands: `generate`, `build` (default), `clang_analyze`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `test_self_host`, `test_all_combinations`, `test_all_combinations_ci`.
-The combination matrix generates one multi-config build tree per compiler and
-sanitizer mode, then builds Debug and Release from that shared tree. Sanitizer
-rows are Clang-only; GCC and Zig still cover unsanitized Debug and Release,
-while TCC covers Debug. Clang static analysis runs only against unsanitized
-Release.
+The combination matrix shares one multi-config build tree across Debug and
+Release when their configure-time policy matches. Clang's fuzz-enabled Debug
+sanitized and Release non-sanitized configurations use dedicated trees;
+sanitizer rows are otherwise Clang-only. GCC and Zig cover unsanitized Debug
+and Release, while TCC covers Debug. Independent non-sanitized Release unity
+compiles run in parallel. CI Release builds use `-O2`; local Release builds
+retain the toolchain default. Clang static analysis runs only against
+unsanitized Release. GUI/GPU smoke tests run for Debug sanitized and Release
+non-sanitized configurations; other combinations run unit tests only.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|tcc|zig|cl>` are accepted **only by
 `generate`**; `build` rejects them with an explicit diagnostic.
