@@ -49,8 +49,17 @@ struct NativeExecutableLinkOptions
 {
     String8 output_path;
     String8 entry_symbol;
+    String8 sysroot;
+    String8* library_paths;
+    String8* framework_paths;
+    String8* frameworks;
+    String8* linker_arguments;
     NativeDynamicLibrary* dynamic_libraries;
     String8* runtime_exported_symbols;
+    u32 library_path_count;
+    u32 framework_path_count;
+    u32 framework_count;
+    u32 linker_argument_count;
     u32 dynamic_library_count;
     u32 runtime_exported_symbol_count;
     bool runtime_exports_known;

@@ -2386,8 +2386,13 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     {
         options.dialect = C_PREPROCESS_DIALECT_GNU17;
     }
+    if (!target_data_layout_is_valid(options.data_layout))
+    {
+        options.data_layout = target_data_layout(options.target);
+    }
     CPreprocessResult result = {
         .target = options.target,
+        .data_layout = options.data_layout,
         .dialect = options.dialect,
     };
     if (!arena)
@@ -2511,9 +2516,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         c_macro_define(arena, &first_macro, &last_macro, string_from_pointer((char8*)constant_macro_names[macro_index]), constant_parameter_replacement, 1,
                        constant_parameters, 1, true, false);
     }
+    TargetDataLayout layout = options.data_layout;
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
-    String8 signed_pointer_type = windows_target ? S8("long long") : S8("long");
-    String8 unsigned_pointer_type = windows_target ? S8("unsigned long long") : S8("unsigned long");
+    String8 signed_pointer_type = layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
+    String8 unsigned_pointer_type = layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
 #define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, &first_macro, &last_macro, S8(name), (replacement))
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
     C_DEFINE_TYPE_MACRO("__PTRDIFF_TYPE__", signed_pointer_type);
@@ -2535,15 +2541,31 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__CHAR32_TYPE__", S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__builtin_va_list", S8("void *"));
-    C_DEFINE_TYPE_MACRO("__SIZEOF_POINTER__", S8("8"));
-    C_DEFINE_TYPE_MACRO("__POINTER_WIDTH__", S8("64"));
-    C_DEFINE_TYPE_MACRO("__SIZE_WIDTH__", S8("64"));
-    C_DEFINE_TYPE_MACRO("__INTPTR_WIDTH__", S8("64"));
-    C_DEFINE_TYPE_MACRO("__LONG_WIDTH__", windows_target ? S8("32") : S8("64"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_POINTER__", string_format(arena, S8("{u32}"), layout.pointer.size));
+    C_DEFINE_TYPE_MACRO("__POINTER_WIDTH__", string_format(arena, S8("{u32}"), layout.pointer.bit_width));
+    C_DEFINE_TYPE_MACRO("__SIZE_WIDTH__", string_format(arena, S8("{u32}"), layout.pointer.bit_width));
+    C_DEFINE_TYPE_MACRO("__INTPTR_WIDTH__", string_format(arena, S8("{u32}"), layout.pointer.bit_width));
+    C_DEFINE_TYPE_MACRO("__INT_WIDTH__", string_format(arena, S8("{u32}"), layout.integer.bit_width));
+    C_DEFINE_TYPE_MACRO("__LONG_WIDTH__", string_format(arena, S8("{u32}"), layout.long_integer.bit_width));
+    C_DEFINE_TYPE_MACRO("__LONG_LONG_WIDTH__", string_format(arena, S8("{u32}"), layout.long_long_integer.bit_width));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_SHORT__", string_format(arena, S8("{u32}"), layout.short_integer.size));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_INT__", string_format(arena, S8("{u32}"), layout.integer.size));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_LONG__", string_format(arena, S8("{u32}"), layout.long_integer.size));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_LONG_LONG__", string_format(arena, S8("{u32}"), layout.long_long_integer.size));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_INT128__", string_format(arena, S8("{u32}"), layout.integer128.size));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_FLOAT__", string_format(arena, S8("{u32}"), layout.float_type.size));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_DOUBLE__", string_format(arena, S8("{u32}"), layout.double_type.size));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_LONG_DOUBLE__", string_format(arena, S8("{u32}"), layout.long_double_type.size));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
+    C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
     C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", windows_target ? S8("16") : S8("32"));
     C_DEFINE_TYPE_MACRO("__ORDER_LITTLE_ENDIAN__", S8("1234"));
     C_DEFINE_TYPE_MACRO("__ORDER_BIG_ENDIAN__", S8("4321"));
-    C_DEFINE_TYPE_MACRO("__BYTE_ORDER__", S8("__ORDER_LITTLE_ENDIAN__"));
+    C_DEFINE_TYPE_MACRO("__BYTE_ORDER__", layout.endianness == TARGET_ENDIAN_LITTLE ? S8("__ORDER_LITTLE_ENDIAN__") : S8("__ORDER_BIG_ENDIAN__"));
+    if (!layout.plain_char_is_signed)
+    {
+        C_DEFINE_TYPE_MACRO("__CHAR_UNSIGNED__", S8("1"));
+    }
     if (windows_target)
     {
         C_DEFINE_TYPE_MACRO("__int8", S8("signed char"));
@@ -3376,52 +3398,88 @@ BUSTER_GLOBAL_LOCAL void c_parse_validate_flexible_array_members(CParseResult* r
 
 BUSTER_GLOBAL_LOCAL bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out)
 {
+    TargetDataLayout layout = target_data_layout(target);
     u64 size = 0;
     u32 alignment = 0;
-    bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
     switch (kind)
     {
     case C_TYPE_BOOL:
+        size = layout.boolean.size;
+        alignment = layout.boolean.alignment;
+        break;
     case C_TYPE_CHAR:
+        size = layout.plain_char.size;
+        alignment = layout.plain_char.alignment;
+        break;
     case C_TYPE_SIGNED_CHAR:
+        size = layout.signed_char.size;
+        alignment = layout.signed_char.alignment;
+        break;
     case C_TYPE_UNSIGNED_CHAR:
-        size = 1;
-        alignment = 1;
+        size = layout.unsigned_char.size;
+        alignment = layout.unsigned_char.alignment;
         break;
     case C_TYPE_SHORT:
+        size = layout.short_integer.size;
+        alignment = layout.short_integer.alignment;
+        break;
     case C_TYPE_UNSIGNED_SHORT:
-        size = 2;
-        alignment = 2;
+        size = layout.unsigned_short_integer.size;
+        alignment = layout.unsigned_short_integer.alignment;
         break;
     case C_TYPE_INT:
+        size = layout.integer.size;
+        alignment = layout.integer.alignment;
+        break;
     case C_TYPE_UNSIGNED_INT:
+        size = layout.unsigned_integer.size;
+        alignment = layout.unsigned_integer.alignment;
+        break;
     case C_TYPE_FLOAT:
-        size = 4;
-        alignment = 4;
+        size = kind == C_TYPE_FLOAT ? layout.float_type.size : layout.unsigned_integer.size;
+        alignment = kind == C_TYPE_FLOAT ? layout.float_type.alignment : layout.unsigned_integer.alignment;
         break;
     case C_TYPE_LONG:
+        size = layout.long_integer.size;
+        alignment = layout.long_integer.alignment;
+        break;
     case C_TYPE_UNSIGNED_LONG:
-        size = windows ? 4 : 8;
-        alignment = (u32)size;
+        size = layout.unsigned_long_integer.size;
+        alignment = layout.unsigned_long_integer.alignment;
         break;
     case C_TYPE_LONG_LONG:
+        size = layout.long_long_integer.size;
+        alignment = layout.long_long_integer.alignment;
+        break;
     case C_TYPE_UNSIGNED_LONG_LONG:
+        size = layout.unsigned_long_long_integer.size;
+        alignment = layout.unsigned_long_long_integer.alignment;
+        break;
     case C_TYPE_DOUBLE:
+        size = layout.double_type.size;
+        alignment = layout.double_type.alignment;
+        break;
     case C_TYPE_NULLPTR:
     case C_TYPE_POINTER:
     case C_TYPE_FUNCTION:
-        size = 8;
-        alignment = 8;
+        size = layout.pointer.size;
+        alignment = layout.pointer.alignment;
         break;
     case C_TYPE_LONG_DOUBLE:
+        size = layout.long_double_type.size;
+        alignment = layout.long_double_type.alignment;
+        break;
     case C_TYPE_INT128:
+        size = layout.integer128.size;
+        alignment = layout.integer128.alignment;
+        break;
     case C_TYPE_UNSIGNED_INT128:
-        size = kind == C_TYPE_LONG_DOUBLE && windows ? 8 : 16;
-        alignment = (u32)size;
+        size = layout.unsigned_integer128.size;
+        alignment = layout.unsigned_integer128.alignment;
         break;
     case C_TYPE_VA_LIST:
-        size = 32;
-        alignment = 8;
+        size = layout.va_list.size;
+        alignment = layout.va_list.alignment;
         break;
     case C_TYPE_VOID:
     case C_TYPE_ARRAY:
@@ -3579,8 +3637,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(Arena* arena, CPreprocessResult pre
                         bool operand_resolved = operand_type.value != C_ID_UNDERLYING_INVALID && operand_type_index == close;
                         if (operand_resolved && pointer_type)
                         {
-                            operand_size = 8;
-                            operand_alignment = 8;
+                            operand_size = preprocess.data_layout.pointer.size;
+                            operand_alignment = preprocess.data_layout.pointer.alignment;
                         }
                         else if (operand_resolved && operand_type.value < result->type_count && resolved[operand_type.value])
                         {
@@ -9585,6 +9643,7 @@ BUSTER_GLOBAL_LOCAL String8 c_ir_scalar_type_name(CTypeKind kind)
 
 BUSTER_GLOBAL_LOCAL bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment)
 {
+    TargetDataLayout layout = target_data_layout(target);
     *ir_kind = IR_TYPE_INTEGER;
     *bit_width = 0;
     *is_signed = false;
@@ -9596,92 +9655,92 @@ BUSTER_GLOBAL_LOCAL bool c_ir_scalar_type_properties(Target target, CTypeKind ki
         return true;
     case C_TYPE_BOOL:
         *ir_kind = IR_TYPE_BOOLEAN;
-        *bit_width = 1;
-        *alignment = 1;
+        *bit_width = layout.boolean.bit_width;
+        *alignment = layout.boolean.alignment;
         return true;
     case C_TYPE_CHAR:
+        *bit_width = layout.plain_char.bit_width;
+        *is_signed = layout.plain_char_is_signed;
+        *alignment = layout.plain_char.alignment;
+        return true;
     case C_TYPE_SIGNED_CHAR:
-        *bit_width = 8;
+        *bit_width = layout.signed_char.bit_width;
         *is_signed = true;
-        *alignment = 1;
+        *alignment = layout.signed_char.alignment;
         return true;
     case C_TYPE_UNSIGNED_CHAR:
-        *bit_width = 8;
-        *alignment = 1;
+        *bit_width = layout.unsigned_char.bit_width;
+        *alignment = layout.unsigned_char.alignment;
         return true;
     case C_TYPE_SHORT:
-        *bit_width = 16;
+        *bit_width = layout.short_integer.bit_width;
         *is_signed = true;
-        *alignment = 2;
+        *alignment = layout.short_integer.alignment;
         return true;
     case C_TYPE_UNSIGNED_SHORT:
-        *bit_width = 16;
-        *alignment = 2;
+        *bit_width = layout.unsigned_short_integer.bit_width;
+        *alignment = layout.unsigned_short_integer.alignment;
         return true;
     case C_TYPE_INT:
-        *bit_width = 32;
+        *bit_width = layout.integer.bit_width;
         *is_signed = true;
-        *alignment = 4;
+        *alignment = layout.integer.alignment;
         return true;
     case C_TYPE_UNSIGNED_INT:
-        *bit_width = 32;
-        *alignment = 4;
+        *bit_width = layout.unsigned_integer.bit_width;
+        *alignment = layout.unsigned_integer.alignment;
         return true;
     case C_TYPE_LONG:
+        *bit_width = layout.long_integer.bit_width;
+        *is_signed = true;
+        *alignment = layout.long_integer.alignment;
+        return true;
     case C_TYPE_UNSIGNED_LONG:
-        *bit_width = target.os == OPERATING_SYSTEM_WINDOWS ? 32 : 64;
-        *is_signed = kind == C_TYPE_LONG;
-        *alignment = *bit_width / 8;
+        *bit_width = layout.unsigned_long_integer.bit_width;
+        *alignment = layout.unsigned_long_integer.alignment;
         return true;
     case C_TYPE_LONG_LONG:
+        *bit_width = layout.long_long_integer.bit_width;
+        *is_signed = true;
+        *alignment = layout.long_long_integer.alignment;
+        return true;
     case C_TYPE_UNSIGNED_LONG_LONG:
-        *bit_width = 64;
-        *is_signed = kind == C_TYPE_LONG_LONG;
-        *alignment = 8;
+        *bit_width = layout.unsigned_long_long_integer.bit_width;
+        *alignment = layout.unsigned_long_long_integer.alignment;
         return true;
     case C_TYPE_INT128:
+        *bit_width = layout.integer128.bit_width;
+        *is_signed = true;
+        *alignment = layout.integer128.alignment;
+        return true;
     case C_TYPE_UNSIGNED_INT128:
-        *bit_width = 128;
-        *is_signed = kind == C_TYPE_INT128;
-        *alignment = 16;
+        *bit_width = layout.unsigned_integer128.bit_width;
+        *alignment = layout.unsigned_integer128.alignment;
         return true;
     case C_TYPE_FLOAT:
         *ir_kind = IR_TYPE_FLOAT;
-        *bit_width = 32;
-        *alignment = 4;
+        *bit_width = layout.float_type.bit_width;
+        *alignment = layout.float_type.alignment;
         return true;
     case C_TYPE_DOUBLE:
         *ir_kind = IR_TYPE_FLOAT;
-        *bit_width = 64;
-        *alignment = 8;
+        *bit_width = layout.double_type.bit_width;
+        *alignment = layout.double_type.alignment;
         return true;
     case C_TYPE_LONG_DOUBLE:
         *ir_kind = IR_TYPE_FLOAT;
-        if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
-        {
-            *bit_width = 64;
-            *alignment = 8;
-        }
-        else if (target.cpu_arch == CPU_ARCH_X86_64)
-        {
-            *bit_width = 80;
-            *alignment = 16;
-        }
-        else
-        {
-            *bit_width = 128;
-            *alignment = 16;
-        }
+        *bit_width = layout.long_double_type.bit_width;
+        *alignment = layout.long_double_type.alignment;
         return true;
     case C_TYPE_VA_LIST:
         *ir_kind = IR_TYPE_VA_LIST;
-        *bit_width = 256;
-        *alignment = 8;
+        *bit_width = layout.va_list.bit_width;
+        *alignment = layout.va_list.alignment;
         return true;
     case C_TYPE_NULLPTR:
         *ir_kind = IR_TYPE_POINTER;
-        *bit_width = 64;
-        *alignment = 8;
+        *bit_width = layout.pointer.bit_width;
+        *alignment = layout.pointer.alignment;
         return true;
     case C_TYPE_INVALID:
     case C_TYPE_POINTER:
@@ -9716,7 +9775,17 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind
     {
         return IR_TYPE_ID_INVALID;
     }
-    u64 size = bit_width ? (bit_width + 7) / 8 : 0;
+    u64 size = 0;
+    u32 storage_alignment = 0;
+    if (ir_kind == IR_TYPE_VOID)
+    {
+        size = 0;
+    }
+    else if (!c_parse_builtin_type_layout(context->target, kind, &size, &storage_alignment))
+    {
+        return IR_TYPE_ID_INVALID;
+    }
+    alignment = storage_alignment;
     IrTypeId type = ir_program_add_type(context->program, (IrType){
                                                               .name = c_ir_scalar_type_name(kind),
                                                               .element_type = IR_TYPE_ID_INVALID,
@@ -9752,12 +9821,12 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_pointer_type(IrProgram* program, IrTypeId 
                                             .return_type = IR_TYPE_ID_INVALID,
                                             .layout =
                                                 {
-                                                    .size = 8,
-                                                    .alignment = 8,
+                                                    .size = program->data_layout.pointer.size,
+                                                    .alignment = program->data_layout.pointer.alignment,
                                                     .resolved = true,
                                                 },
                                             .kind = IR_TYPE_POINTER,
-                                            .bit_width = 64,
+                                            .bit_width = program->data_layout.pointer.bit_width,
                                         });
 }
 
@@ -12993,10 +13062,10 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CT
                                                                   .parameter_types = parameter_types,
                                                                   .element_type = IR_TYPE_ID_INVALID,
                                                                   .return_type = value_type,
-                                                                  .layout =
+                                                                      .layout =
                                                                       {
-                                                                          .size = 8,
-                                                                          .alignment = 8,
+                                                                          .size = builder->program->data_layout.pointer.size,
+                                                                          .alignment = builder->program->data_layout.pointer.alignment,
                                                                           .resolved = true,
                                                                       },
                                                                   .kind = IR_TYPE_FUNCTION,
@@ -16243,7 +16312,9 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name_internal(CIntegerIrBuilder* builder,
                                                                .name = S8("C function"),
                                                                .element_type = IR_TYPE_ID_INVALID,
                                                                .return_type = type,
-                                                               .layout = {.size = 8, .alignment = 8, .resolved = true},
+                                                               .layout = {.size = builder->program->data_layout.pointer.size,
+                                                                          .alignment = builder->program->data_layout.pointer.alignment,
+                                                                          .resolved = true},
                                                                .kind = IR_TYPE_FUNCTION,
                                                                .parameter_types = parameter_types,
                                                                .parameter_count = parameter_count,
@@ -23968,6 +24039,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
+    program->data_layout = preprocess.data_layout;
+    if (!target_data_layout_is_valid(program->data_layout))
+    {
+        program->data_layout = target_data_layout(target);
+    }
     result.program = program;
     CIrTypeContext type_context = {
         .program = program,
@@ -24081,8 +24157,9 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     {
         c_ir_scalar_type(&type_context, (CTypeKind)kind);
     }
-    IrTypeId size_type = type_context.scalar_types[target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG];
-    IrTypeId ptrdiff_type = type_context.scalar_types[target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_LONG_LONG : C_TYPE_LONG];
+    bool pointer_sized_long = program->data_layout.unsigned_long_integer.size == program->data_layout.pointer.size;
+    IrTypeId size_type = type_context.scalar_types[pointer_sized_long ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG];
+    IrTypeId ptrdiff_type = type_context.scalar_types[pointer_sized_long ? C_TYPE_LONG : C_TYPE_LONG_LONG];
     IrTypeId* c_type_ir_map = arena_allocate(arena, IrTypeId, parse.type_count);
     for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
     {
@@ -24263,8 +24340,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                              .return_type = return_type,
                                                                              .layout =
                                                                                  {
-                                                                                     .size = 8,
-                                                                                     .alignment = 8,
+                                                                                     .size = program->data_layout.pointer.size,
+                                                                                     .alignment = program->data_layout.pointer.alignment,
                                                                                      .resolved = true,
                                                                                  },
                                                                              .kind = IR_TYPE_FUNCTION,

@@ -456,6 +456,7 @@ typedef struct IrProgram IrProgram;
 struct IrProgram
 {
     Arena* arena;
+    TargetDataLayout data_layout;
     IrModule* modules;
     IrTypeTable types;
     IrSymbolTable symbols;

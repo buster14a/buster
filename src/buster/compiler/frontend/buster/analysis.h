@@ -610,10 +610,13 @@ struct AnalysisScheduleResult
 };
 
 typedef struct AnalysisInterfaceSummary AnalysisInterfaceSummary;
+#define ANALYSIS_INTERFACE_SCHEMA_VERSION 1u
 struct AnalysisInterfaceSummary
 {
     String8 bytes;
     u64 hash;
+    u32 schema_version;
+    u32 reserved;
 };
 
 typedef struct AnalysisInterfaceCacheEntry AnalysisInterfaceCacheEntry;
@@ -681,6 +684,7 @@ struct AnalysisProgramOptions
     String8 root_path;
     String8 root_module_name;
     String8 module_root;
+    TargetDataLayout data_layout;
     u32 pointer_size;
     u32 pointer_alignment;
 };
@@ -688,6 +692,7 @@ struct AnalysisProgramOptions
 typedef struct AnalysisLayoutOptions AnalysisLayoutOptions;
 struct AnalysisLayoutOptions
 {
+    TargetDataLayout data_layout;
     u32 pointer_size;
     u32 pointer_alignment;
 };
@@ -755,6 +760,7 @@ struct AnalysisResult
 {
     AnalysisModuleInterface module;
     AnalysisTypeTable types;
+    TargetDataLayout data_layout;
     AnalysisDiagnostic* first_diagnostic;
     AnalysisDiagnostic* last_diagnostic;
     AnalysisJob* jobs;
@@ -778,6 +784,7 @@ BUSTER_F_DECL AnalysisEntity* analysis_find_qualified_entity(AnalysisResult* mod
                                                              AnalysisNamespace name_space);
 BUSTER_F_DECL String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result);
 BUSTER_F_DECL AnalysisInterfaceSummary analysis_module_interface_summary(Arena* arena, AnalysisResult* result);
+BUSTER_F_DECL bool analysis_interface_summary_is_valid(AnalysisInterfaceSummary summary);
 BUSTER_F_DECL AnalysisInterfaceCacheEntry* analysis_interface_cache_find(AnalysisInterfaceCache* cache, String8 module_name);
 BUSTER_F_DECL bool analysis_interface_cache_store(Arena* arena, AnalysisInterfaceCache* cache, String8 module_name, AnalysisInterfaceSummary summary);
 BUSTER_F_DECL String8 analysis_source_path(AnalysisResult* result, AnalysisModuleId module, AnalysisSourceId source);

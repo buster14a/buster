@@ -2165,6 +2165,7 @@ IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacit
         return program;
     }
     program.arena = arena;
+    program.data_layout = target_data_layout(target_native);
     program.modules = arena_allocate(arena, IrModule, module_count);
     program.module_count = module_count;
     program.types = (IrTypeTable){
@@ -3038,8 +3039,18 @@ IrProgram ir_generate_program(Arena* result_arena, AnalysisProgram* analysis)
 {
     IrProgram program = {
         .arena = result_arena,
+        .data_layout = target_data_layout(target_native),
         .module_count = analysis->module_count,
     };
+    for (u32 module_index = 0; module_index < analysis->module_count; module_index += 1)
+    {
+        AnalysisResult* module = analysis->module_results[module_index];
+        if (module && target_data_layout_is_valid(module->data_layout))
+        {
+            program.data_layout = module->data_layout;
+            break;
+        }
+    }
     program.modules = arena_allocate(result_arena, IrModule, program.module_count);
     ir_program_metadata_initialize(result_arena, analysis, &program);
     for (u32 module_index = 0; module_index < program.module_count; module_index += 1)

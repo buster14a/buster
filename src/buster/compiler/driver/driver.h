@@ -62,6 +62,7 @@ struct CompilerDriverInvocation
     String8* linker_arguments;
     String8 output_path;
     String8 sysroot;
+    String8 module_root;
     String8 diagnostic;
     Target target;
     u32 input_count;

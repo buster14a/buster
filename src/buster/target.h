@@ -179,6 +179,58 @@ typedef enum CpuModel
 
 typedef u64 TargetCpuFeatures;
 
+typedef enum TargetEndianness
+{
+    TARGET_ENDIAN_LITTLE,
+    TARGET_ENDIAN_BIG,
+    TARGET_ENDIAN_COUNT,
+} TargetEndianness;
+
+typedef struct TargetTypeLayout TargetTypeLayout;
+struct TargetTypeLayout
+{
+    u32 size;
+    u32 alignment;
+    u32 bit_width;
+};
+
+// The data layout is derived from the target, rather than from the host that
+// happens to run the compiler.  Keep all frontend-facing scalar and ABI
+// properties here so a cross compilation cannot accidentally inherit host C
+// sizes or alignment rules.
+typedef struct TargetDataLayout TargetDataLayout;
+struct TargetDataLayout
+{
+    TargetTypeLayout boolean;
+    TargetTypeLayout plain_char;
+    TargetTypeLayout signed_char;
+    TargetTypeLayout unsigned_char;
+    TargetTypeLayout short_integer;
+    TargetTypeLayout unsigned_short_integer;
+    TargetTypeLayout integer;
+    TargetTypeLayout unsigned_integer;
+    TargetTypeLayout long_integer;
+    TargetTypeLayout unsigned_long_integer;
+    TargetTypeLayout long_long_integer;
+    TargetTypeLayout unsigned_long_long_integer;
+    TargetTypeLayout integer128;
+    TargetTypeLayout unsigned_integer128;
+    TargetTypeLayout float_type;
+    TargetTypeLayout double_type;
+    TargetTypeLayout long_double_type;
+    TargetTypeLayout pointer;
+    TargetTypeLayout va_list;
+    u32 atomic_min_width;
+    u32 atomic_max_width;
+    u32 atomic_alignment;
+    u32 abi_stack_alignment;
+    u32 abi_max_alignment;
+    TargetEndianness endianness;
+    bool plain_char_is_signed;
+    bool has_128_bit_integer;
+    u8 reserved[2];
+};
+
 typedef enum TargetCpuFeature
 {
     TARGET_CPU_FEATURE_X86_SSE2 = 1u << 0,
@@ -248,6 +300,8 @@ BUSTER_F_DECL TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuMod
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_effective(Target target);
 BUSTER_F_DECL bool target_cpu_features_are_valid(Target target);
 BUSTER_F_DECL bool target_cpu_feature_has(Target target, TargetCpuFeature feature);
+BUSTER_F_DECL TargetDataLayout target_data_layout(Target target);
+BUSTER_F_DECL bool target_data_layout_is_valid(TargetDataLayout layout);
 BUSTER_F_DECL u32 target_vector_register_size(Target target);
 BUSTER_F_DECL TargetStringSplit target_to_split_string_os(Target target);
 BUSTER_F_DECL String8 target_to_string(Arena* arena, Target target);

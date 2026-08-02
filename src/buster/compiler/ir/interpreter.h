@@ -37,6 +37,30 @@ struct IrExecutionOptions
 };
 
 typedef struct IrExecutionResult IrExecutionResult;
+typedef enum IrExecutionValueKind
+{
+    IR_EXECUTION_VALUE_NONE,
+    IR_EXECUTION_VALUE_SCALAR,
+    IR_EXECUTION_VALUE_AGGREGATE,
+    IR_EXECUTION_VALUE_VECTOR,
+    IR_EXECUTION_VALUE_ADDRESS,
+    IR_EXECUTION_VALUE_FUNCTION,
+    IR_EXECUTION_VALUE_COUNT,
+} IrExecutionValueKind;
+
+typedef struct IrExecutionValue IrExecutionValue;
+struct IrExecutionValue
+{
+    IrExecutionValueKind kind;
+    ByteSlice bytes;
+    ByteSlice initialized;
+    u64 bits;
+    u64 address_offset;
+    u32 address_object;
+    bool has_value;
+    u8 reserved[3];
+};
+
 struct IrExecutionResult
 {
     AnalysisEntityId function;
@@ -44,6 +68,7 @@ struct IrExecutionResult
     AnalysisModuleId type_module;
     AnalysisTypeId type;
     IrInstructionId instruction;
+    IrExecutionValue value;
     u64 bits;
     u64 step_count;
     IrExecutionTrap trap;

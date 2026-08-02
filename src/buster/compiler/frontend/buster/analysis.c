@@ -902,10 +902,20 @@ String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result
             function_argument_count += type->as.function.argument_count;
         }
     }
-    u32 part_capacity = 1 + result->module.source_count + result->module.import_count + result->module.entity_count + result->types.count +
+    u32 part_capacity = 3 + result->module.source_count + result->module.import_count + result->module.entity_count + result->types.count +
                         function_argument_count + result->instantiation_count + specialization_request_count;
     String8* parts = arena_allocate(arena, String8, part_capacity);
     u32 part_count = 0;
+    TargetDataLayout data_layout = target_data_layout_is_valid(result->data_layout) ? result->data_layout : target_data_layout(target_native);
+    parts[part_count++] = string_format(arena, S8("buster-interface version={u32}\n"), ANALYSIS_INTERFACE_SCHEMA_VERSION);
+    parts[part_count++] = string_format(arena,
+                                        S8("layout endian={u32} char_signed={u32} pointer={u32}:{u32} long={u32}:{u32} long_double={u32}:{u32} va_list={u32}:{u32} "
+                                           "atomic={u32}:{u32}:{u32} abi={u32}:{u32}\n"),
+                                        (u32)data_layout.endianness, (u32)data_layout.plain_char_is_signed, data_layout.pointer.size,
+                                        data_layout.pointer.alignment, data_layout.long_integer.size, data_layout.long_integer.alignment,
+                                        data_layout.long_double_type.size, data_layout.long_double_type.alignment, data_layout.va_list.size,
+                                        data_layout.va_list.alignment, data_layout.atomic_min_width, data_layout.atomic_max_width,
+                                        data_layout.atomic_alignment, data_layout.abi_stack_alignment, data_layout.abi_max_alignment);
     parts[part_count++] = string_format(arena, S8("module {S8}\n"), result->module.name);
     for (u32 source_index = 0; source_index < result->module.source_count; source_index += 1)
     {
@@ -1051,9 +1061,16 @@ AnalysisInterfaceSummary analysis_module_interface_summary(Arena* arena, Analysi
     AnalysisInterfaceSummary summary = {
         .bytes = analysis_serialize_module_interface(arena, result),
         .hash = 0,
+        .schema_version = ANALYSIS_INTERFACE_SCHEMA_VERSION,
     };
     summary.hash = analysis_bytes_hash(summary.bytes);
     return summary;
+}
+
+bool analysis_interface_summary_is_valid(AnalysisInterfaceSummary summary)
+{
+    return summary.schema_version == ANALYSIS_INTERFACE_SCHEMA_VERSION && summary.bytes.length && summary.bytes.pointer && summary.hash == analysis_bytes_hash(summary.bytes) &&
+           string_starts_with_sequence(summary.bytes, S8("buster-interface version=1\n"));
 }
 
 AnalysisInterfaceCacheEntry* analysis_interface_cache_find(AnalysisInterfaceCache* cache, String8 module_name)
@@ -1071,7 +1088,12 @@ AnalysisInterfaceCacheEntry* analysis_interface_cache_find(AnalysisInterfaceCach
 bool analysis_interface_cache_store(Arena* arena, AnalysisInterfaceCache* cache, String8 module_name, AnalysisInterfaceSummary summary)
 {
     AnalysisInterfaceCacheEntry* entry = analysis_interface_cache_find(cache, module_name);
-    bool changed = !entry || entry->summary.hash != summary.hash || !string_equal(entry->summary.bytes, summary.bytes);
+    if (!analysis_interface_summary_is_valid(summary))
+    {
+        return false;
+    }
+    bool changed = !entry || entry->summary.schema_version != summary.schema_version || entry->summary.hash != summary.hash ||
+                   !string_equal(entry->summary.bytes, summary.bytes);
     if (!entry)
     {
         entry = arena_allocate(arena, AnalysisInterfaceCacheEntry, 1);
@@ -1094,6 +1116,7 @@ bool analysis_interface_cache_store(Arena* arena, AnalysisInterfaceCache* cache,
         entry->summary = (AnalysisInterfaceSummary){
             .bytes = string_duplicate_arena(arena, summary.bytes, false),
             .hash = summary.hash,
+            .schema_version = summary.schema_version,
         };
     }
     return changed;
@@ -1229,18 +1252,25 @@ AnalysisProgram analysis_program_load(Arena* result_arena, Arena* expression_are
     BUSTER_CHECK(program.root);
 
     analysis_resolve_program_interfaces(result_arena, program.module_results, discovery_count);
+    TargetDataLayout data_layout = options.data_layout;
+    if (!target_data_layout_is_valid(data_layout))
+    {
+        data_layout = target_data_layout(target_native);
+        if (options.pointer_size)
+        {
+            data_layout.pointer.size = options.pointer_size;
+            data_layout.pointer.bit_width = options.pointer_size * 8;
+        }
+        if (options.pointer_alignment)
+        {
+            data_layout.pointer.alignment = options.pointer_alignment;
+        }
+    }
     AnalysisLayoutOptions layout = {
-        .pointer_size = options.pointer_size,
-        .pointer_alignment = options.pointer_alignment,
+        .data_layout = data_layout,
+        .pointer_size = data_layout.pointer.size,
+        .pointer_alignment = data_layout.pointer.alignment,
     };
-    if (!layout.pointer_size)
-    {
-        layout.pointer_size = 8;
-    }
-    if (!layout.pointer_alignment)
-    {
-        layout.pointer_alignment = layout.pointer_size;
-    }
     for (u32 index = 0; index < discovery_count; index += 1)
     {
         AnalysisResult* analysis = program.module_results[index];
@@ -6484,13 +6514,58 @@ void analysis_analyze_bodies(Arena* result_arena, AnalysisResult* result)
 
 BUSTER_GLOBAL_LOCAL u64 analysis_layout_align(u64 value, u32 alignment)
 {
-    BUSTER_CHECK(alignment && !(alignment & (alignment - 1)));
+    if (!alignment || (alignment & (alignment - 1)) || value > UINT64_MAX - (alignment - 1))
+    {
+        return UINT64_MAX;
+    }
     return (value + alignment - 1) & ~((u64)alignment - 1);
+}
+
+BUSTER_GLOBAL_LOCAL bool analysis_layout_product(u64 left, u64 right, u64* result)
+{
+    if (right && left > UINT64_MAX / right)
+    {
+        return false;
+    }
+    *result = left * right;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool analysis_layout_sum(u64 left, u64 right, u64* result)
+{
+    if (left > UINT64_MAX - right)
+    {
+        return false;
+    }
+    *result = left + right;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool analysis_layout_alignment_valid(u64 alignment)
+{
+    return alignment && alignment <= UINT32_MAX && !(alignment & (alignment - 1));
 }
 
 void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions options)
 {
+    TargetDataLayout data_layout = options.data_layout;
+    if (!target_data_layout_is_valid(data_layout))
+    {
+        data_layout = target_data_layout(target_native);
+        if (options.pointer_size)
+        {
+            data_layout.pointer.size = options.pointer_size;
+            data_layout.pointer.bit_width = options.pointer_size * 8;
+        }
+        if (options.pointer_alignment)
+        {
+            data_layout.pointer.alignment = options.pointer_alignment;
+        }
+    }
+    options.pointer_size = data_layout.pointer.size;
+    options.pointer_alignment = data_layout.pointer.alignment;
     BUSTER_CHECK(options.pointer_size && options.pointer_alignment);
+    result->data_layout = data_layout;
     for (u32 index = 0; index < result->types.count; index += 1)
     {
         result->types.types[index].layout = (AnalysisTypeLayout){0};
@@ -6531,21 +6606,35 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
             case ANALYSIS_TYPE_INTEGER:
             {
                 layout.size = type->as.integer.bit_width / 8;
-                layout.alignment = (u32)layout.size;
-                layout.abi_class = ANALYSIS_ABI_CLASS_INTEGER;
+                if (!layout.size || !analysis_layout_alignment_valid(layout.size))
+                {
+                    layout.state = ANALYSIS_LAYOUT_ERROR;
+                }
+                else
+                {
+                    layout.alignment = (u32)layout.size;
+                    layout.abi_class = ANALYSIS_ABI_CLASS_INTEGER;
+                }
             }
             break;
             case ANALYSIS_TYPE_FLOAT:
             {
                 layout.size = type->as.float_bit_width / 8;
-                layout.alignment = (u32)layout.size;
-                layout.abi_class = ANALYSIS_ABI_CLASS_FLOAT;
+                if (!layout.size || !analysis_layout_alignment_valid(layout.size))
+                {
+                    layout.state = ANALYSIS_LAYOUT_ERROR;
+                }
+                else
+                {
+                    layout.alignment = (u32)layout.size;
+                    layout.abi_class = ANALYSIS_ABI_CLASS_FLOAT;
+                }
             }
             break;
             case ANALYSIS_TYPE_VA_LIST:
             {
-                layout.size = 32;
-                layout.alignment = 8;
+                layout.size = data_layout.va_list.size;
+                layout.alignment = data_layout.va_list.alignment;
                 layout.abi_class = ANALYSIS_ABI_CLASS_MEMORY;
             }
             break;
@@ -6559,9 +6648,15 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
             break;
             case ANALYSIS_TYPE_SLICE:
             {
-                layout.size = (u64)options.pointer_size * 2;
-                layout.alignment = options.pointer_alignment;
-                layout.abi_class = ANALYSIS_ABI_CLASS_AGGREGATE;
+                if (!analysis_layout_product(options.pointer_size, 2, &layout.size))
+                {
+                    layout.state = ANALYSIS_LAYOUT_ERROR;
+                }
+                else
+                {
+                    layout.alignment = options.pointer_alignment;
+                    layout.abi_class = ANALYSIS_ABI_CLASS_AGGREGATE;
+                }
             }
             break;
             case ANALYSIS_TYPE_INFERRED_ARRAY:
@@ -6574,9 +6669,15 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
                 AnalysisTypeLayout element = analysis_type_from_id(result, type->as.array.element_type)->layout;
                 if (element.state == ANALYSIS_LAYOUT_RESOLVED)
                 {
-                    layout.size = element.size * type->as.array.count;
-                    layout.alignment = element.alignment;
-                    layout.abi_class = layout.size <= 16 ? ANALYSIS_ABI_CLASS_AGGREGATE : ANALYSIS_ABI_CLASS_MEMORY;
+                    if (!analysis_layout_product(element.size, type->as.array.count, &layout.size))
+                    {
+                        layout.state = ANALYSIS_LAYOUT_ERROR;
+                    }
+                    else
+                    {
+                        layout.alignment = element.alignment;
+                        layout.abi_class = layout.size <= 16 ? ANALYSIS_ABI_CLASS_AGGREGATE : ANALYSIS_ABI_CLASS_MEMORY;
+                    }
                 }
                 else if (element.state == ANALYSIS_LAYOUT_ERROR)
                 {
@@ -6594,7 +6695,11 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
                 AnalysisTypeLayout element = element_type->layout;
                 if (element.state == ANALYSIS_LAYOUT_RESOLVED)
                 {
-                    layout.size = element.size * type->as.vector.count;
+                    if (!analysis_layout_product(element.size, type->as.vector.count, &layout.size))
+                    {
+                        layout.state = ANALYSIS_LAYOUT_ERROR;
+                        break;
+                    }
                     bool valid_element = element_type->kind == ANALYSIS_TYPE_INTEGER || element_type->kind == ANALYSIS_TYPE_FLOAT;
                     bool valid_size = layout.size == 8 || layout.size == 16 || layout.size == 32 || layout.size == 64;
                     if (!valid_element || !valid_size)
@@ -6622,9 +6727,15 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
                 AnalysisTypeLayout element = analysis_type_from_id(result, type->as.element_type)->layout;
                 if (element.state == ANALYSIS_LAYOUT_RESOLVED)
                 {
-                    layout.size = element.size * 2;
-                    layout.alignment = element.alignment;
-                    layout.abi_class = ANALYSIS_ABI_CLASS_AGGREGATE;
+                    if (!analysis_layout_product(element.size, 2, &layout.size))
+                    {
+                        layout.state = ANALYSIS_LAYOUT_ERROR;
+                    }
+                    else
+                    {
+                        layout.alignment = element.alignment;
+                        layout.abi_class = ANALYSIS_ABI_CLASS_AGGREGATE;
+                    }
                 }
                 else if (element.state == ANALYSIS_LAYOUT_ERROR)
                 {
@@ -6673,9 +6784,13 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
                     alignment = BUSTER_MAX(alignment, field_layout.alignment);
                     if (type->kind == ANALYSIS_TYPE_STRUCT)
                     {
-                        size = analysis_layout_align(size, field_layout.alignment);
-                        semantic->fields[field_index].offset = size;
-                        size += field_layout.size;
+                        u64 field_offset = analysis_layout_align(size, field_layout.alignment);
+                        if (field_offset == UINT64_MAX || !analysis_layout_sum(field_offset, field_layout.size, &size))
+                        {
+                            layout.state = ANALYSIS_LAYOUT_ERROR;
+                            break;
+                        }
+                        semantic->fields[field_index].offset = field_offset;
                     }
                     else
                     {
@@ -6686,8 +6801,15 @@ void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions opti
                 if (ready && layout.state != ANALYSIS_LAYOUT_ERROR)
                 {
                     layout.size = analysis_layout_align(size, alignment);
-                    layout.alignment = alignment;
-                    layout.abi_class = layout.size <= 16 ? ANALYSIS_ABI_CLASS_AGGREGATE : ANALYSIS_ABI_CLASS_MEMORY;
+                    if (layout.size == UINT64_MAX)
+                    {
+                        layout.state = ANALYSIS_LAYOUT_ERROR;
+                    }
+                    else
+                    {
+                        layout.alignment = alignment;
+                        layout.abi_class = layout.size <= 16 ? ANALYSIS_ABI_CLASS_AGGREGATE : ANALYSIS_ABI_CLASS_MEMORY;
+                    }
                 }
             }
             break;
@@ -6851,6 +6973,8 @@ BUSTER_GLOBAL_LOCAL bool analysis_abi_systemv_classify(Arena* arena, AnalysisRes
         AnalysisTypeId type;
         u64 offset;
     } AnalysisAbiClassificationTask;
+    TargetDataLayout data_layout = target_data_layout_is_valid(result->data_layout) ? result->data_layout : target_data_layout(target_native);
+    u32 abi_word_size = data_layout.pointer.size;
     u32 capacity = BUSTER_MAX(result->types.count * 16, 16);
     AnalysisAbiClassificationTask* tasks = arena_allocate(arena, AnalysisAbiClassificationTask, capacity);
     u32 count = 1;
@@ -6862,7 +6986,7 @@ BUSTER_GLOBAL_LOCAL bool analysis_abi_systemv_classify(Arena* arena, AnalysisRes
     {
         AnalysisAbiClassificationTask task = tasks[--count];
         AnalysisType* type = analysis_type_from_id(task.module, task.type);
-        if (task.offset + type->layout.size > 16)
+        if (task.offset > UINT64_MAX - type->layout.size || task.offset + type->layout.size > abi_word_size * 2)
         {
             return false;
         }
@@ -6888,7 +7012,7 @@ BUSTER_GLOBAL_LOCAL bool analysis_abi_systemv_classify(Arena* arena, AnalysisRes
                 tasks[count++] = (AnalysisAbiClassificationTask){
                     .module = declaration_module,
                     .type = field->type,
-                    .offset = task.offset + field->offset,
+                    .offset = task.offset > UINT64_MAX - field->offset ? UINT64_MAX : task.offset + field->offset,
                 };
             }
             continue;
@@ -6905,7 +7029,9 @@ BUSTER_GLOBAL_LOCAL bool analysis_abi_systemv_classify(Arena* arena, AnalysisRes
                 tasks[count++] = (AnalysisAbiClassificationTask){
                     .module = task.module,
                     .type = type->as.array.element_type,
-                    .offset = task.offset + index * element->layout.size,
+                    .offset = index && element->layout.size > UINT64_MAX / index ? UINT64_MAX
+                              : task.offset > UINT64_MAX - index * element->layout.size ? UINT64_MAX
+                                                                                           : task.offset + index * element->layout.size,
                 };
             }
             continue;
@@ -6925,13 +7051,18 @@ BUSTER_GLOBAL_LOCAL bool analysis_abi_systemv_classify(Arena* arena, AnalysisRes
             tasks[count++] = (AnalysisAbiClassificationTask){
                 .module = task.module,
                 .type = type->as.element_type,
-                .offset = task.offset + range_element->layout.size,
+                .offset = task.offset > UINT64_MAX - range_element->layout.size ? UINT64_MAX : task.offset + range_element->layout.size,
             };
             continue;
         }
         AnalysisAbiClass abi_class = type->kind == ANALYSIS_TYPE_FLOAT ? ANALYSIS_ABI_CLASS_FLOAT : ANALYSIS_ABI_CLASS_INTEGER;
-        u32 first = (u32)(task.offset / 8);
-        u32 last = (u32)((task.offset + BUSTER_MAX(type->layout.size, 1) - 1) / 8);
+        u64 extent = BUSTER_MAX(type->layout.size, 1);
+        if (task.offset > UINT64_MAX - (extent - 1))
+        {
+            return false;
+        }
+        u32 first = (u32)(task.offset / abi_word_size);
+        u32 last = (u32)((task.offset + extent - 1) / abi_word_size);
         for (u32 part = first; part <= last; part += 1)
         {
             if (part >= 2)
@@ -6956,6 +7087,8 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify_context(Arena* 
                                                                          u32 vector_register_size)
 {
     AnalysisAbiValue value = {0};
+    TargetDataLayout data_layout = target_data_layout_is_valid(result->data_layout) ? result->data_layout : target_data_layout(target_native);
+    u32 abi_word_size = data_layout.pointer.size;
     AnalysisType* type = analysis_type_from_id(result, type_id);
     AnalysisTypeLayout layout = type->layout;
     if (type->kind == ANALYSIS_TYPE_VOID)
@@ -6982,7 +7115,7 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify_context(Arena* 
             value.parts[0] = (AnalysisAbiPart){
                 .abi_class = is_result ? ANALYSIS_ABI_CLASS_POINTER : ANALYSIS_ABI_CLASS_MEMORY,
                 .location = is_result ? ANALYSIS_ABI_LOCATION_INDIRECT : ANALYSIS_ABI_LOCATION_STACK,
-                .size = is_result ? 8 : (u32)layout.size,
+                .size = is_result ? abi_word_size : (u32)layout.size,
             };
         }
         else if (convention == ANALYSIS_ABI_CONVENTION_WIN64_X86_64)
@@ -6992,35 +7125,35 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify_context(Arena* 
             value.parts[0] = (AnalysisAbiPart){
                 .abi_class = ANALYSIS_ABI_CLASS_POINTER,
                 .location = ANALYSIS_ABI_LOCATION_INDIRECT,
-                .size = 8,
+                .size = abi_word_size,
             };
         }
         else if ((convention == ANALYSIS_ABI_CONVENTION_AAPCS64 || convention == ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ||
                   convention == ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64) &&
-                 layout.size > 16)
+                 layout.size > abi_word_size * 2)
         {
             value.indirect = true;
             value.part_count = 1;
             value.parts[0] = (AnalysisAbiPart){
                 .abi_class = ANALYSIS_ABI_CLASS_POINTER,
                 .location = ANALYSIS_ABI_LOCATION_INDIRECT,
-                .size = 8,
+                .size = abi_word_size,
             };
         }
         else if (convention == ANALYSIS_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument)
         {
-            value.part_count = (u32)((layout.size + 7) / 8);
+            value.part_count = (u32)((layout.size + abi_word_size - 1) / abi_word_size);
             for (u32 part = 0; part < value.part_count; part += 1)
             {
                 value.parts[part] = (AnalysisAbiPart){
                     .abi_class = ANALYSIS_ABI_CLASS_INTEGER,
                     .location = ANALYSIS_ABI_LOCATION_REGISTER,
-                    .size = (u32)BUSTER_MIN((u64)8, layout.size - (u64)part * 8),
-                    .value_offset = part * 8,
+                    .size = (u32)BUSTER_MIN((u64)abi_word_size, layout.size - (u64)part * abi_word_size),
+                    .value_offset = part * abi_word_size,
                 };
             }
         }
-        else if (convention == ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 && variadic_argument && layout.size > 16)
+        else if (convention == ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 && variadic_argument && layout.size > abi_word_size * 2)
         {
             value.part_count = 1;
             value.parts[0] = (AnalysisAbiPart){
@@ -7072,7 +7205,7 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify_context(Arena* 
             value.parts[0] = (AnalysisAbiPart){
                 .abi_class = ANALYSIS_ABI_CLASS_POINTER,
                 .location = ANALYSIS_ABI_LOCATION_INDIRECT,
-                .size = 8,
+                .size = abi_word_size,
                 .value_offset = 0,
             };
         }
@@ -7098,16 +7231,16 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify_context(Arena* 
                 };
             }
         }
-        else if (layout.size <= 16)
+        else if (layout.size <= abi_word_size * 2)
         {
-            value.part_count = (u32)((layout.size + 7) / 8);
+            value.part_count = (u32)((layout.size + abi_word_size - 1) / abi_word_size);
             for (u32 part = 0; part < value.part_count; part += 1)
             {
                 value.parts[part] = (AnalysisAbiPart){
                     .abi_class = ANALYSIS_ABI_CLASS_INTEGER,
                     .location = ANALYSIS_ABI_LOCATION_REGISTER,
-                    .size = (u32)BUSTER_MIN((u64)8, layout.size - (u64)part * 8),
-                    .value_offset = part * 8,
+                    .size = (u32)BUSTER_MIN((u64)abi_word_size, layout.size - (u64)part * abi_word_size),
+                    .value_offset = part * abi_word_size,
                 };
             }
         }
@@ -7118,20 +7251,20 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify_context(Arena* 
             value.parts[0] = (AnalysisAbiPart){
                 .abi_class = ANALYSIS_ABI_CLASS_POINTER,
                 .location = ANALYSIS_ABI_LOCATION_INDIRECT,
-                .size = 8,
+                .size = abi_word_size,
                 .value_offset = 0,
             };
         }
         return value;
     }
-    if (layout.size > 16)
+    if (layout.size > abi_word_size * 2)
     {
         value.indirect = is_result;
         value.part_count = 1;
         value.parts[0] = (AnalysisAbiPart){
             .abi_class = is_result ? ANALYSIS_ABI_CLASS_POINTER : ANALYSIS_ABI_CLASS_MEMORY,
             .location = is_result ? ANALYSIS_ABI_LOCATION_INDIRECT : ANALYSIS_ABI_LOCATION_STACK,
-            .size = is_result ? 8 : (u32)layout.size,
+            .size = is_result ? abi_word_size : (u32)layout.size,
             .value_offset = 0,
         };
         return value;
@@ -7143,19 +7276,19 @@ BUSTER_GLOBAL_LOCAL AnalysisAbiValue analysis_abi_value_classify_context(Arena* 
         value.parts[0] = (AnalysisAbiPart){
             .abi_class = is_result ? ANALYSIS_ABI_CLASS_POINTER : ANALYSIS_ABI_CLASS_MEMORY,
             .location = is_result ? ANALYSIS_ABI_LOCATION_INDIRECT : ANALYSIS_ABI_LOCATION_STACK,
-            .size = is_result ? 8 : (u32)layout.size,
+            .size = is_result ? abi_word_size : (u32)layout.size,
         };
         value.indirect = is_result;
         return value;
     }
-    value.part_count = (u32)((layout.size + 7) / 8);
+    value.part_count = (u32)((layout.size + abi_word_size - 1) / abi_word_size);
     for (u32 part = 0; part < value.part_count; part += 1)
     {
         value.parts[part] = (AnalysisAbiPart){
             .abi_class = classes[part] == ANALYSIS_ABI_CLASS_NONE ? ANALYSIS_ABI_CLASS_INTEGER : classes[part],
             .location = ANALYSIS_ABI_LOCATION_REGISTER,
-            .size = (u32)BUSTER_MIN((u64)8, layout.size - (u64)part * 8),
-            .value_offset = part * 8,
+            .size = (u32)BUSTER_MIN((u64)abi_word_size, layout.size - (u64)part * abi_word_size),
+            .value_offset = part * abi_word_size,
         };
     }
     return value;
@@ -7184,6 +7317,9 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(Arena* result_aren
         .fixed_argument_count = function->as.function.argument_count,
         .is_variadic = function->as.function.is_variadic,
     };
+    TargetDataLayout data_layout = target_data_layout_is_valid(result->data_layout) ? result->data_layout : target_data_layout(target_native);
+    u32 abi_word_size = data_layout.pointer.size;
+    u32 abi_stack_alignment = data_layout.abi_stack_alignment;
     u32 vector_register_size = target_vector_register_size(target);
     abi.arguments = arena_allocate(result_arena, AnalysisAbiValue, abi.argument_count);
     abi.result =
@@ -7200,7 +7336,7 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(Arena* result_aren
     u32 integer_register = 0;
     u32 float_register = 0;
     u32 windows_slot = 0;
-    u32 stack_offset = abi.convention == ANALYSIS_ABI_CONVENTION_WIN64_X86_64 ? 32 : 0;
+    u32 stack_offset = abi.convention == ANALYSIS_ABI_CONVENTION_WIN64_X86_64 ? abi_word_size * 4 : 0;
     u32 integer_limit = abi.convention == ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 ? 6 : abi.convention == ANALYSIS_ABI_CONVENTION_WIN64_X86_64 ? 4 : 8;
     u32 float_limit = abi.convention == ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64 ? 8 : abi.convention == ANALYSIS_ABI_CONVENTION_WIN64_X86_64 ? 4 : 8;
     if (abi.result.indirect)
@@ -7238,7 +7374,7 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(Arena* result_aren
             {
                 part->location = ANALYSIS_ABI_LOCATION_STACK;
                 part->stack_offset = stack_offset;
-                stack_offset += 8;
+                stack_offset += abi_word_size;
             }
             windows_slot += 1;
         }
@@ -7288,9 +7424,9 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(Arena* result_aren
                         integer_register = integer_limit;
                     }
                 }
-                u32 value_alignment = value.indirect ? 8 : layout.alignment;
-                u64 value_size = value.indirect ? 8 : layout.size;
-                u32 alignment = abi.convention == ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ? value_alignment : BUSTER_MAX(value_alignment, 8);
+                u32 value_alignment = value.indirect ? abi_word_size : layout.alignment;
+                u64 value_size = value.indirect ? abi_word_size : layout.size;
+                u32 alignment = abi.convention == ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ? value_alignment : BUSTER_MAX(value_alignment, abi_word_size);
                 stack_offset = (u32)analysis_layout_align(stack_offset, alignment);
                 for (u32 part = 0; part < value.part_count; part += 1)
                 {
@@ -7298,7 +7434,8 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(Arena* result_aren
                     value.parts[part].stack_offset = stack_offset + value.parts[part].value_offset;
                 }
                 stack_offset +=
-                    (u32)analysis_layout_align(value_size, abi.convention == ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ? BUSTER_MAX(value_alignment, 1) : 8);
+                    (u32)analysis_layout_align(value_size,
+                                               abi.convention == ANALYSIS_ABI_CONVENTION_APPLE_AARCH64 ? BUSTER_MAX(value_alignment, 1) : abi_word_size);
             }
         }
         abi.arguments[argument] = value;
@@ -7311,11 +7448,11 @@ BUSTER_GLOBAL_LOCAL AnalysisFunctionAbi analysis_classify_abi(Arena* result_aren
             continue;
         }
         AnalysisType* argument_type = analysis_type_from_id(result, argument_types[argument]);
-        stack_offset = (u32)analysis_layout_align(stack_offset, BUSTER_MAX(argument_type->layout.alignment, 8));
+        stack_offset = (u32)analysis_layout_align(stack_offset, BUSTER_MAX(argument_type->layout.alignment, abi_word_size));
         value->indirect_copy_offset = stack_offset;
-        stack_offset += (u32)analysis_layout_align(argument_type->layout.size, 8);
+        stack_offset += (u32)analysis_layout_align(argument_type->layout.size, abi_word_size);
     }
-    abi.stack_size = (u32)analysis_layout_align(stack_offset, 16);
+    abi.stack_size = (u32)analysis_layout_align(stack_offset, abi_stack_alignment);
     return abi;
 }
 
@@ -7476,36 +7613,92 @@ AnalysisScheduleResult analysis_execute_jobs(Arena* result_arena, AnalysisResult
 {
     AnalysisScheduleResult schedule = {0};
     schedule.execution_order = arena_allocate(result_arena, AnalysisJobId, result->job_count);
+    u32* remaining = arena_allocate(result_arena, u32, result->job_count);
+    memset(remaining, 0, sizeof(*remaining) * result->job_count);
+    u32* id_to_index = arena_allocate(result_arena, u32, result->job_count);
+    memset(id_to_index, 0xff, sizeof(*id_to_index) * result->job_count);
+    u64 edge_capacity_u64 = 0;
+    for (u32 job_index = 0; job_index < result->job_count; job_index += 1)
+    {
+        AnalysisJob* job = result->jobs + job_index;
+        if (job->id.value >= result->job_count || id_to_index[job->id.value] != UINT32_MAX)
+        {
+            schedule.has_cycle = true;
+            return schedule;
+        }
+        id_to_index[job->id.value] = job_index;
+        if (edge_capacity_u64 > UINT32_MAX - job->dependency_count)
+        {
+            schedule.has_cycle = true;
+            return schedule;
+        }
+        edge_capacity_u64 += job->dependency_count;
+    }
+    typedef struct AnalysisJobDependencyEdge AnalysisJobDependencyEdge;
+    struct AnalysisJobDependencyEdge
+    {
+        u32 source;
+        u32 dependent;
+    };
+    u32 edge_capacity = (u32)edge_capacity_u64;
+    AnalysisJobDependencyEdge* edges = arena_allocate(result_arena, AnalysisJobDependencyEdge, edge_capacity);
+    u32 edge_count = 0;
+    for (u32 job_index = 0; job_index < result->job_count; job_index += 1)
+    {
+        AnalysisJob* job = result->jobs + job_index;
+        for (u32 dependency_index = 0; dependency_index < job->dependency_count; dependency_index += 1)
+        {
+            AnalysisJobId dependency = job->dependencies[dependency_index];
+            if (dependency.value >= result->job_count || id_to_index[dependency.value] == UINT32_MAX)
+            {
+                remaining[job_index] += 1;
+                continue;
+            }
+            edges[edge_count++] = (AnalysisJobDependencyEdge){
+                .source = id_to_index[dependency.value],
+                .dependent = job_index,
+            };
+            remaining[job_index] += 1;
+        }
+    }
+    u32* source_counts = arena_allocate(result_arena, u32, result->job_count);
+    memset(source_counts, 0, sizeof(*source_counts) * result->job_count);
+    for (u32 edge_index = 0; edge_index < edge_count; edge_index += 1)
+    {
+        source_counts[edges[edge_index].source] += 1;
+    }
+    u32* source_offsets = arena_allocate(result_arena, u32, result->job_count + 1);
+    source_offsets[0] = 0;
+    for (u32 job_index = 0; job_index < result->job_count; job_index += 1)
+    {
+        source_offsets[job_index + 1] = source_offsets[job_index] + source_counts[job_index];
+    }
+    u32* source_cursor = arena_allocate(result_arena, u32, result->job_count);
+    memcpy(source_cursor, source_offsets, sizeof(*source_cursor) * result->job_count);
+    u32* dependents = arena_allocate(result_arena, u32, edge_count);
+    for (u32 edge_index = 0; edge_index < edge_count; edge_index += 1)
+    {
+        AnalysisJobDependencyEdge edge = edges[edge_index];
+        dependents[source_cursor[edge.source]++] = edge.dependent;
+    }
     bool* complete = arena_allocate(result_arena, bool, result->job_count);
     memset(complete, 0, sizeof(*complete) * result->job_count);
     AnalysisJobId* ready = arena_allocate(result_arena, AnalysisJobId, result->job_count);
-    worker_count = BUSTER_MAX(worker_count, 1);
-    while (schedule.execution_count < result->job_count)
+    u32 head = 0;
+    u32 tail = 0;
+    for (u32 job_index = 0; job_index < result->job_count; job_index += 1)
     {
-        u32 ready_count = 0;
-        for (u32 job_index = 0; job_index < result->job_count; job_index += 1)
+        if (!remaining[job_index])
         {
-            if (complete[job_index])
-            {
-                continue;
-            }
-            AnalysisJob* job = result->jobs + job_index;
-            bool dependencies_complete = true;
-            for (u32 dependency = 0; dependency < job->dependency_count; dependency += 1)
-            {
-                AnalysisJobId dependency_id = job->dependencies[dependency];
-                dependencies_complete &= dependency_id.value < result->job_count && complete[dependency_id.value];
-            }
-            if (dependencies_complete)
-            {
-                ready[ready_count++] = job->id;
-            }
+            ready[tail++] = result->jobs[job_index].id;
         }
-        if (!ready_count)
-        {
-            schedule.has_cycle = true;
-            break;
-        }
+    }
+    worker_count = BUSTER_MAX(worker_count, 1);
+    while (head < tail)
+    {
+        u32 batch_start = head;
+        u32 batch_end = tail;
+        u32 ready_count = batch_end - batch_start;
         u32 active_workers = BUSTER_MIN(worker_count, ready_count);
         if (callback && active_workers > 1)
         {
@@ -7515,7 +7708,7 @@ AnalysisScheduleResult analysis_execute_jobs(Arena* result_arena, AnalysisResult
             {
                 workers[worker_index] = (AnalysisScheduleWorker){
                     .result = result,
-                    .ready = ready,
+                    .ready = ready + batch_start,
                     .callback = callback,
                     .user_data = user_data,
                     .ready_count = ready_count,
@@ -7536,7 +7729,7 @@ AnalysisScheduleResult analysis_execute_jobs(Arena* result_arena, AnalysisResult
         {
             AnalysisScheduleWorker worker = {
                 .result = result,
-                .ready = ready,
+                .ready = ready + batch_start,
                 .callback = callback,
                 .user_data = user_data,
                 .ready_count = ready_count,
@@ -7544,13 +7737,29 @@ AnalysisScheduleResult analysis_execute_jobs(Arena* result_arena, AnalysisResult
             };
             analysis_schedule_worker(&worker);
         }
-        for (u32 index = 0; index < ready_count; index += 1)
+        head = batch_end;
+        for (u32 index = batch_start; index < batch_end; index += 1)
         {
-            complete[ready[index].value] = true;
+            u32 job_index = id_to_index[ready[index].value];
+            if (job_index >= result->job_count || complete[job_index])
+            {
+                schedule.has_cycle = true;
+                return schedule;
+            }
+            complete[job_index] = true;
             schedule.execution_order[schedule.execution_count++] = ready[index];
+            for (u32 dependent_index = source_offsets[job_index]; dependent_index < source_offsets[job_index + 1]; dependent_index += 1)
+            {
+                u32 dependent = dependents[dependent_index];
+                if (remaining[dependent] && --remaining[dependent] == 0)
+                {
+                    ready[tail++] = result->jobs[dependent].id;
+                }
+            }
         }
         schedule.wave_count += 1;
     }
+    schedule.has_cycle = schedule.execution_count != result->job_count;
     return schedule;
 }
 
@@ -7612,6 +7821,53 @@ BUSTER_GLOBAL_LOCAL u32 analysis_program_module_index(AnalysisProgram* program, 
     return UINT32_MAX;
 }
 
+BUSTER_GLOBAL_LOCAL u32 analysis_program_job_flat_index(AnalysisProgram* program, u32* offsets, AnalysisModuleId module_id, AnalysisJobId job_id)
+{
+    u32 module_index = analysis_program_module_index(program, module_id);
+    if (module_index == UINT32_MAX)
+    {
+        return UINT32_MAX;
+    }
+    AnalysisResult* module = program->module_results[module_index];
+    if (!module)
+    {
+        return UINT32_MAX;
+    }
+    for (u32 job_index = 0; job_index < module->job_count; job_index += 1)
+    {
+        if (module->jobs[job_index].id.value == job_id.value)
+        {
+            return offsets[module_index] + job_index;
+        }
+    }
+    return UINT32_MAX;
+}
+
+typedef struct AnalysisProgramDependencyEdge AnalysisProgramDependencyEdge;
+struct AnalysisProgramDependencyEdge
+{
+    u32 source;
+    u32 dependent;
+    AnalysisProgramJob dependent_job;
+};
+
+BUSTER_GLOBAL_LOCAL bool analysis_program_schedule_add_edge(AnalysisProgramDependencyEdge* edges, u32 edge_capacity, u32* edge_count, u32* remaining,
+                                                             u32 source, u32 dependent, AnalysisProgramJob dependent_job)
+{
+    if (source == UINT32_MAX || dependent == UINT32_MAX || *edge_count >= edge_capacity)
+    {
+        return false;
+    }
+    edges[*edge_count] = (AnalysisProgramDependencyEdge){
+        .source = source,
+        .dependent = dependent,
+        .dependent_job = dependent_job,
+    };
+    *edge_count += 1;
+    remaining[dependent] += 1;
+    return true;
+}
+
 AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena, AnalysisProgram* program, u32 worker_count,
                                                             AnalysisProgramJobCallback* callback, void* user_data)
 {
@@ -7625,94 +7881,188 @@ AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena,
     }
     u32 total = offsets[program->module_count];
     schedule.execution_order = arena_allocate(result_arena, AnalysisProgramJob, total);
-    bool* complete = arena_allocate(result_arena, bool, total);
-    memset(complete, 0, sizeof(*complete) * total);
-    AnalysisProgramJob* ready = arena_allocate(result_arena, AnalysisProgramJob, total);
-    worker_count = BUSTER_MAX(worker_count, 1);
-
-    while (schedule.execution_count < total)
+    u32* remaining = arena_allocate(result_arena, u32, total);
+    memset(remaining, 0, sizeof(*remaining) * total);
+    u64 edge_capacity_u64 = 0;
+    for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
     {
-        u32 ready_count = 0;
-        for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
+        AnalysisResult* module = program->module_results[module_index];
+        if (!module)
         {
-            AnalysisResult* module = program->module_results[module_index];
-            if (!module)
+            continue;
+        }
+        for (u32 job_index = 0; job_index < module->job_count; job_index += 1)
+        {
+            AnalysisJob* job = module->jobs + job_index;
+            if (edge_capacity_u64 > UINT32_MAX - job->dependency_count)
             {
-                continue;
+                schedule.has_cycle = true;
+                return schedule;
             }
-            for (u32 job_index = 0; job_index < module->job_count; job_index += 1)
+            edge_capacity_u64 += job->dependency_count;
+            if (job->kind == ANALYSIS_JOB_INTERFACE)
             {
-                u32 flat = offsets[module_index] + job_index;
-                if (complete[flat])
+                for (u32 import_index = 0; import_index < module->module.import_count; import_index += 1)
                 {
-                    continue;
-                }
-                AnalysisJob* job = module->jobs + job_index;
-                bool dependencies_complete = true;
-                for (u32 dependency_index = 0; dependency_index < job->dependency_count; dependency_index += 1)
-                {
-                    AnalysisJobId dependency = job->dependencies[dependency_index];
-                    dependencies_complete &= dependency.value < module->job_count && complete[offsets[module_index] + dependency.value];
-                }
-
-                if (job->kind == ANALYSIS_JOB_INTERFACE)
-                {
-                    for (u32 import_index = 0; dependencies_complete && import_index < module->module.import_count; import_index += 1)
+                    AnalysisImport* import = module->module.imports + import_index;
+                    if (import->state != ANALYSIS_IMPORT_RESOLVED || !import->target)
                     {
-                        AnalysisImport* import = module->module.imports + import_index;
-                        if (import->state != ANALYSIS_IMPORT_RESOLVED || !import->target)
+                        continue;
+                    }
+                    for (u32 target_job = 0; target_job < import->target->job_count; target_job += 1)
+                    {
+                        edge_capacity_u64 += import->target->jobs[target_job].kind == ANALYSIS_JOB_INTERFACE;
+                        if (edge_capacity_u64 > UINT32_MAX)
                         {
-                            continue;
-                        }
-                        u32 target_index = analysis_program_module_index(program, import->target_id);
-                        BUSTER_CHECK(target_index != UINT32_MAX);
-                        for (u32 target_job = 0; target_job < import->target->job_count; target_job += 1)
-                        {
-                            if (import->target->jobs[target_job].kind == ANALYSIS_JOB_INTERFACE)
-                            {
-                                dependencies_complete &= complete[offsets[target_index] + target_job];
-                            }
+                            schedule.has_cycle = true;
+                            return schedule;
                         }
                     }
                 }
-                else if (job->kind == ANALYSIS_JOB_BODY && job->entity.index.value < module->module.entity_count)
+            }
+            else if (job->kind == ANALYSIS_JOB_BODY && job->entity.index.value < module->module.entity_count)
+            {
+                AnalysisInstantiation* instantiation =
+                    job->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID ? 0 : analysis_instantiation_from_id(module, job->instantiation);
+                AnalysisBody* body = instantiation ? &instantiation->body : module->module.bodies + job->entity.index.value;
+                if (body)
                 {
-                    AnalysisInstantiation* instantiation =
-                        job->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID ? 0 : analysis_instantiation_from_id(module, job->instantiation);
-                    AnalysisBody* body = instantiation ? &instantiation->body : module->module.bodies + job->entity.index.value;
-                    for (u32 dependency_index = 0; dependencies_complete && dependency_index < body->dependency_count; dependency_index += 1)
+                    for (u32 dependency_index = 0; dependency_index < body->dependency_count; dependency_index += 1)
+                    {
+                        edge_capacity_u64 += body->dependencies[dependency_index].module.value != module->module.id.value;
+                        if (edge_capacity_u64 > UINT32_MAX)
+                        {
+                            schedule.has_cycle = true;
+                            return schedule;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    u32 edge_capacity = (u32)edge_capacity_u64;
+    AnalysisProgramDependencyEdge* edges = arena_allocate(result_arena, AnalysisProgramDependencyEdge, edge_capacity);
+    u32 edge_count = 0;
+    for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
+    {
+        AnalysisResult* module = program->module_results[module_index];
+        if (!module)
+        {
+            continue;
+        }
+        for (u32 job_index = 0; job_index < module->job_count; job_index += 1)
+        {
+            AnalysisJob* job = module->jobs + job_index;
+            u32 dependent = offsets[module_index] + job_index;
+            AnalysisProgramJob dependent_job = {
+                .module = module->module.id,
+                .job = job->id,
+            };
+            for (u32 dependency_index = 0; dependency_index < job->dependency_count; dependency_index += 1)
+            {
+                u32 source = analysis_program_job_flat_index(program, offsets, module->module.id, job->dependencies[dependency_index]);
+                if (!analysis_program_schedule_add_edge(edges, edge_capacity, &edge_count, remaining, source, dependent, dependent_job))
+                {
+                    remaining[dependent] += 1;
+                }
+            }
+            if (job->kind == ANALYSIS_JOB_INTERFACE)
+            {
+                for (u32 import_index = 0; import_index < module->module.import_count; import_index += 1)
+                {
+                    AnalysisImport* import = module->module.imports + import_index;
+                    if (import->state != ANALYSIS_IMPORT_RESOLVED || !import->target)
+                    {
+                        continue;
+                    }
+                    for (u32 target_job = 0; target_job < import->target->job_count; target_job += 1)
+                    {
+                        if (import->target->jobs[target_job].kind != ANALYSIS_JOB_INTERFACE)
+                        {
+                            continue;
+                        }
+                        u32 source = analysis_program_job_flat_index(program, offsets, import->target_id, import->target->jobs[target_job].id);
+                        if (!analysis_program_schedule_add_edge(edges, edge_capacity, &edge_count, remaining, source, dependent, dependent_job))
+                        {
+                            remaining[dependent] += 1;
+                        }
+                    }
+                }
+            }
+            else if (job->kind == ANALYSIS_JOB_BODY && job->entity.index.value < module->module.entity_count)
+            {
+                AnalysisInstantiation* instantiation =
+                    job->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID ? 0 : analysis_instantiation_from_id(module, job->instantiation);
+                AnalysisBody* body = instantiation ? &instantiation->body : module->module.bodies + job->entity.index.value;
+                if (body)
+                {
+                    for (u32 dependency_index = 0; dependency_index < body->dependency_count; dependency_index += 1)
                     {
                         AnalysisEntityId dependency = body->dependencies[dependency_index];
                         if (dependency.module.value == module->module.id.value)
                         {
                             continue;
                         }
-                        u32 target_index = analysis_program_module_index(program, dependency.module);
-                        if (target_index == UINT32_MAX)
+                        u32 source = analysis_program_job_flat_index(program, offsets, dependency.module,
+                                                                      (AnalysisJobId){.value = dependency.index.value});
+                        if (!analysis_program_schedule_add_edge(edges, edge_capacity, &edge_count, remaining, source, dependent, dependent_job))
                         {
-                            dependencies_complete = false;
-                            break;
+                            remaining[dependent] += 1;
                         }
-                        AnalysisResult* target = program->module_results[target_index];
-                        dependencies_complete &=
-                            dependency.index.value < target->module.entity_count && complete[offsets[target_index] + dependency.index.value];
                     }
-                }
-                if (dependencies_complete)
-                {
-                    ready[ready_count++] = (AnalysisProgramJob){
-                        .module = module->module.id,
-                        .job = job->id,
-                    };
                 }
             }
         }
-        if (!ready_count)
+    }
+    u32* source_counts = arena_allocate(result_arena, u32, total);
+    memset(source_counts, 0, sizeof(*source_counts) * total);
+    for (u32 edge_index = 0; edge_index < edge_count; edge_index += 1)
+    {
+        source_counts[edges[edge_index].source] += 1;
+    }
+    u32* source_offsets = arena_allocate(result_arena, u32, total + 1);
+    source_offsets[0] = 0;
+    for (u32 job_index = 0; job_index < total; job_index += 1)
+    {
+        source_offsets[job_index + 1] = source_offsets[job_index] + source_counts[job_index];
+    }
+    u32* source_cursor = arena_allocate(result_arena, u32, total);
+    memcpy(source_cursor, source_offsets, sizeof(*source_cursor) * total);
+    u32* dependent_edges = arena_allocate(result_arena, u32, edge_count);
+    for (u32 edge_index = 0; edge_index < edge_count; edge_index += 1)
+    {
+        AnalysisProgramDependencyEdge edge = edges[edge_index];
+        dependent_edges[source_cursor[edge.source]++] = edge_index;
+    }
+    bool* complete = arena_allocate(result_arena, bool, total);
+    memset(complete, 0, sizeof(*complete) * total);
+    AnalysisProgramJob* ready = arena_allocate(result_arena, AnalysisProgramJob, total);
+    u32 head = 0;
+    u32 tail = 0;
+    for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
+    {
+        AnalysisResult* module = program->module_results[module_index];
+        if (!module)
         {
-            schedule.has_cycle = true;
-            break;
+            continue;
         }
-
+        for (u32 job_index = 0; job_index < module->job_count; job_index += 1)
+        {
+            if (!remaining[offsets[module_index] + job_index])
+            {
+                ready[tail++] = (AnalysisProgramJob){
+                    .module = module->module.id,
+                    .job = module->jobs[job_index].id,
+                };
+            }
+        }
+    }
+    worker_count = BUSTER_MAX(worker_count, 1);
+    while (head < tail)
+    {
+        u32 batch_start = head;
+        u32 batch_end = tail;
+        u32 ready_count = batch_end - batch_start;
         u32 active_workers = BUSTER_MIN(worker_count, ready_count);
         if (callback && active_workers > 1)
         {
@@ -7722,7 +8072,7 @@ AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena,
             {
                 workers[worker_index] = (AnalysisProgramScheduleWorker){
                     .program = program,
-                    .ready = ready,
+                    .ready = ready + batch_start,
                     .callback = callback,
                     .user_data = user_data,
                     .ready_count = ready_count,
@@ -7743,7 +8093,7 @@ AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena,
         {
             AnalysisProgramScheduleWorker worker = {
                 .program = program,
-                .ready = ready,
+                .ready = ready + batch_start,
                 .callback = callback,
                 .user_data = user_data,
                 .ready_count = ready_count,
@@ -7752,16 +8102,30 @@ AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena,
             analysis_program_schedule_worker(&worker);
         }
 
-        for (u32 ready_index = 0; ready_index < ready_count; ready_index += 1)
+        head = batch_end;
+        for (u32 ready_index = batch_start; ready_index < batch_end; ready_index += 1)
         {
             AnalysisProgramJob item = ready[ready_index];
-            u32 module_index = analysis_program_module_index(program, item.module);
-            BUSTER_CHECK(module_index != UINT32_MAX);
-            complete[offsets[module_index] + item.job.value] = true;
+            u32 flat = analysis_program_job_flat_index(program, offsets, item.module, item.job);
+            if (flat == UINT32_MAX || complete[flat])
+            {
+                schedule.has_cycle = true;
+                return schedule;
+            }
+            complete[flat] = true;
             schedule.execution_order[schedule.execution_count++] = item;
+            for (u32 dependent_index = source_offsets[flat]; dependent_index < source_offsets[flat + 1]; dependent_index += 1)
+            {
+                AnalysisProgramDependencyEdge edge = edges[dependent_edges[dependent_index]];
+                if (remaining[edge.dependent] && --remaining[edge.dependent] == 0)
+                {
+                    ready[tail++] = edge.dependent_job;
+                }
+            }
         }
         schedule.wave_count += 1;
     }
+    schedule.has_cycle = schedule.execution_count != total;
     return schedule;
 }
 
@@ -8557,6 +8921,7 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
         }
     }
     AnalysisInterfaceSummary specialization_summary = analysis_module_interface_summary(arguments->arena, &namespace_math);
+    BUSTER_TEST(arguments, analysis_interface_summary_is_valid(specialization_summary));
     BUSTER_TEST(arguments, string_first_sequence(specialization_summary.bytes, S8("specialization ")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(specialization_summary.bytes, S8("requester=app\n")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(specialization_summary.bytes, S8("requester=app-two\n")) != BUSTER_STRING_NO_MATCH);
@@ -8568,6 +8933,9 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, specialization_cache_entry != 0);
     BUSTER_TEST(arguments, specialization_cache_entry && specialization_cache_entry->summary.hash == specialization_summary.hash);
     BUSTER_TEST(arguments, specialization_cache_entry && string_equal(specialization_cache_entry->summary.bytes, specialization_summary.bytes));
+    AnalysisInterfaceSummary corrupted_summary = specialization_summary;
+    corrupted_summary.hash ^= 1;
+    BUSTER_TEST(arguments, !analysis_interface_summary_is_valid(corrupted_summary));
 
     String8 stable_source_left = S8("code identity : fn ($value: $T) $T { return value; }\n"
                                     "code main : fn () s32\n"

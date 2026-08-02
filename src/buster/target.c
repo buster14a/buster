@@ -42,6 +42,91 @@ BUSTER_V_IMPL Target target_native = {
 #endif
 };
 
+TargetDataLayout target_data_layout(Target target)
+{
+    bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
+    bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    bool arm_plain_char_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && !windows;
+    u32 long_size = windows ? 4 : 8;
+    u32 long_double_size = windows || apple ? 8 : 16;
+    u32 long_double_bits = windows || apple ? 64 : target.cpu_arch == CPU_ARCH_X86_64 ? 80 : 128;
+    u32 va_list_size = windows ? 8 : target.cpu_arch == CPU_ARCH_X86_64 ? 32 : 32;
+
+    TargetDataLayout layout = {
+        .boolean = {.size = 1, .alignment = 1, .bit_width = 1},
+        .plain_char = {.size = 1, .alignment = 1, .bit_width = 8},
+        .signed_char = {.size = 1, .alignment = 1, .bit_width = 8},
+        .unsigned_char = {.size = 1, .alignment = 1, .bit_width = 8},
+        .short_integer = {.size = 2, .alignment = 2, .bit_width = 16},
+        .unsigned_short_integer = {.size = 2, .alignment = 2, .bit_width = 16},
+        .integer = {.size = 4, .alignment = 4, .bit_width = 32},
+        .unsigned_integer = {.size = 4, .alignment = 4, .bit_width = 32},
+        .long_integer = {.size = long_size, .alignment = long_size, .bit_width = long_size * 8},
+        .unsigned_long_integer = {.size = long_size, .alignment = long_size, .bit_width = long_size * 8},
+        .long_long_integer = {.size = 8, .alignment = 8, .bit_width = 64},
+        .unsigned_long_long_integer = {.size = 8, .alignment = 8, .bit_width = 64},
+        .integer128 = {.size = 16, .alignment = 16, .bit_width = 128},
+        .unsigned_integer128 = {.size = 16, .alignment = 16, .bit_width = 128},
+        .float_type = {.size = 4, .alignment = 4, .bit_width = 32},
+        .double_type = {.size = 8, .alignment = 8, .bit_width = 64},
+        .long_double_type = {.size = long_double_size, .alignment = long_double_size, .bit_width = long_double_bits},
+        .pointer = {.size = 8, .alignment = 8, .bit_width = 64},
+        .va_list = {.size = va_list_size, .alignment = 8, .bit_width = va_list_size * 8},
+        .atomic_min_width = 8,
+        .atomic_max_width = 128,
+        .atomic_alignment = 16,
+        .abi_stack_alignment = 16,
+        .abi_max_alignment = 16,
+        .endianness = TARGET_ENDIAN_LITTLE,
+        .plain_char_is_signed = !arm_plain_char_unsigned,
+        .has_128_bit_integer = true,
+    };
+    return layout;
+}
+
+BUSTER_GLOBAL_LOCAL bool target_layout_alignment_valid(u32 alignment)
+{
+    return alignment && !(alignment & (alignment - 1));
+}
+
+bool target_data_layout_is_valid(TargetDataLayout layout)
+{
+    TargetTypeLayout types[] = {
+        layout.boolean,
+        layout.plain_char,
+        layout.signed_char,
+        layout.unsigned_char,
+        layout.short_integer,
+        layout.unsigned_short_integer,
+        layout.integer,
+        layout.unsigned_integer,
+        layout.long_integer,
+        layout.unsigned_long_integer,
+        layout.long_long_integer,
+        layout.unsigned_long_long_integer,
+        layout.integer128,
+        layout.unsigned_integer128,
+        layout.float_type,
+        layout.double_type,
+        layout.long_double_type,
+        layout.pointer,
+        layout.va_list,
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(types); index += 1)
+    {
+        TargetTypeLayout type = types[index];
+        if (!type.size || !type.bit_width || type.bit_width > UINT32_MAX - 7 || (type.bit_width + 7) / 8 > type.size ||
+            !target_layout_alignment_valid(type.alignment) || type.alignment > type.size * 2)
+        {
+            return false;
+        }
+    }
+    return layout.endianness < TARGET_ENDIAN_COUNT && layout.pointer.size == 8 && layout.pointer.alignment == 8 && layout.atomic_min_width &&
+           layout.atomic_min_width <= layout.atomic_max_width && layout.atomic_max_width <= 128 && target_layout_alignment_valid(layout.atomic_alignment) &&
+           target_layout_alignment_valid(layout.abi_stack_alignment) && target_layout_alignment_valid(layout.abi_max_alignment) &&
+           layout.abi_stack_alignment <= layout.abi_max_alignment;
+}
+
 bool cpu_is_native(CpuModel model)
 {
     return (model == CPU_MODEL_NATIVE) | (model == target_native.cpu_model);
@@ -1060,6 +1145,31 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     Target invalid_avx512bw = valid_avx512;
     invalid_avx512bw.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX512BW;
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_avx512bw));
+    TargetDataLayout linux_x86_layout = target_data_layout((Target){
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+    });
+    BUSTER_TEST(arguments, target_data_layout_is_valid(linux_x86_layout));
+    BUSTER_TEST(arguments, linux_x86_layout.pointer.size == 8 && linux_x86_layout.pointer.alignment == 8);
+    BUSTER_TEST(arguments, linux_x86_layout.long_integer.bit_width == 64);
+    BUSTER_TEST(arguments, linux_x86_layout.long_double_type.bit_width == 80);
+    BUSTER_TEST(arguments, linux_x86_layout.endianness == TARGET_ENDIAN_LITTLE);
+    BUSTER_TEST(arguments, linux_x86_layout.atomic_min_width == 8 && linux_x86_layout.atomic_max_width == 128);
+    TargetDataLayout windows_x86_layout = target_data_layout((Target){
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_WINDOWS,
+    });
+    BUSTER_TEST(arguments, windows_x86_layout.long_integer.bit_width == 32);
+    BUSTER_TEST(arguments, windows_x86_layout.long_double_type.bit_width == 64);
+    TargetDataLayout linux_arm_layout = target_data_layout((Target){
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+    });
+    BUSTER_TEST(arguments, !linux_arm_layout.plain_char_is_signed);
+    BUSTER_TEST(arguments, target_data_layout_is_valid(linux_arm_layout));
     return result;
 }
 #endif

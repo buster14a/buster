@@ -18,6 +18,8 @@ typedef enum IrRuntimeValueKind
 typedef struct IrRuntimeObject IrRuntimeObject;
 typedef struct IrRuntimeStoredValue IrRuntimeStoredValue;
 typedef struct IrRuntimeValue IrRuntimeValue;
+typedef struct IrRuntimeGlobal IrRuntimeGlobal;
+typedef struct IrRuntimeContext IrRuntimeContext;
 struct IrRuntimeValue
 {
     AnalysisEntityId entity;
@@ -47,6 +49,20 @@ struct IrRuntimeObject
     u64 size;
 };
 
+struct IrRuntimeGlobal
+{
+    IrSymbolId symbol;
+    IrRuntimeObject* object;
+    u32 object_id;
+    u32 reserved;
+};
+
+struct IrRuntimeContext
+{
+    IrRuntimeGlobal* globals;
+    u32 global_count;
+};
+
 struct IrRuntimeStoredValue
 {
     IrRuntimeStoredValue* next;
@@ -65,6 +81,7 @@ struct IrExecutionFrame
     IrRuntimeValue* arguments;
     IrRuntimeValue* transition_values;
     IrValueId caller_result;
+    IrRuntimeContext* runtime;
     IrBlockId block;
     IrInstructionId instruction;
     u32 value_capacity;
@@ -101,6 +118,10 @@ BUSTER_GLOBAL_LOCAL IrExecutionTarget ir_interpreter_function_find(AnalysisProgr
             continue;
         }
         IrModule* candidate_module = program->modules + module_index;
+        if (candidate_module->function_count && !candidate_module->functions)
+        {
+            return target;
+        }
         for (u32 function_index = 0; function_index < candidate_module->function_count; function_index += 1)
         {
             IrFunction* candidate = candidate_module->functions + function_index;
@@ -214,9 +235,17 @@ BUSTER_GLOBAL_LOCAL u64 ir_interpreter_float_write(f64 value, u32 width)
 
 BUSTER_GLOBAL_LOCAL AnalysisResult* ir_interpreter_analysis_find(AnalysisResult* analysis, AnalysisModuleId module)
 {
+    if (!analysis)
+    {
+        return 0;
+    }
     if (analysis->module.id.value == module.value)
     {
         return analysis;
+    }
+    if (analysis->program_module_count && !analysis->program_modules)
+    {
+        return 0;
     }
     for (u32 module_index = 0; module_index < analysis->program_module_count; module_index += 1)
     {
@@ -229,45 +258,149 @@ BUSTER_GLOBAL_LOCAL AnalysisResult* ir_interpreter_analysis_find(AnalysisResult*
     return 0;
 }
 
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_type_id_valid(AnalysisResult* analysis, AnalysisTypeId id)
+{
+    return analysis && id.value != ANALYSIS_ID_UNDERLYING_INVALID && id.value < analysis->types.count;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_u64_add(u64 left, u64 right, u64* result)
+{
+    if (left > UINT64_MAX - right)
+    {
+        return false;
+    }
+    *result = left + right;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_u64_multiply(u64 left, u64 right, u64* result)
+{
+    if (right && left > UINT64_MAX / right)
+    {
+        return false;
+    }
+    *result = left * right;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_arena_can_allocate(Arena* arena, u64 size)
+{
+    if (!arena || arena->position > arena->reserved_size || size > arena->reserved_size - arena->position)
+    {
+        return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_arena_can_allocate_count(Arena* arena, u64 element_size, u64 count)
+{
+    u64 size = 0;
+    return ir_interpreter_u64_multiply(element_size, count, &size) && ir_interpreter_arena_can_allocate(arena, size);
+}
+
 BUSTER_GLOBAL_LOCAL u64 ir_interpreter_type_size(AnalysisResult* analysis, AnalysisTypeId type_id)
 {
-    AnalysisType* type = analysis_type_from_id(analysis, type_id);
-    if (type->layout.state == ANALYSIS_LAYOUT_RESOLVED)
+    if (!analysis || !ir_interpreter_type_id_valid(analysis, type_id))
     {
-        return type->layout.size;
-    }
-    switch (type->kind)
-    {
-    case ANALYSIS_TYPE_BOOL:
-        return 1;
-    case ANALYSIS_TYPE_INTEGER:
-        return (type->as.integer.bit_width + 7) / 8;
-    case ANALYSIS_TYPE_FLOAT:
-        return type->as.float_bit_width / 8;
-    case ANALYSIS_TYPE_VA_LIST:
-        return 32;
-    case ANALYSIS_TYPE_ENUM:
-        return 4;
-    case ANALYSIS_TYPE_POINTER:
-    case ANALYSIS_TYPE_FUNCTION:
-        return 8;
-    case ANALYSIS_TYPE_SLICE:
-        return 16;
-    case ANALYSIS_TYPE_RANGE:
-    {
-        return ir_interpreter_type_size(analysis, type->as.element_type) * 2;
-    }
-    case ANALYSIS_TYPE_ARRAY:
-    {
-        return ir_interpreter_type_size(analysis, type->as.array.element_type) * type->as.array.count;
-    }
-    default:
         return 0;
     }
+    TargetDataLayout data_layout = target_data_layout_is_valid(analysis->data_layout) ? analysis->data_layout : target_data_layout(target_native);
+    u64 multiplier = 1;
+    AnalysisTypeId current = type_id;
+    for (u32 depth = 0; depth < analysis->types.count; depth += 1)
+    {
+        if (!ir_interpreter_type_id_valid(analysis, current))
+        {
+            return 0;
+        }
+        AnalysisType* type = analysis_type_from_id(analysis, current);
+        if (type->layout.state == ANALYSIS_LAYOUT_RESOLVED)
+        {
+            return type->layout.size && multiplier > UINT64_MAX / type->layout.size ? 0 : multiplier * type->layout.size;
+        }
+        u64 size = 0;
+        switch (type->kind)
+        {
+        case ANALYSIS_TYPE_VOID:
+            return 0;
+        case ANALYSIS_TYPE_BOOL:
+            size = data_layout.boolean.size;
+            break;
+        case ANALYSIS_TYPE_INTEGER:
+            if (!type->as.integer.bit_width || type->as.integer.bit_width > UINT32_MAX - 7)
+            {
+                return 0;
+            }
+            size = (type->as.integer.bit_width + 7) / 8;
+            break;
+        case ANALYSIS_TYPE_FLOAT:
+            size = type->as.float_bit_width == data_layout.long_double_type.bit_width ? data_layout.long_double_type.size
+                  : type->as.float_bit_width == data_layout.double_type.bit_width ? data_layout.double_type.size
+                  : type->as.float_bit_width == data_layout.float_type.bit_width  ? data_layout.float_type.size
+                                                                                   : 0;
+            break;
+        case ANALYSIS_TYPE_VA_LIST:
+            size = data_layout.va_list.size;
+            break;
+        case ANALYSIS_TYPE_ENUM:
+            size = data_layout.integer.size;
+            break;
+        case ANALYSIS_TYPE_POINTER:
+        case ANALYSIS_TYPE_FUNCTION:
+            size = data_layout.pointer.size;
+            break;
+        case ANALYSIS_TYPE_SLICE:
+        {
+            u64 descriptor_size = (u64)data_layout.pointer.size * 2;
+            if (!descriptor_size || multiplier > UINT64_MAX / descriptor_size)
+            {
+                return 0;
+            }
+            size = descriptor_size;
+            break;
+        }
+        case ANALYSIS_TYPE_RANGE:
+            if (multiplier > UINT64_MAX / 2)
+            {
+                return 0;
+            }
+            multiplier *= 2;
+            current = type->as.element_type;
+            continue;
+        case ANALYSIS_TYPE_INFERRED_ARRAY:
+        case ANALYSIS_TYPE_ARRAY:
+            if (!type->as.array.count || multiplier > UINT64_MAX / type->as.array.count)
+            {
+                return 0;
+            }
+            multiplier *= type->as.array.count;
+            current = type->as.array.element_type;
+            continue;
+        case ANALYSIS_TYPE_VECTOR:
+            if (!type->as.vector.count || multiplier > UINT64_MAX / type->as.vector.count)
+            {
+                return 0;
+            }
+            multiplier *= type->as.vector.count;
+            current = type->as.vector.element_type;
+            continue;
+        default:
+            return 0;
+        }
+        return size && multiplier > UINT64_MAX / size ? 0 : multiplier * size;
+    }
+    return 0;
 }
 
 BUSTER_GLOBAL_LOCAL IrRuntimeObject* ir_interpreter_object_create(Arena* arena, u64 size)
 {
+    u64 storage_size = 0;
+    if (!arena || !ir_interpreter_u64_multiply(size, 2, &storage_size) ||
+        !ir_interpreter_u64_add(storage_size, sizeof(IrRuntimeObject) + BUSTER_ALIGN_OF(IrRuntimeObject), &storage_size) ||
+        !ir_interpreter_arena_can_allocate(arena, storage_size))
+    {
+        return 0;
+    }
     IrRuntimeObject* object = arena_allocate(arena, IrRuntimeObject, 1);
     *object = (IrRuntimeObject){.size = size};
     if (size)
@@ -283,6 +416,168 @@ BUSTER_GLOBAL_LOCAL IrRuntimeObject* ir_interpreter_object_create(Arena* arena, 
     return object;
 }
 
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(Arena* arena, IrRuntimeObject* object, u64 offset, u64 size, IrRuntimeValue value);
+
+BUSTER_GLOBAL_LOCAL IrRuntimeGlobal* ir_interpreter_global_find(IrRuntimeContext* runtime, IrSymbolId symbol)
+{
+    if (!runtime || symbol.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return 0;
+    }
+    for (u32 index = 0; index < runtime->global_count; index += 1)
+    {
+        if (runtime->globals[index].symbol.value == symbol.value)
+        {
+            return runtime->globals + index;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL void ir_interpreter_global_zero_initialize(IrRuntimeObject* object)
+{
+    if (!object)
+    {
+        return;
+    }
+    for (u64 index = 0; index < object->size; index += 1)
+    {
+        object->bytes[index] = 0;
+        object->initialized[index] = 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_runtime_globals_initialize(Arena* arena, IrProgram* program, IrRuntimeContext* runtime)
+{
+    if (!arena || !program || !runtime)
+    {
+        return false;
+    }
+    u32 global_count = 0;
+    if (program->module_count && !program->modules)
+    {
+        return false;
+    }
+    for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
+    {
+        IrModule* module = program->modules + module_index;
+        if (module->global_count && !module->globals)
+        {
+            return false;
+        }
+        if (module->global_count > UINT32_MAX - global_count)
+        {
+            return false;
+        }
+        global_count += module->global_count;
+    }
+    if (!ir_interpreter_arena_can_allocate_count(arena, sizeof(IrRuntimeGlobal), global_count))
+    {
+        return false;
+    }
+    runtime->globals = arena_allocate(arena, IrRuntimeGlobal, global_count);
+    runtime->global_count = global_count;
+    u32 global_index = 0;
+    for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
+    {
+        IrModule* module = program->modules + module_index;
+        for (u32 module_global_index = 0; module_global_index < module->global_count; module_global_index += 1)
+        {
+            IrGlobal* global = module->globals + module_global_index;
+            IrType* type = ir_type_from_id(&program->types, global->type);
+            if (!type || !type->layout.resolved)
+            {
+                return false;
+            }
+            IrRuntimeGlobal* runtime_global = runtime->globals + global_index;
+            runtime_global->symbol = global->symbol;
+            runtime_global->object_id = global_index + 1;
+            runtime_global->object = ir_interpreter_object_create(arena, type->layout.size);
+            if (!runtime_global->object)
+            {
+                return false;
+            }
+            ir_interpreter_global_zero_initialize(runtime_global->object);
+            global_index += 1;
+        }
+    }
+    global_index = 0;
+    for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
+    {
+        IrModule* module = program->modules + module_index;
+        for (u32 module_global_index = 0; module_global_index < module->global_count; module_global_index += 1)
+        {
+            IrGlobal* global = module->globals + module_global_index;
+            IrRuntimeGlobal* runtime_global = runtime->globals + global_index++;
+            IrRuntimeObject* object = runtime_global->object;
+            switch (global->initializer_kind)
+            {
+            case IR_GLOBAL_INITIALIZER_ZERO:
+            case IR_GLOBAL_INITIALIZER_NONE:
+                break;
+            case IR_GLOBAL_INITIALIZER_BYTES:
+            {
+                if (global->bytes.length && !global->bytes.pointer)
+                {
+                    return false;
+                }
+                u64 count = BUSTER_MIN(object->size, global->bytes.length);
+                if (count)
+                {
+                    memcpy(object->bytes, global->bytes.pointer, count);
+                }
+                for (u64 byte_index = 0; byte_index < object->size; byte_index += 1)
+                {
+                    object->initialized[byte_index] = 1;
+                }
+            }
+            break;
+            case IR_GLOBAL_INITIALIZER_INTEGER:
+            case IR_GLOBAL_INITIALIZER_FLOAT:
+            {
+                u64 bits = global->initializer_bits;
+                for (u64 byte_index = 0; byte_index < object->size; byte_index += 1)
+                {
+                    object->bytes[byte_index] = byte_index < sizeof(bits) ? (u8)(bits >> (u32)(byte_index * 8))
+                                                                            : (global->initializer_is_negative ? 0xff : 0);
+                    object->initialized[byte_index] = 1;
+                }
+            }
+            break;
+            case IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS:
+            {
+                IrRuntimeGlobal* target = ir_interpreter_global_find(runtime, global->initializer_symbol);
+                IrType* type = ir_type_from_id(&program->types, global->type);
+                u64 addend_magnitude = global->initializer_addend < 0 ? (u64)(-(global->initializer_addend + 1)) + 1 : (u64)global->initializer_addend;
+                bool addend_valid = target && addend_magnitude <= target->object->size;
+                if (!addend_valid)
+                {
+                    return false;
+                }
+                IrRuntimeValue address = {
+                    .object = target->object,
+                    .offset = addend_magnitude,
+                    .kind = IR_RUNTIME_VALUE_ADDRESS,
+                    .initialized = true,
+                };
+                if (global->initializer_addend < 0)
+                {
+                    address.offset = target->object->size - addend_magnitude;
+                }
+                if (!type || !ir_interpreter_memory_write(arena, object, 0, type->layout.size, address))
+                {
+                    return false;
+                }
+            }
+            break;
+            case IR_GLOBAL_INITIALIZER_COUNT:
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_object_range_valid(IrRuntimeObject* object, u64 offset, u64 size)
 {
     return object && offset <= object->size && size <= object->size - offset;
@@ -290,7 +585,8 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_object_range_valid(IrRuntimeObject* obje
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_ranges_overlap(u64 left_offset, u64 left_size, u64 right_offset, u64 right_size)
 {
-    return left_size && right_size && left_offset < right_offset + right_size && right_offset < left_offset + left_size;
+    return left_size && right_size && left_offset <= UINT64_MAX - left_size && right_offset <= UINT64_MAX - right_size && left_offset < right_offset + right_size &&
+           right_offset < left_offset + left_size;
 }
 
 BUSTER_GLOBAL_LOCAL void ir_interpreter_stored_values_clear(IrRuntimeObject* object, u64 offset, u64 size)
@@ -334,9 +630,13 @@ BUSTER_GLOBAL_LOCAL IrRuntimeStoredValue* ir_interpreter_stored_value_find(IrRun
     return 0;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_interpreter_object_region_copy(Arena* arena, IrRuntimeObject* destination, u64 destination_offset, IrRuntimeObject* source,
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_object_region_copy(Arena* arena, IrRuntimeObject* destination, u64 destination_offset, IrRuntimeObject* source,
                                                            u64 source_offset, u64 size)
 {
+    if (!ir_interpreter_object_range_valid(destination, destination_offset, size) || !ir_interpreter_object_range_valid(source, source_offset, size))
+    {
+        return false;
+    }
     for (u64 index = 0; index < size; index += 1)
     {
         destination->bytes[destination_offset + index] = source->bytes[source_offset + index];
@@ -344,11 +644,14 @@ BUSTER_GLOBAL_LOCAL void ir_interpreter_object_region_copy(Arena* arena, IrRunti
     }
     for (IrRuntimeStoredValue* stored = source->first_stored_value; stored; stored = stored->next)
     {
-        if (stored->offset >= source_offset && stored->size <= source_offset + size - stored->offset)
+        u64 source_end = 0;
+        if (ir_interpreter_u64_add(source_offset, size, &source_end) && ir_interpreter_object_range_valid(source, stored->offset, stored->size) &&
+            stored->offset >= source_offset && stored->size <= source_end - stored->offset)
         {
             ir_interpreter_stored_value_add(arena, destination, destination_offset + stored->offset - source_offset, stored->size, stored->value);
         }
     }
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(Arena* arena, IrRuntimeObject* object, u64 offset, u64 size, IrRuntimeValue value)
@@ -377,8 +680,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(Arena* arena, IrRuntimeObje
     }
     if (value.kind == IR_RUNTIME_VALUE_AGGREGATE && ir_interpreter_object_range_valid(value.object, value.offset, size))
     {
-        ir_interpreter_object_region_copy(arena, object, offset, value.object, value.offset, size);
-        return true;
+        return ir_interpreter_object_region_copy(arena, object, offset, value.object, value.offset, size);
     }
     for (u64 index = 0; index < size; index += 1)
     {
@@ -434,7 +736,10 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_read(Arena* arena, AnalysisResult
     if (type->kind == ANALYSIS_TYPE_ARRAY || type->kind == ANALYSIS_TYPE_VECTOR || type->kind == ANALYSIS_TYPE_STRUCT || type->kind == ANALYSIS_TYPE_UNION)
     {
         IrRuntimeObject* copy = ir_interpreter_object_create(arena, size);
-        ir_interpreter_object_region_copy(arena, copy, 0, object, offset, size);
+        if (!ir_interpreter_object_region_copy(arena, copy, 0, object, offset, size))
+        {
+            return false;
+        }
         *value_out = (IrRuntimeValue){
             .object = copy,
             .length = size,
@@ -460,7 +765,8 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_field(IrExecutionFrame* frame, AnalysisT
         return false;
     }
     AnalysisResult* declaration_analysis = ir_interpreter_analysis_find(frame->analysis, aggregate_type->as.declaration.module);
-    if (!declaration_analysis || aggregate_type->as.declaration.index.value >= declaration_analysis->module.entity_count)
+    if (!declaration_analysis || aggregate_type->as.declaration.index.value >= declaration_analysis->module.entity_count ||
+        (declaration_analysis->module.entity_count && !declaration_analysis->module.semantics))
     {
         return false;
     }
@@ -473,10 +779,187 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_field(IrExecutionFrame* frame, AnalysisT
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame* frame, IrInstruction* instruction)
+{
+    if (!frame || !instruction || instruction->opcode >= IR_OPCODE_COUNT || !ir_interpreter_type_id_valid(frame->analysis, instruction->type) ||
+        (instruction->operand_count && !instruction->operands) || (instruction->target_count && !instruction->targets) ||
+        (instruction->immediate_count && !instruction->immediates) || (instruction->literal.length && !instruction->literal.pointer))
+    {
+        return false;
+    }
+    if (instruction->operand_count > frame->function->value_count || instruction->target_count > frame->function->block_count)
+    {
+        return false;
+    }
+    if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value >= frame->function->value_count)
+    {
+        return false;
+    }
+    for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+    {
+        if (instruction->operands[operand_index].value >= frame->function->value_count)
+        {
+            return false;
+        }
+    }
+    for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
+    {
+        if (instruction->targets[target_index].value >= frame->function->block_count)
+        {
+            return false;
+        }
+    }
+    switch (instruction->opcode)
+    {
+    case IR_OPCODE_ARGUMENT:
+        return instruction->operand_count == 0 && instruction->target_count == 0 && instruction->immediate_count == 1;
+    case IR_OPCODE_LOCAL:
+    case IR_OPCODE_STACK_SAVE:
+    case IR_OPCODE_GLOBAL:
+    case IR_OPCODE_CONSTANT_STRING:
+    case IR_OPCODE_UNDEFINED:
+    case IR_OPCODE_FUNCTION:
+    case IR_OPCODE_VA_START:
+    case IR_OPCODE_DEBUG_TRAP:
+    case IR_OPCODE_UNREACHABLE:
+        return instruction->operand_count == 0 && instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_STACK_ALLOCATE:
+    case IR_OPCODE_STACK_RESTORE:
+    case IR_OPCODE_LOAD:
+    case IR_OPCODE_ATOMIC_LOAD:
+    case IR_OPCODE_LENGTH:
+    case IR_OPCODE_ADDRESS_OF:
+    case IR_OPCODE_DEREFERENCE:
+    case IR_OPCODE_REVERSE:
+    case IR_OPCODE_VA_COPY:
+    case IR_OPCODE_VA_END:
+    case IR_OPCODE_VA_ARG:
+        return instruction->operand_count == 1 && instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_STORE:
+    case IR_OPCODE_ATOMIC_STORE:
+    case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
+        return instruction->operand_count == 2 && instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
+        return instruction->operand_count == 3 && instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_ATOMIC_FENCE:
+        return instruction->operand_count == 0 && instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
+        return instruction->operand_count == 2 && instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_CONSTANT_INTEGER:
+    case IR_OPCODE_CONSTANT_FLOAT:
+    case IR_OPCODE_ENUM:
+        return instruction->operand_count == 0 && instruction->target_count == 0 && instruction->immediate_count == 1;
+    case IR_OPCODE_ARRAY:
+        return instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_AGGREGATE:
+        return instruction->target_count == 0 && instruction->operand_count == instruction->immediate_count;
+    case IR_OPCODE_INDEX:
+        return instruction->operand_count == 2 && instruction->target_count == 0 && instruction->immediate_count == 0 &&
+               instruction->result.value != IR_ID_UNDERLYING_INVALID;
+    case IR_OPCODE_SLICE:
+        return instruction->operand_count >= 1 && instruction->operand_count <= 3 && instruction->target_count == 0 && instruction->immediate_count == 2;
+    case IR_OPCODE_FIELD:
+        return instruction->operand_count == 1 && instruction->target_count == 0 && instruction->immediate_count == 1 &&
+               instruction->result.value != IR_ID_UNDERLYING_INVALID;
+    case IR_OPCODE_CALL:
+        return instruction->operand_count >= 1 && instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_CAST:
+    case IR_OPCODE_UNARY:
+        return instruction->operand_count == 1 && instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_BINARY:
+        return instruction->operand_count == 2 && instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_INLINE_ASSEMBLY:
+        return instruction->operand_count == instruction->immediate_count && instruction->target_count == 0;
+    case IR_OPCODE_BRANCH:
+        return instruction->operand_count == 0 && instruction->target_count == 1 && instruction->immediate_count == 0;
+    case IR_OPCODE_BRANCH_IF:
+        return instruction->operand_count == 1 && instruction->target_count == 2 && instruction->immediate_count == 0;
+    case IR_OPCODE_SWITCH:
+        return instruction->operand_count == 1 && instruction->immediate_count != UINT32_MAX && instruction->target_count == instruction->immediate_count + 1;
+    case IR_OPCODE_RETURN:
+        return instruction->operand_count <= 1 && instruction->target_count == 0 && instruction->immediate_count == 0;
+    case IR_OPCODE_COUNT:
+        break;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_function_shape_valid(IrExecutionTarget target)
+{
+    IrFunction* function = target.function;
+    if (!target.analysis || !function || !function->blocks || !function->values || !function->instructions ||
+        function->entry.value >= function->block_count || !ir_interpreter_type_id_valid(target.analysis, function->type))
+    {
+        return false;
+    }
+    AnalysisType* function_type = analysis_type_from_id(target.analysis, function->type);
+    if (function_type->kind != ANALYSIS_TYPE_FUNCTION || !ir_interpreter_type_id_valid(target.analysis, function_type->as.function.return_type) ||
+        (function_type->as.function.argument_count && !function_type->as.function.argument_types))
+    {
+        return false;
+    }
+    for (u32 argument_index = 0; argument_index < function_type->as.function.argument_count; argument_index += 1)
+    {
+        if (!ir_interpreter_type_id_valid(target.analysis, function_type->as.function.argument_types[argument_index]))
+        {
+            return false;
+        }
+    }
+    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    {
+        if (!ir_interpreter_type_id_valid(target.analysis, function->values[value_index].type))
+        {
+            return false;
+        }
+    }
+    IrExecutionFrame shape_frame = {
+        .analysis = target.analysis,
+        .function = function,
+    };
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        if ((block->first_instruction.value != IR_ID_UNDERLYING_INVALID && block->first_instruction.value >= function->instruction_count) ||
+            (block->last_instruction.value != IR_ID_UNDERLYING_INVALID && block->last_instruction.value >= function->instruction_count))
+        {
+            return false;
+        }
+        if (block->parameter_count > function->value_count)
+        {
+            return false;
+        }
+        u32 parameter_count = 0;
+        for (IrBlockParameter* parameter = block->first_parameter; parameter && parameter_count < block->parameter_count; parameter = parameter->next)
+        {
+            if (parameter->value.value >= function->value_count || !ir_interpreter_type_id_valid(target.analysis, parameter->type))
+            {
+                return false;
+            }
+            parameter_count += 1;
+        }
+        if (parameter_count != block->parameter_count)
+        {
+            return false;
+        }
+    }
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        if (!ir_interpreter_instruction_shape_valid(&shape_frame, function->instructions + instruction_index))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_frame_prepare(Arena* scratch_arena, IrExecutionFrame* frame, IrExecutionTarget target, IrRuntimeValue* arguments,
                                                       u32 argument_count, IrValueId caller_result)
 {
     if (!scratch_arena || !frame || !target.analysis || !target.function || (argument_count && !arguments))
+    {
+        return false;
+    }
+    if (!ir_interpreter_function_shape_valid(target))
     {
         return false;
     }
@@ -490,6 +973,10 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_frame_prepare(Arena* scratch_arena, IrEx
     u32 required_value_capacity = target.function->value_count ? target.function->value_count : 1;
     if (!frame->values || !frame->transition_values || frame->value_capacity < required_value_capacity)
     {
+        if (!ir_interpreter_arena_can_allocate_count(scratch_arena, sizeof(IrRuntimeValue), (u64)required_value_capacity * 2))
+        {
+            return false;
+        }
         frame->values = arena_allocate(scratch_arena, IrRuntimeValue, required_value_capacity);
         frame->transition_values = arena_allocate(scratch_arena, IrRuntimeValue, required_value_capacity);
         if (!frame->values || !frame->transition_values)
@@ -500,6 +987,10 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_frame_prepare(Arena* scratch_arena, IrEx
     }
     if (argument_count && (!frame->arguments || frame->argument_capacity < argument_count))
     {
+        if (!ir_interpreter_arena_can_allocate_count(scratch_arena, sizeof(IrRuntimeValue), argument_count))
+        {
+            return false;
+        }
         frame->arguments = arena_allocate(scratch_arena, IrRuntimeValue, argument_count);
         if (!frame->arguments)
         {
@@ -533,25 +1024,36 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_block_enter(IrExecutionFrame* frame, IrB
     }
     IrBlock* block = frame->function->blocks + target.value;
     u32 parameter_index = 0;
-    for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+    for (IrBlockParameter* parameter = block->first_parameter; parameter && parameter_index < block->parameter_count; parameter = parameter->next)
     {
         IrIncoming* selected = 0;
-        for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+        u32 incoming_count = 0;
+        for (IrIncoming* incoming = parameter->first_incoming; incoming && incoming_count <= frame->function->value_count; incoming = incoming->next)
         {
             if (incoming->predecessor.value == predecessor.value)
             {
                 selected = incoming;
                 break;
             }
+            incoming_count += 1;
         }
-        if (!selected || selected->value.value >= frame->function->value_count || !frame->values[selected->value.value].initialized)
+        if (!selected && incoming_count > frame->function->value_count)
+        {
+            return false;
+        }
+        if (!selected || parameter->value.value >= frame->function->value_count || selected->value.value >= frame->function->value_count ||
+            !frame->values[selected->value.value].initialized)
         {
             return false;
         }
         frame->transition_values[parameter_index++] = frame->values[selected->value.value];
     }
+    if (parameter_index != block->parameter_count)
+    {
+        return false;
+    }
     parameter_index = 0;
-    for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+    for (IrBlockParameter* parameter = block->first_parameter; parameter && parameter_index < block->parameter_count; parameter = parameter->next)
     {
         frame->values[parameter->value.value] = frame->transition_values[parameter_index++];
     }
@@ -790,10 +1292,17 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_vector_unary(Arena* arena, IrExecutionFr
         return false;
     }
     IrRuntimeObject* object = ir_interpreter_object_create(arena, vector->layout.size);
+    if (!object)
+    {
+        *trap_out = IR_EXECUTION_TRAP_INVALID_MEMORY;
+        return false;
+    }
     for (u64 lane = 0; lane < vector->as.vector.count; lane += 1)
     {
         IrRuntimeValue source = {0};
-        if (!ir_interpreter_memory_read(arena, frame->analysis, element_type_id, operand.object, operand.offset + lane * lane_size, &source))
+        u64 lane_offset = 0;
+        if (!ir_interpreter_u64_multiply(lane, lane_size, &lane_offset) || !ir_interpreter_u64_add(operand.offset, lane_offset, &lane_offset) ||
+            !ir_interpreter_memory_read(arena, frame->analysis, element_type_id, operand.object, lane_offset, &source))
         {
             *trap_out = IR_EXECUTION_TRAP_UNINITIALIZED_VALUE;
             return false;
@@ -854,14 +1363,24 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_vector_binary(Arena* arena, IrExecutionF
         return false;
     }
     IrRuntimeObject* object = ir_interpreter_object_create(arena, result_vector->layout.size);
+    if (!object)
+    {
+        *trap_out = IR_EXECUTION_TRAP_INVALID_MEMORY;
+        return false;
+    }
     u32 width = element->kind == ANALYSIS_TYPE_FLOAT ? element->as.float_bit_width : element->as.integer.bit_width;
     u64 mask = ir_interpreter_mask(width);
     for (u64 lane = 0; lane < vector->as.vector.count; lane += 1)
     {
         IrRuntimeValue left_lane = {0};
         IrRuntimeValue right_lane = {0};
-        if (!ir_interpreter_memory_read(arena, frame->analysis, element_type_id, left.object, left.offset + lane * lane_size, &left_lane) ||
-            !ir_interpreter_memory_read(arena, frame->analysis, element_type_id, right.object, right.offset + lane * lane_size, &right_lane))
+        u64 lane_offset = 0;
+        u64 left_offset = 0;
+        u64 right_offset = 0;
+        if (!ir_interpreter_u64_multiply(lane, lane_size, &lane_offset) || !ir_interpreter_u64_add(left.offset, lane_offset, &left_offset) ||
+            !ir_interpreter_u64_add(right.offset, lane_offset, &right_offset) ||
+            !ir_interpreter_memory_read(arena, frame->analysis, element_type_id, left.object, left_offset, &left_lane) ||
+            !ir_interpreter_memory_read(arena, frame->analysis, element_type_id, right.object, right_offset, &right_lane))
         {
             *trap_out = IR_EXECUTION_TRAP_UNINITIALIZED_VALUE;
             return false;
@@ -1135,6 +1654,10 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_cast(IrExecutionFrame* frame, IrInstruct
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_collection(IrExecutionFrame* frame, AnalysisTypeId type_id, IrRuntimeValue value, IrRuntimeObject** object_out,
                                                    u64* offset_out, u64* count_out, u64* element_size_out)
 {
+    if (!frame || !object_out || !offset_out || !count_out || !element_size_out || !ir_interpreter_type_id_valid(frame->analysis, type_id))
+    {
+        return false;
+    }
     AnalysisType* type = analysis_type_from_id(frame->analysis, type_id);
     if (type->kind == ANALYSIS_TYPE_SLICE && value.kind == IR_RUNTIME_VALUE_PLACE)
     {
@@ -1147,6 +1670,12 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_collection(IrExecutionFrame* frame, Anal
     }
     if (type->kind == ANALYSIS_TYPE_SLICE && value.kind == IR_RUNTIME_VALUE_SLICE)
     {
+        u64 size = 0;
+        if (!value.object || !value.element_size || !ir_interpreter_u64_multiply(value.length, value.element_size, &size) ||
+            !ir_interpreter_object_range_valid(value.object, value.offset, size))
+        {
+            return false;
+        }
         *object_out = value.object;
         *offset_out = value.offset;
         *count_out = value.length;
@@ -1161,6 +1690,11 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_collection(IrExecutionFrame* frame, Anal
         u64 element_size = ir_interpreter_type_size(frame->analysis, element);
         u64 count = type->kind == ANALYSIS_TYPE_ARRAY ? type->as.array.count : type->kind == ANALYSIS_TYPE_VECTOR ? type->as.vector.count : value.length;
         if ((value.kind != IR_RUNTIME_VALUE_AGGREGATE && value.kind != IR_RUNTIME_VALUE_PLACE) || !value.object || !element_size)
+        {
+            return false;
+        }
+        u64 size = 0;
+        if (!ir_interpreter_u64_multiply(count, element_size, &size) || !ir_interpreter_object_range_valid(value.object, value.offset, size))
         {
             return false;
         }
@@ -1184,6 +1718,100 @@ BUSTER_GLOBAL_LOCAL IrExecutionResult ir_interpreter_trap(IrExecutionFrame* fram
     };
 }
 
+BUSTER_GLOBAL_LOCAL IrExecutionValue ir_interpreter_public_value(Arena* arena, AnalysisProgram* analysis, IrRuntimeContext* runtime, IrRuntimeValue value,
+                                                                 AnalysisTypeId type_id)
+{
+    IrExecutionValue result = {
+        .bits = value.bits,
+        .has_value = value.initialized,
+    };
+    if (!value.initialized)
+    {
+        return result;
+    }
+    switch (value.kind)
+    {
+    case IR_RUNTIME_VALUE_SCALAR:
+        result.kind = IR_EXECUTION_VALUE_SCALAR;
+        return result;
+    case IR_RUNTIME_VALUE_FUNCTION:
+        result.kind = IR_EXECUTION_VALUE_FUNCTION;
+        return result;
+    case IR_RUNTIME_VALUE_ADDRESS:
+    {
+        result.kind = IR_EXECUTION_VALUE_ADDRESS;
+        result.address_offset = value.offset;
+        for (u32 index = 0; runtime && index < runtime->global_count; index += 1)
+        {
+            if (runtime->globals[index].object == value.object)
+            {
+                result.address_object = runtime->globals[index].object_id;
+                break;
+            }
+        }
+        return result;
+    }
+    case IR_RUNTIME_VALUE_AGGREGATE:
+    case IR_RUNTIME_VALUE_SLICE:
+    case IR_RUNTIME_VALUE_RANGE:
+    case IR_RUNTIME_VALUE_PLACE:
+    {
+        result.kind = IR_EXECUTION_VALUE_AGGREGATE;
+        AnalysisResult* value_analysis = 0;
+        for (u32 module_index = 0; analysis && module_index < analysis->module_count; module_index += 1)
+        {
+            AnalysisResult* candidate = analysis->module_results[module_index];
+            if (candidate && candidate->module.id.value == value.type_module.value)
+            {
+                value_analysis = candidate;
+                break;
+            }
+        }
+        AnalysisType* type = value_analysis ? analysis_type_from_id(value_analysis, type_id) : 0;
+        if (type && type->kind == ANALYSIS_TYPE_VECTOR)
+        {
+            result.kind = IR_EXECUTION_VALUE_VECTOR;
+        }
+        u64 size = value.length;
+        if (!size && value_analysis)
+        {
+            size = ir_interpreter_type_size(value_analysis, type_id);
+        }
+        if (value.kind == IR_RUNTIME_VALUE_SLICE && value.element_size && value.length <= UINT64_MAX / value.element_size)
+        {
+            size = value.length * value.element_size;
+        }
+        if (arena && value.object && ir_interpreter_object_range_valid(value.object, value.offset, size))
+        {
+            if (!ir_interpreter_arena_can_allocate_count(arena, size, 2))
+            {
+                return result;
+            }
+            result.bytes = (ByteSlice){
+                .pointer = arena_allocate(arena, u8, size),
+                .length = size,
+            };
+            result.initialized = (ByteSlice){
+                .pointer = arena_allocate(arena, u8, size),
+                .length = size,
+            };
+            if (size)
+            {
+                memcpy(result.bytes.pointer, value.object->bytes + value.offset, size);
+                memcpy(result.initialized.pointer, value.object->initialized + value.offset, size);
+            }
+        }
+        return result;
+    }
+    case IR_RUNTIME_VALUE_VA_LIST:
+    case IR_RUNTIME_VALUE_KIND_COUNT:
+        result.kind = IR_EXECUTION_VALUE_NONE;
+        return result;
+    }
+    result.kind = IR_EXECUTION_VALUE_NONE;
+    return result;
+}
+
 IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, IrProgram* program, AnalysisEntityId entry,
                              AnalysisInstantiationId instantiation, IrExecutionArgument* arguments, u32 argument_count, IrExecutionOptions options)
 {
@@ -1194,7 +1822,19 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
     }
     u64 max_steps = options.max_steps ? options.max_steps : UINT64_C(1000000);
     u32 max_call_depth = options.max_call_depth ? options.max_call_depth : 1024;
-    TemporalArena scratch = arena_begin_temporal(execution_arena);
+    Arena* scratch_conflicts[] = {execution_arena};
+    TemporalArena scratch = scratch_begin(scratch_conflicts, BUSTER_ARRAY_LENGTH(scratch_conflicts));
+    IrRuntimeContext runtime = {0};
+    if (!ir_interpreter_runtime_globals_initialize(scratch.arena, program, &runtime))
+    {
+        scratch_end(scratch);
+        return ir_interpreter_trap(0, IR_EXECUTION_TRAP_INVALID_PROGRAM, 0);
+    }
+    if (!ir_interpreter_arena_can_allocate_count(scratch.arena, sizeof(IrExecutionFrame), max_call_depth))
+    {
+        scratch_end(scratch);
+        return ir_interpreter_trap(0, IR_EXECUTION_TRAP_INVALID_PROGRAM, 0);
+    }
     IrExecutionFrame* frames = arena_allocate(scratch.arena, IrExecutionFrame, max_call_depth);
     for (u32 frame_index = 0; frame_index < max_call_depth; frame_index += 1)
     {
@@ -1214,11 +1854,27 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
         arena_set_position(scratch.arena, scratch.position);
         return result;
     }
+    if (!ir_interpreter_function_shape_valid(entry_target))
+    {
+        IrExecutionResult result = ir_interpreter_trap(0, IR_EXECUTION_TRAP_INVALID_PROGRAM, 0);
+        result.function = entry;
+        result.instantiation = instantiation;
+        arena_set_position(scratch.arena, scratch.position);
+        return result;
+    }
     AnalysisType* entry_type = analysis_type_from_id(entry_target.analysis, entry_target.function->type);
     if (entry_type->kind != ANALYSIS_TYPE_FUNCTION || (!entry_type->as.function.is_variadic && entry_type->as.function.argument_count != argument_count) ||
         (entry_type->as.function.is_variadic && entry_type->as.function.argument_count > argument_count))
     {
         IrExecutionResult result = ir_interpreter_trap(0, IR_EXECUTION_TRAP_ARGUMENT_COUNT, 0);
+        result.function = entry;
+        result.instantiation = instantiation;
+        arena_set_position(scratch.arena, scratch.position);
+        return result;
+    }
+    if (!ir_interpreter_arena_can_allocate_count(scratch.arena, sizeof(IrRuntimeValue), argument_count))
+    {
+        IrExecutionResult result = ir_interpreter_trap(0, IR_EXECUTION_TRAP_INVALID_PROGRAM, 0);
         result.function = entry;
         result.instantiation = instantiation;
         arena_set_position(scratch.arena, scratch.position);
@@ -1241,6 +1897,7 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
         arena_set_position(scratch.arena, scratch.position);
         return result;
     }
+    frames[0].runtime = &runtime;
 
     u32 depth = 1;
     u64 step_count = 0;
@@ -1317,6 +1974,11 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 break;
             }
             IrRuntimeObject* object = ir_interpreter_object_create(scratch.arena, instruction->literal.length);
+            if (!object)
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                break;
+            }
             for (u64 index = 0; index < instruction->literal.length; index += 1)
             {
                 object->bytes[index] = instruction->literal.pointer[index];
@@ -1350,6 +2012,10 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 .kind = IR_RUNTIME_VALUE_PLACE,
                 .initialized = true,
             };
+            if (!produced.object)
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+            }
         }
         break;
         case IR_OPCODE_STACK_ALLOCATE:
@@ -1366,6 +2032,10 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 .kind = IR_RUNTIME_VALUE_ADDRESS,
                 .initialized = true,
             };
+            if (!produced.object)
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+            }
         }
         break;
         case IR_OPCODE_STACK_SAVE:
@@ -1375,6 +2045,10 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 .kind = IR_RUNTIME_VALUE_ADDRESS,
                 .initialized = true,
             };
+            if (!produced.object)
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+            }
         }
         break;
         case IR_OPCODE_STACK_RESTORE:
@@ -1388,7 +2062,24 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
         break;
         case IR_OPCODE_GLOBAL:
         {
-            operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+            IrSymbolId symbol = instruction->symbol;
+            if (symbol.value == IR_ID_UNDERLYING_INVALID && instruction->entity.module.value == frame->analysis->module.id.value &&
+                instruction->entity.index.value < frame->module->frontend_symbol_count)
+            {
+                symbol = frame->module->frontend_symbol_map[instruction->entity.index.value];
+            }
+            IrRuntimeGlobal* global = ir_interpreter_global_find(frame->runtime, symbol);
+            if (!global || !global->object)
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                break;
+            }
+            produced = (IrRuntimeValue){
+                .object = global->object,
+                .length = global->object->size,
+                .kind = IR_RUNTIME_VALUE_PLACE,
+                .initialized = true,
+            };
         }
         break;
         case IR_OPCODE_LOAD:
@@ -1439,7 +2130,14 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             case IR_ATOMIC_ADD:
                 if (updated.kind == IR_RUNTIME_VALUE_ADDRESS)
                 {
-                    updated.offset += operand.bits;
+                    if (!updated.object || updated.offset > updated.object->size || operand.bits > updated.object->size - updated.offset)
+                    {
+                        operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    }
+                    else
+                    {
+                        updated.offset += operand.bits;
+                    }
                 }
                 else
                 {
@@ -1449,7 +2147,14 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             case IR_ATOMIC_SUBTRACT:
                 if (updated.kind == IR_RUNTIME_VALUE_ADDRESS)
                 {
-                    updated.offset -= operand.bits;
+                    if (!updated.object || updated.offset < operand.bits)
+                    {
+                        operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                    }
+                    else
+                    {
+                        updated.offset -= operand.bits;
+                    }
                 }
                 else
                 {
@@ -1518,8 +2223,18 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                                                                                      : array_type->as.element_type;
             u64 element_size = ir_interpreter_type_size(frame->analysis, element_type);
             u64 count = instruction->operand_count;
-            u64 size = element_size * count;
+            u64 size = 0;
+            if ((count && !element_size) || !ir_interpreter_u64_multiply(element_size, count, &size))
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                break;
+            }
             IrRuntimeObject* object = ir_interpreter_object_create(scratch.arena, size);
+            if (!object)
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                break;
+            }
             for (u32 element_index = 0; element_index < instruction->operand_count; element_index += 1)
             {
                 if (!element_size || !ir_interpreter_memory_write(scratch.arena, object, (u64)element_index * element_size, element_size,
@@ -1541,7 +2256,17 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
         case IR_OPCODE_AGGREGATE:
         {
             u64 size = ir_interpreter_type_size(frame->analysis, instruction->type);
+            if (!size)
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                break;
+            }
             IrRuntimeObject* object = ir_interpreter_object_create(scratch.arena, size);
+            if (!object)
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                break;
+            }
             for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
             {
                 AnalysisField* field = 0;
@@ -1552,7 +2277,8 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                     break;
                 }
                 u64 field_size = ir_interpreter_type_size(frame->analysis, field->type);
-                if (!ir_interpreter_memory_write(scratch.arena, object, field->offset, field_size, frame->values[instruction->operands[operand_index].value]))
+                if (!field_size || !ir_interpreter_memory_write(scratch.arena, object, field->offset, field_size,
+                                                                 frame->values[instruction->operands[operand_index].value]))
                 {
                     operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
                     break;
@@ -1639,9 +2365,16 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             {
                 index = count - index - 1;
             }
+            u64 element_offset = 0;
+            if (!ir_interpreter_u64_multiply(index, element_size, &element_offset) || !ir_interpreter_u64_add(offset, element_offset, &element_offset) ||
+                !ir_interpreter_object_range_valid(object, element_offset, element_size))
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                break;
+            }
             produced = (IrRuntimeValue){
                 .object = object,
-                .offset = offset + index * element_size,
+                .offset = element_offset,
                 .length = element_size,
                 .kind = IR_RUNTIME_VALUE_PLACE,
                 .initialized = true,
@@ -1678,9 +2411,18 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 operation_trap = IR_EXECUTION_TRAP_OUT_OF_BOUNDS;
                 break;
             }
+            u64 start_offset = 0;
+            u64 slice_size = 0;
+            if (!ir_interpreter_u64_multiply(start, element_size, &start_offset) || !ir_interpreter_u64_add(offset, start_offset, &start_offset) ||
+                !ir_interpreter_u64_multiply(end - start, element_size, &slice_size) ||
+                !ir_interpreter_object_range_valid(object, start_offset, slice_size))
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                break;
+            }
             produced = (IrRuntimeValue){
                 .object = object,
-                .offset = offset + start * element_size,
+                .offset = start_offset,
                 .length = end - start,
                 .element_size = element_size,
                 .kind = IR_RUNTIME_VALUE_SLICE,
@@ -1700,10 +2442,18 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
                 break;
             }
+            u64 field_offset = 0;
+            u64 field_size = ir_interpreter_type_size(frame->analysis, field->type);
+            if (!field_size || !ir_interpreter_u64_add(base.offset, field->offset, &field_offset) ||
+                !ir_interpreter_object_range_valid(base.object, field_offset, field_size))
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                break;
+            }
             produced = (IrRuntimeValue){
                 .object = base.object,
-                .offset = base.offset + field->offset,
-                .length = ir_interpreter_type_size(frame->analysis, field->type),
+                .offset = field_offset,
+                .length = field_size,
                 .kind = IR_RUNTIME_VALUE_PLACE,
                 .initialized = true,
             };
@@ -1886,6 +2636,11 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 operation_trap = IR_EXECUTION_TRAP_FUNCTION_NOT_LOWERED;
                 break;
             }
+            if (!ir_interpreter_function_shape_valid(callee))
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+                break;
+            }
             u32 callee_argument_count = instruction->operand_count - 1;
             for (u32 argument_index = 0; argument_index < callee_argument_count; argument_index += 1)
             {
@@ -1897,6 +2652,7 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 operation_trap = IR_EXECUTION_TRAP_ARGUMENT_COUNT;
                 break;
             }
+            callee_frame->runtime = frame->runtime;
             frame->instruction = instruction->next;
             depth += 1;
             advance = false;
@@ -1925,7 +2681,7 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             produced = address;
             produced.kind = IR_RUNTIME_VALUE_PLACE;
             produced.length = ir_interpreter_type_size(frame->analysis, instruction->type);
-            if (!ir_interpreter_object_range_valid(produced.object, produced.offset, produced.length))
+            if (!produced.length || !ir_interpreter_object_range_valid(produced.object, produced.offset, produced.length))
             {
                 operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
             }
@@ -2082,6 +2838,10 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                     .trap = IR_EXECUTION_TRAP_NONE,
                     .has_value = has_value,
                 };
+                if (has_value)
+                {
+                    result.value = ir_interpreter_public_value(execution_arena, analysis, frame->runtime, returned, return_type);
+                }
                 arena_set_position(scratch.arena, scratch.position);
                 return result;
             }
@@ -2295,6 +3055,11 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
                                "code main : fn () s32\n"
                                "{\n"
                                "    return choose(3, 4) * 2;\n"
+                               "}\n"
+                               "code aggregate_return : fn () Pair\n"
+                               "{\n"
+                               "    data pair: Pair = { .a = 11, .b = 13 };\n"
+                               "    return pair;\n"
                                "}\n");
     TokenizerResult scalar_tokens = tokenize(arguments->arena, scalar_source.pointer, scalar_source.length);
     ParserResult scalar_parser = parser_parse(arguments->arena, expression_arena, scalar_source, scalar_tokens);
@@ -2359,6 +3124,35 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
                            .max_call_depth = 1,
                        });
         BUSTER_TEST(arguments, depth_limited.trap == IR_EXECUTION_TRAP_CALL_DEPTH_LIMIT);
+        if (indirect_test_call)
+        {
+            u32 saved_operand_count = indirect_test_call->operand_count;
+            indirect_test_call->operand_count = 0;
+            IrExecutionResult malformed =
+                ir_execute(expression_arena, &scalar_program_analysis, &scalar_program, main_entity->id, ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0,
+                           (IrExecutionOptions){0});
+            BUSTER_TEST(arguments, malformed.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+            indirect_test_call->operand_count = saved_operand_count;
+        }
+    }
+    AnalysisEntity* aggregate_return_entity = ir_interpreter_test_entity_find(&scalar_analysis, S8("aggregate_return"));
+    BUSTER_TEST(arguments, aggregate_return_entity != 0);
+    if (aggregate_return_entity)
+    {
+        IrExecutionResult aggregate_result = ir_execute(expression_arena, &scalar_program_analysis, &scalar_program, aggregate_return_entity->id,
+                                                         ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, aggregate_result.trap == IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments, aggregate_result.value.kind == IR_EXECUTION_VALUE_AGGREGATE);
+        if (aggregate_result.value.bytes.pointer && aggregate_result.value.bytes.length == 8)
+        {
+            s32 fields[2] = {0};
+            memcpy(fields, aggregate_result.value.bytes.pointer, sizeof(fields));
+            BUSTER_TEST(arguments, fields[0] == 11 && fields[1] == 13);
+        }
+        else
+        {
+            BUSTER_TEST(arguments, false);
+        }
     }
     AnalysisEntity* variadic_main_entity = ir_interpreter_test_entity_find(&scalar_analysis, S8("variadic_main"));
     BUSTER_TEST(arguments, variadic_main_entity != 0);

@@ -3321,7 +3321,9 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
 {
     NativeExecutableLinkResult result = {0};
     if (!arena || !object || object->error != OBJECT_ERROR_NONE || object->section_count != OBJECT_SECTION_COUNT || !object->sections ||
-        (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations))
+        (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations) ||
+        (options.library_path_count && !options.library_paths) || (options.framework_path_count && !options.framework_paths) ||
+        (options.framework_count && !options.frameworks) || (options.linker_argument_count && !options.linker_arguments))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;

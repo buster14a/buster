@@ -115,6 +115,7 @@ struct CPreprocessOptions
     String8* system_include_paths;
     String8 source_path;
     Target target;
+    TargetDataLayout data_layout;
     u32 definition_count;
     u32 undefinition_count;
     u32 include_path_count;
@@ -131,6 +132,7 @@ struct CPreprocessResult
     CDiagnostic* diagnostics;
     String8* files;
     Target target;
+    TargetDataLayout data_layout;
     u64 token_count;
     u64 diagnostic_count;
     u32 file_count;

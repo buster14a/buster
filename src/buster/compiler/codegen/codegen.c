@@ -6351,6 +6351,16 @@ BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_aggregate_abi(IrP
     return ir_type_abi_value(program, type_id, convention, use);
 }
 
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_va_list_component_count(IrProgram* program, IrTypeId type_id)
+{
+    IrType* type = ir_type_from_id(&program->types, type_id);
+    if (!type || type->kind != IR_TYPE_VA_LIST || !type->layout.resolved || !type->layout.size || type->layout.size > 32 || (type->layout.size & 7))
+    {
+        return 0;
+    }
+    return (u32)(type->layout.size / 8);
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count)
 {
     IrType* type = ir_type_from_id(&program->types, type_id);
@@ -6359,9 +6369,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_integer_aggregate_parts(IrProgram* pr
         *part_count = (u32)((type->layout.size + 7) / 8);
         return true;
     }
-    if (type && type->kind == IR_TYPE_VA_LIST && type->layout.resolved && type->layout.size == 32)
+    if (type && type->kind == IR_TYPE_VA_LIST && type->layout.resolved && type->layout.size > 8 && type->layout.size <= 32 && !(type->layout.size & 7))
     {
-        *part_count = 4;
+        *part_count = (u32)(type->layout.size / 8);
         return true;
     }
     if (type && type->kind == IR_TYPE_VECTOR && type->layout.resolved && type->layout.size && type->layout.size <= 64)
@@ -9522,6 +9532,12 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
+                        u32 va_list_component_count = codegen_canonical_va_list_component_count(program, instruction->canonical_type);
+                        if (!va_list_component_count)
+                        {
+                            result.error = CODEGEN_ERROR_INVALID_IR;
+                            return result;
+                        }
                         u32 gp_count = 0;
                         u32 fp_count = 0;
                         u32 stack_parts = 0;
@@ -9585,7 +9601,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         codegen_emit_u8(&buffer, 0x31);
                         codegen_emit_u8(&buffer, 0xc0);
                         u32 zero_start = result.abi == CODEGEN_ABI_X86_64_SYSTEM_V ? 24 : 8;
-                        for (u32 offset = zero_start; offset < 32; offset += 8)
+                        for (u32 offset = zero_start; offset < va_list_component_count * 8; offset += 8)
                         {
                             codegen_emit_u8(&buffer, 0x48);
                             codegen_emit_u8(&buffer, 0x89);
@@ -9595,8 +9611,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     }
                     else if (instruction->opcode == IR_OPCODE_VA_COPY)
                     {
+                        u32 va_list_component_count = codegen_canonical_va_list_component_count(program, instruction->canonical_type);
+                        if (!va_list_component_count)
+                        {
+                            result.error = CODEGEN_ERROR_INVALID_IR;
+                            return result;
+                        }
                         C_X64_LOAD(0x85, instruction->operands[0]);
-                        for (u32 component = 0; component < 4; component += 1)
+                        for (u32 component = 0; component < va_list_component_count; component += 1)
                         {
                             codegen_emit_u8(&buffer, 0x48);
                             codegen_emit_u8(&buffer, 0x8b);
@@ -9613,12 +9635,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     }
                     else if (instruction->opcode == IR_OPCODE_VA_END)
                     {
-                        C_X64_LOAD(0x85, instruction->operands[0]);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0xc7);
-                        codegen_emit_u8(&buffer, 0x40);
-                        codegen_emit_u8(&buffer, 24);
-                        codegen_emit_u32(&buffer, 1);
+                        // va_end is a semantic lifetime marker.  The native
+                        // representations used here do not require a
+                        // destructive operation, and writing a fixed fourth
+                        // word would exceed pointer-sized Windows va_list
+                        // objects.
                     }
                     else if (instruction->opcode == IR_OPCODE_VA_ARG)
                     {
