@@ -382,6 +382,18 @@ struct IrGlobal
 };
 
 typedef struct IrFunction IrFunction;
+typedef struct IrDebugLocal IrDebugLocal;
+struct IrDebugLocal
+{
+    String8 name;
+    IrSourceRange source;
+    IrTypeId type;
+    IrLocalId id;
+    u32 scope_depth;
+    bool is_parameter;
+    u8 reserved[3];
+};
+
 struct IrFunction
 {
     String8 name;
@@ -398,6 +410,7 @@ struct IrFunction
     IrValue* values;
     IrValueId* local_places;
     bool* local_uses_memory;
+    IrDebugLocal* debug_locals;
     u32 block_count;
     u32 block_capacity;
     u32 instruction_count;
@@ -405,6 +418,7 @@ struct IrFunction
     u32 value_count;
     u32 value_capacity;
     u32 local_count;
+    u32 debug_local_count;
     IrFunctionState state;
 };
 

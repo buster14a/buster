@@ -2,6 +2,7 @@
 
 #include <buster/base.h>
 #include <buster/arena.h>
+#include <buster/compiler/debug/debug.h>
 // CodeView consumes the same neutral function and line descriptors the DWARF
 // emitter uses; the two emitters are alternative backends over one input.
 #include <buster/compiler/dwarf/dwarf.h>
@@ -22,11 +23,13 @@ struct CodeviewRelocation
     u64 offset;
     u32 function;
     CodeviewRelocationKind kind;
+    String8 symbol_name;
 };
 
 typedef struct CodeviewInput CodeviewInput;
 struct CodeviewInput
 {
+    DebugModel* model;
     String8 producer;
     String8* file_paths;
     DwarfFunction* functions;

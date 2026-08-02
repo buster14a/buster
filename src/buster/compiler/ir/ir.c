@@ -2970,6 +2970,39 @@ BUSTER_GLOBAL_LOCAL void ir_program_canonicalize_module(IrProgram* program, Anal
             }
             function->source = ir_source_range_from_parser(source, entity->range);
         }
+        AnalysisBody* debug_body = 0;
+        if (function->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID)
+        {
+            if (function->entity.index.value < module_analysis->module.entity_count && module_analysis->module.bodies)
+            {
+                debug_body = module_analysis->module.bodies + function->entity.index.value;
+            }
+        }
+        else
+        {
+            AnalysisInstantiation* instantiation = ir_instantiation_from_id(module_analysis, function->instantiation);
+            if (instantiation)
+            {
+                debug_body = &instantiation->body;
+            }
+        }
+        if (debug_body)
+        {
+            function->debug_local_count = debug_body->local_count;
+            function->debug_locals = arena_allocate(program->arena, IrDebugLocal, function->debug_local_count);
+            for (u32 local_index = 0; local_index < debug_body->local_count; local_index += 1)
+            {
+                AnalysisLocal* local = debug_body->locals + local_index;
+                function->debug_locals[local_index] = (IrDebugLocal){
+                    .name = local->name,
+                    .source = ir_source_range_from_parser(source, local->range),
+                    .type = ir_program_type_map(program, module_analysis->module.id, local->type),
+                    .id = (IrLocalId){.value = local->id.value},
+                    .scope_depth = local->scope_depth,
+                    .is_parameter = local->kind == ANALYSIS_LOCAL_ARGUMENT,
+                };
+            }
+        }
         for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
             IrValue* value = function->values + value_index;

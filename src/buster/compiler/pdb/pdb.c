@@ -64,6 +64,27 @@ enum
     PDB_DEBUG_S_FILECHKSMS = 0xf4,
 };
 
+enum
+{
+    PDB_S_CONSTANT = 0x1107,
+    PDB_S_GDATA32 = 0x110d,
+    PDB_S_LOCAL = 0x113e,
+    PDB_S_GPROC32 = 0x1110,
+    PDB_S_INLINESITE = 0x114d,
+    PDB_LF_MODIFIER = 0x1001,
+    PDB_LF_POINTER = 0x1002,
+    PDB_LF_PROCEDURE = 0x1008,
+    PDB_LF_ARGLIST = 0x1201,
+    PDB_LF_FIELDLIST = 0x1203,
+    PDB_LF_ENUMERATE = 0x1502,
+    PDB_LF_ARRAY = 0x1503,
+    PDB_LF_STRUCTURE = 0x1505,
+    PDB_LF_UNION = 0x1506,
+    PDB_LF_ENUM = 0x1507,
+    PDB_LF_ALIAS = 0x150a,
+    PDB_LF_MEMBER = 0x150d,
+};
+
 typedef struct PdbBuffer PdbBuffer;
 struct PdbBuffer
 {
@@ -177,6 +198,30 @@ struct PdbCodeviewSplit
     u8 reserved[7];
 };
 
+typedef struct PdbTypeModule PdbTypeModule;
+struct PdbTypeModule
+{
+    u32* local_to_global;
+    u32 count;
+};
+
+typedef struct PdbTypeRecord PdbTypeRecord;
+struct PdbTypeRecord
+{
+    ByteSlice bytes;
+    u32 module_index;
+    u32 local_index;
+};
+
+typedef struct PdbUniqueType PdbUniqueType;
+struct PdbUniqueType
+{
+    ByteSlice bytes;
+    u32 module_index;
+    u32 local_index;
+    u32 type_index;
+};
+
 BUSTER_GLOBAL_LOCAL PdbCodeviewSplit pdb_split_codeview(Arena* arena, ByteSlice blob)
 {
     PdbCodeviewSplit result = {0};
@@ -286,59 +331,471 @@ BUSTER_GLOBAL_LOCAL ByteSlice pdb_rebuild_c13(Arena* arena, ByteSlice blob, u32 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u32 pdb_codeview_type_record_count(ByteSlice types, bool* valid)
+{
+    u32 result = 0;
+    if (valid)
+    {
+        *valid = false;
+    }
+    if (types.length < 4)
+    {
+        return result;
+    }
+    u64 offset = 4;
+    while (offset < types.length)
+    {
+        if (offset + 2 > types.length)
+        {
+            return result;
+        }
+        u16 length = 0;
+        memcpy(&length, types.pointer + offset, sizeof(length));
+        if (length < 2 || (u64)length > types.length - offset - 2)
+        {
+            return result;
+        }
+        u64 record_size = 2 + length;
+        u64 aligned = (record_size + 3) & ~3u;
+        if (aligned > types.length - offset || result == UINT32_MAX)
+        {
+            return result;
+        }
+        result += 1;
+        offset += aligned;
+    }
+    if (valid)
+    {
+        *valid = true;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool pdb_read_u16_checked(ByteSlice bytes, u64 offset, u16* value)
+{
+    if (offset > bytes.length || sizeof(u16) > bytes.length - offset)
+    {
+        return false;
+    }
+    memcpy(value, bytes.pointer + offset, sizeof(*value));
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool pdb_read_u32_checked(ByteSlice bytes, u64 offset, u32* value)
+{
+    if (offset > bytes.length || sizeof(u32) > bytes.length - offset)
+    {
+        return false;
+    }
+    memcpy(value, bytes.pointer + offset, sizeof(*value));
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool pdb_write_u32_checked(ByteSlice bytes, u64 offset, u32 value)
+{
+    if (offset > bytes.length || sizeof(u32) > bytes.length - offset)
+    {
+        return false;
+    }
+    memcpy(bytes.pointer + offset, &value, sizeof(value));
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool pdb_type_index_map(PdbTypeModule* module, ByteSlice bytes, u64 offset)
+{
+    u32 value = 0;
+    if (!module || !pdb_read_u32_checked(bytes, offset, &value))
+    {
+        return false;
+    }
+    if (value < 0x1000)
+    {
+        return true;
+    }
+    if (value - 0x1000 >= module->count)
+    {
+        return false;
+    }
+    u32 mapped = module->local_to_global[value - 0x1000];
+    return mapped != UINT32_MAX && pdb_write_u32_checked(bytes, offset, mapped);
+}
+
+BUSTER_GLOBAL_LOCAL u64 pdb_skip_numeric(ByteSlice bytes, u64 offset)
+{
+    u16 leaf = 0;
+    if (!pdb_read_u16_checked(bytes, offset, &leaf))
+    {
+        return bytes.length + 1;
+    }
+    offset += sizeof(leaf);
+    if (leaf < 0x8000)
+    {
+        return offset;
+    }
+    u64 size = leaf == 0x8000 || leaf == 0x8005 ? 1
+               : leaf == 0x8001 || leaf == 0x8002 || leaf == 0x8006 || leaf == 0x8007 ? 2
+               : leaf == 0x8003 || leaf == 0x8004 || leaf == 0x8008 || leaf == 0x800b || leaf == 0x8010 ? 4
+                                                                                                             : 8;
+    return offset + size;
+}
+
+BUSTER_GLOBAL_LOCAL u64 pdb_skip_name(ByteSlice bytes, u64 offset)
+{
+    while (offset < bytes.length && bytes.pointer[offset])
+    {
+        offset += 1;
+    }
+    return offset < bytes.length ? offset + 1 : bytes.length + 1;
+}
+
+BUSTER_GLOBAL_LOCAL bool pdb_rewrite_type_record(PdbTypeModule* module, ByteSlice record)
+{
+    u16 leaf = 0;
+    if (!pdb_read_u16_checked(record, 2, &leaf))
+    {
+        return false;
+    }
+    switch (leaf)
+    {
+    case PDB_LF_MODIFIER:
+    case PDB_LF_POINTER:
+        return pdb_type_index_map(module, record, 4);
+    case PDB_LF_ARRAY:
+        return pdb_type_index_map(module, record, 4) && pdb_type_index_map(module, record, 8);
+    case PDB_LF_STRUCTURE:
+    case PDB_LF_UNION:
+        return pdb_type_index_map(module, record, 8) && pdb_type_index_map(module, record, 12) && pdb_type_index_map(module, record, 16);
+    case PDB_LF_ENUM:
+        return pdb_type_index_map(module, record, 8) && pdb_type_index_map(module, record, 12);
+    case PDB_LF_ALIAS:
+        return pdb_type_index_map(module, record, 4);
+    case PDB_LF_PROCEDURE:
+        return pdb_type_index_map(module, record, 4) && pdb_type_index_map(module, record, 12);
+    case PDB_LF_ARGLIST:
+    {
+        u32 count = 0;
+        if (!pdb_read_u32_checked(record, 4, &count) || count > (record.length - 8) / 4)
+        {
+            return false;
+        }
+        for (u32 index = 0; index < count; index += 1)
+        {
+            if (!pdb_type_index_map(module, record, 8 + (u64)index * 4))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+    case PDB_LF_FIELDLIST:
+    {
+        u64 cursor = 4;
+        while (cursor + 2 <= record.length)
+        {
+            u16 member_leaf = 0;
+            if (!pdb_read_u16_checked(record, cursor, &member_leaf))
+            {
+                return false;
+            }
+            if (member_leaf == PDB_LF_MEMBER)
+            {
+                if (cursor + 8 > record.length || !pdb_type_index_map(module, record, cursor + 4))
+                {
+                    return false;
+                }
+                cursor = pdb_skip_numeric(record, cursor + 8);
+                cursor = pdb_skip_name(record, cursor);
+            }
+            else if (member_leaf == PDB_LF_ENUMERATE)
+            {
+                cursor = pdb_skip_numeric(record, cursor + 4);
+                cursor = pdb_skip_name(record, cursor);
+            }
+            else
+            {
+                // Field-list padding and future leaf records are left intact;
+                // the known records above are the only ones emitted by the
+                // current CodeView frontend.
+                break;
+            }
+            if (cursor > record.length)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+    default:
+        return true;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool pdb_collect_type_records(ByteSlice types, u32 module_index, PdbTypeRecord* records, u32* cursor)
+{
+    if (!types.length)
+    {
+        return true;
+    }
+    if (types.length < 4)
+    {
+        return false;
+    }
+    u64 offset = 4;
+    u32 local_index = 0;
+    while (offset < types.length)
+    {
+        u16 length = 0;
+        if (!pdb_read_u16_checked(types, offset, &length) || length < 2 || (u64)length > types.length - offset - 2)
+        {
+            return false;
+        }
+        u64 record_size = 2 + length;
+        u64 aligned = (record_size + 3) & ~UINT64_C(3);
+        if (aligned > types.length - offset || local_index == UINT32_MAX)
+        {
+            return false;
+        }
+        records[*cursor] = (PdbTypeRecord){
+            .bytes = {.pointer = types.pointer + offset, .length = aligned},
+            .module_index = module_index,
+            .local_index = local_index++,
+        };
+        *cursor += 1;
+        offset += aligned;
+    }
+    return offset == types.length;
+}
+
+BUSTER_GLOBAL_LOCAL bool pdb_rewrite_symbol_types(ByteSlice symbols, PdbTypeModule* module)
+{
+    u64 offset = 0;
+    while (offset + 4 <= symbols.length)
+    {
+        u16 length = 0;
+        u16 kind = 0;
+        if (!pdb_read_u16_checked(symbols, offset, &length) || !pdb_read_u16_checked(symbols, offset + 2, &kind) || length < 2 ||
+            (u64)length > symbols.length - offset - 2)
+        {
+            return false;
+        }
+        u64 record_size = 2 + length;
+        u64 aligned = (record_size + 3) & ~UINT64_C(3);
+        if (aligned > symbols.length - offset)
+        {
+            return false;
+        }
+        u64 type_offset = UINT64_MAX;
+        if (kind == PDB_S_LOCAL || kind == PDB_S_CONSTANT || kind == PDB_S_GDATA32)
+        {
+            type_offset = offset + 4;
+        }
+        else if (kind == PDB_S_GPROC32)
+        {
+            // S_GPROC32 stores debug_start at +20, debug_end at +24, and
+            // the procedure type index at +28 (all offsets include the
+            // record's two-byte length and two-byte kind fields).
+            type_offset = offset + 28;
+        }
+        else if (kind == PDB_S_INLINESITE)
+        {
+            type_offset = offset + 12;
+        }
+        if (type_offset != UINT64_MAX)
+        {
+            if (!pdb_type_index_map(module, symbols, type_offset))
+            {
+                return false;
+            }
+        }
+        offset += aligned;
+    }
+    return offset == symbols.length;
+}
+
 PdbResult pdb_build(Arena* arena, PdbInput input)
 {
     PdbResult result = {0};
-    if (!arena || !input.section_count || !input.sections || !input.codeview_symbols.length)
+    if (!arena || !input.section_count || !input.sections)
     {
         return result;
     }
-    PdbCodeviewSplit split = pdb_split_codeview(arena, input.codeview_symbols);
-    if (!split.valid)
+    u32 module_count = input.module_count ? input.module_count : 1;
+    if (input.module_count && !input.modules)
     {
         return result;
     }
-    String8 module_name = input.module_name.length ? input.module_name : S8("buster.obj");
-
-    // Source file names come from the checksum table's string-table offsets,
-    // so the DBI file list matches the line tables exactly.
-    u32 source_file_count = split.checksums.length ? (u32)(split.checksums.length / PDB_CHECKSUM_ENTRY_SIZE) : 0;
-    String8* source_names = arena_allocate(arena, String8, source_file_count ? source_file_count : 1);
-    u32* names_offsets = arena_allocate(arena, u32, source_file_count ? source_file_count : 1);
-    u64 source_names_size = 0;
-    // The /names buffer opens with an empty string, so offset zero is unused.
-    u64 names_buffer_size = 1;
-    for (u32 file_index = 0; file_index < source_file_count; file_index += 1)
+    PdbModule* modules = arena_allocate(arena, PdbModule, module_count);
+    if (input.module_count)
     {
-        u32 string_offset = pdb_read_u32(split.checksums, (u64)file_index * PDB_CHECKSUM_ENTRY_SIZE);
-        if (string_offset >= split.string_table.length)
-        {
-            source_file_count = file_index;
-            break;
-        }
-        u64 length = 0;
-        while (string_offset + length < split.string_table.length && split.string_table.pointer[string_offset + length])
-        {
-            length += 1;
-        }
-        source_names[file_index] = (String8){
-            .pointer = (char8*)(split.string_table.pointer + string_offset),
-            .length = length,
+        memcpy(modules, input.modules, (u64)module_count * sizeof(*modules));
+    }
+    else
+    {
+        modules[0] = (PdbModule){
+            .name = input.module_name,
+            .codeview_symbols = input.codeview_symbols,
+            .code_offset = 0,
+            .code_size = input.code_size,
+            .code_section = input.code_section,
         };
-        names_offsets[file_index] = (u32)names_buffer_size;
-        names_buffer_size += length + 1;
-        source_names_size += length + 1;
     }
-    ByteSlice c13 = pdb_rebuild_c13(arena, input.codeview_symbols, names_offsets, source_file_count);
-    if (!c13.pointer)
+    PdbCodeviewSplit* splits = arena_allocate(arena, PdbCodeviewSplit, module_count);
+    u32* source_counts = arena_allocate(arena, u32, module_count);
+    u32 total_source_file_count = 0;
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
-        return result;
+        if (!modules[module_index].codeview_symbols.length)
+        {
+            return result;
+        }
+        splits[module_index] = pdb_split_codeview(arena, modules[module_index].codeview_symbols);
+        if (!splits[module_index].valid)
+        {
+            return result;
+        }
+        if (splits[module_index].checksums.length / PDB_CHECKSUM_ENTRY_SIZE > UINT32_MAX)
+        {
+            return result;
+        }
+        source_counts[module_index] = (u32)(splits[module_index].checksums.length / PDB_CHECKSUM_ENTRY_SIZE);
+        if (total_source_file_count > UINT32_MAX - source_counts[module_index])
+        {
+            return result;
+        }
+        total_source_file_count += source_counts[module_index];
     }
-    split.c13 = c13;
+    String8* source_names = arena_allocate(arena, String8, total_source_file_count ? total_source_file_count : 1);
+    u32* all_names_offsets = arena_allocate(arena, u32, total_source_file_count ? total_source_file_count : 1);
+    u64 source_names_size = 0;
+    u64 names_buffer_size = 1;
+    u32 source_cursor = 0;
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        PdbCodeviewSplit* split = splits + module_index;
+        u32 source_count = source_counts[module_index];
+        u32* names_offsets = arena_allocate(arena, u32, source_count ? source_count : 1);
+        for (u32 file_index = 0; file_index < source_count; file_index += 1)
+        {
+            u32 string_offset = pdb_read_u32(split->checksums, (u64)file_index * PDB_CHECKSUM_ENTRY_SIZE);
+            if (string_offset >= split->string_table.length)
+            {
+                return result;
+            }
+            u64 length = 0;
+            while (string_offset + length < split->string_table.length && split->string_table.pointer[string_offset + length])
+            {
+                length += 1;
+            }
+            source_names[source_cursor] = (String8){
+                .pointer = (char8*)(split->string_table.pointer + string_offset),
+                .length = length,
+            };
+            names_offsets[file_index] = (u32)names_buffer_size;
+            all_names_offsets[source_cursor] = names_offsets[file_index];
+            source_cursor += 1;
+            names_buffer_size += length + 1;
+            source_names_size += length + 1;
+        }
+        split->c13 = pdb_rebuild_c13(arena, modules[module_index].codeview_symbols, names_offsets, source_count);
+        if (!split->c13.pointer)
+        {
+            return result;
+        }
+    }
+
+    u32 source_file_count = total_source_file_count;
+
+    // CodeView type indices are local to each object.  Build one deterministic
+    // map per module, deduplicate byte-identical LF records, then rewrite the
+    // references in both the shared TPI records and each module's symbols.
+    u32 total_type_record_count = 0;
+    PdbTypeModule* type_modules = arena_allocate(arena, PdbTypeModule, module_count);
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        bool valid_types = true;
+        u32 count = pdb_codeview_type_record_count(modules[module_index].codeview_types, &valid_types);
+        if (modules[module_index].codeview_types.length && !valid_types)
+        {
+            return result;
+        }
+        if (total_type_record_count > UINT32_MAX - count)
+        {
+            return result;
+        }
+        type_modules[module_index].count = count;
+        type_modules[module_index].local_to_global = arena_allocate(arena, u32, count ? count : 1);
+        for (u32 type_index = 0; type_index < count; type_index += 1)
+        {
+            type_modules[module_index].local_to_global[type_index] = UINT32_MAX;
+        }
+        total_type_record_count += count;
+    }
+    PdbTypeRecord* records = arena_allocate(arena, PdbTypeRecord, total_type_record_count ? total_type_record_count : 1);
+    u32 record_cursor = 0;
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        if (!pdb_collect_type_records(modules[module_index].codeview_types, module_index, records, &record_cursor))
+        {
+            return result;
+        }
+    }
+    PdbUniqueType* unique_types = arena_allocate(arena, PdbUniqueType, total_type_record_count ? total_type_record_count : 1);
+    u32 unique_type_count = 0;
+    for (u32 record_index = 0; record_index < record_cursor; record_index += 1)
+    {
+        PdbTypeRecord* record = records + record_index;
+        u32 global_type_index = UINT32_MAX;
+        for (u32 unique_index = 0; unique_index < unique_type_count; unique_index += 1)
+        {
+            PdbUniqueType* candidate = unique_types + unique_index;
+            if (candidate->bytes.length == record->bytes.length &&
+                (!candidate->bytes.length || memcmp(candidate->bytes.pointer, record->bytes.pointer, candidate->bytes.length) == 0))
+            {
+                global_type_index = candidate->type_index;
+                break;
+            }
+        }
+        if (global_type_index == UINT32_MAX)
+        {
+            if (unique_type_count > UINT32_MAX - 0x1000)
+            {
+                return result;
+            }
+            u8* bytes = arena_allocate(arena, u8, record->bytes.length ? record->bytes.length : 1);
+            if (record->bytes.length)
+            {
+                memcpy(bytes, record->bytes.pointer, record->bytes.length);
+            }
+            global_type_index = 0x1000 + unique_type_count;
+            unique_types[unique_type_count++] = (PdbUniqueType){
+                .bytes = {.pointer = bytes, .length = record->bytes.length},
+                .module_index = record->module_index,
+                .local_index = record->local_index,
+                .type_index = global_type_index,
+            };
+        }
+        type_modules[record->module_index].local_to_global[record->local_index] = global_type_index;
+    }
+    for (u32 unique_index = 0; unique_index < unique_type_count; unique_index += 1)
+    {
+        PdbUniqueType* type = unique_types + unique_index;
+        if (!pdb_rewrite_type_record(type_modules + type->module_index, type->bytes))
+        {
+            return result;
+        }
+    }
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        if (!pdb_rewrite_symbol_types(splits[module_index].symbols, type_modules + module_index))
+        {
+            return result;
+        }
+    }
 
     u64 names_key_capacity = 16;
-    PdbBuffer* streams = arena_allocate(arena, PdbBuffer, PDB_STREAM_COUNT);
-    memset(streams, 0, PDB_STREAM_COUNT * sizeof(*streams));
+    u32 stream_count = PDB_STREAM_COUNT + (module_count > 1 ? module_count - 1 : 0);
+    PdbBuffer* streams = arena_allocate(arena, PdbBuffer, stream_count);
+    memset(streams, 0, (u64)stream_count * sizeof(*streams));
 #define PDB_STREAM_BEGIN(index, size)                                                                                                                          \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
@@ -368,17 +825,30 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     pdb_emit_u32(info, PDB_STREAM_NAMES);
     pdb_emit_u32(info, PDB_FEATURE_VC140);
 
-    // Streams 2 and 4: empty but structurally valid type and id records.
+    // Streams 2 and 4: structurally valid type and id records.  The TPI
+    // records have already been deduplicated and rewritten above; IPI remains
+    // an empty but valid stream until the compiler emits id records.
+    u64 type_record_bytes = 0;
+    for (u32 unique_index = 0; unique_index < unique_type_count; unique_index += 1)
+    {
+        PdbUniqueType* type = unique_types + unique_index;
+        if (type_record_bytes > UINT32_MAX - type->bytes.length)
+        {
+            return result;
+        }
+        type_record_bytes += type->bytes.length;
+    }
     for (u32 pass = 0; pass < 2; pass += 1)
     {
         u32 stream_index = pass ? PDB_STREAM_IPI : PDB_STREAM_TPI;
-        PDB_STREAM_BEGIN(stream_index, PDB_TPI_HEADER_SIZE);
+        u64 capacity = PDB_TPI_HEADER_SIZE + (pass ? 0 : type_record_bytes);
+        PDB_STREAM_BEGIN(stream_index, capacity);
         PdbBuffer* type_stream = streams + stream_index;
         pdb_emit_u32(type_stream, PDB_TPI_VERSION_V80);
         pdb_emit_u32(type_stream, PDB_TPI_HEADER_SIZE);
         pdb_emit_u32(type_stream, 0x1000);
-        pdb_emit_u32(type_stream, 0x1000);
-        pdb_emit_u32(type_stream, 0);
+        pdb_emit_u32(type_stream, 0x1000 + (pass ? 0 : unique_type_count));
+        pdb_emit_u32(type_stream, (u32)(pass ? 0 : type_record_bytes));
         pdb_emit_u16(type_stream, 0xffff);
         pdb_emit_u16(type_stream, 0xffff);
         pdb_emit_u32(type_stream, 4);
@@ -389,6 +859,17 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         pdb_emit_u32(type_stream, 0);
         pdb_emit_u32(type_stream, 0);
         pdb_emit_u32(type_stream, 0);
+        if (!pass)
+        {
+            for (u32 unique_index = 0; unique_index < unique_type_count; unique_index += 1)
+            {
+                ByteSlice type = unique_types[unique_index].bytes;
+                if (type.length)
+                {
+                    pdb_emit_bytes(type_stream, type.pointer, type.length);
+                }
+            }
+        }
     }
 
     // Stream 8: the image section table, which maps addresses to sections.
@@ -412,20 +893,35 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     }
 
     // Stream 9: the module's symbols followed by its C13 line tables.
-    u64 module_capacity = 8 + split.symbols.length + split.c13.length;
-    PDB_STREAM_BEGIN(PDB_STREAM_MODULE, module_capacity);
-    PdbBuffer* module = streams + PDB_STREAM_MODULE;
-    pdb_emit_u32(module, 4);
-    pdb_emit_bytes(module, split.symbols.pointer, split.symbols.length);
-    u32 symbol_byte_size = (u32)(4 + split.symbols.length);
-    pdb_emit_bytes(module, split.c13.pointer, split.c13.length);
-    pdb_emit_u32(module, 0);
+    u32* module_stream_indices = arena_allocate(arena, u32, module_count);
+    u32* module_symbol_sizes = arena_allocate(arena, u32, module_count);
+    u32* module_c13_sizes = arena_allocate(arena, u32, module_count);
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        u32 stream_index = module_index ? PDB_STREAM_COUNT + module_index - 1 : PDB_STREAM_MODULE;
+        module_stream_indices[module_index] = stream_index;
+        PdbCodeviewSplit* split = splits + module_index;
+        u64 module_capacity = 8 + split->symbols.length + split->c13.length;
+        PDB_STREAM_BEGIN(stream_index, module_capacity);
+        PdbBuffer* module = streams + stream_index;
+        pdb_emit_u32(module, 4);
+        pdb_emit_bytes(module, split->symbols.pointer, split->symbols.length);
+        module_symbol_sizes[module_index] = (u32)(4 + split->symbols.length);
+        pdb_emit_bytes(module, split->c13.pointer, split->c13.length);
+        module_c13_sizes[module_index] = (u32)split->c13.length;
+        pdb_emit_u32(module, 0);
+    }
 
     // Stream 3: DBI, describing the one module and its section contributions.
-    u64 module_info_size = align_forward(64 + module_name.length + 1 + module_name.length + 1, 4);
-    u64 section_contribution_size = 4 + (u64)input.section_count * PDB_SECTION_CONTRIBUTION_SIZE;
+    u64 module_info_size = 0;
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        String8 module_name = modules[module_index].name.length ? modules[module_index].name : S8("buster.obj");
+        module_info_size += align_forward(64 + module_name.length + 1 + module_name.length + 1, 4);
+    }
+    u64 section_contribution_size = 4 + (u64)module_count * input.section_count * PDB_SECTION_CONTRIBUTION_SIZE;
     u64 section_map_size = 4 + (u64)input.section_count * 20;
-    u64 source_info_size = align_forward(4 + 2 + 2 + (u64)source_file_count * 4 + source_names_size, 4);
+    u64 source_info_size = align_forward(4 + (u64)module_count * 4 + (u64)source_file_count * 4 + source_names_size, 4);
     // Readers resolve a module's paths through the edit-and-continue name
     // table, so an empty but well-formed string table must be present.
     u64 ec_substream_size = align_forward(12 + 1 + 4 + 4 + 4, 4);
@@ -455,48 +951,59 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     pdb_emit_u16(dbi, input.machine);
     pdb_emit_u32(dbi, 0);
     u64 module_info_start = dbi->count;
-    pdb_emit_u32(dbi, 0);
-    u64 module_contribution = dbi->count;
-    pdb_emit_zero(dbi, PDB_SECTION_CONTRIBUTION_SIZE);
-    pdb_emit_u16(dbi, 0);
-    pdb_emit_u16(dbi, PDB_STREAM_MODULE);
-    pdb_emit_u32(dbi, symbol_byte_size);
-    pdb_emit_u32(dbi, 0);
-    pdb_emit_u32(dbi, (u32)split.c13.length);
-    pdb_emit_u16(dbi, (u16)source_file_count);
-    pdb_emit_u16(dbi, 0);
-    pdb_emit_u32(dbi, 0);
-    pdb_emit_u32(dbi, 0);
-    pdb_emit_u32(dbi, 0);
-    pdb_emit_bytes(dbi, module_name.pointer, module_name.length);
-    pdb_emit_zero(dbi, 1);
-    pdb_emit_bytes(dbi, module_name.pointer, module_name.length);
-    pdb_emit_zero(dbi, 1);
-    pdb_emit_align4(dbi);
-    // The module owns the code section, so its contribution covers that range.
-    u32 contribution_section = input.code_section ? input.code_section : 1;
-    u32 contribution_index = contribution_section - 1;
-    pdb_write_u32_at(dbi, module_contribution, contribution_section);
-    pdb_write_u32_at(dbi, module_contribution + 4, 0);
-    pdb_write_u32_at(dbi, module_contribution + 8, input.code_size);
-    pdb_write_u32_at(dbi, module_contribution + 12, contribution_index < input.section_count ? input.sections[contribution_index].characteristics : 0);
+    u32* module_contribution_offsets = arena_allocate(arena, u32, module_count);
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        PdbModule* source_module = modules + module_index;
+        String8 module_name = source_module->name.length ? source_module->name : S8("buster.obj");
+        pdb_emit_u32(dbi, 0);
+        module_contribution_offsets[module_index] = (u32)dbi->count;
+        pdb_emit_zero(dbi, PDB_SECTION_CONTRIBUTION_SIZE);
+        pdb_emit_u16(dbi, 0);
+        pdb_emit_u16(dbi, (u16)module_stream_indices[module_index]);
+        pdb_emit_u32(dbi, module_symbol_sizes[module_index]);
+        pdb_emit_u32(dbi, 0);
+        pdb_emit_u32(dbi, module_c13_sizes[module_index]);
+        pdb_emit_u16(dbi, (u16)source_counts[module_index]);
+        pdb_emit_u16(dbi, 0);
+        pdb_emit_u32(dbi, 0);
+        pdb_emit_u32(dbi, 0);
+        pdb_emit_u32(dbi, 0);
+        pdb_emit_bytes(dbi, module_name.pointer, module_name.length);
+        pdb_emit_zero(dbi, 1);
+        pdb_emit_bytes(dbi, module_name.pointer, module_name.length);
+        pdb_emit_zero(dbi, 1);
+        pdb_emit_align4(dbi);
+        u32 contribution_section = source_module->code_section ? source_module->code_section : (input.code_section ? input.code_section : 1);
+        u32 contribution_index = contribution_section - 1;
+        u32 code_size = source_module->code_size;
+        pdb_write_u32_at(dbi, module_contribution_offsets[module_index], contribution_section);
+        pdb_write_u32_at(dbi, module_contribution_offsets[module_index] + 4, source_module->code_offset);
+        pdb_write_u32_at(dbi, module_contribution_offsets[module_index] + 8, code_size);
+        pdb_write_u32_at(dbi, module_contribution_offsets[module_index] + 12,
+                         contribution_index < input.section_count ? input.sections[contribution_index].characteristics : 0);
+    }
     if (dbi->count - module_info_start != module_info_size)
     {
         return result;
     }
     pdb_emit_u32(dbi, PDB_SECTION_CONTRIBUTION_VERSION);
-    for (u32 section_index = 0; section_index < input.section_count; section_index += 1)
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
-        PdbSection* section = input.sections + section_index;
-        pdb_emit_u16(dbi, (u16)(section_index + 1));
-        pdb_emit_u16(dbi, 0);
-        pdb_emit_u32(dbi, 0);
-        pdb_emit_u32(dbi, section->virtual_size);
-        pdb_emit_u32(dbi, section->characteristics);
-        pdb_emit_u16(dbi, 0);
-        pdb_emit_u16(dbi, 0);
-        pdb_emit_u32(dbi, 0);
-        pdb_emit_u32(dbi, 0);
+        (void)module_index;
+        for (u32 section_index = 0; section_index < input.section_count; section_index += 1)
+        {
+            PdbSection* section = input.sections + section_index;
+            pdb_emit_u16(dbi, (u16)(section_index + 1));
+            pdb_emit_u16(dbi, 0);
+            pdb_emit_u32(dbi, 0);
+            pdb_emit_u32(dbi, section->virtual_size);
+            pdb_emit_u32(dbi, section->characteristics);
+            pdb_emit_u16(dbi, 0);
+            pdb_emit_u16(dbi, 0);
+            pdb_emit_u32(dbi, 0);
+            pdb_emit_u32(dbi, 0);
+        }
     }
     pdb_emit_u16(dbi, (u16)input.section_count);
     pdb_emit_u16(dbi, (u16)input.section_count);
@@ -512,10 +1019,16 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         pdb_emit_u32(dbi, input.sections[section_index].virtual_size);
     }
     u64 source_info_start = dbi->count;
-    pdb_emit_u16(dbi, 1);
+    pdb_emit_u16(dbi, (u16)module_count);
     pdb_emit_u16(dbi, (u16)source_file_count);
-    pdb_emit_u16(dbi, 0);
-    pdb_emit_u16(dbi, (u16)source_file_count);
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        pdb_emit_u16(dbi, 0);
+    }
+    for (u32 module_index = 0; module_index < module_count; module_index += 1)
+    {
+        pdb_emit_u16(dbi, (u16)source_counts[module_index]);
+    }
     u64 name_offset_start = dbi->count;
     pdb_emit_zero(dbi, (u64)source_file_count * 4);
     u64 names_start = dbi->count;
@@ -597,11 +1110,11 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         {
             bucket = (bucket + 1) % names_bucket_count;
         }
-        pdb_write_u32_at(names, names_bucket_start + (u64)bucket * 4, names_offsets[file_index]);
+        pdb_write_u32_at(names, names_bucket_start + (u64)bucket * 4, all_names_offsets[file_index]);
     }
     pdb_emit_u32(names, source_file_count);
     // Stream 7 stays empty: no symbol records are published yet.
-    for (u32 index = 0; index < PDB_STREAM_COUNT; index += 1)
+    for (u32 index = 0; index < stream_count; index += 1)
     {
         if (streams[index].overflow)
         {
@@ -611,14 +1124,14 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
 #undef PDB_STREAM_BEGIN
 
     // Lay the streams out as MSF blocks, then the directory and its block map.
-    u32* stream_block_counts = arena_allocate(arena, u32, PDB_STREAM_COUNT);
+    u32* stream_block_counts = arena_allocate(arena, u32, stream_count);
     u32 data_block_count = 0;
-    for (u32 index = 0; index < PDB_STREAM_COUNT; index += 1)
+    for (u32 index = 0; index < stream_count; index += 1)
     {
         stream_block_counts[index] = (u32)((streams[index].count + PDB_BLOCK_SIZE - 1) / PDB_BLOCK_SIZE);
         data_block_count += stream_block_counts[index];
     }
-    u64 directory_size = 4 + (u64)PDB_STREAM_COUNT * 4 + (u64)data_block_count * 4;
+    u64 directory_size = 4 + (u64)stream_count * 4 + (u64)data_block_count * 4;
     u32 directory_block_count = (u32)((directory_size + PDB_BLOCK_SIZE - 1) / PDB_BLOCK_SIZE);
     u32 first_directory_block = PDB_FIRST_DATA_BLOCK + data_block_count;
     u32 block_map_block = first_directory_block + directory_block_count;
@@ -630,10 +1143,14 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     static char8 const magic[] = "Microsoft C/C++ MSF 7.00\r\n\x1a"
                                  "DS\0\0";
     memcpy(bytes, magic, 32);
-    u32 superblock[] = {
-        PDB_BLOCK_SIZE, PDB_FREE_BLOCK_MAP, block_count, (u32)directory_size, 0, block_map_block,
-    };
-    memcpy(bytes + 32, superblock, sizeof(superblock));
+    u32* superblock = arena_allocate(arena, u32, 6);
+    superblock[0] = PDB_BLOCK_SIZE;
+    superblock[1] = PDB_FREE_BLOCK_MAP;
+    superblock[2] = block_count;
+    superblock[3] = (u32)directory_size;
+    superblock[4] = 0;
+    superblock[5] = block_map_block;
+    memcpy(bytes + 32, superblock, sizeof(*superblock) * 6);
     // Both free block maps mark every block outside the image as free.
     for (u32 map = 1; map <= 2; map += 1)
     {
@@ -651,13 +1168,13 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         .bytes = arena_allocate(arena, u8, directory_size),
         .capacity = directory_size,
     };
-    pdb_emit_u32(&directory, PDB_STREAM_COUNT);
-    for (u32 index = 0; index < PDB_STREAM_COUNT; index += 1)
+    pdb_emit_u32(&directory, stream_count);
+    for (u32 index = 0; index < stream_count; index += 1)
     {
         pdb_emit_u32(&directory, (u32)streams[index].count);
     }
     u32 next_block = PDB_FIRST_DATA_BLOCK;
-    for (u32 index = 0; index < PDB_STREAM_COUNT; index += 1)
+    for (u32 index = 0; index < stream_count; index += 1)
     {
         for (u32 block = 0; block < stream_block_counts[index]; block += 1)
         {

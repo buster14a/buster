@@ -122,6 +122,7 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &ir_tests,
     &ir_interpreter_tests,
     &codegen_tests,
+    &debug_model_tests,
     &dwarf_tests,
     &codeview_tests,
     &pdb_tests,

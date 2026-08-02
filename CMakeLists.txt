@@ -802,6 +802,7 @@ buster_register_module(compiler_analysis "${BUSTER_SOURCE_DIR}/compiler/frontend
 buster_register_module(compiler_c_frontend "${BUSTER_SOURCE_DIR}/compiler/frontend/c/c${COMMON_EXTENSION}")
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
 buster_register_module(compiler_ir_interpreter "${BUSTER_SOURCE_DIR}/compiler/ir/interpreter${COMMON_EXTENSION}")
+buster_register_module(compiler_debug "${BUSTER_SOURCE_DIR}/compiler/debug/debug${COMMON_EXTENSION}")
 buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")
 buster_register_module(compiler_dwarf "${BUSTER_SOURCE_DIR}/compiler/dwarf/dwarf${COMMON_EXTENSION}")
 buster_register_module(compiler_codeview "${BUSTER_SOURCE_DIR}/compiler/codeview/codeview${COMMON_EXTENSION}")
@@ -1588,6 +1589,7 @@ buster_add_executable(ide src/buster/ide/ide.c
     compiler_c_frontend
     compiler_ir
     compiler_ir_interpreter
+    compiler_debug
     compiler_codegen
     compiler_dwarf
     compiler_codeview

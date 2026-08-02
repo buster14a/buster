@@ -54,13 +54,16 @@ struct NativeExecutableLinkOptions
     u32 dynamic_library_count;
     u32 runtime_exported_symbol_count;
     bool runtime_exports_known;
-    u8 reserved[7];
+    bool debug_info;
+    u8 reserved[6];
 };
 
 typedef struct NativeExecutableLinkResult NativeExecutableLinkResult;
 struct NativeExecutableLinkResult
 {
     ByteSlice executable;
+    ByteSlice pdb;
+    String8 pdb_path;
     String8 symbol;
     LinkError error;
 };

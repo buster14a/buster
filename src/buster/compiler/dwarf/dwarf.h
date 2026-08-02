@@ -2,6 +2,10 @@
 
 #include <buster/base.h>
 #include <buster/arena.h>
+#include <buster/compiler/ir/model.h>
+#include <buster/target.h>
+
+typedef struct DebugModel DebugModel;
 
 typedef enum DwarfSectionKind
 {
@@ -9,6 +13,8 @@ typedef enum DwarfSectionKind
     DWARF_SECTION_ABBREV,
     DWARF_SECTION_LINE,
     DWARF_SECTION_STR,
+    DWARF_SECTION_LOC,
+    DWARF_SECTION_RANGES,
     DWARF_SECTION_COUNT,
 } DwarfSectionKind;
 
@@ -42,13 +48,18 @@ struct DwarfRelocation
     u64 offset;
     DwarfSectionKind section;
     DwarfSectionKind target;
+    String8 symbol_name;
+    IrSymbolId symbol;
     bool address;
-    u8 reserved[7];
+    bool symbol_address;
+    u8 reserved[2];
 };
 
 typedef struct DwarfInput DwarfInput;
 struct DwarfInput
 {
+    DebugModel* model;
+    Target target;
     String8 producer;
     String8 comp_dir;
     String8* file_paths;

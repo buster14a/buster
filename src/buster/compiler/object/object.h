@@ -34,6 +34,8 @@ typedef enum ObjectSectionKind
     OBJECT_SECTION_DEBUG_ABBREV,
     OBJECT_SECTION_DEBUG_LINE,
     OBJECT_SECTION_DEBUG_STR,
+    OBJECT_SECTION_DEBUG_LOC,
+    OBJECT_SECTION_DEBUG_RANGES,
     OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
     OBJECT_SECTION_DEBUG_CODEVIEW_TYPES,
     OBJECT_SECTION_COUNT,
@@ -106,6 +108,22 @@ struct ObjectRelocation
     ObjectRelocationKind kind;
 };
 
+// A debug module is kept separate from the merged section storage.  Its
+// offsets are relative to the corresponding ObjectFile sections, so linking
+// can adjust every input module without concatenating translation units into
+// one indistinguishable CodeView stream.
+typedef struct ObjectDebugModule ObjectDebugModule;
+struct ObjectDebugModule
+{
+    String8 name;
+    u64 code_offset;
+    u64 code_size;
+    u64 symbols_offset;
+    u64 symbols_size;
+    u64 types_offset;
+    u64 types_size;
+};
+
 typedef struct ObjectFile ObjectFile;
 struct ObjectFile
 {
@@ -117,6 +135,8 @@ struct ObjectFile
     u32 section_count;
     u32 symbol_count;
     u32 relocation_count;
+    ObjectDebugModule* debug_modules;
+    u32 debug_module_count;
 };
 
 typedef struct ObjectArtifact ObjectArtifact;

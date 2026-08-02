@@ -16,6 +16,18 @@ struct PdbSection
     u32 characteristics;
 };
 
+typedef struct PdbModule PdbModule;
+struct PdbModule
+{
+    String8 name;
+    ByteSlice codeview_symbols;
+    ByteSlice codeview_types;
+    u32 code_offset;
+    u32 code_size;
+    u32 code_section;
+    u8 reserved[4];
+};
+
 typedef struct PdbInput PdbInput;
 struct PdbInput
 {
@@ -32,6 +44,8 @@ struct PdbInput
     u32 code_size;
     u16 machine;
     u8 reserved[2];
+    PdbModule* modules;
+    u32 module_count;
 };
 
 typedef struct PdbResult PdbResult;

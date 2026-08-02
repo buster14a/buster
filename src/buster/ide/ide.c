@@ -14,6 +14,7 @@
 #include <buster/compiler/frontend/c/c.h>
 #include <buster/compiler/ir/ir.h>
 #include <buster/compiler/ir/interpreter.h>
+#include <buster/compiler/debug/debug.h>
 #include <buster/compiler/codegen/codegen.h>
 #include <buster/compiler/object/object.h>
 #include <buster/compiler/link/link.h>
@@ -46,6 +47,7 @@
 #include <buster/compiler/frontend/c/c.c>
 #include <buster/compiler/ir/ir.c>
 #include <buster/compiler/ir/interpreter.c>
+#include <buster/compiler/debug/debug.c>
 #include <buster/compiler/codegen/codegen.c>
 #include <buster/compiler/dwarf/dwarf.c>
 #include <buster/compiler/codeview/codeview.c>
@@ -266,6 +268,12 @@ ProcessResult process_arguments(void)
         else if ((string_equal(arg, S8("-g")) || string_equal(arg, S8("-g0"))) && ide_state.compile)
         {
             ide_state.compile_debug_info = !string_equal(arg, S8("-g0"));
+        }
+        else if (ide_state.compile && string_starts_with_sequence(arg, S8("-g")))
+        {
+            string_print(S8("unsupported debug option: {S8}\n"), arg);
+            result = PROCESS_RESULT_FAILED;
+            break;
         }
         else if (string_equal(arg, S8("-o")) && ide_state.compile)
         {

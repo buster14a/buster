@@ -4,6 +4,8 @@
 #include <buster/os.h>
 #include <buster/string.h>
 
+BUSTER_GLOBAL_LOCAL void object_debug_module_set(Arena* arena, ObjectFile* object, String8 name, u64 code_size);
+
 typedef struct ObjectBuffer ObjectBuffer;
 struct ObjectBuffer
 {
@@ -346,6 +348,22 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
             return S8("\t.section __DATA,__thread_data\n");
         case OBJECT_SECTION_THREAD_LOCAL_ZERO:
             return S8("\t.section __DATA,__thread_bss\n");
+        case OBJECT_SECTION_DEBUG_INFO:
+            return S8("\t.section __DWARF,__debug_info\n");
+        case OBJECT_SECTION_DEBUG_ABBREV:
+            return S8("\t.section __DWARF,__debug_abbrev\n");
+        case OBJECT_SECTION_DEBUG_LINE:
+            return S8("\t.section __DWARF,__debug_line\n");
+        case OBJECT_SECTION_DEBUG_STR:
+            return S8("\t.section __DWARF,__debug_str\n");
+        case OBJECT_SECTION_DEBUG_LOC:
+            return S8("\t.section __DWARF,__debug_loc\n");
+        case OBJECT_SECTION_DEBUG_RANGES:
+            return S8("\t.section __DWARF,__debug_ranges\n");
+        case OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS:
+            return S8("\t.section __DWARF,__debug$S\n");
+        case OBJECT_SECTION_DEBUG_CODEVIEW_TYPES:
+            return S8("\t.section __DWARF,__debug$T\n");
         case OBJECT_SECTION_COUNT:
             break;
         }
@@ -363,6 +381,22 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
     case OBJECT_SECTION_THREAD_LOCAL_ZERO:
         return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .tbss\n")
                                                                                            : S8("\t.section .tbss,\"awT\",@nobits\n");
+    case OBJECT_SECTION_DEBUG_INFO:
+        return S8("\t.section .debug_info\n");
+    case OBJECT_SECTION_DEBUG_ABBREV:
+        return S8("\t.section .debug_abbrev\n");
+    case OBJECT_SECTION_DEBUG_LINE:
+        return S8("\t.section .debug_line\n");
+    case OBJECT_SECTION_DEBUG_STR:
+        return S8("\t.section .debug_str\n");
+    case OBJECT_SECTION_DEBUG_LOC:
+        return S8("\t.section .debug_loc\n");
+    case OBJECT_SECTION_DEBUG_RANGES:
+        return S8("\t.section .debug_ranges\n");
+    case OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS:
+        return S8("\t.section .debug$S\n");
+    case OBJECT_SECTION_DEBUG_CODEVIEW_TYPES:
+        return S8("\t.section .debug$T\n");
     case OBJECT_SECTION_COUNT:
         break;
     }
@@ -371,7 +405,7 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
 
 BUSTER_GLOBAL_LOCAL u32 object_assembly_relocation_size(ObjectRelocationKind kind)
 {
-    return kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+    return kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : 4;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_assembly_is_apple(Target target)
@@ -585,6 +619,21 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
     case OBJECT_RELOCATION_ABSOLUTE64:
         object_assembly_append_string(buffer, S8("\t.quad "));
         object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+        object_assembly_append_string(buffer, S8("\n"));
+        return true;
+    case OBJECT_RELOCATION_ABSOLUTE32:
+        object_assembly_append_string(buffer, S8("\t.long "));
+        object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+        object_assembly_append_string(buffer, S8("\n"));
+        return true;
+    case OBJECT_RELOCATION_COFF_SECREL32:
+        object_assembly_append_string(buffer, S8("\t.long "));
+        object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@SECREL32"));
+        object_assembly_append_string(buffer, S8("\n"));
+        return true;
+    case OBJECT_RELOCATION_COFF_SECTION16:
+        object_assembly_append_string(buffer, S8("\t.short "));
+        object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@SECT"));
         object_assembly_append_string(buffer, S8("\n"));
         return true;
     case OBJECT_RELOCATION_X86_64_PC32:
@@ -2933,6 +2982,10 @@ String8 object_section_name_for_kind(ObjectSectionKind kind)
         return S8(".debug_line");
     case OBJECT_SECTION_DEBUG_STR:
         return S8(".debug_str");
+    case OBJECT_SECTION_DEBUG_LOC:
+        return S8(".debug_loc");
+    case OBJECT_SECTION_DEBUG_RANGES:
+        return S8(".debug_ranges");
     case OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS:
         return S8(".debug$S");
     case OBJECT_SECTION_DEBUG_CODEVIEW_TYPES:
@@ -2965,6 +3018,14 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String
     if (string_equal(name, S8(".debug_str")) || string_equal(name, S8("__debug_str")))
     {
         return OBJECT_SECTION_DEBUG_STR;
+    }
+    if (string_equal(name, S8(".debug_loc")) || string_equal(name, S8("__debug_loc")))
+    {
+        return OBJECT_SECTION_DEBUG_LOC;
+    }
+    if (string_equal(name, S8(".debug_ranges")) || string_equal(name, S8("__debug_ranges")))
+    {
+        return OBJECT_SECTION_DEBUG_RANGES;
     }
     if (string_equal(name, S8(".debug$S")))
     {
@@ -3312,6 +3373,33 @@ BUSTER_GLOBAL_LOCAL String8 object_read_coff_name(ByteSlice bytes, u64 offset, u
     if (offset > bytes.length || 8 > bytes.length - offset)
     {
         return (String8){0};
+    }
+    if (bytes.pointer[offset] == '/')
+    {
+        u32 parsed = 0;
+        u64 index = 1;
+        bool any = false;
+        while (index < 8 && bytes.pointer[offset + index] >= '0' && bytes.pointer[offset + index] <= '9')
+        {
+            any = true;
+            u32 digit = (u32)(bytes.pointer[offset + index] - '0');
+            if (parsed > (UINT32_MAX - digit) / 10)
+            {
+                return (String8){0};
+            }
+            parsed = parsed * 10 + digit;
+            index += 1;
+        }
+        bool padding = true;
+        while (index < 8)
+        {
+            padding &= bytes.pointer[offset + index] == 0;
+            index += 1;
+        }
+        if (any && padding)
+        {
+            return object_read_string(bytes, string_offset, string_size, parsed);
+        }
     }
     u32 zero = 0;
     u32 name_offset = 0;
@@ -4040,7 +4128,17 @@ ObjectFile object_read(Arena* arena, ByteSlice bytes, Target target)
         memcpy(&machine, bytes.pointer, sizeof(machine));
         if (machine == 0x8664 || machine == 0xaa64)
         {
-            return object_read_coff(arena, bytes, target);
+            ObjectFile result = object_read_coff(arena, bytes, target);
+            if (result.error == OBJECT_ERROR_NONE)
+            {
+                // COFF does not carry the source-module boundary used by the
+                // PDB DBI stream.  A standalone read object is nevertheless
+                // one translation unit, so retain a deterministic synthetic
+                // module rather than collapsing its CodeView into the linker's
+                // anonymous stream.
+                object_debug_module_set(arena, &result, S8("object.obj"), result.sections[OBJECT_SECTION_TEXT].data.length);
+            }
+            return result;
         }
     }
     if (bytes.length >= 4)
@@ -4260,7 +4358,8 @@ BUSTER_GLOBAL_LOCAL String8 object_entity_name(Arena* arena, AnalysisResult* ana
 bool object_section_kind_is_debug(ObjectSectionKind kind)
 {
     return kind == OBJECT_SECTION_DEBUG_INFO || kind == OBJECT_SECTION_DEBUG_ABBREV || kind == OBJECT_SECTION_DEBUG_LINE ||
-           kind == OBJECT_SECTION_DEBUG_STR || kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || kind == OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
+           kind == OBJECT_SECTION_DEBUG_STR || kind == OBJECT_SECTION_DEBUG_LOC || kind == OBJECT_SECTION_DEBUG_RANGES ||
+           kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || kind == OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
 }
 
 BUSTER_GLOBAL_LOCAL void object_debug_sections_initialize(ObjectFile* object)
@@ -4295,13 +4394,47 @@ BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResu
     for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
     {
         CodeviewRelocation relocation = built.relocations[relocation_index];
+        u32 symbol_index = relocation.function;
+        if (relocation.symbol_name.length)
+        {
+            symbol_index = UINT32_MAX;
+            for (u32 candidate_index = 0; candidate_index < object->symbol_count; candidate_index += 1)
+            {
+                ObjectSymbol* candidate = object->symbols + candidate_index;
+                if (candidate->section != OBJECT_SECTION_UNDEFINED && string_equal(candidate->name, relocation.symbol_name))
+                {
+                    symbol_index = candidate_index;
+                    break;
+                }
+            }
+        }
+        if (symbol_index == UINT32_MAX || symbol_index >= object->symbol_count)
+        {
+            continue;
+        }
         object->relocations[object->relocation_count++] = (ObjectRelocation){
             .offset = relocation.offset,
             .section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
-            .symbol = relocation.function,
+            .symbol = symbol_index,
             .kind = relocation.kind == CODEVIEW_RELOCATION_SECREL32 ? OBJECT_RELOCATION_COFF_SECREL32 : OBJECT_RELOCATION_COFF_SECTION16,
         };
     }
+}
+
+BUSTER_GLOBAL_LOCAL void object_debug_module_set(Arena* arena, ObjectFile* object, String8 name, u64 code_size)
+{
+    if (!arena || !object || !object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length)
+    {
+        return;
+    }
+    object->debug_modules = arena_allocate(arena, ObjectDebugModule, 1);
+    object->debug_module_count = 1;
+    object->debug_modules[0] = (ObjectDebugModule){
+        .name = string_duplicate_arena(arena, name.length ? name : S8("buster.obj"), false),
+        .code_size = code_size,
+        .symbols_size = object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length,
+        .types_size = object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length,
+    };
 }
 
 BUSTER_GLOBAL_LOCAL ObjectSectionKind object_section_kind_for_dwarf(DwarfSectionKind kind)
@@ -4316,6 +4449,10 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_section_kind_for_dwarf(DwarfSection
         return OBJECT_SECTION_DEBUG_LINE;
     case DWARF_SECTION_STR:
         return OBJECT_SECTION_DEBUG_STR;
+    case DWARF_SECTION_LOC:
+        return OBJECT_SECTION_DEBUG_LOC;
+    case DWARF_SECTION_RANGES:
+        return OBJECT_SECTION_DEBUG_RANGES;
     case DWARF_SECTION_COUNT:
         break;
     }
@@ -4363,11 +4500,24 @@ BUSTER_GLOBAL_LOCAL void object_append_dwarf(ObjectFile* object, DwarfResult bui
     for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
     {
         DwarfRelocation relocation = built.relocations[relocation_index];
+        u32 relocation_symbol = relocation.address ? text_symbol : debug_symbols[relocation.target];
+        if (relocation.symbol_address && relocation.symbol_name.length)
+        {
+            for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+            {
+                ObjectSymbol* candidate = object->symbols + symbol_index;
+                if (candidate->section != OBJECT_SECTION_UNDEFINED && string_equal(candidate->name, relocation.symbol_name))
+                {
+                    relocation_symbol = symbol_index;
+                    break;
+                }
+            }
+        }
         object->relocations[object->relocation_count++] = (ObjectRelocation){
             .addend = relocation.addend,
             .offset = relocation.offset,
             .section = (u32)object_section_kind_for_dwarf(relocation.section),
-            .symbol = relocation.address ? text_symbol : debug_symbols[relocation.target],
+            .symbol = relocation_symbol,
             .kind = relocation.address ? OBJECT_RELOCATION_ABSOLUTE64 : OBJECT_RELOCATION_ABSOLUTE32,
         };
     }
@@ -4447,7 +4597,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
     object_debug_sections_initialize(&result);
     DwarfResult dwarf = {0};
     CodeviewResult codeview = {0};
-    if (module->debug_info && module->entry_count && analysis->module.source_count)
+    if (module->debug_info && analysis->module.source_count && (module->entry_count || module->global_count))
     {
         String8* file_paths = arena_allocate(arena, String8, analysis->module.source_count);
         for (u32 source_index = 0; source_index < analysis->module.source_count; source_index += 1)
@@ -4455,6 +4605,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
             file_paths[source_index] = analysis->module.sources[source_index].path;
         }
         DwarfFunction* functions = arena_allocate(arena, DwarfFunction, module->entry_count);
+        DebugFunctionSeed* debug_functions = arena_allocate(arena, DebugFunctionSeed, module->entry_count);
         for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
         {
             CodegenModuleEntry* entry = module->entries + entry_index;
@@ -4467,10 +4618,19 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
                 .file = definition && definition->source.value < analysis->module.source_count ? definition->source.value : 0,
                 .line = definition ? definition->range.line : 0,
             };
+            debug_functions[entry_index] = (DebugFunctionSeed){
+                .name = functions[entry_index].name,
+                .symbol = entry->symbol,
+                .entity = entry->entity,
+                .instantiation = entry->instantiation,
+                .code_offset = entry->offset,
+                .code_size = (u32)(end - entry->offset),
+            };
         }
-        DwarfLineEntry* lines = arena_allocate(arena, DwarfLineEntry, module->line_entry_count);
+        u32 line_count = module->entry_count ? module->line_entry_count : 0;
+        DwarfLineEntry* lines = arena_allocate(arena, DwarfLineEntry, line_count);
         u32 function_cursor = 0;
-        for (u32 line_index = 0; line_index < module->line_entry_count; line_index += 1)
+        for (u32 line_index = 0; line_index < line_count; line_index += 1)
         {
             CodegenLineEntry entry = module->line_entries[line_index];
             while (function_cursor + 1 < module->entry_count && entry.code_offset >= module->entries[function_cursor + 1].offset)
@@ -4486,20 +4646,45 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
         }
         if (target.os == OPERATING_SYSTEM_WINDOWS)
         {
+            DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
+                                                                   .analysis = analysis,
+                                                                   .module = module->ir_module,
+                                                                   .producer = S8("buster"),
+                                                                   .comp_dir = S8("."),
+                                                                   .functions = debug_functions,
+                                                                   .locations = module->debug_locations,
+                                                                   .function_count = module->entry_count,
+                                                                   .location_count = module->debug_location_count,
+                                                                   .canonical = false,
+                                                               });
             codeview = codeview_build(arena, (CodeviewInput){
+                                                 .model = &debug_model,
                                                  .producer = S8("buster"),
                                                  .file_paths = file_paths,
                                                  .functions = functions,
                                                  .lines = lines,
                                                  .file_count = analysis->module.source_count,
                                                  .function_count = module->entry_count,
-                                                 .line_count = module->line_entry_count,
+                                                 .line_count = line_count,
                                                  .machine = target.cpu_arch == CPU_ARCH_AARCH64 ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
                                              });
         }
         else
         {
+            DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
+                                                                   .analysis = analysis,
+                                                                   .module = module->ir_module,
+                                                                   .producer = S8("buster"),
+                                                                   .comp_dir = S8("."),
+                                                                   .functions = debug_functions,
+                                                                   .locations = module->debug_locations,
+                                                                   .function_count = module->entry_count,
+                                                                   .location_count = module->debug_location_count,
+                                                                   .canonical = false,
+                                                               });
             dwarf = dwarf_build(arena, (DwarfInput){
+                                           .model = &debug_model,
+                                           .target = target,
                                            .producer = S8("buster"),
                                            .comp_dir = S8("."),
                                            .file_paths = file_paths,
@@ -4508,7 +4693,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
                                            .code_size = module->code.length,
                                            .file_count = analysis->module.source_count,
                                            .function_count = module->entry_count,
-                                           .line_count = module->line_entry_count,
+                                           .line_count = line_count,
                                            .language = 0x000c,
                                        });
         }
@@ -4636,6 +4821,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
     }
     object_append_dwarf(&result, dwarf);
     object_append_codeview(&result, codeview);
+    object_debug_module_set(arena, &result, analysis->module.source_count ? analysis->module.sources[0].path : S8("buster.obj"), module->code.length);
     return result;
 }
 
@@ -4713,8 +4899,32 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     object_debug_sections_initialize(&result);
     DwarfResult dwarf = {0};
     CodeviewResult codeview = {0};
-    if (module->debug_info && module->entry_count && program->sources.count)
+    if (module->debug_info && program->sources.count && (module->entry_count || module->global_count))
     {
+        IrModule* debug_ir_module = module->ir_module;
+        for (u32 module_index = 0; module_index < program->module_count && !debug_ir_module; module_index += 1)
+        {
+            IrModule* candidate = program->modules + module_index;
+            for (u32 function_index = 0; function_index < candidate->function_count && module->entry_count; function_index += 1)
+            {
+                if (candidate->functions[function_index].symbol.value == module->entries[0].symbol.value)
+                {
+                    debug_ir_module = candidate;
+                    break;
+                }
+            }
+            for (u32 global_index = 0; global_index < candidate->global_count && !debug_ir_module && module->global_count; global_index += 1)
+            {
+                for (u32 object_global_index = 0; object_global_index < module->global_count; object_global_index += 1)
+                {
+                    if (candidate->globals[global_index].symbol.value == module->globals[object_global_index].symbol.value)
+                    {
+                        debug_ir_module = candidate;
+                        break;
+                    }
+                }
+            }
+        }
         String8* file_paths = arena_allocate(arena, String8, program->sources.count);
         for (u32 source_index = 0; source_index < program->sources.count; source_index += 1)
         {
@@ -4735,6 +4945,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             }
         }
         DwarfFunction* functions = arena_allocate(arena, DwarfFunction, module->entry_count);
+        DebugFunctionSeed* debug_functions = arena_allocate(arena, DebugFunctionSeed, module->entry_count);
         for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
         {
             CodegenModuleEntry* entry = module->entries + entry_index;
@@ -4748,9 +4959,16 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .file = declaration.source.value < program->sources.count ? declaration.source.value : 0,
                 .line = declaration.line,
             };
+            debug_functions[entry_index] = (DebugFunctionSeed){
+                .name = functions[entry_index].name,
+                .symbol = entry->symbol,
+                .code_offset = entry->offset,
+                .code_size = (u32)(end - entry->offset),
+            };
         }
-        DwarfLineEntry* lines = arena_allocate(arena, DwarfLineEntry, module->line_entry_count);
-        for (u32 line_index = 0; line_index < module->line_entry_count; line_index += 1)
+        u32 line_count = module->entry_count ? module->line_entry_count : 0;
+        DwarfLineEntry* lines = arena_allocate(arena, DwarfLineEntry, line_count);
+        for (u32 line_index = 0; line_index < line_count; line_index += 1)
         {
             CodegenLineEntry entry = module->line_entries[line_index];
             lines[line_index] = (DwarfLineEntry){
@@ -4762,20 +4980,45 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         }
         if (target.os == OPERATING_SYSTEM_WINDOWS)
         {
+            DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
+                                                                   .program = program,
+                                                                   .module = debug_ir_module,
+                                                                   .producer = S8("buster"),
+                                                                   .comp_dir = S8("."),
+                                                                   .functions = debug_functions,
+                                                                   .locations = module->debug_locations,
+                                                                   .function_count = module->entry_count,
+                                                                   .location_count = module->debug_location_count,
+                                                                   .canonical = true,
+                                                               });
             codeview = codeview_build(arena, (CodeviewInput){
+                                                 .model = &debug_model,
                                                  .producer = S8("buster"),
                                                  .file_paths = file_paths,
                                                  .functions = functions,
                                                  .lines = lines,
                                                  .file_count = program->sources.count,
                                                  .function_count = module->entry_count,
-                                                 .line_count = module->line_entry_count,
+                                                 .line_count = line_count,
                                                  .machine = target.cpu_arch == CPU_ARCH_AARCH64 ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
                                              });
         }
         else
         {
+            DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
+                                                                   .program = program,
+                                                                   .module = debug_ir_module,
+                                                                   .producer = S8("buster"),
+                                                                   .comp_dir = S8("."),
+                                                                   .functions = debug_functions,
+                                                                   .locations = module->debug_locations,
+                                                                   .function_count = module->entry_count,
+                                                                   .location_count = module->debug_location_count,
+                                                                   .canonical = true,
+                                                               });
             dwarf = dwarf_build(arena, (DwarfInput){
+                                           .model = &debug_model,
+                                           .target = target,
                                            .producer = S8("buster"),
                                            .comp_dir = S8("."),
                                            .file_paths = file_paths,
@@ -4784,7 +5027,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                            .code_size = module->code.length,
                                            .file_count = program->sources.count,
                                            .function_count = module->entry_count,
-                                           .line_count = module->line_entry_count,
+                                           .line_count = line_count,
                                            .language = 0x000c,
                                        });
         }
@@ -4956,6 +5199,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     }
     object_append_dwarf(&result, dwarf);
     object_append_codeview(&result, codeview);
+    object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
     return result;
 }
 
@@ -5564,7 +5808,9 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                                : source->kind == OBJECT_SECTION_DEBUG_ABBREV     ? S8("__debug_abbrev")
                                : source->kind == OBJECT_SECTION_DEBUG_LINE       ? S8("__debug_line")
                                : source->kind == OBJECT_SECTION_DEBUG_STR        ? S8("__debug_str")
-                                                                                  : S8("__data");
+                               : source->kind == OBJECT_SECTION_DEBUG_LOC        ? S8("__debug_loc")
+                               : source->kind == OBJECT_SECTION_DEBUG_RANGES     ? S8("__debug_ranges")
+                                                                               : S8("__data");
         String8 segment_name =
             (source->kind == OBJECT_SECTION_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
                 ? S8("__DATA")

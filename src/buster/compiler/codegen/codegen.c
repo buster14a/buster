@@ -79,6 +79,7 @@ struct X64Builder
 
 #define X64_VALUE_SLOT_SIZE 32
 #define X64_VALUE_SLOT_COMPONENT_COUNT 4
+#define A64_VALUE_SLOT_SIZE 32
 
 BUSTER_GLOBAL_LOCAL u32 codegen_align_u32(u32 value, u32 alignment)
 {
@@ -3337,11 +3338,253 @@ BUSTER_GLOBAL_LOCAL void codegen_record_line(CodegenLineEntry* entries, u32* cou
     *count += 1;
 }
 
+BUSTER_GLOBAL_LOCAL DebugRegister codegen_debug_register_for_value(Target target, bool vector, u32 index)
+{
+    if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        return vector ? (DebugRegister)((u32)DEBUG_REGISTER_X86_XMM0 + 3 + index) : (DebugRegister)((u32)DEBUG_REGISTER_X86_R10 + index);
+    }
+    if (target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        return vector ? (DebugRegister)((u32)DEBUG_REGISTER_AARCH64_V0 + 2 + index) : (DebugRegister)((u32)DEBUG_REGISTER_AARCH64_X0 + 9 + index);
+    }
+    return DEBUG_REGISTER_NONE;
+}
+
+BUSTER_GLOBAL_LOCAL DebugLocation codegen_debug_analysis_value_location(IrFunction* function, AnalysisResult* analysis, IrValueId value,
+                                                                         u8* value_registers, u8* vector_registers, u32* value_storage_offsets,
+                                                                         Target target, bool negative_offsets)
+{
+    DebugLocation result = {
+        .kind = DEBUG_LOCATION_UNAVAILABLE,
+    };
+    if (!function || value.value >= function->value_count)
+    {
+        return result;
+    }
+    AnalysisType* type = analysis ? analysis_type_from_id(analysis, function->values[value.value].type) : 0;
+    bool vector = type && type->kind == ANALYSIS_TYPE_VECTOR && type->layout.size <= 16;
+    if (vector && vector_registers && vector_registers[value.value] != CODEGEN_REGISTER_UNALLOCATED)
+    {
+        return (DebugLocation){
+            .kind = DEBUG_LOCATION_REGISTER,
+            .reg = codegen_debug_register_for_value(target, true, vector_registers[value.value]),
+        };
+    }
+    if (!vector && value_registers && value_registers[value.value] != CODEGEN_REGISTER_UNALLOCATED)
+    {
+        return (DebugLocation){
+            .kind = DEBUG_LOCATION_REGISTER,
+            .reg = codegen_debug_register_for_value(target, false, value_registers[value.value]),
+        };
+    }
+    u64 offset = value_storage_offsets && value_storage_offsets[value.value]
+                     ? value_storage_offsets[value.value]
+                     : target.cpu_arch == CPU_ARCH_X86_64 ? (u64)value.value * X64_VALUE_SLOT_SIZE + 8
+                                                          : (u64)value.value * A64_VALUE_SLOT_SIZE;
+    s32 frame_offset = offset > INT32_MAX ? INT32_MAX : (s32)offset;
+    return (DebugLocation){
+        .kind = DEBUG_LOCATION_FRAME,
+        .frame_offset = negative_offsets ? -frame_offset : frame_offset,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_debug_location_append(CodegenFunction* result, u32 capacity, IrSymbolId symbol, IrLocalId local, u32 start, u32 end,
+                                                        DebugLocation location)
+{
+    if (!result || result->debug_location_count >= capacity || end <= start)
+    {
+        return;
+    }
+    result->debug_locations[result->debug_location_count++] = (DebugLocationSeed){
+        .function_symbol = symbol,
+        .local = local,
+        .start = start,
+        .end = end,
+        .location = location,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_record_analysis_locations(Arena* arena, CodegenFunction* result, AnalysisResult* analysis, IrFunction* function,
+                                                             u32* local_offsets, u32* value_storage_offsets, u8* value_registers, u8* vector_registers,
+                                                             u32* block_offsets, Target target, bool negative_offsets)
+{
+    if (!arena || !result || !function || !result->code.length || !function->local_count)
+    {
+        return;
+    }
+    u64 capacity_64 = (u64)function->local_count * ((u64)function->block_count + 1);
+    if (capacity_64 > UINT32_MAX)
+    {
+        result->error = CODEGEN_ERROR_CAPACITY;
+        return;
+    }
+    u32 capacity = (u32)capacity_64;
+    result->debug_locations = arena_allocate(arena, DebugLocationSeed, capacity ? capacity : 1);
+    result->debug_location_count = 0;
+    for (u32 local_index = 0; local_index < function->local_count; local_index += 1)
+    {
+        IrLocalId local = {.value = local_index};
+        bool emitted = false;
+        if (function->local_uses_memory && function->local_places && function->local_uses_memory[local_index] &&
+            function->local_places[local_index].value != IR_ID_UNDERLYING_INVALID && local_offsets)
+        {
+            u32 offset = local_offsets[local_index];
+            s32 frame_offset = offset > INT32_MAX ? INT32_MAX : (s32)offset;
+            codegen_debug_location_append(result, capacity, function->symbol, local, 0, (u32)result->code.length,
+                                          (DebugLocation){
+                                              .kind = DEBUG_LOCATION_FRAME,
+                                              .frame_offset = negative_offsets ? -frame_offset : frame_offset,
+                                          });
+            emitted = true;
+        }
+        if (!emitted && block_offsets)
+        {
+            for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+            {
+                IrBlock* block = function->blocks + block_index;
+                if (!block->local_values || local_index >= function->local_count)
+                {
+                    continue;
+                }
+                IrValueId value = block->local_values[local_index];
+                if (value.value == IR_ID_UNDERLYING_INVALID || value.value >= function->value_count)
+                {
+                    continue;
+                }
+                u32 start = block_offsets[block_index];
+                u32 end = block_index + 1 < function->block_count ? block_offsets[block_index + 1] : (u32)result->code.length;
+                start = BUSTER_MIN(start, (u32)result->code.length);
+                end = BUSTER_MIN(end, (u32)result->code.length);
+                DebugLocation location = codegen_debug_analysis_value_location(function, analysis, value, value_registers, vector_registers,
+                                                                                value_storage_offsets, target, negative_offsets);
+                codegen_debug_location_append(result, capacity, function->symbol, local, start, end, location);
+                emitted |= end > start;
+            }
+        }
+        if (!emitted)
+        {
+            codegen_debug_location_append(result, capacity, function->symbol, local, 0, (u32)result->code.length,
+                                          (DebugLocation){
+                                              .kind = DEBUG_LOCATION_UNAVAILABLE,
+                                          });
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL DebugLocation codegen_debug_canonical_value_location(IrValueId value, IrFunction* function, u32* value_offsets, Target target)
+{
+    if (!function || !value_offsets || value.value >= function->value_count)
+    {
+        return (DebugLocation){
+            .kind = DEBUG_LOCATION_UNAVAILABLE,
+        };
+    }
+    u32 offset = value_offsets[value.value];
+    s32 frame_offset = offset > INT32_MAX ? INT32_MAX : (s32)offset;
+    return (DebugLocation){
+        .kind = DEBUG_LOCATION_FRAME,
+        .frame_offset = target.cpu_arch == CPU_ARCH_X86_64 ? -frame_offset : frame_offset,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_canonical_location_append(CodegenModule* result, u32 capacity, IrSymbolId symbol, IrLocalId local, u32 start, u32 end,
+                                                            DebugLocation location)
+{
+    if (!result || result->debug_location_count >= capacity || end <= start)
+    {
+        return;
+    }
+    result->debug_locations[result->debug_location_count++] = (DebugLocationSeed){
+        .function_symbol = symbol,
+        .local = local,
+        .start = start,
+        .end = end,
+        .location = location,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* result, IrFunction* function, u32* value_offsets, u32* block_offsets,
+                                                             u32 function_start, u32 function_end, Target target, u32 capacity)
+{
+    if (!result || !function || !function->debug_local_count || !result->debug_locations)
+    {
+        return;
+    }
+    for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+    {
+        IrDebugLocal* local = function->debug_locals + local_index;
+        if (local->id.value == IR_ID_UNDERLYING_INVALID)
+        {
+            continue;
+        }
+        bool emitted = false;
+        IrValueId place = IR_VALUE_ID_INVALID;
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction* instruction = function->instructions + instruction_index;
+            if (instruction->result.value < function->value_count && instruction->canonical_local.value == local->id.value &&
+                (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT))
+            {
+                place = instruction->result;
+                break;
+            }
+        }
+        if (place.value != IR_ID_UNDERLYING_INVALID)
+        {
+            codegen_canonical_location_append(result, capacity, function->symbol, local->id, function_start, function_end,
+                                              codegen_debug_canonical_value_location(place, function, value_offsets, target));
+            emitted = true;
+        }
+        if (!emitted && block_offsets)
+        {
+            for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+            {
+                IrBlock* block = function->blocks + block_index;
+                IrValueId value = IR_VALUE_ID_INVALID;
+                if (block->local_values && local->id.value < function->local_count)
+                {
+                    value = block->local_values[local->id.value];
+                }
+                if (value.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+                    {
+                        if (parameter->canonical_local.value == local->id.value)
+                        {
+                            value = parameter->value;
+                            break;
+                        }
+                    }
+                }
+                if (value.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    continue;
+                }
+                u32 start = BUSTER_MAX(block_offsets[block_index], function_start);
+                u32 end = block_index + 1 < function->block_count ? block_offsets[block_index + 1] : function_end;
+                end = BUSTER_MIN(end, function_end);
+                codegen_canonical_location_append(result, capacity, function->symbol, local->id, start, end,
+                                                  codegen_debug_canonical_value_location(value, function, value_offsets, target));
+                emitted |= end > start;
+            }
+        }
+        if (!emitted)
+        {
+            codegen_canonical_location_append(result, capacity, function->symbol, local->id, function_start, function_end,
+                                              (DebugLocation){
+                                                  .kind = DEBUG_LOCATION_UNAVAILABLE,
+                                              });
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target, bool record_lines)
 {
     CodegenAbi abi = codegen_abi_for_target(target);
     CodegenFunction result = {
         .abi = abi,
+        .symbol = function->symbol,
     };
     CodegenAbiSignature signature = codegen_classify_signature_for_target(arena, analysis, function->type, target);
     if (!signature.valid)
@@ -3557,6 +3800,11 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, Analys
     result.split_vector_operation_count = builder.split_vector_operation_count;
     result.vzeroupper_count = builder.vzeroupper_count;
     result.forwarded_wide_vector_load_count = builder.forwarded_wide_vector_load_count;
+    if (record_lines)
+    {
+        codegen_record_analysis_locations(arena, &result, analysis, function, local_storage_offsets, builder.value_storage_offsets,
+                                          allocation.registers, vector_allocation.registers, builder.block_offsets, target, true);
+    }
     return result;
 }
 
@@ -3570,7 +3818,6 @@ struct A64Relocation
     u8 reserved[3];
 };
 
-#define A64_VALUE_SLOT_SIZE 32
 #define A64_VALUE_SLOT_COMPONENT_COUNT 4
 
 BUSTER_GLOBAL_LOCAL void a64_emit_instruction_word(CodegenBuffer* buffer, u32 instruction)
@@ -4343,6 +4590,7 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
     CodegenAbi abi = codegen_abi_for_target(target);
     CodegenFunction result = {
         .abi = abi,
+        .symbol = function->symbol,
     };
     CodegenAbiSignature function_signature = codegen_classify_signature_for_target(arena, analysis, function->type, target);
     if (!function_signature.valid)
@@ -5831,6 +6079,11 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
     result.line_entry_count = line_entry_count;
     result.register_value_count = allocation.allocated_count + vector_allocation.allocated_count;
     result.spilled_value_count = allocation.spilled_count + vector_allocation.spilled_count;
+    if (record_lines)
+    {
+        codegen_record_analysis_locations(arena, &result, analysis, function, local_storage_offsets, value_storage_offsets,
+                                          allocation.registers, vector_allocation.registers, block_offsets, target, false);
+    }
     return result;
 }
 
@@ -5873,6 +6126,7 @@ CodegenFunction codegen_generate_function(Arena* arena, AnalysisResult* analysis
 CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, IrModule* module, Target target, CodegenModuleOptions options)
 {
     CodegenModule result = {
+        .ir_module = module,
         .abi = codegen_abi_for_target(target),
         .failed_function = IR_FUNCTION_ID_INVALID,
         .failed_instruction = IR_INSTRUCTION_ID_INVALID,
@@ -5900,6 +6154,7 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
     u32 relocation_capacity = 0;
     u32 data_relocation_capacity = 0;
     u32 line_entry_capacity = 0;
+    u32 debug_location_capacity = 0;
     for (u32 index = 0; index < module->function_count; index += 1)
     {
         IrFunction* function = module->functions + index;
@@ -5922,6 +6177,7 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
             relocation_capacity += 1;
         }
         line_entry_capacity += generated[index].line_entry_count;
+        debug_location_capacity += generated[index].debug_location_count;
         total_read_only_data_size = codegen_align_u32((u32)total_read_only_data_size, 16);
         total_read_only_data_size += generated[index].read_only_data.length;
         for (CodegenDataRelocation* relocation = generated[index].first_data_relocation; relocation; relocation = relocation->next)
@@ -5948,6 +6204,7 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
     result.relocations = arena_allocate(arena, CodegenModuleRelocation, relocation_capacity);
     result.data_relocations = arena_allocate(arena, CodegenModuleDataRelocation, data_relocation_capacity);
     result.line_entries = arena_allocate(arena, CodegenLineEntry, line_entry_capacity);
+    result.debug_locations = arena_allocate(arena, DebugLocationSeed, debug_location_capacity);
     result.debug_info = options.debug_info;
     CodegenBuffer read_only_data_buffer = {
         .bytes = arena_allocate(arena, u8, total_read_only_data_size),
@@ -6044,6 +6301,13 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
             CodegenLineEntry entry = function->line_entries[line_index];
             entry.code_offset += function_offset;
             result.line_entries[result.line_entry_count++] = entry;
+        }
+        for (u32 location_index = 0; location_index < function->debug_location_count; location_index += 1)
+        {
+            DebugLocationSeed location = function->debug_locations[location_index];
+            location.start += function_offset;
+            location.end += function_offset;
+            result.debug_locations[result.debug_location_count++] = location;
         }
         entry_index += 1;
     }
@@ -7390,6 +7654,7 @@ BUSTER_GLOBAL_LOCAL u8* codegen_canonical_direct_call_uses(Arena* arena, IrFunct
 CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options)
 {
     CodegenModule result = {
+        .ir_module = module,
         .abi = codegen_abi_for_target(target),
     };
     if (!arena || !program || !module || result.abi >= CODEGEN_ABI_COUNT || (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
@@ -7522,11 +7787,19 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     }
     result.entries = arena_allocate(arena, CodegenModuleEntry, module->function_count + (u32)BUSTER_MIN(assembly_capacity, UINT32_MAX));
     u32 instruction_count = 0;
+    u64 debug_location_capacity_64 = 0;
     u64 stack_probe_capacity = 0;
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
         instruction_count += function->instruction_count;
+        u64 local_capacity = function->debug_local_count ? function->debug_local_count : function->local_count;
+        debug_location_capacity_64 += local_capacity * ((u64)function->block_count + 1);
+        if (debug_location_capacity_64 > UINT32_MAX)
+        {
+            result.error = CODEGEN_ERROR_CAPACITY;
+            return result;
+        }
         u64 function_value_bytes = 0;
         for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
@@ -7561,6 +7834,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         u64 probe_count = (function_value_bytes + 4079) / 4080;
         stack_probe_capacity += probe_count * 11;
     }
+    u32 debug_location_capacity = (u32)debug_location_capacity_64;
     u32 global_relocation_count = 0;
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
@@ -7618,6 +7892,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     // per-instruction rows.
     u32 line_entry_capacity = instruction_count + module->function_count;
     result.line_entries = options.debug_info ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
+    result.debug_locations = options.debug_info ? arena_allocate(arena, DebugLocationSeed, debug_location_capacity) : 0;
     result.debug_info = options.debug_info;
     typedef struct CCanonicalBranchPatch CCanonicalBranchPatch;
     struct CCanonicalBranchPatch
@@ -12848,6 +13123,12 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 instruction |= patch.conditional ? (immediate & 0x7ffff) << 5 : immediate & 0x03ffffff;
                 memcpy(buffer.bytes + patch.offset, &instruction, sizeof(instruction));
             }
+        }
+        if (options.debug_info)
+        {
+            u32 function_start = result.entries[result.entry_count - 1].offset;
+            codegen_record_canonical_locations(&result, function, value_offsets, block_offsets, function_start, (u32)buffer.count, target,
+                                               debug_location_capacity);
         }
     }
     for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)

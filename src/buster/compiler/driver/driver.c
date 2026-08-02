@@ -159,10 +159,15 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.verbose = true;
             continue;
         }
-        if (string_starts_with_sequence(argument, S8("-g")) && (argument.length == 2 || argument.pointer[2] != '-'))
+        if (string_equal(argument, S8("-g")) || string_equal(argument, S8("-g0")))
         {
             invocation.debug_info = !string_equal(argument, S8("-g0"));
             continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-g")))
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported debug option: {S8}"), argument);
+            return invocation;
         }
         if (string_equal(argument, S8("-nostdinc")))
         {
@@ -1200,6 +1205,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
                                                     .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
+                                                    .debug_info = invocation.debug_info,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
     if (result.native_link.error != LINK_ERROR_NONE)
@@ -1425,6 +1431,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 .section_count = unit.object.section_count,
                 .symbol_count = unit.object.symbol_count,
                 .relocation_count = unit.object.relocation_count,
+                .debug_module_count = unit.object.debug_module_count,
             };
             object.sections = arena_allocate(arena, ObjectSection, object.section_count);
             for (u32 section_index = 0; section_index < object.section_count; section_index += 1)
@@ -1449,6 +1456,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             if (object.relocation_count)
             {
                 memcpy(object.relocations, unit.object.relocations, sizeof(ObjectRelocation) * object.relocation_count);
+            }
+            object.debug_modules = arena_allocate(arena, ObjectDebugModule, object.debug_module_count);
+            for (u32 module_index = 0; module_index < object.debug_module_count; module_index += 1)
+            {
+                object.debug_modules[module_index] = unit.object.debug_modules[module_index];
+                object.debug_modules[module_index].name = string_duplicate_arena(arena, unit.object.debug_modules[module_index].name, false);
             }
             objects[object_count++] = object;
         }
@@ -1538,6 +1551,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
                                                     .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
+                                                    .debug_info = invocation.debug_info,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
     if (result.native_link.error != LINK_ERROR_NONE)
@@ -1685,6 +1699,7 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
                                                 (NativeExecutableLinkOptions){
                                                     .output_path = options.output_path,
                                                     .entry_symbol = S8("main"),
+                                                    .debug_info = options.debug_info,
                                                 });
     if (result.native_link.error != LINK_ERROR_NONE)
     {
@@ -1862,6 +1877,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invocation.target.cpu_arch == CPU_ARCH_AARCH64);
     BUSTER_TEST(arguments, invocation.target.os == OPERATING_SYSTEM_ANDROID);
     BUSTER_TEST(arguments, invocation.target.cpu_model == CPU_MODEL_A64_APPLE_M4);
+    BUSTER_TEST(arguments, invocation.debug_info);
     BUSTER_TEST(arguments, invocation.include_path_count == 1);
     BUSTER_TEST(arguments, invocation.system_include_path_count >= 4);
     BUSTER_STRING_TEST(arguments, invocation.system_include_paths[0], S8("system"));
@@ -1895,6 +1911,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_cpu_invocation.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, x86_cpu_invocation.target.cpu_model == CPU_MODEL_AMD_ZEN_5);
     BUSTER_TEST(arguments, target_vector_register_size(x86_cpu_invocation.target) == 64);
+    String8 no_debug_command_line[] = {S8("-g0"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation no_debug_invocation =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(no_debug_command_line));
+    BUSTER_TEST(arguments, no_debug_invocation.error == COMPILER_DRIVER_ERROR_NONE && !no_debug_invocation.debug_info);
+    String8 unsupported_debug_command_line[] = {S8("-g1"), S8("source.c")};
+    CompilerDriverInvocation unsupported_debug =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unsupported_debug_command_line));
+    BUSTER_TEST(arguments, unsupported_debug.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, unsupported_debug.diagnostic, S8("unsupported debug option: -g1"));
     String8 incompatible_cpu_command_line[] = {
         S8("--target=x86_64-linux"),
         S8("-mcpu=apple-m4"),
@@ -2261,7 +2286,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ByteSlice codeview_symbols = codeview_object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data;
             ByteSlice codeview_types = codeview_object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data;
             BUSTER_TEST(arguments, codeview_symbols.length > 16);
-            BUSTER_TEST(arguments, codeview_types.length == 4);
+            BUSTER_TEST(arguments, codeview_types.length >= 4);
             BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_DEBUG_INFO].data.length == 0);
             BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_DEBUG_LINE].data.length == 0);
             u32 codeview_signature = 0;
@@ -2281,10 +2306,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, relocation.symbol < codeview_object->symbol_count);
                 BUSTER_TEST(arguments, relocation.offset + 2 <= codeview_symbols.length);
             }
-            // Each function contributes a procedure record and a line block,
-            // each needing one section-relative and one section-index slot.
+            // Functions and materialized globals each contribute matching
+            // section-relative and section-index slots.
             BUSTER_TEST(arguments, secrel_count != 0 && secrel_count == section_count);
-            BUSTER_TEST(arguments, secrel_count % 2 == 0);
         }
         scratch_end(codeview_temporary);
     }

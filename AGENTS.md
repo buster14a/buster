@@ -36,8 +36,8 @@ expanded equivalent is:
 
 ```sh
 ./build.sh build --config Release -t ide
-build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 src/buster/ide/ide.c -o build/ide-self
-build/ide-self cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 src/buster/ide/ide.c -o build/ide-self-stage2
+build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/ide/ide.c -o build/ide-self
+build/ide-self cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/ide/ide.c -o build/ide-self-stage2
 cmp build/ide-self build/ide-self-stage2
 build/ide-self-stage2 bench
 ```
@@ -387,15 +387,17 @@ has hard design constraints:
   format** — CodeView for Windows, DWARF everywhere else. Canonical IR source
   ranges are one-based; the zero-based buster parser lines are converted at
   the parser→IR boundary.
-- DWARF (Linux, macOS, iOS, Android) emits
-  `.debug_info`/`.debug_abbrev`/`.debug_line`/`.debug_str` with relocations
-  against local text and debug base symbols, so 32-bit cross-section offsets
-  survive object concatenation. ELF executable writers resolve those
-  relocations statically and append the non-loaded sections with a section
-  header table. Mach-O executables carry them in an unmapped `__DWARF`
-  segment (`vmsize` 0, sections flagged `S_ATTR_DEBUG`) placed before
-  `__LINKEDIT` so the ad-hoc code signature still covers them; lldb reads
-  DWARF straight from the image, with no dSYM step.
+- DWARF 4 (Linux, macOS, iOS, Android) emits
+  `.debug_info`/`.debug_abbrev`/`.debug_line`/`.debug_str` plus
+  `.debug_loc`/`.debug_ranges`, with relocations against local text and
+  debug-base symbols, so 32-bit cross-section offsets survive object
+  concatenation. ELF executable writers resolve those relocations statically
+  and append the non-loaded sections with a section header table. Mach-O
+  executables carry the same six sections in a read-only, file-backed
+  `__DWARF` segment (each section is flagged `S_ATTR_DEBUG`) placed before
+  `__LINKEDIT`; its virtual size is page-rounded to satisfy dyld while the
+  ad-hoc code signature covers the complete image. LLDB reads DWARF straight
+  from the image, with no dSYM step.
 - CodeView (Windows) emits `.debug$S` (C13: `S_OBJNAME`, `S_COMPILE3`,
   per-function `S_GPROC32`/`S_END`, line blocks, file checksums, string
   table) and a minimal `.debug$T`. Its `SECREL32`/`SECTION` relocations
@@ -403,17 +405,18 @@ has hard design constraints:
   numbers are shared with the TLS relocations, so the reader disambiguates
   them by section. COFF section names longer than eight bytes use the
   `/<offset>` string-table form.
-- `pdb_build` turns a resolved CodeView blob into a PDB: symbol subsections
-  become the module stream's symbol region, the remaining subsections its C13
-  region, and checksum entries are remapped from the object-local string
-  table onto the PDB `/names` stream (the local table is then dropped, since
-  a PDB does not carry one per module). Readers need more than the streams
-  they will read — an empty globals or publics stream still needs its GSI
-  hash header, and the DBI needs an edit-and-continue name table, or module
-  iteration fails. Validate changes with `llvm-pdbutil dump --all`, which is
-  strict about all of this. **Not yet wired in:** buster's PE writer does not
-  emit the PDB or an `IMAGE_DEBUG_DIRECTORY` RSDS entry, so debugging a
-  self-linked PE still needs an external linker over the relocatable objects.
+- `pdb_build` turns resolved CodeView modules into a PDB: each input object
+  remains a DBI module stream, symbol subsections become that module's symbol
+  region, the remaining subsections its C13 region, and checksum entries are
+  remapped from object-local string tables onto the PDB `/names` stream. TPI
+  records are merged into the shared type stream. Readers need more than the
+  streams they will read — an empty globals or publics stream still needs its
+  GSI hash header, and the DBI needs an edit-and-continue name table, or module
+  iteration fails. Windows links with debug enabled derive a sibling `.pdb`,
+  emit a read-only PE `.debug` section containing a matching RSDS record, and
+  derive the GUID deterministically from the pre-debug PE image and canonical
+  debug-module data. Validate changes with `llvm-pdbutil dump --all`, which is
+  strict about all of this.
 - `object_section_name_for_kind` and `object_section_default_alignment` are
   the single source of truth for section naming and defaults. Use them when
   adding a section kind rather than adding another local table, otherwise

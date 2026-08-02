@@ -857,6 +857,10 @@ struct SelfHostCompare
 {
     String8 stage1;
     String8 stage2;
+#if BUSTER_WINDOWS
+    String8 pdb1;
+    String8 pdb2;
+#endif
 };
 
 BUSTER_GLOBAL_LOCAL String8 cmake_build_config(CmakeBuildOptions options)
@@ -864,6 +868,73 @@ BUSTER_GLOBAL_LOCAL String8 cmake_build_config(CmakeBuildOptions options)
     String8 result = options.config.pointer ? options.config : (options.optimize ? S8("Release") : S8("Debug"));
     return result;
 }
+
+#if BUSTER_WINDOWS
+typedef struct SelfHostRsdsPath SelfHostRsdsPath;
+struct SelfHostRsdsPath
+{
+    u64 start;
+    u64 end;
+};
+
+BUSTER_GLOBAL_LOCAL bool self_host_find_rsds_path(ByteSlice image, SelfHostRsdsPath* result)
+{
+    if (!image.pointer || !result || image.length < 24)
+    {
+        return false;
+    }
+    for (u64 offset = 0; offset + 24 <= image.length; offset += 1)
+    {
+        if (memcmp(image.pointer + offset, "RSDS", 4) != 0)
+        {
+            continue;
+        }
+        u64 start = offset + 24;
+        u64 end = start;
+        while (end < image.length && image.pointer[end])
+        {
+            end += 1;
+        }
+        if (end == image.length || end == start || end - start < 4 || image.pointer[end - 4] != '.' || image.pointer[end - 3] != 'p' ||
+            image.pointer[end - 2] != 'd' || image.pointer[end - 1] != 'b')
+        {
+            continue;
+        }
+        *result = (SelfHostRsdsPath){
+            .start = start,
+            .end = end + 1,
+        };
+        return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice self_host_canonicalize_pe(Arena* arena, ByteSlice image)
+{
+    SelfHostRsdsPath path = {0};
+    if (!arena || !self_host_find_rsds_path(image, &path))
+    {
+        return (ByteSlice){0};
+    }
+    String8 canonical_path = S8("self-host.pdb");
+    u64 path_size = path.end - path.start;
+    u64 canonical_size = canonical_path.length + 1;
+    if (path_size > image.length || image.length - path_size > UINT64_MAX - canonical_size)
+    {
+        return (ByteSlice){0};
+    }
+    u64 size = image.length - path_size + canonical_size;
+    u8* bytes = arena_allocate(arena, u8, size);
+    memcpy(bytes, image.pointer, path.start);
+    memcpy(bytes + path.start, canonical_path.pointer, canonical_path.length);
+    bytes[path.start + canonical_path.length] = 0;
+    memcpy(bytes + path.start + canonical_size, image.pointer + path.end, image.length - path.end);
+    return (ByteSlice){
+        .pointer = bytes,
+        .length = size,
+    };
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL void build_run_add(Arena* arena, BuildStep* step, String8 build_directory, SliceString8 targets, SliceString8 native_arguments,
                                        CmakeBuildOptions options)
@@ -928,7 +999,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* d
         string_print(S8("error: could not read self-host stage outputs\n"));
         return PROCESS_RESULT_FAILED;
     }
+#if BUSTER_WINDOWS
+    ByteSlice canonical_stage1 = self_host_canonicalize_pe(arena, stage1);
+    ByteSlice canonical_stage2 = self_host_canonicalize_pe(arena, stage2);
+    ByteSlice pdb1 = file_read(arena, compare->pdb1, (FileReadOptions){0});
+    ByteSlice pdb2 = file_read(arena, compare->pdb2, (FileReadOptions){0});
+    bool executable_equal = canonical_stage1.pointer && canonical_stage2.pointer && canonical_stage1.length == canonical_stage2.length &&
+                            memory_compare(canonical_stage1.pointer, canonical_stage2.pointer, canonical_stage1.length);
+    bool pdb_equal = pdb1.pointer && pdb2.pointer && pdb1.length == pdb2.length && memory_compare(pdb1.pointer, pdb2.pointer, pdb1.length);
+    if (!executable_equal || !pdb_equal)
+#else
     if (stage1.length != stage2.length || !memory_compare(stage1.pointer, stage2.pointer, stage1.length))
+#endif
     {
         string_print(S8("error: self-host stages differ: {S8} ({u64} bytes) != {S8} ({u64} bytes)\n"), compare->stage1, stage1.length, compare->stage2,
                      stage2.length);
@@ -969,6 +1051,7 @@ BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, S
 #endif
     os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
     os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
+    os_argument_builder_append(&builder, S8("-g"));
 #if BUSTER_MACOS
     os_argument_builder_append(&builder, S8("-isysroot"));
     os_argument_builder_append(&builder, sysroot);
@@ -1100,11 +1183,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     bootstrap = os_path_absolute(arena, bootstrap, true);
     stage1 = os_path_absolute(arena, stage1, true);
     stage2 = os_path_absolute(arena, stage2, true);
+    String8 stage1_pdb = string_format(arena, S8("{S8}.pdb"), string_slice(stage1, 0, stage1.length - 4));
+    String8 stage2_pdb = string_format(arena, S8("{S8}.pdb"), string_slice(stage2, 0, stage2.length - 4));
 #endif
     // Replacing an executable in place can leave macOS with a stale vnode code-signature cache.
     // Unlink both outputs before either compiler recreates them.
     remove_path_recursive(arena, stage1);
     remove_path_recursive(arena, stage2);
+#if BUSTER_WINDOWS
+    remove_path_recursive(arena, stage1_pdb);
+    remove_path_recursive(arena, stage2_pdb);
+#endif
     String8 targets[] = {S8("ide")};
     build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
     self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"));
@@ -1113,6 +1202,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     *compare = (SelfHostCompare){
         .stage1 = stage1,
         .stage2 = stage2,
+#if BUSTER_WINDOWS
+        .pdb1 = stage1_pdb,
+        .pdb2 = stage2_pdb,
+#endif
     };
     BuildStep* compare_step = step_add(arena);
     ProcessRun* compare_run = run_add(arena, compare_step);

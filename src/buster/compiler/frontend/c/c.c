@@ -9921,6 +9921,7 @@ typedef struct CIntegerIrLocal CIntegerIrLocal;
 struct CIntegerIrLocal
 {
     String8 name;
+    IrSourceRange source;
     IrValueId place;
     IrValueId runtime_size;
     IrValueId* vla_dimension_counts;
@@ -9933,8 +9934,25 @@ struct CIntegerIrLocal
     u32 vla_dimension_count;
     bool is_variable_length_array;
     bool is_vla_parameter;
-    u8 reserved[2];
+    bool is_parameter;
+    u8 reserved;
 };
+
+BUSTER_GLOBAL_LOCAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId entity)
+{
+    if (!parse || entity.value >= parse->entity_count)
+    {
+        return 0;
+    }
+    CScopeId scope = parse->entities[entity.value].scope;
+    u32 depth = 0;
+    while (scope.value != C_ID_UNDERLYING_INVALID && scope.value < parse->scope_count && parse->scopes[scope.value].parent.value != C_ID_UNDERLYING_INVALID)
+    {
+        depth += 1;
+        scope = parse->scopes[scope.value].parent;
+    }
+    return depth ? depth - 1 : 0;
+}
 
 typedef struct CIntegerIrBuilder CIntegerIrBuilder;
 
@@ -10411,6 +10429,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken
     builder->function->values[place.value].definition = id;
     builder->locals[builder->local_count++] = (CIntegerIrLocal){
         .name = name.spelling,
+        .source = c_ir_source_range(name.location, name.spelling.length),
         .place = place,
         .id = local_id,
         .type = type,
@@ -11367,6 +11386,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken 
     {
         return false;
     }
+    local->is_parameter = true;
     IrValueId value = c_ir_add_result(builder, type);
     u64* immediate = arena_allocate(builder->arena, u64, 1);
     immediate[0] = argument_index;
@@ -22191,6 +22211,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                     place = c_ir_emit_global_place(builder, entity, local_source);
                     builder->locals[builder->local_count++] = (CIntegerIrLocal){
                         .name = name.spelling,
+                        .source = local_source,
                         .place = place,
                         .id = IR_LOCAL_ID_INVALID,
                         .type = local_type,
@@ -25245,6 +25266,20 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             continue;
         }
         function->state = IR_FUNCTION_LOWERED;
+        function->debug_local_count = builder.local_count;
+        function->debug_locals = arena_allocate(arena, IrDebugLocal, function->debug_local_count);
+        for (u32 local_index = 0; local_index < builder.local_count; local_index += 1)
+        {
+            CIntegerIrLocal* local = builder.locals + local_index;
+            function->debug_locals[local_index] = (IrDebugLocal){
+                .name = local->name,
+                .source = local->source,
+                .type = local->type,
+                .id = local->id,
+                .scope_depth = c_ir_debug_scope_depth(&builder.parse, local->entity),
+                .is_parameter = local->is_parameter,
+            };
+        }
         module->lowered_function_count += 1;
         program->lowered_function_count += 1;
         scratch_end(lowering_temporary);

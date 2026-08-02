@@ -1,5 +1,6 @@
 #pragma once
 
+#include <buster/compiler/debug/debug.h>
 #include <buster/compiler/ir/ir.h>
 #include <buster/target.h>
 
@@ -119,7 +120,10 @@ struct CodegenFunction
     CodegenCallRelocation* first_call_relocation;
     CodegenDataRelocation* first_data_relocation;
     CodegenLineEntry* line_entries;
+    DebugLocationSeed* debug_locations;
+    IrSymbolId symbol;
     u32 line_entry_count;
+    u32 debug_location_count;
     CodegenError error;
     CodegenAbi abi;
     u32 stack_frame_size;
@@ -206,6 +210,7 @@ struct CodegenStatistics
 
 struct CodegenModule
 {
+    IrModule* ir_module;
     ByteSlice code;
     ByteSlice read_only_data;
     ByteSlice writable_data;
@@ -216,7 +221,9 @@ struct CodegenModule
     CodegenModuleRelocation* relocations;
     CodegenModuleDataRelocation* data_relocations;
     CodegenLineEntry* line_entries;
+    DebugLocationSeed* debug_locations;
     u32 line_entry_count;
+    u32 debug_location_count;
     bool debug_info;
     u8 reserved[3];
     CodegenError error;
