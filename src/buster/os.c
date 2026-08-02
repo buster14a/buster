@@ -643,6 +643,16 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
         {
             result = posix_fd_to_generic_fd(fd);
         }
+        else if (program_flag_get(PROGRAM_FLAG_VERBOSE))
+        {
+            OsError error = os_get_last_error();
+            // Missing paths are expected while probing include and library
+            // candidates. Keep diagnostics for other failures visible.
+            if (error.v != (u32)ENOENT && error.v != (u32)ENOTDIR)
+            {
+                string_print(S8("Error opening {S8}: {EOs}\n"), path, error);
+            }
+        }
 #elif defined(_WIN32)
         TemporalArena scratch = scratch_begin(0, 0);
 
@@ -704,11 +714,14 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
         {
             result = (OsFileDescriptor*)fd;
         }
-        else
+        else if (program_flag_get(PROGRAM_FLAG_VERBOSE))
         {
-            if (program_flag_get(PROGRAM_FLAG_VERBOSE))
+            OsError error = os_get_last_error();
+            // Missing paths are expected while probing include and library
+            // candidates. Keep diagnostics for other failures visible.
+            if (error.v != (u32)ERROR_FILE_NOT_FOUND && error.v != (u32)ERROR_PATH_NOT_FOUND)
             {
-                string_print(S8("Error: {EOs}\n"), os_get_last_error());
+                string_print(S8("Error opening {S8}: {EOs}\n"), path, error);
             }
         }
         scratch_end(scratch);
