@@ -3351,9 +3351,35 @@ BUSTER_GLOBAL_LOCAL DebugRegister codegen_debug_register_for_value(Target target
     return DEBUG_REGISTER_NONE;
 }
 
+// Debug locations use the frame pointer as their common base.  x86-64 storage
+// offsets are distances below RBP and need their sign changed; AArch64
+// codegen stores values relative to the final SP and keeps X29 at the
+// pre-allocation SP, so translate those offsets back across the frame here.
+BUSTER_GLOBAL_LOCAL s32 codegen_debug_frame_offset(u32 offset, Target target, bool negative_offsets, u32 frame_size)
+{
+    s64 result = offset > INT32_MAX ? INT32_MAX : (s64)offset;
+    if (target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        result -= frame_size;
+    }
+    else if (negative_offsets)
+    {
+        result = -result;
+    }
+    if (result < INT32_MIN)
+    {
+        result = INT32_MIN;
+    }
+    else if (result > INT32_MAX)
+    {
+        result = INT32_MAX;
+    }
+    return (s32)result;
+}
+
 BUSTER_GLOBAL_LOCAL DebugLocation codegen_debug_analysis_value_location(IrFunction* function, AnalysisResult* analysis, IrValueId value,
                                                                          u8* value_registers, u8* vector_registers, u32* value_storage_offsets,
-                                                                         Target target, bool negative_offsets)
+                                                                         Target target, bool negative_offsets, u32 frame_size)
 {
     DebugLocation result = {
         .kind = DEBUG_LOCATION_UNAVAILABLE,
@@ -3382,10 +3408,9 @@ BUSTER_GLOBAL_LOCAL DebugLocation codegen_debug_analysis_value_location(IrFuncti
                      ? value_storage_offsets[value.value]
                      : target.cpu_arch == CPU_ARCH_X86_64 ? (u64)value.value * X64_VALUE_SLOT_SIZE + 8
                                                           : (u64)value.value * A64_VALUE_SLOT_SIZE;
-    s32 frame_offset = offset > INT32_MAX ? INT32_MAX : (s32)offset;
     return (DebugLocation){
         .kind = DEBUG_LOCATION_FRAME,
-        .frame_offset = negative_offsets ? -frame_offset : frame_offset,
+        .frame_offset = codegen_debug_frame_offset(offset > UINT32_MAX ? UINT32_MAX : (u32)offset, target, negative_offsets, frame_size),
     };
 }
 
@@ -3407,7 +3432,7 @@ BUSTER_GLOBAL_LOCAL void codegen_debug_location_append(CodegenFunction* result, 
 
 BUSTER_GLOBAL_LOCAL void codegen_record_analysis_locations(Arena* arena, CodegenFunction* result, AnalysisResult* analysis, IrFunction* function,
                                                              u32* local_offsets, u32* value_storage_offsets, u8* value_registers, u8* vector_registers,
-                                                             u32* block_offsets, Target target, bool negative_offsets)
+                                                             u32* block_offsets, Target target, bool negative_offsets, u32 frame_size)
 {
     if (!arena || !result || !function || !result->code.length || !function->local_count)
     {
@@ -3430,11 +3455,10 @@ BUSTER_GLOBAL_LOCAL void codegen_record_analysis_locations(Arena* arena, Codegen
             function->local_places[local_index].value != IR_ID_UNDERLYING_INVALID && local_offsets)
         {
             u32 offset = local_offsets[local_index];
-            s32 frame_offset = offset > INT32_MAX ? INT32_MAX : (s32)offset;
             codegen_debug_location_append(result, capacity, function->symbol, local, 0, (u32)result->code.length,
                                           (DebugLocation){
                                               .kind = DEBUG_LOCATION_FRAME,
-                                              .frame_offset = negative_offsets ? -frame_offset : frame_offset,
+                                              .frame_offset = codegen_debug_frame_offset(offset, target, negative_offsets, frame_size),
                                           });
             emitted = true;
         }
@@ -3457,7 +3481,7 @@ BUSTER_GLOBAL_LOCAL void codegen_record_analysis_locations(Arena* arena, Codegen
                 start = BUSTER_MIN(start, (u32)result->code.length);
                 end = BUSTER_MIN(end, (u32)result->code.length);
                 DebugLocation location = codegen_debug_analysis_value_location(function, analysis, value, value_registers, vector_registers,
-                                                                                value_storage_offsets, target, negative_offsets);
+                                                                                value_storage_offsets, target, negative_offsets, frame_size);
                 codegen_debug_location_append(result, capacity, function->symbol, local, start, end, location);
                 emitted |= end > start;
             }
@@ -3472,7 +3496,8 @@ BUSTER_GLOBAL_LOCAL void codegen_record_analysis_locations(Arena* arena, Codegen
     }
 }
 
-BUSTER_GLOBAL_LOCAL DebugLocation codegen_debug_canonical_value_location(IrValueId value, IrFunction* function, u32* value_offsets, Target target)
+BUSTER_GLOBAL_LOCAL DebugLocation codegen_debug_canonical_value_location(IrValueId value, IrFunction* function, u32* value_offsets, Target target,
+                                                                         u32 frame_size)
 {
     if (!function || !value_offsets || value.value >= function->value_count)
     {
@@ -3481,10 +3506,9 @@ BUSTER_GLOBAL_LOCAL DebugLocation codegen_debug_canonical_value_location(IrValue
         };
     }
     u32 offset = value_offsets[value.value];
-    s32 frame_offset = offset > INT32_MAX ? INT32_MAX : (s32)offset;
     return (DebugLocation){
         .kind = DEBUG_LOCATION_FRAME,
-        .frame_offset = target.cpu_arch == CPU_ARCH_X86_64 ? -frame_offset : frame_offset,
+        .frame_offset = codegen_debug_frame_offset(offset, target, true, frame_size),
     };
 }
 
@@ -3505,7 +3529,7 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_location_append(CodegenModule* result
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* result, IrFunction* function, u32* value_offsets, u32* block_offsets,
-                                                             u32 function_start, u32 function_end, Target target, u32 capacity)
+                                                             u32 function_start, u32 function_end, Target target, u32 frame_size, u32 capacity)
 {
     if (!result || !function || !function->debug_local_count || !result->debug_locations)
     {
@@ -3533,7 +3557,7 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
         if (place.value != IR_ID_UNDERLYING_INVALID)
         {
             codegen_canonical_location_append(result, capacity, function->symbol, local->id, function_start, function_end,
-                                              codegen_debug_canonical_value_location(place, function, value_offsets, target));
+                                              codegen_debug_canonical_value_location(place, function, value_offsets, target, frame_size));
             emitted = true;
         }
         if (!emitted && block_offsets)
@@ -3565,7 +3589,7 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
                 u32 end = block_index + 1 < function->block_count ? block_offsets[block_index + 1] : function_end;
                 end = BUSTER_MIN(end, function_end);
                 codegen_canonical_location_append(result, capacity, function->symbol, local->id, start, end,
-                                                  codegen_debug_canonical_value_location(value, function, value_offsets, target));
+                                                  codegen_debug_canonical_value_location(value, function, value_offsets, target, frame_size));
                 emitted |= end > start;
             }
         }
@@ -3803,7 +3827,7 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, Analys
     if (record_lines)
     {
         codegen_record_analysis_locations(arena, &result, analysis, function, local_storage_offsets, builder.value_storage_offsets,
-                                          allocation.registers, vector_allocation.registers, builder.block_offsets, target, true);
+                                          allocation.registers, vector_allocation.registers, builder.block_offsets, target, true, frame_size);
     }
     return result;
 }
@@ -6082,7 +6106,7 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
     if (record_lines)
     {
         codegen_record_analysis_locations(arena, &result, analysis, function, local_storage_offsets, value_storage_offsets,
-                                          allocation.registers, vector_allocation.registers, block_offsets, target, false);
+                                          allocation.registers, vector_allocation.registers, block_offsets, target, false, frame_size);
     }
     return result;
 }
@@ -6188,6 +6212,7 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
         result.entries[result.entry_count++] = (CodegenModuleEntry){
             .entity = function->entity,
             .instantiation = function->instantiation,
+            .symbol = function->symbol,
             .offset = (u32)total_size,
         };
         total_size += generated[index].code.length;
@@ -13148,7 +13173,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         if (options.debug_info)
         {
             u32 function_start = result.entries[result.entry_count - 1].offset;
-            codegen_record_canonical_locations(&result, function, value_offsets, block_offsets, function_start, (u32)buffer.count, target,
+            codegen_record_canonical_locations(&result, function, value_offsets, block_offsets, function_start, (u32)buffer.count, target, frame_size,
                                                debug_location_capacity);
         }
     }
@@ -14180,6 +14205,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     aarch64_target.cpu_arch = CPU_ARCH_AARCH64;
     aarch64_target.cpu_features_explicit = true;
     aarch64_target.cpu_features = TARGET_CPU_FEATURE_AARCH64_NEON;
+    BUSTER_TEST(arguments, codegen_debug_frame_offset(40, target, true, 32) == -40);
+    BUSTER_TEST(arguments, codegen_debug_frame_offset(40, aarch64_target, false, 32) == 8);
     CodegenFunction aarch64_generated = straight_function ? codegen_generate_function(arguments->arena, &analysis, straight_function, aarch64_target)
                                                           : (CodegenFunction){
                                                                 .error = CODEGEN_ERROR_INVALID_IR,

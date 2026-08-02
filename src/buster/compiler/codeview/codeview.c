@@ -1063,6 +1063,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                                                                  });
     BUSTER_TEST(arguments, model_built.valid && model_built.types.length > 4);
     bool found_local = false;
+    bool found_procedure_type = false;
     bool found_register = false;
     bool found_frame = false;
     bool found_subfield = false;
@@ -1093,6 +1094,12 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                 {
                     break;
                 }
+                if (record_kind == S_GPROC32 && record_offset + 32 <= record_end)
+                {
+                    u32 type_index = 0;
+                    memcpy(&type_index, model_built.symbols.pointer + record_offset + 28, sizeof(type_index));
+                    found_procedure_type |= type_index == 0x1001u;
+                }
                 found_local |= record_kind == S_LOCAL;
                 found_register |= record_kind == S_DEFRANGE_REGISTER;
                 found_frame |= record_kind == S_DEFRANGE_FRAMEPOINTER_REL;
@@ -1103,7 +1110,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         }
         model_symbol_offset = payload + ((subsection_length + 3) & ~3u);
     }
-    BUSTER_TEST(arguments, found_local && found_register && found_frame && found_subfield && found_inline);
+    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame && found_subfield && found_inline);
 
     DebugVariable global_variable = {
         .name = S8("global_value"),

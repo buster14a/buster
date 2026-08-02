@@ -1160,6 +1160,37 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_tree(DwarfModelWriter* writer, D
     }
 }
 
+BUSTER_GLOBAL_LOCAL DebugTypeId dwarf_model_function_return_type(DebugModel* model, DebugTypeId function_type)
+{
+    // DW_AT_TYPE on a DW_TAG_subprogram is the result type.  The complete
+    // callable signature is emitted separately as a subroutine type and as
+    // the child formal-parameter DIEs used by debuggers when evaluating calls.
+    if (model && function_type != DEBUG_ID_INVALID && function_type < model->type_count && model->types[function_type].kind == DEBUG_TYPE_FUNCTION)
+    {
+        return model->types[function_type].return_type;
+    }
+    return function_type;
+}
+
+BUSTER_GLOBAL_LOCAL void dwarf_model_emit_frame_base(DwarfModelWriter* writer)
+{
+    // Codegen normalizes frame locations to these registers, including the
+    // AArch64 translation from final-SP offsets to the saved X29 value.
+    DebugRegister frame_register = writer->input.target.cpu_arch == CPU_ARCH_X86_64 ? DEBUG_REGISTER_X86_RBP : DEBUG_REGISTER_AARCH64_X29;
+    u32 dwarf_register = debug_register_dwarf_number(writer->input.target, frame_register);
+    if (dwarf_register != UINT32_MAX)
+    {
+        dwarf_emit_uleb128(&writer->info, 2);
+        dwarf_emit_u8(&writer->info, DW_OP_REGX);
+        dwarf_emit_uleb128(&writer->info, dwarf_register);
+    }
+    else
+    {
+        dwarf_emit_uleb128(&writer->info, 1);
+        dwarf_emit_u8(&writer->info, DW_OP_CALL_FRAME_CFA);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void dwarf_model_emit_function(DwarfModelWriter* writer, u32 function_index)
 {
     DebugFunction* function = writer->model->functions + function_index;
@@ -1182,9 +1213,8 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_function(DwarfModelWriter* writer, u32
     dwarf_model_string(writer, function->name);
     dwarf_model_emit_declaration(writer, function->declaration);
     dwarf_model_emit_ranges_attribute(writer, function->code_offset, function->code_offset + function->code_size);
-    dwarf_model_type_reference(writer, function->type);
-    dwarf_emit_uleb128(&writer->info, 1);
-    dwarf_emit_u8(&writer->info, DW_OP_CALL_FRAME_CFA);
+    dwarf_model_type_reference(writer, dwarf_model_function_return_type(writer->model, function->type));
+    dwarf_model_emit_frame_base(writer);
 
     if (has_children && function->scope < writer->model->scope_count)
     {
