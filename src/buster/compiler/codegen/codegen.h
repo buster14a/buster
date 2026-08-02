@@ -103,12 +103,23 @@ struct CodegenCallRelocation
     u8 reserved[2];
 };
 
+typedef struct CodegenLineEntry CodegenLineEntry;
+struct CodegenLineEntry
+{
+    u32 code_offset;
+    u32 source;
+    u32 line;
+    u32 column;
+};
+
 struct CodegenFunction
 {
     ByteSlice code;
     ByteSlice read_only_data;
     CodegenCallRelocation* first_call_relocation;
     CodegenDataRelocation* first_data_relocation;
+    CodegenLineEntry* line_entries;
+    u32 line_entry_count;
     CodegenError error;
     CodegenAbi abi;
     u32 stack_frame_size;
@@ -204,6 +215,10 @@ struct CodegenModule
     CodegenModuleGlobal* globals;
     CodegenModuleRelocation* relocations;
     CodegenModuleDataRelocation* data_relocations;
+    CodegenLineEntry* line_entries;
+    u32 line_entry_count;
+    bool debug_info;
+    u8 reserved[3];
     CodegenError error;
     CodegenAbi abi;
     CodegenStatistics statistics;
@@ -224,11 +239,18 @@ struct CodegenExecutable
     CodegenError error;
 };
 
+typedef struct CodegenModuleOptions CodegenModuleOptions;
+struct CodegenModuleOptions
+{
+    bool debug_info;
+    u8 reserved[7];
+};
+
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
 BUSTER_F_DECL CodegenAbiSignature codegen_classify_signature(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type, CodegenAbi abi);
 BUSTER_F_DECL CodegenFunction codegen_generate_function(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target);
-BUSTER_F_DECL CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, IrModule* module, Target target);
-BUSTER_F_DECL CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target);
+BUSTER_F_DECL CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, IrModule* module, Target target, CodegenModuleOptions options);
+BUSTER_F_DECL CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options);
 BUSTER_F_DECL CodegenExecutable codegen_make_executable(CodegenFunction function);
 BUSTER_F_DECL void codegen_release_executable(CodegenExecutable executable);
 

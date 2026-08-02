@@ -80,7 +80,8 @@ struct CompilerDriverInvocation
     CompilerDriverError error;
     bool verbose;
     bool no_standard_includes;
-    u8 reserved[2];
+    bool debug_info;
+    u8 reserved;
 };
 
 typedef struct CompilerDriverOptions CompilerDriverOptions;
@@ -90,6 +91,8 @@ struct CompilerDriverOptions
     String8 output_path;
     String8 module_root;
     Target target;
+    bool debug_info;
+    u8 reserved[7];
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;

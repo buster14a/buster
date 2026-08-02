@@ -1,6 +1,7 @@
 #pragma once
 
 #include <buster/compiler/codegen/codegen.h>
+#include <buster/compiler/dwarf/dwarf.h>
 
 typedef enum ObjectFormat
 {
@@ -28,8 +29,14 @@ typedef enum ObjectSectionKind
     OBJECT_SECTION_DATA,
     OBJECT_SECTION_THREAD_LOCAL_DATA,
     OBJECT_SECTION_THREAD_LOCAL_ZERO,
+    OBJECT_SECTION_DEBUG_INFO,
+    OBJECT_SECTION_DEBUG_ABBREV,
+    OBJECT_SECTION_DEBUG_LINE,
+    OBJECT_SECTION_DEBUG_STR,
     OBJECT_SECTION_COUNT,
 } ObjectSectionKind;
+
+BUSTER_F_DECL bool object_section_kind_is_debug(ObjectSectionKind kind);
 
 typedef enum ObjectSymbolKind
 {
@@ -43,6 +50,7 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_X86_64_PC32,
     OBJECT_RELOCATION_AARCH64_CALL26,
     OBJECT_RELOCATION_ABSOLUTE64,
+    OBJECT_RELOCATION_ABSOLUTE32,
     OBJECT_RELOCATION_X86_64_TPOFF32,
     OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32,
     OBJECT_RELOCATION_PE_TLS_OFFSET32,

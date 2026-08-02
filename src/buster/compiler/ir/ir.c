@@ -1901,6 +1901,14 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(Arena* result_arena, AnalysisR
         module.functions[function_index] = (IrFunction){
             .name = entity->name,
             .symbol = IR_SYMBOL_ID_INVALID,
+            .source =
+                {
+                    .source = {.value = entity->source.value},
+                    .offset = entity->range.offset,
+                    .length = entity->range.length,
+                    .line = entity->range.line + 1,
+                    .column = entity->range.column + 1,
+                },
             .canonical_type = IR_TYPE_ID_INVALID,
             .entity = entity->id,
             .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
@@ -1951,6 +1959,14 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(Arena* result_arena, AnalysisR
         module.functions[function_index] = (IrFunction){
             .name = instantiation->symbol_name,
             .symbol = IR_SYMBOL_ID_INVALID,
+            .source =
+                {
+                    .source = {.value = entity->source.value},
+                    .offset = entity->range.offset,
+                    .length = entity->range.length,
+                    .line = entity->range.line + 1,
+                    .column = entity->range.column + 1,
+                },
             .canonical_type = IR_TYPE_ID_INVALID,
             .entity = entity->id,
             .instantiation = instantiation->id,
@@ -2114,14 +2130,16 @@ BUSTER_GLOBAL_LOCAL IrSymbolKind ir_symbol_kind_from_analysis(AnalysisEntityKind
     return IR_SYMBOL_COUNT;
 }
 
+// Parser lines and columns are zero-based; canonical IR source ranges are
+// one-based, matching the C frontend and DWARF.
 BUSTER_GLOBAL_LOCAL IrSourceRange ir_source_range_from_parser(IrSourceId source, ParserSourceRange range)
 {
     return (IrSourceRange){
         .source = source,
         .offset = range.offset,
         .length = range.length,
-        .line = range.line,
-        .column = range.column,
+        .line = range.line + 1,
+        .column = range.column + 1,
     };
 }
 

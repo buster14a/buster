@@ -22,6 +22,8 @@ struct CSourceLocation
     u64 offset;
     u32 line;
     u32 column;
+    u32 file;
+    u32 reserved;
 };
 
 typedef struct CToken CToken;
@@ -127,9 +129,11 @@ struct CPreprocessResult
 {
     CToken* tokens;
     CDiagnostic* diagnostics;
+    String8* files;
     Target target;
     u64 token_count;
     u64 diagnostic_count;
+    u32 file_count;
     CPreprocessDialect dialect;
 };
 

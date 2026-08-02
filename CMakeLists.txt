@@ -803,6 +803,7 @@ buster_register_module(compiler_c_frontend "${BUSTER_SOURCE_DIR}/compiler/fronte
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
 buster_register_module(compiler_ir_interpreter "${BUSTER_SOURCE_DIR}/compiler/ir/interpreter${COMMON_EXTENSION}")
 buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")
+buster_register_module(compiler_dwarf "${BUSTER_SOURCE_DIR}/compiler/dwarf/dwarf${COMMON_EXTENSION}")
 buster_register_module(compiler_object "${BUSTER_SOURCE_DIR}/compiler/object/object${COMMON_EXTENSION}")
 buster_register_module(compiler_link "${BUSTER_SOURCE_DIR}/compiler/link/link${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
@@ -1586,6 +1587,7 @@ buster_add_executable(ide src/buster/ide/ide.c
     compiler_ir
     compiler_ir_interpreter
     compiler_codegen
+    compiler_dwarf
     compiler_object
     compiler_link
     compiler_driver

@@ -10,6 +10,7 @@
 #include <buster/compiler/frontend/c/c.h>
 #include <buster/compiler/ir/ir.h>
 #include <buster/compiler/ir/interpreter.h>
+#include <buster/compiler/dwarf/dwarf.h>
 #include <buster/compiler/object/object.h>
 #include <buster/compiler/link/link.h>
 #include <buster/compiler/driver/driver.h>
@@ -119,6 +120,7 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &ir_tests,
     &ir_interpreter_tests,
     &codegen_tests,
+    &dwarf_tests,
     &object_tests,
     &link_tests,
     &compiler_driver_tests,

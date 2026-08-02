@@ -47,6 +47,7 @@
 #include <buster/compiler/ir/ir.c>
 #include <buster/compiler/ir/interpreter.c>
 #include <buster/compiler/codegen/codegen.c>
+#include <buster/compiler/dwarf/dwarf.c>
 #include <buster/compiler/object/object.c>
 #include <buster/compiler/link/link.c>
 #include <buster/compiler/driver/driver.c>
@@ -97,10 +98,11 @@ struct IdeProgram
     bool test;
     bool bench;
     bool compile;
+    bool compile_debug_info;
     bool cc;
     bool fuzz;
     bool test_app;
-    u8 reserved[2];
+    u8 reserved;
     TimeDataType last_frame_timestamp;
 };
 
@@ -257,6 +259,10 @@ ProcessResult process_arguments(void)
             result = PROCESS_RESULT_FAILED;
             break;
 #endif
+        }
+        else if (string_equal(arg, S8("-g")) && ide_state.compile)
+        {
+            ide_state.compile_debug_info = true;
         }
         else if (string_equal(arg, S8("-o")) && ide_state.compile)
         {
@@ -1070,6 +1076,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
                                                                       .output_path = output_path,
                                                                       .module_root = ide_state.compile_module_root,
                                                                       .target = target_native,
+                                                                      .debug_info = ide_state.compile_debug_info,
                                                                   });
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.error != COMPILER_DRIVER_ERROR_NONE)

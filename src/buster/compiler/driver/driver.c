@@ -158,6 +158,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.verbose = true;
             continue;
         }
+        if (string_starts_with_sequence(argument, S8("-g")) && (argument.length == 2 || argument.pointer[2] != '-'))
+        {
+            invocation.debug_info = !string_equal(argument, S8("-g0"));
+            continue;
+        }
         if (string_equal(argument, S8("-nostdinc")))
         {
             invocation.no_standard_includes = true;
@@ -1066,7 +1071,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                           (u32)validation.error, validation.function.value, function_name, validation.block.value, validation.instruction.value, opcode);
         goto end;
     }
-    CodegenModule code = codegen_generate_canonical_module(arena, lowered.program, module, invocation.target);
+    CodegenModule code = codegen_generate_canonical_module(arena, lowered.program, module, invocation.target,
+                                                           (CodegenModuleOptions){
+                                                               .debug_info = invocation.debug_info,
+                                                           });
     result.codegen_statistics = code.statistics;
     result.codegen_error = code.error;
     if (code.error != CODEGEN_ERROR_NONE)
@@ -1633,7 +1641,10 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
                 string_format(arena, S8("IR validation failed in module {S8} with error {u32}"), module_analysis->module.name, (u32)validation.error);
             return result;
         }
-        CodegenModule code = codegen_generate_module(arena, module_analysis, module_ir, options.target);
+        CodegenModule code = codegen_generate_module(arena, module_analysis, module_ir, options.target,
+                                                     (CodegenModuleOptions){
+                                                         .debug_info = options.debug_info,
+                                                     });
         result.codegen_error = code.error;
         if (code.error != CODEGEN_ERROR_NONE)
         {
@@ -1684,6 +1695,86 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
 }
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, String8 name, u64* offset, u64* size, u64* address)
+{
+    enum
+    {
+        ELF_HEADER_SIZE = 64,
+        ELF_SECTION_HEADER_SIZE = 64,
+    };
+    if (image.length < ELF_HEADER_SIZE || memcmp(image.pointer, "\x7f" "ELF", 4) != 0)
+    {
+        return false;
+    }
+    u64 section_table;
+    u16 section_count;
+    u16 string_index;
+    memcpy(&section_table, image.pointer + 40, sizeof(section_table));
+    memcpy(&section_count, image.pointer + 60, sizeof(section_count));
+    memcpy(&string_index, image.pointer + 62, sizeof(string_index));
+    if (!section_count || string_index >= section_count || section_table > image.length ||
+        (u64)section_count * ELF_SECTION_HEADER_SIZE > image.length - section_table)
+    {
+        return false;
+    }
+    u64 string_header = section_table + (u64)string_index * ELF_SECTION_HEADER_SIZE;
+    u64 string_offset;
+    u64 string_size;
+    memcpy(&string_offset, image.pointer + string_header + 24, sizeof(string_offset));
+    memcpy(&string_size, image.pointer + string_header + 32, sizeof(string_size));
+    if (string_offset > image.length || string_size > image.length - string_offset)
+    {
+        return false;
+    }
+    for (u16 section_index = 0; section_index < section_count; section_index += 1)
+    {
+        u64 header = section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE;
+        u32 name_offset;
+        memcpy(&name_offset, image.pointer + header, sizeof(name_offset));
+        if (name_offset >= string_size || string_size - name_offset <= name.length)
+        {
+            continue;
+        }
+        if (memcmp(image.pointer + string_offset + name_offset, name.pointer, name.length) != 0 ||
+            image.pointer[string_offset + name_offset + name.length] != 0)
+        {
+            continue;
+        }
+        memcpy(offset, image.pointer + header + 24, sizeof(*offset));
+        memcpy(size, image.pointer + header + 32, sizeof(*size));
+        memcpy(address, image.pointer + header + 16, sizeof(*address));
+        return *offset <= image.length && *size <= image.length - *offset;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_elf_section(ByteSlice image, String8 name)
+{
+    u64 offset = 0;
+    u64 size = 0;
+    u64 address = 0;
+    if (!compiler_driver_test_elf_section_find(image, name, &offset, &size, &address))
+    {
+        return (ByteSlice){0};
+    }
+    return (ByteSlice){
+        .pointer = image.pointer + offset,
+        .length = size,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_test_elf_section_address(ByteSlice image, String8 name)
+{
+    u64 offset = 0;
+    u64 size = 0;
+    u64 address = 0;
+    if (!compiler_driver_test_elf_section_find(image, name, &offset, &size, &address))
+    {
+        return 0;
+    }
+    return address;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_driver_bytes_contain(ByteSlice bytes, String8 needle)
 {
     if (!needle.length || needle.length > bytes.length)
@@ -2127,6 +2218,48 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+#if BUSTER_LINUX
+    // -g must produce loadable executables that carry DWARF line and info
+    // sections resolvable back to source lines.
+    String8 c_debug_path = buster_test_temporary_path(arguments->arena, S8("buster-c-debug"), S8(""));
+    String8 c_debug_command_line[] = {
+        S8("-g"),
+        S8("-o"),
+        c_debug_path,
+        S8("tests/basic_c_operations.c"),
+    };
+    CompilerDriverResult c_debug_link = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_debug_command_line)));
+    BUSTER_TEST(arguments, c_debug_link.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_debug_link.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        ByteSlice c_debug_image = file_read(arguments->arena, c_debug_path, (FileReadOptions){0});
+        ByteSlice c_debug_line = compiler_driver_test_elf_section(c_debug_image, S8(".debug_line"));
+        ByteSlice c_debug_info = compiler_driver_test_elf_section(c_debug_image, S8(".debug_info"));
+        ByteSlice c_debug_text = compiler_driver_test_elf_section(c_debug_image, S8(".text"));
+        u64 c_debug_text_address = compiler_driver_test_elf_section_address(c_debug_image, S8(".text"));
+        BUSTER_TEST(arguments, c_debug_line.length > 4);
+        BUSTER_TEST(arguments, c_debug_info.length > 11);
+        BUSTER_TEST(arguments, c_debug_text.length != 0);
+        BUSTER_TEST(arguments, c_debug_text_address != 0);
+        DwarfLineRow c_debug_row = {0};
+        BUSTER_TEST(arguments, dwarf_line_lookup(c_debug_line, c_debug_text_address, &c_debug_row));
+        BUSTER_TEST(arguments, c_debug_row.line != 0 && c_debug_row.file != 0);
+        String8 c_debug_run_arguments[] = {
+            c_debug_path,
+        };
+        ProcessSpawnResult c_debug_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_debug_run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){
+                                                                .use_process_environment = true,
+                                                            });
+        BUSTER_TEST(arguments, c_debug_spawn.handle != 0);
+        if (c_debug_spawn.handle)
+        {
+            ProcessWaitResult c_debug_wait = os_process_wait_sync(arguments->arena, c_debug_spawn);
+            BUSTER_TEST(arguments, c_debug_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+#endif
     String8 string_concat_path = buster_test_temporary_path(arguments->arena, S8("buster-c-string-concat"),
 #if BUSTER_WINDOWS
                                                             S8(".exe"));
@@ -3090,6 +3223,30 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+#if BUSTER_LINUX
+    // The buster driver path must also emit resolvable DWARF when asked.
+    String8 buster_debug_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-debug"), S8(""));
+    CompilerDriverResult buster_debug_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
+                                                                                              .source_path = source_path,
+                                                                                              .output_path = buster_debug_path,
+                                                                                              .target = target_native,
+                                                                                              .debug_info = true,
+                                                                                          });
+    BUSTER_TEST(arguments, buster_debug_compile.error == COMPILER_DRIVER_ERROR_NONE);
+    if (buster_debug_compile.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        ByteSlice buster_debug_image = file_read(arguments->arena, buster_debug_path, (FileReadOptions){0});
+        ByteSlice buster_debug_line = compiler_driver_test_elf_section(buster_debug_image, S8(".debug_line"));
+        ByteSlice buster_debug_info = compiler_driver_test_elf_section(buster_debug_image, S8(".debug_info"));
+        u64 buster_debug_text_address = compiler_driver_test_elf_section_address(buster_debug_image, S8(".text"));
+        BUSTER_TEST(arguments, buster_debug_line.length > 4);
+        BUSTER_TEST(arguments, buster_debug_info.length > 11);
+        BUSTER_TEST(arguments, buster_debug_text_address != 0);
+        DwarfLineRow buster_debug_row = {0};
+        BUSTER_TEST(arguments, dwarf_line_lookup(buster_debug_line, buster_debug_text_address, &buster_debug_row));
+        BUSTER_TEST(arguments, buster_debug_row.line == 1 && buster_debug_row.file == 1);
+    }
+#endif
     String8 module_directory = buster_test_temporary_path(arguments->arena, S8("buster-driver-modules"), S8(""));
     String8 module_child_directory = string_format_z(arguments->arena, S8("{S8}/core"), module_directory);
     String8 module_root_path = string_format_z(arguments->arena, S8("{S8}/main.bbb"), module_directory);

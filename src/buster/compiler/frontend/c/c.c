@@ -1824,6 +1824,52 @@ BUSTER_GLOBAL_LOCAL CSourceLocation c_preprocess_logical_location(CPreprocessSou
     return location;
 }
 
+typedef struct CPreprocessFileTable CPreprocessFileTable;
+struct CPreprocessFileTable
+{
+    String8* files;
+    String8 memo_path;
+    u32 memo_index;
+    u32 count;
+    u32 capacity;
+    u32 reserved;
+};
+
+BUSTER_GLOBAL_LOCAL u32 c_preprocess_file_index(Arena* arena, CPreprocessFileTable* table, String8 path)
+{
+    if (table->count && table->memo_path.pointer == path.pointer && table->memo_path.length == path.length)
+    {
+        return table->memo_index;
+    }
+    u32 index = table->count;
+    for (u32 existing = 0; existing < table->count; existing += 1)
+    {
+        if (string_equal(table->files[existing], path))
+        {
+            index = existing;
+            break;
+        }
+    }
+    if (index == table->count)
+    {
+        if (table->count == table->capacity)
+        {
+            u32 capacity = table->capacity ? table->capacity * 2 : 16;
+            String8* files = arena_allocate(arena, String8, capacity);
+            if (table->count)
+            {
+                memcpy(files, table->files, table->count * sizeof(*files));
+            }
+            table->files = files;
+            table->capacity = capacity;
+        }
+        table->files[table->count++] = path;
+    }
+    table->memo_path = path;
+    table->memo_index = index;
+    return index;
+}
+
 BUSTER_GLOBAL_LOCAL String8 c_path_directory(String8 path)
 {
     for (u64 index = path.length; index; index -= 1)
@@ -2616,6 +2662,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .line_start = true,
     };
     CPreprocessSourceFrame* source_frame = &root_frame;
+    CPreprocessFileTable file_table = {0};
+    c_preprocess_file_index(arena, &file_table, root_frame.logical_path);
     u32 include_depth_limit = options.include_depth_limit ? options.include_depth_limit : 256;
     String8* once_paths = arena_allocate(arena, String8, source.length + 1);
     u32 once_path_count = 0;
@@ -3035,6 +3083,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         }
         CToken* logical_tokens = arena_allocate(arena, CToken, logical_end - token_index);
         u32 logical_token_count = 0;
+        u32 token_file = c_preprocess_file_index(arena, &file_table, source_frame->logical_path);
         for (u64 scan = token_index; scan < logical_end; scan += 1)
         {
             if (lex.tokens[scan].kind != C_TOKEN_NEWLINE)
@@ -3042,6 +3091,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 logical_tokens[logical_token_count++] = lex.tokens[scan];
                 logical_tokens[logical_token_count - 1].location =
                     c_preprocess_logical_location(source_frame, logical_tokens[logical_token_count - 1].location);
+                logical_tokens[logical_token_count - 1].location.file = token_file;
                 logical_tokens[logical_token_count - 1].pack_alignment = pack_alignment;
             }
         }
@@ -3064,6 +3114,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .kind = C_TOKEN_END_OF_FILE,
     };
     result.token_count = output_index;
+    result.files = file_table.files;
+    result.file_count = file_table.count;
     return result;
 }
 
@@ -9414,10 +9466,12 @@ CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL IrSourceRange c_ir_source_range(IrSourceId source, CSourceLocation location, u64 length)
+// Preprocess file indices are registered as IR sources in table order, so a
+// token's file index is also its IR source id.
+BUSTER_GLOBAL_LOCAL IrSourceRange c_ir_source_range(CSourceLocation location, u64 length)
 {
     return (IrSourceRange){
-        .source = source,
+        .source = {.value = location.file},
         .offset = location.offset,
         .length = length,
         .line = location.line,
@@ -10350,7 +10404,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken
                                                 .points_to_read_only = entity.value < builder->parse.entity_count &&
                                                                        c_ir_c_type_points_to_read_only(builder, builder->parse.entities[entity.value].type),
                                             });
-    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_LOCAL, type, c_ir_source_range(builder->source, name.location, name.spelling.length));
+    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_LOCAL, type, c_ir_source_range(name.location, name.spelling.length));
     instruction.canonical_local = local_id;
     instruction.result = place;
     IrInstructionId id = c_ir_append_instruction(builder, instruction);
@@ -10457,7 +10511,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntege
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
     operands[0] = local->place;
     IrInstruction instruction = c_ir_instruction_initialize(atomic ? IR_OPCODE_ATOMIC_LOAD : IR_OPCODE_LOAD, result_type,
-                                                            c_ir_source_range(builder->source, token.location, token.spelling.length));
+                                                            c_ir_source_range(token.location, token.spelling.length));
     instruction.operands = operands;
     instruction.operand_count = 1;
     instruction.canonical_local = local->id;
@@ -10690,7 +10744,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nullptr(CIntegerIrBuilder* builder, CTok
         return IR_VALUE_ID_INVALID;
     }
     return c_ir_emit_cast_instruction(builder, zero, builder->nullptr_type, IR_CONVERSION_INTEGER_TO_POINTER,
-                                      c_ir_source_range(builder->source, token.location, token.spelling.length));
+                                      c_ir_source_range(token.location, token.spelling.length));
 }
 
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_decay_array(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source);
@@ -10790,7 +10844,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder
                                          .is_read_only = builder->function->values[operand.value].points_to_read_only,
                                      });
         IrInstruction dereference =
-            c_ir_instruction_initialize(IR_OPCODE_DEREFERENCE, aggregate_type_id, c_ir_source_range(builder->source, access.location, access.spelling.length));
+            c_ir_instruction_initialize(IR_OPCODE_DEREFERENCE, aggregate_type_id, c_ir_source_range(access.location, access.spelling.length));
         dereference.operands = arena_allocate(builder->arena, IrValueId, 1);
         dereference.operands[0] = operand;
         dereference.operand_count = 1;
@@ -10816,7 +10870,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder
         }
         else
         {
-            IrSourceRange source = c_ir_source_range(builder->source, member.location, member.spelling.length);
+            IrSourceRange source = c_ir_source_range(member.location, member.spelling.length);
             base = c_ir_emit_temporary(builder, aggregate_type_id, source);
             if (base.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_store_place(builder, base, aggregate_type_id, operand, source))
             {
@@ -10913,7 +10967,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder
                                                    .is_read_only = builder->function->values[place.value].is_read_only,
                                                });
         IrInstruction field =
-            c_ir_instruction_initialize(IR_OPCODE_FIELD, field_type, c_ir_source_range(builder->source, member.location, member.spelling.length));
+            c_ir_instruction_initialize(IR_OPCODE_FIELD, field_type, c_ir_source_range(member.location, member.spelling.length));
         field.operands = arena_allocate(builder->arena, IrValueId, 1);
         field.operands[0] = place;
         field.operand_count = 1;
@@ -11109,7 +11163,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_simple_place_expression(CIntegerIrBuilde
         }
     }
     IrSourceRange source =
-        c_ir_source_range(builder->source, builder->preprocess.tokens[base_index].location, builder->preprocess.tokens[base_index].spelling.length);
+        c_ir_source_range(builder->preprocess.tokens[base_index].location, builder->preprocess.tokens[base_index].spelling.length);
     IrValueId place = local ? local->place : c_ir_emit_global_place(builder, entity, source);
     if (place.value == IR_ID_UNDERLYING_INVALID)
     {
@@ -11316,7 +11370,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken 
     IrValueId value = c_ir_add_result(builder, type);
     u64* immediate = arena_allocate(builder->arena, u64, 1);
     immediate[0] = argument_index;
-    IrInstruction argument = c_ir_instruction_initialize(IR_OPCODE_ARGUMENT, type, c_ir_source_range(builder->source, name.location, name.spelling.length));
+    IrInstruction argument = c_ir_instruction_initialize(IR_OPCODE_ARGUMENT, type, c_ir_source_range(name.location, name.spelling.length));
     argument.immediates = immediate;
     argument.immediate_count = 1;
     argument.result = value;
@@ -11336,7 +11390,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* b
     u64* immediate = arena_allocate(builder->arena, u64, 1);
     immediate[0] = value;
     IrInstruction instruction =
-        c_ir_instruction_initialize(IR_OPCODE_CONSTANT_INTEGER, type, c_ir_source_range(builder->source, token.location, token.spelling.length));
+        c_ir_instruction_initialize(IR_OPCODE_CONSTANT_INTEGER, type, c_ir_source_range(token.location, token.spelling.length));
     instruction.immediates = immediate;
     instruction.immediate_count = 1;
     instruction.immediate_is_negative = is_negative;
@@ -11415,7 +11469,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTy
     result->suffix_sizes = arena_allocate(builder->scratch_arena, IrValueId, result->dimension_count + 1);
     memset(result->dimension_counts, 0xff, sizeof(*result->dimension_counts) * result->dimension_count);
     memset(result->suffix_sizes, 0xff, sizeof(*result->suffix_sizes) * (result->dimension_count + 1));
-    IrSourceRange source = c_ir_source_range(builder->source, token.location, token.spelling.length);
+    IrSourceRange source = c_ir_source_range(token.location, token.spelling.length);
     for (u32 dimension = 0; dimension < result->dimension_count; dimension += 1)
     {
         CArrayBound bound = c_ir_vla_bound_expression(builder->preprocess, bounds[dimension]);
@@ -11761,7 +11815,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_float(CIntegerIrBuilder* builder, CToken
     u64* immediate = arena_allocate(builder->arena, u64, 1);
     immediate[0] = bits;
     IrInstruction instruction =
-        c_ir_instruction_initialize(IR_OPCODE_CONSTANT_FLOAT, type, c_ir_source_range(builder->source, token.location, token.spelling.length));
+        c_ir_instruction_initialize(IR_OPCODE_CONSTANT_FLOAT, type, c_ir_source_range(token.location, token.spelling.length));
     instruction.literal = token.spelling;
     instruction.immediates = immediate;
     instruction.immediate_count = 1;
@@ -12506,7 +12560,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_string_contents_typed(CIntegerIrBuilder*
                                                            });
     }
     String8 name = string_format(builder->arena, S8(".L.cstr.{u32}"), builder->program->symbols.count);
-    IrSourceRange source = c_ir_source_range(builder->source, token.location, token.spelling.length);
+    IrSourceRange source = c_ir_source_range(token.location, token.spelling.length);
     IrSymbolId symbol = ir_program_add_symbol(builder->program, (IrSymbol){
                                                                     .name = name,
                                                                     .link_name = name,
@@ -12797,7 +12851,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_function_pointer(CIntegerIrBuilder* buil
     IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, target->canonical_type);
     IrValueId result = c_ir_add_result(builder, pointer_type);
     IrInstruction reference =
-        c_ir_instruction_initialize(IR_OPCODE_FUNCTION, pointer_type, c_ir_source_range(builder->source, token.location, token.spelling.length));
+        c_ir_instruction_initialize(IR_OPCODE_FUNCTION, pointer_type, c_ir_source_range(token.location, token.spelling.length));
     reference.symbol = target->symbol;
     reference.result = result;
     IrInstructionId reference_id = c_ir_append_instruction(builder, reference);
@@ -12851,7 +12905,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_call_values(CIntegerIrBuilder* builder, 
     }
     IrValueId reference_result = c_ir_add_result(builder, target->canonical_type);
     IrInstruction reference =
-        c_ir_instruction_initialize(IR_OPCODE_FUNCTION, target->canonical_type, c_ir_source_range(builder->source, token.location, token.spelling.length));
+        c_ir_instruction_initialize(IR_OPCODE_FUNCTION, target->canonical_type, c_ir_source_range(token.location, token.spelling.length));
     reference.symbol = target->symbol;
     reference.result = reference_result;
     IrInstructionId reference_id = c_ir_append_instruction(builder, reference);
@@ -12889,7 +12943,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CT
         return IR_VALUE_ID_INVALID;
     }
     IrTypeId value_type = string_ends_with_sequence(link_name, S8("f")) ? builder->f32_type : builder->f64_type;
-    IrSourceRange source = c_ir_source_range(builder->source, token.location, token.spelling.length);
+    IrSourceRange source = c_ir_source_range(token.location, token.spelling.length);
     IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, argument_count);
     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
     {
@@ -13829,7 +13883,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                                          selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE
                                      ? 1
                                      : 3;
-            IrSourceRange source = c_ir_source_range(builder->source, token.location, token.spelling.length);
+            IrSourceRange source = c_ir_source_range(token.location, token.spelling.length);
             if (!c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count) || argument_count != expected_count)
             {
                 return false;
@@ -14032,7 +14086,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             }
             IrValueId result = c_ir_add_result(builder, type);
             IrInstruction instruction =
-                c_ir_instruction_initialize(IR_OPCODE_UNARY, type, c_ir_source_range(builder->source, token.location, token.spelling.length));
+                c_ir_instruction_initialize(IR_OPCODE_UNARY, type, c_ir_source_range(token.location, token.spelling.length));
             instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
             instruction.operands[0] = operand;
             instruction.operand_count = 1;
@@ -14105,7 +14159,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             {
                 return false;
             }
-            IrSourceRange source = c_ir_source_range(builder->source, token.location, token.spelling.length);
+            IrSourceRange source = c_ir_source_range(token.location, token.spelling.length);
             c_ir_append_instruction(builder, c_ir_instruction_initialize(IR_OPCODE_DEBUG_TRAP, builder->void_type, source));
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
             selected->emitted = true;
@@ -14142,7 +14196,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 return false;
             }
             IrInstruction clear = c_ir_instruction_initialize(IR_OPCODE_CLEAR_INSTRUCTION_CACHE, builder->void_type,
-                                                              c_ir_source_range(builder->source, token.location, token.spelling.length));
+                                                              c_ir_source_range(token.location, token.spelling.length));
             clear.operands = arena_allocate(builder->arena, IrValueId, 2);
             clear.operands[0] = first;
             clear.operands[1] = second;
@@ -14162,7 +14216,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             }
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
             IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type,
-                                                                    c_ir_source_range(builder->source, token.location, token.spelling.length));
+                                                                    c_ir_source_range(token.location, token.spelling.length));
             c_ir_append_instruction(builder, unreachable);
             builder->function->blocks[builder->current_block.value].terminated = true;
             selected->emitted = true;
@@ -14200,7 +14254,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                     break;
                 }
             }
-            IrSourceRange source = c_ir_source_range(builder->source, token.location, token.spelling.length);
+            IrSourceRange source = c_ir_source_range(token.location, token.spelling.length);
             if (selected->builtin_va_end)
             {
                 IrValueId list = IR_VALUE_ID_INVALID;
@@ -14301,7 +14355,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             }
             selected->result = c_ir_add_result(builder, result_type);
             IrInstruction instruction =
-                c_ir_instruction_initialize(IR_OPCODE_VA_ARG, result_type, c_ir_source_range(builder->source, token.location, token.spelling.length));
+                c_ir_instruction_initialize(IR_OPCODE_VA_ARG, result_type, c_ir_source_range(token.location, token.spelling.length));
             instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
             instruction.operands[0] = list;
             instruction.operand_count = 1;
@@ -14515,7 +14569,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             }
             indirect_callee = builder->function->values[callee.value].category == IR_VALUE_PLACE
                                   ? c_ir_emit_load_place(builder, callee, pointer_type_id,
-                                                         c_ir_source_range(builder->source, token.location, token.spelling.length))
+                                                         c_ir_source_range(token.location, token.spelling.length))
                                   : callee;
             signature = (CIrSignature){
                 .parameter_types = function_type->parameter_types,
@@ -14596,7 +14650,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 return false;
             }
             IrSourceRange source =
-                c_ir_source_range(builder->source, builder->preprocess.tokens[index].location, builder->preprocess.tokens[index].spelling.length);
+                c_ir_source_range(builder->preprocess.tokens[index].location, builder->preprocess.tokens[index].spelling.length);
             if (argument_count < signature.parameter_count)
             {
                 value = c_ir_decay_array(builder, value, signature.parameter_types[argument_count], source);
@@ -14643,7 +14697,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 operands[argument_index + 1] = selected->arguments[argument_index];
             }
             IrInstruction call =
-                c_ir_instruction_initialize(IR_OPCODE_CALL, signature.return_type, c_ir_source_range(builder->source, token.location, token.spelling.length));
+                c_ir_instruction_initialize(IR_OPCODE_CALL, signature.return_type, c_ir_source_range(token.location, token.spelling.length));
             call.operands = operands;
             call.operand_count = argument_count + 1;
             call.result = result;
@@ -16341,7 +16395,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_increment(CIntegerIrBuilder* builder, Ir
         IrValueId atomic_previous = IR_VALUE_ID_INVALID;
         IrValueId atomic_result = IR_VALUE_ID_INVALID;
         if (!c_ir_emit_compound_assignment(builder, place, type, c_token_is_punctuator(token, S8("++")) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
-                                           c_ir_source_range(builder->source, token.location, token.spelling.length), &atomic_previous, &atomic_result))
+                                           c_ir_source_range(token.location, token.spelling.length), &atomic_previous, &atomic_result))
         {
             return IR_VALUE_ID_INVALID;
         }
@@ -16352,7 +16406,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_increment(CIntegerIrBuilder* builder, Ir
         one,
     };
     u32 value_count = 2;
-    IrSourceRange source = c_ir_source_range(builder->source, token.location, token.spelling.length);
+    IrSourceRange source = c_ir_source_range(token.location, token.spelling.length);
     if (!c_ir_apply_operation(builder, c_token_is_punctuator(token, S8("++")) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, values, &value_count, source,
                               IR_TYPE_ID_INVALID) ||
         value_count != 1 || !c_ir_emit_store_place(builder, place, type, values[0], source))
@@ -16415,7 +16469,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, I
             IrValueId aggregate = c_ir_add_result(builder, task.type);
             IrInstruction instruction =
                 c_ir_instruction_initialize((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, task.type,
-                                            c_ir_source_range(builder->source, token.location, token.spelling.length));
+                                            c_ir_source_range(token.location, token.spelling.length));
             instruction.operands = task.operands;
             instruction.operand_count = task.operand_count;
             instruction.immediates = task.fields;
@@ -16436,7 +16490,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, I
                 zero_token.kind = C_TOKEN_PREPROCESSING_NUMBER;
                 zero_token.spelling = type->bit_width == 32 ? S8("0.0f") : S8("0.0");
                 zero = c_ir_emit_float(builder, zero_token);
-                zero = c_ir_emit_cast(builder, zero, task.type, c_ir_source_range(builder->source, token.location, token.spelling.length));
+                zero = c_ir_emit_cast(builder, zero, task.type, c_ir_source_range(token.location, token.spelling.length));
             }
             else if (type->kind == IR_TYPE_INTEGER)
             {
@@ -16445,12 +16499,12 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, I
             else if (type->kind == IR_TYPE_POINTER)
             {
                 zero = c_ir_emit_integer_value(builder, 0, false, token);
-                zero = c_ir_emit_cast(builder, zero, task.type, c_ir_source_range(builder->source, token.location, token.spelling.length));
+                zero = c_ir_emit_cast(builder, zero, task.type, c_ir_source_range(token.location, token.spelling.length));
             }
             else if (type->kind == IR_TYPE_BOOLEAN)
             {
                 zero = c_ir_emit_integer_value(builder, 0, false, token);
-                zero = c_ir_truth_value(builder, zero, c_ir_source_range(builder->source, token.location, token.spelling.length));
+                zero = c_ir_truth_value(builder, zero, c_ir_source_range(token.location, token.spelling.length));
             }
             if (zero.value == IR_ID_UNDERLYING_INVALID)
             {
@@ -16511,9 +16565,9 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
     };
     CToken root_token = builder->preprocess.tokens[root_open];
     IrValueId initial = c_ir_emit_zero_value(builder, root_type, root_token);
-    IrValueId root_place = c_ir_emit_temporary(builder, root_type, c_ir_source_range(builder->source, root_token.location, root_token.spelling.length));
+    IrValueId root_place = c_ir_emit_temporary(builder, root_type, c_ir_source_range(root_token.location, root_token.spelling.length));
     if (initial.value == IR_ID_UNDERLYING_INVALID || root_place.value == IR_ID_UNDERLYING_INVALID ||
-        !c_ir_emit_store_place(builder, root_place, root_type, initial, c_ir_source_range(builder->source, root_token.location, root_token.spelling.length)))
+        !c_ir_emit_store_place(builder, root_place, root_type, initial, c_ir_source_range(root_token.location, root_token.spelling.length)))
     {
         if (!builder->failure_message.length)
         {
@@ -16671,7 +16725,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
                                                                 : type->fields[selected_index].type;
             IrValueId child_place = IR_VALUE_ID_INVALID;
             IrSourceRange source =
-                c_ir_source_range(builder->source, builder->preprocess.tokens[value_start].location, builder->preprocess.tokens[value_start].spelling.length);
+                c_ir_source_range(builder->preprocess.tokens[value_start].location, builder->preprocess.tokens[value_start].spelling.length);
             if (promoted_designator)
             {
                 child_place = c_ir_emit_field_place_from_value(builder, task.place,
@@ -16763,7 +16817,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
             index += 1;
         }
     }
-    return c_ir_emit_load_place(builder, root_place, root_type, c_ir_source_range(builder->source, root_token.location, root_token.spelling.length));
+    return c_ir_emit_load_place(builder, root_place, root_type, c_ir_source_range(root_token.location, root_token.spelling.length));
 }
 
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* builder, IrTypeId type_id, u32 open, u32 close)
@@ -16776,7 +16830,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* buil
     if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION)
     {
         IrValueId value = IR_VALUE_ID_INVALID;
-        IrSourceRange source = c_ir_source_range(builder->source, builder->preprocess.tokens[open].location, builder->preprocess.tokens[open].spelling.length);
+        IrSourceRange source = c_ir_source_range(builder->preprocess.tokens[open].location, builder->preprocess.tokens[open].spelling.length);
         if (open + 1 >= close || !c_ir_lower_expression(builder, open + 1, close, &value))
         {
             return IR_VALUE_ID_INVALID;
@@ -16924,7 +16978,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* buil
             return IR_VALUE_ID_INVALID;
         }
         IrSourceRange source =
-            c_ir_source_range(builder->source, builder->preprocess.tokens[index].location, builder->preprocess.tokens[index].spelling.length);
+            c_ir_source_range(builder->preprocess.tokens[index].location, builder->preprocess.tokens[index].spelling.length);
         IrTypeId field_type = type->kind == IR_TYPE_ARRAY ? type->element_type : type->fields[field_index].type;
         value = c_ir_decay_array(builder, value, field_type, source);
         value = c_ir_emit_cast(builder, value, field_type, source);
@@ -16984,7 +17038,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* buil
     IrValueId result = c_ir_add_result(builder, type_id);
     IrInstruction instruction = c_ir_instruction_initialize(
         type->kind == IR_TYPE_ARRAY ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, type_id,
-        c_ir_source_range(builder->source, builder->preprocess.tokens[open].location, builder->preprocess.tokens[open].spelling.length));
+        c_ir_source_range(builder->preprocess.tokens[open].location, builder->preprocess.tokens[open].spelling.length));
     instruction.operands = operands;
     instruction.operand_count = operand_count;
     if (type->kind != IR_TYPE_ARRAY)
@@ -17536,7 +17590,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             return false;
         }
         IrTypeId type = builder->function->values[place.value].canonical_type;
-        IrSourceRange source = c_ir_source_range(builder->source, update.location, update.spelling.length);
+        IrSourceRange source = c_ir_source_range(update.location, update.spelling.length);
         IrValueId previous = ir_type_from_id(&builder->program->types, type)->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
         if (previous.value >= builder->function->value_count)
         {
@@ -17565,7 +17619,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
     {
         builder->failure_token_index = index;
         CToken token = builder->preprocess.tokens[index];
-        IrSourceRange source = c_ir_source_range(builder->source, token.location, token.spelling.length);
+        IrSourceRange source = c_ir_source_range(token.location, token.spelling.length);
         if (expect_operand && (c_token_is_punctuator(token, S8("++")) || c_token_is_punctuator(token, S8("--"))))
         {
             u32 operand_end = c_ir_unary_expression_end(builder, index + 1, end);
@@ -18570,7 +18624,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_leaf(CIntegerIrBuilder* builder, u
         return false;
     }
     CToken assignment_token = builder->preprocess.tokens[assignment];
-    IrSourceRange assignment_source = c_ir_source_range(builder->source, assignment_token.location, assignment_token.spelling.length);
+    IrSourceRange assignment_source = c_ir_source_range(assignment_token.location, assignment_token.spelling.length);
     IrTypeId type = builder->function->values[place.value].canonical_type;
     bool simple = c_token_is_punctuator(assignment_token, S8("="));
     if (!simple)
@@ -18923,7 +18977,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_logical_value(CIntegerIrBuilder* builder, u3
     {
         return c_ir_lower_expression_core(builder, start, end, value_out);
     }
-    IrSourceRange source = c_ir_source_range(builder->source, builder->preprocess.tokens[start].location, builder->preprocess.tokens[start].spelling.length);
+    IrSourceRange source = c_ir_source_range(builder->preprocess.tokens[start].location, builder->preprocess.tokens[start].spelling.length);
     IrValueId place = c_ir_emit_temporary(builder, builder->bool_type, source);
     IrBlockId true_block = c_ir_block_create(builder);
     IrBlockId false_block = c_ir_block_create(builder);
@@ -19748,7 +19802,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_conditional_value(CIntegerIrBuilder* builder
         return false;
     }
     IrSourceRange source =
-        c_ir_source_range(builder->source, builder->preprocess.tokens[expression_start].location, builder->preprocess.tokens[expression_start].spelling.length);
+        c_ir_source_range(builder->preprocess.tokens[expression_start].location, builder->preprocess.tokens[expression_start].spelling.length);
     IrValueId place = c_ir_emit_temporary(builder, result_type, source);
     IrBlockId final_block = c_ir_block_create(builder);
     if (place.value == IR_ID_UNDERLYING_INVALID || final_block.value == IR_ID_UNDERLYING_INVALID || end - start > (UINT32_MAX - 4) / 3)
@@ -19906,7 +19960,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_impl(CIntegerIrBuilder* builder, 
     if (assignment < end && assignment != start && assignment + 1 < end)
     {
         CToken operator_token = builder->preprocess.tokens[assignment];
-        IrSourceRange source = c_ir_source_range(builder->source, operator_token.location, operator_token.spelling.length);
+        IrSourceRange source = c_ir_source_range(operator_token.location, operator_token.spelling.length);
         IrValueId place = c_ir_emit_simple_place_expression(builder, start, assignment);
         IrValueId value = IR_VALUE_ID_INVALID;
         if (place.value >= builder->function->value_count || !c_ir_lower_expression(builder, assignment + 1, end, &value))
@@ -20123,7 +20177,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_simple_assignment_segment(CIntegerIrBuilder*
         return false;
     }
     IrSourceRange source =
-        c_ir_source_range(builder->source, builder->preprocess.tokens[assignment].location, builder->preprocess.tokens[assignment].spelling.length);
+        c_ir_source_range(builder->preprocess.tokens[assignment].location, builder->preprocess.tokens[assignment].spelling.length);
     IrValueId place = c_ir_emit_simple_place_expression(builder, start, assignment);
     IrValueId value = c_ir_emit_simple_place_expression(builder, assignment + 1, end);
     if (value.value != IR_ID_UNDERLYING_INVALID)
@@ -20558,7 +20612,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_automatic_declaration_segment(CIntegerIrBuil
     }
     CToken assignment = builder->preprocess.tokens[initializer_index];
     bool stored = value.value != IR_ID_UNDERLYING_INVALID &&
-                  c_ir_emit_store(builder, local, value, c_ir_source_range(builder->source, assignment.location, assignment.spelling.length));
+                  c_ir_emit_store(builder, local, value, c_ir_source_range(assignment.location, assignment.spelling.length));
     if (!stored && !builder->failure_message.length)
     {
         builder->failure_message = string_format(builder->arena, S8("could not initialize automatic local '{S8}'"), name.spelling);
@@ -20843,7 +20897,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_inline_assembly(CIntegerIrBuilder* builder, 
     }
     IrInstruction instruction = c_ir_instruction_initialize(
         IR_OPCODE_INLINE_ASSEMBLY, builder->void_type,
-        c_ir_source_range(builder->source, builder->preprocess.tokens[start].location, builder->preprocess.tokens[start].spelling.length));
+        c_ir_source_range(builder->preprocess.tokens[start].location, builder->preprocess.tokens[start].spelling.length));
     instruction.literal = (String8){
         .pointer = (char8*)assembly.pointer,
         .length = assembly.length,
@@ -20919,7 +20973,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
         .break_block = IR_BLOCK_ID_INVALID,
         .continue_block = IR_BLOCK_ID_INVALID,
     };
-    IrSourceRange declaration_source = c_ir_source_range(builder->source, declaration.location, declaration.name.length);
+    IrSourceRange declaration_source = c_ir_source_range(declaration.location, declaration.name.length);
     while (task_count)
     {
         CIrBodyTask task = tasks[--task_count];
@@ -21033,7 +21087,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                     return false;
                 }
                 if (!current->terminated && !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &label->block, 1,
-                                                            c_ir_source_range(builder->source, first.location, first.spelling.length)))
+                                                            c_ir_source_range(first.location, first.spelling.length)))
                 {
                     return false;
                 }
@@ -21211,7 +21265,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                     }
                 }
                 if (!c_ir_terminate_switch(builder, switched, cases, case_count, default_block,
-                                           c_ir_source_range(builder->source, first.location, first.spelling.length)))
+                                           c_ir_source_range(first.location, first.spelling.length)))
                 {
                     return false;
                 }
@@ -21253,7 +21307,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 {
                     return false;
                 }
-                IrSourceRange condition_source = c_ir_source_range(builder->source, first.location, first.spelling.length);
+                IrSourceRange condition_source = c_ir_source_range(first.location, first.spelling.length);
                 u32 then_start = 0;
                 u32 then_end = 0;
                 u32 after = 0;
@@ -21342,7 +21396,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 IrBlockId exit_block = c_ir_block_create(builder);
                 if (body_block.value == IR_ID_UNDERLYING_INVALID || condition_block.value == IR_ID_UNDERLYING_INVALID ||
                     exit_block.value == IR_ID_UNDERLYING_INVALID ||
-                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &body_block, 1, c_ir_source_range(builder->source, first.location, first.spelling.length)))
+                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &body_block, 1, c_ir_source_range(first.location, first.spelling.length)))
                 {
                     return false;
                 }
@@ -21494,7 +21548,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 }
                 else if (!c_ir_switch_block(builder, preheader_block) ||
                          !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &condition_block, 1,
-                                         c_ir_source_range(builder->source, first.location, first.spelling.length)))
+                                         c_ir_source_range(first.location, first.spelling.length)))
                 {
                     return false;
                 }
@@ -21525,12 +21579,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 if (condition_block.value == IR_ID_UNDERLYING_INVALID || body_block.value == IR_ID_UNDERLYING_INVALID ||
                     exit_block.value == IR_ID_UNDERLYING_INVALID ||
                     !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &condition_block, 1,
-                                    c_ir_source_range(builder->source, first.location, first.spelling.length)) ||
+                                    c_ir_source_range(first.location, first.spelling.length)) ||
                     !c_ir_switch_block(builder, condition_block))
                 {
                     return false;
                 }
-                IrSourceRange condition_source = c_ir_source_range(builder->source, first.location, first.spelling.length);
+                IrSourceRange condition_source = c_ir_source_range(first.location, first.spelling.length);
                 if (!c_ir_lower_condition(builder, index + 2, condition_close, body_block, exit_block, condition_source))
                 {
                     return false;
@@ -21743,15 +21797,15 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 }
                 if (has_value)
                 {
-                    value = c_ir_decay_array(builder, value, builder->return_type, c_ir_source_range(builder->source, first.location, first.spelling.length));
-                    value = c_ir_emit_cast(builder, value, builder->return_type, c_ir_source_range(builder->source, first.location, first.spelling.length));
+                    value = c_ir_decay_array(builder, value, builder->return_type, c_ir_source_range(first.location, first.spelling.length));
+                    value = c_ir_emit_cast(builder, value, builder->return_type, c_ir_source_range(first.location, first.spelling.length));
                     if (value.value == IR_ID_UNDERLYING_INVALID)
                     {
                         return false;
                     }
                 }
                 if (!c_ir_terminate(builder, IR_OPCODE_RETURN, has_value ? &value : 0, has_value ? 1 : 0, 0, 0,
-                                    c_ir_source_range(builder->source, first.location, first.spelling.length)))
+                                    c_ir_source_range(first.location, first.spelling.length)))
                 {
                     return false;
                 }
@@ -21766,7 +21820,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 }
                 CIrLabel* label = c_ir_label_find(labels, label_count, builder->preprocess.tokens[index + 1].spelling);
                 if (!label || !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &label->block, 1,
-                                              c_ir_source_range(builder->source, first.location, first.spelling.length)))
+                                              c_ir_source_range(first.location, first.spelling.length)))
                 {
                     return false;
                 }
@@ -21781,8 +21835,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 IrValueId checkpoint = is_break ? task.break_checkpoint : task.continue_checkpoint;
                 if (index + 1 != end || target.value == IR_ID_UNDERLYING_INVALID ||
                     (has_checkpoint &&
-                     !c_ir_emit_stack_restore(builder, checkpoint, c_ir_source_range(builder->source, first.location, first.spelling.length))) ||
-                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, c_ir_source_range(builder->source, first.location, first.spelling.length)))
+                     !c_ir_emit_stack_restore(builder, checkpoint, c_ir_source_range(first.location, first.spelling.length))) ||
+                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, c_ir_source_range(first.location, first.spelling.length)))
                 {
                     return false;
                 }
@@ -22057,7 +22111,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 {
                     if (!task.has_stack_checkpoint)
                     {
-                        task.stack_checkpoint = c_ir_emit_stack_save(builder, c_ir_source_range(builder->source, name.location, name.spelling.length));
+                        task.stack_checkpoint = c_ir_emit_stack_save(builder, c_ir_source_range(name.location, name.spelling.length));
                         if (task.stack_checkpoint.value == IR_ID_UNDERLYING_INVALID)
                         {
                             return false;
@@ -22080,7 +22134,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                         return false;
                     }
                     IrInstruction allocation = c_ir_instruction_initialize(IR_OPCODE_STACK_ALLOCATE, local_type,
-                                                                           c_ir_source_range(builder->source, name.location, name.spelling.length));
+                                                                           c_ir_source_range(name.location, name.spelling.length));
                     allocation.operands = arena_allocate(builder->arena, IrValueId, 1);
                     allocation.operands[0] = variable_size;
                     allocation.operand_count = 1;
@@ -22100,7 +22154,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                         return false;
                     }
                     String8 symbol_name = string_format(builder->arena, S8(".L.{S8}.{S8}.{u64}"), builder->function->name, name.spelling, name.location.offset);
-                    IrSourceRange local_source = c_ir_source_range(builder->source, name.location, name.spelling.length);
+                    IrSourceRange local_source = c_ir_source_range(name.location, name.spelling.length);
                     IrSymbolId symbol = ir_program_add_symbol(builder->program, (IrSymbol){
                                                                                     .name = symbol_name,
                                                                                     .link_name = symbol_name,
@@ -22161,7 +22215,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                     local->vla_suffix_sizes = variable_layout.suffix_sizes;
                     local->vla_dimension_count = variable_layout.dimension_count;
                     local->is_variable_length_array = true;
-                    if (!c_ir_emit_store(builder, local, variable_storage, c_ir_source_range(builder->source, name.location, name.spelling.length)))
+                    if (!c_ir_emit_store(builder, local, variable_storage, c_ir_source_range(name.location, name.spelling.length)))
                     {
                         return false;
                     }
@@ -22293,7 +22347,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                         return false;
                     }
                     if (value.value == IR_ID_UNDERLYING_INVALID ||
-                        !c_ir_emit_store(builder, local, value, c_ir_source_range(builder->source, assign.location, assign.spelling.length)))
+                        !c_ir_emit_store(builder, local, value, c_ir_source_range(assign.location, assign.spelling.length)))
                     {
                         if (!builder->failure_message.length)
                         {
@@ -22454,7 +22508,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                     }
                     IrTypeId type = builder->function->values[place.value].canonical_type;
                     CToken assignment = builder->preprocess.tokens[assignment_index];
-                    IrSourceRange source = c_ir_source_range(builder->source, assignment.location, assignment.spelling.length);
+                    IrSourceRange source = c_ir_source_range(assignment.location, assignment.spelling.length);
                     if ((simple_assignment && !c_ir_emit_store_place(builder, place, type, right, source)) ||
                         (compound_assignment && !c_ir_emit_place_update(builder, place, type, assignment_operation, right, source)))
                     {
@@ -22489,7 +22543,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 {
                     return false;
                 }
-                IrSourceRange source = c_ir_source_range(builder->source, assignment.location, assignment.spelling.length);
+                IrSourceRange source = c_ir_source_range(assignment.location, assignment.spelling.length);
                 IrValueId place = c_ir_emit_index_place(builder, base, subscript, source);
                 IrValueId value = IR_VALUE_ID_INVALID;
                 if (place.value == IR_ID_UNDERLYING_INVALID || !c_ir_lower_expression(builder, close + 2, end, &value))
@@ -22527,7 +22581,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 }
                 else
                 {
-                    IrSourceRange field_source = c_ir_source_range(builder->source, first.location, first.spelling.length);
+                    IrSourceRange field_source = c_ir_source_range(first.location, first.spelling.length);
                     IrValueId base = c_ir_emit_global_place(builder, entity, field_source);
                     if (base.value != IR_ID_UNDERLYING_INVALID && c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("->")))
                     {
@@ -22543,7 +22597,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                     return false;
                 }
                 IrTypeId field_type = builder->function->values[place.value].canonical_type;
-                IrSourceRange source = c_ir_source_range(builder->source, assignment.location, assignment.spelling.length);
+                IrSourceRange source = c_ir_source_range(assignment.location, assignment.spelling.length);
                 if (compound_assignment)
                 {
                     if (!c_ir_emit_compound_assignment(builder, place, field_type, operation, value, source, 0, &value))
@@ -22570,7 +22624,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                                                            });
                 if (!local ||
                     !c_ir_emit_local_update(builder, local, first, c_token_is_punctuator(update, S8("++")) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
-                                            c_ir_source_range(builder->source, update.location, update.spelling.length)))
+                                            c_ir_source_range(update.location, update.spelling.length)))
                 {
                     return false;
                 }
@@ -22590,7 +22644,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                                                                .kind = C_TOKEN_PREPROCESSING_NUMBER,
                                                            });
                 if (!local || !c_ir_emit_local_update(builder, local, name, c_token_is_punctuator(first, S8("++")) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT,
-                                                      one, c_ir_source_range(builder->source, first.location, first.spelling.length)))
+                                                      one, c_ir_source_range(first.location, first.spelling.length)))
                 {
                     return false;
                 }
@@ -22613,7 +22667,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                 }
                 CEntityId entity = c_ir_identifier_entity(builder, index);
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-                IrSourceRange source = c_ir_source_range(builder->source, assignment.location, assignment.spelling.length);
+                IrSourceRange source = c_ir_source_range(assignment.location, assignment.spelling.length);
                 IrValueId place = local ? local->place : c_ir_emit_global_place(builder, entity, source);
                 IrTypeId type = local                                          ? local->type
                                 : place.value < builder->function->value_count ? builder->function->values[place.value].canonical_type
@@ -22941,7 +22995,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* buil
                                                                      });
                 String8 literal_name = string_format(arena, S8(".L.cstr.{u32}"), program->symbols.count);
                 IrSourceRange source =
-                    c_ir_source_range((IrSourceId){0}, preprocess.tokens[literal_index].location, preprocess.tokens[literal_index].spelling.length);
+                    c_ir_source_range(preprocess.tokens[literal_index].location, preprocess.tokens[literal_index].spelling.length);
                 IrSymbolId literal_symbol = ir_program_add_symbol(program, (IrSymbol){
                                                                                .name = literal_name,
                                                                                .link_name = literal_name,
@@ -23891,7 +23945,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     Arena* temporary_arena = temporary.arena;
     result.diagnostics = arena_allocate(arena, CDiagnostic, parse.declaration_count + 1);
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
-    *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, 1);
+    u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
+    *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
     result.program = program;
     CIrTypeContext type_context = {
         .program = program,
@@ -23909,9 +23964,28 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     module->global_capacity = parse.declaration_count;
     module->assemblies = arena_allocate(arena, IrModuleAssembly, parse.declaration_count);
     module->assembly_capacity = parse.declaration_count;
-    IrSourceId source_id = ir_program_add_source(program, (IrSource){
-                                                              .path = source_path,
-                                                          });
+    // Register the preprocess file table in order so token file indices double
+    // as IR source ids (see c_ir_source_range).
+    IrSourceId source_id = {0};
+    if (preprocess.file_count)
+    {
+        for (u32 file_index = 0; file_index < preprocess.file_count; file_index += 1)
+        {
+            IrSourceId registered = ir_program_add_source(program, (IrSource){
+                                                                       .path = preprocess.files[file_index],
+                                                                   });
+            if (!file_index)
+            {
+                source_id = registered;
+            }
+        }
+    }
+    else
+    {
+        source_id = ir_program_add_source(program, (IrSource){
+                                                       .path = source_path,
+                                                   });
+    }
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -23971,7 +24045,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                     .pointer = source,
                     .length = source_length,
                 },
-            .source_range = c_ir_source_range(source_id, declaration.location, declaration.token_count),
+            .source_range = c_ir_source_range(declaration.location, declaration.token_count),
         };
     }
     IrTypeId void_type = c_ir_scalar_type(&type_context, C_TYPE_VOID);
@@ -24301,7 +24375,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                     }
                     aggregate_type->fields[field_index] = (IrField){
                         .name = member->name,
-                        .source = c_ir_source_range(source_id, member->location, member->name.length),
+                        .source = c_ir_source_range(member->location, member->name.length),
                         .type = field_type_id,
                         .offset = offset,
                         .bit_offset = bit_offset,
@@ -24498,7 +24572,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             continue;
         }
-        IrSourceRange source = c_ir_source_range(source_id, first->location, first->name.length);
+        IrSourceRange source = c_ir_source_range(first->location, first->name.length);
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
@@ -24602,7 +24676,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             continue;
         }
-        IrSourceRange source = c_ir_source_range(source_id, first->location, first->name.length);
+        IrSourceRange source = c_ir_source_range(first->location, first->name.length);
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
@@ -24707,7 +24781,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .symbol = symbol,
             .initializer_symbol = IR_SYMBOL_ID_INVALID,
             .type = type,
-            .source = c_ir_source_range(source_id, definition->location, definition->name.length),
+            .source = c_ir_source_range(definition->location, definition->name.length),
             .initializer_kind = IR_GLOBAL_INITIALIZER_NONE,
             .alignment = object_alignment,
             .is_read_only = definition->is_constexpr || (type_value->kind != IR_TYPE_POINTER && c_declaration_has_token(preprocess, *definition, S8("const"))),
@@ -24758,7 +24832,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                          .element_count = element_count,
                                                                      });
                 String8 literal_name = string_format(arena, S8(".L.cstr.{u32}"), program->symbols.count);
-                IrSourceRange literal_source = c_ir_source_range(source_id, token.location, token.spelling.length);
+                IrSourceRange literal_source = c_ir_source_range(token.location, token.spelling.length);
                 IrSymbolId literal_symbol = ir_program_add_symbol(program, (IrSymbol){
                                                                                .name = literal_name,
                                                                                .link_name = literal_name,
@@ -24931,7 +25005,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             {
                 IrSymbol* symbol = ir_symbol_from_id(&program->symbols, existing_function->symbol);
                 symbol->is_definition = true;
-                existing_function->source = c_ir_source_range(source_id, declaration.location, declaration.name.length);
+                existing_function->source = c_ir_source_range(declaration.location, declaration.name.length);
                 existing_function->state = IR_FUNCTION_REJECTED;
             }
             continue;
@@ -24956,7 +25030,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             continue;
         }
-        IrSourceRange source = c_ir_source_range(source_id, declaration.location, declaration.name.length);
+        IrSourceRange source = c_ir_source_range(declaration.location, declaration.name.length);
         IrSymbolId symbol = declaration.entity.value < parse.entity_count ? entity_symbols[declaration.entity.value] : IR_SYMBOL_ID_INVALID;
         if (symbol.value == IR_ID_UNDERLYING_INVALID)
         {
