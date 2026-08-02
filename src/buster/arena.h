@@ -4,7 +4,8 @@ typedef struct ArenaFlags ArenaFlags;
 struct ArenaFlags
 {
     u64 execute : 1;
-    u64 flags : 63;
+    u64 lock_pages : 1;
+    u64 flags : 62;
 };
 
 typedef struct Arena Arena;

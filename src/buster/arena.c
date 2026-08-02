@@ -2,7 +2,6 @@
 #include <buster/os.h>
 #include <buster/integer.h>
 
-BUSTER_GLOBAL_LOCAL bool arena_lock_pages = false;
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(64);
@@ -27,7 +26,7 @@ void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
         u64 size_to_commit = target_committed_size - os_position;
         u8* commit_pointer = arena_byte_pointer + os_position;
 
-        if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena_lock_pages))
+        if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.lock_pages))
         {
             arena->os_position = target_committed_size;
         }
@@ -131,7 +130,7 @@ Arena* arena_create(ArenaCreation original_creation)
         {
             Arena* arena = (Arena*)(result + (individual_reserved_size * i));
 
-            bool commit_result = os_commit(arena, creation.initial_size, protection_flags, arena_lock_pages);
+            bool commit_result = os_commit(arena, creation.initial_size, protection_flags, creation.flags.lock_pages);
             if (commit_result)
             {
                 *arena = (Arena){
