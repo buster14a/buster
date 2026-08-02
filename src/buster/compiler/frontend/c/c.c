@@ -28858,6 +28858,140 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         scratch_end(invalid_generic_temporary);
     }
+    {
+        TemporalArena direct_ir_temporary = scratch_begin(0, 0);
+        CPreprocessResult direct_ir_tokens =
+            c_preprocess(direct_ir_temporary.arena,
+                         S8("typedef unsigned long Word;\n"
+                            "typedef unsigned char Byte;\n"
+                            "enum { BASE_INDEX = 3 };\n"
+                            "struct Pair { char prefix; int values[3]; };\n"
+                            "_Alignas(sizeof(int) * 2) static int aligned = (unsigned long)7;\n"
+                            "static const int base = 4;\n"
+                            "static int scalar = (unsigned long)(base + sizeof(Byte));\n"
+                            "static int table[sizeof(struct Pair) / sizeof(int)] ="
+                            " { [BASE_INDEX] = (int)(sizeof(Word) / sizeof(Byte)) };\n"
+                            "static const int primitive_width = sizeof(long long) + sizeof(signed char) +"
+                            " sizeof(_Bool) + sizeof(double);\n"
+                            "static const int compound_width = sizeof((int[3]){ 1, 2, 3 });\n"
+                            "static int compound_values[3] = { [1 + 1] = 9 };\n"
+                            "int inspect(void) {\n"
+                            "    struct Pair pair = { .values = { [1] = 5 } };\n"
+                            "    int local[sizeof((pair).values) / sizeof((pair).values[0])];\n"
+                            "    switch (sizeof((pair).values) / sizeof((pair).values[0])) {\n"
+                            "        case BASE_INDEX: return local[1] + table[BASE_INDEX] + scalar + aligned;\n"
+                            "        default: return compound_width + compound_values[2];\n"
+                            "    }\n"
+                            "}\n"),
+                         (CPreprocessOptions){0});
+        CParseResult direct_ir_parse = c_parse(direct_ir_temporary.arena, direct_ir_tokens);
+        CIRLowerResult direct_ir = c_lower_to_ir(direct_ir_temporary.arena, S8("direct-ir-regression.c"), direct_ir_tokens, direct_ir_parse, target_native);
+        BUSTER_TEST(arguments, direct_ir_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, direct_ir_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, direct_ir.diagnostic_count == 0);
+        BUSTER_TEST(arguments, direct_ir.program != 0);
+        if (direct_ir.program)
+        {
+            IrModule* module = &direct_ir.program->modules[0];
+            bool found_aligned = false;
+            bool found_base = false;
+            bool found_scalar = false;
+            bool found_table = false;
+            bool found_primitive_width = false;
+            bool found_compound_width = false;
+            bool found_compound_values = false;
+            u32 expected_word_bytes = target_native.os == OPERATING_SYSTEM_WINDOWS ? 4 : 8;
+            BUSTER_TEST(arguments, module->global_count == 7);
+            BUSTER_TEST(arguments, module->function_count == 1);
+            for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+            {
+                IrGlobal* global = module->globals + global_index;
+                IrSymbol* symbol = ir_symbol_from_id(&direct_ir.program->symbols, global->symbol);
+                if (!symbol)
+                {
+                    continue;
+                }
+                if (string_equal(symbol->name, S8("aligned")))
+                {
+                    found_aligned = true;
+                    BUSTER_TEST(arguments, global->alignment == 8);
+                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                    BUSTER_TEST(arguments, global->initializer_bits == 7);
+                }
+                else if (string_equal(symbol->name, S8("base")))
+                {
+                    found_base = true;
+                    BUSTER_TEST(arguments, global->is_read_only);
+                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                    BUSTER_TEST(arguments, global->initializer_bits == 4);
+                }
+                else if (string_equal(symbol->name, S8("scalar")))
+                {
+                    found_scalar = true;
+                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                    BUSTER_TEST(arguments, global->initializer_bits == 5);
+                }
+                else if (string_equal(symbol->name, S8("table")))
+                {
+                    found_table = true;
+                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
+                    BUSTER_TEST(arguments, global->bytes.length == 16);
+                    if (global->bytes.pointer && global->bytes.length >= 4 * sizeof(u32))
+                    {
+                        u32 value = 0;
+                        memcpy(&value, global->bytes.pointer + 3 * sizeof(value), sizeof(value));
+                        BUSTER_TEST(arguments, value == expected_word_bytes);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, false);
+                    }
+                }
+                else if (string_equal(symbol->name, S8("primitive_width")))
+                {
+                    found_primitive_width = true;
+                    BUSTER_TEST(arguments, global->is_read_only);
+                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                    BUSTER_TEST(arguments, global->initializer_bits == 18);
+                }
+                else if (string_equal(symbol->name, S8("compound_width")))
+                {
+                    found_compound_width = true;
+                    BUSTER_TEST(arguments, global->is_read_only);
+                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                    BUSTER_TEST(arguments, global->initializer_bits == 12);
+                }
+                else if (string_equal(symbol->name, S8("compound_values")))
+                {
+                    found_compound_values = true;
+                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
+                    BUSTER_TEST(arguments, global->bytes.length == 12);
+                    if (global->bytes.pointer && global->bytes.length >= 3 * sizeof(u32))
+                    {
+                        u32 value = 0;
+                        memcpy(&value, global->bytes.pointer + 2 * sizeof(value), sizeof(value));
+                        BUSTER_TEST(arguments, value == 9);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, false);
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, found_aligned);
+            BUSTER_TEST(arguments, found_base);
+            BUSTER_TEST(arguments, found_scalar);
+            BUSTER_TEST(arguments, found_table);
+            BUSTER_TEST(arguments, found_primitive_width);
+            BUSTER_TEST(arguments, found_compound_width);
+            BUSTER_TEST(arguments, found_compound_values);
+            IrFunction* inspect = module->functions;
+            BUSTER_TEST(arguments, inspect->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, inspect->local_count >= 2);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(direct_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(direct_ir_temporary);
+    }
     enum
     {
         C_IR_NESTED_CALL_STRESS_DEPTH = 256,
