@@ -180,11 +180,13 @@ jobs:
             $benchPhaseLines = ($benchOutput | Select-String '^BENCH_PHASE ' | ForEach-Object { $_.Line }) -join "`n"
             $benchFileLines = ($benchOutput | Select-String '^BENCH_FILE ' | ForEach-Object { $_.Line }) -join "`n"
 
-            $compileMilliseconds = [int](($genEnd - $genStart).TotalMilliseconds + ($buildEnd - $buildStart).TotalMilliseconds)
+            $generationMilliseconds = [int](($genEnd - $genStart).TotalMilliseconds)
+            $ideBuildMilliseconds = [int](($buildEnd - $buildStart).TotalMilliseconds)
+            $compileMilliseconds = $generationMilliseconds + $ideBuildMilliseconds
             $benchRunMilliseconds = [int](($benchEnd - $benchStart).TotalMilliseconds)
 
             # Per-config totals; Debug and Release each report their own, never summed.
-            Write-Output "PERF_TOTAL config=$config compile_milliseconds=$compileMilliseconds bench_run_milliseconds=$benchRunMilliseconds"
+            Write-Output "PERF_TOTAL config=$config generation_milliseconds=$generationMilliseconds ide_build_milliseconds=$ideBuildMilliseconds compile_milliseconds=$compileMilliseconds bench_run_milliseconds=$benchRunMilliseconds"
 
             $env:RUNNER_NAME = "${{ matrix.runner }}"
             $env:CONFIG = $config

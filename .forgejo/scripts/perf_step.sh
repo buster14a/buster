@@ -39,12 +39,20 @@ for config in Debug Release; do
     { time {
         ./build.sh generate --build-dir "$build_dir" --config "$config" \
             --no-sanitize --no-fuzz --instrument --time-trace 2>&3
-        ./build.sh build --build-dir "$build_dir" --config "$config" -t ide 2>&3
     }; } 3>&2 2>"$timing_file"
 
     export CONFIG="$config"
+    generation_milliseconds=$(awk '{ printf "%.0f\n", $1 * 1000 }' "$timing_file")
+    rm -f "$timing_file"
+
+    timing_file=$(mktemp)
+    { time {
+        ./build.sh build --build-dir "$build_dir" --config "$config" -t ide 2>&3
+    }; } 3>&2 2>"$timing_file"
+
+    ide_build_milliseconds=$(awk '{ printf "%.0f\n", $1 * 1000 }' "$timing_file")
     export COMPILE_MILLISECONDS
-    COMPILE_MILLISECONDS=$(awk '{ printf "%.0f\n", $1 * 1000 }' "$timing_file")
+    COMPILE_MILLISECONDS=$((generation_milliseconds + ide_build_milliseconds))
     rm -f "$timing_file"
 
     echo "--- Where compile time went ($config) ---"
@@ -76,7 +84,7 @@ for config in Debug Release; do
     export BENCH_FILE_LINES=$(grep '^BENCH_FILE ' "$build_dir/bench_output.log" || true)
 
     # Per-config totals; Debug and Release each report their own, never summed.
-    echo "PERF_TOTAL config=$config compile_milliseconds=$COMPILE_MILLISECONDS bench_run_milliseconds=$BENCH_RUN_MILLISECONDS"
+    echo "PERF_TOTAL config=$config generation_milliseconds=$generation_milliseconds ide_build_milliseconds=$ide_build_milliseconds compile_milliseconds=$COMPILE_MILLISECONDS bench_run_milliseconds=$BENCH_RUN_MILLISECONDS"
 
     if ! ./.forgejo/scripts/record_perf.sh; then
         overall_result=1
