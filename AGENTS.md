@@ -134,6 +134,15 @@ enabled.
 
 ## Performance tracking
 
+- **`test_self_host` is the most trustworthy and complete compiler benchmark.**
+  It exercises the full self-hosting IDE pipeline, including the trusted
+  bootstrap, two complete unity-build IDE compilations, byte-identical stage
+  verification, and the stage-2 benchmark. Use its end-to-end result as the
+  primary completeness/fixed-point signal for compiler-throughput changes.
+  For performance measurements, run the benchmark with the trusted
+  Clang-compiled `ide` executable, whose generated host code has the best
+  quality; buster-compiled stage executables are useful for self-hosting
+  validation, not as the default benchmark host.
 - `ide bench` (built via the `bench_all` ninja target) parses the
   `parser_file_test_cases` corpus 200 times and prints one line,
   `BENCH parse_all_tests iterations=... files=... min_ns=... median_ns=...`.
