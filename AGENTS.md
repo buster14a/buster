@@ -379,17 +379,45 @@ has hard design constraints:
   internal global symbols. C aggregate initializer lowering uses an explicit
   task stack, and incomplete character-array bounds are inferred from string
   initializers before layout.
-- Debug info is opt-in (`-g` on `ide cc` and `ide compile`) and lowers through
-  one path for both frontends: codegen records per-instruction line entries
-  plus a function-start row, the object builders run the DWARF emitter and
-  attach `.debug_info`/`.debug_abbrev`/`.debug_line`/`.debug_str` sections with
-  relocations against local text/debug base symbols, and the in-memory object
-  merger concatenates them like any other section. ELF executable writers
-  resolve those relocations statically and append the non-loaded debug
-  sections with a section header table; PE and Mach-O executables currently
-  drop them (relocatable objects keep them on every format). Canonical IR
-  source ranges are one-based; the zero-based buster parser lines are
-  converted at the parser→IR boundary.
+- Debug info is **on by default** for both `ide cc` and `ide compile`; `-g0`
+  turns it off and `-g` is accepted for compatibility. Both frontends lower
+  through one path: codegen records per-instruction line entries plus a
+  function-start row, and the object builders hand those neutral
+  function/line descriptors to the emitter selected by the **target's native
+  format** — CodeView for Windows, DWARF everywhere else. Canonical IR source
+  ranges are one-based; the zero-based buster parser lines are converted at
+  the parser→IR boundary.
+- DWARF (Linux, macOS, iOS, Android) emits
+  `.debug_info`/`.debug_abbrev`/`.debug_line`/`.debug_str` with relocations
+  against local text and debug base symbols, so 32-bit cross-section offsets
+  survive object concatenation. ELF executable writers resolve those
+  relocations statically and append the non-loaded sections with a section
+  header table. Mach-O executables carry them in an unmapped `__DWARF`
+  segment (`vmsize` 0, sections flagged `S_ATTR_DEBUG`) placed before
+  `__LINKEDIT` so the ad-hoc code signature still covers them; lldb reads
+  DWARF straight from the image, with no dSYM step.
+- CodeView (Windows) emits `.debug$S` (C13: `S_OBJNAME`, `S_COMPILE3`,
+  per-function `S_GPROC32`/`S_END`, line blocks, file checksums, string
+  table) and a minimal `.debug$T`. Its `SECREL32`/`SECTION` relocations
+  resolve against each function's own object symbol. Those COFF relocation
+  numbers are shared with the TLS relocations, so the reader disambiguates
+  them by section. COFF section names longer than eight bytes use the
+  `/<offset>` string-table form.
+- `pdb_build` turns a resolved CodeView blob into a PDB: symbol subsections
+  become the module stream's symbol region, the remaining subsections its C13
+  region, and checksum entries are remapped from the object-local string
+  table onto the PDB `/names` stream (the local table is then dropped, since
+  a PDB does not carry one per module). Readers need more than the streams
+  they will read — an empty globals or publics stream still needs its GSI
+  hash header, and the DBI needs an edit-and-continue name table, or module
+  iteration fails. Validate changes with `llvm-pdbutil dump --all`, which is
+  strict about all of this. **Not yet wired in:** buster's PE writer does not
+  emit the PDB or an `IMAGE_DEBUG_DIRECTORY` RSDS entry, so debugging a
+  self-linked PE still needs an external linker over the relocatable objects.
+- `object_section_name_for_kind` and `object_section_default_alignment` are
+  the single source of truth for section naming and defaults. Use them when
+  adding a section kind rather than adding another local table, otherwise
+  every reader, writer, and test helper silently misses the new kind.
 - Native executables target the platform libc and CRT without invoking a host
   compiler or linker. Buster writes final ELF64 images for Linux and Android,
   PE32+ images for Windows, and ad-hoc-signed Mach-O images for macOS and iOS,
@@ -470,7 +498,9 @@ Compiler:
 | `compiler/frontend/c/c.{c,h}` | GNU C frontend in progress: source translation, preprocessing tokens/macros/includes/conditionals, non-recursive external-declaration parsing with strong IDs, flattened scalar/pointer/array/function/aggregate types, nested lexical scopes with entity-based identifier binding and canonical redeclarations, and target-aware shared-IR lowering for scalar/pointer/aggregate parameters, locals, static-storage objects, explicit conversions, array decay/indexing, chained field access, control flow, short-circuit and conditional expressions, direct calls, and constant aggregate initialization. |
 | `compiler/frontend/buster/analysis.{c,h}` | Semantic analysis. |
 | `compiler/ir/ir.{c,h}` | Typed control-flow IR, semantic lowering, validation, printing, and fixture-wide IR tests. |
-| `compiler/dwarf/dwarf.{c,h}` | DWARF 4 emitter: one compile unit with subprogram DIEs plus a single-sequence line program, expressed as debug section blobs with text-base address slots and cross-section 32-bit offset relocations. |
+| `compiler/dwarf/dwarf.{c,h}` | DWARF 4 emitter: one compile unit with subprogram DIEs plus a single-sequence line program, expressed as debug section blobs with text-base address slots and cross-section 32-bit offset relocations. Owns the neutral `DwarfFunction`/`DwarfLineEntry` descriptors both debug backends consume. |
+| `compiler/codeview/codeview.{c,h}` | CodeView C13 emitter for Windows targets: `.debug$S` symbol/line/checksum/string subsections and `.debug$T`, with per-function `SECREL32`/`SECTION` relocation slots. |
+| `compiler/pdb/pdb.{c,h}` | PDB writer: MSF container plus the info, TPI, DBI, IPI, globals, publics, section-header, module and `/names` streams. Repackages a CodeView blob into the module stream and remaps checksum entries onto the PDB string table. |
 | `compiler/object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers; in-memory object linking. |
 | `compiler/link/link.{c,h}` | Multi-object section merging and symbol resolution; from-scratch libc-backed ELF64, PE32+, and Mach-O executable writers. |
 | `compiler/driver/driver.{c,h}` | End-to-end source-to-object compilation and libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported target, and multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset. |

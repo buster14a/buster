@@ -2911,6 +2911,43 @@ BUSTER_GLOBAL_LOCAL String8 object_read_string(ByteSlice bytes, u64 table_offset
     };
 }
 
+String8 object_section_name_for_kind(ObjectSectionKind kind)
+{
+    switch (kind)
+    {
+    case OBJECT_SECTION_TEXT:
+        return S8(".text");
+    case OBJECT_SECTION_READ_ONLY_DATA:
+        return S8(".rodata");
+    case OBJECT_SECTION_DATA:
+        return S8(".data");
+    case OBJECT_SECTION_THREAD_LOCAL_DATA:
+        return S8(".tdata");
+    case OBJECT_SECTION_THREAD_LOCAL_ZERO:
+        return S8(".tbss");
+    case OBJECT_SECTION_DEBUG_INFO:
+        return S8(".debug_info");
+    case OBJECT_SECTION_DEBUG_ABBREV:
+        return S8(".debug_abbrev");
+    case OBJECT_SECTION_DEBUG_LINE:
+        return S8(".debug_line");
+    case OBJECT_SECTION_DEBUG_STR:
+        return S8(".debug_str");
+    case OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS:
+        return S8(".debug$S");
+    case OBJECT_SECTION_DEBUG_CODEVIEW_TYPES:
+        return S8(".debug$T");
+    case OBJECT_SECTION_COUNT:
+        break;
+    }
+    return (String8){0};
+}
+
+u32 object_section_default_alignment(ObjectSectionKind kind)
+{
+    return object_section_kind_is_debug(kind) ? 1 : 16;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String8 name)
 {
     if (string_equal(name, S8(".debug_info")) || string_equal(name, S8("__debug_info")))
@@ -2928,6 +2965,14 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String
     if (string_equal(name, S8(".debug_str")) || string_equal(name, S8("__debug_str")))
     {
         return OBJECT_SECTION_DEBUG_STR;
+    }
+    if (string_equal(name, S8(".debug$S")))
+    {
+        return OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS;
+    }
+    if (string_equal(name, S8(".debug$T")))
+    {
+        return OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
     }
     return OBJECT_SECTION_COUNT;
 }
@@ -3033,22 +3078,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
     }
     result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
     result.section_count = OBJECT_SECTION_COUNT;
-    String8 section_names[OBJECT_SECTION_COUNT] = {
-        [OBJECT_SECTION_TEXT] = S8(".text"),
-        [OBJECT_SECTION_READ_ONLY_DATA] = S8(".rodata"),
-        [OBJECT_SECTION_DATA] = S8(".data"),
-        [OBJECT_SECTION_THREAD_LOCAL_DATA] = S8(".tdata"),
-        [OBJECT_SECTION_THREAD_LOCAL_ZERO] = S8(".tbss"),
-        [OBJECT_SECTION_DEBUG_INFO] = S8(".debug_info"),
-        [OBJECT_SECTION_DEBUG_ABBREV] = S8(".debug_abbrev"),
-        [OBJECT_SECTION_DEBUG_LINE] = S8(".debug_line"),
-        [OBJECT_SECTION_DEBUG_STR] = S8(".debug_str"),
-    };
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
         bool zero_fill = kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
         result.sections[kind] = (ObjectSection){
-            .name = section_names[kind],
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
                 {
                     .pointer = zero_fill ? 0 : arena_allocate(arena, u8, section_sizes[kind]),
@@ -3367,17 +3401,23 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
         }
         bool is_thread_local =
             string_starts_with_sequence(name, S8(".tls")) || string_starts_with_sequence(name, S8(".tdata")) || string_starts_with_sequence(name, S8(".tbss"));
-        bool ignored = (characteristics & 0x02000800) != 0 || string_equal(name, S8(".pdata")) || string_equal(name, S8(".xdata"));
+        // CodeView sections are discardable but must survive a round trip
+        // through a relocatable object, so they are classified before the
+        // discardable/removable filter.
+        ObjectSectionKind debug_kind = object_debug_section_kind_from_name(name);
+        bool ignored = debug_kind == OBJECT_SECTION_COUNT &&
+                       ((characteristics & 0x02000800) != 0 || string_equal(name, S8(".pdata")) || string_equal(name, S8(".xdata")));
         if (ignored)
         {
             section_kinds[section_index] = UINT32_MAX;
             continue;
         }
         bool zero_fill = !raw_offset || (characteristics & 0x80) != 0;
-        ObjectSectionKind kind = is_thread_local                ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
-                                 : characteristics & 0x20       ? OBJECT_SECTION_TEXT
-                                 : characteristics & 0x80000000 ? OBJECT_SECTION_DATA
-                                                                : OBJECT_SECTION_READ_ONLY_DATA;
+        ObjectSectionKind kind = debug_kind != OBJECT_SECTION_COUNT ? debug_kind
+                                 : is_thread_local                  ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
+                                 : characteristics & 0x20           ? OBJECT_SECTION_TEXT
+                                 : characteristics & 0x80000000     ? OBJECT_SECTION_DATA
+                                                                    : OBJECT_SECTION_READ_ONLY_DATA;
         u32 alignment_code = (characteristics >> 20) & 0xf;
         u32 alignment = alignment_code > 1 ? 1u << (alignment_code - 1) : 1;
         u64 base = align_forward(section_sizes[kind], alignment);
@@ -3393,22 +3433,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
     }
     result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
     result.section_count = OBJECT_SECTION_COUNT;
-    String8 section_names[OBJECT_SECTION_COUNT] = {
-        [OBJECT_SECTION_TEXT] = S8(".text"),
-        [OBJECT_SECTION_READ_ONLY_DATA] = S8(".rodata"),
-        [OBJECT_SECTION_DATA] = S8(".data"),
-        [OBJECT_SECTION_THREAD_LOCAL_DATA] = S8(".tdata"),
-        [OBJECT_SECTION_THREAD_LOCAL_ZERO] = S8(".tbss"),
-        [OBJECT_SECTION_DEBUG_INFO] = S8(".debug_info"),
-        [OBJECT_SECTION_DEBUG_ABBREV] = S8(".debug_abbrev"),
-        [OBJECT_SECTION_DEBUG_LINE] = S8(".debug_line"),
-        [OBJECT_SECTION_DEBUG_STR] = S8(".debug_str"),
-    };
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
         bool zero_fill = kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
         result.sections[kind] = (ObjectSection){
-            .name = section_names[kind],
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
                 {
                     .pointer = zero_fill ? 0 : arena_allocate(arena, u8, section_sizes[kind]),
@@ -3511,6 +3540,30 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             ObjectRelocationKind kind = OBJECT_RELOCATION_COUNT;
             s64 addend = 0;
             ObjectSymbol* referenced = &result.symbols[symbol_map[source_symbol]];
+            // SECREL32 and SECTION share their type numbers with the TLS
+            // relocations, so CodeView sections select the debug meaning.
+            bool codeview_section = section_kinds[section_index] == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS ||
+                                    section_kinds[section_index] == OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
+            if (codeview_section)
+            {
+                u16 secrel_type = target.cpu_arch == CPU_ARCH_X86_64 ? 0x000b : 0x0008;
+                u16 section_type = target.cpu_arch == CPU_ARCH_X86_64 ? 0x000a : 0x0007;
+                kind = relocation_type == secrel_type    ? OBJECT_RELOCATION_COFF_SECREL32
+                       : relocation_type == section_type ? OBJECT_RELOCATION_COFF_SECTION16
+                                                         : OBJECT_RELOCATION_COUNT;
+                if (kind == OBJECT_RELOCATION_COUNT)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    return result;
+                }
+                result.relocations[result.relocation_count++] = (ObjectRelocation){
+                    .offset = section_bases[section_index] + source_offset,
+                    .section = section_kinds[section_index],
+                    .symbol = symbol_map[source_symbol],
+                    .kind = kind,
+                };
+                continue;
+            }
             if (target.cpu_arch == CPU_ARCH_X86_64)
             {
                 if (relocation_type == 1)
@@ -3702,7 +3755,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     name.length += 1;
                 }
                 bool is_thread_local = section_type == 0x11 || section_type == 0x12 || string_starts_with_sequence(name, S8("__thread"));
-                ObjectSectionKind output_kind = is_thread_local ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
+                // The __DWARF sections must keep their debug identity so that
+                // their contents and relocations do not land in read-only data.
+                ObjectSectionKind debug_kind = object_debug_section_kind_from_name(name);
+                ObjectSectionKind output_kind = debug_kind != OBJECT_SECTION_COUNT ? debug_kind
+                                                : is_thread_local ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                                 : (flags & 0x80000000) || string_equal(name, S8("__text")) ? OBJECT_SECTION_TEXT
                                                 : string_starts_with_sequence(name, S8("__data")) || string_starts_with_sequence(name, S8("__bss"))
                                                     ? OBJECT_SECTION_DATA
@@ -3727,22 +3784,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
     }
     result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
     result.section_count = OBJECT_SECTION_COUNT;
-    String8 section_names[OBJECT_SECTION_COUNT] = {
-        [OBJECT_SECTION_TEXT] = S8(".text"),
-        [OBJECT_SECTION_READ_ONLY_DATA] = S8(".rodata"),
-        [OBJECT_SECTION_DATA] = S8(".data"),
-        [OBJECT_SECTION_THREAD_LOCAL_DATA] = S8(".tdata"),
-        [OBJECT_SECTION_THREAD_LOCAL_ZERO] = S8(".tbss"),
-        [OBJECT_SECTION_DEBUG_INFO] = S8(".debug_info"),
-        [OBJECT_SECTION_DEBUG_ABBREV] = S8(".debug_abbrev"),
-        [OBJECT_SECTION_DEBUG_LINE] = S8(".debug_line"),
-        [OBJECT_SECTION_DEBUG_STR] = S8(".debug_str"),
-    };
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
         bool zero_fill = kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
         result.sections[kind] = (ObjectSection){
-            .name = section_names[kind],
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
                 {
                     .pointer = zero_fill ? 0 : arena_allocate(arena, u8, section_sizes[kind]),
@@ -3897,6 +3943,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     output_kind = OBJECT_RELOCATION_ABSOLUTE64;
                     addend = (s64)stored;
                 }
+                else if (relocation_type == 0 && length == 2)
+                {
+                    u32 stored = 0;
+                    if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                    {
+                        return result;
+                    }
+                    output_kind = OBJECT_RELOCATION_ABSOLUTE32;
+                    addend = (s64)stored;
+                }
                 else if ((relocation_type == 1 || relocation_type == 2 || (relocation_type >= 6 && relocation_type <= 8) || relocation_type == 9) &&
                          length == 2)
                 {
@@ -3916,6 +3972,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             else
             {
                 output_kind = relocation_type == 0 && length == 3   ? OBJECT_RELOCATION_ABSOLUTE64
+                              : relocation_type == 0 && length == 2 ? OBJECT_RELOCATION_ABSOLUTE32
                               : relocation_type == 2 && length == 2 ? OBJECT_RELOCATION_AARCH64_CALL26
                               : relocation_type == 8 && length == 2 ? OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21
                               : relocation_type == 9 && length == 2 ? OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
@@ -3924,6 +3981,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 {
                     u64 stored = 0;
                     if (!object_read_u64(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                    {
+                        return result;
+                    }
+                    addend = (s64)stored;
+                }
+                if (relocation_type == 0 && length == 2)
+                {
+                    u32 stored = 0;
+                    if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
                     {
                         return result;
                     }
@@ -4193,31 +4259,49 @@ BUSTER_GLOBAL_LOCAL String8 object_entity_name(Arena* arena, AnalysisResult* ana
 
 bool object_section_kind_is_debug(ObjectSectionKind kind)
 {
-    return kind == OBJECT_SECTION_DEBUG_INFO || kind == OBJECT_SECTION_DEBUG_ABBREV || kind == OBJECT_SECTION_DEBUG_LINE || kind == OBJECT_SECTION_DEBUG_STR;
+    return kind == OBJECT_SECTION_DEBUG_INFO || kind == OBJECT_SECTION_DEBUG_ABBREV || kind == OBJECT_SECTION_DEBUG_LINE ||
+           kind == OBJECT_SECTION_DEBUG_STR || kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || kind == OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
 }
 
 BUSTER_GLOBAL_LOCAL void object_debug_sections_initialize(ObjectFile* object)
 {
-    object->sections[OBJECT_SECTION_DEBUG_INFO] = (ObjectSection){
-        .name = S8(".debug_info"),
-        .kind = OBJECT_SECTION_DEBUG_INFO,
-        .alignment = 1,
-    };
-    object->sections[OBJECT_SECTION_DEBUG_ABBREV] = (ObjectSection){
-        .name = S8(".debug_abbrev"),
-        .kind = OBJECT_SECTION_DEBUG_ABBREV,
-        .alignment = 1,
-    };
-    object->sections[OBJECT_SECTION_DEBUG_LINE] = (ObjectSection){
-        .name = S8(".debug_line"),
-        .kind = OBJECT_SECTION_DEBUG_LINE,
-        .alignment = 1,
-    };
-    object->sections[OBJECT_SECTION_DEBUG_STR] = (ObjectSection){
-        .name = S8(".debug_str"),
-        .kind = OBJECT_SECTION_DEBUG_STR,
-        .alignment = 1,
-    };
+    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+    {
+        if (!object_section_kind_is_debug((ObjectSectionKind)kind))
+        {
+            continue;
+        }
+        object->sections[kind] = (ObjectSection){
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
+            .kind = (ObjectSectionKind)kind,
+            .alignment = object_section_default_alignment((ObjectSectionKind)kind),
+        };
+    }
+}
+
+// Appends the built CodeView sections. Relocations resolve against the
+// per-entry function symbols, which both module object builders place at
+// symbol indices [0, entry_count).
+BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResult built)
+{
+    if (!built.valid)
+    {
+        return;
+    }
+    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data = built.symbols;
+    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data = built.types;
+    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].alignment = 4;
+    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].alignment = 4;
+    for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
+    {
+        CodeviewRelocation relocation = built.relocations[relocation_index];
+        object->relocations[object->relocation_count++] = (ObjectRelocation){
+            .offset = relocation.offset,
+            .section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
+            .symbol = relocation.function,
+            .kind = relocation.kind == CODEVIEW_RELOCATION_SECREL32 ? OBJECT_RELOCATION_COFF_SECREL32 : OBJECT_RELOCATION_COFF_SECTION16,
+        };
+    }
 }
 
 BUSTER_GLOBAL_LOCAL ObjectSectionKind object_section_kind_for_dwarf(DwarfSectionKind kind)
@@ -4362,6 +4446,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
     };
     object_debug_sections_initialize(&result);
     DwarfResult dwarf = {0};
+    CodeviewResult codeview = {0};
     if (module->debug_info && module->entry_count && analysis->module.source_count)
     {
         String8* file_paths = arena_allocate(arena, String8, analysis->module.source_count);
@@ -4399,20 +4484,36 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
                 .column = entry.column,
             };
         }
-        dwarf = dwarf_build(arena, (DwarfInput){
-                                       .producer = S8("buster"),
-                                       .comp_dir = S8("."),
-                                       .file_paths = file_paths,
-                                       .functions = functions,
-                                       .lines = lines,
-                                       .code_size = module->code.length,
-                                       .file_count = analysis->module.source_count,
-                                       .function_count = module->entry_count,
-                                       .line_count = module->line_entry_count,
-                                       .language = 0x000c,
-                                   });
+        if (target.os == OPERATING_SYSTEM_WINDOWS)
+        {
+            codeview = codeview_build(arena, (CodeviewInput){
+                                                 .producer = S8("buster"),
+                                                 .file_paths = file_paths,
+                                                 .functions = functions,
+                                                 .lines = lines,
+                                                 .file_count = analysis->module.source_count,
+                                                 .function_count = module->entry_count,
+                                                 .line_count = module->line_entry_count,
+                                                 .machine = target.cpu_arch == CPU_ARCH_AARCH64 ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
+                                             });
+        }
+        else
+        {
+            dwarf = dwarf_build(arena, (DwarfInput){
+                                           .producer = S8("buster"),
+                                           .comp_dir = S8("."),
+                                           .file_paths = file_paths,
+                                           .functions = functions,
+                                           .lines = lines,
+                                           .code_size = module->code.length,
+                                           .file_count = analysis->module.source_count,
+                                           .function_count = module->entry_count,
+                                           .line_count = module->line_entry_count,
+                                           .language = 0x000c,
+                                       });
+        }
     }
-    u32 dwarf_relocation_count = dwarf.valid ? dwarf.relocation_count : 0;
+    u32 dwarf_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0);
     u32 symbol_capacity =
         module->entry_count + module->relocation_count + (module->data_relocation_count ? 1 : 0) + (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0);
     result.symbols = arena_allocate(arena, ObjectSymbol, symbol_capacity);
@@ -4534,6 +4635,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
         }
     }
     object_append_dwarf(&result, dwarf);
+    object_append_codeview(&result, codeview);
     return result;
 }
 
@@ -4610,6 +4712,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     };
     object_debug_sections_initialize(&result);
     DwarfResult dwarf = {0};
+    CodeviewResult codeview = {0};
     if (module->debug_info && module->entry_count && program->sources.count)
     {
         String8* file_paths = arena_allocate(arena, String8, program->sources.count);
@@ -4657,20 +4760,36 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .column = entry.column,
             };
         }
-        dwarf = dwarf_build(arena, (DwarfInput){
-                                       .producer = S8("buster"),
-                                       .comp_dir = S8("."),
-                                       .file_paths = file_paths,
-                                       .functions = functions,
-                                       .lines = lines,
-                                       .code_size = module->code.length,
-                                       .file_count = program->sources.count,
-                                       .function_count = module->entry_count,
-                                       .line_count = module->line_entry_count,
-                                       .language = 0x000c,
-                                   });
+        if (target.os == OPERATING_SYSTEM_WINDOWS)
+        {
+            codeview = codeview_build(arena, (CodeviewInput){
+                                                 .producer = S8("buster"),
+                                                 .file_paths = file_paths,
+                                                 .functions = functions,
+                                                 .lines = lines,
+                                                 .file_count = program->sources.count,
+                                                 .function_count = module->entry_count,
+                                                 .line_count = module->line_entry_count,
+                                                 .machine = target.cpu_arch == CPU_ARCH_AARCH64 ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
+                                             });
+        }
+        else
+        {
+            dwarf = dwarf_build(arena, (DwarfInput){
+                                           .producer = S8("buster"),
+                                           .comp_dir = S8("."),
+                                           .file_paths = file_paths,
+                                           .functions = functions,
+                                           .lines = lines,
+                                           .code_size = module->code.length,
+                                           .file_count = program->sources.count,
+                                           .function_count = module->entry_count,
+                                           .line_count = module->line_entry_count,
+                                           .language = 0x000c,
+                                       });
+        }
     }
-    u32 dwarf_relocation_count = dwarf.valid ? dwarf.relocation_count : 0;
+    u32 dwarf_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0);
     bool apple_thread_local = false;
     if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
     {
@@ -4836,6 +4955,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         };
     }
     object_append_dwarf(&result, dwarf);
+    object_append_codeview(&result, codeview);
     return result;
 }
 
@@ -5099,6 +5219,8 @@ BUSTER_GLOBAL_LOCAL u16 object_coff_relocation_type(CpuArch arch, ObjectRelocati
                : kind == OBJECT_RELOCATION_PE_TLS_OFFSET32          ? 0x000b
                : kind == OBJECT_RELOCATION_ABSOLUTE64               ? 0x0001
                : kind == OBJECT_RELOCATION_ABSOLUTE32               ? 0x0002
+               : kind == OBJECT_RELOCATION_COFF_SECREL32            ? 0x000b
+               : kind == OBJECT_RELOCATION_COFF_SECTION16           ? 0x000a
                                                                     : 0;
     }
     return kind == OBJECT_RELOCATION_AARCH64_CALL26              ? 0x0003
@@ -5107,6 +5229,8 @@ BUSTER_GLOBAL_LOCAL u16 object_coff_relocation_type(CpuArch arch, ObjectRelocati
            : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12   ? 0x000f
            : kind == OBJECT_RELOCATION_ABSOLUTE64                ? 0x000e
            : kind == OBJECT_RELOCATION_ABSOLUTE32                ? 0x0001
+           : kind == OBJECT_RELOCATION_COFF_SECREL32             ? 0x0008
+           : kind == OBJECT_RELOCATION_COFF_SECTION16            ? 0x0007
                                                                  : 0;
 }
 
@@ -5203,6 +5327,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
     u32 string_table_offset = (u32)buffer.count;
     object_buffer_zero(&buffer, 4);
     u32* string_offsets = arena_allocate(arena, u32, object->symbol_count);
+    u32* section_name_offsets = arena_allocate(arena, u32, section_count);
     u8 zero = 0;
     for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
     {
@@ -5212,6 +5337,16 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         }
         string_offsets[symbol] = (u32)(buffer.count - string_table_offset);
         object_buffer_write(&buffer, object->symbols[symbol].name.pointer, object->symbols[symbol].name.length);
+        object_buffer_write(&buffer, &zero, 1);
+    }
+    for (u32 section = 0; section < section_count; section += 1)
+    {
+        if (object->sections[section].name.length <= 8)
+        {
+            continue;
+        }
+        section_name_offsets[section] = (u32)(buffer.count - string_table_offset);
+        object_buffer_write(&buffer, object->sections[section].name.pointer, object->sections[section].name.length);
         object_buffer_write(&buffer, &zero, 1);
     }
     object_write_u32_at(&buffer, string_table_offset, (u32)(buffer.count - string_table_offset));
@@ -5234,10 +5369,16 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
     {
         ObjectSection* source = object->sections + section;
         u64 offset = COFF_HEADER_SIZE + (u64)section * COFF_SECTION_SIZE;
-        u64 section_name_length = BUSTER_MIN(source->name.length, 8);
-        if (section_name_length)
+        if (source->name.length > 8)
         {
-            memcpy(buffer.bytes + offset, source->name.pointer, section_name_length);
+            // Names longer than the inline field live in the string table and
+            // are referenced as "/<decimal offset>".
+            String8 reference = string_format(arena, S8("/{u32}"), section_name_offsets[section]);
+            memcpy(buffer.bytes + offset, reference.pointer, BUSTER_MIN(reference.length, 8));
+        }
+        else if (source->name.length)
+        {
+            memcpy(buffer.bytes + offset, source->name.pointer, source->name.length);
         }
         object_write_u32_at(&buffer, offset + 16, (u32)source->data.length);
         object_write_u32_at(&buffer, offset + 20, raw_offsets[section]);
@@ -5360,7 +5501,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
             u64 offset = buffer.count;
             object_buffer_zero(&buffer, MACH_RELOCATION_SIZE);
             object_write_u32_at(&buffer, offset, (u32)source->offset);
-            bool pc_relative = source->kind != OBJECT_RELOCATION_ABSOLUTE64 && source->kind != OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12;
+            bool pc_relative = source->kind != OBJECT_RELOCATION_ABSOLUTE64 && source->kind != OBJECT_RELOCATION_ABSOLUTE32 &&
+                               source->kind != OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12;
             u32 word = (source->symbol & 0x00ffffff) | (pc_relative ? 1u << 24 : 0) | ((source->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 3u : 2u) << 25) |
                        (1u << 27) | (type << 28);
             object_write_u32_at(&buffer, offset + 4, word);

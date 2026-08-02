@@ -126,23 +126,12 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         .target = target,
         .section_count = OBJECT_SECTION_COUNT,
     };
-    String8 section_names[OBJECT_SECTION_COUNT] = {
-        [OBJECT_SECTION_TEXT] = S8(".text"),
-        [OBJECT_SECTION_READ_ONLY_DATA] = S8(".rodata"),
-        [OBJECT_SECTION_DATA] = S8(".data"),
-        [OBJECT_SECTION_THREAD_LOCAL_DATA] = S8(".tdata"),
-        [OBJECT_SECTION_THREAD_LOCAL_ZERO] = S8(".tbss"),
-        [OBJECT_SECTION_DEBUG_INFO] = S8(".debug_info"),
-        [OBJECT_SECTION_DEBUG_ABBREV] = S8(".debug_abbrev"),
-        [OBJECT_SECTION_DEBUG_LINE] = S8(".debug_line"),
-        [OBJECT_SECTION_DEBUG_STR] = S8(".debug_str"),
-    };
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
         bool zero_fill = kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
         u8* data = zero_fill ? 0 : arena_allocate(arena, u8, section_sizes[kind]);
         result.object.sections[kind] = (ObjectSection){
-            .name = section_names[kind],
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
                 {
                     .pointer = data,
@@ -2281,6 +2270,27 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     }
     u32 data_section_count = 2 + (thread_local_count ? 3 : 0);
     u64 data_command_size = MACH_SEGMENT_COMMAND_SIZE + (u64)data_section_count * MACH_SECTION_SIZE;
+    // Debug sections travel in their own unmapped __DWARF segment, the same
+    // shape dsymutil produces, so lldb reads them straight from the image.
+    static ObjectSectionKind const dwarf_kinds[] = {
+        OBJECT_SECTION_DEBUG_INFO,
+        OBJECT_SECTION_DEBUG_ABBREV,
+        OBJECT_SECTION_DEBUG_LINE,
+        OBJECT_SECTION_DEBUG_STR,
+    };
+    static char const* const dwarf_section_names[] = {
+        "__debug_info",
+        "__debug_abbrev",
+        "__debug_line",
+        "__debug_str",
+    };
+    u64 dwarf_total = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(dwarf_kinds); index += 1)
+    {
+        dwarf_total += object->sections[dwarf_kinds[index]].data.length;
+    }
+    bool has_dwarf = dwarf_total != 0;
+    u64 dwarf_command_size = has_dwarf ? MACH_SEGMENT_COMMAND_SIZE + BUSTER_ARRAY_LENGTH(dwarf_kinds) * MACH_SECTION_SIZE : 0;
     u64 extra_dylib_command_size = 0;
     for (u32 library_index = 0; library_index < options.dynamic_library_count; library_index += 1)
     {
@@ -2292,9 +2302,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         }
         extra_dylib_command_size += align_forward(24 + library.length + 1, 8);
     }
-    u64 command_size = 2 * MACH_SEGMENT_COMMAND_SIZE + MACH_TEXT_COMMAND_SIZE + data_command_size + MACH_DYLD_INFO_COMMAND_SIZE + MACH_DYLINKER_COMMAND_SIZE +
-                       MACH_DYLIB_COMMAND_SIZE + extra_dylib_command_size + MACH_MAIN_COMMAND_SIZE + MACH_BUILD_VERSION_COMMAND_SIZE +
-                       MACH_SYMTAB_COMMAND_SIZE + MACH_DYSYMTAB_COMMAND_SIZE + MACH_CODE_SIGNATURE_COMMAND_SIZE;
+    u64 command_size = 2 * MACH_SEGMENT_COMMAND_SIZE + MACH_TEXT_COMMAND_SIZE + data_command_size + dwarf_command_size + MACH_DYLD_INFO_COMMAND_SIZE +
+                       MACH_DYLINKER_COMMAND_SIZE + MACH_DYLIB_COMMAND_SIZE + extra_dylib_command_size + MACH_MAIN_COMMAND_SIZE +
+                       MACH_BUILD_VERSION_COMMAND_SIZE + MACH_SYMTAB_COMMAND_SIZE + MACH_DYSYMTAB_COMMAND_SIZE + MACH_CODE_SIGNATURE_COMMAND_SIZE;
     u64 header_end = MACH_HEADER_SIZE + command_size;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     section_offsets[OBJECT_SECTION_TEXT] = align_forward(header_end, object->sections[OBJECT_SECTION_TEXT].alignment);
@@ -2314,7 +2324,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     u64 data_end = section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
     section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] = align_forward(data_end, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
     u64 data_vm_end = section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
-    u64 linkedit_offset = align_forward(BUSTER_MAX(data_vm_end, data_file_offset + 1), MACH_PAGE_SIZE);
+    // The kernel loader rejects an image whose segments are not page aligned
+    // in the file, so the debug segment starts on a page of its own.
+    u64 dwarf_offset = align_forward(BUSTER_MAX(data_vm_end, data_file_offset + 1), MACH_PAGE_SIZE);
+    u64 dwarf_offsets[BUSTER_ARRAY_LENGTH(dwarf_kinds)] = {0};
+    u64 dwarf_cursor = dwarf_offset;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(dwarf_kinds); index += 1)
+    {
+        dwarf_offsets[index] = dwarf_cursor;
+        dwarf_cursor += object->sections[dwarf_kinds[index]].data.length;
+    }
+    u64 linkedit_offset = align_forward(has_dwarf ? dwarf_cursor : BUSTER_MAX(data_vm_end, data_file_offset + 1), MACH_PAGE_SIZE);
     u32 rebase_count = 0;
     for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
     {
@@ -2434,6 +2454,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             memcpy(bytes + section_offsets[section], data.pointer, data.length);
         }
     }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(dwarf_kinds); index += 1)
+    {
+        ByteSlice data = object->sections[dwarf_kinds[index]].data;
+        if (data.length)
+        {
+            memcpy(bytes + dwarf_offsets[index], data.pointer, data.length);
+        }
+    }
     if (rebase_size)
     {
         memcpy(bytes + linkedit_offset, rebase_bytes, rebase_size);
@@ -2525,6 +2553,49 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             link_write_u64(bytes, pointer_offset, descriptor_address);
             link_write_u64(bytes, descriptor_offset, bootstrap_address);
             link_write_u64(bytes, descriptor_offset + 2 * sizeof(u64), initializer_offset);
+        }
+    }
+    // Debug sections are not mapped, so their relocations are resolved here
+    // rather than through dyld: address slots take link-time virtual
+    // addresses and 32-bit slots take offsets into the target debug section.
+    for (u32 index = 0; has_dwarf && index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = &object->relocations[index];
+        if (relocation->section >= OBJECT_SECTION_COUNT || !object_section_kind_is_debug((ObjectSectionKind)relocation->section) ||
+            relocation->symbol >= object->symbol_count)
+        {
+            continue;
+        }
+        u32 debug_index = 0;
+        while (debug_index < BUSTER_ARRAY_LENGTH(dwarf_kinds) && dwarf_kinds[debug_index] != (ObjectSectionKind)relocation->section)
+        {
+            debug_index += 1;
+        }
+        if (debug_index >= BUSTER_ARRAY_LENGTH(dwarf_kinds))
+        {
+            continue;
+        }
+        ObjectSection* section = &object->sections[relocation->section];
+        ObjectSymbol* symbol = &object->symbols[relocation->symbol];
+        u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        if (relocation->offset > section->data.length || width > section->data.length - relocation->offset || symbol->section >= OBJECT_SECTION_COUNT)
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            return result;
+        }
+        u64 slot = dwarf_offsets[debug_index] + relocation->offset;
+        if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
+        {
+            link_write_u64(bytes, slot, image_base + section_offsets[symbol->section] + symbol->value + (u64)relocation->addend);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE32 && object_section_kind_is_debug((ObjectSectionKind)symbol->section))
+        {
+            link_write_u32(bytes, slot, (u32)(symbol->value + (u64)relocation->addend));
+        }
+        else
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            return result;
         }
     }
     for (u32 index = 0; index < object->relocation_count; index += 1)
@@ -2681,7 +2752,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     link_write_u32(bytes, 4, object->target.cpu_arch == CPU_ARCH_X86_64 ? 0x01000007 : 0x0100000c);
     link_write_u32(bytes, 8, object->target.cpu_arch == CPU_ARCH_X86_64 ? 3 : 0);
     link_write_u32(bytes, 12, 2);
-    link_write_u32(bytes, 16, MACH_BASE_COMMAND_COUNT + options.dynamic_library_count);
+    link_write_u32(bytes, 16, MACH_BASE_COMMAND_COUNT + options.dynamic_library_count + (has_dwarf ? 1 : 0));
     link_write_u32(bytes, 20, (u32)command_size);
     link_write_u32(bytes, 24, 0x200084 | (thread_local_count ? 0x800000 : 0));
     u64 command = MACH_HEADER_SIZE;
@@ -2738,6 +2809,31 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                                 0, 4, 0x12, 0, 0);
     }
     command += data_command_size;
+    if (has_dwarf)
+    {
+        // dyld refuses a segment whose filesize exceeds its vmsize, so the
+        // debug segment is a read-only mapping between __DATA and __LINKEDIT
+        // rather than an unmapped one. It is never touched at run time.
+        link_write_u32(bytes, command, 0x19);
+        link_write_u32(bytes, command + 4, (u32)dwarf_command_size);
+        link_mach_name_write(bytes, command + 8, "__DWARF");
+        link_write_u64(bytes, command + 24, image_base + dwarf_offset);
+        link_write_u64(bytes, command + 32, align_forward(dwarf_cursor - dwarf_offset, MACH_PAGE_SIZE));
+        link_write_u64(bytes, command + 40, dwarf_offset);
+        link_write_u64(bytes, command + 48, dwarf_cursor - dwarf_offset);
+        link_write_u32(bytes, command + 56, 1);
+        link_write_u32(bytes, command + 60, 1);
+        link_write_u32(bytes, command + 64, BUSTER_ARRAY_LENGTH(dwarf_kinds));
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(dwarf_kinds); index += 1)
+        {
+            // Each section must sit inside its segment's address range or
+            // dyld rejects the image.
+            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (u64)index * MACH_SECTION_SIZE, dwarf_section_names[index], "__DWARF",
+                                    image_base + dwarf_offsets[index], object->sections[dwarf_kinds[index]].data.length, (u32)dwarf_offsets[index], 0,
+                                    0x02000000, 0, 0);
+        }
+        command += dwarf_command_size;
+    }
     BUSTER_LINK_MACH_SEGMENT("__LINKEDIT", image_base + linkedit_offset, align_forward(file_size - linkedit_offset, MACH_PAGE_SIZE), linkedit_offset,
                              file_size - linkedit_offset, 1, 1);
 #undef BUSTER_LINK_MACH_SEGMENT
@@ -3018,52 +3114,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_test_object_make(Arena* arena, Target target
                                                      ObjectRelocation* relocations, u32 relocation_count)
 {
     ObjectSection* sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
-    sections[OBJECT_SECTION_TEXT] = (ObjectSection){
-        .name = S8(".text"),
-        .data = text,
-        .kind = OBJECT_SECTION_TEXT,
-        .alignment = 16,
-    };
-    sections[OBJECT_SECTION_READ_ONLY_DATA] = (ObjectSection){
-        .name = S8(".rodata"),
-        .kind = OBJECT_SECTION_READ_ONLY_DATA,
-        .alignment = 8,
-    };
-    sections[OBJECT_SECTION_DATA] = (ObjectSection){
-        .name = S8(".data"),
-        .kind = OBJECT_SECTION_DATA,
-        .alignment = 8,
-    };
-    sections[OBJECT_SECTION_THREAD_LOCAL_DATA] = (ObjectSection){
-        .name = S8(".tdata"),
-        .kind = OBJECT_SECTION_THREAD_LOCAL_DATA,
-        .alignment = 8,
-    };
-    sections[OBJECT_SECTION_THREAD_LOCAL_ZERO] = (ObjectSection){
-        .name = S8(".tbss"),
-        .kind = OBJECT_SECTION_THREAD_LOCAL_ZERO,
-        .alignment = 8,
-    };
-    sections[OBJECT_SECTION_DEBUG_INFO] = (ObjectSection){
-        .name = S8(".debug_info"),
-        .kind = OBJECT_SECTION_DEBUG_INFO,
-        .alignment = 1,
-    };
-    sections[OBJECT_SECTION_DEBUG_ABBREV] = (ObjectSection){
-        .name = S8(".debug_abbrev"),
-        .kind = OBJECT_SECTION_DEBUG_ABBREV,
-        .alignment = 1,
-    };
-    sections[OBJECT_SECTION_DEBUG_LINE] = (ObjectSection){
-        .name = S8(".debug_line"),
-        .kind = OBJECT_SECTION_DEBUG_LINE,
-        .alignment = 1,
-    };
-    sections[OBJECT_SECTION_DEBUG_STR] = (ObjectSection){
-        .name = S8(".debug_str"),
-        .kind = OBJECT_SECTION_DEBUG_STR,
-        .alignment = 1,
-    };
+    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+    {
+        sections[kind] = (ObjectSection){
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
+            .kind = (ObjectSectionKind)kind,
+            .alignment = object_section_default_alignment((ObjectSectionKind)kind),
+        };
+    }
+    sections[OBJECT_SECTION_TEXT].data = text;
     return (ObjectFile){
         .sections = sections,
         .symbols = symbols,
@@ -3601,6 +3660,89 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                          .entry_symbol = S8("main"),
                                                                                      });
     BUSTER_TEST(arguments, aarch64_mach_libc_executable.error == LINK_ERROR_NONE);
+    // Debug sections must reach the Mach-O image in an unmapped __DWARF
+    // segment, with their address relocations resolved statically.
+    ObjectFile mach_debug_object = aarch64_mach_object;
+    ObjectSection* mach_debug_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
+    memcpy(mach_debug_sections, mach_debug_object.sections, OBJECT_SECTION_COUNT * sizeof(*mach_debug_sections));
+    mach_debug_object.sections = mach_debug_sections;
+    u8 mach_debug_info[16] = {0};
+    u8 mach_debug_line[8] = {0};
+    mach_debug_sections[OBJECT_SECTION_DEBUG_INFO].data = (ByteSlice){
+        .pointer = mach_debug_info,
+        .length = sizeof(mach_debug_info),
+    };
+    mach_debug_sections[OBJECT_SECTION_DEBUG_LINE].data = (ByteSlice){
+        .pointer = mach_debug_line,
+        .length = sizeof(mach_debug_line),
+    };
+    ObjectRelocation mach_debug_relocation = {
+        .offset = 0,
+        .section = OBJECT_SECTION_DEBUG_INFO,
+        .symbol = 0,
+        .kind = OBJECT_RELOCATION_ABSOLUTE64,
+    };
+    mach_debug_object.relocations = &mach_debug_relocation;
+    mach_debug_object.relocation_count = 1;
+    NativeExecutableLinkResult mach_debug_executable = link_native_executable(arguments->arena, &mach_debug_object,
+                                                                             (NativeExecutableLinkOptions){
+                                                                                 .entry_symbol = S8("main"),
+                                                                             });
+    BUSTER_TEST(arguments, mach_debug_executable.error == LINK_ERROR_NONE);
+    if (mach_debug_executable.error == LINK_ERROR_NONE)
+    {
+        ByteSlice image = mach_debug_executable.executable;
+        BUSTER_TEST(arguments, image.length > 32 && link_read_u32(image.pointer, 0) == 0xfeedfacf);
+        u32 mach_command_count = link_read_u32(image.pointer, 16);
+        u64 mach_command = 32;
+        bool found_dwarf = false;
+        u64 dwarf_file_offset = 0;
+        u32 dwarf_section_count = 0;
+        for (u32 command_index = 0; command_index < mach_command_count && mach_command + 8 <= image.length; command_index += 1)
+        {
+            u32 command_kind = link_read_u32(image.pointer, mach_command);
+            u32 command_length = link_read_u32(image.pointer, mach_command + 4);
+            if (!command_length || mach_command + command_length > image.length)
+            {
+                break;
+            }
+            if (command_kind == 0x19 && memcmp(image.pointer + mach_command + 8, "__DWARF", 8) == 0)
+            {
+                found_dwarf = true;
+                dwarf_file_offset = link_read_u64(image.pointer, mach_command + 40);
+                dwarf_section_count = link_read_u32(image.pointer, mach_command + 64);
+                // dyld rejects a segment whose file size exceeds its virtual
+                // size, so the debug segment covers its bytes with a page
+                // rounded read-only mapping.
+                BUSTER_TEST(arguments, link_read_u64(image.pointer, mach_command + 48) == sizeof(mach_debug_info) + sizeof(mach_debug_line));
+                BUSTER_TEST(arguments, link_read_u64(image.pointer, mach_command + 32) == 0x4000);
+                BUSTER_TEST(arguments, link_read_u64(image.pointer, mach_command + 24) == UINT64_C(0x100000000) + dwarf_file_offset);
+                BUSTER_TEST(arguments, link_read_u32(image.pointer, mach_command + 60) == 1);
+                for (u32 section_index = 0; section_index < dwarf_section_count; section_index += 1)
+                {
+                    u64 section_command = mach_command + 72 + (u64)section_index * 80;
+                    BUSTER_TEST(arguments, memcmp(image.pointer + section_command + 16, "__DWARF", 8) == 0);
+                    BUSTER_TEST(arguments, (link_read_u32(image.pointer, section_command + 64) & 0x02000000) != 0);
+                    // Sections must stay inside the address range of the
+                    // segment that carries them.
+                    BUSTER_TEST(arguments, link_read_u64(image.pointer, section_command + 32) ==
+                                               UINT64_C(0x100000000) + link_read_u32(image.pointer, section_command + 48));
+                }
+            }
+            mach_command += command_length;
+        }
+        BUSTER_TEST(arguments, found_dwarf);
+        BUSTER_TEST(arguments, dwarf_section_count == 4);
+        // The kernel loader refuses images with segments that are not page
+        // aligned in the file.
+        BUSTER_TEST(arguments, dwarf_file_offset % 0x4000 == 0);
+        // The resolved slot must hold the link-time address of "main".
+        BUSTER_TEST(arguments, dwarf_file_offset + 8 <= image.length);
+        if (dwarf_file_offset + 8 <= image.length)
+        {
+            BUSTER_TEST(arguments, link_read_u64(image.pointer, dwarf_file_offset) >= UINT64_C(0x100000000));
+        }
+    }
     ObjectFile ios_mach_object = aarch64_mach_object;
     ios_mach_object.target.os = OPERATING_SYSTEM_IOS;
     String8 ios_mach_output_path = link_test_temporary_executable_path(arguments->arena, S8("buster-native-ios-macho-test"), S8(""));

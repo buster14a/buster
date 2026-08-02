@@ -3314,9 +3314,9 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(X64Builder* builder, IrBlockId blo
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 code_offset, u32 source, u32 line, u32 column)
+BUSTER_GLOBAL_LOCAL void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column)
 {
-    if (!entries || !line)
+    if (!entries || !line || *count >= capacity)
     {
         return;
     }
@@ -3500,9 +3500,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, Analys
             }
         }
     }
-    CodegenLineEntry* line_entries = record_lines ? arena_allocate(arena, CodegenLineEntry, function->instruction_count + 1) : 0;
+    u32 line_entry_capacity = function->instruction_count + 1;
+    CodegenLineEntry* line_entries = record_lines ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
     u32 line_entry_count = 0;
-    codegen_record_line(line_entries, &line_entry_count, 0, 0, function->source.line, function->source.column);
+    codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, 0, 0, function->source.line, function->source.column);
     for (u32 block_index = 0; block_index < function->block_count && builder.buffer.error == CODEGEN_ERROR_NONE; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
@@ -3511,7 +3512,8 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, Analys
         {
             IrInstruction* emitted = function->instructions + id.value;
             // Parser lines are zero-based; recorded lines are one-based.
-            codegen_record_line(line_entries, &line_entry_count, (u32)builder.buffer.count, 0, emitted->source.line + 1, emitted->source.column + 1);
+            codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, (u32)builder.buffer.count, 0, emitted->source.line + 1,
+                                emitted->source.column + 1);
             if (!x64_emit_instruction(&builder, block->id, emitted))
             {
                 builder.buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
@@ -4512,9 +4514,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
             }
         }
     }
-    CodegenLineEntry* line_entries = record_lines ? arena_allocate(arena, CodegenLineEntry, function->instruction_count + 1) : 0;
+    u32 line_entry_capacity = function->instruction_count + 1;
+    CodegenLineEntry* line_entries = record_lines ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
     u32 line_entry_count = 0;
-    codegen_record_line(line_entries, &line_entry_count, 0, 0, function->source.line, function->source.column);
+    codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, 0, 0, function->source.line, function->source.column);
     for (u32 block_index = 0; block_index < function->block_count && buffer.error == CODEGEN_ERROR_NONE; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
@@ -4523,7 +4526,8 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
         {
             IrInstruction* instruction = function->instructions + id.value;
             // Parser lines are zero-based; recorded lines are one-based.
-            codegen_record_line(line_entries, &line_entry_count, (u32)buffer.count, 0, instruction->source.line + 1, instruction->source.column + 1);
+            codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, (u32)buffer.count, 0, instruction->source.line + 1,
+                                instruction->source.column + 1);
             switch (instruction->opcode)
             {
             case IR_OPCODE_LOCAL:
@@ -7610,7 +7614,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
     };
-    result.line_entries = options.debug_info ? arena_allocate(arena, CodegenLineEntry, instruction_count) : 0;
+    // Every function contributes a row for its own declaration on top of the
+    // per-instruction rows.
+    u32 line_entry_capacity = instruction_count + module->function_count;
+    result.line_entries = options.debug_info ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
     result.debug_info = options.debug_info;
     typedef struct CCanonicalBranchPatch CCanonicalBranchPatch;
     struct CCanonicalBranchPatch
@@ -7646,8 +7653,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         {
             // A row at the function start makes the prologue map to the
             // declaration line instead of falling outside the line table.
-            codegen_record_line(result.line_entries, &result.line_entry_count, (u32)buffer.count, function->source.source.value, function->source.line,
-                                function->source.column);
+            codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count, function->source.source.value,
+                                function->source.line, function->source.column);
         }
         IrBlock* entry = function->blocks + function->entry.value;
         if (entry->first_instruction.value >= function->instruction_count)
@@ -7896,8 +7903,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 }
                 if (instruction->canonical_source.source.value != IR_ID_UNDERLYING_INVALID)
                 {
-                    codegen_record_line(result.line_entries, &result.line_entry_count, (u32)buffer.count, instruction->canonical_source.source.value,
-                                        instruction->canonical_source.line, instruction->canonical_source.column);
+                    codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
+                                        instruction->canonical_source.source.value, instruction->canonical_source.line, instruction->canonical_source.column);
                 }
                 if (x64_upper_vector_dirty && !codegen_canonical_x64_instruction_preserves_wide_vector(program, instruction) &&
                     !codegen_canonical_x64_instruction_uses_wide_vector(program, function, instruction, target))
@@ -13004,6 +13011,17 @@ BUSTER_GLOBAL_LOCAL CodegenModuleEntry* codegen_test_module_entry_find(CodegenMo
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    // Line rows must stop at the capacity of the array they are recorded
+    // into: rows are appended while code is emitted, so running past the end
+    // corrupts the arena allocations that follow and changes the code.
+    CodegenLineEntry line_rows[3] = {0};
+    u32 line_row_count = 0;
+    for (u32 line_index = 0; line_index < 8; line_index += 1)
+    {
+        codegen_record_line(line_rows, &line_row_count, 2, line_index * 4, 0, line_index + 1, 1);
+    }
+    BUSTER_TEST(arguments, line_row_count == 2);
+    BUSTER_TEST(arguments, line_rows[2].line == 0 && line_rows[2].code_offset == 0);
     u8 large_frame_operation_bytes[256] = {0};
     CodegenBuffer large_frame_operation = {
         .bytes = large_frame_operation_bytes,

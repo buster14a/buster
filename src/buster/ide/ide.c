@@ -48,6 +48,8 @@
 #include <buster/compiler/ir/interpreter.c>
 #include <buster/compiler/codegen/codegen.c>
 #include <buster/compiler/dwarf/dwarf.c>
+#include <buster/compiler/codeview/codeview.c>
+#include <buster/compiler/pdb/pdb.c>
 #include <buster/compiler/object/object.c>
 #include <buster/compiler/link/link.c>
 #include <buster/compiler/driver/driver.c>
@@ -233,6 +235,7 @@ ProcessResult process_arguments(void)
                 break;
             }
             ide_state.compile = true;
+            ide_state.compile_debug_info = true;
             i += 1;
             ide_state.compile_source_path = arguments.pointer[i];
         }
@@ -260,9 +263,9 @@ ProcessResult process_arguments(void)
             break;
 #endif
         }
-        else if (string_equal(arg, S8("-g")) && ide_state.compile)
+        else if ((string_equal(arg, S8("-g")) || string_equal(arg, S8("-g0"))) && ide_state.compile)
         {
-            ide_state.compile_debug_info = true;
+            ide_state.compile_debug_info = !string_equal(arg, S8("-g0"));
         }
         else if (string_equal(arg, S8("-o")) && ide_state.compile)
         {

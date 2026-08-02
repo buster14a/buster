@@ -103,6 +103,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         .language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
         .action = COMPILER_DRIVER_ACTION_LINK,
         .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
+        .debug_info = true,
     };
     if (!arena)
     {
@@ -2079,6 +2080,29 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         FileMapRead cross_map = file_map_read(cross_temp.arena, cross_object_path, (FileReadOptions){0});
         ByteSlice cross_bytes = cross_map.bytes;
         BUSTER_TEST(arguments, cross_bytes.length != 0);
+        // Debug sections and their relocations must survive a round trip
+        // through every object format, or linking a previously compiled
+        // object back in fails.
+        BUSTER_TEST(arguments, cross.has_object);
+        if (cross.has_object)
+        {
+            ObjectFile cross_round_trip = object_read(cross_temp.arena, cross_bytes, cross.object.target);
+            BUSTER_TEST(arguments, cross_round_trip.error == OBJECT_ERROR_NONE);
+            if (cross_round_trip.error == OBJECT_ERROR_NONE)
+            {
+                bool debug_found = false;
+                for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+                {
+                    if (!object_section_kind_is_debug((ObjectSectionKind)kind))
+                    {
+                        continue;
+                    }
+                    BUSTER_TEST(arguments, cross_round_trip.sections[kind].data.length == cross.object.sections[kind].data.length);
+                    debug_found = debug_found || cross_round_trip.sections[kind].data.length != 0;
+                }
+                BUSTER_TEST(arguments, debug_found);
+            }
+        }
         file_map_unmap(cross_map);
         String8 fixed_enum_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-fixed-enum"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
@@ -2217,6 +2241,101 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessWaitResult c_wait = os_process_wait_sync(arguments->arena, c_spawn);
             BUSTER_TEST(arguments, c_wait.result == PROCESS_RESULT_SUCCESS);
         }
+    }
+    // Windows targets must select CodeView rather than DWARF: the COFF object
+    // carries .debug$S/.debug$T with SECREL32/SECTION relocations, and no
+    // DWARF sections at all.
+    {
+        TemporalArena codeview_temporary = scratch_begin(&arguments->arena, 1);
+        String8 codeview_object_path = buster_test_temporary_path(codeview_temporary.arena, S8("buster-c-codeview"), S8(".o"));
+        String8 codeview_command_line[] = {
+            S8("-target"), S8("x86_64-windows"), S8("-c"), S8("-o"), codeview_object_path, S8("tests/basic_c_operations.c"),
+        };
+        CompilerDriverResult codeview_compile = compiler_driver_execute_invocation(
+            codeview_temporary.arena, compiler_driver_parse_arguments(codeview_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(codeview_command_line)));
+        BUSTER_TEST(arguments, codeview_compile.error == COMPILER_DRIVER_ERROR_NONE);
+        if (codeview_compile.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, codeview_compile.has_object);
+            ObjectFile* codeview_object = &codeview_compile.object;
+            ByteSlice codeview_symbols = codeview_object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data;
+            ByteSlice codeview_types = codeview_object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data;
+            BUSTER_TEST(arguments, codeview_symbols.length > 16);
+            BUSTER_TEST(arguments, codeview_types.length == 4);
+            BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_DEBUG_INFO].data.length == 0);
+            BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_DEBUG_LINE].data.length == 0);
+            u32 codeview_signature = 0;
+            memcpy(&codeview_signature, codeview_symbols.pointer, sizeof(codeview_signature));
+            BUSTER_TEST(arguments, codeview_signature == 4);
+            u32 secrel_count = 0;
+            u32 section_count = 0;
+            for (u32 relocation_index = 0; relocation_index < codeview_object->relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation relocation = codeview_object->relocations[relocation_index];
+                if (relocation.section != OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS)
+                {
+                    continue;
+                }
+                secrel_count += relocation.kind == OBJECT_RELOCATION_COFF_SECREL32;
+                section_count += relocation.kind == OBJECT_RELOCATION_COFF_SECTION16;
+                BUSTER_TEST(arguments, relocation.symbol < codeview_object->symbol_count);
+                BUSTER_TEST(arguments, relocation.offset + 2 <= codeview_symbols.length);
+            }
+            // Each function contributes a procedure record and a line block,
+            // each needing one section-relative and one section-index slot.
+            BUSTER_TEST(arguments, secrel_count != 0 && secrel_count == section_count);
+            BUSTER_TEST(arguments, secrel_count % 2 == 0);
+        }
+        scratch_end(codeview_temporary);
+    }
+    // Recording line rows must not change the code that is generated for
+    // them: the machine code has to be identical with and without -g.
+    {
+        TemporalArena debug_parity_temporary = scratch_begin(&arguments->arena, 1);
+        String8 debug_parity_targets[] = {
+            S8("x86_64-unknown-linux-gnu"),
+            S8("aarch64-apple-macos"),
+        };
+        String8 debug_parity_sources[] = {
+            S8("tests/basic_c_operations.c"),
+            S8("tests/basic_c_archive_bias.c"),
+            S8("tests/basic_c_multi_add.c"),
+        };
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(debug_parity_targets); target_index += 1)
+        {
+            for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(debug_parity_sources); source_index += 1)
+            {
+                String8 source = debug_parity_sources[source_index];
+                String8 debug_command_line[] = {
+                    S8("-c"), S8("-g"), S8("-target"), debug_parity_targets[target_index], source,
+                };
+                String8 stripped_command_line[] = {
+                    S8("-c"), S8("-g0"), S8("-target"), debug_parity_targets[target_index], source,
+                };
+                CompilerDriverResult with_debug = compiler_driver_execute_invocation(
+                    debug_parity_temporary.arena,
+                    compiler_driver_parse_arguments(debug_parity_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(debug_command_line)));
+                CompilerDriverResult without_debug = compiler_driver_execute_invocation(
+                    debug_parity_temporary.arena,
+                    compiler_driver_parse_arguments(debug_parity_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(stripped_command_line)));
+                BUSTER_TEST(arguments, with_debug.error == COMPILER_DRIVER_ERROR_NONE && with_debug.has_object);
+                BUSTER_TEST(arguments, without_debug.error == COMPILER_DRIVER_ERROR_NONE && without_debug.has_object);
+                if (with_debug.has_object && without_debug.has_object)
+                {
+                    ByteSlice debug_text = with_debug.object.sections[OBJECT_SECTION_TEXT].data;
+                    ByteSlice stripped_text = without_debug.object.sections[OBJECT_SECTION_TEXT].data;
+                    BUSTER_TEST(arguments, debug_text.length != 0);
+                    BUSTER_TEST(arguments, debug_text.length == stripped_text.length);
+                    if (debug_text.length == stripped_text.length)
+                    {
+                        BUSTER_TEST(arguments, memcmp(debug_text.pointer, stripped_text.pointer, debug_text.length) == 0);
+                    }
+                    BUSTER_TEST(arguments, with_debug.object.sections[OBJECT_SECTION_DEBUG_LINE].data.length != 0);
+                    BUSTER_TEST(arguments, without_debug.object.sections[OBJECT_SECTION_DEBUG_LINE].data.length == 0);
+                }
+            }
+        }
+        scratch_end(debug_parity_temporary);
     }
 #if BUSTER_LINUX
     // -g must produce loadable executables that carry DWARF line and info

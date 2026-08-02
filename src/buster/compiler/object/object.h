@@ -2,6 +2,7 @@
 
 #include <buster/compiler/codegen/codegen.h>
 #include <buster/compiler/dwarf/dwarf.h>
+#include <buster/compiler/codeview/codeview.h>
 
 typedef enum ObjectFormat
 {
@@ -33,10 +34,14 @@ typedef enum ObjectSectionKind
     OBJECT_SECTION_DEBUG_ABBREV,
     OBJECT_SECTION_DEBUG_LINE,
     OBJECT_SECTION_DEBUG_STR,
+    OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
+    OBJECT_SECTION_DEBUG_CODEVIEW_TYPES,
     OBJECT_SECTION_COUNT,
 } ObjectSectionKind;
 
 BUSTER_F_DECL bool object_section_kind_is_debug(ObjectSectionKind kind);
+BUSTER_F_DECL String8 object_section_name_for_kind(ObjectSectionKind kind);
+BUSTER_F_DECL u32 object_section_default_alignment(ObjectSectionKind kind);
 
 typedef enum ObjectSymbolKind
 {
@@ -51,6 +56,8 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_CALL26,
     OBJECT_RELOCATION_ABSOLUTE64,
     OBJECT_RELOCATION_ABSOLUTE32,
+    OBJECT_RELOCATION_COFF_SECREL32,
+    OBJECT_RELOCATION_COFF_SECTION16,
     OBJECT_RELOCATION_X86_64_TPOFF32,
     OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32,
     OBJECT_RELOCATION_PE_TLS_OFFSET32,
