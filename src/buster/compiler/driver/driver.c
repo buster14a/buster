@@ -1033,12 +1033,6 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         goto end;
     }
-    if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
-    {
-        result.error = COMPILER_DRIVER_ERROR_CODEGEN;
-        result.diagnostic = S8("textual assembly output is not implemented yet");
-        goto end;
-    }
     CIRLowerResult lowered = c_lower_to_ir(arena, invocation.input_paths[0], preprocess, parse, invocation.target);
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     if (!lowered.program || lowered.diagnostic_count)
@@ -1134,6 +1128,22 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     result.object = object;
     result.has_object = true;
+    if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
+    {
+        result.output = object_print_assembly(arena, &object);
+        if (!result.output.length)
+        {
+            result.error = COMPILER_DRIVER_ERROR_OBJECT;
+            result.diagnostic = S8("could not format native object as textual assembly");
+            return result;
+        }
+        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        {
+            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
+        }
+        return result;
+    }
     if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
     {
         if (suppress_object_write)
@@ -1219,10 +1229,11 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             return result;
         }
     }
-    if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT && invocation.output_path.length)
+    if ((invocation.action == COMPILER_DRIVER_ACTION_OBJECT || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY) && invocation.output_path.length)
     {
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        result.diagnostic = S8("cannot specify -o with -c and multiple input files");
+        result.diagnostic = invocation.action == COMPILER_DRIVER_ACTION_OBJECT ? S8("cannot specify -o with -c and multiple input files")
+                                                                                : S8("cannot specify -o with -S and multiple input files");
         return result;
     }
     ObjectArchive* input_archives = arena_allocate(arena, ObjectArchive, invocation.input_count);
@@ -1476,6 +1487,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.error = COMPILER_DRIVER_ERROR_FILE_READ;
             result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
         }
+        return result;
+    }
+    if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
+    {
+        result.output = string_join_arena(arena,
+                                          (SliceString8){
+                                              .pointer = preprocessed,
+                                              .length = invocation.input_count,
+                                          },
+                                          false);
         return result;
     }
     if (invocation.action != COMPILER_DRIVER_ACTION_LINK)
@@ -1834,6 +1855,73 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverResult syntax = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command_line)));
     BUSTER_TEST(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 assembly_command_line[] = {
+        S8("-S"),
+        S8("-target"),
+        S8("x86_64-unknown-linux-gnu"),
+        S8("tests/basic_c_compile.c"),
+    };
+    CompilerDriverResult assembly = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_command_line)));
+    BUSTER_TEST(arguments, assembly.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, assembly.output.length != 0);
+    BUSTER_TEST(arguments, string_first_sequence(assembly.output, S8("\t.intel_syntax noprefix\n")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(assembly.output, S8("\t.text\n")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(assembly.output, S8("main:\n")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(assembly.output, S8("\tpush rbp\n")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(assembly.output, S8("\tmov rbp, rsp\n")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(assembly.output, S8("\t.byte ")) != BUSTER_STRING_NO_MATCH);
+    String8 assembly_c23_command_line[] = {
+        S8("-S"), S8("-std=c23"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_constexpr.c"),
+    };
+    CompilerDriverResult assembly_c23 = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_c23_command_line)));
+    BUSTER_TEST(arguments, assembly_c23.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, string_first_sequence(assembly_c23.output, S8("[rip + \"offset\"]")) != BUSTER_STRING_NO_MATCH);
+    String8 assembly_tls_command_line[] = {
+        S8("-S"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_thread_local.c"),
+    };
+    CompilerDriverResult assembly_tls = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_tls_command_line)));
+    BUSTER_TEST(arguments, assembly_tls.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, string_first_sequence(assembly_tls.output, S8("@TPOFF")) != BUSTER_STRING_NO_MATCH);
+    String8 assembly_aarch64_command_line[] = {
+        S8("-S"),
+        S8("-target"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("tests/basic_c_compile.c"),
+    };
+    CompilerDriverResult assembly_aarch64 = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_aarch64_command_line)));
+    BUSTER_TEST(arguments, assembly_aarch64.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, string_first_sequence(assembly_aarch64.output, S8("\tstp x29, x30")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(assembly_aarch64.output, S8("\tret\n")) != BUSTER_STRING_NO_MATCH);
+    String8 assembly_multi_command_line[] = {
+        S8("-S"),
+        S8("tests/basic_c_multi_main.c"),
+        S8("tests/basic_c_multi_add.c"),
+    };
+    CompilerDriverResult assembly_multi = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_multi_command_line)));
+    BUSTER_TEST(arguments, assembly_multi.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, string_first_sequence(assembly_multi.output, S8("main:\n")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(assembly_multi.output, S8("add_values:\n")) != BUSTER_STRING_NO_MATCH);
+    String8 assembly_output_path = buster_test_temporary_path(arguments->arena, S8("buster-c-assembly"), S8(".s"));
+    String8 assembly_file_command_line[] = {
+        S8("-S"),
+        S8("-o"),
+        assembly_output_path,
+        S8("tests/basic_c_compile.c"),
+    };
+    CompilerDriverResult assembly_file = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_file_command_line)));
+    BUSTER_TEST(arguments, assembly_file.error == COMPILER_DRIVER_ERROR_NONE);
+    ByteSlice assembly_file_bytes = file_read(arguments->arena, assembly_output_path, (FileReadOptions){0});
+    BUSTER_TEST(arguments, assembly_file_bytes.length == assembly_file.output.length);
+    if (assembly_file_bytes.length == assembly_file.output.length)
+    {
+        BUSTER_TEST(arguments, memcmp(assembly_file_bytes.pointer, assembly_file.output.pointer, assembly_file.output.length) == 0);
+    }
     String8 dialect_flags[] = {
         S8("-std=gnu11"), S8("-std=gnu17"), S8("-std=gnu23"), S8("-std=c11"), S8("-std=c17"), S8("-std=c23"),
     };

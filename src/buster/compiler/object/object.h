@@ -133,6 +133,7 @@ struct ObjectExecutable
 BUSTER_F_DECL ObjectFormat object_format_for_target(Target target);
 BUSTER_F_DECL ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, CodegenModule* module, Target target);
 BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target);
+BUSTER_F_DECL String8 object_print_assembly(Arena* arena, ObjectFile* object);
 BUSTER_F_DECL ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format);
 BUSTER_F_DECL ObjectFile object_read(Arena* arena, ByteSlice bytes, Target target);
 BUSTER_F_DECL ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target);
