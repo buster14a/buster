@@ -713,7 +713,7 @@ endif()
 
 set(COMMON_EXTENSION ".c")
 
-set(BUSTER_SOURCE_DIR "src/buster")
+set(BUSTER_SOURCE_DIR "src/buster/lib")
 
 function(buster_normalize_module_name out_var module)
     string(TOUPPER "${module}" module_key)
@@ -814,7 +814,7 @@ buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
 buster_register_module(x86_64 "${BUSTER_SOURCE_DIR}/x86_64${COMMON_EXTENSION}")
 buster_register_module(aarch64 "${BUSTER_SOURCE_DIR}/aarch64${COMMON_EXTENSION}")
-buster_register_module(test "${BUSTER_SOURCE_DIR}/test${COMMON_EXTENSION}")
+buster_register_module(test "src/buster/tests/test${COMMON_EXTENSION}")
 buster_register_module(time "${BUSTER_SOURCE_DIR}/time${COMMON_EXTENSION}")
 buster_register_module(ui_core "${BUSTER_SOURCE_DIR}/ui_core${COMMON_EXTENSION}")
 buster_register_module(ui_builder "${BUSTER_SOURCE_DIR}/ui_builder${COMMON_EXTENSION}")
@@ -823,6 +823,53 @@ buster_register_module(rendering "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSI
 buster_register_module(truetype "${BUSTER_SOURCE_DIR}/truetype${COMMON_EXTENSION}")
 buster_register_module(font_provider "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
 buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
+
+# Include-only module tests stay visible to IDEs without becoming independent
+# translation units. test.c includes the sources when tests are enabled.
+set(BUSTER_TEST_FILES
+    src/buster/tests/test.h
+    src/buster/tests/arena_test.c
+    src/buster/tests/arena_test.h
+    src/buster/tests/hash_test.c
+    src/buster/tests/hash_test.h
+    src/buster/tests/string_test.c
+    src/buster/tests/string_test.h
+    src/buster/tests/os_test.c
+    src/buster/tests/os_test.h
+    src/buster/tests/file_test.c
+    src/buster/tests/file_test.h
+    src/buster/tests/target_test.c
+    src/buster/tests/target_test.h
+    src/buster/tests/x86_64_test.c
+    src/buster/tests/x86_64_test.h
+    src/buster/tests/compiler/frontend/buster/parser_test.c
+    src/buster/tests/compiler/frontend/buster/parser_test.h
+    src/buster/tests/compiler/frontend/buster/analysis_test.c
+    src/buster/tests/compiler/frontend/buster/analysis_test.h
+    src/buster/tests/compiler/frontend/c/c_test.c
+    src/buster/tests/compiler/frontend/c/c_test.h
+    src/buster/tests/compiler/ir/ir_test.c
+    src/buster/tests/compiler/ir/ir_test.h
+    src/buster/tests/compiler/ir/interpreter_test.c
+    src/buster/tests/compiler/ir/interpreter_test.h
+    src/buster/tests/compiler/codegen/codegen_test.c
+    src/buster/tests/compiler/codegen/codegen_test.h
+    src/buster/tests/compiler/debug/debug_test.c
+    src/buster/tests/compiler/debug/debug_test.h
+    src/buster/tests/compiler/dwarf/dwarf_test.c
+    src/buster/tests/compiler/dwarf/dwarf_test.h
+    src/buster/tests/compiler/codeview/codeview_test.c
+    src/buster/tests/compiler/codeview/codeview_test.h
+    src/buster/tests/compiler/pdb/pdb_test.c
+    src/buster/tests/compiler/pdb/pdb_test.h
+    src/buster/tests/compiler/object/object_test.c
+    src/buster/tests/compiler/object/object_test.h
+    src/buster/tests/compiler/link/link_test.c
+    src/buster/tests/compiler/link/link_test.h
+    src/buster/tests/compiler/driver/driver_test.c
+    src/buster/tests/compiler/driver/driver_test.h
+)
+set_source_files_properties(${BUSTER_TEST_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 
 set(GNU_FAMILY_OPTIONS
     -fwrapv
@@ -1032,10 +1079,10 @@ if (NOT WIN32 AND BUSTER_SANITIZE)
     list(APPEND BUSTER_APP_TEST_ENV "ASAN_OPTIONS=${BUSTER_ASAN_OPTIONS}:alloc_dealloc_mismatch=0")
 endif()
 
-set(BUSTER_SHADER_SOURCE_DIR "${CMAKE_SOURCE_DIR}/src/buster/shaders")
+set(BUSTER_SHADER_SOURCE_DIR "${CMAKE_SOURCE_DIR}/src/buster/lib/shaders")
 set(BUSTER_SHADER_BINARY_DIR "${CMAKE_BINARY_DIR}/shaders")
 set(BUSTER_SHADER_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated")
-set(BUSTER_SHADER_GENERATED_HEADER_DIR "${BUSTER_SHADER_GENERATED_INCLUDE_DIR}/buster/shaders")
+set(BUSTER_SHADER_GENERATED_HEADER_DIR "${BUSTER_SHADER_GENERATED_INCLUDE_DIR}/buster/lib/shaders")
 set(BUSTER_SHADER_GENERATED_PATH_HEADER "${BUSTER_SHADER_GENERATED_HEADER_DIR}/paths.h")
 set(BUSTER_RECT_TEXTURE_SLOT_COUNT 2)
 
@@ -1192,7 +1239,7 @@ function(buster_embed_d3d12_shaders out_var vertex_source pixel_source output_na
 endfunction()
 
 set(BUSTER_SHADER_SOURCES
-    src/buster/shaders/rect.slang
+    src/buster/lib/shaders/rect.slang
 )
 
 set(BUSTER_RECT_VERTEX_SHADER_BINARY "${BUSTER_SHADER_BINARY_DIR}/rect.vert.spv")
@@ -1212,8 +1259,8 @@ if (BUSTER_USE_VULKAN AND BUSTER_COMPILE_SHADERS)
     message(STATUS "BUSTER_VULKAN_INCLUDE_DIR: ${BUSTER_VULKAN_INCLUDE_DIR}")
 
     message(STATUS "BUSTER_SLANGC_EXECUTABLE: ${BUSTER_SLANGC_EXECUTABLE}")
-    buster_compile_slang_spirv(BUSTER_RECT_VERTEX_SHADER_BINARY src/buster/shaders/rect.slang vs_main vertex rect.vert.spv)
-    buster_compile_slang_spirv(BUSTER_RECT_FRAGMENT_SHADER_BINARY src/buster/shaders/rect.slang ps_main fragment rect.frag.spv)
+    buster_compile_slang_spirv(BUSTER_RECT_VERTEX_SHADER_BINARY src/buster/lib/shaders/rect.slang vs_main vertex rect.vert.spv)
+    buster_compile_slang_spirv(BUSTER_RECT_FRAGMENT_SHADER_BINARY src/buster/lib/shaders/rect.slang ps_main fragment rect.frag.spv)
 
     list(APPEND BUSTER_SHADER_TARGET_DEPENDS
         "${BUSTER_RECT_VERTEX_SHADER_BINARY}"
@@ -1222,8 +1269,8 @@ if (BUSTER_USE_VULKAN AND BUSTER_COMPILE_SHADERS)
 endif()
 
 if (BUSTER_USE_METAL AND BUSTER_COMPILE_SHADERS)
-    buster_compile_slang_metal(BUSTER_RECT_METAL_VERTEX_SHADER_SOURCE src/buster/shaders/rect.slang rect_vs vertex rect.vert.metal)
-    buster_compile_slang_metal(BUSTER_RECT_METAL_FRAGMENT_SHADER_SOURCE src/buster/shaders/rect.slang rect_fs fragment rect.frag.metal)
+    buster_compile_slang_metal(BUSTER_RECT_METAL_VERTEX_SHADER_SOURCE src/buster/lib/shaders/rect.slang rect_vs vertex rect.vert.metal)
+    buster_compile_slang_metal(BUSTER_RECT_METAL_FRAGMENT_SHADER_SOURCE src/buster/lib/shaders/rect.slang rect_fs fragment rect.frag.metal)
     buster_embed_metal_shaders(BUSTER_RECT_METAL_SHADER_HEADER "${BUSTER_RECT_METAL_VERTEX_SHADER_SOURCE}" "${BUSTER_RECT_METAL_FRAGMENT_SHADER_SOURCE}" metal.h)
     list(APPEND BUSTER_SHADER_TARGET_DEPENDS
         "${BUSTER_RECT_METAL_SHADER_HEADER}"
@@ -1231,8 +1278,8 @@ if (BUSTER_USE_METAL AND BUSTER_COMPILE_SHADERS)
 endif()
 
 if (BUSTER_USE_D3D12 AND BUSTER_COMPILE_SHADERS)
-    buster_compile_slang_hlsl(BUSTER_RECT_D3D12_VERTEX_SHADER_SOURCE src/buster/shaders/rect.slang vs_main vertex rect.vert.hlsl)
-    buster_compile_slang_hlsl(BUSTER_RECT_D3D12_PIXEL_SHADER_SOURCE src/buster/shaders/rect.slang ps_main fragment rect.frag.hlsl)
+    buster_compile_slang_hlsl(BUSTER_RECT_D3D12_VERTEX_SHADER_SOURCE src/buster/lib/shaders/rect.slang vs_main vertex rect.vert.hlsl)
+    buster_compile_slang_hlsl(BUSTER_RECT_D3D12_PIXEL_SHADER_SOURCE src/buster/lib/shaders/rect.slang ps_main fragment rect.frag.hlsl)
     buster_embed_d3d12_shaders(BUSTER_RECT_D3D12_SHADER_HEADER "${BUSTER_RECT_D3D12_VERTEX_SHADER_SOURCE}" "${BUSTER_RECT_D3D12_PIXEL_SHADER_SOURCE}" d3d12.h)
     list(APPEND BUSTER_SHADER_TARGET_DEPENDS
         "${BUSTER_RECT_D3D12_SHADER_HEADER}"
@@ -1295,6 +1342,9 @@ function(executable_add name is_buster_program main_file)
         add_executable(${name} MACOSX_BUNDLE ${main_file})
     else()
         add_executable(${name} ${main_file})
+    endif()
+    if (${is_buster_program})
+        target_sources(${name} PRIVATE ${BUSTER_TEST_FILES})
     endif()
     foreach(target_source IN LISTS target_sources)
         if (IS_ABSOLUTE "${target_source}")
@@ -1426,7 +1476,7 @@ function(executable_add name is_buster_program main_file)
     endif()
 
     if (${uses_windows_clang_runtime_helpers} AND WIN32 AND C_COMPILER_CLANG AND NOT MINGW)
-        target_sources(${name} PRIVATE src/buster/sanitizer_coe_win.c)
+        target_sources(${name} PRIVATE src/buster/lib/sanitizer_coe_win.c)
         target_link_libraries(${name} PRIVATE dbghelp onecore synchronization)
         target_link_options(${name} PRIVATE "LINKER:/ignore:4217")
     endif()
@@ -1576,7 +1626,7 @@ function(buster_add_executable name main_file)
 endfunction()
 
 # buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
-buster_add_executable(ide src/buster/ide/ide.c
+buster_add_executable(ide src/buster/apps/ide/ide.c
     MODULES
     os
     entry_point

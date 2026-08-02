@@ -1,0 +1,26 @@
+#pragma once
+
+#include <buster/tests/test.h>
+#include <buster/lib/compiler/codeview/codeview.h>
+#include <buster/lib/string.h>
+
+enum
+{
+    CODEVIEW_TEST_SIGNATURE_C13 = 4,
+    CODEVIEW_TEST_SYMBOLS = 0xf1,
+    CODEVIEW_TEST_LINES = 0xf2,
+    CODEVIEW_TEST_STRINGTABLE = 0xf3,
+    CODEVIEW_TEST_FILECHKSMS = 0xf4,
+    CODEVIEW_TEST_S_LOCAL = 0x113e,
+    CODEVIEW_TEST_S_DEFRANGE_SUBFIELD = 0x1140,
+    CODEVIEW_TEST_S_GPROC32 = 0x1110,
+    CODEVIEW_TEST_S_DEFRANGE_REGISTER = 0x1141,
+    CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
+    CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
+    CODEVIEW_TEST_S_INLINESITE = 0x114d,
+};
+
+#define CODEVIEW_TEST_LINE_STATEMENT 0x80000000u
+#define CODEVIEW_TEST_LINE_NUMBER_MASK 0x00ffffffu
+
+BUSTER_TEST_F_DECL UnitTestResult codeview_tests(UnitTestArguments* arguments);

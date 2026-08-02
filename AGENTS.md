@@ -36,8 +36,8 @@ expanded equivalent is:
 
 ```sh
 ./build.sh build --config Release -t ide
-build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/ide/ide.c -o build/ide-self
-build/ide-self cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/ide/ide.c -o build/ide-self-stage2
+build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -o build/ide-self
+build/ide-self cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -o build/ide-self-stage2
 cmp build/ide-self build/ide-self-stage2
 build/ide-self-stage2 bench
 ```
@@ -112,16 +112,25 @@ enabled.
 
 - All tests use the `ide` executable with no external test framework.
   `test_all` runs `ide test --verbose=1`, which calls `library_tests()` in
-  `src/buster/test.c`; fuzz-capable builds then run their bounded fuzz session
+  `src/buster/tests/test.c`; fuzz-capable builds then run their bounded fuzz session
   in that process. Desktop CI runs the IDE window/rendering path separately as
   `ide test_app --verbose=1 --ci=1`, so external Vulkan/LLVM sanitizer policy
   cannot weaken unit-test or fuzz coverage. Android and iOS retain the combined
   in-app test and counted graphical smoke-test flow.
+- Module tests live under `src/buster/tests/` as mirrored `*_test.c`/`*_test.h`
+  pairs. They are include-only sources: only `src/buster/tests/test.c`
+  includes the test headers and implementations, while `CMakeLists.txt` lists
+  them as `HEADER_FILE_ONLY` so IDEs can display them without compiling them as
+  independent translation units. Production sources expose only the narrow
+  seams needed by tests; `BUSTER_TEST_F_DECL` keeps those seams static in
+  production and unity builds and externally linkable in non-unity test builds.
+  Private data shared by codegen and interpreter tests belongs in their
+  `*_internal.h` headers under `src/buster/lib/`.
 - Run from the **repo root**: parser tests open `tests/*.bbb` by relative
   path.
 - To add a language test: drop a `.bbb` file in `tests/` **and** append it to
   the hardcoded `parser_file_test_cases` list in
-  `src/buster/compiler/frontend/buster/parser.c` (covered by
+  `src/buster/lib/compiler/frontend/buster/parser.c` (covered by
   `parser_file_tests()`). Valid fixtures must also be appended to
   `analysis_fixture_tests` in `analysis.c` with their exact semantic diagnostic
   count and to `ir_fixture_tests` in `ir.c`; this keeps the complete frontend
@@ -147,7 +156,7 @@ enabled.
   `parser_file_test_cases` corpus 200 times and prints one line,
   `BENCH parse_all_tests iterations=... files=... min_ns=... median_ns=...`.
   It's implemented by `parser_parse_bench()` in
-  `src/buster/compiler/frontend/buster/parser.c`, deliberately **not** gated
+  `src/buster/lib/compiler/frontend/buster/parser.c`, deliberately **not** gated
   behind `BUSTER_INCLUDE_TESTS` (it's a benchmark, not a test, and must stay
   buildable in Release) and deliberately independent of the windowing/
   rendering path `ide test` also drives, so it runs headless on a plain CI
@@ -210,7 +219,7 @@ enabled.
 `2026-08-02` (Linux x86_64, Release + Debug, with `--instrument --time-trace`):
 
 - `build/Release` compile time is currently dominated by the unity TU:
-  `CMakeFiles/ide.dir/Release/src/buster/ide/ide.c.o` at `20613 ms`
+  `CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o` at `20613 ms`
   in `ninja_log_summary build --limit 20`.
 - `build/Debug` split compilation hotspots (same summary):
   `parser.c.o` (`707 ms`), `codegen.c.o` (`582 ms`), `analysis.c.o` (`475 ms`),
@@ -261,19 +270,25 @@ enabled.
   `GNU_FAMILY_WARNINGS` in `CMakeLists.txt`), and code must stay clean under
   clang, gcc, tcc, zig cc, and MSVC. Avoid compiler-specific extensions
   unless guarded.
-- **Idioms**: arena allocation (`arena.h`) — no malloc/free churn;
-  `String8`/`S8("...")` (defined in `base.h`) — no C strings; `STRUCT(Name)`
+- **Idioms**: arena allocation (`<buster/lib/arena.h>`) — no malloc/free churn;
+  `String8`/`S8("...")` (defined in `<buster/lib/base.h>`) — no C strings; `STRUCT(Name)`
   declarations; `BUSTER_`-prefixed macros; 4-space indent, snake_case, braces
   on their own line. Prefer function headers, declarations, statements, and
   similar constructs on one line; split them only when doing so is clearer.
   Match the surrounding file.
-- **Adding a module** (`foo.c`/`foo.h` under `src/buster/`) takes three
+- Test implementations are not registered as modules and are not added to the
+  unity-build include list; add new test pairs under `src/buster/tests/`, add
+  them to the `BUSTER_TEST_FILES` `HEADER_FILE_ONLY` list in `CMakeLists.txt`,
+  and include them from `src/buster/tests/test.c` in the existing registration
+  order.
+- **Adding a module** (`foo.c`/`foo.h` under `src/buster/lib/`) takes three
   edits: (1) `buster_register_module(foo ...)` in `CMakeLists.txt`;
   (2) add `foo` to the `MODULES` list of `buster_add_executable(ide ...)`;
-  (3) add `#include <buster/foo.c>` to the `BUSTER_UNITY_BUILD` block at the
-  top of `src/buster/ide/ide.c` — optimized non-sanitized configs compile as
+  (3) add `#include <buster/lib/foo.c>` to the `BUSTER_UNITY_BUILD` block at
+  the top of `src/buster/apps/ide/ide.c` — optimized non-sanitized configs compile as
   unity builds, so forgetting this breaks ordinary Release builds.
-- Headers are included as `<buster/...>` (include root is `src/`).
+- Headers are included as `<buster/lib/...>` or `<buster/tests/...>` (include
+  root is `src/`).
   `compile_commands.json` is exported to `build/` by default.
 
 ## Platform and backend boundaries
@@ -281,8 +296,8 @@ enabled.
 - In rendering and windowing, keep platform-neutral policy and data flow in
   the module front door (`rendering.c`, `window.c`). Native API calls
   belong in the selected backend implementation.
-- Rendering backends live in `src/buster/rendering/*.c`; window backends
-  live in `src/buster/window/*.c`. These are implementation files
+- Rendering backends live in `src/buster/lib/rendering/*.c`; window backends
+  live in `src/buster/lib/window/*.c`. These are implementation files
   included by their owning module, not standalone CMake modules, so do not
   register them or add them to the unity-build include list.
 - Every backend `.c` includes its directory's `internal.h` before its
@@ -297,7 +312,7 @@ enabled.
 
 ## Parser rules
 
-The buster-language parser (`src/buster/compiler/frontend/buster/parser.c`)
+The buster-language parser (`src/buster/lib/compiler/frontend/buster/parser.c`)
 has hard design constraints:
 
 - **No recursion in C.** The parser is a state machine driven by an explicit,
@@ -462,16 +477,17 @@ Top level:
 | `build.c` / `build.sh` / `build.ps1` | Build driver (C, tcc-bootstrapped) and its POSIX/Windows bootstrap scripts. |
 | `CMakeLists.txt` | The real build definition: compiler detection, warning sets, sanitizer runtimes, shader compilation, module registry, targets, Android/iOS packaging. |
 | `cmake/` | `embed_d3d12_shaders.cmake`, `embed_metal_shaders.cmake` — turn compiled shaders into embeddable C data. |
-| `src/buster/` | All product source (see below). |
-| `tests/` | Compiler test corpus: `.bbb` programs + `assembly.S` for the asm frontend. Read at runtime by the test suite. |
-| `test/` | Empty placeholder; unused. |
+| `src/buster/apps/` | Application entrypoints and standalone tools. |
+| `src/buster/lib/` | Reusable runtime, UI, platform, compiler, and rendering code. |
+| `src/buster/tests/` | Include-only test harness and module test pairs. |
+| `tests/` | Runtime compiler fixture corpus: `.bbb` programs, C fixtures, and `assembly.S` for the asm frontend. Test implementations themselves live under `src/buster/tests/`. |
 | `android/`, `ios/` | Manifest/plist plus CI scripts to package, install, and run the on-device/simulator test suite. |
 | `.forgejo/workflows/ci.yml` | CI pipeline, including the per-platform `Perf` steps. |
 | `.forgejo/scripts/` | `perf_step.sh` (clean Debug/Release `ide` builds + separately run `bench_all`), `record_perf.sh` (perf-history compare/append/push — see Performance tracking above). |
 | `lsan.supp` | LeakSanitizer suppressions. |
 | `build/` | Generated build output (ninja files, per-config dirs, `compile_commands.json`, `build/build`). Never edit. |
 
-`src/buster/` — foundation modules (each `name.c` + `name.h`):
+`src/buster/lib/` — foundation modules (each `name.c` + `name.h`):
 
 | Path | Contents |
 |---|---|
@@ -480,7 +496,6 @@ Top level:
 | `apple_runtime.h` | Objective-C runtime includes and ABI-compatible scalar/geometry types shared by Apple windowing and Metal. |
 | `os.{c,h}`, `entry_point.{c,h}` | OS abstraction (processes, virtual memory) and per-platform entry glue (`main`, NativeActivity, UIKit). |
 | `arena.{c,h}`, `string.{c,h}`, `integer.{c,h}`, `float.{c,h}`, `hash.{c,h}`, `simd.{c,h}`, `file.{c,h}`, `time.{c,h}` | Arena allocator; `String8` operations and `string_print` (`{S8}` placeholders); numeric parse/format; hashing; SIMD; file IO; clocks. |
-| `test.{c,h}` | In-process test harness: `UnitTestArguments`, `BatchTestResult`, `library_tests()`. |
 
 UI / graphics:
 
@@ -492,7 +507,7 @@ UI / graphics:
 | `truetype.{c,h}`, `font_provider.{c,h}` | From-scratch TrueType rasterizer; system font discovery (fontconfig on Linux). |
 | `shaders/` | `rect.slang` (Slang source, compiled by `slangc`), `rect.vert`/`.frag` (GLSL fallback), and their shared `rect_shared.glsl` declarations. Android uses an SSBO vertex path (`BUSTER_VULKAN_VERTEX_SSBO`, Adreno workaround). |
 
-Compiler:
+Compiler (`src/buster/lib/compiler/`):
 
 | Path | Contents |
 |---|---|
@@ -507,15 +522,15 @@ Compiler:
 | `compiler/object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers; in-memory object linking. |
 | `compiler/link/link.{c,h}` | Multi-object section merging and symbol resolution; from-scratch libc-backed ELF64, PE32+, and Mach-O executable writers. |
 | `compiler/driver/driver.{c,h}` | End-to-end source-to-object compilation and libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported target, and multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset. |
-| `compiler/codegen/codegen.{c,h}` | Direct-IR ABI classification, native instruction emission, executable-memory support, and interpreter/native differential tests. |
-| `compiler/ir/interpreter.{c,h}` | Bounded, explicit-stack runtime IR interpreter and end-to-end execution tests. |
+| `compiler/codegen/codegen.{c,h}`, `compiler/codegen/codegen_internal.h` | Direct-IR ABI classification, native instruction emission, executable-memory support, and the private codegen test seam/types. Tests live in `codegen_test.{c,h}`. |
+| `compiler/ir/interpreter.{c,h}`, `compiler/ir/interpreter_internal.h` | Bounded, explicit-stack runtime IR interpreter and its private test seam/types. Tests live in `interpreter_test.{c,h}`. |
 | `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/ABI descriptions and per-arch instruction encoders. |
 
 Applications and standalone tools:
 
 | Path | Contents |
 |---|---|
-| `ide/ide.c` | Main application, the **only CMake executable target**, and the unity-build translation unit (the `BUSTER_UNITY_BUILD` include block at the top). |
-| `scrape_llvm.c`, `scrape_xed.c` | Standalone generators scraping LLVM TableGen / Intel XED data into C encoder tables. Not wired into CMake; compile manually. |
-| `disk_builder.c` | Standalone MBR/GPT disk-image builder. Not wired into CMake. |
-| `sanitizer_coe_win.c` | Windows continue-on-error sanitizer shim (raw `WriteFile` to stderr, no CRT). |
+| `apps/ide/ide.c` | Main application, the **only CMake executable target**, and the unity-build translation unit (the `BUSTER_UNITY_BUILD` include block at the top). |
+| `apps/scrape_llvm.c`, `apps/scrape_xed.c` | Standalone generators scraping LLVM TableGen / Intel XED data into C encoder tables. Not wired into CMake; compile manually. |
+| `apps/disk_builder.c` | Standalone MBR/GPT disk-image builder. Not wired into CMake. |
+| `lib/sanitizer_coe_win.c` | Windows continue-on-error sanitizer shim (raw `WriteFile` to stderr, no CRT). |

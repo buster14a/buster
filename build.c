@@ -1,24 +1,24 @@
 #define BUSTER_UNITY_BUILD 1
 #define BUSTER_SINGLE_THREADED 1
-#include <buster/base.h>
-#include <buster/os.h>
-#include <buster/entry_point.h>
-#include <buster/file.h>
-#include <buster/integer.h>
-#include <buster/string.h>
-#include <buster/target.h>
+#include <buster/lib/base.h>
+#include <buster/lib/os.h>
+#include <buster/lib/entry_point.h>
+#include <buster/lib/file.h>
+#include <buster/lib/integer.h>
+#include <buster/lib/string.h>
+#include <buster/lib/target.h>
 #include <stdio.h>
 #if BUSTER_LINUX || BUSTER_APPLE
 #include <dirent.h>
 #endif
 
-#include <buster/string.c>
-#include <buster/os.c>
-#include <buster/arena.c>
-#include <buster/file.c>
-#include <buster/integer.c>
-#include <buster/entry_point.c>
-#include <buster/target.c>
+#include <buster/lib/string.c>
+#include <buster/lib/os.c>
+#include <buster/lib/arena.c>
+#include <buster/lib/file.c>
+#include <buster/lib/integer.c>
+#include <buster/lib/entry_point.c>
+#include <buster/lib/target.c>
 
 typedef enum BuildCommand
 {
@@ -1058,7 +1058,7 @@ BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, S
 #else
     BUSTER_UNUSED(sysroot);
 #endif
-    os_argument_builder_append(&builder, S8("src/buster/ide/ide.c"));
+    os_argument_builder_append(&builder, S8("src/buster/apps/ide/ide.c"));
 #if BUSTER_MACOS
     String8 frameworks[] = {
         S8("AppKit"),

@@ -1,0 +1,98 @@
+#pragma once
+
+#include <buster/lib/compiler/codegen/codegen.h>
+
+typedef struct CodegenBuffer CodegenBuffer;
+struct CodegenBuffer
+{
+    u8* bytes;
+    u64 count;
+    u64 capacity;
+    u8* value_registers;
+    u8 allocated_register_base;
+    CodegenError error;
+};
+
+typedef struct CodegenRelocation CodegenRelocation;
+struct CodegenRelocation
+{
+    CodegenRelocation* next;
+    IrBlockId target;
+    u32 displacement_offset;
+};
+
+typedef enum X64Register
+{
+    X64_REGISTER_RAX,
+    X64_REGISTER_RCX,
+    X64_REGISTER_RDX,
+    X64_REGISTER_RBX,
+    X64_REGISTER_RSP,
+    X64_REGISTER_RBP,
+    X64_REGISTER_RSI,
+    X64_REGISTER_RDI,
+    X64_REGISTER_R8,
+    X64_REGISTER_R9,
+    X64_REGISTER_R10,
+    X64_REGISTER_R11,
+} X64Register;
+
+typedef struct X64Builder X64Builder;
+struct X64Builder
+{
+    Arena* arena;
+    AnalysisResult* analysis;
+    IrFunction* function;
+    CodegenBuffer buffer;
+    CodegenRelocation* first_relocation;
+    CodegenRelocation* last_relocation;
+    CodegenCallRelocation* first_call_relocation;
+    CodegenCallRelocation* last_call_relocation;
+    u32* block_offsets;
+    u32 frame_size;
+    u32 temporary_base;
+    u32 temporary_count;
+    u32 local_storage_base;
+    u32* value_storage_offsets;
+    u32* local_storage_offsets;
+    u8* value_registers;
+    u8* vector_registers;
+    s32 hidden_result_displacement;
+    s32 va_register_save_displacement;
+    CodegenAbiSignature signature;
+    CodegenAbi abi;
+    Target target;
+    CodegenBuffer read_only_data;
+    CodegenDataRelocation* first_data_relocation;
+    CodegenDataRelocation* last_data_relocation;
+    u32 native_vector_operation_count;
+    u32 split_vector_operation_count;
+    u32 vzeroupper_count;
+    u32 forwarded_wide_vector_load_count;
+    bool upper_vector_dirty;
+    IrValueId last_wide_vector_result;
+    u32 last_wide_vector_size;
+};
+
+BUSTER_TEST_F_DECL CodegenAbiSignature codegen_classify_signature_with_arguments(Arena* arena, AnalysisResult* analysis,
+                                                                                  AnalysisTypeId function_type_id, AnalysisTypeId* argument_types,
+                                                                                  u32 argument_count, Target target);
+BUSTER_TEST_F_DECL Target codegen_target_for_abi(CodegenAbi abi);
+BUSTER_TEST_F_DECL void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column);
+BUSTER_TEST_F_DECL s32 codegen_debug_frame_offset(u32 offset, Target target, bool negative_offsets, u32 frame_size);
+BUSTER_TEST_F_DECL bool x64_target_supports_native_vector(Target target, u64 size, u32 element_width, bool integer_operation);
+BUSTER_TEST_F_DECL void x64_emit_vector_native_memory(X64Builder* builder, bool store, u32 size, X64Register base);
+BUSTER_TEST_F_DECL void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 opcode, u32 size, X64Register base);
+BUSTER_TEST_F_DECL void x64_emit_vzeroupper(X64Builder* builder);
+BUSTER_TEST_F_DECL void codegen_canonical_x64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract);
+BUSTER_TEST_F_DECL void codegen_canonical_a64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract);
+BUSTER_TEST_F_DECL void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset);
+BUSTER_TEST_F_DECL bool codegen_canonical_a64_frame_memory_operation(CodegenBuffer* buffer, u32 register_number, u32 offset, u32 size, bool store,
+                                                                      bool sign_extend);
+BUSTER_TEST_F_DECL u32 codegen_canonical_a64_remainder_divide_instruction(bool signed_remainder, bool wide);
+BUSTER_TEST_F_DECL void a64_emit_load_pointer_offset(CodegenBuffer* buffer, u32 target, u32 address, u32 offset, u32 size);
+BUSTER_TEST_F_DECL void a64_emit_store_pointer_offset(CodegenBuffer* buffer, u32 source, u32 address, u32 offset, u32 size);
+BUSTER_TEST_F_DECL void a64_emit_initialize_aggregate_result(CodegenBuffer* buffer, u32* value_storage_offsets, IrValueId value);
+BUSTER_TEST_F_DECL void a64_emit_copy_memory_registers(CodegenBuffer* buffer, u32 destination, u32 source, u32 scratch, u32 size);
+BUSTER_TEST_F_DECL void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 target, u32 offset, u32 size);
+BUSTER_TEST_F_DECL void a64_emit_float_store_offset(CodegenBuffer* buffer, u32 source, u32 offset, u32 size);
