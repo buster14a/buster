@@ -28,6 +28,7 @@ BUSTER_GLOBAL_LOCAL void buster_msg_void_id(id receiver, const char* selector, i
     ((void (*)(id, SEL, id))objc_msgSend)(receiver, buster_sel(selector), argument);
 }
 
+#if BUSTER_MACOS
 BUSTER_GLOBAL_LOCAL void buster_msg_void_bool(id receiver, const char* selector, bool argument)
 {
     ((void (*)(id, SEL, bool))objc_msgSend)(receiver, buster_sel(selector), argument);
@@ -37,6 +38,7 @@ BUSTER_GLOBAL_LOCAL bool buster_msg_bool(id receiver, const char* selector)
 {
     return ((bool (*)(id, SEL))objc_msgSend)(receiver, buster_sel(selector));
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL id buster_nsstring_from_cstring(const char* string)
 {
@@ -45,6 +47,7 @@ BUSTER_GLOBAL_LOCAL id buster_nsstring_from_cstring(const char* string)
     return ((id (*)(id, SEL, const char*))objc_msgSend)(allocated, buster_sel("initWithUTF8String:"), string);
 }
 
+#if BUSTER_MACOS
 BUSTER_GLOBAL_LOCAL void buster_release(id object)
 {
     if (object)
@@ -52,3 +55,4 @@ BUSTER_GLOBAL_LOCAL void buster_release(id object)
         buster_msg_void(object, "release");
     }
 }
+#endif

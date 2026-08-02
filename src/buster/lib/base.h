@@ -430,7 +430,7 @@ typedef float4 vec4;
 #define float2_element(vector, index) (((f32*)&(vector))[(index)])
 #define float4_element(vector, index) (((f32*)&(vector))[(index)])
 
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE float2 float2_make(f32 x, f32 y)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE float2 float2_make(f32 x, f32 y)
 {
     float2 result = (float2){0};
     f32 elements[] = {x, y};
@@ -438,7 +438,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE float2 float2_make(f32 x, f32 y)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE float4 float4_make(f32 x, f32 y, f32 z, f32 w)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE float4 float4_make(f32 x, f32 y, f32 z, f32 w)
 {
     float4 result = (float4){0};
     f32 elements[] = {x, y, z, w};

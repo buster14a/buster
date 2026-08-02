@@ -1370,17 +1370,6 @@ struct TokenIterator
     u32 column_index;
 };
 
-BUSTER_GLOBAL_LOCAL TokenIterator token_initialize(Token* tokens, u32 token_count, const char8* source)
-{
-    TokenIterator result = {
-        .tokens = tokens,
-        .token_count = token_count,
-        .source = source,
-    };
-
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL ExtendedToken to_extended_token(TokenIterator* restrict iterator, Token token)
 {
     u32 token_length = token_length_get(&token);
@@ -2810,24 +2799,6 @@ BUSTER_GLOBAL_LOCAL bool token_matches(Parser* parser, ExtendedToken token, Stri
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool token_matches_any(Parser* parser, ExtendedToken token, String8* names, u64 name_count)
-{
-    bool result = false;
-    if (token.id == TOKEN_IDENTIFIER)
-    {
-        String8 candidate = get_string(parser->iterator.source, token);
-        for (u64 i = 0; i < name_count; i += 1)
-        {
-            if (string_equal(candidate, names[i]))
-            {
-                result = true;
-                break;
-            }
-        }
-    }
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL bool token_begins_type(TokenId id)
 {
     bool result = id == TOKEN_IDENTIFIER || id == TOKEN_DOLLAR || id == pointer_token || id == array_slice_token_start || id == TOKEN_KEYWORD_VECTOR ||
@@ -2998,100 +2969,6 @@ BUSTER_GLOBAL_LOCAL String8 symbol_attribute_names[] = {
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(symbol_attribute_names) == SYMBOL_ATTRIBUTE_COUNT);
-
-BUSTER_GLOBAL_LOCAL String8 string_from_node_id(AstNodeId id)
-{
-    switch (id)
-    {
-    case AST_NODE_CONSTANT_INTEGER:
-        return S8("ConstantInteger");
-    case AST_NODE_CONSTANT_FLOAT:
-        return S8("ConstantFloat");
-    case AST_NODE_CONSTANT_CHARACTER:
-        return S8("ConstantCharacter");
-    case AST_NODE_CONSTANT_STRING:
-        return S8("ConstantString");
-    case AST_NODE_UNDEFINED:
-        return S8("Undefined");
-    case AST_NODE_ARRAY_LITERAL:
-        return S8("ArrayLiteral");
-    case AST_NODE_ARRAY_INDEX:
-        return S8("ArrayIndex");
-    case AST_NODE_ARRAY_SLICE:
-        return S8("ArraySlice");
-    case AST_NODE_AGGREGATE_LITERAL:
-        return S8("AggregateLiteral");
-    case AST_NODE_MEMBER_ACCESS:
-        return S8("MemberAccess");
-    case AST_NODE_ENUM_LITERAL:
-        return S8("EnumLiteral");
-    case AST_NODE_CALL:
-        return S8("Call");
-    case AST_NODE_INTRINSIC_CALL:
-        return S8("IntrinsicCall");
-    case AST_NODE_UNARY_MINUS:
-        return S8("UnaryMinus");
-    case AST_NODE_UNARY_PLUS:
-        return S8("UnaryPlus");
-    case AST_NODE_UNARY_LOGICAL_NOT:
-        return S8("UnaryLogicalNot");
-    case AST_NODE_UNARY_BITWISE_NOT:
-        return S8("UnaryBitwiseNot");
-    case AST_NODE_ADDRESS_OF:
-        return S8("AddressOf");
-    case AST_NODE_DEREFERENCE:
-        return S8("Dereference");
-    case AST_NODE_BINARY_PLUS:
-        return S8("BinaryPlus");
-    case AST_NODE_BINARY_MINUS:
-        return S8("BinaryMinus");
-    case AST_NODE_BINARY_ASTERISK:
-        return S8("BinaryAsterisk");
-    case AST_NODE_BINARY_SLASH:
-        return S8("BinarySlash");
-    case AST_NODE_BINARY_PERCENT:
-        return S8("BinaryPercent");
-    case AST_NODE_BINARY_SHIFT_LEFT:
-        return S8("BinaryShiftLeft");
-    case AST_NODE_BINARY_SHIFT_RIGHT:
-        return S8("BinaryShiftRight");
-    case AST_NODE_BINARY_EQUAL:
-        return S8("BinaryEqual");
-    case AST_NODE_BINARY_NOT_EQUAL:
-        return S8("BinaryNotEqual");
-    case AST_NODE_BINARY_LESS:
-        return S8("BinaryLess");
-    case AST_NODE_BINARY_LESS_EQUAL:
-        return S8("BinaryLessEqual");
-    case AST_NODE_BINARY_GREATER:
-        return S8("BinaryGreater");
-    case AST_NODE_BINARY_GREATER_EQUAL:
-        return S8("BinaryGreaterEqual");
-    case AST_NODE_BINARY_AMPERSAND:
-        return S8("BinaryAmpersand");
-    case AST_NODE_BINARY_BAR:
-        return S8("BinaryBar");
-    case AST_NODE_BINARY_CARET:
-        return S8("BinaryCaret");
-    case AST_NODE_BINARY_BOOLEAN_AND:
-        return S8("BinaryBooleanAnd");
-    case AST_NODE_BINARY_BOOLEAN_OR:
-        return S8("BinaryBooleanOr");
-    case AST_NODE_BINARY_BOOLEAN_AND_SHORT_CIRCUIT:
-        return S8("BinaryBooleanAndShortCircuit");
-    case AST_NODE_BINARY_BOOLEAN_OR_SHORT_CIRCUIT:
-        return S8("BinaryBooleanOrShortCircuit");
-    case AST_NODE_BINARY_RANGE:
-        return S8("BinaryRange");
-    case AST_NODE_IDENTIFIER:
-        return S8("Identifier");
-    case AST_NODE_COUNT:
-    {
-    }
-    }
-
-    BUSTER_UNREACHABLE();
-}
 
 typedef enum CodeAttributeId
 {
@@ -7016,23 +6893,6 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
 
     scratch_end(scratch);
     return result;
-}
-
-BUSTER_GLOBAL_LOCAL void print_tokenizer_result(TokenizerResult tokenizer, const char8* restrict source)
-{
-    TokenIterator iterator = token_initialize(tokenizer.tokens, tokenizer.token_count, source);
-    for (u32 i = 0; i < tokenizer.token_count; i += 1)
-    {
-        ExtendedToken token = token_get(&iterator);
-        String8 string = get_string(source, token);
-
-        String8 token_id = string_from_token_id(token.id);
-
-        String8 display_string = string.pointer && string.length > 0 && string.pointer[0] >= ' ' ? string : S8("");
-        string_print(S8("[{u64}] {u32}:{u32} at {u32} {S8} \"{S8}\"\n"), i, token.line, token.column, token.offset, token_id, display_string);
-
-        consume(&iterator);
-    }
 }
 
 BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic missing_array_delimiter_diagnostics[] = {

@@ -987,8 +987,11 @@ if (C_COMPILER_CLANG_FAMILY AND BUSTER_CHECK_OPTIONAL_WARNINGS)
 endif()
 
 set(GNU_FAMILY_DISABLE_WARNINGS
-    -Wno-unused-function
     -Wno-missing-field-initializers
+)
+
+set(GNU_FAMILY_UNITY_DISABLE_WARNINGS
+    "$<${BUSTER_UNITY_BUILD_CONDITION}:-Wno-unused-function>"
 )
 
 set(GNU_FAMILY_NATIVE_TARGET -march=native)
@@ -1393,6 +1396,7 @@ function(executable_add name is_buster_program main_file)
         target_compile_options(${name} PRIVATE ${GNU_FAMILY_OPTIONS})
         target_compile_options(${name} PRIVATE ${GNU_FAMILY_WARNINGS})
         target_compile_options(${name} PRIVATE ${GNU_FAMILY_DISABLE_WARNINGS})
+        target_compile_options(${name} PRIVATE ${GNU_FAMILY_UNITY_DISABLE_WARNINGS})
         if (BUSTER_CI)
             target_compile_options(${name} PRIVATE "$<$<CONFIG:Release>:-O2>")
         endif()

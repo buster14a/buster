@@ -36,6 +36,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_test_object_make(Arena* arena, Target target
     };
 }
 
+#if BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, String8 library, String8 symbol)
 {
     if (executable.length < 0x40 || executable.pointer[0] != 'M' || executable.pointer[1] != 'Z')
@@ -191,6 +192,7 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, Strin
     }
     return false;
 }
+#endif
 
 BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
 {

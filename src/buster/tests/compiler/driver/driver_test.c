@@ -53,7 +53,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, 
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_elf_section(ByteSlice image, String8 name)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_elf_section(ByteSlice image, String8 name)
 {
     u64 offset = 0;
     u64 size = 0;
@@ -68,7 +68,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_elf_section(ByteSlice image, 
     };
 }
 
-BUSTER_GLOBAL_LOCAL u64 compiler_driver_test_elf_section_address(ByteSlice image, String8 name)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u64 compiler_driver_test_elf_section_address(ByteSlice image, String8 name)
 {
     u64 offset = 0;
     u64 size = 0;
@@ -80,7 +80,7 @@ BUSTER_GLOBAL_LOCAL u64 compiler_driver_test_elf_section_address(ByteSlice image
     return address;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_bytes_contain(ByteSlice bytes, String8 needle)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_bytes_contain(ByteSlice bytes, String8 needle)
 {
     if (!needle.length || needle.length > bytes.length)
     {
@@ -96,7 +96,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_bytes_contain(ByteSlice bytes, String8 
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_archive(Arena* arena, ByteSlice* members, String8* names, u32 member_count)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_archive(Arena* arena, ByteSlice* members, String8* names, u32 member_count)
 {
     u64 size = 8;
     for (u32 member_index = 0; member_index < member_count; member_index += 1)

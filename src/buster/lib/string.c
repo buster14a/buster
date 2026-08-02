@@ -1557,25 +1557,6 @@ BUSTER_TEST_F_DECL String16 string16_from_pointer(const char16* pointer)
     return (String16){.pointer = (char16*)pointer, .length = string16_length(pointer)};
 }
 
-BUSTER_GLOBAL_LOCAL u64 raw_string16_first_code_unit(const char16* pointer, char16 code_unit)
-{
-    u64 result = BUSTER_STRING_NO_MATCH;
-
-    if (pointer)
-    {
-        for (char16* it = (char16*)pointer; *it; it += 1)
-        {
-            if (*it == code_unit)
-            {
-                result = (u64)(it - pointer);
-                break;
-            }
-        }
-    }
-
-    return result;
-}
-
 PosixStringList posix_string_list_from_slice_string(Arena* arena, SliceString8 parts)
 {
     PosixChar** list = arena_allocate(arena, PosixChar*, parts.length + 1);

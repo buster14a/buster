@@ -66,6 +66,7 @@ bool update(void)
 #endif
 }
 
+#if !BUSTER_SANITIZE
 #if defined(__linux__)
 // Everything below runs inside a signal handler for a fatal signal, so it must
 // be async-signal-safe: raw write(2) into a stack buffer, no allocation, no
@@ -171,6 +172,7 @@ BUSTER_GLOBAL_LOCAL void install_signal_handlers(void)
 #else
 #endif
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOsList envp)
 {

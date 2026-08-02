@@ -24,7 +24,7 @@ BUSTER_GLOBAL_LOCAL WmEvent* wm_event_push(WmHandle* windowing, WmEvent event)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL SliceWmWindowHandle get_windows(WmHandle* handle)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL SliceWmWindowHandle get_windows(WmHandle* handle)
 {
     SliceWmWindowHandle result = {0};
 

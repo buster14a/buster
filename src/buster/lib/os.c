@@ -317,20 +317,6 @@ BUSTER_GLOBAL_LOCAL void* generic_fd_to_windows(OsFileDescriptor* fd)
 }
 #endif
 
-#if defined(__linux__) || defined(__APPLE__)
-BUSTER_GLOBAL_LOCAL OsThreadHandle* os_posix_thread_to_generic(pthread_t handle)
-{
-    BUSTER_CHECK(handle != 0);
-    return (OsThreadHandle*)handle;
-}
-
-BUSTER_GLOBAL_LOCAL pthread_t os_posix_thread_from_generic(OsThreadHandle* handle)
-{
-    BUSTER_CHECK(handle != 0);
-    return (pthread_t)handle;
-}
-#endif
-
 BUSTER_GLOBAL_LOCAL bool os_fault(void* address, u64 size)
 {
     bool result = 1;
@@ -461,20 +447,6 @@ OsFileDescriptor* os_get_stdout(void)
 #endif
     return result;
 }
-
-#if defined(_WIN32)
-BUSTER_GLOBAL_LOCAL OsThreadHandle* os_windows_thread_to_generic(HANDLE handle)
-{
-    BUSTER_CHECK(handle != 0);
-    return (OsThreadHandle*)handle;
-}
-
-BUSTER_GLOBAL_LOCAL HANDLE os_windows_thread_from_generic(OsThreadHandle* handle)
-{
-    BUSTER_CHECK(handle != 0);
-    return (HANDLE)handle;
-}
-#endif
 
 BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, void* user_argument)
 {

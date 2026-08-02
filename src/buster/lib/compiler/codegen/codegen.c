@@ -6484,11 +6484,6 @@ BUSTER_TEST_F_DECL void codegen_canonical_a64_base_address(CodegenBuffer* buffer
     codegen_emit_u32(buffer, 0x8b000000 | (offset_register << 16) | (base_register << 5) | register_number);
 }
 
-BUSTER_GLOBAL_LOCAL void codegen_canonical_a64_stack_address(CodegenBuffer* buffer, u32 register_number, u32 byte_offset)
-{
-    codegen_canonical_a64_base_address(buffer, register_number, 31, byte_offset);
-}
-
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_float_memory(CodegenBuffer* buffer, u32 vector_register, s32 displacement, u32 size, bool store)
 {
     if (vector_register >= 8 || (size != 4 && size != 8 && size != 16))

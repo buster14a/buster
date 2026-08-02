@@ -223,6 +223,7 @@ BUSTER_GLOBAL_LOCAL void metal_release(id object)
     }
 }
 
+#if !BUSTER_USE_SLANG_SHADERS
 BUSTER_GLOBAL_LOCAL const char* metal_rect_inline_shader_source(void)
 {
     return "#include <metal_stdlib>\n"
@@ -254,8 +255,9 @@ BUSTER_GLOBAL_LOCAL const char* metal_rect_inline_shader_source(void)
                                                      "input.softness; float softness_padding_scalar = max(0.0, softness * 2.0 - 1.0); float distance = "
                                                      "rounded_rect_sdf(input.pixel_position, input.center, input.half_size - float2(softness_padding_scalar, "
                                                      "softness_padding_scalar), input.corner_radius); float sdf_factor = 1.0 - smoothstep(0.0, 2.0 * softness, "
-                                                     "distance); return input.color * sampled * sdf_factor; }\n";
+           "distance); return input.color * sampled * sdf_factor; }\n";
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL const char* metal_rect_vertex_shader_source(void)
 {

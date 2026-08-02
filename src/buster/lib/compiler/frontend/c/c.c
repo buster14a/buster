@@ -3332,28 +3332,6 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_is_flexible_array_member(CParseResult* res
     return array->element_type.value < result->type_count;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_type_is_flexible_array(CParseResult* result, CTypeId type)
-{
-    if (!result || type.value >= result->type_count)
-    {
-        return false;
-    }
-    for (u32 aggregate_index = 0; aggregate_index < result->type_count; aggregate_index += 1)
-    {
-        CType* aggregate = result->types + aggregate_index;
-        if (!aggregate->member_count || !c_parse_type_is_flexible_array_member(result, aggregate, aggregate->member_count - 1))
-        {
-            continue;
-        }
-        CMember* member = result->members + aggregate->member_start + aggregate->member_count - 1;
-        if (member->type.value == type.value)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 BUSTER_GLOBAL_LOCAL void c_parse_validate_flexible_array_members(CParseResult* result, CType* aggregate)
 {
     if (!result || !aggregate)
@@ -4265,18 +4243,6 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_expression_scalar_type(CParseResult* result,
                                         .unqualified_type = C_TYPE_ID_INVALID,
                                         .array_bound = C_ARRAY_BOUND_INVALID,
                                         .kind = kind,
-                                        .is_complete = true,
-                                    });
-}
-
-BUSTER_GLOBAL_LOCAL CTypeId c_parse_expression_pointer_type(CParseResult* result, CTypeId element)
-{
-    return c_parse_add_type(result, (CType){
-                                        .element_type = element,
-                                        .return_type = C_TYPE_ID_INVALID,
-                                        .unqualified_type = C_TYPE_ID_INVALID,
-                                        .array_bound = C_ARRAY_BOUND_INVALID,
-                                        .kind = C_TYPE_POINTER,
                                         .is_complete = true,
                                     });
 }
@@ -18915,22 +18881,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_switch_block(CIntegerIrBuilder* builder, IrBlockId
     builder->current_block = block;
     builder->last_instruction = builder->function->blocks[block.value].last_instruction;
     return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool c_ir_block_has_predecessor(CIntegerIrBuilder* builder, IrBlockId block)
-{
-    for (u32 instruction_index = 0; instruction_index < builder->function->instruction_count; instruction_index += 1)
-    {
-        IrInstruction* instruction = &builder->function->instructions[instruction_index];
-        for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
-        {
-            if (instruction->targets[target_index].value == block.value)
-            {
-                return true;
-            }
-        }
-    }
-    return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_block_is_reachable_impl(CIntegerIrBuilder* builder, IrBlockId block)

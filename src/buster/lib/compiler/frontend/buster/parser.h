@@ -110,13 +110,13 @@ enum
     TOKEN_MAX_LENGTH = ((u32)1 << 24) - 1,
 };
 
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 token_length_get(Token* restrict token)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u32 token_length_get(Token* restrict token)
 {
     u32 result = ((u32)token->length_bytes[0] << 0) | ((u32)token->length_bytes[1] << 8) | ((u32)token->length_bytes[2] << 16);
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE void token_length_set(Token* restrict token, u32 length)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE void token_length_set(Token* restrict token, u32 length)
 {
     BUSTER_CHECK(length <= TOKEN_MAX_LENGTH);
     token->length_bytes[0] = (u8)(length >> 0);

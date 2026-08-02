@@ -296,6 +296,7 @@ BUSTER_GLOBAL_LOCAL u32 d3d12_format_channel_count(TextureFormat format)
     return 0;
 }
 
+#if !BUSTER_USE_SLANG_SHADERS
 BUSTER_GLOBAL_LOCAL const char* d3d12_rect_inline_shader_source(void)
 {
     return "struct RectVertex { float2 p0; float2 uv0; float2 extent; float corner_radius; float softness; float4 colors[4]; uint texture_index; uint3 "
@@ -335,6 +336,7 @@ BUSTER_GLOBAL_LOCAL const char* d3d12_rect_inline_shader_source(void)
                                                      "softness_padding_scalar), input.corner_radius); float sdf_factor = 1.0 - smoothstep(0.0, 2.0 * softness, "
                                                      "distance); return input.color * sampled * sdf_factor; }\n";
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL const char* d3d12_rect_vertex_shader_source(void)
 {

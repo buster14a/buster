@@ -25,22 +25,6 @@ BUSTER_GLOBAL_LOCAL bool ui_rect_contains(F32Interval2 rect, float2 p)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL float4 ui_color_mul_alpha(float4 color, f32 alpha)
-{
-    float4_element(color, 3) *= alpha;
-    return color;
-}
-
-BUSTER_GLOBAL_LOCAL UI_Box* ui_nil_box(void)
-{
-    return 0;
-}
-
-BUSTER_GLOBAL_LOCAL bool ui_box_is_nil(UI_Box* box)
-{
-    return box == 0;
-}
-
 BUSTER_GLOBAL_LOCAL void ui_stack_reset(UI_State* state)
 {
     memset(&state->stacks, 0, sizeof(state->stacks));

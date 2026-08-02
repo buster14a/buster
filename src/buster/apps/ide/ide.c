@@ -594,11 +594,6 @@ enum MachineSize
 };
 typedef u8 MachineSize;
 
-BUSTER_GLOBAL_LOCAL u32 machine_size_to_int(MachineSize size)
-{
-    return (u32)1 << (u32)size;
-}
-
 typedef struct MachineOperandFlags MachineOperandFlags;
 struct MachineOperandFlags
 {
@@ -745,8 +740,6 @@ struct SliceVirtualRegister
     u64 length;
 };
 
-BUSTER_GLOBAL_LOCAL u8 physical_not_assigned = UINT8_MAX;
-
 typedef struct ISelArena ISelArena;
 struct ISelArena
 {
@@ -760,127 +753,6 @@ struct FunctionISel
     ISelArena virtual_registers;
     ISelArena instructions;
 };
-
-BUSTER_GLOBAL_LOCAL MachineInstruction* isel_function_allocate_instruction(FunctionISel* isel, u64 count)
-{
-    MachineInstruction* result = arena_allocate(isel->instructions.arena, MachineInstruction, count);
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL MachineInstruction* isel_allocate_instruction(ISelArena* isel_arena, u64 count)
-{
-    MachineInstruction* result = arena_allocate(isel_arena->arena, MachineInstruction, count);
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL OperandValue new_virtual_register(FunctionISel* isel, RegisterClassX86_64 register_class, MachineSize size)
-{
-    u64 index = (isel->virtual_registers.arena->position - arena_minimum_position) / sizeof(VirtualRegister);
-    VirtualRegister* virtual_register = arena_allocate(isel->virtual_registers.arena, VirtualRegister, 1);
-    *virtual_register = (VirtualRegister){
-        .register_class = register_class,
-        .physical = physical_not_assigned,
-        .size = size,
-    };
-    return (OperandValue){.index = index};
-}
-
-BUSTER_GLOBAL_LOCAL void instruction_new_virtual_register(FunctionISel* isel, MachineInstruction* i, RegisterClassX86_64 register_class, MachineSize size,
-                                                          u8 index)
-{
-    OperandValue virtual_register = new_virtual_register(isel, register_class, size);
-    i->operand_values[index] = virtual_register;
-    i->operand_ids[index] = MACHINE_OPERAND_VIRTUAL_REGISTER;
-    i->operand_flags[index] = (MachineOperandFlags){.def = 1};
-}
-
-BUSTER_GLOBAL_LOCAL MachineInstruction mov_imm(FunctionISel* isel, u64 immediate, MachineSize size)
-{
-    BUSTER_CHECK(size <= MACHINE_SIZE_EIGHT);
-    MachineInstruction i = {0};
-
-    instruction_new_virtual_register(isel, &i, REGISTER_CLASS_GPR, size, 0);
-
-    bool is_zero = immediate == 0;
-
-    if (!is_zero)
-    {
-        i.operand_values[1] = (OperandValue){.integer = immediate};
-        i.operand_ids[1] = MACHINE_OPERAND_IMMEDIATE;
-    }
-
-    i.id = (MachineInstructionId)((u64)size + (u64)(is_zero ? MACHINE_INSTRUCTION_ZERO_08_GPR : MACHINE_INSTRUCTION_MOVE_08_REG_IMM));
-
-    return i;
-}
-
-BUSTER_GLOBAL_LOCAL MachineInstruction copy(FunctionISel* isel, PhysicalRegisterX8664 physical_register, u64 virtual_register, MachineSize size)
-{
-    BUSTER_UNUSED(isel);
-
-    MachineInstruction i = {0};
-
-    i.operand_values[0] = (OperandValue){.index = (u64)physical_register};
-    i.operand_ids[0] = MACHINE_OPERAND_PHYSICAL_REGISTER;
-    i.operand_flags[0] = (MachineOperandFlags){.def = 1};
-
-    i.operand_values[1] = (OperandValue){.index = virtual_register};
-    i.operand_ids[1] = MACHINE_OPERAND_VIRTUAL_REGISTER;
-    i.operand_flags[1] = (MachineOperandFlags){.use = 1};
-
-    i.id = (MachineInstructionId)((u64)size + (u64)(MACHINE_INSTRUCTION_COPY_08));
-
-    return i;
-}
-
-BUSTER_GLOBAL_LOCAL MachineInstruction ret(FunctionISel* isel, PhysicalRegisterX8664 physical_register, MachineSize size)
-{
-    BUSTER_UNUSED(isel);
-
-    MachineInstruction i = {0};
-
-    i.operand_values[0] = (OperandValue){.index = (u64)physical_register};
-    i.operand_ids[0] = MACHINE_OPERAND_PHYSICAL_REGISTER;
-    i.operand_flags[0] = (MachineOperandFlags){.use = 1, .implicit = 1};
-
-    i.id = (MachineInstructionId)((u64)size + (u64)(MACHINE_INSTRUCTION_RET_08));
-
-    return i;
-}
-
-BUSTER_GLOBAL_LOCAL MachineInstruction consume_spill(PhysicalRegisterX8664 physical_register, s32 offset, MachineSize size)
-{
-    MachineInstruction i = {0};
-
-    i.operand_values[0] = (OperandValue){.index = (u64)physical_register};
-    i.operand_ids[0] = MACHINE_OPERAND_PHYSICAL_REGISTER;
-    i.operand_flags[0] = (MachineOperandFlags){.def = 1};
-
-    i.operand_values[1] = (OperandValue){.memory = {.offset = offset, .base = REGISTER_BASE_BASE_POINTER}};
-    i.operand_ids[1] = MACHINE_OPERAND_MEMORY;
-    i.operand_flags[1] = (MachineOperandFlags){.use = 1};
-
-    i.id = (MachineInstructionId)((u64)MACHINE_INSTRUCTION_LOAD_08 + (u64)size);
-
-    return i;
-}
-
-BUSTER_GLOBAL_LOCAL MachineInstruction produce_spill(s32 offset, PhysicalRegisterX8664 physical_register, MachineSize size)
-{
-    MachineInstruction i = {0};
-
-    i.operand_values[0] = (OperandValue){.memory = {.offset = offset, .base = REGISTER_BASE_BASE_POINTER}};
-    i.operand_ids[0] = MACHINE_OPERAND_MEMORY;
-    i.operand_flags[0] = (MachineOperandFlags){.def = 1};
-
-    i.operand_values[1] = (OperandValue){.index = (u64)physical_register};
-    i.operand_ids[1] = MACHINE_OPERAND_PHYSICAL_REGISTER;
-    i.operand_flags[1] = (MachineOperandFlags){.use = 1};
-
-    i.id = (MachineInstructionId)((u64)MACHINE_INSTRUCTION_STORE_08 + (u64)size);
-
-    return i;
-}
 
 typedef int MainFunction(void);
 
