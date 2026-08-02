@@ -292,6 +292,9 @@ struct CParameter
     CEntityId entity;
 };
 
+typedef struct CParserStatement CParserStatement;
+typedef struct CParserDeclaration CParserDeclaration;
+
 typedef enum CEntityKind
 {
     C_ENTITY_OBJECT,
@@ -333,6 +336,8 @@ struct CScope
     CScopeId parent;
     CEntityId first_entity;
     CEntityId last_entity;
+    u32 token_start;
+    u32 token_end;
     u32 entity_count;
 };
 
@@ -371,11 +376,92 @@ struct CDeclaration
     CTypeId base_type;
     CEntityId entity;
     CScopeId scope;
+    CParserDeclaration* syntax_declaration;
+    CParserStatement* syntax_body;
     CDeclarationKind kind;
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
     u8 reserved;
+};
+
+typedef enum CParserDeclarationKind
+{
+    C_PARSER_DECLARATION_OBJECT,
+    C_PARSER_DECLARATION_FUNCTION,
+    C_PARSER_DECLARATION_TYPEDEF,
+    C_PARSER_DECLARATION_TYPE,
+    C_PARSER_DECLARATION_STATIC_ASSERT,
+    C_PARSER_DECLARATION_ASSEMBLY,
+    C_PARSER_DECLARATION_UNKNOWN,
+    C_PARSER_DECLARATION_COUNT,
+} CParserDeclarationKind;
+
+typedef enum CParserStatementKind
+{
+    C_PARSER_STATEMENT_BLOCK,
+    C_PARSER_STATEMENT_STATIC_ASSERT,
+    C_PARSER_STATEMENT_DECLARATION,
+    C_PARSER_STATEMENT_EXPRESSION,
+    C_PARSER_STATEMENT_LABEL,
+    C_PARSER_STATEMENT_UNKNOWN,
+    C_PARSER_STATEMENT_COUNT,
+} CParserStatementKind;
+
+typedef struct CParserExpression CParserExpression;
+struct CParserExpression
+{
+    u32 token_start;
+    u32 token_count;
+};
+
+struct CParserStatement
+{
+    CParserStatement* next;
+    CParserStatement* first_child;
+    CParserStatement* last_child;
+    CParserExpression expression;
+    CSourceLocation location;
+    u32 token_start;
+    u32 token_count;
+    u32 body_start;
+    u32 body_token_count;
+    CParserStatementKind kind;
+    u8 reserved[4];
+};
+
+struct CParserDeclaration
+{
+    CParserDeclaration* next;
+    CSourceLocation location;
+    u32 token_start;
+    u32 token_count;
+    u32 body_start;
+    u32 body_token_count;
+    u32 name_token;
+    u32 function_name_token;
+    CParserStatement* first_statement;
+    CParserStatement* last_statement;
+    CParserExpression expression;
+    CParserDeclarationKind kind;
+    bool is_definition;
+    bool is_typedef;
+    bool is_constexpr;
+    bool is_variadic;
+    bool seen_equal;
+    u8 reserved[3];
+};
+
+typedef struct CParserResult CParserResult;
+struct CParserResult
+{
+    CParserDeclaration* first_declaration;
+    CParserDeclaration* last_declaration;
+    CDiagnostic* diagnostics;
+    u32 declaration_count;
+    u32 diagnostic_count;
+    u32 declaration_capacity;
+    u32 diagnostic_capacity;
 };
 
 typedef struct CParseResult CParseResult;
@@ -419,6 +505,11 @@ struct CParseResult
     u32 diagnostic_capacity;
 };
 
+// CParseResult is the compatibility name for the semantic model.  New phase
+// boundaries should use CAnalysisResult so syntax parsing cannot be confused
+// with semantic analysis.
+typedef CParseResult CAnalysisResult;
+
 typedef struct IrProgram IrProgram;
 typedef struct CIRLowerResult CIRLowerResult;
 struct CIRLowerResult
@@ -430,8 +521,11 @@ struct CIRLowerResult
 
 BUSTER_F_DECL CLexResult c_lex(Arena* arena, String8 source);
 BUSTER_F_DECL CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options);
+BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
+BUSTER_F_DECL CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target);
 BUSTER_F_DECL CParseResult c_parse(Arena* arena, CPreprocessResult preprocess);
-BUSTER_F_DECL CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParseResult parse, Target target);
+// Compatibility entry point for tests and callers that already own an analyzed model.
+BUSTER_F_DECL CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult analysis, Target target);
 BUSTER_F_DECL String8 c_token_kind_name(CTokenKind kind);
 
 #if BUSTER_INCLUDE_TESTS

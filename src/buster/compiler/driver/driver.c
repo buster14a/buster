@@ -1075,11 +1075,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
         goto end;
     }
-    CParseResult parse = c_parse(arena, preprocess);
-    result.parser_diagnostic_count = parse.diagnostic_count;
-    if (parse.diagnostic_count)
+    CParserResult syntax = c_parse_ast(arena, preprocess);
+    result.parser_diagnostic_count = syntax.diagnostic_count;
+    if (syntax.diagnostic_count)
     {
-        CDiagnostic diagnostic = parse.diagnostics[0];
+        CDiagnostic diagnostic = syntax.diagnostics[0];
         result.error = COMPILER_DRIVER_ERROR_PARSE;
         result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), invocation.input_paths[0], diagnostic.location.line, diagnostic.location.column,
                                           diagnostic.message);
@@ -1087,7 +1087,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
-        CIRLowerResult semantic = c_lower_to_ir(arena, invocation.input_paths[0], preprocess, parse, invocation.target);
+        CIRLowerResult semantic = c_analyze(arena, invocation.input_paths[0], preprocess, syntax, invocation.target);
         result.analysis_diagnostic_count = semantic.diagnostic_count;
         if (semantic.diagnostic_count || !semantic.program)
         {
@@ -1105,7 +1105,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
         goto end;
     }
-    CIRLowerResult lowered = c_lower_to_ir(arena, invocation.input_paths[0], preprocess, parse, invocation.target);
+    CIRLowerResult lowered = c_analyze(arena, invocation.input_paths[0], preprocess, syntax, invocation.target);
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     if (!lowered.program || lowered.diagnostic_count)
     {
