@@ -143,6 +143,31 @@ BUSTER_GLOBAL_LOCAL void ide_window_queue_font_update(IdeWindow* window, f32 dpi
     window->font_height = font_height;
 }
 
+BUSTER_GLOBAL_LOCAL void ide_window_deinitialize(IdeWindow* window, RenderingHandle* rendering)
+{
+    if (!window)
+    {
+        return;
+    }
+
+    if (window->ui)
+    {
+        ui_state_deinitialize(window->ui);
+        window->ui = 0;
+    }
+
+    if (rendering && window->render)
+    {
+        rendering_window_deinitialize(rendering, window->render);
+        window->render = 0;
+    }
+
+    window->previous = 0;
+    window->next = 0;
+    window->wm = 0;
+    window->root_panel = 0;
+}
+
 BUSTER_GLOBAL_LOCAL void ide_window_update_font_for_dpi(IdeWindow* window)
 {
     if (window && window->wm && window->render)
@@ -371,10 +396,7 @@ bool frame(void)
                         ide_state.last_window = window->previous;
                     }
 
-                    ui_state_deinitialize(window->ui);
-                    window->ui = 0;
-                    rendering_window_deinitialize(ide_state.rendering, window->render);
-                    window->render = 0;
+                    ide_window_deinitialize(window, ide_state.rendering);
 
                     break;
                 }
@@ -854,6 +876,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
         if (r)
         {
             ide_state.first_window = ide_state.last_window = arena_allocate(arena, IdeWindow, 1);
+            ide_state.first_window->previous = 0;
+            ide_state.first_window->next = 0;
             WmWindowHandle* wm_window = wm_window_create(windowing, (WmWindowCreate){
                                                                         .name = S8("Ide"),
                                                                         .size =
@@ -910,13 +934,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
                         // block forever and the BUSTER_IOS_RESULT marker would
                         // never be printed.
 #else
-                        for (IdeWindow* window = ide_state.first_window; window; window = window->next)
+                        for (IdeWindow* window = ide_state.first_window; window;)
                         {
-                            ui_state_deinitialize(window->ui);
-                            window->ui = 0;
-                            rendering_window_deinitialize(ide_state.rendering, window->render);
-                            window->render = 0;
+                            IdeWindow* next = window->next;
+                            ide_window_deinitialize(window, ide_state.rendering);
+                            window = next;
                         }
+                        ide_state.first_window = 0;
+                        ide_state.last_window = 0;
 #endif
                     }
 
@@ -960,17 +985,26 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_benchmarks(void)
 {
     Arena* arena = arena_create((ArenaCreation){0});
 
-    ParserBenchResult parse_result = parser_parse_bench(arena, 200);
-    string_print(S8("BENCH parse_all_tests iterations={u64} files={u64} min_ns={u64} median_ns={u64}\n"), parse_result.iterations, parse_result.file_count,
-                 parse_result.min_ns, parse_result.median_ns);
+    String8 benchmark_label = S8("BENCH");
+    String8 mmap_flag = os_get_environment_variable(S8("BUSTER_BENCH_MMAP"));
+    bool use_mmap = string_equal(mmap_flag, S8("1")) || string_equal(mmap_flag, S8("true"));
+    ParserBenchResult parse_result = use_mmap ? parser_parse_bench_mmap(arena, 200) : parser_parse_bench(arena, 200);
+    if (use_mmap)
+    {
+        benchmark_label = S8("BENCH_MMAP");
+    }
+    string_print(
+        S8("{S8} parse_all_tests iterations={u64} files={u64} min_ns={u64} median_ns={u64}\n"), benchmark_label, parse_result.iterations,
+        parse_result.file_count, parse_result.min_ns, parse_result.median_ns);
 
 #if BUSTER_INSTRUMENT
-    string_print(S8("BENCH_PHASE tokenize min_ns={u64} median_ns={u64}\n"), parse_result.tokenize_min_ns, parse_result.tokenize_median_ns);
-    string_print(S8("BENCH_PHASE parse min_ns={u64} median_ns={u64}\n"), parse_result.parse_min_ns, parse_result.parse_median_ns);
+    string_print(S8("{S8}_PHASE tokenize min_ns={u64} median_ns={u64}\n"), benchmark_label, parse_result.tokenize_min_ns, parse_result.tokenize_median_ns);
+    string_print(S8("{S8}_PHASE parse min_ns={u64} median_ns={u64}\n"), benchmark_label, parse_result.parse_min_ns, parse_result.parse_median_ns);
     for (u64 i = 0; i < parse_result.file_count; i += 1)
     {
         ParserBenchFileResult file_result = parse_result.files[i];
-        string_print(S8("BENCH_FILE path={S8} min_ns={u64} median_ns={u64}\n"), file_result.path, file_result.min_ns, file_result.median_ns);
+        string_print(S8("{S8}_FILE path={S8} min_ns={u64} median_ns={u64}\n"), benchmark_label, file_result.path, file_result.min_ns,
+                    file_result.median_ns);
     }
 #endif
 

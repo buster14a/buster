@@ -13,6 +13,10 @@
 #define BUSTER_KERNEL 0
 #endif
 
+#if defined(__WIN32__) && !defined(_WIN32)
+#define _WIN32 1
+#endif
+
 #ifndef BUSTER_SINGLE_THREADED
 #define BUSTER_SINGLE_THREADED 0
 #endif

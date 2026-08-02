@@ -10,6 +10,7 @@ struct AnalysisProgramDiscovery
     String8 name;
     String8 path;
     String8 source;
+    FileMapRead source_map;
     ParserResult parser;
 };
 
@@ -1145,13 +1146,16 @@ AnalysisProgram analysis_program_load(Arena* result_arena, Arena* expression_are
 
     for (AnalysisProgramDiscovery* discovery = first; discovery; discovery = discovery->next)
     {
-        ByteSlice bytes = file_read(result_arena, discovery->path, (FileReadOptions){0});
+        FileMapRead source_map = file_map_read(result_arena, discovery->path, (FileReadOptions){0});
+        ByteSlice bytes = source_map.bytes;
         if (!bytes.pointer)
         {
+            file_map_unmap(source_map);
             program.load_failed = true;
             continue;
         }
         discovery->source = BYTE_SLICE_TO_STRING(8, bytes);
+        discovery->source_map = source_map;
         TokenizerResult tokenizer = tokenize(result_arena, discovery->source.pointer, discovery->source.length);
         discovery->parser = parser_parse(result_arena, expression_arena, discovery->source, tokenizer);
         program.parser_diagnostic_count += tokenizer.error_count + discovery->parser.diagnostic_count;
@@ -1182,6 +1186,7 @@ AnalysisProgram analysis_program_load(Arena* result_arena, Arena* expression_are
             .name = discovery->name,
             .path = discovery->path,
             .source = discovery->source,
+            .source_map = discovery->source_map,
             .parser = discovery->parser,
         };
         module_index += 1;
@@ -1278,6 +1283,19 @@ AnalysisProgram analysis_program_load(Arena* result_arena, Arena* expression_are
         program.analysis_diagnostic_count += analysis->diagnostic_count;
     }
     return program;
+}
+
+void analysis_program_unmap_sources(AnalysisProgram* program)
+{
+    if (!program)
+    {
+        return;
+    }
+    for (u32 index = 0; index < program->module_count; index += 1)
+    {
+        AnalysisProgramModule* module = program->modules + index;
+        file_map_unmap(module->source_map);
+    }
 }
 
 typedef struct AnalysisAstTypeLink AnalysisAstTypeLink;
@@ -8660,7 +8678,8 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
     {
         TemporalArena fixture_temporary = arena_begin_temporal(arguments->arena);
         AnalysisFixtureTest fixture = analysis_fixture_tests[fixture_index];
-        String8 source = BYTE_SLICE_TO_STRING(8, file_read(arguments->arena, fixture.path, (FileReadOptions){0}));
+        FileMapRead source_file = file_map_read(arguments->arena, fixture.path, (FileReadOptions){0});
+        String8 source = BYTE_SLICE_TO_STRING(8, source_file.bytes);
         BUSTER_TEST(arguments, source.pointer != 0);
         TokenizerResult tokenizer = tokenize(arguments->arena, source.pointer, source.length);
         ParserResult parser = parser_parse(arguments->arena, fixture_expression_arena, source, tokenizer);
@@ -8791,6 +8810,7 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
                 }
             }
         }
+        file_map_unmap(source_file);
         arena_set_position(fixture_temporary.arena, fixture_temporary.position);
     }
 
@@ -8824,6 +8844,7 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !loaded_schedule.has_cycle);
         BUSTER_TEST(arguments, loaded_schedule.execution_count != 0);
     }
+    analysis_program_unmap_sources(&loaded);
     BUSTER_CHECK(arena_destroy(fixture_expression_arena, 1));
 
     arena_set_position(temporary.arena, temporary.position);

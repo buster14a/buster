@@ -7720,6 +7720,29 @@ BUSTER_GLOBAL_LOCAL int parser_bench_file_result_compare_desc(const void* a, con
 }
 #endif
 
+typedef struct ParserBenchMappedFile ParserBenchMappedFile;
+struct ParserBenchMappedFile
+{
+    String8 source;
+    FileMapRead mapped_file;
+};
+
+BUSTER_GLOBAL_LOCAL void parser_bench_populate_file(Arena* arena, ParserBenchMappedFile* mapped_file, String8 path)
+{
+    *mapped_file = (ParserBenchMappedFile){0};
+    mapped_file->mapped_file = file_map_read(arena, path, (FileReadOptions){0});
+    mapped_file->source = BYTE_SLICE_TO_STRING(8, mapped_file->mapped_file.bytes);
+}
+
+BUSTER_GLOBAL_LOCAL void parser_bench_unmap_files(ParserBenchMappedFile* mapped_files, u64 file_count)
+{
+    for (u64 i = 0; i < file_count; i += 1)
+    {
+        ParserBenchMappedFile file = mapped_files[i];
+        file_map_unmap(file.mapped_file);
+    }
+}
+
 ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
 {
     ParserBenchResult result = {0};
@@ -7748,7 +7771,111 @@ ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parser_file_test_cases); i += 1)
         {
             ParserFileTestCase test_case = parser_file_test_cases[i];
-            String8 source = BYTE_SLICE_TO_STRING(8, file_read(scratch.arena, test_case.path, (FileReadOptions){0}));
+            FileMapRead source_file = file_map_read(scratch.arena, test_case.path, (FileReadOptions){0});
+            String8 source = BYTE_SLICE_TO_STRING(8, source_file.bytes);
+
+            if (source.pointer && source.length)
+            {
+#if BUSTER_INSTRUMENT
+                TimeDataType file_start = timestamp_take();
+                TokenizerResult tokenizer = tokenize(scratch.arena, source.pointer, source.length);
+                TimeDataType tokenize_end = timestamp_take();
+                parser_parse(scratch.arena, expression_arena, source, tokenizer);
+                TimeDataType parse_end = timestamp_take();
+
+                tokenize_ns_sum += timestamp_ns_between(file_start, tokenize_end);
+                parse_ns_sum += timestamp_ns_between(tokenize_end, parse_end);
+                file_durations_ns[iteration * result.file_count + i] = timestamp_ns_between(file_start, parse_end);
+#else
+                TokenizerResult tokenizer = tokenize(scratch.arena, source.pointer, source.length);
+                parser_parse(scratch.arena, expression_arena, source, tokenizer);
+#endif
+            }
+            file_map_unmap(source_file);
+        }
+        TimeDataType end = timestamp_take();
+        durations_ns[iteration] = timestamp_ns_between(start, end);
+#if BUSTER_INSTRUMENT
+        tokenize_durations_ns[iteration] = tokenize_ns_sum;
+        parse_durations_ns[iteration] = parse_ns_sum;
+#endif
+
+        scratch_end(scratch);
+    }
+
+    qsort(durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+    result.min_ns = iterations ? durations_ns[0] : 0;
+    result.median_ns = iterations ? durations_ns[iterations / 2] : 0;
+
+#if BUSTER_INSTRUMENT
+    qsort(tokenize_durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+    qsort(parse_durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+    result.tokenize_min_ns = iterations ? tokenize_durations_ns[0] : 0;
+    result.tokenize_median_ns = iterations ? tokenize_durations_ns[iterations / 2] : 0;
+    result.parse_min_ns = iterations ? parse_durations_ns[0] : 0;
+    result.parse_median_ns = iterations ? parse_durations_ns[iterations / 2] : 0;
+
+    result.files = arena_allocate(arena, ParserBenchFileResult, result.file_count);
+    u64* per_file_ns = arena_allocate(arena, u64, iterations);
+    for (u64 file_i = 0; file_i < result.file_count; file_i += 1)
+    {
+        for (u64 iteration = 0; iteration < iterations; iteration += 1)
+        {
+            per_file_ns[iteration] = file_durations_ns[iteration * result.file_count + file_i];
+        }
+        qsort(per_file_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+
+        result.files[file_i] = (ParserBenchFileResult){
+            .path = parser_file_test_cases[file_i].path,
+            .min_ns = iterations ? per_file_ns[0] : 0,
+            .median_ns = iterations ? per_file_ns[iterations / 2] : 0,
+        };
+    }
+    qsort(result.files, result.file_count, sizeof(ParserBenchFileResult), parser_bench_file_result_compare_desc);
+#endif
+
+    bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
+    BUSTER_CHECK(expression_arena_destroyed);
+
+    return result;
+}
+
+ParserBenchResult parser_parse_bench_mmap(Arena* arena, u64 iterations)
+{
+    ParserBenchResult result = {0};
+    result.iterations = iterations;
+    result.file_count = BUSTER_ARRAY_LENGTH(parser_file_test_cases);
+
+    Arena* expression_arena = arena_create((ArenaCreation){0});
+    BUSTER_CHECK(expression_arena);
+
+    ParserBenchMappedFile* mapped_files = arena_allocate(arena, ParserBenchMappedFile, result.file_count);
+
+    for (u64 i = 0; i < result.file_count; i += 1)
+    {
+        mapped_files[i] = (ParserBenchMappedFile){0};
+        parser_bench_populate_file(arena, &mapped_files[i], parser_file_test_cases[i].path);
+    }
+
+    u64* durations_ns = arena_allocate(arena, u64, iterations);
+#if BUSTER_INSTRUMENT
+    u64* tokenize_durations_ns = arena_allocate(arena, u64, iterations);
+    u64* parse_durations_ns = arena_allocate(arena, u64, iterations);
+    u64* file_durations_ns = arena_allocate(arena, u64, iterations * result.file_count);
+#endif
+
+    for (u64 iteration = 0; iteration < iterations; iteration += 1)
+    {
+        TemporalArena scratch = scratch_begin(&arena, 1);
+
+#if BUSTER_INSTRUMENT
+        u64 tokenize_ns_sum = 0;
+        u64 parse_ns_sum = 0;
+#endif
+        TimeDataType start = timestamp_take();
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parser_file_test_cases); i += 1)
+        {
+            String8 source = mapped_files[i].source;
 
             if (source.pointer && source.length)
             {
@@ -7799,7 +7926,6 @@ ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
             per_file_ns[iteration] = file_durations_ns[iteration * result.file_count + file_i];
         }
         qsort(per_file_ns, iterations, sizeof(u64), parser_bench_u64_compare);
-
         result.files[file_i] = (ParserBenchFileResult){
             .path = parser_file_test_cases[file_i].path,
             .min_ns = iterations ? per_file_ns[0] : 0,
@@ -7809,9 +7935,7 @@ ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
     qsort(result.files, result.file_count, sizeof(ParserBenchFileResult), parser_bench_file_result_compare_desc);
 #endif
 
-    bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
-    BUSTER_CHECK(expression_arena_destroyed);
-
+    parser_bench_unmap_files(mapped_files, result.file_count);
     return result;
 }
 
@@ -10269,7 +10393,8 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
     {
         u64 position = arena->position;
         ParserFileTestCase test_case = parser_file_test_cases[i];
-        String8 source = BYTE_SLICE_TO_STRING(8, file_read(arena, test_case.path, (FileReadOptions){0}));
+        FileMapRead source_file = file_map_read(arena, test_case.path, (FileReadOptions){0});
+        String8 source = BYTE_SLICE_TO_STRING(8, source_file.bytes);
 
         bool file_valid = source.pointer != 0 && source.length != 0;
         BUSTER_TEST(arguments, file_valid);
@@ -10399,6 +10524,7 @@ UnitTestResult parser_file_tests(UnitTestArguments* arguments)
             }
         }
 
+        file_map_unmap(source_file);
         arena->position = position;
     }
 

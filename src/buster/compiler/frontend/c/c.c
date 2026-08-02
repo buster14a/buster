@@ -1360,10 +1360,10 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_apply(CConditionalOperator operation, u64
 }
 
 BUSTER_GLOBAL_LOCAL bool c_include_resolve(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, bool quoted, String8* path_out,
-                                           String8* source_out);
+                                           String8* source_out, FileMapRead* map_out);
 
 BUSTER_GLOBAL_LOCAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, String8* path_out,
-                                                String8* source_out);
+                                                String8* source_out, FileMapRead* map_out);
 
 BUSTER_GLOBAL_LOCAL bool c_include_name(Arena* arena, CToken* tokens, u32 token_count, String8* name_out, bool* quoted_out);
 
@@ -1498,9 +1498,10 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_feature_operators(Arena* arena, CMacro* f
             bool quoted = false;
             String8 resolved_path = {0};
             String8 resolved_source = {0};
-            supported = c_include_name(arena, arguments, argument_count, &include_name, &quoted) && options &&
-                        (has_include_next ? c_include_resolve_next(arena, *options, including_path, include_name, &resolved_path, &resolved_source)
-                                          : c_include_resolve(arena, *options, including_path, include_name, quoted, &resolved_path, &resolved_source));
+            supported = c_include_name(arena, arguments, argument_count, &include_name, &quoted) &&
+                        options &&
+                        (has_include_next ? c_include_resolve_next(arena, *options, including_path, include_name, &resolved_path, &resolved_source, 0)
+                                          : c_include_resolve(arena, *options, including_path, include_name, quoted, &resolved_path, &resolved_source, 0));
         }
         else if ((has_builtin || has_attribute) && argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER)
         {
@@ -1798,6 +1799,7 @@ struct CPreprocessSourceFrame
     u64 token_index;
     u32 depth;
     bool line_start;
+    FileMapRead source_map;
 };
 
 typedef struct CPragmaPackStack CPragmaPackStack;
@@ -1843,16 +1845,25 @@ BUSTER_GLOBAL_LOCAL bool c_path_is_absolute(String8 path)
     return path.length && (path.pointer[0] == '/' || path.pointer[0] == '\\' || (path.length >= 2 && c_ascii_alpha(path.pointer[0]) && path.pointer[1] == ':'));
 }
 
-BUSTER_GLOBAL_LOCAL bool c_include_read(Arena* arena, String8 directory, String8 name, String8* path_out, String8* source_out)
+BUSTER_GLOBAL_LOCAL bool c_include_read(Arena* arena, String8 directory, String8 name, String8* path_out, String8* source_out, FileMapRead* map_out)
 {
+    if (map_out)
+    {
+        *map_out = (FileMapRead){0};
+    }
     String8 path = c_path_is_absolute(name) ? string_format_z(arena, S8("{S8}"), name) : string_format_z(arena, S8("{S8}/{S8}"), directory, name);
-    ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
+    FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
+    ByteSlice bytes = map.bytes;
     if (!bytes.pointer)
     {
         return false;
     }
     *path_out = path;
     *source_out = BYTE_SLICE_TO_STRING(8, bytes);
+    if (map_out)
+    {
+        *map_out = map;
+    }
     return true;
 }
 
@@ -1976,19 +1987,23 @@ BUSTER_GLOBAL_LOCAL bool c_include_builtin(String8 name, String8* path_out, Stri
 }
 
 BUSTER_GLOBAL_LOCAL bool c_include_resolve(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, bool quoted, String8* path_out,
-                                           String8* source_out)
+                                           String8* source_out, FileMapRead* map_out)
 {
+    if (map_out)
+    {
+        *map_out = (FileMapRead){0};
+    }
     if (c_path_is_absolute(name))
     {
-        return c_include_read(arena, S8("."), name, path_out, source_out);
+        return c_include_read(arena, S8("."), name, path_out, source_out, map_out);
     }
-    if (quoted && c_include_read(arena, c_path_directory(including_path), name, path_out, source_out))
+    if (quoted && c_include_read(arena, c_path_directory(including_path), name, path_out, source_out, map_out))
     {
         return true;
     }
     for (u32 index = 0; index < options.include_path_count; index += 1)
     {
-        if (c_include_read(arena, options.include_paths[index], name, path_out, source_out))
+        if (c_include_read(arena, options.include_paths[index], name, path_out, source_out, map_out))
         {
             return true;
         }
@@ -1999,7 +2014,7 @@ BUSTER_GLOBAL_LOCAL bool c_include_resolve(Arena* arena, CPreprocessOptions opti
     }
     for (u32 index = 0; index < options.system_include_path_count; index += 1)
     {
-        if (c_include_read(arena, options.system_include_paths[index], name, path_out, source_out))
+        if (c_include_read(arena, options.system_include_paths[index], name, path_out, source_out, map_out))
         {
             return true;
         }
@@ -2008,8 +2023,12 @@ BUSTER_GLOBAL_LOCAL bool c_include_resolve(Arena* arena, CPreprocessOptions opti
 }
 
 BUSTER_GLOBAL_LOCAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, String8* path_out,
-                                                String8* source_out)
+                                                String8* source_out, FileMapRead* map_out)
 {
+    if (map_out)
+    {
+        *map_out = (FileMapRead){0};
+    }
     String8 current_directory = c_path_directory(including_path);
     bool current_found = false;
     for (u32 index = 0; index < options.include_path_count; index += 1)
@@ -2019,7 +2038,7 @@ BUSTER_GLOBAL_LOCAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions
             current_found = string_equal(current_directory, options.include_paths[index]);
             continue;
         }
-        if (c_include_read(arena, options.include_paths[index], name, path_out, source_out))
+        if (c_include_read(arena, options.include_paths[index], name, path_out, source_out, map_out))
         {
             return true;
         }
@@ -2031,7 +2050,7 @@ BUSTER_GLOBAL_LOCAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions
             current_found = string_equal(current_directory, options.system_include_paths[index]);
             continue;
         }
-        if (c_include_read(arena, options.system_include_paths[index], name, path_out, source_out))
+        if (c_include_read(arena, options.system_include_paths[index], name, path_out, source_out, map_out))
         {
             return true;
         }
@@ -2615,6 +2634,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 c_preprocess_diagnostic_push(&result, conditional->location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL, S8("unterminated preprocessing conditional"));
                 conditional = conditional->previous;
             }
+            if (source_frame != &root_frame)
+            {
+                file_map_unmap(source_frame->source_map);
+            }
             source_frame = source_frame->previous;
             continue;
         }
@@ -2844,9 +2867,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                     {
                         String8 include_path = {0};
                         String8 include_source = {0};
+                        FileMapRead include_source_map = {0};
                         bool include_resolved =
-                            is_include_next ? c_include_resolve_next(arena, options, source_frame->path, include_name, &include_path, &include_source)
-                                            : c_include_resolve(arena, options, source_frame->path, include_name, quoted, &include_path, &include_source);
+                            is_include_next ? c_include_resolve_next(arena, options, source_frame->path, include_name, &include_path, &include_source, &include_source_map)
+                                            : c_include_resolve(arena, options, source_frame->path, include_name, quoted, &include_path, &include_source,
+                                                                &include_source_map);
                         if (!include_resolved)
                         {
                             c_preprocess_diagnostic_push(&result, directive.location, C_DIAGNOSTIC_INCLUDE_NOT_FOUND,
@@ -2879,9 +2904,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                     .lex = include_lex,
                                     .path = include_path,
                                     .logical_path = include_path,
+                                    .source_map = include_source_map,
                                     .depth = source_frame->depth + 1,
                                     .line_start = true,
                                 };
+                            }
+                            else
+                            {
+                                file_map_unmap(include_source_map);
                             }
                         }
                     }

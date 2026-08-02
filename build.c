@@ -1096,6 +1096,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
 #else
                                S8("ide-stage2"));
 #endif
+#if BUSTER_WINDOWS
+    bootstrap = os_path_absolute(arena, bootstrap, true);
+    stage1 = os_path_absolute(arena, stage1, true);
+    stage2 = os_path_absolute(arena, stage2, true);
+#endif
     // Replacing an executable in place can leave macOS with a stale vnode code-signature cache.
     // Unlink both outputs before either compiler recreates them.
     remove_path_recursive(arena, stage1);

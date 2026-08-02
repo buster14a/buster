@@ -570,12 +570,23 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
 
     if (length_plus_null_termination != 0)
     {
-        WindowsChar* os_result = arena_allocate(temp.arena, WindowsChar, length_plus_null_termination);
-        DWORD new_length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, length_plus_null_termination, os_result, 0);
-        BUSTER_CHECK(new_length_plus_null_termination == length_plus_null_termination);
-
-        String16 string16 = {.pointer = os_result, .length = new_length_plus_null_termination - 1};
-        result = string8_from_string16(arena, string16, null_terminate);
+        DWORD buffer_length = length_plus_null_termination + 1;
+        for (;;)
+        {
+            WindowsChar* os_result = arena_allocate(temp.arena, WindowsChar, buffer_length);
+            DWORD new_length = GetFullPathNameW(relative_file_path_w.pointer, buffer_length, os_result, 0);
+            if (new_length == 0)
+            {
+                break;
+            }
+            if (new_length < buffer_length)
+            {
+                String16 string16 = {.pointer = os_result, .length = new_length};
+                result = string8_from_string16(arena, string16, null_terminate);
+                break;
+            }
+            buffer_length = new_length + 1;
+        }
     }
 
     scratch_end(temp);

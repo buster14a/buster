@@ -5036,7 +5036,8 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     {
         TemporalArena fixture_temporary = arena_begin_temporal(arguments->arena);
         IrFixtureTest fixture = ir_fixture_tests[fixture_index];
-        String8 source = BYTE_SLICE_TO_STRING(8, file_read(arguments->arena, fixture.path, (FileReadOptions){0}));
+        FileMapRead source_file = file_map_read(arguments->arena, fixture.path, (FileReadOptions){0});
+        String8 source = BYTE_SLICE_TO_STRING(8, source_file.bytes);
         BUSTER_TEST(arguments, source.pointer != 0);
         TokenizerResult tokenizer = tokenize(arguments->arena, source.pointer, source.length);
         ParserResult parser = parser_parse(arguments->arena, expression_arena, source, tokenizer);
@@ -5241,6 +5242,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         String8 printed = ir_print_module(arguments->arena, &analysis, &module);
         BUSTER_TEST(arguments, printed.length > 0);
         BUSTER_TEST(arguments, string_starts_with_sequence(printed, S8("module ir-fixture")));
+        file_map_unmap(source_file);
         arena_set_position(fixture_temporary.arena, fixture_temporary.position);
     }
 
@@ -5302,6 +5304,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
         }
     }
+    analysis_program_unmap_sources(&loaded_program);
     BUSTER_CHECK(arena_destroy(expression_arena, 1));
     arena_set_position(temporary.arena, temporary.position);
     return result;

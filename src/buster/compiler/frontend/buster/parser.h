@@ -771,3 +771,7 @@ struct ParserBenchResult
 // BUSTER_INCLUDE_TESTS: this is a benchmark, not a test, and must stay
 // buildable in Release for CI perf tracking.
 BUSTER_F_DECL ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations);
+
+// Parses the file-test corpus with pre-mapped source contents to isolate
+// filesystem read costs from tokenizer/parser throughput.
+BUSTER_F_DECL ParserBenchResult parser_parse_bench_mmap(Arena* arena, u64 iterations);

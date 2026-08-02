@@ -517,7 +517,9 @@ struct CompilerDriverDynamicLibraries
 {
     NativeDynamicLibrary* pointer;
     NativeDynamicLibrary runtime;
+    FileMapRead* export_maps;
     u32 count;
+    u32 export_map_count;
 };
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u16(ByteSlice bytes, u64 offset, u16* value)
@@ -570,19 +572,30 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_pe_rva_offset(ByteSlice bytes, u64 sect
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, CompilerDriverInvocation invocation, NativeDynamicLibrary* library)
+BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, CompilerDriverInvocation invocation, NativeDynamicLibrary* library,
+                                                            FileMapRead* export_map)
 {
     String8 path = {0};
+    FileMapRead file = {0};
     ByteSlice bytes = {0};
+    *export_map = (FileMapRead){0};
+
     for (u32 path_index = 0; path_index < invocation.library_path_count && !bytes.pointer; path_index += 1)
     {
+        if (file.bytes.pointer)
+        {
+            file_map_unmap(file);
+        }
         path = string_format(arena, S8("{S8}/{S8}"), invocation.library_paths[path_index], library->name);
-        bytes = file_read(arena, path, (FileReadOptions){0});
+        file = file_map_read(arena, path, (FileReadOptions){0});
+        bytes = file.bytes;
     }
     if (!bytes.pointer && invocation.sysroot.length)
     {
         path = string_format(arena, S8("{S8}/Windows/System32/{S8}"), invocation.sysroot, library->name);
-        bytes = file_read(arena, path, (FileReadOptions){0});
+        file_map_unmap(file);
+        file = file_map_read(arena, path, (FileReadOptions){0});
+        bytes = file.bytes;
     }
 #if BUSTER_WINDOWS
     if (!bytes.pointer && invocation.target.os == OPERATING_SYSTEM_WINDOWS)
@@ -591,13 +604,17 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
         if (system_root.length)
         {
             path = string_format(arena, S8("{S8}/System32/{S8}"), system_root, library->name);
-            bytes = file_read(arena, path, (FileReadOptions){0});
+            file_map_unmap(file);
+            file = file_map_read(arena, path, (FileReadOptions){0});
+            bytes = file.bytes;
         }
     }
 #endif
     if (!bytes.pointer)
     {
-        bytes = file_read(arena, library->name, (FileReadOptions){0});
+        file_map_unmap(file);
+        file = file_map_read(arena, library->name, (FileReadOptions){0});
+        bytes = file.bytes;
     }
     u32 pe_offset = 0;
     u16 section_count = 0;
@@ -606,23 +623,27 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
         pe_offset > bytes.length || bytes.length - pe_offset < 24 || memcmp(bytes.pointer + pe_offset, "PE\0\0", 4) != 0 ||
         !compiler_driver_read_u16(bytes, pe_offset + 6, &section_count) || !compiler_driver_read_u16(bytes, pe_offset + 20, &optional_size))
     {
+        file_map_unmap(file);
         return;
     }
     u64 optional = pe_offset + 24;
     u16 magic = 0;
     if (!compiler_driver_read_u16(bytes, optional, &magic))
     {
+        file_map_unmap(file);
         return;
     }
     u64 directory = optional + (magic == 0x20b ? 112 : 96);
     u32 export_rva = 0;
     if ((magic != 0x20b && magic != 0x10b) || directory + 8 > optional + optional_size || !compiler_driver_read_u32(bytes, directory, &export_rva))
     {
+        file_map_unmap(file);
         return;
     }
     library->exports_known = true;
     if (!export_rva)
     {
+        *export_map = file;
         return;
     }
     u64 section_table = optional + optional_size;
@@ -633,12 +654,14 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
         !compiler_driver_read_u32(bytes, export_offset + 24, &name_count) || !compiler_driver_read_u32(bytes, export_offset + 32, &names_rva) ||
         name_count > (bytes.length / sizeof(u32)))
     {
+        file_map_unmap(file);
         return;
     }
     u64 names_offset = 0;
     if (!compiler_driver_pe_rva_offset(bytes, section_table, section_count, names_rva, &names_offset) || names_offset > bytes.length ||
         (u64)name_count * sizeof(u32) > bytes.length - names_offset)
     {
+        file_map_unmap(file);
         return;
     }
     library->exported_symbols = arena_allocate(arena, String8, name_count);
@@ -664,6 +687,15 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
             .pointer = (char8*)bytes.pointer + name_offset,
             .length = length,
         };
+    }
+    *export_map = file;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_dynamic_libraries_release(CompilerDriverDynamicLibraries* libraries)
+{
+    for (u32 index = 0; index < libraries->export_map_count; index += 1)
+    {
+        file_map_unmap(libraries->export_maps[index]);
     }
 }
 
@@ -782,11 +814,16 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
     }
     if (invocation.target.os == OPERATING_SYSTEM_WINDOWS)
     {
+        result.export_maps = arena_allocate(arena, FileMapRead, count + 1);
         result.runtime.name = S8("ucrtbase.dll");
-        compiler_driver_pe_library_exports(arena, invocation, &result.runtime);
+        FileMapRead* export_map = result.export_maps + result.export_map_count;
+        compiler_driver_pe_library_exports(arena, invocation, &result.runtime, export_map);
+        result.export_map_count += export_map->bytes.pointer != 0;
         for (u32 index = 0; index < count; index += 1)
         {
-            compiler_driver_pe_library_exports(arena, invocation, &libraries[index]);
+            export_map = result.export_maps + result.export_map_count;
+            compiler_driver_pe_library_exports(arena, invocation, &libraries[index], export_map);
+            result.export_map_count += export_map->bytes.pointer != 0;
         }
     }
     result.pointer = libraries;
@@ -842,34 +879,45 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
                                       ? string_format(arena, S8("lib{S8}.dylib"), requested)
                                       : string_format(arena, S8("lib{S8}.so"), requested);
             String8 shared_path = string_format_z(arena, S8("{S8}/{S8}"), root, shared_name);
-            ByteSlice shared = file_read(arena, shared_path, (FileReadOptions){0});
+            FileMapRead shared_map = file_map_read(arena, shared_path, (FileReadOptions){0});
+            ByteSlice shared = shared_map.bytes;
             if (shared.pointer)
             {
+                file_map_unmap(shared_map);
                 return result;
             }
+            file_map_unmap(shared_map);
         }
         String8 archive_name = exact_archive                                      ? exact_name
                                : invocation.target.os == OPERATING_SYSTEM_WINDOWS ? string_format(arena, S8("{S8}.lib"), requested)
                                                                                   : string_format(arena, S8("lib{S8}.a"), requested);
         String8 archive_path = string_format_z(arena, S8("{S8}/{S8}"), root, archive_name);
-        ByteSlice archive_bytes = file_read(arena, archive_path, (FileReadOptions){0});
+        FileMapRead archive_map = file_map_read(arena, archive_path, (FileReadOptions){0});
+        ByteSlice archive_bytes = archive_map.bytes;
         if (!archive_bytes.pointer)
         {
+            file_map_unmap(archive_map);
             continue;
         }
         *found = true;
         *path_out = archive_path;
-        return object_archive_read(arena, archive_bytes, invocation.target);
+        ObjectArchive archive = object_archive_read(arena, archive_bytes, invocation.target);
+        file_map_unmap(archive_map);
+        return archive;
     }
     if (exact_archive)
     {
-        ByteSlice archive_bytes = file_read(arena, exact_name, (FileReadOptions){0});
+        FileMapRead archive_map = file_map_read(arena, exact_name, (FileReadOptions){0});
+        ByteSlice archive_bytes = archive_map.bytes;
         if (archive_bytes.pointer)
         {
             *found = true;
             *path_out = exact_name;
-            return object_archive_read(arena, archive_bytes, invocation.target);
+            ObjectArchive archive = object_archive_read(arena, archive_bytes, invocation.target);
+            file_map_unmap(archive_map);
+            return archive;
         }
+        file_map_unmap(archive_map);
     }
     return result;
 }
@@ -914,6 +962,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         .error = invocation.error,
         .diagnostic = invocation.diagnostic,
     };
+    FileMapRead source_file = {0};
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
@@ -922,14 +971,15 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
         result.diagnostic = S8("the C frontend currently requires exactly one C input");
-        return result;
+        goto end;
     }
-    ByteSlice bytes = file_read(arena, invocation.input_paths[0], (FileReadOptions){0});
+    source_file = file_map_read(arena, invocation.input_paths[0], (FileReadOptions){0});
+    ByteSlice bytes = source_file.bytes;
     if (!bytes.pointer)
     {
         result.error = COMPILER_DRIVER_ERROR_FILE_READ;
         result.diagnostic = string_format(arena, S8("could not read {S8}"), invocation.input_paths[0]);
-        return result;
+        goto end;
     }
     CPreprocessorDefinition* definitions = arena_allocate(arena, CPreprocessorDefinition, invocation.definition_count);
     for (u32 index = 0; index < invocation.definition_count; index += 1)
@@ -957,7 +1007,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.tokenizer_error_count = (u32)preprocess.diagnostic_count;
         result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), invocation.input_paths[0], diagnostic.location.line, diagnostic.location.column,
                                           diagnostic.message);
-        return result;
+        goto end;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
@@ -967,7 +1017,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             result.error = COMPILER_DRIVER_ERROR_FILE_READ;
             result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
         }
-        return result;
+        goto end;
     }
     CParseResult parse = c_parse(arena, preprocess);
     result.parser_diagnostic_count = parse.diagnostic_count;
@@ -977,17 +1027,17 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.error = COMPILER_DRIVER_ERROR_PARSE;
         result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), invocation.input_paths[0], diagnostic.location.line, diagnostic.location.column,
                                           diagnostic.message);
-        return result;
+        goto end;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
-        return result;
+        goto end;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
     {
         result.error = COMPILER_DRIVER_ERROR_CODEGEN;
         result.diagnostic = S8("textual assembly output is not implemented yet");
-        return result;
+        goto end;
     }
     CIRLowerResult lowered = c_lower_to_ir(arena, invocation.input_paths[0], preprocess, parse, invocation.target);
     result.analysis_diagnostic_count = lowered.diagnostic_count;
@@ -1000,7 +1050,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), invocation.input_paths[0], diagnostic.location.line,
                                               diagnostic.location.column, diagnostic.message);
         }
-        return result;
+        goto end;
     }
     IrModule* module = &lowered.program->modules[0];
     IrValidationResult validation = ir_validate_canonical_module(lowered.program, module);
@@ -1020,7 +1070,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic =
             string_format(arena, S8("canonical C IR validation failed: error {u32}, function {u32} ('{S8}'), block {u32}, instruction {u32}, opcode {u32}"),
                           (u32)validation.error, validation.function.value, function_name, validation.block.value, validation.instruction.value, opcode);
-        return result;
+        goto end;
     }
     CodegenModule code = codegen_generate_canonical_module(arena, lowered.program, module, invocation.target);
     result.codegen_statistics = code.statistics;
@@ -1072,7 +1122,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                              "{u32}, opcode {u32}, operation {u32}, source {u32}:{u32}, referenced symbol '{S8}'"),
                           (u32)code.error, code.failed_function.value, function_name, function_state, function_block_count, function_instruction_count,
                           code.failed_instruction.value, (u32)code.failed_opcode, operation, source_line, source_column, referenced_symbol);
-        return result;
+        goto end;
     }
     ObjectFile object = object_from_canonical_codegen_module(arena, lowered.program, &code, invocation.target);
     result.object_error = object.error;
@@ -1080,7 +1130,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         result.error = COMPILER_DRIVER_ERROR_OBJECT;
         result.diagnostic = string_format(arena, S8("C object generation failed with error {u32}"), (u32)object.error);
-        return result;
+        goto end;
     }
     result.object = object;
     result.has_object = true;
@@ -1088,14 +1138,14 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         if (suppress_object_write)
         {
-            return result;
+            goto end;
         }
         ObjectArtifact artifact = object_write(arena, &object, object_format_for_target(invocation.target));
         if (artifact.error != OBJECT_ERROR_NONE)
         {
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
             result.object_error = artifact.error;
-            return result;
+            goto end;
         }
         String8 output = invocation.output_path.length ? invocation.output_path : S8("a.o");
         if (!file_write(output, artifact.bytes))
@@ -1103,7 +1153,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             result.error = COMPILER_DRIVER_ERROR_FILE_READ;
             result.diagnostic = string_format(arena, S8("could not write {S8}"), output);
         }
-        return result;
+        goto end;
     }
     LinkObjectResult linked = link_objects(arena, &object, 1,
                                            (LinkOptions){
@@ -1113,7 +1163,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
         result.diagnostic = string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
-        return result;
+        goto end;
     }
     String8 output = invocation.output_path.length ? invocation.output_path :
 #if BUSTER_WINDOWS
@@ -1132,11 +1182,14 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
                                                 });
+    compiler_driver_dynamic_libraries_release(&dynamic_libraries);
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
         result.diagnostic = string_format(arena, S8("native C link failed with error {u32}: {S8}"), (u32)result.native_link.error, result.native_link.symbol);
     }
+end:
+    file_map_unmap(source_file);
     return result;
 }
 
@@ -1181,14 +1234,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             continue;
         }
-        ByteSlice archive_bytes = file_read(arena, input_path, (FileReadOptions){0});
-        if (!archive_bytes.pointer)
+        FileMapRead archive_file = file_map_read(arena, input_path, (FileReadOptions){0});
+        if (!archive_file.bytes.pointer)
         {
             result.error = COMPILER_DRIVER_ERROR_FILE_READ;
             result.diagnostic = string_format(arena, S8("could not read {S8}"), input_path);
+            file_map_unmap(archive_file);
             return result;
         }
-        input_archives[input_index] = object_archive_read(arena, archive_bytes, invocation.target);
+        input_archives[input_index] = object_archive_read(arena, archive_file.bytes, invocation.target);
+        file_map_unmap(archive_file);
         if (input_archives[input_index].error != OBJECT_ERROR_NONE || input_archives[input_index].object_count > UINT32_MAX - object_capacity)
         {
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
@@ -1251,14 +1306,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         if (compiler_driver_object_input(input_path))
         {
-            ByteSlice object_bytes = file_read(arena, input_path, (FileReadOptions){0});
-            if (!object_bytes.pointer)
+            FileMapRead object_file = file_map_read(arena, input_path, (FileReadOptions){0});
+            if (!object_file.bytes.pointer)
             {
                 result.error = COMPILER_DRIVER_ERROR_FILE_READ;
                 result.diagnostic = string_format(arena, S8("could not read {S8}"), input_path);
+                file_map_unmap(object_file);
                 return result;
             }
-            ObjectFile object = object_read(arena, object_bytes, invocation.target);
+            ObjectFile object = object_read(arena, object_file.bytes, invocation.target);
+            file_map_unmap(object_file);
             if (object.error != OBJECT_ERROR_NONE)
             {
                 result.error = COMPILER_DRIVER_ERROR_OBJECT;
@@ -1452,6 +1509,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
                                                 });
+    compiler_driver_dynamic_libraries_release(&dynamic_libraries);
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
@@ -1820,8 +1878,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_object.codegen_statistics.stack_value_bytes > 0);
     BUSTER_TEST(arguments, c_object.codegen_statistics.stack_frame_bytes >= c_object.codegen_statistics.maximum_stack_frame_bytes);
     BUSTER_TEST(arguments, c_object.codegen_statistics.code_bytes > 0);
-    ByteSlice c_object_bytes = file_read(c_object_arena, c_object_path, (FileReadOptions){0});
+    FileMapRead c_object_map = file_map_read(c_object_arena, c_object_path, (FileReadOptions){0});
+    ByteSlice c_object_bytes = c_object_map.bytes;
     BUSTER_TEST(arguments, c_object_bytes.length != 0);
+    file_map_unmap(c_object_map);
     String8 c_object_targets[] = {
         S8("x86_64-unknown-linux-gnu"),  S8("x86_64-pc-windows-msvc"),  S8("x86_64-apple-macos"),  S8("x86_64-linux-android"),  S8("x86_64-apple-ios"),
         S8("aarch64-unknown-linux-gnu"), S8("aarch64-pc-windows-msvc"), S8("aarch64-apple-macos"), S8("aarch64-linux-android"), S8("aarch64-apple-ios"),
@@ -1837,8 +1897,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult cross = compiler_driver_execute_invocation(
             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(cross_command_line)));
         BUSTER_TEST(arguments, cross.error == COMPILER_DRIVER_ERROR_NONE);
-        ByteSlice cross_bytes = file_read(cross_temp.arena, cross_object_path, (FileReadOptions){0});
+        FileMapRead cross_map = file_map_read(cross_temp.arena, cross_object_path, (FileReadOptions){0});
+        ByteSlice cross_bytes = cross_map.bytes;
         BUSTER_TEST(arguments, cross_bytes.length != 0);
+        file_map_unmap(cross_map);
         String8 fixed_enum_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-fixed-enum"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 fixed_enum_command_line[] = {
@@ -1847,8 +1909,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult fixed_enum = compiler_driver_execute_invocation(
             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixed_enum_command_line)));
         BUSTER_TEST(arguments, fixed_enum.error == COMPILER_DRIVER_ERROR_NONE);
-        ByteSlice fixed_enum_bytes = file_read(cross_temp.arena, fixed_enum_object_path, (FileReadOptions){0});
+        FileMapRead fixed_enum_map = file_map_read(cross_temp.arena, fixed_enum_object_path, (FileReadOptions){0});
+        ByteSlice fixed_enum_bytes = fixed_enum_map.bytes;
         BUSTER_TEST(arguments, fixed_enum_bytes.length != 0);
+        file_map_unmap(fixed_enum_map);
         String8 string_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-string"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 string_command_line[] = {
@@ -1857,8 +1921,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult string_literals = compiler_driver_execute_invocation(
             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(string_command_line)));
         BUSTER_TEST(arguments, string_literals.error == COMPILER_DRIVER_ERROR_NONE);
-        ByteSlice string_bytes = file_read(cross_temp.arena, string_object_path, (FileReadOptions){0});
+        FileMapRead string_map = file_map_read(cross_temp.arena, string_object_path, (FileReadOptions){0});
+        ByteSlice string_bytes = string_map.bytes;
         BUSTER_TEST(arguments, string_bytes.length != 0);
+        file_map_unmap(string_map);
         String8 nullptr_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-nullptr"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 nullptr_command_line[] = {
@@ -1867,8 +1933,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult nullptr_result = compiler_driver_execute_invocation(
             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(nullptr_command_line)));
         BUSTER_TEST(arguments, nullptr_result.error == COMPILER_DRIVER_ERROR_NONE);
-        ByteSlice nullptr_bytes = file_read(cross_temp.arena, nullptr_object_path, (FileReadOptions){0});
+        FileMapRead nullptr_map = file_map_read(cross_temp.arena, nullptr_object_path, (FileReadOptions){0});
+        ByteSlice nullptr_bytes = nullptr_map.bytes;
         BUSTER_TEST(arguments, nullptr_bytes.length != 0);
+        file_map_unmap(nullptr_map);
         String8 constexpr_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-constexpr"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 constexpr_command_line[] = {
@@ -1877,8 +1945,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult constexpr_result = compiler_driver_execute_invocation(
             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(constexpr_command_line)));
         BUSTER_TEST(arguments, constexpr_result.error == COMPILER_DRIVER_ERROR_NONE);
-        ByteSlice constexpr_bytes = file_read(cross_temp.arena, constexpr_object_path, (FileReadOptions){0});
+        FileMapRead constexpr_map = file_map_read(cross_temp.arena, constexpr_object_path, (FileReadOptions){0});
+        ByteSlice constexpr_bytes = constexpr_map.bytes;
         BUSTER_TEST(arguments, constexpr_bytes.length != 0);
+        file_map_unmap(constexpr_map);
         String8 atomic_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-atomic"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 atomic_command_line[] = {
@@ -1887,8 +1957,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult atomic = compiler_driver_execute_invocation(
             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_command_line)));
         BUSTER_TEST(arguments, atomic.error == COMPILER_DRIVER_ERROR_NONE);
-        ByteSlice atomic_bytes = file_read(cross_temp.arena, atomic_object_path, (FileReadOptions){0});
+        FileMapRead atomic_map = file_map_read(cross_temp.arena, atomic_object_path, (FileReadOptions){0});
+        ByteSlice atomic_bytes = atomic_map.bytes;
         BUSTER_TEST(arguments, atomic_bytes.length != 0);
+        file_map_unmap(atomic_map);
         String8 stdatomic_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-stdatomic"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 stdatomic_command_line[] = {
@@ -1897,8 +1969,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult stdatomic = compiler_driver_execute_invocation(
             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(stdatomic_command_line)));
         BUSTER_TEST(arguments, stdatomic.error == COMPILER_DRIVER_ERROR_NONE);
-        ByteSlice stdatomic_bytes = file_read(cross_temp.arena, stdatomic_object_path, (FileReadOptions){0});
+        FileMapRead stdatomic_map = file_map_read(cross_temp.arena, stdatomic_object_path, (FileReadOptions){0});
+        ByteSlice stdatomic_bytes = stdatomic_map.bytes;
         BUSTER_TEST(arguments, stdatomic_bytes.length != 0);
+        file_map_unmap(stdatomic_map);
         scratch_end(cross_temp);
     }
     {
@@ -1911,8 +1985,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             large_frame_temporary.arena,
             compiler_driver_parse_arguments(large_frame_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(large_frame_command_line)));
         BUSTER_TEST(arguments, large_frame.error == COMPILER_DRIVER_ERROR_NONE);
-        ByteSlice large_frame_bytes = file_read(large_frame_temporary.arena, large_frame_object_path, (FileReadOptions){0});
+        FileMapRead large_frame_map = file_map_read(large_frame_temporary.arena, large_frame_object_path, (FileReadOptions){0});
+        ByteSlice large_frame_bytes = large_frame_map.bytes;
         BUSTER_TEST(arguments, large_frame_bytes.length != 0);
+        file_map_unmap(large_frame_map);
         scratch_end(large_frame_temporary);
     }
     {
@@ -1924,8 +2000,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult ucontext = compiler_driver_execute_invocation(
             ucontext_temporary.arena, compiler_driver_parse_arguments(ucontext_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ucontext_command_line)));
         BUSTER_TEST(arguments, ucontext.error == COMPILER_DRIVER_ERROR_NONE);
-        ByteSlice ucontext_bytes = file_read(ucontext_temporary.arena, ucontext_object_path, (FileReadOptions){0});
+        FileMapRead ucontext_map = file_map_read(ucontext_temporary.arena, ucontext_object_path, (FileReadOptions){0});
+        ByteSlice ucontext_bytes = ucontext_map.bytes;
         BUSTER_TEST(arguments, ucontext_bytes.length != 0);
+        file_map_unmap(ucontext_map);
         scratch_end(ucontext_temporary);
     }
     scratch_end(c_object_temporary);
@@ -2831,15 +2909,19 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         c_multi_arena, compiler_driver_parse_arguments(c_multi_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_archive_add_command_line)));
     BUSTER_TEST(arguments, c_archive_bias.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, c_archive_add.error == COMPILER_DRIVER_ERROR_NONE);
+    FileMapRead c_archive_bias_map = file_map_read(c_multi_arena, c_archive_bias_object_path, (FileReadOptions){0});
+    FileMapRead c_archive_add_map = file_map_read(c_multi_arena, c_archive_add_object_path, (FileReadOptions){0});
     ByteSlice c_archive_members[] = {
-        file_read(c_multi_arena, c_archive_bias_object_path, (FileReadOptions){0}),
-        file_read(c_multi_arena, c_archive_add_object_path, (FileReadOptions){0}),
+        c_archive_bias_map.bytes,
+        c_archive_add_map.bytes,
     };
     String8 c_archive_names[] = {
         S8("bias.o"),
         S8("add.o"),
     };
     ByteSlice c_archive_bytes = compiler_driver_test_archive(c_multi_arena, c_archive_members, c_archive_names, BUSTER_ARRAY_LENGTH(c_archive_members));
+    file_map_unmap(c_archive_bias_map);
+    file_map_unmap(c_archive_add_map);
     String8 c_archive_directory = buster_test_temporary_path(c_multi_arena, S8("buster-c-driver-archive"), S8(""));
     os_make_directory(c_archive_directory);
     String8 c_archive_path = string_format_z(c_multi_arena,

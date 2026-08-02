@@ -3274,11 +3274,22 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
 // TODO: support gradient
 void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
+    if (!rendering || !window)
+    {
+        return;
+    }
+
     string_print(S8("Vulkan render window deinitialize: surface={u64:x}, swapchain={u64:x}, frame_count={u32}, image_count={u32}\n"), (u64)window->surface,
                  (u64)window->swapchain, window->frame_count, window->swapchain_image_count);
     if (vkDeviceWaitIdle(rendering->device) == VK_SUCCESS)
     {
-        for (u32 i = 0; i < window->frame_count; i += 1)
+        u32 frame_count = window->frame_count;
+        if (frame_count > BUSTER_ARRAY_LENGTH(window->frames))
+        {
+            frame_count = BUSTER_ARRAY_LENGTH(window->frames);
+        }
+
+        for (u32 i = 0; i < frame_count; i += 1)
         {
             WindowFrame* frame = &window->frames[i];
             if (frame->swapchain_semaphore)
@@ -3325,7 +3336,13 @@ void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHa
 
         destroy_image(rendering->device, rendering->allocator, window->render_image.view, window->render_image.handle, window->render_image.memory.handle);
 
-        for (u32 i = 0; i < window->swapchain_image_count; i += 1)
+        u32 image_count = window->swapchain_image_count;
+        if (image_count > BUSTER_ARRAY_LENGTH(window->swapchain_image_views))
+        {
+            image_count = BUSTER_ARRAY_LENGTH(window->swapchain_image_views);
+        }
+
+        for (u32 i = 0; i < image_count; i += 1)
         {
             vkDestroyImageView(rendering->device, window->swapchain_image_views[i], rendering->allocator);
             vkDestroySemaphore(rendering->device, window->render_semaphores[i], rendering->allocator);
@@ -3351,6 +3368,11 @@ void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHa
 
 void rendering_deinitialize(RenderingHandle* rendering)
 {
+    if (!rendering)
+    {
+        return;
+    }
+
     string_print(S8("Vulkan rendering deinitialize: texture_count={u32}, device={u64:x}, instance={u64:x}\n"), rendering->texture_count, (u64)rendering->device,
                  (u64)rendering->instance);
     if (vkDeviceWaitIdle(rendering->device) == VK_SUCCESS)

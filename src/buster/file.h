@@ -10,7 +10,18 @@ struct FileReadOptions
     u32 end_alignment;
 };
 
+typedef struct FileMapRead FileMapRead;
+struct FileMapRead
+{
+    ByteSlice bytes;
+    void* mapped_pointer;
+    u64 mapped_size;
+    void* mapped_handle;
+};
+
 BUSTER_F_DECL ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options);
+BUSTER_F_DECL FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options);
+BUSTER_F_DECL void file_map_unmap(FileMapRead map);
 BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 
 typedef struct CopyFileArguments CopyFileArguments;

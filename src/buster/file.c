@@ -46,6 +46,106 @@ bool file_write(String8 path, ByteSlice content)
     return result;
 }
 
+FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
+{
+    FileMapRead result = {0};
+
+#if BUSTER_ANDROID || BUSTER_IOS
+    result.bytes = file_read(arena, path, options);
+    return result;
+#endif
+
+    if (!path.length || options.start_padding || options.end_padding || options.start_alignment || options.end_alignment)
+    {
+        result.bytes = file_read(arena, path, options);
+        return result;
+    }
+
+#if BUSTER_WINDOWS
+    {
+        OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        if (file)
+        {
+            u64 file_size = os_file_get_size(file);
+            if (file_size)
+            {
+                HANDLE mapping = CreateFileMappingW((HANDLE)file, 0, PAGE_READONLY, (DWORD)(file_size >> 32), (DWORD)file_size, 0);
+                if (mapping)
+                {
+                    void* mapped = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+                    if (mapped)
+                    {
+                        result.bytes = (ByteSlice){(u8*)mapped, file_size};
+                        result.mapped_pointer = mapped;
+                        result.mapped_size = file_size;
+                        result.mapped_handle = mapping;
+                    }
+                    else
+                    {
+                        CloseHandle(mapping);
+                    }
+                }
+            }
+            os_file_close(file);
+        }
+    }
+#elif BUSTER_LINUX || BUSTER_MACOS
+    if (path.pointer[0] == '/')
+    {
+        char* path_buffer = (char*)arena_allocate_bytes(arena, path.length + 1, 1);
+        if (path_buffer)
+        {
+            memcpy(path_buffer, path.pointer, path.length);
+            path_buffer[path.length] = 0;
+
+            int file_descriptor = open(path_buffer, O_RDONLY, 0);
+            if (file_descriptor >= 0)
+            {
+                struct stat file_stats = {0};
+                if (fstat(file_descriptor, &file_stats) == 0 && file_stats.st_size > 0)
+                {
+                    void* mapped = mmap(0, (u64)file_stats.st_size, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
+                    if (mapped != MAP_FAILED)
+                    {
+                        result.bytes = (ByteSlice){(u8*)mapped, (u64)file_stats.st_size};
+                        result.mapped_pointer = mapped;
+                        result.mapped_size = (u64)file_stats.st_size;
+                    }
+                }
+                close(file_descriptor);
+            }
+        }
+    }
+#endif
+
+    if (!result.bytes.pointer)
+    {
+        result.bytes = file_read(arena, path, options);
+    }
+    return result;
+}
+
+void file_map_unmap(FileMapRead map)
+{
+#if BUSTER_WINDOWS
+    if (map.mapped_pointer)
+    {
+        UnmapViewOfFile(map.mapped_pointer);
+    }
+    if (map.mapped_handle)
+    {
+        CloseHandle(map.mapped_handle);
+    }
+#elif BUSTER_ANDROID || BUSTER_IOS
+    BUSTER_UNUSED(map);
+#else
+    if (map.mapped_pointer && map.mapped_size)
+    {
+        munmap(map.mapped_pointer, map.mapped_size);
+    }
+#endif
+}
+
 ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
 {
     ByteSlice result = {0};

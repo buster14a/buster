@@ -205,6 +205,47 @@ enabled.
   `PERF_HISTORY_TOKEN` repo secret with push access, since the main
   `Checkout` step deliberately uses `persist-credentials: false`.
 
+## Latest performance audit notes
+
+`2026-08-02` (Linux x86_64, Release + Debug, with `--instrument --time-trace`):
+
+- `build/Release` compile time is currently dominated by the unity TU:
+  `CMakeFiles/ide.dir/Release/src/buster/ide/ide.c.o` at `20613 ms`
+  in `ninja_log_summary build --limit 20`.
+- `build/Debug` split compilation hotspots (same summary):
+  `parser.c.o` (`707 ms`), `codegen.c.o` (`582 ms`), `analysis.c.o` (`475 ms`),
+  `ir.c.o` (`361 ms`).
+- `bench_all` result snapshots:
+  - Release: `BENCH parse_all_tests iterations=200 files=59 min_ns=398673 median_ns=418340`.
+  - Debug: `BENCH parse_all_tests iterations=200 files=59 min_ns=941358 median_ns=975512`.
+- In `BUSTER_INSTRUMENT` mode:
+  - Tokenize: `55_363 ns` median (Release), `297_607 ns` median (Debug).
+  - Parse: `48_272 ns` median (Release), `340_853 ns` median (Debug).
+- `BENCH_FILE` output is consistently slowest-first; `tests/basic_variadic.bbb`
+  is the dominant long-tail input across both configs.
+- Superluminal capture of `ide bench` shows `parser_parse_bench` paths flowing
+  heavily through `file_read -> os_file_open -> __libc_open64`, indicating
+  benchmark procedure repeatedly performs disk reads instead of amortizing source
+  input.
+- Recommended next optimization experiment:
+  - Add a preloaded-source benchmark mode to separate parser throughput
+    (`tokenize`/`parse`) from filesystem input, then compare both modes via
+    `perf_file_median_ns` and `bench_median_ns_per_file`.
+
+`2026-08-02` (Linux x86_64, Release `bench_all`, `BUSTER_INSTRUMENT=1`):
+
+- Added an opt-in mmap benchmark path selected by `BUSTER_BENCH_MMAP=1`:
+  - `BENCH parse_all_tests ... median_ns=421736` (baseline: `file_read` each iteration).
+  - `BENCH_MMAP parse_all_tests ... median_ns=90831` (files memory-mapped once, then reused).
+- Mapped benchmark reduced total wall time by roughly `78.5%` (`421736 -> 90831`).
+- Tokenize/parse split moved only modestly:
+  - Baseline `BENCH_PHASE tokenize` median: `57241`, parse median: `48711`.
+  - Mapped `BENCH_MMAP_PHASE tokenize` median: `50023`, parse median: `39756`.
+- The remaining gap between modes is mostly filesystem read overhead in the old
+  path; parser/tokenization itself improves only ~12–19%.
+- The dominant input is still `tests/basic_variadic.bbb`, but its parse path also
+  drops (median `11171 -> 10430`) under mmap reuse.
+
 ## Core rules
 
 - **C only.** No C++, no exceptions. `-fwrapv`, `-fno-strict-aliasing`,

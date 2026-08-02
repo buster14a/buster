@@ -793,9 +793,21 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
 void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
     BUSTER_UNUSED(rendering);
+    if (!window)
+    {
+        return;
+    }
+
     string_print(S8("Metal render window deinitialize: ns_window={u64:x}, layer={u64:x}, frame_count={u32}\n"), (u64)window->ns_window, (u64)window->layer,
                  window->frame_count);
-    for (u32 frame_index = 0; frame_index < window->frame_count; frame_index += 1)
+
+    u32 frame_count = window->frame_count;
+    if (frame_count > BUSTER_ARRAY_LENGTH(window->frames))
+    {
+        frame_count = BUSTER_ARRAY_LENGTH(window->frames);
+    }
+
+    for (u32 frame_index = 0; frame_index < frame_count; frame_index += 1)
     {
         WindowFrame* frame = &window->frames[frame_index];
         if (frame->command_buffer)
@@ -825,6 +837,11 @@ void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHa
 
 void rendering_deinitialize(RenderingHandle* rendering)
 {
+    if (!rendering)
+    {
+        return;
+    }
+
     string_print(S8("Metal rendering deinitialize: texture_count={u32}, device={u64:x}, command_queue={u64:x}\n"), rendering->texture_count,
                  (u64)rendering->device, (u64)rendering->command_queue);
     for (u32 i = 0; i < rendering->texture_count; i += 1)
