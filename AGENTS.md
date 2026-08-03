@@ -76,7 +76,8 @@ shell, CMake, and utility subprocesses.
 
 `build/build` commands: `generate`, `build` (default), `clang_analyze`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
-`test_self_host`, `test_all_combinations`, `test_all_combinations_ci`.
+`import_assembly_metadata`, `test_self_host`, `test_all_combinations`,
+`test_all_combinations_ci`.
 The combination matrix shares one multi-config build tree across Debug and
 Release when their configure-time policy matches. Clang's fuzz-enabled Debug
 sanitized and Release non-sanitized configurations use dedicated trees;
@@ -573,7 +574,7 @@ Compiler (`src/buster/lib/compiler/`):
 |---|---|
 | `frontend/buster/parser.{c,h}` | Lexer + explicit-stack parser; owns the `.bbb` fixture array and parser benchmarks. `parser_file_tests()` lives in `src/buster/tests/compiler/frontend/buster/parser_test.c`. |
 | `frontend/c/c.{c,h}` | GNU C frontend in progress: source translation, preprocessing tokens/macros/includes/conditionals, non-recursive external-declaration parsing with strong IDs, flattened scalar/pointer/array/function/aggregate types, nested lexical scopes with entity-based identifier binding and canonical redeclarations, and target-aware shared-IR lowering for scalar/pointer/aggregate parameters, locals, static-storage objects, explicit conversions, array decay/indexing, chained field access, control flow, short-circuit and conditional expressions, direct calls, and constant aggregate initialization. |
-| `assembly/assembly.{c,h}` | Standalone target assembly parser and encoder with labels, expressions, relocations, symbols, and structured diagnostics. |
+| `assembly/assembly.{c,h}` | Standalone target assembly parser and encoder with labels, expressions, relocations, symbols, and structured diagnostics. `assembly/generated/` contains pinned reduced XED/LLVM metadata and its provenance; regenerate it only through `build.c`'s explicit `import_assembly_metadata` command. |
 | `frontend/buster/analysis.{c,h}` | Buster semantic indexing, interface resolution, body analysis, layouts, ABI classification, specialization, and dependency scheduling. Fixture-wide tests live in `src/buster/tests/compiler/frontend/buster/analysis_test.c`. |
 | `ir/model.h` | Format-neutral canonical typed IR data model shared by frontends, codegen, debug metadata, objects, and the interpreter. |
 | `ir/ir.{c,h}` | Buster semantic-to-IR lowering, IR validation, and printing. Fixture-wide and structural tests live in `src/buster/tests/compiler/ir/ir_test.c`. |
@@ -592,6 +593,5 @@ Applications and standalone tools:
 | Path | Contents |
 |---|---|
 | `apps/ide/ide.c` | Main application, the **only CMake executable target**, and the unity-build translation unit (the `BUSTER_UNITY_BUILD` include block at the top). |
-| `apps/scrape_llvm.c`, `apps/scrape_xed.c` | Standalone generators scraping LLVM TableGen / Intel XED data into C encoder tables. Not wired into CMake; compile manually. |
 | `apps/disk_builder.c` | Standalone MBR/GPT disk-image builder. Not wired into CMake. |
 | `lib/sanitizer_coe_win.c` | Windows continue-on-error sanitizer shim (raw `WriteFile` to stderr, no CRT). |
