@@ -603,18 +603,23 @@ BUSTER_GLOBAL_LOCAL bool wm_xim_style_is_supported(WmHandle* handle, u32 style)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u32 const wm_xim_input_style_candidates[] = {
+    XCB_IM_PreeditNothing | XCB_IM_StatusNothing,     XCB_IM_PreeditNothing | XCB_IM_StatusNone,      XCB_IM_PreeditNone | XCB_IM_StatusNothing,
+    XCB_IM_PreeditNone | XCB_IM_StatusNone,           XCB_IM_PreeditPosition | XCB_IM_StatusNothing,  XCB_IM_PreeditPosition | XCB_IM_StatusNone,
+    XCB_IM_PreeditCallbacks | XCB_IM_StatusCallbacks, XCB_IM_PreeditCallbacks | XCB_IM_StatusNothing, XCB_IM_PreeditCallbacks | XCB_IM_StatusNone,
+};
+
+BUSTER_TEST_F_DECL u32 wm_xim_next_input_style_attempt(u32 current)
+{
+    return current < BUSTER_ARRAY_LENGTH(wm_xim_input_style_candidates) ? current + 1 : current;
+}
+
 BUSTER_GLOBAL_LOCAL bool wm_xim_select_input_style(WmHandle* handle, WmWindowHandle* window, u32* input_style_out)
 {
-    u32 candidates[] = {
-        XCB_IM_PreeditNothing | XCB_IM_StatusNothing,     XCB_IM_PreeditNothing | XCB_IM_StatusNone,      XCB_IM_PreeditNone | XCB_IM_StatusNothing,
-        XCB_IM_PreeditNone | XCB_IM_StatusNone,           XCB_IM_PreeditPosition | XCB_IM_StatusNothing,  XCB_IM_PreeditPosition | XCB_IM_StatusNone,
-        XCB_IM_PreeditCallbacks | XCB_IM_StatusCallbacks, XCB_IM_PreeditCallbacks | XCB_IM_StatusNothing, XCB_IM_PreeditCallbacks | XCB_IM_StatusNone,
-    };
-
     bool result = false;
-    for (u32 i = window->xim_input_style_attempt_index; !result && i < BUSTER_ARRAY_LENGTH(candidates); i += 1)
+    for (u32 i = window->xim_input_style_attempt_index; !result && i < BUSTER_ARRAY_LENGTH(wm_xim_input_style_candidates); i += 1)
     {
-        u32 candidate = candidates[i];
+        u32 candidate = wm_xim_input_style_candidates[i];
         if (wm_xim_style_is_supported(handle, candidate))
         {
             *input_style_out = candidate;
@@ -623,9 +628,10 @@ BUSTER_GLOBAL_LOCAL bool wm_xim_select_input_style(WmHandle* handle, WmWindowHan
         }
     }
 
-    if (!result && handle->xim_supported_input_style_count == 0 && window->xim_input_style_attempt_index < BUSTER_ARRAY_LENGTH(candidates))
+    if (!result && handle->xim_supported_input_style_count == 0 &&
+        window->xim_input_style_attempt_index < BUSTER_ARRAY_LENGTH(wm_xim_input_style_candidates))
     {
-        *input_style_out = candidates[window->xim_input_style_attempt_index];
+        *input_style_out = wm_xim_input_style_candidates[window->xim_input_style_attempt_index];
         result = true;
     }
 
@@ -760,7 +766,7 @@ BUSTER_GLOBAL_LOCAL void wm_xim_create_ic_callback(xcb_xim_t* im, xcb_xic_t new_
     }
     else
     {
-        window->xim_input_style_attempt_index += 1;
+        window->xim_input_style_attempt_index = wm_xim_next_input_style_attempt(window->xim_input_style_attempt_index);
     }
 }
 
@@ -808,9 +814,13 @@ BUSTER_GLOBAL_LOCAL void wm_xim_create_ic_for_window(WmWindowHandle* window)
             }
         }
 
-        u32 input_style = 0;
-        if (handle->xim_input_styles_ready && wm_xim_select_input_style(handle, window, &input_style))
+        while (handle->xim_input_styles_ready)
         {
+            u32 input_style = 0;
+            if (!wm_xim_select_input_style(handle, window, &input_style))
+            {
+                break;
+            }
             bool requested = false;
 
             if ((input_style & XCB_IM_PreeditPosition) != 0)
@@ -833,11 +843,11 @@ BUSTER_GLOBAL_LOCAL void wm_xim_create_ic_for_window(WmWindowHandle* window)
             if (requested)
             {
                 window->xim_create_ic_pending = true;
+                break;
             }
             else
             {
-                window->xim_input_style_attempt_index += 1;
-                wm_xim_create_ic_for_window(window);
+                window->xim_input_style_attempt_index = wm_xim_next_input_style_attempt(window->xim_input_style_attempt_index);
             }
         }
     }

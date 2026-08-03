@@ -18,6 +18,13 @@ BUSTER_TEST_F_DECL UnitTestResult window_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, wm_x11_utf8_result_length(0, 64) == 0);
     BUSTER_TEST(arguments, wm_x11_utf8_result_length(3, 64) == 3);
     BUSTER_TEST(arguments, wm_x11_utf8_result_length(64, 64) == 0);
+    u32 xim_attempt = 0;
+    for (u32 retry = 0; retry < 32; retry += 1)
+    {
+        xim_attempt = wm_xim_next_input_style_attempt(xim_attempt);
+    }
+    BUSTER_TEST(arguments, xim_attempt == 9);
+    BUSTER_TEST(arguments, wm_xim_next_input_style_attempt(xim_attempt) == xim_attempt);
 #endif
 #if defined(_WIN32)
     struct WmWin32KeyTestCase
