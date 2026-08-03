@@ -1,6 +1,8 @@
 static int factor = 14;
 static const int divisor = 2;
 static int calls;
+static unsigned char large_zero_storage[1024 * 1024];
+static const unsigned char constant_zero_storage[64];
 
 typedef void* va_list;
 typedef char char8;
@@ -532,6 +534,18 @@ static int indirect_variadic_struct_argument(void)
     return holder.callback(4, slice, 5ULL, 6ULL) == 18;
 }
 
+static int zero_storage_round_trip(void)
+{
+    if (large_zero_storage[0] || large_zero_storage[sizeof(large_zero_storage) - 1] || constant_zero_storage[0] ||
+        constant_zero_storage[sizeof(constant_zero_storage) - 1])
+    {
+        return 0;
+    }
+    large_zero_storage[0] = 17;
+    large_zero_storage[sizeof(large_zero_storage) - 1] = 29;
+    return large_zero_storage[0] == 17 && large_zero_storage[sizeof(large_zero_storage) - 1] == 29;
+}
+
 int main(void)
 {
     int value = answer();
@@ -570,5 +584,5 @@ int main(void)
            8 * (0ULL - (unsigned long long)(-9223372036854775807LL - 1) == 9223372036854775808ULL) + 16 * ((-10LL - 1) == -11LL) +
            32 * (9223372036854775807LL == 0x7fffffffffffffffLL) + 64 * (-9223372036854775807LL == (long long)0x8000000000000001ULL) +
            2 * initialized_integer_arrays() + unicode_exception_paths() + unicode_index_conditions() + narrow_unsigned_conversions() +
-           (integer_width_mask(32) == 0xffffffffULL) + indirect_variadic_struct_argument() - 470;
+           (integer_width_mask(32) == 0xffffffffULL) + indirect_variadic_struct_argument() + zero_storage_round_trip() - 471;
 }

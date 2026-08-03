@@ -12272,7 +12272,20 @@ BUSTER_GLOBAL_LOCAL CEntityId c_ir_local_entity_at(CIntegerIrBuilder* builder, u
 
 BUSTER_GLOBAL_LOCAL bool c_ir_c_type_is_read_only(CIntegerIrBuilder* builder, CTypeId type_id)
 {
-    return type_id.value < builder->parse.type_count && builder->parse.types[type_id.value].is_const;
+    while (type_id.value < builder->parse.type_count)
+    {
+        CType* type = builder->parse.types + type_id.value;
+        if (type->is_const)
+        {
+            return true;
+        }
+        if (type->kind != C_TYPE_ARRAY)
+        {
+            break;
+        }
+        type_id = type->element_type;
+    }
+    return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_c_type_points_to_read_only(CIntegerIrBuilder* builder, CTypeId type_id)

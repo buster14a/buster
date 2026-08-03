@@ -7632,6 +7632,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     u64 read_only_capacity = 0;
     u64 writable_capacity = 0;
     u64 thread_local_capacity = 0;
+    u64 zero_fill_capacity = 0;
     u64 thread_local_zero_capacity = 0;
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
@@ -7648,8 +7649,9 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             result.error = CODEGEN_ERROR_INVALID_IR;
             return result;
         }
-        bool thread_local_zero = global->is_thread_local && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
-        u64* capacity = thread_local_zero         ? &thread_local_zero_capacity
+        bool zero_fill = !global->is_read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+        u64* capacity = zero_fill && global->is_thread_local ? &thread_local_zero_capacity
+                        : zero_fill                           ? &zero_fill_capacity
                         : global->is_thread_local ? &thread_local_capacity
                         : global->is_read_only    ? &read_only_capacity
                                                   : &writable_capacity;
@@ -7678,18 +7680,20 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     u64 read_only_count = 0;
     u64 writable_count = 0;
     u64 thread_local_count = 0;
+    u64 zero_fill_count = 0;
     u64 thread_local_zero_count = 0;
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
         IrGlobal* global = module->globals + global_index;
         IrType* type = ir_type_from_id(&program->types, global->type);
         u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
-        bool thread_local_zero = global->is_thread_local && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
-        u64* count = thread_local_zero         ? &thread_local_zero_count
+        bool zero_fill = !global->is_read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+        u64* count = zero_fill && global->is_thread_local ? &thread_local_zero_count
+                     : zero_fill                           ? &zero_fill_count
                      : global->is_thread_local ? &thread_local_count
                      : global->is_read_only    ? &read_only_count
                                                : &writable_count;
-        u8* bytes = thread_local_zero ? 0 : global->is_thread_local ? thread_local_bytes : global->is_read_only ? read_only_bytes : writable_bytes;
+        u8* bytes = zero_fill ? 0 : global->is_thread_local ? thread_local_bytes : global->is_read_only ? read_only_bytes : writable_bytes;
         u64 remainder = *count % global_alignment;
         if (remainder)
         {
@@ -7703,7 +7707,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             .alignment = global_alignment,
             .read_only = global->is_read_only,
             .is_thread_local = global->is_thread_local,
-            .zero_fill = thread_local_zero,
+            .zero_fill = zero_fill,
         };
         if (global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER || global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT)
         {
@@ -7734,6 +7738,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         .pointer = writable_bytes,
         .length = writable_count,
     };
+    result.zero_fill_size = zero_fill_count;
     result.thread_local_data = (ByteSlice){
         .pointer = thread_local_bytes,
         .length = thread_local_count,

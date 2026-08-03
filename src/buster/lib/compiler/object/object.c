@@ -344,6 +344,8 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
             return S8("\t.section __TEXT,__const\n");
         case OBJECT_SECTION_DATA:
             return S8("\t.section __DATA,__data\n");
+        case OBJECT_SECTION_ZERO:
+            return S8("\t.section __DATA,__bss,zerofill\n");
         case OBJECT_SECTION_THREAD_LOCAL_DATA:
             return S8("\t.section __DATA,__thread_data\n");
         case OBJECT_SECTION_THREAD_LOCAL_ZERO:
@@ -376,6 +378,9 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
         return S8("\t.section .rodata\n");
     case OBJECT_SECTION_DATA:
         return S8("\t.section .data\n");
+    case OBJECT_SECTION_ZERO:
+        return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .bss\n")
+                                                                                           : S8("\t.section .bss,\"aw\",@nobits\n");
     case OBJECT_SECTION_THREAD_LOCAL_DATA:
         return S8("\t.section .tdata\n");
     case OBJECT_SECTION_THREAD_LOCAL_ZERO:
@@ -2723,7 +2728,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_next_internal_label(ObjectAssemblyBuffer
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section_index)
 {
     ObjectSection* section = object->sections + section_index;
-    u64 data_length = section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? section->virtual_size : section->data.length;
+    u64 data_length = object_section_kind_is_zero_fill(section->kind) ? section->virtual_size : section->data.length;
     bool has_symbols = false;
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
@@ -2740,7 +2745,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         object_assembly_append_u64_decimal(buffer, object_assembly_alignment_exponent(section->alignment));
         object_assembly_append_string(buffer, S8("\n"));
     }
-    if (section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
+    if (object_section_kind_is_zero_fill(section->kind))
     {
         object_assembly_emit_labels(buffer, object, target, section_index, 0);
         if (data_length)
@@ -2970,6 +2975,8 @@ String8 object_section_name_for_kind(ObjectSectionKind kind)
         return S8(".rodata");
     case OBJECT_SECTION_DATA:
         return S8(".data");
+    case OBJECT_SECTION_ZERO:
+        return S8(".bss");
     case OBJECT_SECTION_THREAD_LOCAL_DATA:
         return S8(".tdata");
     case OBJECT_SECTION_THREAD_LOCAL_ZERO:
@@ -2999,6 +3006,11 @@ String8 object_section_name_for_kind(ObjectSectionKind kind)
 u32 object_section_default_alignment(ObjectSectionKind kind)
 {
     return object_section_kind_is_debug(kind) ? 1 : 16;
+}
+
+bool object_section_kind_is_zero_fill(ObjectSectionKind kind)
+{
+    return kind == OBJECT_SECTION_ZERO || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
 }
 
 BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String8 name)
@@ -3125,6 +3137,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         ObjectSectionKind kind = debug_kind != OBJECT_SECTION_COUNT ? debug_kind
                                  : flags & 0x400                    ? (section_type == 8 ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                  : flags & 0x4                      ? OBJECT_SECTION_TEXT
+                                 : section_type == 8                ? OBJECT_SECTION_ZERO
                                  : flags & 0x1                      ? OBJECT_SECTION_DATA
                                                                     : OBJECT_SECTION_READ_ONLY_DATA;
         u64 base = align_forward(section_sizes[kind], alignment);
@@ -3141,7 +3154,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
     result.section_count = OBJECT_SECTION_COUNT;
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
-        bool zero_fill = kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+        bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
         result.sections[kind] = (ObjectSection){
             .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
@@ -3504,6 +3517,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
         ObjectSectionKind kind = debug_kind != OBJECT_SECTION_COUNT ? debug_kind
                                  : is_thread_local                  ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                  : characteristics & 0x20           ? OBJECT_SECTION_TEXT
+                                 : zero_fill                         ? OBJECT_SECTION_ZERO
                                  : characteristics & 0x80000000     ? OBJECT_SECTION_DATA
                                                                     : OBJECT_SECTION_READ_ONLY_DATA;
         u32 alignment_code = (characteristics >> 20) & 0xf;
@@ -3523,7 +3537,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
     result.section_count = OBJECT_SECTION_COUNT;
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
-        bool zero_fill = kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+        bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
         result.sections[kind] = (ObjectSection){
             .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
@@ -3849,9 +3863,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 ObjectSectionKind output_kind = debug_kind != OBJECT_SECTION_COUNT ? debug_kind
                                                 : is_thread_local ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                                 : (flags & 0x80000000) || string_equal(name, S8("__text")) ? OBJECT_SECTION_TEXT
-                                                : string_starts_with_sequence(name, S8("__data")) || string_starts_with_sequence(name, S8("__bss"))
-                                                    ? OBJECT_SECTION_DATA
-                                                    : OBJECT_SECTION_READ_ONLY_DATA;
+                                                : zero_fill || string_starts_with_sequence(name, S8("__bss")) ? OBJECT_SECTION_ZERO
+                                                : string_starts_with_sequence(name, S8("__data")) ? OBJECT_SECTION_DATA
+                                                                                                     : OBJECT_SECTION_READ_ONLY_DATA;
                 u32 alignment = 1u << alignment_power;
                 u64 base = align_forward(section_sizes[output_kind], alignment);
                 if (base < section_sizes[output_kind] || section_size > UINT64_MAX - base)
@@ -3874,7 +3888,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
     result.section_count = OBJECT_SECTION_COUNT;
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
-        bool zero_fill = kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+        bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
         result.sections[kind] = (ObjectSection){
             .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
@@ -4596,6 +4610,11 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
         .kind = OBJECT_SECTION_DATA,
         .alignment = writable_alignment,
     };
+    result.sections[OBJECT_SECTION_ZERO] = (ObjectSection){
+        .name = S8(".bss"),
+        .kind = OBJECT_SECTION_ZERO,
+        .alignment = writable_alignment,
+    };
     result.sections[OBJECT_SECTION_THREAD_LOCAL_DATA] = (ObjectSection){
         .name = S8(".tdata"),
         .kind = OBJECT_SECTION_THREAD_LOCAL_DATA,
@@ -4896,6 +4915,12 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         .kind = OBJECT_SECTION_DATA,
         .alignment = writable_alignment,
     };
+    result.sections[OBJECT_SECTION_ZERO] = (ObjectSection){
+        .name = S8(".bss"),
+        .virtual_size = module->zero_fill_size,
+        .kind = OBJECT_SECTION_ZERO,
+        .alignment = writable_alignment,
+    };
     result.sections[OBJECT_SECTION_THREAD_LOCAL_DATA] = (ObjectSection){
         .name = S8(".tdata"),
         .data = module->thread_local_data,
@@ -5084,12 +5109,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             return result;
         }
         ByteSlice section_data =
-            global.zero_fill ?
-                (ByteSlice){
-                    .length =
-                        module->
-                            thread_local_zero_size,
-                } :
+            global.zero_fill ? (ByteSlice){.length = global.is_thread_local ? module->thread_local_zero_size : module->zero_fill_size} :
             global.is_thread_local ?
                 module->thread_local_data :
             global.read_only ?
@@ -5104,7 +5124,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .name = symbol->link_name.length ? symbol->link_name : symbol->name,
             .value = global.offset,
             .size = global.size,
-            .section = global.zero_fill         ? OBJECT_SECTION_THREAD_LOCAL_ZERO
+            .section = global.zero_fill         ? (global.is_thread_local ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_ZERO)
                        : global.is_thread_local ? OBJECT_SECTION_THREAD_LOCAL_DATA
                        : global.read_only       ? OBJECT_SECTION_READ_ONLY_DATA
                                                 : OBJECT_SECTION_DATA,
@@ -5293,7 +5313,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
     {
         object_buffer_align(&buffer, object->sections[section].alignment);
         section_offsets[section + 1] = buffer.count;
-        object_buffer_write(&buffer, object->sections[section].data.pointer, object->sections[section].data.length);
+        if (!object_section_kind_is_zero_fill(object->sections[section].kind))
+        {
+            object_buffer_write(&buffer, object->sections[section].data.pointer, object->sections[section].data.length);
+        }
         section_sizes[section + 1] = BUSTER_MAX(object->sections[section].data.length, object->sections[section].virtual_size);
     }
     for (u32 relocation_section_index = 0; relocation_section_index < relocation_section_count; relocation_section_index += 1)
@@ -5399,13 +5422,13 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
         if (section <= object->section_count)
         {
             ObjectSection* source = object->sections + section - 1;
-            if (source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
+            if (object_section_kind_is_zero_fill(source->kind))
             {
                 type = 8;
             }
             flags = source->kind == OBJECT_SECTION_TEXT                                                                    ? 0x6
                     : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? 0x403
-                    : source->kind == OBJECT_SECTION_DATA                                                                  ? 0x3
+                    : source->kind == OBJECT_SECTION_DATA || source->kind == OBJECT_SECTION_ZERO                           ? 0x3
                     : object_section_kind_is_debug(source->kind)                                                           ? 0x0
                                                                                                                            : 0x2;
             alignment = source->alignment;
@@ -5531,9 +5554,14 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
     memset(relocation_counts, 0, (u64)section_count * sizeof(*relocation_counts));
     for (u32 section = 0; section < section_count; section += 1)
     {
+        ObjectSection* object_section = object->sections + section;
+        bool zero_fill = object_section_kind_is_zero_fill(object_section->kind);
         object_buffer_align(&buffer, 4);
-        raw_offsets[section] = (u32)buffer.count;
-        object_buffer_write(&buffer, object->sections[section].data.pointer, object->sections[section].data.length);
+        raw_offsets[section] = zero_fill ? 0 : (u32)buffer.count;
+        if (!zero_fill)
+        {
+            object_buffer_write(&buffer, object_section->data.pointer, object_section->data.length);
+        }
         for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
         {
             ObjectRelocation* source = object->relocations + relocation;
@@ -5636,14 +5664,15 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         {
             memcpy(buffer.bytes + offset, source->name.pointer, source->name.length);
         }
-        object_write_u32_at(&buffer, offset + 16, (u32)source->data.length);
+        object_write_u32_at(&buffer, offset + 16, (u32)(object_section_kind_is_zero_fill(source->kind) ? source->virtual_size : source->data.length));
         object_write_u32_at(&buffer, offset + 20, raw_offsets[section]);
         object_write_u32_at(&buffer, offset + 24, relocation_counts[section] ? relocation_offsets[section] : 0);
         object_write_u16_at(&buffer, offset + 32, relocation_counts[section]);
         u32 characteristics = source->kind == OBJECT_SECTION_TEXT             ? 0x60500020
                               : source->kind == OBJECT_SECTION_READ_ONLY_DATA ? 0x40500040
                               : object_section_kind_is_debug(source->kind)    ? 0x42100040
-                                                                              : 0xc0500040;
+                              : object_section_kind_is_zero_fill(source->kind) ? 0xc0500080
+                                                                               : 0xc0500040;
         object_write_u32_at(&buffer, offset + 36, characteristics);
     }
     result.bytes = (ByteSlice){
@@ -5718,8 +5747,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         u64 effective_alignment = alignment ? alignment : 1;
         segment_virtual_size = (segment_virtual_size + effective_alignment - 1) & ~(effective_alignment - 1);
         section_addresses[section] = segment_virtual_size;
-        segment_virtual_size +=
-            object->sections[section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? object->sections[section].virtual_size : object->sections[section].data.length;
+        segment_virtual_size += object_section_kind_is_zero_fill(object->sections[section].kind) ? object->sections[section].virtual_size
+                                                                                                  : object->sections[section].data.length;
         object_buffer_align(&buffer, object->sections[section].alignment);
         section_offsets[section] = (u32)buffer.count;
         object_buffer_write(&buffer, object->sections[section].data.pointer, object->sections[section].data.length);
@@ -5814,6 +5843,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         u64 offset = segment_offset + MACH_SEGMENT_COMMAND_SIZE + (u64)section * MACH_SECTION_SIZE;
         String8 section_name = source->kind == OBJECT_SECTION_TEXT                ? S8("__text")
                                : source->kind == OBJECT_SECTION_READ_ONLY_DATA    ? S8("__const")
+                               : source->kind == OBJECT_SECTION_ZERO              ? S8("__bss")
                                : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ? S8("__thread_data")
                                : source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? S8("__thread_bss")
                                : source->kind == OBJECT_SECTION_DEBUG_INFO        ? S8("__debug_info")
@@ -5824,15 +5854,16 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                                : source->kind == OBJECT_SECTION_DEBUG_RANGES     ? S8("__debug_ranges")
                                                                                : S8("__data");
         String8 segment_name =
-            (source->kind == OBJECT_SECTION_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
+            (source->kind == OBJECT_SECTION_DATA || source->kind == OBJECT_SECTION_ZERO || source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+             source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
                 ? S8("__DATA")
             : object_section_kind_is_debug(source->kind) ? S8("__DWARF")
                                                          : S8("__TEXT");
         object_mach_name_write(buffer.bytes + offset, 16, section_name);
         object_mach_name_write(buffer.bytes + offset + 16, 16, segment_name);
         object_write_u64_at(&buffer, offset + 32, section_addresses[section]);
-        object_write_u64_at(&buffer, offset + 40, source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? source->virtual_size : source->data.length);
-        object_write_u32_at(&buffer, offset + 48, source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? 0 : section_offsets[section]);
+        object_write_u64_at(&buffer, offset + 40, object_section_kind_is_zero_fill(source->kind) ? source->virtual_size : source->data.length);
+        object_write_u32_at(&buffer, offset + 48, object_section_kind_is_zero_fill(source->kind) ? 0 : section_offsets[section]);
         u32 alignment = 0;
         u32 value = source->alignment;
         while (value > 1)
@@ -5845,6 +5876,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         object_write_u32_at(&buffer, offset + 60, relocation_counts[section]);
         object_write_u32_at(&buffer, offset + 64,
                             source->kind == OBJECT_SECTION_TEXT                ? 0x80000400
+                            : source->kind == OBJECT_SECTION_ZERO              ? 0x1
                             : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ? 0x11
                             : source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? 0x12
                             : object_section_kind_is_debug(source->kind)       ? 0x02000000
@@ -5883,7 +5915,8 @@ ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat forma
     for (u32 section = 0; section < object->section_count; section += 1)
     {
         ObjectSection* source = object->sections + section;
-        if ((source->data.length && !source->data.pointer) || (source->alignment && (source->alignment & (source->alignment - 1))))
+        if ((source->data.length && !source->data.pointer) || (source->alignment && (source->alignment & (source->alignment - 1))) ||
+            (object_section_kind_is_zero_fill(source->kind) && source->data.length))
         {
             return result;
         }
@@ -5935,7 +5968,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
         }
         image_size = (image_size + alignment - 1) & ~(alignment - 1);
         section_offsets[section] = image_size;
-        image_size += object->sections[section].data.length;
+        image_size += BUSTER_MAX(object->sections[section].data.length, object->sections[section].virtual_size);
     }
     u64 page_size = os_get_page_size();
     u64 allocation_size = (image_size + page_size - 1) & ~(page_size - 1);

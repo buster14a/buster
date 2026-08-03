@@ -670,6 +670,15 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     CompilerDriverResult c_link = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_link_command_line)));
     BUSTER_TEST(arguments, c_link.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_link.has_object);
+    if (c_link.has_object)
+    {
+        BUSTER_TEST(arguments, c_link.object.sections[OBJECT_SECTION_ZERO].data.length == 0);
+        BUSTER_TEST(arguments, c_link.object.sections[OBJECT_SECTION_ZERO].virtual_size >= BUSTER_MB(1));
+        BUSTER_TEST(arguments, c_link.object.sections[OBJECT_SECTION_READ_ONLY_DATA].data.length >= 64);
+        ByteSlice c_image = file_read(arguments->arena, c_executable_path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, c_image.length != 0 && c_image.length < BUSTER_MB(1));
+    }
     if (c_link.error == COMPILER_DRIVER_ERROR_NONE)
     {
         String8 c_run_arguments[] = {
@@ -738,6 +747,11 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
             BUSTER_TEST(arguments, codeview_types.length >= 4);
             BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_DEBUG_INFO].data.length == 0);
             BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_DEBUG_LINE].data.length == 0);
+            BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_ZERO].data.length == 0);
+            BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_ZERO].virtual_size >= BUSTER_MB(1));
+            BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length >= 64);
+            ByteSlice codeview_file = file_read(codeview_temporary.arena, codeview_object_path, (FileReadOptions){0});
+            BUSTER_TEST(arguments, codeview_file.length != 0 && codeview_file.length < BUSTER_MB(1));
             u32 codeview_signature = 0;
             memcpy(&codeview_signature, codeview_symbols.pointer, sizeof(codeview_signature));
             BUSTER_TEST(arguments, codeview_signature == 4);

@@ -62,6 +62,12 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
             .kind = OBJECT_SECTION_DATA,
             .alignment = 8,
         },
+        {
+            .name = S8(".bss"),
+            .virtual_size = BUSTER_MB(1),
+            .kind = OBJECT_SECTION_ZERO,
+            .alignment = 64,
+        },
     };
     ObjectSymbol symbols[] = {
         {
@@ -90,6 +96,13 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
             .name = S8("external_function"),
             .section = OBJECT_SECTION_UNDEFINED,
             .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("object_zero"),
+            .size = BUSTER_MB(1),
+            .section = OBJECT_SECTION_ZERO,
+            .kind = OBJECT_SYMBOL_DATA,
             .global = true,
         },
     };
@@ -137,6 +150,7 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
         ObjectArtifact artifact = object_write(arguments->arena, &object, formats[index]);
         BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
         BUSTER_TEST(arguments, artifact.bytes.length > 64);
+        BUSTER_TEST(arguments, artifact.bytes.length < BUSTER_MB(1));
         BUSTER_TEST(arguments, object_bytes_contain(artifact.bytes, S8("object_entry")));
         BUSTER_TEST(arguments, object_bytes_contain(artifact.bytes, S8("external_function")));
         BUSTER_TEST(arguments, object_bytes_contain(artifact.bytes, S8("hello")));
@@ -177,6 +191,8 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_TEXT].data.length == sizeof(x86_text));
         BUSTER_TEST(arguments, memcmp(elf_roundtrip.sections[OBJECT_SECTION_TEXT].data.pointer, x86_text, sizeof(x86_text)) == 0);
     }
+    BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
+    BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
     bool elf_relocation_valid = elf_roundtrip.relocations && elf_roundtrip.relocation_count && elf_roundtrip.symbols &&
                                 elf_roundtrip.relocations[0].symbol < elf_roundtrip.symbol_count;
     BUSTER_TEST(arguments, elf_relocation_valid);
@@ -195,6 +211,8 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, coff_roundtrip.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, coff_roundtrip.symbol_count == object.symbol_count);
     BUSTER_TEST(arguments, coff_roundtrip.relocation_count == object.relocation_count);
+    BUSTER_TEST(arguments, coff_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
+    BUSTER_TEST(arguments, coff_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
     bool coff_relocation_valid = coff_roundtrip.relocations && coff_roundtrip.relocation_count && coff_roundtrip.symbols &&
                                  coff_roundtrip.relocations[0].symbol < coff_roundtrip.symbol_count;
     BUSTER_TEST(arguments, coff_relocation_valid);
@@ -219,6 +237,8 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, mach_roundtrip.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, mach_roundtrip.symbol_count == object.symbol_count);
     BUSTER_TEST(arguments, mach_roundtrip.relocation_count == object.relocation_count);
+    BUSTER_TEST(arguments, mach_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
+    BUSTER_TEST(arguments, mach_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
     bool mach_relocation_valid = mach_roundtrip.relocations && mach_roundtrip.relocation_count && mach_roundtrip.symbols &&
                                  mach_roundtrip.relocations[0].symbol < mach_roundtrip.symbol_count;
     BUSTER_TEST(arguments, mach_relocation_valid);

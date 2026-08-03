@@ -214,6 +214,7 @@ struct CodegenModule
     ByteSlice code;
     ByteSlice read_only_data;
     ByteSlice writable_data;
+    u64 zero_fill_size;
     ByteSlice thread_local_data;
     u64 thread_local_zero_size;
     CodegenModuleEntry* entries;

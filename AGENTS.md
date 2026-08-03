@@ -395,7 +395,10 @@ has hard design constraints:
   allowed to satisfy them.
 - Canonical static-storage objects are `IrGlobal` values. Zero, integer, float,
   byte aggregate, and symbol-address initializers are materialized into
-  read-only or writable object sections; static locals use deterministic
+  read-only or writable object sections; mutable non-TLS zero objects use BSS,
+  const zero objects retain read-only bytes, and TLS zero objects use TBSS.
+  Zero-fill sections preserve virtual size without serialized bytes through
+  object merging and native image writing. Static locals use deterministic
   internal global symbols. C aggregate initializer lowering uses an explicit
   task stack, and incomplete character-array bounds are inferred from string
   initializers before layout.

@@ -28,6 +28,7 @@ typedef enum ObjectSectionKind
     OBJECT_SECTION_TEXT,
     OBJECT_SECTION_READ_ONLY_DATA,
     OBJECT_SECTION_DATA,
+    OBJECT_SECTION_ZERO,
     OBJECT_SECTION_THREAD_LOCAL_DATA,
     OBJECT_SECTION_THREAD_LOCAL_ZERO,
     OBJECT_SECTION_DEBUG_INFO,
@@ -42,6 +43,7 @@ typedef enum ObjectSectionKind
 } ObjectSectionKind;
 
 BUSTER_F_DECL bool object_section_kind_is_debug(ObjectSectionKind kind);
+BUSTER_F_DECL bool object_section_kind_is_zero_fill(ObjectSectionKind kind);
 BUSTER_F_DECL String8 object_section_name_for_kind(ObjectSectionKind kind);
 BUSTER_F_DECL u32 object_section_default_alignment(ObjectSectionKind kind);
 BUSTER_TEST_F_DECL AnalysisEntity* object_entity_find(AnalysisResult* analysis, AnalysisEntityId entity);
