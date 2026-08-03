@@ -1731,7 +1731,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         {
             continue;
         }
-        if (!symbol->global || symbol->kind != OBJECT_SYMBOL_FUNCTION || !symbol->name.length || symbol->name.length > UINT32_MAX ||
+        if (!symbol->global || (symbol->kind != OBJECT_SYMBOL_FUNCTION && symbol->kind != OBJECT_SYMBOL_DATA) || !symbol->name.length ||
+            symbol->name.length > UINT32_MAX ||
             imported_name_size > UINT32_MAX - symbol->name.length - 3)
         {
             result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
@@ -2112,18 +2113,40 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         u64 symbol_rva = 0;
+        bool data_import = false;
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
             u32 import_index = import_indices[relocation->symbol];
             bool call_relocation =
                 (!aarch64 && relocation->kind == OBJECT_RELOCATION_X86_64_PC32) || (aarch64 && relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26);
-            if (import_index == UINT32_MAX || !call_relocation)
+            if (import_index == UINT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
                 return result;
             }
-            symbol_rva = section_rvas[0] + thunk_offset + (u64)import_index * thunk_entry_size;
+            if (symbol->kind == OBJECT_SYMBOL_DATA)
+            {
+                if ((!aarch64 && relocation->kind != OBJECT_RELOCATION_X86_64_PC32) ||
+                    (aarch64 && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                    return result;
+                }
+                symbol_rva = import_section_rva + runtime_address_offset + (u64)import_slots[relocation->symbol] * sizeof(u64);
+                data_import = true;
+            }
+            else
+            {
+                if (!call_relocation)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                    return result;
+                }
+                symbol_rva = section_rvas[0] + thunk_offset + (u64)import_index * thunk_entry_size;
+            }
         }
         else if (symbol->section < OBJECT_SECTION_COUNT)
         {
@@ -2204,6 +2227,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         }
         else if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
         {
+            if (data_import)
+            {
+                if (relocation->section != OBJECT_SECTION_TEXT || relocation->offset < 3 || bytes[output_offset - 3] != 0x48 ||
+                    bytes[output_offset - 2] != 0x8d || bytes[output_offset - 1] != 0x05)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                    return result;
+                }
+                bytes[output_offset - 2] = 0x8b;
+            }
             s64 value = (s64)symbol_rva + relocation->addend - (s64)place_rva;
             if (value < INT32_MIN || value > INT32_MAX)
             {
@@ -2226,7 +2260,35 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
             u64 image_base = ((u64)PE_IMAGE_BASE_HIGH << 32) | PE_IMAGE_BASE_LOW;
-            link_write_u64(bytes, output_offset, image_base + symbol_rva + (u64)relocation->addend);
+            if (data_import)
+            {
+                if (!aarch64 || relocation->section != OBJECT_SECTION_TEXT || relocation->offset < 8 ||
+                    link_read_u32(bytes + output_offset - 8, 0) != UINT32_C(0x58000049) ||
+                    link_read_u32(bytes + output_offset - 4, 0) != UINT32_C(0x14000003) || relocation->addend)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                    return result;
+                }
+                u64 iat_address = image_base + symbol_rva;
+                u64 load_address = image_base + place_rva - 8;
+                bool valid = true;
+                link_write_u32(bytes, output_offset - 8, link_aarch64_adrp(9, load_address, iat_address, &valid));
+                u64 page_offset = symbol_rva & 0xfff;
+                if (!valid || page_offset % sizeof(u64))
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                    return result;
+                }
+                link_write_u32(bytes, output_offset - 4, UINT32_C(0xf9400000) | ((u32)(page_offset / sizeof(u64)) << 10) | (9 << 5) | 9);
+                link_write_u32(bytes, output_offset, UINT32_C(0x14000002));
+                link_write_u32(bytes, output_offset + sizeof(u32), 0);
+            }
+            else
+            {
+                link_write_u64(bytes, output_offset, image_base + symbol_rva + (u64)relocation->addend);
+            }
         }
         else
         {
@@ -2539,7 +2601,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         result.symbol = entry_name;
         return result;
     }
-    u32 data_section_count = 2 + (thread_local_count ? 3 : 0);
+    u32 data_section_count = 3 + (thread_local_count ? 3 : 0);
     u64 data_command_size = MACH_SEGMENT_COMMAND_SIZE + (u64)data_section_count * MACH_SECTION_SIZE;
     // Debug sections travel in their own read-only __DWARF segment.  The
     // segment is file-backed and page-rounded (rather than unmapped), which
@@ -2587,12 +2649,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     section_offsets[OBJECT_SECTION_TEXT] = align_forward(header_end, object->sections[OBJECT_SECTION_TEXT].alignment);
     u32 stub_size = object->target.cpu_arch == CPU_ARCH_X86_64 ? MACH_STUB_X86_64_SIZE : MACH_STUB_AARCH64_SIZE;
     u64 stub_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
-    section_offsets[OBJECT_SECTION_READ_ONLY_DATA] =
-        align_forward(stub_offset + (u64)import_count * stub_size, object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
-    u64 text_end = section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length;
+    u64 text_end = stub_offset + (u64)import_count * stub_size;
     u64 data_file_offset = align_forward(text_end, MACH_PAGE_SIZE);
     section_offsets[OBJECT_SECTION_DATA] = data_file_offset;
-    u64 got_offset = align_forward(section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length, 8);
+    section_offsets[OBJECT_SECTION_READ_ONLY_DATA] =
+        align_forward(section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length,
+                      object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
+    u64 got_offset = align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length, 8);
     u64 got_count = (u64)import_count + thread_local_count;
     u64 thread_local_variables_offset = align_forward(got_offset + got_count * sizeof(u64), 8);
     u64 thread_local_variables_size = (u64)thread_local_count * 3 * sizeof(u64);
@@ -2645,8 +2708,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
             }
-            u8 segment_index = relocation->section == OBJECT_SECTION_DATA || relocation->section == OBJECT_SECTION_THREAD_LOCAL_DATA ||
-                                       relocation->section == OBJECT_SECTION_THREAD_LOCAL_ZERO
+            u8 segment_index = relocation->section == OBJECT_SECTION_DATA || relocation->section == OBJECT_SECTION_READ_ONLY_DATA ||
+                                       relocation->section == OBJECT_SECTION_THREAD_LOCAL_DATA || relocation->section == OBJECT_SECTION_THREAD_LOCAL_ZERO
                                    ? 2
                                    : 1;
             u64 segment_offset = segment_index == 2 ? section_offsets[relocation->section] + relocation->offset - data_file_offset
@@ -3081,16 +3144,25 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     link_write_u32(bytes, command + 64, data_section_count);
     link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE, "__data", "__DATA", data_vm_address, object->sections[OBJECT_SECTION_DATA].data.length,
                             (u32)data_file_offset, 3, 0, 0, 0);
-    link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + MACH_SECTION_SIZE, "__got", "__DATA", image_base + got_offset, got_count * sizeof(u64),
+    u32 read_only_alignment_power = 0;
+    for (u32 read_only_alignment = object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment; read_only_alignment > 1; read_only_alignment >>= 1)
+    {
+        read_only_alignment_power += 1;
+    }
+    link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + MACH_SECTION_SIZE, "__const", "__DATA",
+                            image_base + section_offsets[OBJECT_SECTION_READ_ONLY_DATA], object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length,
+                            (u32)section_offsets[OBJECT_SECTION_READ_ONLY_DATA],
+                            read_only_alignment_power, 0, 0, 0);
+    link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 2 * MACH_SECTION_SIZE, "__got", "__DATA", image_base + got_offset, got_count * sizeof(u64),
                             (u32)got_offset, 3, 0, 0, 0);
     if (thread_local_count)
     {
-        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 2 * MACH_SECTION_SIZE, "__thread_vars", "__DATA",
+        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 3 * MACH_SECTION_SIZE, "__thread_vars", "__DATA",
                                 image_base + thread_local_variables_offset, thread_local_variables_size, (u32)thread_local_variables_offset, 3, 0x13, 0, 0);
-        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 3 * MACH_SECTION_SIZE, "__thread_data", "__DATA",
+        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 4 * MACH_SECTION_SIZE, "__thread_data", "__DATA",
                                 image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA], object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length,
                                 (u32)section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA], 4, 0x11, 0, 0);
-        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 4 * MACH_SECTION_SIZE, "__thread_bss", "__DATA",
+        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 5 * MACH_SECTION_SIZE, "__thread_bss", "__DATA",
                                 image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO], object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size,
                                 0, 4, 0x12, 0, 0);
     }

@@ -762,6 +762,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         S8_INITIALIZER("ws2_32.dll"),
         S8_INITIALIZER("dwmapi.dll"),
         S8_INITIALIZER("shell32.dll"),
+        S8_INITIALIZER("vcruntime140.dll"),
     };
     u32 default_library_count = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? BUSTER_ARRAY_LENGTH(windows_system_libraries) : 0;
     NativeDynamicLibrary* libraries =

@@ -2114,6 +2114,28 @@ BUSTER_GLOBAL_LOCAL IrCallingConvention ir_calling_convention_from_ast(AstCallin
     return IR_CALLING_CONVENTION_COUNT;
 }
 
+IrAbiConvention ir_abi_convention_for_target(Target target)
+{
+    if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? IR_ABI_CONVENTION_WIN64_X86_64
+                                                                                           : IR_ABI_CONVENTION_SYSTEMV_X86_64;
+    }
+    if (target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        if (target.os == OPERATING_SYSTEM_WINDOWS)
+        {
+            return IR_ABI_CONVENTION_WINDOWS_AARCH64;
+        }
+        if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+        {
+            return IR_ABI_CONVENTION_DARWIN_AARCH64;
+        }
+        return IR_ABI_CONVENTION_AAPCS64;
+    }
+    return IR_ABI_CONVENTION_SYSTEMV_X86_64;
+}
+
 BUSTER_GLOBAL_LOCAL IrSymbolKind ir_symbol_kind_from_analysis(AnalysisEntityKind kind)
 {
     switch (kind)
@@ -2301,7 +2323,7 @@ BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId r
         {
             valid = false;
         }
-        else if (type->kind == IR_TYPE_FLOAT || (type->kind == IR_TYPE_VECTOR && (type->layout.size == 8 || type->layout.size == 16)))
+        else if (type->kind == IR_TYPE_FLOAT)
         {
             if (element.value != IR_ID_UNDERLYING_INVALID && element.value != type_id.value)
             {
@@ -2354,35 +2376,139 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
 {
     IrAbiValue value = {0};
     IrType* type = ir_type_from_id(&program->types, type_id);
-    if (!type || !type->layout.resolved ||
-        (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR))
+    if (!type || !type->layout.resolved || convention >= IR_ABI_CONVENTION_COUNT)
     {
         return value;
     }
     u64 size = type->layout.size;
-    if (type->kind == IR_TYPE_VECTOR)
+    bool aggregate = type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VA_LIST;
+    if (type->kind == IR_TYPE_VOID)
     {
-        bool short_vector = size == 8 || size == 16;
-        if (convention == IR_ABI_CONVENTION_WIN64_X86_64 && !is_result)
+        return value;
+    }
+    if (!aggregate && type->kind != IR_TYPE_VECTOR)
+    {
+        if (type->kind == IR_TYPE_FLOAT)
         {
-            value.part_count = 1;
-            value.indirect = true;
-            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
+            if (type->bit_width > 64)
+            {
+                value.part_count = 1;
+                value.indirect = is_result;
+                value.memory = !is_result;
+                value.parts[0] = (IrAbiPart){
+                    .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                    .size = is_result ? 8 : (u32)size,
+                };
+            }
+            else
+            {
+                value.part_count = 1;
+                value.parts[0] = (IrAbiPart){
+                    .abi_class = convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_FLOAT,
+                    .size = (u32)size,
+                };
+            }
             return value;
         }
-        if (short_vector)
+        if (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION)
         {
             value.part_count = 1;
-            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_FLOAT, .size = (u32)size};
+            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = (u32)size};
+            return value;
+        }
+        if (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM)
+        {
+            if (size <= 8)
+            {
+                value.part_count = 1;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
+                return value;
+            }
+            if (size <= 16 && convention != IR_ABI_CONVENTION_WIN64_X86_64)
+            {
+                value.part_count = (u32)((size + 7) / 8);
+                for (u32 part = 0; part < value.part_count; part += 1)
+                {
+                    value.parts[part] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_INTEGER,
+                        .value_offset = part * 8,
+                        .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                    };
+                }
+                return value;
+            }
+            value.part_count = 1;
+            value.indirect = true;
+            value.memory = !is_result;
+            value.parts[0] = (IrAbiPart){
+                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                .size = is_result ? 8 : (u32)size,
+            };
+            return value;
+        }
+        return value;
+    }
+    if (type->kind == IR_TYPE_VECTOR)
+    {
+        bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
+                       convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
+        if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
+        {
+            if (!is_result || (size != 8 && size != 16))
+            {
+                value.part_count = 1;
+                value.indirect = true;
+                value.parts[0] = (IrAbiPart){
+                    .abi_class = IR_ABI_CLASS_POINTER,
+                    .size = 8,
+                };
+            }
+            else
+            {
+                value.part_count = 1;
+                value.parts[0] = (IrAbiPart){
+                    .abi_class = IR_ABI_CLASS_VECTOR,
+                    .size = (u32)size,
+                };
+            }
+            return value;
+        }
+        if ((aarch64 && size > 16) || (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && size > 64))
+        {
+            value.part_count = 1;
+            value.indirect = is_result;
+            value.memory = !is_result;
+            value.parts[0] = (IrAbiPart){
+                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                .size = is_result ? 8 : (u32)size,
+            };
+            return value;
+        }
+        if (convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument)
+        {
+            value.part_count = (u32)((size + 7) / 8);
+            for (u32 part = 0; part < value.part_count; part += 1)
+            {
+                value.parts[part] = (IrAbiPart){
+                    .abi_class = IR_ABI_CLASS_INTEGER,
+                    .value_offset = part * 8,
+                    .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                };
+            }
+            return value;
+        }
+        if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && variadic_argument && size > 16)
+        {
+            value.part_count = 1;
+            value.memory = true;
+            value.parts[0] = (IrAbiPart){
+                .abi_class = IR_ABI_CLASS_MEMORY,
+                .size = (u32)size,
+            };
             return value;
         }
         value.part_count = 1;
-        value.indirect = is_result;
-        value.memory = !is_result;
-        value.parts[0] = (IrAbiPart){
-            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-            .size = is_result ? 8 : (u32)size,
-        };
+        value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_VECTOR, .size = (u32)size};
         return value;
     }
     if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
@@ -2476,14 +2602,14 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
 BUSTER_GLOBAL_LOCAL void ir_resolve_type_abi(IrProgram* program, IrTypeId type_id, IrAbiConvention convention)
 {
     IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
-    if (!type || !program->arena || convention >= IR_ABI_CONVENTION_COUNT || !type->layout.resolved ||
-        (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR))
+    if (!type || !program->arena || convention >= IR_ABI_CONVENTION_COUNT || !type->layout.resolved)
     {
         return;
     }
     if (!type->abi)
     {
         type->abi = arena_allocate(program->arena, IrTypeAbi, 1);
+        *type->abi = (IrTypeAbi){0};
     }
     type->abi->values[convention][IR_ABI_USE_ARGUMENT] = ir_classify_abi_value(program, type_id, convention, false, false);
     type->abi->values[convention][IR_ABI_USE_RESULT] = ir_classify_abi_value(program, type_id, convention, true, false);
@@ -2515,6 +2641,10 @@ IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConventi
     if (!type || convention >= IR_ABI_CONVENTION_COUNT || use >= IR_ABI_USE_COUNT)
     {
         return (IrAbiValue){0};
+    }
+    if (!type->abi || !type->abi->resolved[convention])
+    {
+        ir_resolve_type_abi(program, type_id, convention);
     }
     return type->abi && type->abi->resolved[convention] ? type->abi->values[convention][use] : (IrAbiValue){0};
 }

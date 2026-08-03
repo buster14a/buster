@@ -6285,15 +6285,16 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_register_is_64_bit(IrProgram* program
 
 BUSTER_GLOBAL_LOCAL IrAbiConvention codegen_canonical_ir_abi_convention(CodegenAbi abi)
 {
-    return abi == CODEGEN_ABI_X86_64_SYSTEM_V   ? IR_ABI_CONVENTION_SYSTEMV_X86_64
-           : abi == CODEGEN_ABI_X86_64_WINDOWS  ? IR_ABI_CONVENTION_WIN64_X86_64
-           : abi == CODEGEN_ABI_AARCH64_DARWIN  ? IR_ABI_CONVENTION_DARWIN_AARCH64
-           : abi == CODEGEN_ABI_AARCH64_WINDOWS ? IR_ABI_CONVENTION_WINDOWS_AARCH64
-                                                 : IR_ABI_CONVENTION_AAPCS64;
+    return ir_abi_convention_for_target(codegen_target_for_abi(abi));
 }
 
 typedef IrAbiPart CodegenCanonicalAbiPart;
 typedef IrAbiValue CodegenCanonicalAbiValue;
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_abi_part_is_float(IrAbiClass abi_class)
+{
+    return abi_class == IR_ABI_CLASS_FLOAT || abi_class == IR_ABI_CLASS_VECTOR;
+}
 
 BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_aggregate_abi(IrProgram* program, IrTypeId type_id, CodegenAbi abi, bool is_result,
                                                                              bool variadic_argument)
@@ -8296,7 +8297,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 u32 float_count = 0;
                                 for (u32 part = 0; part < prior_aggregate_abi.part_count; part += 1)
                                 {
-                                    if (prior_aggregate_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT)
+                                    if (codegen_canonical_abi_part_is_float(prior_aggregate_abi.parts[part].abi_class))
                                     {
                                         float_count += 1;
                                     }
@@ -8405,7 +8406,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         {
                             for (u32 part = 0; part < argument_aggregate_abi.part_count; part += 1)
                             {
-                                if (argument_aggregate_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT)
+                                if (codegen_canonical_abi_part_is_float(argument_aggregate_abi.parts[part].abi_class))
                                 {
                                     system_v_float_parts += 1;
                                 }
@@ -8509,7 +8510,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         }
                         for (u32 part_index = 0; part_index < part_count; part_index += 1)
                         {
-                            if (system_v_register_aggregate && argument_aggregate_abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT)
+                            if (system_v_register_aggregate && codegen_canonical_abi_part_is_float(argument_aggregate_abi.parts[part_index].abi_class))
                             {
                                 u32 part_offset = argument_aggregate_abi.parts[part_index].value_offset;
                                 u32 part_size = argument_aggregate_abi.parts[part_index].size;
@@ -9612,7 +9613,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         {
                             for (u32 part = 0; part < aggregate_abi.part_count; part += 1)
                             {
-                                if (aggregate_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT)
+                                if (codegen_canonical_abi_part_is_float(aggregate_abi.parts[part].abi_class))
                                 {
                                     split_float_count += 1;
                                 }
@@ -9658,7 +9659,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             u32 float_part = 0;
                             for (u32 part = 0; part < aggregate_abi.part_count; part += 1)
                             {
-                                bool part_float = aggregate_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT;
+                                bool part_float = codegen_canonical_abi_part_is_float(aggregate_abi.parts[part].abi_class);
                                 u32 part_offset = part_float ? float_part++ * 16 : integer_part++ * 8;
                                 codegen_emit_u8(&buffer, part_float ? 0x4e : 0x4c);
                                 codegen_emit_u8(&buffer, 0x8b);
@@ -9885,7 +9886,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 u32 float_count = 0;
                                 for (u32 part = 0; part < argument_abi.part_count; part += 1)
                                 {
-                                    if (argument_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT)
+                                    if (codegen_canonical_abi_part_is_float(argument_abi.parts[part].abi_class))
                                     {
                                         float_count += 1;
                                     }
@@ -10046,7 +10047,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 {
                                     CodegenCanonicalAbiPart* part = argument_abi.parts + part_index;
                                     s32 displacement = -(s32)(value_offsets[argument.value]) + (s32)part->value_offset;
-                                    if (part->abi_class == IR_ABI_CLASS_FLOAT)
+                                    if (codegen_canonical_abi_part_is_float(part->abi_class))
                                     {
                                         if (float_register >= 8 || (part->size != 4 && part->size != 8 && part->size != 16))
                                         {
@@ -10186,7 +10187,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 for (u32 part_index = 0; part_index < call_return_abi.part_count; part_index += 1)
                                 {
                                     CodegenCanonicalAbiPart* part = call_return_abi.parts + part_index;
-                                    if (part->abi_class == IR_ABI_CLASS_FLOAT)
+                                    if (codegen_canonical_abi_part_is_float(part->abi_class))
                                     {
                                         if (float_index >= 2 || (part->size != 4 && part->size != 8 && part->size != 16))
                                         {
@@ -11000,7 +11001,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 {
                                     CodegenCanonicalAbiPart* part = aggregate_return_abi.parts + part_index;
                                     s32 displacement = -(s32)(value_offsets[return_value.value]) + (s32)part->value_offset;
-                                    if (part->abi_class == IR_ABI_CLASS_FLOAT)
+                                    if (codegen_canonical_abi_part_is_float(part->abi_class))
                                     {
                                         if (float_index >= 2 || (part->size != 4 && part->size != 8 && part->size != 16))
                                         {
@@ -11178,7 +11179,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             bool prior_hfa = prior_abi.part_count != 0;
                             for (u32 part = 0; part < prior_abi.part_count; part += 1)
                             {
-                                prior_hfa &= prior_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT;
+                                prior_hfa &= codegen_canonical_abi_part_is_float(prior_abi.parts[part].abi_class);
                             }
                             if (prior_hfa)
                             {
@@ -11225,7 +11226,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         bool argument_hfa = argument_abi.part_count != 0;
                         for (u32 part = 0; part < argument_abi.part_count; part += 1)
                         {
-                            argument_hfa &= argument_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT;
+                            argument_hfa &= codegen_canonical_abi_part_is_float(argument_abi.parts[part].abi_class);
                         }
                         bool indirect = aggregate && argument_type && argument_type->layout.size > 16;
                         u32 abi_part_count = indirect ? 1 : part_count;
@@ -12248,7 +12249,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             bool argument_hfa = argument_abi.part_count != 0;
                             for (u32 part = 0; part < argument_abi.part_count; part += 1)
                             {
-                                argument_hfa &= argument_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT;
+                                argument_hfa &= codegen_canonical_abi_part_is_float(argument_abi.parts[part].abi_class);
                             }
                             if (!type || ((type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && !aggregate))
                             {
@@ -12355,7 +12356,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             bool argument_hfa = argument_abi.part_count != 0;
                             for (u32 part = 0; part < argument_abi.part_count; part += 1)
                             {
-                                argument_hfa &= argument_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT;
+                                argument_hfa &= codegen_canonical_abi_part_is_float(argument_abi.parts[part].abi_class);
                             }
                             bool indirect = aggregate && argument_type && argument_type->layout.size > 16;
                             if (indirect)
@@ -12479,7 +12480,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             bool return_hfa = call_return_abi.part_count != 0;
                             for (u32 part = 0; part < call_return_abi.part_count; part += 1)
                             {
-                                return_hfa &= call_return_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT;
+                                return_hfa &= codegen_canonical_abi_part_is_float(call_return_abi.parts[part].abi_class);
                             }
                             if (return_hfa)
                             {
@@ -12950,7 +12951,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             bool return_hfa = aggregate_return_abi.part_count != 0;
                             for (u32 part = 0; part < aggregate_return_abi.part_count; part += 1)
                             {
-                                return_hfa &= aggregate_return_abi.parts[part].abi_class == IR_ABI_CLASS_FLOAT;
+                                return_hfa &= codegen_canonical_abi_part_is_float(aggregate_return_abi.parts[part].abi_class);
                             }
                             if (return_hfa)
                             {

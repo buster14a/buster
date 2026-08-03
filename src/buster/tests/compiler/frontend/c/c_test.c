@@ -1756,6 +1756,110 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, module->functions[3].state == IR_FUNCTION_LOWERED);
         }
     }
+    // __builtin_prefetch is a hint: the address operand keeps its side effects,
+    // the call itself disappears.  base.h falls back to <intrin.h> when the
+    // builtin is missing, which drags all of <immintrin.h> into MSVC-targeted
+    // builds.
+    CPreprocessResult prefetch_tokens = c_preprocess(scalar_arena,
+                                                     S8("extern int sink;\n"
+                                                        "static int bump(int *values) { sink += 1; return values[0]; }\n"
+                                                        "int warm(int *values)\n"
+                                                        "{\n"
+                                                        "    __builtin_prefetch(values);\n"
+                                                        "    __builtin_prefetch(values, 0, 3);\n"
+                                                        "    __builtin_prefetch(&values[bump(values)], 1, 1);\n"
+                                                        "    return values[0];\n"
+                                                        "}\n"),
+                                                     (CPreprocessOptions){0});
+    CParseResult prefetch_parse = c_parse(scalar_arena, prefetch_tokens);
+    CIRLowerResult prefetch_ir = c_lower_to_ir(scalar_arena, S8("prefetch.c"), prefetch_tokens, prefetch_parse, lp64_target);
+    BUSTER_TEST(arguments, prefetch_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, prefetch_ir.diagnostic_count == 0);
+    if (prefetch_ir.program)
+    {
+        IrModule* module = &prefetch_ir.program->modules[0];
+        bool called_prefetch = false;
+        u32 bump_calls = 0;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = &module->functions[function_index];
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction instruction = function->instructions[instruction_index];
+                if (instruction.opcode != IR_OPCODE_CALL)
+                {
+                    continue;
+                }
+                IrSymbol* symbol = ir_symbol_from_id(&prefetch_ir.program->symbols, instruction.symbol);
+                called_prefetch |= symbol && string_equal(symbol->link_name, S8("__builtin_prefetch"));
+                bump_calls += symbol && string_equal(symbol->link_name, S8("bump"));
+            }
+        }
+        BUSTER_TEST(arguments, !called_prefetch);
+        BUSTER_TEST(arguments, bump_calls == 1);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(prefetch_ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    // C99 6.7.4p7: an inline definition provides no external definition, so an
+    // unused one must not be emitted -- and must not import what its body
+    // touches.  MSVC's <immintrin.h> reaches __isa_inverted this way.
+    CPreprocessResult inline_definition_tokens = c_preprocess(scalar_arena,
+                                                              S8("extern int inline_only_symbol;\n"
+                                                                 "extern int emitted_symbol;\n"
+                                                                 "inline int inline_only(void) { return inline_only_symbol; }\n"
+                                                                 "__inline int inline_keyword_only(void) { return inline_only_symbol; }\n"
+                                                                 "extern inline int extern_inline(void) { return emitted_symbol; }\n"
+                                                                 "int redeclared(void);\n"
+                                                                 "inline int redeclared(void) { return emitted_symbol; }\n"
+                                                                 "inline int inline_used(void) { return emitted_symbol; }\n"
+                                                                 "int caller(void) { return inline_used(); }\n"),
+                                                              (CPreprocessOptions){0});
+    CParseResult inline_definition_parse = c_parse(scalar_arena, inline_definition_tokens);
+    CIRLowerResult inline_definition_ir =
+        c_lower_to_ir(scalar_arena, S8("inline-definition.c"), inline_definition_tokens, inline_definition_parse, lp64_target);
+    BUSTER_TEST(arguments, inline_definition_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, inline_definition_ir.diagnostic_count == 0);
+    if (inline_definition_ir.program)
+    {
+        IrModule* module = &inline_definition_ir.program->modules[0];
+        bool found_inline_only = false;
+        bool found_inline_keyword_only = false;
+        bool found_extern_inline = false;
+        bool found_redeclared = false;
+        bool found_inline_used = false;
+        bool found_caller = false;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            String8 name = module->functions[function_index].name;
+            found_inline_only |= string_equal(name, S8("inline_only"));
+            found_inline_keyword_only |= string_equal(name, S8("inline_keyword_only"));
+            found_extern_inline |= string_equal(name, S8("extern_inline"));
+            found_redeclared |= string_equal(name, S8("redeclared"));
+            found_inline_used |= string_equal(name, S8("inline_used"));
+            found_caller |= string_equal(name, S8("caller"));
+        }
+        BUSTER_TEST(arguments, !found_inline_only);
+        BUSTER_TEST(arguments, !found_inline_keyword_only);
+        BUSTER_TEST(arguments, found_extern_inline);
+        BUSTER_TEST(arguments, found_redeclared);
+        BUSTER_TEST(arguments, found_inline_used);
+        BUSTER_TEST(arguments, found_caller);
+        // No emitted body may reach the extern only the dropped inline
+        // definitions touched, which is what turns into an unresolvable import.
+        bool referenced_inline_only_symbol = false;
+        bool referenced_emitted_symbol = false;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = &module->functions[function_index];
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&inline_definition_ir.program->symbols, function->instructions[instruction_index].symbol);
+                referenced_inline_only_symbol |= symbol && string_equal(symbol->link_name, S8("inline_only_symbol"));
+                referenced_emitted_symbol |= symbol && string_equal(symbol->link_name, S8("emitted_symbol"));
+            }
+        }
+        BUSTER_TEST(arguments, !referenced_inline_only_symbol);
+        BUSTER_TEST(arguments, referenced_emitted_symbol);
+    }
     CPreprocessResult typedef_shadow_tokens = c_preprocess(scalar_arena,
                                                            S8("typedef void *id;\n"
                                                               "typedef int TokenId;\n"
@@ -4034,6 +4138,344 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_validate_canonical_module(direct_ir.program, module).error == IR_VALIDATION_NONE);
         }
         scratch_end(direct_ir_temporary);
+    }
+    {
+        TemporalArena artifact_temporary = scratch_begin(0, 0);
+        CPreprocessResult artifact_tokens = c_preprocess(
+            artifact_temporary.arena,
+            S8("typedef struct Pair { int left; int right; } Pair;"
+               " typedef float Float4 __attribute__((vector_size(16)));"
+               " typedef __int128 Wide;"
+               " typedef void *va_list;"
+               " static int callback(int value);"
+               " static int callback_two(int value) { return value + 2; }"
+               " static int (*callbacks[2])(int) = { callback, callback_two };"
+               " static const int answer = 3 * 4 + (5 > 2 ? 1 : 0);"
+               " static const float fraction = 1.25f + 0.5f;"
+               " static Pair pair = { .right = 9, .left = 4 };"
+               " static int matrix[2][3] = { { 1, 2, 3 }, 4, 5, 6 };"
+               " static char exact[3] = \"abc\";"
+               " static int *address = &matrix[1][2];"
+               " static int pointer_target;"
+               " static int *const pointer_source = &pointer_target;"
+               " static int *pointer_alias = pointer_source;"
+               " static int short_false = 0 && (1 / 0);"
+               " static int short_true = 1 || (1 / 0);"
+               " static int short_conditional = 0 ? (1 / 0) : 7;"
+               " static int callback(int value) { return value + pair.left; }"
+               " static int apply(int (*)(int), int values[2][3])"
+               " { return callbacks[0](values[0][0]) + values[1][2]; }"
+               " int external_value = 3;"
+               " static int local_static_and_extern(void)"
+               " { static Pair local_pair = { .right = 3, .left = 1 }; extern int external_value;"
+               " return local_pair.left + external_value; }"
+               " static int statement_and_builtins(int input, int values[2][3])"
+               " { int local_values[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };"
+               " int chosen = __builtin_choose_expr(__builtin_constant_p(1 + 2), 7, input);"
+               " int runtime_constant = __builtin_constant_p(input);"
+               " int compatible = __builtin_types_compatible_p(int, int);"
+               " unsigned long object_size = __builtin_object_size(local_values, 0);"
+               " int (*aligned)[3] = __builtin_assume_aligned(local_values, 16);"
+               " return chosen + runtime_constant + compatible + (object_size == sizeof(local_values))"
+               " + (aligned[1][2] == values[1][2]) + ({ int local = input + 1; local * 2; }); }"
+               " Wide wide_identity(Wide value);"
+               " Float4 vector_identity(Float4 value);"
+               " va_list va_identity(va_list value);"
+               " int main(void) { int values[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };"
+               " return apply(callback, matrix) == 11 && local_static_and_extern() == 4 &&"
+               " statement_and_builtins(3, values) == 18 ? 0 : 1; }\n"),
+            (CPreprocessOptions){0});
+        CParseResult artifact_parse = c_parse(artifact_temporary.arena, artifact_tokens);
+        CIRLowerResult artifact_ir =
+            c_lower_to_ir(artifact_temporary.arena, S8("c-frontend-artifacts.c"), artifact_tokens, artifact_parse, target_native);
+        BUSTER_TEST(arguments, artifact_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, artifact_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, artifact_ir.diagnostic_count == 0);
+        BUSTER_TEST(arguments, artifact_ir.program != 0);
+        if (artifact_ir.program)
+        {
+            IrModule* module = &artifact_ir.program->modules[0];
+            IrGlobal* callbacks_global = 0;
+            IrGlobal* answer_global = 0;
+            IrGlobal* fraction_global = 0;
+            IrGlobal* pair_global = 0;
+            IrGlobal* matrix_global = 0;
+            IrGlobal* exact_global = 0;
+            IrGlobal* address_global = 0;
+            IrGlobal* pointer_alias_global = 0;
+            IrGlobal* short_false_global = 0;
+            IrGlobal* short_true_global = 0;
+            IrGlobal* short_conditional_global = 0;
+            IrType* pair_type = 0;
+            IrType* wide_type = 0;
+            IrType* vector_type = 0;
+            IrType* va_list_type = 0;
+            IrFunction* apply_function = 0;
+            IrFunction* statement_function = 0;
+            IrFunction* local_static_function = 0;
+            for (u32 type_index = 0; type_index < artifact_ir.program->types.count; type_index += 1)
+            {
+                IrType* type = artifact_ir.program->types.types + type_index;
+                if (type->kind == IR_TYPE_STRUCT && string_equal(type->name, S8("Pair")))
+                {
+                    pair_type = type;
+                }
+                else if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+                {
+                    wide_type = type;
+                }
+                else if (type->kind == IR_TYPE_VECTOR && type->layout.size == 16 && type->element_count == 4)
+                {
+                    vector_type = type;
+                }
+                else if (type->kind == IR_TYPE_VA_LIST)
+                {
+                    va_list_type = type;
+                }
+            }
+            for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+            {
+                IrGlobal* global = module->globals + global_index;
+                IrSymbol* symbol = ir_symbol_from_id(&artifact_ir.program->symbols, global->symbol);
+                if (!symbol)
+                {
+                    continue;
+                }
+                if (string_equal(symbol->name, S8("callbacks")))
+                {
+                    callbacks_global = global;
+                }
+                else if (string_equal(symbol->name, S8("answer")))
+                {
+                    answer_global = global;
+                }
+                else if (string_equal(symbol->name, S8("fraction")))
+                {
+                    fraction_global = global;
+                }
+                else if (string_equal(symbol->name, S8("pair")))
+                {
+                    pair_global = global;
+                }
+                else if (string_equal(symbol->name, S8("matrix")))
+                {
+                    matrix_global = global;
+                }
+                else if (string_equal(symbol->name, S8("exact")))
+                {
+                    exact_global = global;
+                }
+                else if (string_equal(symbol->name, S8("address")))
+                {
+                    address_global = global;
+                }
+                else if (string_equal(symbol->name, S8("pointer_alias")))
+                {
+                    pointer_alias_global = global;
+                }
+                else if (string_equal(symbol->name, S8("short_false")))
+                {
+                    short_false_global = global;
+                }
+                else if (string_equal(symbol->name, S8("short_true")))
+                {
+                    short_true_global = global;
+                }
+                else if (string_equal(symbol->name, S8("short_conditional")))
+                {
+                    short_conditional_global = global;
+                }
+            }
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                if (string_equal(function->name, S8("apply")))
+                {
+                    apply_function = function;
+                }
+                else if (string_equal(function->name, S8("statement_and_builtins")))
+                {
+                    statement_function = function;
+                }
+                else if (string_equal(function->name, S8("local_static_and_extern")))
+                {
+                    local_static_function = function;
+                }
+            }
+            BUSTER_TEST(arguments, callbacks_global != 0);
+            BUSTER_TEST(arguments, answer_global != 0);
+            BUSTER_TEST(arguments, fraction_global != 0);
+            BUSTER_TEST(arguments, pair_global != 0);
+            BUSTER_TEST(arguments, matrix_global != 0);
+            BUSTER_TEST(arguments, exact_global != 0);
+            BUSTER_TEST(arguments, address_global != 0);
+            BUSTER_TEST(arguments, pointer_alias_global != 0);
+            BUSTER_TEST(arguments, short_false_global != 0);
+            BUSTER_TEST(arguments, short_true_global != 0);
+            BUSTER_TEST(arguments, short_conditional_global != 0);
+            BUSTER_TEST(arguments, pair_type != 0);
+            BUSTER_TEST(arguments, wide_type != 0);
+            BUSTER_TEST(arguments, vector_type != 0);
+            BUSTER_TEST(arguments, va_list_type != 0);
+            BUSTER_TEST(arguments, apply_function != 0);
+            BUSTER_TEST(arguments, statement_function != 0);
+            BUSTER_TEST(arguments, local_static_function != 0);
+            if (callbacks_global)
+            {
+                BUSTER_TEST(arguments, callbacks_global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
+                BUSTER_TEST(arguments, callbacks_global->bytes.length == 16);
+                BUSTER_TEST(arguments, callbacks_global->relocation_count == 2);
+            }
+            if (answer_global)
+            {
+                BUSTER_TEST(arguments, answer_global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                BUSTER_TEST(arguments, answer_global->initializer_bits == 13);
+            }
+            if (fraction_global)
+            {
+                f32 expected_fraction = 1.75f;
+                u32 expected_fraction_bits = 0;
+                memcpy(&expected_fraction_bits, &expected_fraction, sizeof(expected_fraction_bits));
+                BUSTER_TEST(arguments, fraction_global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
+                BUSTER_TEST(arguments, fraction_global->initializer_bits == expected_fraction_bits);
+            }
+            if (pair_global && pair_global->bytes.pointer && pair_global->bytes.length == 8)
+            {
+                u32 left = 0;
+                u32 right = 0;
+                memcpy(&left, pair_global->bytes.pointer, sizeof(left));
+                memcpy(&right, pair_global->bytes.pointer + sizeof(left), sizeof(right));
+                BUSTER_TEST(arguments, left == 4);
+                BUSTER_TEST(arguments, right == 9);
+            }
+            if (matrix_global && matrix_global->bytes.pointer && matrix_global->bytes.length == 24)
+            {
+                u32 last = 0;
+                memcpy(&last, matrix_global->bytes.pointer + 5 * sizeof(last), sizeof(last));
+                BUSTER_TEST(arguments, last == 6);
+            }
+            if (exact_global && exact_global->bytes.pointer)
+            {
+                BUSTER_TEST(arguments, exact_global->bytes.length == 3);
+                BUSTER_TEST(arguments, exact_global->bytes.length >= 3 && exact_global->bytes.pointer[0] == 'a');
+                BUSTER_TEST(arguments, exact_global->bytes.length >= 3 && exact_global->bytes.pointer[1] == 'b');
+                BUSTER_TEST(arguments, exact_global->bytes.length >= 3 && exact_global->bytes.pointer[2] == 'c');
+            }
+            if (address_global)
+            {
+                BUSTER_TEST(arguments, address_global->initializer_kind == IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS);
+                BUSTER_TEST(arguments, address_global->initializer_symbol.value != IR_ID_UNDERLYING_INVALID);
+                BUSTER_TEST(arguments, address_global->initializer_addend == 20);
+                if (address_global->relocation_count == 1 && address_global->relocations)
+                {
+                    BUSTER_TEST(arguments, address_global->relocations[0].addend == 20);
+                }
+            }
+            if (pointer_alias_global)
+            {
+                BUSTER_TEST(arguments, pointer_alias_global->initializer_kind == IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS);
+                BUSTER_TEST(arguments, pointer_alias_global->initializer_symbol.value != IR_ID_UNDERLYING_INVALID);
+                BUSTER_TEST(arguments, pointer_alias_global->initializer_addend == 0);
+            }
+            if (short_false_global)
+            {
+                BUSTER_TEST(arguments, short_false_global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                BUSTER_TEST(arguments, short_false_global->initializer_bits == 0);
+            }
+            if (short_true_global)
+            {
+                BUSTER_TEST(arguments, short_true_global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                BUSTER_TEST(arguments, short_true_global->initializer_bits == 1);
+            }
+            if (short_conditional_global)
+            {
+                BUSTER_TEST(arguments, short_conditional_global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                BUSTER_TEST(arguments, short_conditional_global->initializer_bits == 7);
+            }
+            if (apply_function)
+            {
+                IrType* function_type = ir_type_from_id(&artifact_ir.program->types, apply_function->canonical_type);
+                IrType* callback_parameter = function_type && function_type->parameter_count > 0
+                                                  ? ir_type_from_id(&artifact_ir.program->types, function_type->parameter_types[0])
+                                                  : 0;
+                IrType* callback_function = callback_parameter && callback_parameter->kind == IR_TYPE_POINTER
+                                                 ? ir_type_from_id(&artifact_ir.program->types, callback_parameter->element_type)
+                                                 : 0;
+                IrType* array_parameter = function_type && function_type->parameter_count > 1
+                                               ? ir_type_from_id(&artifact_ir.program->types, function_type->parameter_types[1])
+                                               : 0;
+                IrType* array_element = array_parameter && array_parameter->kind == IR_TYPE_POINTER
+                                             ? ir_type_from_id(&artifact_ir.program->types, array_parameter->element_type)
+                                             : 0;
+                BUSTER_TEST(arguments, function_type && function_type->parameter_count == 2);
+                BUSTER_TEST(arguments, callback_function && callback_function->kind == IR_TYPE_FUNCTION);
+                BUSTER_TEST(arguments, array_parameter && array_parameter->kind == IR_TYPE_POINTER);
+                BUSTER_TEST(arguments, array_element && array_element->kind == IR_TYPE_ARRAY && array_element->element_count == 3);
+                BUSTER_TEST(arguments, apply_function->state == IR_FUNCTION_LOWERED);
+            }
+            if (statement_function)
+            {
+                BUSTER_TEST(arguments, statement_function->state == IR_FUNCTION_LOWERED);
+            }
+            if (local_static_function)
+            {
+                BUSTER_TEST(arguments, local_static_function->state == IR_FUNCTION_LOWERED);
+            }
+            IrType* abi_types[] = {pair_type, wide_type, vector_type, va_list_type};
+            for (u32 type_index = 0; type_index < BUSTER_ARRAY_LENGTH(abi_types); type_index += 1)
+            {
+                if (!abi_types[type_index])
+                {
+                    continue;
+                }
+                for (u32 convention = 0; convention < IR_ABI_CONVENTION_COUNT; convention += 1)
+                {
+                    IrAbiValue argument_abi = ir_type_abi_value(artifact_ir.program, abi_types[type_index]->id,
+                                                                 (IrAbiConvention)convention, IR_ABI_USE_ARGUMENT);
+                    BUSTER_TEST(arguments, argument_abi.part_count || argument_abi.indirect);
+                    BUSTER_TEST(arguments, argument_abi.part_count <= IR_ABI_MAX_PARTS);
+                }
+            }
+            if (wide_type)
+            {
+                IrAbiValue system_v = ir_type_abi_value(artifact_ir.program, wide_type->id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+                IrAbiValue win64 = ir_type_abi_value(artifact_ir.program, wide_type->id, IR_ABI_CONVENTION_WIN64_X86_64, IR_ABI_USE_ARGUMENT);
+                IrAbiValue aapcs = ir_type_abi_value(artifact_ir.program, wide_type->id, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_ARGUMENT);
+                IrAbiValue darwin = ir_type_abi_value(artifact_ir.program, wide_type->id, IR_ABI_CONVENTION_DARWIN_AARCH64, IR_ABI_USE_ARGUMENT);
+                IrAbiValue windows_aarch64 =
+                    ir_type_abi_value(artifact_ir.program, wide_type->id, IR_ABI_CONVENTION_WINDOWS_AARCH64, IR_ABI_USE_ARGUMENT);
+                BUSTER_TEST(arguments, system_v.part_count == 2 && !system_v.indirect);
+                BUSTER_TEST(arguments, win64.indirect);
+                BUSTER_TEST(arguments, aapcs.part_count == 2 && !aapcs.indirect);
+                BUSTER_TEST(arguments, darwin.part_count == 2 && !darwin.indirect);
+                BUSTER_TEST(arguments, windows_aarch64.part_count == 2 && !windows_aarch64.indirect);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(artifact_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        String8 abi_triples[] = {
+            S8("x86_64-unknown-linux-gnu"),
+            S8("x86_64-pc-windows-msvc"),
+            S8("aarch64-unknown-linux-gnu"),
+            S8("aarch64-apple-macos"),
+            S8("aarch64-pc-windows-msvc"),
+        };
+        IrAbiConvention abi_conventions[] = {
+            IR_ABI_CONVENTION_SYSTEMV_X86_64,
+            IR_ABI_CONVENTION_WIN64_X86_64,
+            IR_ABI_CONVENTION_AAPCS64,
+            IR_ABI_CONVENTION_DARWIN_AARCH64,
+            IR_ABI_CONVENTION_WINDOWS_AARCH64,
+        };
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(abi_triples); target_index += 1)
+        {
+            TargetParseResult parsed_target = target_parse_triple(abi_triples[target_index]);
+            BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+            if (parsed_target.error == TARGET_PARSE_ERROR_NONE)
+            {
+                BUSTER_TEST(arguments, ir_abi_convention_for_target(parsed_target.target) == abi_conventions[target_index]);
+            }
+        }
+        scratch_end(artifact_temporary);
     }
     enum
     {

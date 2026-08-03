@@ -371,6 +371,44 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, pe_external_executable.error == LINK_ERROR_NONE);
     BUSTER_TEST(arguments, link_test_pe_import_matches(pe_external_executable.executable, S8("external.dll"), S8("external_value")));
     BUSTER_TEST(arguments, !link_test_pe_import_matches(pe_external_executable.executable, S8("ucrtbase.dll"), S8("external_value")));
+    u8 pe_data_main_text[] = {
+        0x48, 0x8d, 0x05, 0, 0, 0, 0, 0xc3,
+    };
+    ObjectSymbol pe_data_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = sizeof(pe_data_main_text),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("external_value"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+    };
+    ObjectRelocation pe_data_relocation = {
+        .addend = -4,
+        .offset = 3,
+        .section = OBJECT_SECTION_TEXT,
+        .symbol = 1,
+        .kind = OBJECT_RELOCATION_X86_64_PC32,
+    };
+    ObjectFile pe_data_object = link_test_object_make(arguments->arena, windows_object.target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(pe_data_main_text),
+                                                       pe_data_symbols, BUSTER_ARRAY_LENGTH(pe_data_symbols), &pe_data_relocation, 1);
+    NativeExecutableLinkResult pe_data_executable = link_native_executable(arguments->arena, &pe_data_object,
+                                                                            (NativeExecutableLinkOptions){
+                                                                                .entry_symbol = S8("main"),
+                                                                                .dynamic_libraries = &external_library,
+                                                                                .dynamic_library_count = 1,
+                                                                            });
+    BUSTER_TEST(arguments, pe_data_executable.error == LINK_ERROR_NONE);
+    u64 pe_data_text_offset = 0x400 + align_forward(54, 16);
+    BUSTER_TEST(arguments, pe_data_executable.executable.length > pe_data_text_offset + 2 && pe_data_executable.executable.pointer[pe_data_text_offset] == 0x48 &&
+                           pe_data_executable.executable.pointer[pe_data_text_offset + 1] == 0x8b);
+    BUSTER_TEST(arguments, link_test_pe_import_matches(pe_data_executable.executable, S8("external.dll"), S8("external_value")));
     pe_libc_symbols[1].name = S8("missing_value");
     NativeExecutableLinkResult pe_missing_external = link_native_executable(arguments->arena, &pe_libc_object,
                                                                             (NativeExecutableLinkOptions){
@@ -450,6 +488,54 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                     .entry_symbol = S8("main"),
                                                                                 });
     BUSTER_TEST(arguments, aarch64_libc_executable.error == LINK_ERROR_NONE);
+    u32 aarch64_data_main_instructions[] = {
+        0x58000049, 0x14000003, 0, 0,
+    };
+    ObjectSymbol aarch64_data_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = sizeof(aarch64_data_main_instructions),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("external_value"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+    };
+    ObjectRelocation aarch64_data_relocation = {
+        .offset = 2 * sizeof(u32),
+        .section = OBJECT_SECTION_TEXT,
+        .symbol = 1,
+        .kind = OBJECT_RELOCATION_ABSOLUTE64,
+    };
+    ObjectFile aarch64_data_object = link_test_object_make(arguments->arena, (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+                                                            (ByteSlice){
+                                                                .pointer = (u8*)aarch64_data_main_instructions,
+                                                                .length = sizeof(aarch64_data_main_instructions),
+                                                            },
+                                                            aarch64_data_symbols, BUSTER_ARRAY_LENGTH(aarch64_data_symbols), &aarch64_data_relocation, 1);
+    String8 aarch64_data_exports[] = {
+        S8("external_value"),
+    };
+    NativeDynamicLibrary aarch64_data_library = {
+        .name = S8("external.dll"),
+        .exported_symbols = aarch64_data_exports,
+        .exported_symbol_count = BUSTER_ARRAY_LENGTH(aarch64_data_exports),
+    };
+    NativeExecutableLinkResult aarch64_data_executable = link_native_executable(arguments->arena, &aarch64_data_object,
+                                                                                  (NativeExecutableLinkOptions){
+                                                                                      .entry_symbol = S8("main"),
+                                                                                      .dynamic_libraries = &aarch64_data_library,
+                                                                                      .dynamic_library_count = 1,
+                                                                                  });
+    BUSTER_TEST(arguments, aarch64_data_executable.error == LINK_ERROR_NONE);
+    u64 aarch64_data_text_offset = 0x400 + align_forward(20, 16);
+    BUSTER_TEST(arguments, aarch64_data_executable.executable.length > aarch64_data_text_offset + 12 &&
+                           link_read_u32(aarch64_data_executable.executable.pointer, aarch64_data_text_offset + 8) == UINT32_C(0x14000002));
     ObjectFile aarch64_pe_object = aarch64_object;
     aarch64_pe_object.target.os = OPERATING_SYSTEM_WINDOWS;
     String8 aarch64_pe_output_path = link_test_temporary_executable_path(arguments->arena, S8("buster-native-aarch64-pe-test"), S8(".exe"));
