@@ -29,6 +29,9 @@ BUSTER_GLOBAL_LOCAL void c_test_preprocessed_token(UnitTestArguments* arguments,
     outer_result->succeeded_test_count += result.succeeded_test_count;
 }
 
+#if BUSTER_COMPILER_CLANG
+__attribute__((optnone))
+#endif
 BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4479,8 +4482,208 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     enum
     {
+        C_TYPE_FUNCTION_POINTER_STRESS_DEPTH = 4096,
+        C_TYPE_AGGREGATE_STRESS_DEPTH = 1024,
+        C_TYPE_SPECIFIER_STRESS_DEPTH = 1024,
+        C_IR_ARRAY_BOUND_STRESS_DEPTH = 1024,
         C_IR_NESTED_CALL_STRESS_DEPTH = 256,
     };
+    {
+        Arena* declarator_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+        String8 declarator_prefix = S8("int root(");
+        String8 parameter_prefix = S8("int (*callback)(");
+        String8 declarator_suffix = S8(");");
+        u64 declarator_source_length = declarator_prefix.length +
+                                       (u64)C_TYPE_FUNCTION_POINTER_STRESS_DEPTH * (parameter_prefix.length + 1) + S8("void").length +
+                                       declarator_suffix.length;
+        char8* declarator_source_pointer = arena_allocate(declarator_arena, char8, declarator_source_length);
+        u64 declarator_at = 0;
+        memcpy(declarator_source_pointer + declarator_at, declarator_prefix.pointer, declarator_prefix.length);
+        declarator_at += declarator_prefix.length;
+        for (u32 depth = 0; depth < C_TYPE_FUNCTION_POINTER_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(declarator_source_pointer + declarator_at, parameter_prefix.pointer, parameter_prefix.length);
+            declarator_at += parameter_prefix.length;
+        }
+        memcpy(declarator_source_pointer + declarator_at, S8("void").pointer, S8("void").length);
+        declarator_at += S8("void").length;
+        for (u32 depth = 0; depth < C_TYPE_FUNCTION_POINTER_STRESS_DEPTH; depth += 1)
+        {
+            declarator_source_pointer[declarator_at++] = ')';
+        }
+        memcpy(declarator_source_pointer + declarator_at, declarator_suffix.pointer, declarator_suffix.length);
+        declarator_at += declarator_suffix.length;
+        BUSTER_TEST(arguments, declarator_at == declarator_source_length);
+        CPreprocessResult declarator_tokens = c_preprocess(
+            declarator_arena, (String8){.pointer = declarator_source_pointer, .length = declarator_source_length}, (CPreprocessOptions){0});
+        CParseResult declarator_parse = c_parse(declarator_arena, declarator_tokens);
+        CIRLowerResult declarator_ir =
+            c_lower_to_ir(declarator_arena, S8("function-pointer-stress.c"), declarator_tokens, declarator_parse, target_native);
+        BUSTER_TEST(arguments, declarator_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, declarator_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, declarator_ir.diagnostic_count == 0);
+        if (declarator_ir.program)
+        {
+            BUSTER_TEST(arguments, declarator_ir.program->types.count >= C_TYPE_FUNCTION_POINTER_STRESS_DEPTH * 2);
+            BUSTER_TEST(arguments,
+                        ir_validate_canonical_module(declarator_ir.program, declarator_ir.program->modules).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, arena_destroy(declarator_arena, 1));
+    }
+    {
+        Arena* typeof_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+        String8 typeof_prefix = S8("__typeof__(");
+        String8 typeof_suffix = S8(" value; int main(void) { return 0; }");
+        u64 typeof_source_length = (u64)C_TYPE_SPECIFIER_STRESS_DEPTH * (typeof_prefix.length + 1) + S8("int").length + typeof_suffix.length;
+        char8* typeof_source_pointer = arena_allocate(typeof_arena, char8, typeof_source_length);
+        u64 typeof_at = 0;
+        for (u32 depth = 0; depth < C_TYPE_SPECIFIER_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(typeof_source_pointer + typeof_at, typeof_prefix.pointer, typeof_prefix.length);
+            typeof_at += typeof_prefix.length;
+        }
+        memcpy(typeof_source_pointer + typeof_at, S8("int").pointer, S8("int").length);
+        typeof_at += S8("int").length;
+        for (u32 depth = 0; depth < C_TYPE_SPECIFIER_STRESS_DEPTH; depth += 1)
+        {
+            typeof_source_pointer[typeof_at++] = ')';
+        }
+        memcpy(typeof_source_pointer + typeof_at, typeof_suffix.pointer, typeof_suffix.length);
+        typeof_at += typeof_suffix.length;
+        BUSTER_TEST(arguments, typeof_at == typeof_source_length);
+        CPreprocessResult typeof_tokens =
+            c_preprocess(typeof_arena, (String8){.pointer = typeof_source_pointer, .length = typeof_source_length}, (CPreprocessOptions){0});
+        CParseResult typeof_parse = c_parse(typeof_arena, typeof_tokens);
+        CIRLowerResult typeof_ir = c_lower_to_ir(typeof_arena, S8("typeof-stress.c"), typeof_tokens, typeof_parse, target_native);
+        BUSTER_TEST(arguments, typeof_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, typeof_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, typeof_ir.diagnostic_count == 0);
+        if (typeof_ir.program)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(typeof_ir.program, typeof_ir.program->modules).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, arena_destroy(typeof_arena, 1));
+    }
+    {
+        Arena* atomic_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+        String8 atomic_prefix = S8("_Atomic(");
+        String8 atomic_suffix = S8(" value;");
+        u64 atomic_source_length = (u64)C_TYPE_SPECIFIER_STRESS_DEPTH * (atomic_prefix.length + 1) + S8("int").length + atomic_suffix.length;
+        char8* atomic_source_pointer = arena_allocate(atomic_arena, char8, atomic_source_length);
+        u64 atomic_at = 0;
+        for (u32 depth = 0; depth < C_TYPE_SPECIFIER_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(atomic_source_pointer + atomic_at, atomic_prefix.pointer, atomic_prefix.length);
+            atomic_at += atomic_prefix.length;
+        }
+        memcpy(atomic_source_pointer + atomic_at, S8("int").pointer, S8("int").length);
+        atomic_at += S8("int").length;
+        for (u32 depth = 0; depth < C_TYPE_SPECIFIER_STRESS_DEPTH; depth += 1)
+        {
+            atomic_source_pointer[atomic_at++] = ')';
+        }
+        memcpy(atomic_source_pointer + atomic_at, atomic_suffix.pointer, atomic_suffix.length);
+        atomic_at += atomic_suffix.length;
+        BUSTER_TEST(arguments, atomic_at == atomic_source_length);
+        CPreprocessResult atomic_tokens =
+            c_preprocess(atomic_arena, (String8){.pointer = atomic_source_pointer, .length = atomic_source_length}, (CPreprocessOptions){0});
+        CParseResult atomic_parse = c_parse(atomic_arena, atomic_tokens);
+        BUSTER_TEST(arguments, atomic_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, atomic_parse.diagnostic_count == 1);
+        if (atomic_parse.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, atomic_parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ATOMIC_TYPE);
+            BUSTER_TEST(arguments,
+                        atomic_parse.diagnostics[0].location.offset == (u64)(C_TYPE_SPECIFIER_STRESS_DEPTH - 2) * atomic_prefix.length);
+        }
+        BUSTER_TEST(arguments, arena_destroy(atomic_arena, 1));
+    }
+    {
+        Arena* aggregate_stress_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+        String8 aggregate_prefix = S8("struct Root { ");
+        String8 aggregate_open = S8("struct { ");
+        String8 aggregate_leaf = S8("int value;");
+        String8 aggregate_close = S8(" } member;");
+        String8 aggregate_suffix = S8(" }; struct Root root; int main(void) { return 0; }");
+        u64 aggregate_source_length = aggregate_prefix.length +
+                                      (u64)C_TYPE_AGGREGATE_STRESS_DEPTH * (aggregate_open.length + aggregate_close.length) +
+                                      aggregate_leaf.length + aggregate_suffix.length;
+        char8* aggregate_source_pointer = arena_allocate(aggregate_stress_arena, char8, aggregate_source_length);
+        u64 aggregate_at = 0;
+        memcpy(aggregate_source_pointer + aggregate_at, aggregate_prefix.pointer, aggregate_prefix.length);
+        aggregate_at += aggregate_prefix.length;
+        for (u32 depth = 0; depth < C_TYPE_AGGREGATE_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(aggregate_source_pointer + aggregate_at, aggregate_open.pointer, aggregate_open.length);
+            aggregate_at += aggregate_open.length;
+        }
+        memcpy(aggregate_source_pointer + aggregate_at, aggregate_leaf.pointer, aggregate_leaf.length);
+        aggregate_at += aggregate_leaf.length;
+        for (u32 depth = 0; depth < C_TYPE_AGGREGATE_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(aggregate_source_pointer + aggregate_at, aggregate_close.pointer, aggregate_close.length);
+            aggregate_at += aggregate_close.length;
+        }
+        memcpy(aggregate_source_pointer + aggregate_at, aggregate_suffix.pointer, aggregate_suffix.length);
+        aggregate_at += aggregate_suffix.length;
+        BUSTER_TEST(arguments, aggregate_at == aggregate_source_length);
+        CPreprocessResult aggregate_stress_tokens = c_preprocess(
+            aggregate_stress_arena, (String8){.pointer = aggregate_source_pointer, .length = aggregate_source_length}, (CPreprocessOptions){0});
+        CParseResult aggregate_stress_parse = c_parse(aggregate_stress_arena, aggregate_stress_tokens);
+        CIRLowerResult aggregate_stress_ir = c_lower_to_ir(aggregate_stress_arena, S8("aggregate-stress.c"), aggregate_stress_tokens,
+                                                           aggregate_stress_parse, target_native);
+        BUSTER_TEST(arguments, aggregate_stress_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aggregate_stress_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aggregate_stress_ir.diagnostic_count == 0);
+        if (aggregate_stress_ir.program)
+        {
+            BUSTER_TEST(arguments, aggregate_stress_parse.member_count >= C_TYPE_AGGREGATE_STRESS_DEPTH + 1);
+            BUSTER_TEST(arguments,
+                        ir_validate_canonical_module(aggregate_stress_ir.program, aggregate_stress_ir.program->modules).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, arena_destroy(aggregate_stress_arena, 1));
+    }
+    {
+        Arena* array_bound_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+        String8 array_bound_prefix = S8("int values[");
+        String8 sizeof_open = S8("sizeof(char[");
+        String8 sizeof_close = S8("])");
+        String8 array_bound_suffix = S8("]; int main(void) { return values[0]; }");
+        u64 array_bound_source_length = array_bound_prefix.length +
+                                        (u64)C_IR_ARRAY_BOUND_STRESS_DEPTH * (sizeof_open.length + sizeof_close.length) + 1 +
+                                        array_bound_suffix.length;
+        char8* array_bound_source_pointer = arena_allocate(array_bound_arena, char8, array_bound_source_length);
+        u64 array_bound_at = 0;
+        memcpy(array_bound_source_pointer + array_bound_at, array_bound_prefix.pointer, array_bound_prefix.length);
+        array_bound_at += array_bound_prefix.length;
+        for (u32 depth = 0; depth < C_IR_ARRAY_BOUND_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(array_bound_source_pointer + array_bound_at, sizeof_open.pointer, sizeof_open.length);
+            array_bound_at += sizeof_open.length;
+        }
+        array_bound_source_pointer[array_bound_at++] = '1';
+        for (u32 depth = 0; depth < C_IR_ARRAY_BOUND_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(array_bound_source_pointer + array_bound_at, sizeof_close.pointer, sizeof_close.length);
+            array_bound_at += sizeof_close.length;
+        }
+        memcpy(array_bound_source_pointer + array_bound_at, array_bound_suffix.pointer, array_bound_suffix.length);
+        array_bound_at += array_bound_suffix.length;
+        BUSTER_TEST(arguments, array_bound_at == array_bound_source_length);
+        CPreprocessResult array_bound_tokens = c_preprocess(
+            array_bound_arena, (String8){.pointer = array_bound_source_pointer, .length = array_bound_source_length}, (CPreprocessOptions){0});
+        CParseResult array_bound_parse = c_parse(array_bound_arena, array_bound_tokens);
+        CIRLowerResult array_bound_ir =
+            c_lower_to_ir(array_bound_arena, S8("array-bound-stress.c"), array_bound_tokens, array_bound_parse, target_native);
+        BUSTER_TEST(arguments, array_bound_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, array_bound_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, array_bound_ir.diagnostic_count == 0);
+        if (array_bound_ir.program)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(array_bound_ir.program, array_bound_ir.program->modules).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, arena_destroy(array_bound_arena, 1));
+    }
     TemporalArena nested_temporary = scratch_begin(0, 0);
     String8 nested_prefix = S8("static int identity(int value)"
                                " { return value; }"
@@ -4530,6 +4733,9 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     {
         C_IR_ASSIGNMENT_STRESS_DEPTH = 4096,
         C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH = 1024,
+        C_IR_COMPOUND_LITERAL_STRESS_DEPTH = 1024,
+        C_IR_CONDITIONAL_STRESS_DEPTH = 1024,
+        C_IR_VLA_ASSEMBLY_STRESS_DEPTH = 1024,
         C_IR_SUBSCRIPT_STRESS_DEPTH = 1024,
         C_IR_FUNCTION_NAME_STRESS_COUNT = 1024,
     };
@@ -4625,6 +4831,214 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_validate_canonical_module(statement_lowered.program, statement_module).error == IR_VALIDATION_NONE);
         }
         scratch_end(statement_temporary);
+    }
+    {
+        Arena* statement_nontrivial_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+        u64 statement_part_count = (u64)C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH * 2 + 3;
+        String8* statement_parts = arena_allocate(statement_nontrivial_arena, String8, statement_part_count);
+        u64 statement_part_index = 0;
+        statement_parts[statement_part_index++] = S8("int main(void) { return ");
+        for (u32 depth = 0; depth < C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH; depth += 1)
+        {
+            statement_parts[statement_part_index++] = S8("({ ");
+        }
+        statement_parts[statement_part_index++] = S8("1");
+        for (u32 depth = 0; depth < C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH; depth += 1)
+        {
+            u32 local_index = C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH - depth - 1;
+            statement_parts[statement_part_index++] =
+                string_format(statement_nontrivial_arena, S8("; int local{u32} = 1; local{u32} + 1; }})"), local_index, local_index);
+        }
+        statement_parts[statement_part_index++] = S8("; }");
+        BUSTER_TEST(arguments, statement_part_index == statement_part_count);
+        String8 statement_source =
+            string_join_arena(statement_nontrivial_arena, (SliceString8){.pointer = statement_parts, .length = statement_part_count}, false);
+        CPreprocessResult statement_tokens = c_preprocess(
+            statement_nontrivial_arena, statement_source, (CPreprocessOptions){0});
+        CParseResult statement_parse = c_parse(statement_nontrivial_arena, statement_tokens);
+        CIRLowerResult statement_lowered =
+            c_lower_to_ir(statement_nontrivial_arena, S8("statement-expression-nontrivial-stress.c"), statement_tokens, statement_parse, target_native);
+        BUSTER_TEST(arguments, statement_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, statement_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, statement_lowered.diagnostic_count == 0);
+        if (statement_lowered.program)
+        {
+            IrModule* statement_module = statement_lowered.program->modules;
+            IrFunction* statement_function = statement_module->functions;
+            BUSTER_TEST(arguments, statement_function->local_count >= C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(statement_lowered.program, statement_module).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, arena_destroy(statement_nontrivial_arena, 1));
+    }
+    {
+        Arena* compound_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+        String8 compound_prefix = S8("int main(void) { return ");
+        String8 compound_open = S8("(int){");
+        String8 compound_suffix = S8("; }");
+        u64 compound_source_length = compound_prefix.length +
+                                     (u64)C_IR_COMPOUND_LITERAL_STRESS_DEPTH * (compound_open.length + 1) + 1 + compound_suffix.length;
+        char8* compound_source_pointer = arena_allocate(compound_arena, char8, compound_source_length);
+        u64 compound_at = 0;
+        memcpy(compound_source_pointer + compound_at, compound_prefix.pointer, compound_prefix.length);
+        compound_at += compound_prefix.length;
+        for (u32 depth = 0; depth < C_IR_COMPOUND_LITERAL_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(compound_source_pointer + compound_at, compound_open.pointer, compound_open.length);
+            compound_at += compound_open.length;
+        }
+        compound_source_pointer[compound_at++] = '1';
+        for (u32 depth = 0; depth < C_IR_COMPOUND_LITERAL_STRESS_DEPTH; depth += 1)
+        {
+            compound_source_pointer[compound_at++] = '}';
+        }
+        memcpy(compound_source_pointer + compound_at, compound_suffix.pointer, compound_suffix.length);
+        compound_at += compound_suffix.length;
+        BUSTER_TEST(arguments, compound_at == compound_source_length);
+        CPreprocessResult compound_stress_tokens = c_preprocess(
+            compound_arena, (String8){.pointer = compound_source_pointer, .length = compound_source_length}, (CPreprocessOptions){0});
+        CParseResult compound_stress_parse = c_parse(compound_arena, compound_stress_tokens);
+        CIRLowerResult compound_stress_lowered =
+            c_lower_to_ir(compound_arena, S8("compound-literal-stress.c"), compound_stress_tokens, compound_stress_parse, target_native);
+        BUSTER_TEST(arguments, compound_stress_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, compound_stress_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, compound_stress_lowered.diagnostic_count == 0);
+        if (compound_stress_lowered.program)
+        {
+            IrFunction* compound_function = compound_stress_lowered.program->modules->functions;
+            u32 compound_local_count = 0;
+            u32 compound_store_count = 0;
+            u32 compound_return_count = 0;
+            for (u32 instruction_index = 0; instruction_index < compound_function->instruction_count; instruction_index += 1)
+            {
+                IrOpcode opcode = compound_function->instructions[instruction_index].opcode;
+                compound_local_count += opcode == IR_OPCODE_LOCAL;
+                compound_store_count += opcode == IR_OPCODE_STORE;
+                compound_return_count += opcode == IR_OPCODE_RETURN;
+            }
+            BUSTER_TEST(arguments, compound_local_count >= C_IR_COMPOUND_LITERAL_STRESS_DEPTH);
+            BUSTER_TEST(arguments, compound_store_count >= C_IR_COMPOUND_LITERAL_STRESS_DEPTH);
+            BUSTER_TEST(arguments, compound_return_count == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(compound_stress_lowered.program, compound_stress_lowered.program->modules).error ==
+                                       IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, arena_destroy(compound_arena, 1));
+    }
+    {
+        Arena* conditional_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+        String8 conditional_prefix = S8("int main(void) { return ");
+        String8 conditional_open = S8("(1 ? 1 + ");
+        String8 conditional_close = S8(" : 0)");
+        String8 conditional_suffix = S8("; }");
+        u64 conditional_source_length = conditional_prefix.length +
+                                        (u64)C_IR_CONDITIONAL_STRESS_DEPTH * (conditional_open.length + conditional_close.length) + 1 +
+                                        conditional_suffix.length;
+        char8* conditional_source_pointer = arena_allocate(conditional_arena, char8, conditional_source_length);
+        u64 conditional_at = 0;
+        memcpy(conditional_source_pointer + conditional_at, conditional_prefix.pointer, conditional_prefix.length);
+        conditional_at += conditional_prefix.length;
+        for (u32 depth = 0; depth < C_IR_CONDITIONAL_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(conditional_source_pointer + conditional_at, conditional_open.pointer, conditional_open.length);
+            conditional_at += conditional_open.length;
+        }
+        conditional_source_pointer[conditional_at++] = '1';
+        for (u32 depth = 0; depth < C_IR_CONDITIONAL_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(conditional_source_pointer + conditional_at, conditional_close.pointer, conditional_close.length);
+            conditional_at += conditional_close.length;
+        }
+        memcpy(conditional_source_pointer + conditional_at, conditional_suffix.pointer, conditional_suffix.length);
+        conditional_at += conditional_suffix.length;
+        BUSTER_TEST(arguments, conditional_at == conditional_source_length);
+        CPreprocessResult conditional_tokens = c_preprocess(
+            conditional_arena, (String8){.pointer = conditional_source_pointer, .length = conditional_source_length}, (CPreprocessOptions){0});
+        CParseResult conditional_parse = c_parse(conditional_arena, conditional_tokens);
+        CIRLowerResult conditional_lowered =
+            c_lower_to_ir(conditional_arena, S8("conditional-stress.c"), conditional_tokens, conditional_parse, target_native);
+        BUSTER_TEST(arguments, conditional_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, conditional_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, conditional_lowered.diagnostic_count == 0);
+        if (conditional_lowered.program)
+        {
+            IrFunction* conditional_function = conditional_lowered.program->modules->functions;
+            u32 conditional_branch_count = 0;
+            u32 conditional_branch_if_count = 0;
+            u32 conditional_return_count = 0;
+            for (u32 instruction_index = 0; instruction_index < conditional_function->instruction_count; instruction_index += 1)
+            {
+                IrOpcode opcode = conditional_function->instructions[instruction_index].opcode;
+                conditional_branch_count += opcode == IR_OPCODE_BRANCH;
+                conditional_branch_if_count += opcode == IR_OPCODE_BRANCH_IF;
+                conditional_return_count += opcode == IR_OPCODE_RETURN;
+            }
+            BUSTER_TEST(arguments, conditional_branch_count >= C_IR_CONDITIONAL_STRESS_DEPTH * 2);
+            BUSTER_TEST(arguments, conditional_branch_if_count >= C_IR_CONDITIONAL_STRESS_DEPTH);
+            BUSTER_TEST(arguments, conditional_return_count == 1);
+            BUSTER_TEST(arguments,
+                        ir_validate_canonical_module(conditional_lowered.program, conditional_lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, arena_destroy(conditional_arena, 1));
+    }
+    {
+        Arena* vla_assembly_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+        String8 vla_assembly_prefix = S8("int main(int count) { int values[");
+        String8 vla_assembly_open = S8("(count ? 1 + ");
+        String8 vla_assembly_close = S8(" : 1)");
+        String8 vla_assembly_middle = S8("]; __asm__ volatile (\"\" : : \"r\"(");
+        String8 vla_assembly_suffix = S8(")); return values[0]; }");
+        u64 nested_expression_length = (u64)C_IR_VLA_ASSEMBLY_STRESS_DEPTH * (vla_assembly_open.length + vla_assembly_close.length) +
+                                       S8("count").length;
+        u64 vla_assembly_source_length = vla_assembly_prefix.length + nested_expression_length + vla_assembly_middle.length +
+                                         nested_expression_length + vla_assembly_suffix.length;
+        char8* vla_assembly_source_pointer = arena_allocate(vla_assembly_arena, char8, vla_assembly_source_length);
+        u64 vla_assembly_at = 0;
+        memcpy(vla_assembly_source_pointer + vla_assembly_at, vla_assembly_prefix.pointer, vla_assembly_prefix.length);
+        vla_assembly_at += vla_assembly_prefix.length;
+        for (u32 expression = 0; expression < 2; expression += 1)
+        {
+            for (u32 depth = 0; depth < C_IR_VLA_ASSEMBLY_STRESS_DEPTH; depth += 1)
+            {
+                memcpy(vla_assembly_source_pointer + vla_assembly_at, vla_assembly_open.pointer, vla_assembly_open.length);
+                vla_assembly_at += vla_assembly_open.length;
+            }
+            memcpy(vla_assembly_source_pointer + vla_assembly_at, S8("count").pointer, S8("count").length);
+            vla_assembly_at += S8("count").length;
+            for (u32 depth = 0; depth < C_IR_VLA_ASSEMBLY_STRESS_DEPTH; depth += 1)
+            {
+                memcpy(vla_assembly_source_pointer + vla_assembly_at, vla_assembly_close.pointer, vla_assembly_close.length);
+                vla_assembly_at += vla_assembly_close.length;
+            }
+            String8 separator = expression ? vla_assembly_suffix : vla_assembly_middle;
+            memcpy(vla_assembly_source_pointer + vla_assembly_at, separator.pointer, separator.length);
+            vla_assembly_at += separator.length;
+        }
+        BUSTER_TEST(arguments, vla_assembly_at == vla_assembly_source_length);
+        CPreprocessResult vla_assembly_tokens = c_preprocess(
+            vla_assembly_arena, (String8){.pointer = vla_assembly_source_pointer, .length = vla_assembly_source_length}, (CPreprocessOptions){0});
+        CParseResult vla_assembly_parse = c_parse(vla_assembly_arena, vla_assembly_tokens);
+        CIRLowerResult vla_assembly_lowered =
+            c_lower_to_ir(vla_assembly_arena, S8("vla-assembly-stress.c"), vla_assembly_tokens, vla_assembly_parse, target_native);
+        BUSTER_TEST(arguments, vla_assembly_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, vla_assembly_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, vla_assembly_lowered.diagnostic_count == 0);
+        if (vla_assembly_lowered.program)
+        {
+            IrModule* vla_assembly_module = vla_assembly_lowered.program->modules;
+            IrFunction* vla_assembly_function = vla_assembly_module->functions;
+            u32 vla_assembly_instruction_count = 0;
+            u32 branch_instruction_count = 0;
+            for (u32 instruction_index = 0; instruction_index < vla_assembly_function->instruction_count; instruction_index += 1)
+            {
+                IrOpcode opcode = vla_assembly_function->instructions[instruction_index].opcode;
+                vla_assembly_instruction_count += opcode == IR_OPCODE_INLINE_ASSEMBLY;
+                branch_instruction_count += opcode == IR_OPCODE_BRANCH || opcode == IR_OPCODE_BRANCH_IF;
+            }
+            BUSTER_TEST(arguments, vla_assembly_instruction_count == 1);
+            BUSTER_TEST(arguments, branch_instruction_count >= C_IR_VLA_ASSEMBLY_STRESS_DEPTH * 2);
+            BUSTER_TEST(arguments,
+                        ir_validate_canonical_module(vla_assembly_lowered.program, vla_assembly_module).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, arena_destroy(vla_assembly_arena, 1));
     }
     {
         TemporalArena subscript_temporary = scratch_begin(0, 0);
