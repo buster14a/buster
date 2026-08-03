@@ -4525,5 +4525,211 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, ir_validate_canonical_module(nested_ir.program, &nested_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
     scratch_end(nested_temporary);
+
+    enum
+    {
+        C_IR_ASSIGNMENT_STRESS_DEPTH = 4096,
+        C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH = 1024,
+        C_IR_SUBSCRIPT_STRESS_DEPTH = 1024,
+        C_IR_FUNCTION_NAME_STRESS_COUNT = 1024,
+    };
+    {
+        TemporalArena assignment_temporary = scratch_begin(0, 0);
+        String8 assignment_prefix = S8("static int identity(int value) { return value; } int main(void) { int value; return identity(");
+        String8 assignment = S8("value = ");
+        String8 assignment_suffix = S8("1); }");
+        u64 assignment_source_length =
+            assignment_prefix.length + (u64)C_IR_ASSIGNMENT_STRESS_DEPTH * assignment.length + assignment_suffix.length;
+        char8* assignment_source_pointer = arena_allocate(assignment_temporary.arena, char8, assignment_source_length);
+        u64 assignment_at = 0;
+        memcpy(assignment_source_pointer + assignment_at, assignment_prefix.pointer, assignment_prefix.length);
+        assignment_at += assignment_prefix.length;
+        for (u32 depth = 0; depth < C_IR_ASSIGNMENT_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(assignment_source_pointer + assignment_at, assignment.pointer, assignment.length);
+            assignment_at += assignment.length;
+        }
+        memcpy(assignment_source_pointer + assignment_at, assignment_suffix.pointer, assignment_suffix.length);
+        assignment_at += assignment_suffix.length;
+        BUSTER_TEST(arguments, assignment_at == assignment_source_length);
+        CPreprocessResult assignment_tokens = c_preprocess(
+            assignment_temporary.arena, (String8){.pointer = assignment_source_pointer, .length = assignment_source_length}, (CPreprocessOptions){0});
+        CParseResult assignment_parse = c_parse(assignment_temporary.arena, assignment_tokens);
+        CIRLowerResult assignment_lowered =
+            c_lower_to_ir(assignment_temporary.arena, S8("assignment-stress.c"), assignment_tokens, assignment_parse, target_native);
+        BUSTER_TEST(arguments, assignment_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, assignment_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, assignment_lowered.diagnostic_count == 0);
+        if (assignment_lowered.program)
+        {
+            IrModule* assignment_module = assignment_lowered.program->modules;
+            IrFunction* assignment_function = assignment_module->functions + 1;
+            u32 assignment_store_count = 0;
+            for (u32 instruction_index = 0; instruction_index < assignment_function->instruction_count; instruction_index += 1)
+            {
+                assignment_store_count += assignment_function->instructions[instruction_index].opcode == IR_OPCODE_STORE;
+            }
+            BUSTER_TEST(arguments, assignment_store_count == C_IR_ASSIGNMENT_STRESS_DEPTH);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(assignment_lowered.program, assignment_module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(assignment_temporary);
+    }
+    {
+        TemporalArena statement_temporary = scratch_begin(0, 0);
+        String8 statement_prefix = S8("int main(void) { return ");
+        String8 statement_open = S8("({");
+        String8 statement_close = S8(";})");
+        String8 statement_suffix = S8("; }");
+        u64 statement_source_length = statement_prefix.length +
+                                      (u64)C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH * (statement_open.length + statement_close.length) + 1 +
+                                      statement_suffix.length;
+        char8* statement_source_pointer = arena_allocate(statement_temporary.arena, char8, statement_source_length);
+        u64 statement_at = 0;
+        memcpy(statement_source_pointer + statement_at, statement_prefix.pointer, statement_prefix.length);
+        statement_at += statement_prefix.length;
+        for (u32 depth = 0; depth < C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(statement_source_pointer + statement_at, statement_open.pointer, statement_open.length);
+            statement_at += statement_open.length;
+        }
+        statement_source_pointer[statement_at++] = '7';
+        for (u32 depth = 0; depth < C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(statement_source_pointer + statement_at, statement_close.pointer, statement_close.length);
+            statement_at += statement_close.length;
+        }
+        memcpy(statement_source_pointer + statement_at, statement_suffix.pointer, statement_suffix.length);
+        statement_at += statement_suffix.length;
+        BUSTER_TEST(arguments, statement_at == statement_source_length);
+        CPreprocessResult statement_tokens = c_preprocess(
+            statement_temporary.arena, (String8){.pointer = statement_source_pointer, .length = statement_source_length}, (CPreprocessOptions){0});
+        CParseResult statement_parse = c_parse(statement_temporary.arena, statement_tokens);
+        CIRLowerResult statement_lowered =
+            c_lower_to_ir(statement_temporary.arena, S8("statement-expression-stress.c"), statement_tokens, statement_parse, target_native);
+        BUSTER_TEST(arguments, statement_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, statement_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, statement_lowered.diagnostic_count == 0);
+        if (statement_lowered.program)
+        {
+            IrModule* statement_module = statement_lowered.program->modules;
+            IrFunction* statement_function = statement_module->functions;
+            IrInstruction* return_instruction = 0;
+            for (u32 instruction_index = 0; instruction_index < statement_function->instruction_count; instruction_index += 1)
+            {
+                if (statement_function->instructions[instruction_index].opcode == IR_OPCODE_RETURN)
+                {
+                    return_instruction = statement_function->instructions + instruction_index;
+                }
+            }
+            BUSTER_TEST(arguments, return_instruction && return_instruction->operand_count == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(statement_lowered.program, statement_module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(statement_temporary);
+    }
+    {
+        TemporalArena subscript_temporary = scratch_begin(0, 0);
+        String8 subscript_prefix = S8("int main(void) { int values[1] = { 0 }; return values[");
+        String8 subscript_nested = S8("values[");
+        String8 subscript_suffix = S8("] = 1; }");
+        u64 subscript_source_length = subscript_prefix.length + (u64)(C_IR_SUBSCRIPT_STRESS_DEPTH - 1) * subscript_nested.length + 1 +
+                                      (u64)C_IR_SUBSCRIPT_STRESS_DEPTH + subscript_suffix.length - 1;
+        char8* subscript_source_pointer = arena_allocate(subscript_temporary.arena, char8, subscript_source_length);
+        u64 subscript_at = 0;
+        memcpy(subscript_source_pointer + subscript_at, subscript_prefix.pointer, subscript_prefix.length);
+        subscript_at += subscript_prefix.length;
+        for (u32 depth = 1; depth < C_IR_SUBSCRIPT_STRESS_DEPTH; depth += 1)
+        {
+            memcpy(subscript_source_pointer + subscript_at, subscript_nested.pointer, subscript_nested.length);
+            subscript_at += subscript_nested.length;
+        }
+        subscript_source_pointer[subscript_at++] = '0';
+        for (u32 depth = 0; depth < C_IR_SUBSCRIPT_STRESS_DEPTH; depth += 1)
+        {
+            subscript_source_pointer[subscript_at++] = ']';
+        }
+        memcpy(subscript_source_pointer + subscript_at, subscript_suffix.pointer + 1, subscript_suffix.length - 1);
+        subscript_at += subscript_suffix.length - 1;
+        BUSTER_TEST(arguments, subscript_at == subscript_source_length);
+        CPreprocessResult subscript_tokens = c_preprocess(
+            subscript_temporary.arena, (String8){.pointer = subscript_source_pointer, .length = subscript_source_length}, (CPreprocessOptions){0});
+        CParseResult subscript_parse = c_parse(subscript_temporary.arena, subscript_tokens);
+        CIRLowerResult subscript_lowered =
+            c_lower_to_ir(subscript_temporary.arena, S8("subscript-stress.c"), subscript_tokens, subscript_parse, target_native);
+        BUSTER_TEST(arguments, subscript_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, subscript_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, subscript_lowered.diagnostic_count == 0);
+        if (subscript_lowered.program)
+        {
+            BUSTER_TEST(arguments,
+                        ir_validate_canonical_module(subscript_lowered.program, subscript_lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(subscript_temporary);
+    }
+    {
+        TemporalArena names_temporary = scratch_begin(0, 0);
+        u64 names_source_capacity = (u64)C_IR_FUNCTION_NAME_STRESS_COUNT * 40 + 1024;
+        char8* names_source_pointer = arena_allocate(names_temporary.arena, char8, names_source_capacity);
+        u64 names_at = 0;
+        for (u32 function_index = 0; function_index < C_IR_FUNCTION_NAME_STRESS_COUNT; function_index += 1)
+        {
+            String8 names_declaration = string_format(names_temporary.arena, S8("int function_{u32}(void);\n"), function_index);
+            BUSTER_TEST(arguments, names_declaration.length <= names_source_capacity - names_at);
+            memcpy(names_source_pointer + names_at, names_declaration.pointer, names_declaration.length);
+            names_at += names_declaration.length;
+        }
+        String8 names_suffix = S8("int select_large(int value) __asm__(\"select_large_signed\");\n"
+                                  "int select_large(unsigned value) __attribute__((__overloadable__)) __asm__(\"select_large_unsigned\");\n"
+                                  "int main(void) { int *first; int *second; return select_large(1) + select_large(1U) + (first == second); }\n");
+        BUSTER_TEST(arguments, names_suffix.length <= names_source_capacity - names_at);
+        memcpy(names_source_pointer + names_at, names_suffix.pointer, names_suffix.length);
+        names_at += names_suffix.length;
+        CPreprocessResult names_tokens =
+            c_preprocess(names_temporary.arena, (String8){.pointer = names_source_pointer, .length = names_at}, (CPreprocessOptions){0});
+        CParseResult names_parse = c_parse(names_temporary.arena, names_tokens);
+        CIRLowerResult names_lowered =
+            c_lower_to_ir(names_temporary.arena, S8("function-name-stress.c"), names_tokens, names_parse, target_native);
+        BUSTER_TEST(arguments, names_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, names_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, names_lowered.diagnostic_count == 0);
+        if (names_lowered.program)
+        {
+            bool found_signed_call = false;
+            bool found_unsigned_call = false;
+            for (u32 type_index = 0; type_index < names_lowered.program->types.count; type_index += 1)
+            {
+                IrType* type = names_lowered.program->types.types + type_index;
+                if (type->kind != IR_TYPE_POINTER || type->is_atomic || type->is_nullptr)
+                {
+                    continue;
+                }
+                for (u32 previous = 0; previous < type_index; previous += 1)
+                {
+                    IrType* earlier = names_lowered.program->types.types + previous;
+                    BUSTER_TEST(arguments, earlier->kind != IR_TYPE_POINTER || earlier->is_atomic || earlier->is_nullptr ||
+                                               earlier->element_type.value != type->element_type.value);
+                }
+            }
+            IrModule* names_module = names_lowered.program->modules;
+            for (u32 function_index = 0; function_index < names_module->function_count; function_index += 1)
+            {
+                IrFunction* names_function = names_module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < names_function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = names_function->instructions + instruction_index;
+                    if (instruction->opcode != IR_OPCODE_CALL)
+                    {
+                        continue;
+                    }
+                    IrSymbol* symbol = ir_symbol_from_id(&names_lowered.program->symbols, instruction->symbol);
+                    found_signed_call |= symbol && string_equal(symbol->link_name, S8("select_large_signed"));
+                    found_unsigned_call |= symbol && string_equal(symbol->link_name, S8("select_large_unsigned"));
+                }
+            }
+            BUSTER_TEST(arguments, found_signed_call);
+            BUSTER_TEST(arguments, found_unsigned_call);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(names_lowered.program, names_module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(names_temporary);
+    }
     return result;
 }
