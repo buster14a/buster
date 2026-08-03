@@ -109,15 +109,19 @@ struct DwarfBuffer
     u8* bytes;
     u64 count;
     u64 capacity;
-    bool overflow;
+    bool error;
     u8 reserved[7];
 };
 
 BUSTER_GLOBAL_LOCAL void dwarf_emit_bytes(DwarfBuffer* buffer, void const* source, u64 size)
 {
-    if (buffer->count + size > buffer->capacity)
+    if (buffer->error)
     {
-        buffer->overflow = true;
+        return;
+    }
+    if ((size && !source) || buffer->count > buffer->capacity || size > buffer->capacity - buffer->count)
+    {
+        buffer->error = true;
         return;
     }
     if (size)
@@ -186,9 +190,13 @@ BUSTER_GLOBAL_LOCAL void dwarf_emit_sleb128(DwarfBuffer* buffer, s64 value)
 
 BUSTER_GLOBAL_LOCAL void dwarf_write_u32_at(DwarfBuffer* buffer, u64 offset, u32 value)
 {
-    if (offset + sizeof(value) > buffer->count)
+    if (buffer->error)
     {
-        buffer->overflow = true;
+        return;
+    }
+    if (offset > buffer->count || sizeof(value) > buffer->count - offset)
+    {
+        buffer->error = true;
         return;
     }
     memcpy(buffer->bytes + offset, &value, sizeof(value));
@@ -231,6 +239,11 @@ BUSTER_GLOBAL_LOCAL DwarfStringTable dwarf_string_table_make(Arena* arena, Dwarf
 
 BUSTER_GLOBAL_LOCAL u32 dwarf_string_intern(DwarfStringTable* table, String8 string)
 {
+    if ((string.length && !string.pointer) || table->buffer->error)
+    {
+        table->buffer->error = true;
+        return 0;
+    }
     u64 hash = buster_hash_64(string.pointer ? (u8*)string.pointer : (u8*)"", string.length);
     u32 slot_index = (u32)hash & table->slot_mask;
     for (;;)
@@ -248,12 +261,16 @@ BUSTER_GLOBAL_LOCAL u32 dwarf_string_intern(DwarfStringTable* table, String8 str
     }
     if (table->count >= table->capacity || table->buffer->count > UINT32_MAX)
     {
-        table->buffer->overflow = true;
+        table->buffer->error = true;
         return 0;
     }
     u32 offset = (u32)table->buffer->count;
     dwarf_emit_bytes(table->buffer, string.pointer, string.length);
     dwarf_emit_u8(table->buffer, 0);
+    if (table->buffer->error)
+    {
+        return 0;
+    }
     table->strings[table->count] = string;
     table->offsets[table->count] = offset;
     table->slots[slot_index] = table->count;
@@ -538,7 +555,7 @@ DwarfResult dwarf_build_legacy(Arena* arena, DwarfInput input)
     }
     dwarf_write_u32_at(&line, 0, (u32)(line.count - 4));
 
-    if (str.overflow || abbrev.overflow || info.overflow || line.overflow)
+    if (str.error || abbrev.error || info.error || line.error)
     {
         return result;
     }
@@ -597,7 +614,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_relocation(DwarfModelWriter* writer, DwarfR
 {
     if (writer->relocation_count >= writer->relocation_capacity)
     {
-        writer->info.overflow = true;
+        writer->info.error = true;
         return;
     }
     writer->relocations[writer->relocation_count++] = relocation;
@@ -607,7 +624,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_reference(DwarfModelWriter* writer, u32 tar
 {
     if (writer->ref_count >= writer->ref_capacity)
     {
-        writer->info.overflow = true;
+        writer->info.error = true;
         return;
     }
     writer->refs[writer->ref_count++] = (DwarfModelRefPatch){
@@ -1425,7 +1442,7 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
     result.sections[DWARF_SECTION_RANGES] = (ByteSlice){.pointer = writer.ranges.bytes, .length = writer.ranges.count};
     result.relocations = writer.relocations;
     result.relocation_count = writer.relocation_count;
-    result.valid = !writer.str.overflow && !writer.abbrev.overflow && !writer.info.overflow && !writer.loc.overflow && !writer.ranges.overflow;
+    result.valid = !writer.str.error && !writer.abbrev.error && !writer.info.error && !writer.loc.error && !writer.ranges.error;
     return result;
 }
 

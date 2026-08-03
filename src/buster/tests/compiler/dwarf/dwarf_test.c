@@ -291,6 +291,19 @@ BUSTER_TEST_F_DECL UnitTestResult dwarf_tests(UnitTestArguments* arguments)
     DwarfResult rejected = dwarf_build(arguments->arena, invalid);
     BUSTER_TEST(arguments, !rejected.valid);
 
+    DwarfInput empty_optional_strings = input;
+    empty_optional_strings.producer = (String8){0};
+    empty_optional_strings.comp_dir = (String8){0};
+    BUSTER_TEST(arguments, dwarf_build(arguments->arena, empty_optional_strings).valid);
+
+    String8 invalid_file = {.length = 1};
+    DwarfInput invalid_string = input;
+    invalid_string.file_paths = &invalid_file;
+    invalid_string.file_count = 1;
+    invalid_string.function_count = 0;
+    invalid_string.line_count = 0;
+    BUSTER_TEST(arguments, !dwarf_build(arguments->arena, invalid_string).valid);
+
     DebugTypeId dwarf_parameter_types[] = {0};
     DebugType dwarf_types[] = {
         {
