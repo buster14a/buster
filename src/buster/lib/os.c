@@ -1880,10 +1880,11 @@ void thread_context_release(ThreadContext* thread_context)
     {
         thread_context_select(0);
     }
-    u64 i = BUSTER_ARRAY_LENGTH(thread_context->arenas);
-    while (i--)
+    Arena* arenas[BUSTER_ARRAY_LENGTH(thread_context->arenas)];
+    memcpy(arenas, thread_context->arenas, sizeof(arenas));
+    for (u64 i = BUSTER_ARRAY_LENGTH(arenas); i > 0; i -= 1)
     {
-        arena_destroy(thread_context->arenas[i], 1);
+        arena_destroy(arenas[i - 1], 1);
     }
 }
 
