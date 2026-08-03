@@ -26208,7 +26208,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             builder.prepared_call_indices[token_offset] = UINT32_MAX;
             builder.matching_delimiters[token_offset] = UINT32_MAX;
         }
-        BUSTER_CHECK(c_ir_build_delimiter_index(&builder));
+        bool delimiters_valid = c_ir_build_delimiter_index(&builder);
+        if (!delimiters_valid)
+        {
+            builder.failure_message = S8("function body has mismatched delimiters");
+        }
         CIrSignature signature = signatures[declaration_index];
         bool parameters_lowered = true;
         for (u32 parameter_index = 0; parameter_index < signature.parameter_count; parameter_index += 1)
@@ -26250,7 +26254,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 local->is_vla_parameter = true;
             }
         }
-        if (!parameters_lowered || !c_ir_lower_body(&builder, declaration))
+        if (!parameters_lowered || !delimiters_valid || !c_ir_lower_body(&builder, declaration))
         {
             CSourceLocation failure_location = declaration.location;
             String8 failure_token = {0};

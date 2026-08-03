@@ -927,6 +927,24 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                               "\"expected failure\""));
     }
 
+    TemporalArena mismatched_delimiter_temporary = scratch_begin(0, 0);
+    CPreprocessResult mismatched_delimiter_tokens = c_preprocess(mismatched_delimiter_temporary.arena,
+                                                                 S8("int main(void) { return (0; }\n"),
+                                                                 (CPreprocessOptions){0});
+    CParserResult mismatched_delimiter_syntax = c_parse_ast(mismatched_delimiter_temporary.arena, mismatched_delimiter_tokens);
+    CIRLowerResult mismatched_delimiter_ir =
+        c_analyze(mismatched_delimiter_temporary.arena, S8("mismatched-delimiter.c"), mismatched_delimiter_tokens, mismatched_delimiter_syntax, target_native);
+    BUSTER_TEST(arguments, mismatched_delimiter_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, mismatched_delimiter_syntax.diagnostic_count == 0);
+    BUSTER_TEST(arguments, mismatched_delimiter_ir.diagnostic_count == 1);
+    if (mismatched_delimiter_ir.diagnostic_count == 1)
+    {
+        BUSTER_TEST(arguments, mismatched_delimiter_ir.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+        BUSTER_STRING_TEST(arguments, mismatched_delimiter_ir.diagnostics[0].message,
+                           S8("in function 'main': function body has mismatched delimiters"));
+    }
+    scratch_end(mismatched_delimiter_temporary);
+
     CPreprocessResult declaration_tokens = c_preprocess(arguments->arena,
                                                         S8("typedef unsigned long Size;\n"
                                                            "extern int value;\n"
