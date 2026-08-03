@@ -139,7 +139,7 @@ BUSTER_GLOBAL_LOCAL void ide_window_queue_font_update(IdeWindow* window, f32 dpi
         font_height = 1;
     }
 
-    String8 font_path = font_file_get_path(ide_state.state.arena, FONT_INDEX_MONO);
+    String8 font_path = font_file_get_path(FONT_INDEX_MONO);
     FontTextureAtlas font = rendering_font_create(ide_state.state.arena, ide_state.rendering,
                                                   (FontTextureAtlasCreate){
                                                       .font_path = font_path,

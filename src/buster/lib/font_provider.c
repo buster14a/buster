@@ -142,11 +142,10 @@ BUSTER_GLOBAL_LOCAL void font_print_attempted_paths(String8* candidates, u64 cou
     }
 }
 
-String8 font_file_get_path(Arena* arena, FontIndex index)
+String8 font_file_get_path(FontIndex index)
 {
     BUSTER_GLOBAL_LOCAL String8 table[(u64)FONT_INDEX_COUNT] = {0};
 
-    BUSTER_UNUSED(arena);
     BUSTER_CHECK(os_state.arena != 0);
     BUSTER_CHECK((u64)index < (u64)FONT_INDEX_COUNT);
 
@@ -221,7 +220,7 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
         String8 fallback_files[] = {
             S8("CascadiaMono.ttf"),
             S8("CascadiaCode.ttf"),
-            S8("Consolas.ttf"),
+            S8("consola.ttf"),
             S8("lucon.ttf"),
             S8("cour.ttf"),
         };
@@ -261,6 +260,9 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
         font_candidate_append(candidates, &candidate_count, S8("/system/fonts/DroidSansMono.ttf"));
         font_candidate_append(candidates, &candidate_count, S8("/system/fonts/RobotoMono-Regular.ttf"));
         table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+#else
+        scratch_end(temp);
+        return (String8){0};
 #endif
 
         if (!table[(u64)FONT_INDEX_MONO].pointer)

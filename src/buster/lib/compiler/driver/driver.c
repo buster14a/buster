@@ -1010,28 +1010,72 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
     };
 }
 
-BUSTER_GLOBAL_LOCAL void compiler_driver_append_warning(Arena* arena, String8* warnings, String8 path, CDiagnostic diagnostic)
+typedef struct CompilerDriverWarningChunk CompilerDriverWarningChunk;
+struct CompilerDriverWarningChunk
 {
-    if (!arena || !warnings || diagnostic.severity != C_DIAGNOSTIC_WARNING)
+    CompilerDriverWarningChunk* next;
+    String8 text;
+};
+
+typedef struct CompilerDriverWarningCollector CompilerDriverWarningCollector;
+struct CompilerDriverWarningCollector
+{
+    Arena* arena;
+    CompilerDriverWarningChunk* first;
+    CompilerDriverWarningChunk* last;
+    u64 length;
+};
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_warning_append_text(CompilerDriverWarningCollector* collector, String8 text)
+{
+    if (!collector || !collector->arena || !text.length)
     {
         return;
     }
-    String8 formatted = string_format(arena, S8("{S8}:{u32}:{u32}: warning: {S8}\n"), path, diagnostic.location.line, diagnostic.location.column,
+    CompilerDriverWarningChunk* chunk = arena_allocate(collector->arena, CompilerDriverWarningChunk, 1);
+    *chunk = (CompilerDriverWarningChunk){
+        .text = text,
+    };
+    if (collector->last)
+    {
+        collector->last->next = chunk;
+    }
+    else
+    {
+        collector->first = chunk;
+    }
+    collector->last = chunk;
+    collector->length += text.length;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_append_warning(CompilerDriverWarningCollector* collector, String8 path, CDiagnostic diagnostic)
+{
+    if (!collector || !collector->arena || diagnostic.severity != C_DIAGNOSTIC_WARNING)
+    {
+        return;
+    }
+    String8 formatted = string_format(collector->arena, S8("{S8}:{u32}:{u32}: warning: {S8}\n"), path, diagnostic.location.line, diagnostic.location.column,
                                       diagnostic.message);
-    u64 length = warnings->length + formatted.length;
-    char8* text = arena_allocate(arena, char8, length + 1);
-    if (warnings->length)
+    compiler_driver_warning_append_text(collector, formatted);
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_warning_flatten(CompilerDriverWarningCollector collector)
+{
+    if (!collector.arena || !collector.length)
     {
-        memcpy(text, warnings->pointer, warnings->length);
+        return (String8){0};
     }
-    if (formatted.length)
+    char8* text = arena_allocate(collector.arena, char8, collector.length + 1);
+    u64 offset = 0;
+    for (CompilerDriverWarningChunk* chunk = collector.first; chunk; chunk = chunk->next)
     {
-        memcpy(text + warnings->length, formatted.pointer, formatted.length);
+        memcpy(text + offset, chunk->text.pointer, chunk->text.length);
+        offset += chunk->text.length;
     }
-    text[length] = 0;
-    *warnings = (String8){
+    text[offset] = 0;
+    return (String8){
         .pointer = text,
-        .length = length,
+        .length = offset,
     };
 }
 
@@ -1050,7 +1094,8 @@ BUSTER_GLOBAL_LOCAL CDiagnostic* compiler_driver_first_preprocess_error(CPreproc
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, String8 input);
 
-static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write)
+static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write,
+                                                             CompilerDriverWarningCollector* warnings)
 {
     CompilerDriverResult result = {
         .error = invocation.error,
@@ -1097,7 +1142,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                 });
     for (u64 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
     {
-        compiler_driver_append_warning(arena, &result.warning, invocation.input_paths[0], preprocess.diagnostics[diagnostic_index]);
+        compiler_driver_append_warning(warnings, invocation.input_paths[0], preprocess.diagnostics[diagnostic_index]);
     }
     result.tokenizer_warning_count = (u32)preprocess.warning_count;
     if (preprocess.error_count)
@@ -1576,9 +1621,14 @@ cleanup:
 
 CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation)
 {
+    CompilerDriverWarningCollector warnings = {
+        .arena = arena,
+    };
+    CompilerDriverResult result = {0};
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
-        return compiler_driver_execute_c_single(arena, invocation, false);
+        result = compiler_driver_execute_c_single(arena, invocation, false, &warnings);
+        goto finish;
     }
     bool has_buster_input = false;
     bool has_c_input = false;
@@ -1596,20 +1646,21 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         if (has_c_input)
         {
-            CompilerDriverResult result = {
+            result = (CompilerDriverResult){
                 .error = COMPILER_DRIVER_ERROR_INVALID_INPUT,
                 .diagnostic = S8("cannot mix C and Buster inputs in one invocation"),
             };
-            return result;
+            goto finish;
         }
-        return compiler_driver_execute_buster(arena, invocation);
+        result = compiler_driver_execute_buster(arena, invocation);
+        goto finish;
     }
     if (invocation.input_count <= 1 && !invocation.library_count &&
         (!invocation.input_count || (!compiler_driver_object_input(invocation.input_paths[0]) && !compiler_driver_archive_input(invocation.input_paths[0]))))
     {
-        return compiler_driver_execute_c_single(arena, invocation, false);
+        result = compiler_driver_execute_c_single(arena, invocation, false, &warnings);
+        goto finish;
     }
-    CompilerDriverResult result = {0};
     for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
     {
         bool object_input = compiler_driver_object_input(invocation.input_paths[input_index]);
@@ -1618,13 +1669,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
             result.diagnostic = string_format(arena, S8("prebuilt input {S8} is only valid while linking"), invocation.input_paths[input_index]);
-            return result;
+            goto finish;
         }
         if (!object_input && !archive_input && !compiler_driver_c_input(invocation, invocation.input_paths[input_index]))
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
             result.diagnostic = string_format(arena, S8("unsupported C input {S8}"), invocation.input_paths[input_index]);
-            return result;
+            goto finish;
         }
     }
     if ((invocation.action == COMPILER_DRIVER_ACTION_OBJECT || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
@@ -1634,7 +1685,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = invocation.action == COMPILER_DRIVER_ACTION_OBJECT   ? S8("cannot specify -o with -c and multiple input files")
                              : invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ? S8("cannot specify -o with -S and multiple input files")
                                                                                      : S8("cannot specify -o with -fsyntax-only and multiple input files");
-        return result;
+        goto finish;
     }
     ObjectArchive* input_archives = arena_allocate(arena, ObjectArchive, invocation.input_count);
     u32 object_capacity = invocation.input_count;
@@ -1651,7 +1702,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.error = COMPILER_DRIVER_ERROR_FILE_READ;
             result.diagnostic = string_format(arena, S8("could not read {S8}"), input_path);
             file_map_unmap(archive_file);
-            return result;
+            goto finish;
         }
         input_archives[input_index] = object_archive_read(arena, archive_file.bytes, invocation.target);
         file_map_unmap(archive_file);
@@ -1660,7 +1711,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
             result.object_error = input_archives[input_index].error;
             result.diagnostic = string_format(arena, S8("could not read archive {S8}: error {u32}"), input_path, (u32)input_archives[input_index].error);
-            return result;
+            goto finish;
         }
         object_capacity += input_archives[input_index].object_count;
     }
@@ -1683,7 +1734,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
             result.object_error = archive.error;
             result.diagnostic = string_format(arena, S8("could not read archive {S8}: error {u32}"), archive_path, (u32)archive.error);
-            return result;
+            goto finish;
         }
         object_capacity += archive.object_count;
     }
@@ -1723,7 +1774,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 result.error = COMPILER_DRIVER_ERROR_FILE_READ;
                 result.diagnostic = string_format(arena, S8("could not read {S8}"), input_path);
                 file_map_unmap(object_file);
-                return result;
+                goto finish;
             }
             ObjectFile object = object_read(arena, object_file.bytes, invocation.target);
             file_map_unmap(object_file);
@@ -1732,7 +1783,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 result.error = COMPILER_DRIVER_ERROR_OBJECT;
                 result.object_error = object.error;
                 result.diagnostic = string_format(arena, S8("could not read object {S8}: error {u32}"), input_path, (u32)object.error);
-                return result;
+                goto finish;
             }
             objects[object_count++] = object;
             continue;
@@ -1781,28 +1832,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
             result.diagnostic = S8("could not allocate C translation-unit arena");
-            return result;
+            goto finish;
         }
-        CompilerDriverResult unit = compiler_driver_execute_c_single(unit_arena, single, suppress_object_write);
+        CompilerDriverResult unit = compiler_driver_execute_c_single(unit_arena, single, suppress_object_write, &warnings);
         result.tokenizer_error_count += unit.tokenizer_error_count;
         result.tokenizer_warning_count += unit.tokenizer_warning_count;
         result.parser_diagnostic_count += unit.parser_diagnostic_count;
         result.analysis_diagnostic_count += unit.analysis_diagnostic_count;
-        if (unit.warning.length)
-        {
-            u64 warning_length = result.warning.length + unit.warning.length;
-            char8* warning = arena_allocate(arena, char8, warning_length + 1);
-            if (result.warning.length)
-            {
-                memcpy(warning, result.warning.pointer, result.warning.length);
-            }
-            memcpy(warning + result.warning.length, unit.warning.pointer, unit.warning.length);
-            warning[warning_length] = 0;
-            result.warning = (String8){
-                .pointer = warning,
-                .length = warning_length,
-            };
-        }
         result.codegen_statistics.instruction_count += unit.codegen_statistics.instruction_count;
         result.codegen_statistics.value_count += unit.codegen_statistics.value_count;
         result.codegen_statistics.stack_value_bytes += unit.codegen_statistics.stack_value_bytes;
@@ -1825,7 +1861,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.codegen_error = unit.codegen_error;
             result.object_error = unit.object_error;
             arena_destroy(unit_arena, 1);
-            return result;
+            goto finish;
         }
         if (unit.has_object)
         {
@@ -1913,7 +1949,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.error = COMPILER_DRIVER_ERROR_FILE_READ;
             result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
         }
-        return result;
+        goto finish;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
     {
@@ -1923,11 +1959,11 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                               .length = invocation.input_count,
                                           },
                                           false);
-        return result;
+        goto finish;
     }
     if (invocation.action != COMPILER_DRIVER_ACTION_LINK)
     {
-        return result;
+        goto finish;
     }
     LinkObjectResult linked = link_objects(arena, objects, object_count,
                                            (LinkOptions){
@@ -1937,7 +1973,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
         result.diagnostic = string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
-        return result;
+        goto finish;
     }
     String8 output = invocation.output_path.length ? invocation.output_path :
 #if BUSTER_WINDOWS
@@ -1972,6 +2008,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = COMPILER_DRIVER_ERROR_LINK;
         result.diagnostic = string_format(arena, S8("native C link failed with error {u32}: {S8}"), (u32)result.native_link.error, result.native_link.symbol);
     }
+finish:
+    result.warning = compiler_driver_warning_flatten(warnings);
     return result;
 }
 

@@ -285,7 +285,7 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_STRING_TEST(arguments, preprocess_diagnostics.diagnostics[0].message, S8("direct warning"));
         BUSTER_TEST(arguments, preprocess_diagnostics.diagnostics[1].kind == C_DIAGNOSTIC_PREPROCESSOR_WARNING);
         BUSTER_TEST(arguments, preprocess_diagnostics.diagnostics[1].severity == C_DIAGNOSTIC_WARNING);
-        BUSTER_STRING_TEST(arguments, preprocess_diagnostics.diagnostics[1].message, S8("expanded warning"));
+        BUSTER_STRING_TEST(arguments, preprocess_diagnostics.diagnostics[1].message, S8("DIAGNOSTIC_TEXT"));
     }
     CPreprocessResult preprocess_error = c_preprocess(arguments->arena,
                                                       S8("#define ERROR_TEXT expanded error\n"
@@ -300,7 +300,7 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, preprocess_error.diagnostics[0].kind == C_DIAGNOSTIC_PREPROCESSOR_ERROR);
         BUSTER_TEST(arguments, preprocess_error.diagnostics[0].severity == C_DIAGNOSTIC_ERROR);
-        BUSTER_STRING_TEST(arguments, preprocess_error.diagnostics[0].message, S8("expanded error"));
+        BUSTER_STRING_TEST(arguments, preprocess_error.diagnostics[0].message, S8("ERROR_TEXT"));
     }
 
     CPreprocessResult expanded_pragmas = c_preprocess(arguments->arena,
@@ -641,6 +641,33 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     for (u32 query_index = 0; query_index < BUSTER_ARRAY_LENGTH(feature_query_values); query_index += 1)
     {
         c_test_preprocessed_token(arguments, &result, feature_queries, query_index, C_TOKEN_PREPROCESSING_NUMBER, feature_query_values[query_index]);
+    }
+    String8 builtin_include_next_system_paths[] = {
+        S8("tests/include_second"),
+    };
+    CPreprocessResult builtin_include_next = c_preprocess(arguments->arena,
+                                                           S8("#include <buster_test_builtin_include_next.h>\n"),
+                                                           (CPreprocessOptions){
+                                                               .system_include_paths = builtin_include_next_system_paths,
+                                                               .source_path = S8("tests/builtin_include_next.c"),
+                                                               .system_include_path_count = BUSTER_ARRAY_LENGTH(builtin_include_next_system_paths),
+                                                           });
+    BUSTER_TEST(arguments, builtin_include_next.diagnostic_count == 0);
+    BUSTER_TEST(arguments, builtin_include_next.token_count == 2);
+    c_test_preprocessed_token(arguments, &result, builtin_include_next, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("79"));
+    CPreprocessResult included_warning_growth = c_preprocess(arguments->arena,
+                                                             S8("#include \"basic_c_preprocessor_warning_include.h\"\n"
+                                                                "int included_warning_fixture;\n"),
+                                                             (CPreprocessOptions){
+                                                                 .source_path = S8("tests/basic_c_preprocessor_warning_include.c"),
+                                                             });
+    BUSTER_TEST(arguments, included_warning_growth.diagnostic_count == 65);
+    BUSTER_TEST(arguments, included_warning_growth.error_count == 0);
+    BUSTER_TEST(arguments, included_warning_growth.warning_count == 65);
+    if (included_warning_growth.diagnostic_count == 65)
+    {
+        BUSTER_STRING_TEST(arguments, included_warning_growth.diagnostics[0].message, S8("included warning 00"));
+        BUSTER_STRING_TEST(arguments, included_warning_growth.diagnostics[64].message, S8("included warning 64"));
     }
     CPreprocessResult line_remapping = c_preprocess(arguments->arena,
                                                     S8("#define REMAPPED_LINE 200\n"

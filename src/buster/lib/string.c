@@ -449,6 +449,13 @@ BUSTER_GLOBAL_LOCAL u64 string_format_u128_parts_divide(StringFormatU128Parts* v
 {
     BUSTER_CHECK(divisor >= 2 && divisor <= 16);
 
+    if (!value->high)
+    {
+        u64 remainder = value->low % divisor;
+        value->low /= divisor;
+        return remainder;
+    }
+
     StringFormatU128Parts quotient = {0};
     u64 remainder = 0;
 
@@ -890,16 +897,8 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
         }
         else if (format_character == '}')
         {
-            if (format_index + 1 < format.length && format.pointer[format_index + 1] == '}')
-            {
-                *arena_allocate(arena, char8, 1) = '}';
-                format_index += 2;
-            }
-            else
-            {
-                *arena_allocate(arena, char8, 1) = '}';
-                format_index += 1;
-            }
+            *arena_allocate(arena, char8, 1) = '}';
+            format_index += format_index + 1 < format.length && format.pointer[format_index + 1] == '}' ? 2 : 1;
         }
         else if (format_character != '{')
         {

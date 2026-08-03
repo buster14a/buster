@@ -80,11 +80,6 @@ typedef enum CDiagnosticSeverity
     C_DIAGNOSTIC_WARNING,
 } CDiagnosticSeverity;
 
-// Keep the descriptive spelling available to callers that prefer to make the
-// severity explicit at a use site.
-#define C_DIAGNOSTIC_SEVERITY_ERROR C_DIAGNOSTIC_ERROR
-#define C_DIAGNOSTIC_SEVERITY_WARNING C_DIAGNOSTIC_WARNING
-
 typedef struct CDiagnostic CDiagnostic;
 struct CDiagnostic
 {
@@ -156,6 +151,7 @@ struct CPreprocessResult
     u64 diagnostic_count;
     u64 error_count;
     u64 warning_count;
+    u64 diagnostic_capacity;
     u32 file_count;
     CPreprocessDialect dialect;
 };

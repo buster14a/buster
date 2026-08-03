@@ -263,7 +263,7 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     BUSTER_TEST(arguments, warning.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, warning.tokenizer_error_count == 0);
     BUSTER_TEST(arguments, warning.tokenizer_warning_count == 1);
-    BUSTER_TEST(arguments, string_first_sequence(warning.warning, S8("warning: expanded driver warning")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(warning.warning, S8("warning: PREPROCESSOR_WARNING_TEXT")) != BUSTER_STRING_NO_MATCH);
     String8 warning_cross_target_command_line[] = {
         S8("-E"),
         S8("-target"),
@@ -285,6 +285,21 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     BUSTER_TEST(arguments, preprocessor_error.error == COMPILER_DRIVER_ERROR_TOKENIZE);
     BUSTER_TEST(arguments, preprocessor_error.tokenizer_error_count == 1);
     BUSTER_TEST(arguments, string_first_sequence(preprocessor_error.diagnostic, S8("expanded driver error")) != BUSTER_STRING_NO_MATCH);
+    String8 warning_multi_command_line[] = {
+        S8("-fsyntax-only"),
+        S8("tests/basic_c_preprocessor_warning.c"),
+        S8("tests/basic_c_preprocessor_warning_second.c"),
+    };
+    CompilerDriverResult warning_multi = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(warning_multi_command_line)));
+    BUSTER_TEST(arguments, warning_multi.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, warning_multi.tokenizer_error_count == 0);
+    BUSTER_TEST(arguments, warning_multi.tokenizer_warning_count == 2);
+    u64 first_warning = string_first_sequence(warning_multi.warning, S8("warning: PREPROCESSOR_WARNING_TEXT"));
+    u64 second_warning = string_first_sequence(warning_multi.warning, S8("warning: second driver warning"));
+    BUSTER_TEST(arguments, first_warning != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, second_warning != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, first_warning < second_warning);
     String8 syntax_command_line[] = {
         S8("-fsyntax-only"),
         S8("tests/basic_c_driver.c"),
