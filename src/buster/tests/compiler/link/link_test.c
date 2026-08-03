@@ -150,6 +150,7 @@ BUSTER_GLOBAL_LOCAL bool link_test_mach_section_find(ByteSlice image, String8 se
     return false;
 }
 
+#if BUSTER_LINUX || BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name, u32* virtual_address, u32* raw_offset)
 {
     if (image.length < 0x40 || image.pointer[0] != 'M' || image.pointer[1] != 'Z')
@@ -194,6 +195,7 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name
     }
     return false;
 }
+#endif
 
 #if BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, String8 library, String8 symbol)
@@ -387,7 +389,7 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
             ObjectSectionKind section = symbol_sections[index];
             symbols[index] = (ObjectSymbol){
                 .value = 0x100 + (u64)index * 0x10,
-                .section = section,
+                .section = (u32)section,
                 .kind = OBJECT_SYMBOL_DATA,
             };
             relocations[index * 2] = (ObjectRelocation){

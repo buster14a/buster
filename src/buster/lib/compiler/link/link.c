@@ -816,12 +816,12 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
         ObjectSection* section = &object->sections[kind];
         u64 size = BUSTER_MAX(section->data.length, section->virtual_size);
         u64 offset = section_offsets[kind];
-        bool thread_local = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
-        bool writable = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO || thread_local;
+        bool thread_local_section = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+        bool writable = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO || thread_local_section;
         descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
             .name = object_section_name_for_kind(kind),
             .flags = (kind == OBJECT_SECTION_TEXT ? UINT64_C(0x6) : writable ? UINT64_C(0x3) : UINT64_C(0x2)) |
-                     (thread_local ? UINT64_C(0x400) : 0),
+                     (thread_local_section ? UINT64_C(0x400) : 0),
             .address = size ? image_base + offset : 0,
             .offset = size ? offset : 0,
             .size = size,
