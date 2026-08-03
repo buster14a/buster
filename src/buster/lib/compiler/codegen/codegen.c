@@ -993,6 +993,71 @@ BUSTER_GLOBAL_LOCAL void x64_emit_store_abi_part(X64Builder* builder, IrValueId 
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool x64_emit_windows_stack_allocate(CodegenBuffer* buffer, u32 size, CodegenFunctionDescriptor* descriptor, u32 action_capacity,
+                                                          u32 function_offset)
+{
+    if (!buffer || size <= 4096)
+    {
+        return false;
+    }
+    // Probe with volatile r10/r11 while RSP still denotes the caller-visible
+    // frame. The loop keeps the prolog size constant even for very large
+    // frames; only the final SUB changes RSP and therefore needs a UWOP.
+    codegen_emit_u8(buffer, 0x49);
+    codegen_emit_u8(buffer, 0x89);
+    codegen_emit_u8(buffer, 0xe2);
+    codegen_emit_u8(buffer, 0x49);
+    codegen_emit_u8(buffer, 0x81);
+    codegen_emit_u8(buffer, 0xea);
+    codegen_emit_u32(buffer, size);
+    codegen_emit_u8(buffer, 0x49);
+    codegen_emit_u8(buffer, 0x89);
+    codegen_emit_u8(buffer, 0xe3);
+    u64 loop_offset = buffer->count;
+    codegen_emit_u8(buffer, 0x49);
+    codegen_emit_u8(buffer, 0x81);
+    codegen_emit_u8(buffer, 0xeb);
+    codegen_emit_u32(buffer, 4096);
+    codegen_emit_u8(buffer, 0x4d);
+    codegen_emit_u8(buffer, 0x39);
+    codegen_emit_u8(buffer, 0xd3);
+    codegen_emit_u8(buffer, 0x76);
+    u64 final_patch = buffer->count;
+    codegen_emit_u8(buffer, 0);
+    codegen_emit_u8(buffer, 0x41);
+    codegen_emit_u8(buffer, 0xf6);
+    codegen_emit_u8(buffer, 0x03);
+    codegen_emit_u8(buffer, 0);
+    codegen_emit_u8(buffer, 0xeb);
+    u64 loop_patch = buffer->count;
+    codegen_emit_u8(buffer, 0);
+    u64 final_offset = buffer->count;
+    codegen_emit_u8(buffer, 0x41);
+    codegen_emit_u8(buffer, 0xf6);
+    codegen_emit_u8(buffer, 0x02);
+    codegen_emit_u8(buffer, 0);
+    codegen_emit_u8(buffer, 0x48);
+    codegen_emit_u8(buffer, 0x81);
+    codegen_emit_u8(buffer, 0xec);
+    codegen_emit_u32(buffer, size);
+    s64 final_displacement = (s64)final_offset - (s64)(final_patch + 1);
+    s64 loop_displacement = (s64)loop_offset - (s64)(loop_patch + 1);
+    if (buffer->error != CODEGEN_ERROR_NONE || final_displacement < INT8_MIN || final_displacement > INT8_MAX || loop_displacement < INT8_MIN ||
+        loop_displacement > INT8_MAX || buffer->count - function_offset > UINT32_MAX)
+    {
+        buffer->error = CODEGEN_ERROR_CAPACITY;
+        return true;
+    }
+    buffer->bytes[final_patch] = (u8)(s8)final_displacement;
+    buffer->bytes[loop_patch] = (u8)(s8)loop_displacement;
+    if (descriptor && !codegen_unwind_action_append(descriptor, action_capacity, (u32)(buffer->count - function_offset),
+                                                    CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, size))
+    {
+        buffer->error = CODEGEN_ERROR_CAPACITY;
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL void x64_emit_stack_adjust_described(X64Builder* builder, u32 size, bool subtract, CodegenFunctionDescriptor* descriptor,
                                                          u32 action_capacity)
 {
@@ -1013,6 +1078,10 @@ BUSTER_GLOBAL_LOCAL void x64_emit_stack_adjust_described(X64Builder* builder, u3
         {
             codegen_emit_u32(&builder->buffer, size);
         }
+        return;
+    }
+    if (builder->target.os == OPERATING_SYSTEM_WINDOWS && x64_emit_windows_stack_allocate(&builder->buffer, size, descriptor, action_capacity, 0))
+    {
         return;
     }
     while (size)
@@ -6525,7 +6594,7 @@ BUSTER_TEST_F_DECL void codegen_canonical_a64_adjust_stack(CodegenBuffer* buffer
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_adjust_stack_described(CodegenBuffer* buffer, u32 byte_count, bool subtract,
-                                                                      CodegenFunctionDescriptor* descriptor, u32 action_capacity)
+                                                                      CodegenFunctionDescriptor* descriptor, u32 action_capacity, bool windows)
 {
     if (!subtract)
     {
@@ -6544,6 +6613,10 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_adjust_stack_described(CodegenBuf
         {
             codegen_emit_u32(buffer, byte_count);
         }
+        return;
+    }
+    if (windows && x64_emit_windows_stack_allocate(buffer, byte_count, descriptor, action_capacity, descriptor ? descriptor->code_offset : 0))
+    {
         return;
     }
     while (byte_count)
@@ -6576,7 +6649,7 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_adjust_stack_described(CodegenBuf
 
 BUSTER_TEST_F_DECL void codegen_canonical_x64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
 {
-    codegen_canonical_x64_adjust_stack_described(buffer, byte_count, subtract, 0, 0);
+    codegen_canonical_x64_adjust_stack_described(buffer, byte_count, subtract, 0, 0, false);
 }
 
 BUSTER_TEST_F_DECL void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset)
@@ -8166,7 +8239,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, (u32)buffer.count - descriptor->code_offset,
                                                         CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_REGISTER_RBP, 0) &&
                            unwind_valid;
-            codegen_canonical_x64_adjust_stack_described(&buffer, frame_size, true, descriptor, unwind_action_capacity);
+            codegen_canonical_x64_adjust_stack_described(&buffer, frame_size, true, descriptor, unwind_action_capacity,
+                                                         target.os == OPERATING_SYSTEM_WINDOWS);
             descriptor->prolog_size = (u32)buffer.count - descriptor->code_offset;
             if (!unwind_valid || buffer.error != CODEGEN_ERROR_NONE)
             {

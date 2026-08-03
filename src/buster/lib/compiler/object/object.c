@@ -352,6 +352,10 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
             return S8("\t.section __DATA,__thread_bss\n");
         case OBJECT_SECTION_UNWIND:
             return S8("\t.section __TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support\n");
+        case OBJECT_SECTION_WINDOWS_PDATA:
+            return S8("\t.section __DATA,__pdata\n");
+        case OBJECT_SECTION_WINDOWS_XDATA:
+            return S8("\t.section __DATA,__xdata\n");
         case OBJECT_SECTION_DEBUG_INFO:
             return S8("\t.section __DWARF,__debug_info\n");
         case OBJECT_SECTION_DEBUG_ABBREV:
@@ -390,6 +394,10 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
                                                                                            : S8("\t.section .tbss,\"awT\",@nobits\n");
     case OBJECT_SECTION_UNWIND:
         return S8("\t.section .eh_frame,\"a\",@progbits\n");
+    case OBJECT_SECTION_WINDOWS_PDATA:
+        return S8("\t.section .pdata\n");
+    case OBJECT_SECTION_WINDOWS_XDATA:
+        return S8("\t.section .xdata\n");
     case OBJECT_SECTION_DEBUG_INFO:
         return S8("\t.section .debug_info\n");
     case OBJECT_SECTION_DEBUG_ABBREV:
@@ -643,6 +651,11 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
     case OBJECT_RELOCATION_COFF_SECTION16:
         object_assembly_append_string(buffer, S8("\t.short "));
         object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@SECT"));
+        object_assembly_append_string(buffer, S8("\n"));
+        return true;
+    case OBJECT_RELOCATION_COFF_ADDR32NB:
+        object_assembly_append_string(buffer, S8("\t.rva "));
+        object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
         object_assembly_append_string(buffer, S8("\n"));
         return true;
     case OBJECT_RELOCATION_X86_64_PC32:
@@ -2988,6 +3001,10 @@ String8 object_section_name_for_kind(ObjectSectionKind kind)
         return S8(".tbss");
     case OBJECT_SECTION_UNWIND:
         return S8(".eh_frame");
+    case OBJECT_SECTION_WINDOWS_PDATA:
+        return S8(".pdata");
+    case OBJECT_SECTION_WINDOWS_XDATA:
+        return S8(".xdata");
     case OBJECT_SECTION_DEBUG_INFO:
         return S8(".debug_info");
     case OBJECT_SECTION_DEBUG_ABBREV:
@@ -3012,7 +3029,15 @@ String8 object_section_name_for_kind(ObjectSectionKind kind)
 
 u32 object_section_default_alignment(ObjectSectionKind kind)
 {
-    return object_section_kind_is_debug(kind) ? 1 : kind == OBJECT_SECTION_UNWIND ? 8 : 16;
+    if (object_section_kind_is_debug(kind))
+    {
+        return 1;
+    }
+    if (kind == OBJECT_SECTION_UNWIND)
+    {
+        return 8;
+    }
+    return kind == OBJECT_SECTION_WINDOWS_PDATA || kind == OBJECT_SECTION_WINDOWS_XDATA ? 4 : 16;
 }
 
 bool object_section_kind_is_zero_fill(ObjectSectionKind kind)
@@ -3517,15 +3542,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
         // through a relocatable object, so they are classified before the
         // discardable/removable filter.
         ObjectSectionKind debug_kind = object_debug_section_kind_from_name(name);
-        bool ignored = debug_kind == OBJECT_SECTION_COUNT &&
-                       ((characteristics & 0x02000800) != 0 || string_equal(name, S8(".pdata")) || string_equal(name, S8(".xdata")));
+        bool ignored = debug_kind == OBJECT_SECTION_COUNT && (characteristics & 0x02000800) != 0;
         if (ignored)
         {
             section_kinds[section_index] = UINT32_MAX;
             continue;
         }
         bool zero_fill = !raw_offset || (characteristics & 0x80) != 0;
-        ObjectSectionKind kind = debug_kind != OBJECT_SECTION_COUNT ? debug_kind
+        ObjectSectionKind kind = string_equal(name, S8(".pdata")) ? OBJECT_SECTION_WINDOWS_PDATA
+                                 : string_equal(name, S8(".xdata")) ? OBJECT_SECTION_WINDOWS_XDATA
+                                 : debug_kind != OBJECT_SECTION_COUNT ? debug_kind
                                  : is_thread_local                  ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                  : characteristics & 0x20           ? OBJECT_SECTION_TEXT
                                  : zero_fill                         ? OBJECT_SECTION_ZERO
@@ -3688,6 +3714,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         return result;
                     }
                     addend = (s64)stored;
+                }
+                else if (relocation_type == 3)
+                {
+                    u32 stored = 0;
+                    if (!object_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
+                    {
+                        return result;
+                    }
+                    kind = OBJECT_RELOCATION_COFF_ADDR32NB;
+                    addend = stored;
                 }
                 else if (relocation_type >= 4 && relocation_type <= 9)
                 {
@@ -4829,14 +4865,10 @@ bool object_section_kind_is_debug(ObjectSectionKind kind)
 
 BUSTER_GLOBAL_LOCAL void object_metadata_sections_initialize(ObjectFile* object)
 {
-    object->sections[OBJECT_SECTION_UNWIND] = (ObjectSection){
-        .name = object_section_name_for_kind(OBJECT_SECTION_UNWIND),
-        .kind = OBJECT_SECTION_UNWIND,
-        .alignment = object_section_default_alignment(OBJECT_SECTION_UNWIND),
-    };
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
-        if (!object_section_kind_is_debug((ObjectSectionKind)kind))
+        if (kind != OBJECT_SECTION_UNWIND && kind != OBJECT_SECTION_WINDOWS_PDATA && kind != OBJECT_SECTION_WINDOWS_XDATA &&
+            !object_section_kind_is_debug((ObjectSectionKind)kind))
         {
             continue;
         }
@@ -5017,22 +5049,267 @@ BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiRes
     return true;
 }
 
+typedef struct ObjectWindowsUnwindResult ObjectWindowsUnwindResult;
+struct ObjectWindowsUnwindResult
+{
+    ByteSlice pdata;
+    ByteSlice xdata;
+    u32* xdata_offsets;
+    u32 function_count;
+    bool valid;
+    u8 reserved[3];
+};
+
+BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Arena* arena, CodegenFunctionDescriptor* functions, u32 function_count)
+{
+    ObjectWindowsUnwindResult result = {
+        .function_count = function_count,
+    };
+    if (!arena || (function_count && !functions) || function_count > UINT32_MAX / 12)
+    {
+        return result;
+    }
+    result.xdata_offsets = arena_allocate(arena, u32, function_count);
+    u64 xdata_size = 0;
+    for (u32 function_index = 0; function_index < function_count; function_index += 1)
+    {
+        CodegenFunctionDescriptor* function = functions + function_index;
+        if (function->prolog_size > UINT8_MAX)
+        {
+            return result;
+        }
+        u32 frame_action = UINT32_MAX;
+        u32 frame_offset = 0;
+        u32 unwind_slot_count = 0;
+        for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
+        {
+            CodegenUnwindAction* action = function->unwind_actions + action_index;
+            if (action->code_offset > UINT8_MAX || action->register_index > 15)
+            {
+                return result;
+            }
+            if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
+            {
+                unwind_slot_count += 1;
+            }
+            else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
+            {
+                if (frame_action != UINT32_MAX)
+                {
+                    return result;
+                }
+                frame_action = action_index;
+                frame_offset = action->value;
+            }
+            else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
+            {
+                if (action->value % 8)
+                {
+                    return result;
+                }
+                unwind_slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
+                if (frame_action != UINT32_MAX)
+                {
+                    if (action->value > UINT32_MAX - frame_offset)
+                    {
+                        return result;
+                    }
+                    frame_offset += action->value;
+                }
+            }
+            else
+            {
+                // x86-64 codegen does not currently save nonvolatile registers
+                // to arbitrary frame slots. Do not publish misleading unwind
+                // metadata if that changes without a matching UWOP encoding.
+                return result;
+            }
+            if (unwind_slot_count > UINT8_MAX)
+            {
+                return result;
+            }
+        }
+        bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
+        unwind_slot_count += encode_frame;
+        if (unwind_slot_count > UINT8_MAX)
+        {
+            return result;
+        }
+        result.xdata_offsets[function_index] = (u32)xdata_size;
+        u64 record_size = align_forward(4 + (u64)unwind_slot_count * 2, 4);
+        if (xdata_size > UINT32_MAX || record_size > UINT32_MAX - xdata_size)
+        {
+            return result;
+        }
+        xdata_size += record_size;
+    }
+    result.pdata = (ByteSlice){
+        .pointer = arena_allocate(arena, u8, (u64)function_count * 12),
+        .length = (u64)function_count * 12,
+    };
+    result.xdata = (ByteSlice){
+        .pointer = arena_allocate(arena, u8, xdata_size),
+        .length = xdata_size,
+    };
+    if (result.pdata.length)
+    {
+        memset(result.pdata.pointer, 0, result.pdata.length);
+    }
+    if (result.xdata.length)
+    {
+        memset(result.xdata.pointer, 0, result.xdata.length);
+    }
+    for (u32 function_index = 0; function_index < function_count; function_index += 1)
+    {
+        CodegenFunctionDescriptor* function = functions + function_index;
+        u32 frame_action = UINT32_MAX;
+        u32 frame_offset = 0;
+        u32 unwind_slot_count = 0;
+        for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
+        {
+            CodegenUnwindAction* action = function->unwind_actions + action_index;
+            if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
+            {
+                unwind_slot_count += 1;
+            }
+            else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
+            {
+                frame_action = action_index;
+                frame_offset = action->value;
+            }
+            else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
+            {
+                unwind_slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
+                if (frame_action != UINT32_MAX)
+                {
+                    frame_offset += action->value;
+                }
+            }
+        }
+        bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
+        unwind_slot_count += encode_frame;
+        u8* record = result.xdata.pointer + result.xdata_offsets[function_index];
+        record[0] = 1;
+        record[1] = (u8)function->prolog_size;
+        record[2] = (u8)unwind_slot_count;
+        if (encode_frame)
+        {
+            record[3] = (u8)(functions[function_index].unwind_actions[frame_action].register_index | ((frame_offset / 16) << 4));
+        }
+        u32 cursor = 4;
+        for (u32 action_index = function->unwind_action_count; action_index > 0; action_index -= 1)
+        {
+            CodegenUnwindAction* action = function->unwind_actions + action_index - 1;
+            if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && !encode_frame)
+            {
+                continue;
+            }
+            record[cursor] = (u8)action->code_offset;
+            if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
+            {
+                record[cursor + 1] = (u8)(action->register_index << 4);
+                cursor += 2;
+            }
+            else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
+            {
+                record[cursor + 1] = 3;
+                cursor += 2;
+            }
+            else if (action->value <= 128)
+            {
+                record[cursor + 1] = (u8)(((action->value / 8 - 1) << 4) | 2);
+                cursor += 2;
+            }
+            else if (action->value <= 524280)
+            {
+                u16 scaled_size = (u16)(action->value / 8);
+                record[cursor + 1] = 1;
+                memcpy(record + cursor + 2, &scaled_size, sizeof(scaled_size));
+                cursor += 4;
+            }
+            else
+            {
+                record[cursor + 1] = 0x11;
+                memcpy(record + cursor + 2, &action->value, sizeof(action->value));
+                cursor += 6;
+            }
+        }
+        if (cursor != 4 + unwind_slot_count * 2)
+        {
+            return (ObjectWindowsUnwindResult){0};
+        }
+    }
+    result.valid = true;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_append_windows_x64_unwind(Arena* arena, ObjectFile* object, ObjectWindowsUnwindResult built)
+{
+    if (!built.valid || built.function_count > object->symbol_count)
+    {
+        return false;
+    }
+    object->sections[OBJECT_SECTION_WINDOWS_PDATA].data = built.pdata;
+    object->sections[OBJECT_SECTION_WINDOWS_PDATA].virtual_size = built.pdata.length;
+    object->sections[OBJECT_SECTION_WINDOWS_XDATA].data = built.xdata;
+    object->sections[OBJECT_SECTION_WINDOWS_XDATA].virtual_size = built.xdata.length;
+    if (!built.function_count)
+    {
+        return true;
+    }
+    u32 xdata_symbol = object->symbol_count++;
+    object->symbols[xdata_symbol] = (ObjectSymbol){
+        .name = string_format(arena, S8(".Lxdata.{u32}"), xdata_symbol),
+        .size = built.xdata.length,
+        .section = OBJECT_SECTION_WINDOWS_XDATA,
+        .kind = OBJECT_SYMBOL_DATA,
+    };
+    for (u32 function_index = 0; function_index < built.function_count; function_index += 1)
+    {
+        u64 offset = (u64)function_index * 12;
+        object->relocations[object->relocation_count++] = (ObjectRelocation){
+            .offset = offset,
+            .section = OBJECT_SECTION_WINDOWS_PDATA,
+            .symbol = function_index,
+            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+        };
+        object->relocations[object->relocation_count++] = (ObjectRelocation){
+            .addend = (s64)object->symbols[function_index].size,
+            .offset = offset + 4,
+            .section = OBJECT_SECTION_WINDOWS_PDATA,
+            .symbol = function_index,
+            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+        };
+        object->relocations[object->relocation_count++] = (ObjectRelocation){
+            .addend = (s64)built.xdata_offsets[function_index],
+            .offset = offset + 8,
+            .section = OBJECT_SECTION_WINDOWS_PDATA,
+            .symbol = xdata_symbol,
+            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+        };
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
 {
     if (module->function_count != module->entry_count || (module->function_count && (!module->functions || !module->entries)))
     {
         return false;
     }
+    u32 previous_end = 0;
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         CodegenModuleEntry* entry = module->entries + function_index;
         CodegenFunctionDescriptor* function = module->functions + function_index;
-        if (function->symbol.value != entry->symbol.value || function->code_offset != entry->offset || function->code_offset > module->code.length ||
+        if (function->symbol.value != entry->symbol.value || function->code_offset != entry->offset || function->code_offset < previous_end ||
+            function->code_offset > module->code.length ||
             function->code_size > module->code.length - function->code_offset || function->prolog_size > function->code_size ||
             (function->unwind_action_count && !function->unwind_actions))
         {
             return false;
         }
+        previous_end = function->code_offset + function->code_size;
         u32 previous_offset = 0;
         for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
         {
@@ -5126,6 +5403,16 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
         .alignment = thread_local_alignment,
     };
     object_metadata_sections_initialize(&result);
+    ObjectWindowsUnwindResult windows_unwind = {0};
+    if (target.os == OPERATING_SYSTEM_WINDOWS && target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        windows_unwind = object_windows_x64_unwind_build(arena, module->functions, module->function_count);
+        if (!windows_unwind.valid)
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
     DwarfCfiResult cfi = {0};
     if (object_format_for_target(target) != OBJECT_FORMAT_COFF && module->function_count)
     {
@@ -5243,9 +5530,11 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
                                        });
         }
     }
-    u32 dwarf_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count;
+    u32 metadata_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count +
+                                    windows_unwind.function_count * 3;
     u32 symbol_capacity =
-        module->entry_count + module->relocation_count + (module->data_relocation_count ? 1 : 0) + (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0);
+        module->entry_count + module->relocation_count + (module->data_relocation_count ? 1 : 0) + (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) +
+        (windows_unwind.function_count ? 1 : 0);
     result.symbols = arena_allocate(arena, ObjectSymbol, symbol_capacity);
     for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
     {
@@ -5260,7 +5549,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
             .global = true,
         };
     }
-    result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + dwarf_relocation_count);
+    result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + metadata_relocation_count);
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation* source = module->relocations + relocation_index;
@@ -5345,7 +5634,8 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
             .section = OBJECT_SECTION_READ_ONLY_DATA,
             .kind = OBJECT_SYMBOL_DATA,
         };
-        ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + module->data_relocation_count + dwarf_relocation_count);
+        ObjectRelocation* relocations =
+            arena_allocate(arena, ObjectRelocation, module->relocation_count + module->data_relocation_count + metadata_relocation_count);
         if (result.relocation_count)
         {
             memcpy(relocations, result.relocations, (u64)result.relocation_count * sizeof(*relocations));
@@ -5367,6 +5657,11 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
     object_append_dwarf(&result, dwarf);
     object_append_codeview(&result, codeview);
     if (cfi.valid && !object_append_dwarf_cfi(&result, cfi))
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+        return result;
+    }
+    if (windows_unwind.valid && !object_append_windows_x64_unwind(arena, &result, windows_unwind))
     {
         result.error = OBJECT_ERROR_INVALID_INPUT;
         return result;
@@ -5453,6 +5748,16 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         .alignment = thread_local_alignment,
     };
     object_metadata_sections_initialize(&result);
+    ObjectWindowsUnwindResult windows_unwind = {0};
+    if (target.os == OPERATING_SYSTEM_WINDOWS && target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        windows_unwind = object_windows_x64_unwind_build(arena, module->functions, module->function_count);
+        if (!windows_unwind.valid)
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
     DwarfCfiResult cfi = {0};
     if (object_format_for_target(target) != OBJECT_FORMAT_COFF && module->function_count)
     {
@@ -5602,7 +5907,8 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                        });
         }
     }
-    u32 dwarf_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count;
+    u32 metadata_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count +
+                                    windows_unwind.function_count * 3;
     bool apple_thread_local = false;
     if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
     {
@@ -5612,7 +5918,8 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         }
     }
     result.symbols = arena_allocate(arena, ObjectSymbol, module->entry_count + module->global_count + module->relocation_count + (apple_thread_local ? 1 : 0) +
-                                                             (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0));
+                                                             (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) +
+                                                             (windows_unwind.function_count ? 1 : 0));
     for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
     {
         CodegenModuleEntry entry = module->entries[entry_index];
@@ -5674,7 +5981,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .global = true,
         };
     }
-    result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + dwarf_relocation_count);
+    result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + metadata_relocation_count);
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation source = module->relocations[relocation_index];
@@ -5765,6 +6072,11 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     object_append_dwarf(&result, dwarf);
     object_append_codeview(&result, codeview);
     if (cfi.valid && !object_append_dwarf_cfi(&result, cfi))
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+        return result;
+    }
+    if (windows_unwind.valid && !object_append_windows_x64_unwind(arena, &result, windows_unwind))
     {
         result.error = OBJECT_ERROR_INVALID_INPUT;
         return result;
@@ -6043,6 +6355,7 @@ BUSTER_GLOBAL_LOCAL u16 object_coff_relocation_type(CpuArch arch, ObjectRelocati
                : kind == OBJECT_RELOCATION_ABSOLUTE32               ? 0x0002
                : kind == OBJECT_RELOCATION_COFF_SECREL32            ? 0x000b
                : kind == OBJECT_RELOCATION_COFF_SECTION16           ? 0x000a
+               : kind == OBJECT_RELOCATION_COFF_ADDR32NB            ? 0x0003
                                                                     : 0;
     }
     return kind == OBJECT_RELOCATION_AARCH64_CALL26              ? 0x0003
@@ -6213,7 +6526,9 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         object_write_u16_at(&buffer, offset + 32, relocation_counts[section]);
         u32 characteristics = source->kind == OBJECT_SECTION_TEXT             ? 0x60500020
                               : source->kind == OBJECT_SECTION_READ_ONLY_DATA ? 0x40500040
-                              : object_section_kind_is_debug(source->kind)    ? 0x42100040
+                              : source->kind == OBJECT_SECTION_WINDOWS_PDATA || source->kind == OBJECT_SECTION_WINDOWS_XDATA
+                                  ? 0x40300040
+                              : object_section_kind_is_debug(source->kind)     ? 0x42100040
                               : object_section_kind_is_zero_fill(source->kind) ? 0xc0500080
                                                                                : 0xc0500040;
         object_write_u32_at(&buffer, offset + 36, characteristics);
@@ -6443,6 +6758,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                                : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ? S8("__thread_data")
                                : source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? S8("__thread_bss")
                                : source->kind == OBJECT_SECTION_UNWIND            ? S8("__eh_frame")
+                               : source->kind == OBJECT_SECTION_WINDOWS_PDATA     ? S8("__pdata")
+                               : source->kind == OBJECT_SECTION_WINDOWS_XDATA     ? S8("__xdata")
                                : source->kind == OBJECT_SECTION_DEBUG_INFO        ? S8("__debug_info")
                                : source->kind == OBJECT_SECTION_DEBUG_ABBREV     ? S8("__debug_abbrev")
                                : source->kind == OBJECT_SECTION_DEBUG_LINE       ? S8("__debug_line")
@@ -6452,7 +6769,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                                                                                : S8("__data");
         String8 segment_name =
             (source->kind == OBJECT_SECTION_DATA || source->kind == OBJECT_SECTION_ZERO || source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
-             source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
+             source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO || source->kind == OBJECT_SECTION_WINDOWS_PDATA ||
+             source->kind == OBJECT_SECTION_WINDOWS_XDATA)
                 ? S8("__DATA")
             : object_section_kind_is_debug(source->kind) ? S8("__DWARF")
                                                          : S8("__TEXT");

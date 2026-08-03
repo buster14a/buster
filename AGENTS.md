@@ -460,6 +460,13 @@ has hard design constraints:
   derive the GUID deterministically from the pre-debug PE image and canonical
   debug-module data. Validate changes with `llvm-pdbutil dump --all`, which is
   strict about all of this.
+- Windows x86-64 unwind metadata is emitted independently of source debug
+  information. Each generated function has a `.pdata` runtime-function entry
+  and x64 `UNWIND_INFO` in `.xdata`; COFF uses `ADDR32NB` relocations and the
+  final PE exception directory covers the resolved `.pdata` table. Large
+  frames use a constant-size inline guard-page probe loop followed by one
+  described stack allocation so the prolog remains representable by the x64
+  unwind format.
 - `object_section_name_for_kind` and `object_section_default_alignment` are
   the single source of truth for section naming and defaults. Use them when
   adding a section kind rather than adding another local table, otherwise

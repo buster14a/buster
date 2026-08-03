@@ -750,6 +750,18 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
             BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_ZERO].data.length == 0);
             BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_ZERO].virtual_size >= BUSTER_MB(1));
             BUSTER_TEST(arguments, codeview_object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length >= 64);
+            ByteSlice codeview_pdata = codeview_object->sections[OBJECT_SECTION_WINDOWS_PDATA].data;
+            ByteSlice codeview_xdata = codeview_object->sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+            BUSTER_TEST(arguments, codeview_pdata.length >= 12 && codeview_pdata.length % 12 == 0);
+            BUSTER_TEST(arguments, codeview_xdata.length >= 4);
+            bool codeview_unwind_relocation = false;
+            for (u32 relocation_index = 0; relocation_index < codeview_object->relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation* relocation = codeview_object->relocations + relocation_index;
+                codeview_unwind_relocation |= relocation->section == OBJECT_SECTION_WINDOWS_PDATA &&
+                                              relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB;
+            }
+            BUSTER_TEST(arguments, codeview_unwind_relocation);
             ByteSlice codeview_file = file_read(codeview_temporary.arena, codeview_object_path, (FileReadOptions){0});
             BUSTER_TEST(arguments, codeview_file.length != 0 && codeview_file.length < BUSTER_MB(1));
             u32 codeview_signature = 0;

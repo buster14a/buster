@@ -447,6 +447,75 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, separate_roundtrip_cfi);
 
+    u8 windows_unwind_code[32] = {0};
+    CodegenUnwindAction windows_unwind_actions[] = {
+        {
+            .code_offset = 1,
+            .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER,
+            .register_index = 5,
+        },
+        {
+            .code_offset = 4,
+            .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER,
+            .register_index = 5,
+        },
+        {
+            .code_offset = 11,
+            .value = 144,
+            .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK,
+        },
+    };
+    CodegenFunctionDescriptor windows_unwind_function = {
+        .unwind_actions = windows_unwind_actions,
+        .code_size = sizeof(windows_unwind_code),
+        .prolog_size = 11,
+        .unwind_action_count = BUSTER_ARRAY_LENGTH(windows_unwind_actions),
+    };
+    CodegenModule windows_unwind_module = {
+        .code = BUSTER_ARRAY_TO_SLICE(windows_unwind_code),
+        .entries = &separate_entry,
+        .functions = &windows_unwind_function,
+        .abi = CODEGEN_ABI_X86_64_WINDOWS,
+        .entry_count = 1,
+        .function_count = 1,
+    };
+    Target windows_unwind_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .os = OPERATING_SYSTEM_WINDOWS,
+    };
+    ObjectFile windows_unwind_object =
+        object_from_codegen_module(arguments->arena, &separate_analysis, &windows_unwind_module, windows_unwind_target);
+    BUSTER_TEST(arguments, windows_unwind_object.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_UNWIND].data.length == 0);
+    BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 12);
+    BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == 12);
+    u8 expected_windows_xdata[] = {
+        1, 11, 4, 0x95, 11, 1, 18, 0, 4, 3, 1, 0x50,
+    };
+    BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_xdata) &&
+                               memcmp(windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.pointer, expected_windows_xdata,
+                                      sizeof(expected_windows_xdata)) == 0);
+    BUSTER_TEST(arguments, windows_unwind_object.relocation_count == 3);
+    for (u32 relocation_index = 0; relocation_index < windows_unwind_object.relocation_count; relocation_index += 1)
+    {
+        BUSTER_TEST(arguments, windows_unwind_object.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
+        BUSTER_TEST(arguments, windows_unwind_object.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+    }
+    ObjectArtifact windows_unwind_coff = object_write(arguments->arena, &windows_unwind_object, OBJECT_FORMAT_COFF);
+    BUSTER_TEST(arguments, windows_unwind_coff.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, object_bytes_contain(windows_unwind_coff.bytes, S8(".pdata")));
+    BUSTER_TEST(arguments, object_bytes_contain(windows_unwind_coff.bytes, S8(".xdata")));
+    ObjectFile windows_unwind_roundtrip = object_read(arguments->arena, windows_unwind_coff.bytes, windows_unwind_target);
+    BUSTER_TEST(arguments, windows_unwind_roundtrip.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, windows_unwind_roundtrip.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 12);
+    BUSTER_TEST(arguments, windows_unwind_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_xdata));
+    BUSTER_TEST(arguments, windows_unwind_roundtrip.relocation_count == 3);
+    for (u32 relocation_index = 0; relocation_index < windows_unwind_roundtrip.relocation_count; relocation_index += 1)
+    {
+        BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
+        BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+    }
+
     CodegenModule mach_cfi_module = separate_module;
     mach_cfi_module.relocations = 0;
     mach_cfi_module.relocation_count = 0;
