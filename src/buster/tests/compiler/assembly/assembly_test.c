@@ -300,6 +300,77 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, x86_att_condition_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
     BUSTER_TEST(arguments, x86_att_conditions.diagnostic_count == 0 && x86_att_conditions.bytes.length == sizeof(expected_x86_conditions) &&
                                memcmp(x86_att_conditions.bytes.pointer, expected_x86_conditions, sizeof(expected_x86_conditions)) == 0);
+    Target x86_avx_target = x86_target;
+    x86_avx_target.cpu_features_explicit = true;
+    x86_avx_target.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX;
+    u8 expected_x86_avx[] = {
+        0xc5, 0xfc, 0x28, 0xc1,
+        0xc4, 0x01, 0x7c, 0x10, 0x44, 0x4c, 0x20,
+        0xc4, 0x41, 0x7d, 0x29, 0x7d, 0x00,
+        0xc5, 0xf9, 0x10, 0x15, 0x00, 0x00, 0x00, 0x00,
+        0xc4, 0x41, 0x24, 0x57, 0xd4,
+        0xc5, 0xe9, 0x57, 0xcb,
+        0xc5, 0xdc, 0x58, 0xdd,
+        0xc5, 0xc5, 0x58, 0x75, 0x00,
+        0xc4, 0xc1, 0x3a, 0x58, 0xf9,
+        0xc4, 0x41, 0x2b, 0x58, 0xcb,
+        0xc4, 0x41, 0x1c, 0x5c, 0xdd,
+        0xc4, 0x41, 0x09, 0x5c, 0xef,
+        0xc5, 0x7c, 0x59, 0xf9,
+        0xc5, 0xe9, 0x59, 0xcb,
+        0xc5, 0xdc, 0x5e, 0xdd,
+        0xc5, 0xc9, 0x5e, 0xef,
+    };
+    String8 x86_intel_avx_source =
+        S8("vmovaps ymm0, ymm1\n"
+           "vmovups ymm8, [r12 + r9*2 + 32]\n"
+           "vmovapd [r13], ymm15\n"
+           "vmovupd xmm2, [rip + external]\n"
+           "vxorps ymm10, ymm11, ymm12\n"
+           "vxorpd xmm1, xmm2, xmm3\n"
+           "vaddps ymm3, ymm4, ymm5\n"
+           "vaddpd ymm6, ymm7, [rbp]\n"
+           "vaddss xmm7, xmm8, xmm9\n"
+           "vaddsd xmm9, xmm10, xmm11\n"
+           "vsubps ymm11, ymm12, ymm13\n"
+           "vsubpd xmm13, xmm14, xmm15\n"
+           "vmulps ymm15, ymm0, ymm1\n"
+           "vmulpd xmm1, xmm2, xmm3\n"
+           "vdivps ymm3, ymm4, ymm5\n"
+           "vdivpd xmm5, xmm6, xmm7\n");
+    AssemblyEncodeResult x86_intel_avx = assembly_encode(
+        arguments->arena, x86_intel_avx_source, (AssemblyEncodeOptions){.target = x86_avx_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_avx.diagnostic_count == 0 && x86_intel_avx.bytes.length == sizeof(expected_x86_avx) &&
+                               memcmp(x86_intel_avx.bytes.pointer, expected_x86_avx, sizeof(expected_x86_avx)) == 0);
+    BUSTER_TEST(arguments, x86_intel_avx.relocation_count == 1 && x86_intel_avx.relocations[0].offset == 21 &&
+                               x86_intel_avx.relocations[0].addend == -4 &&
+                               x86_intel_avx.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+    String8 x86_att_avx_source =
+        S8("vmovaps %ymm1, %ymm0\n"
+           "vmovups 32(%r12,%r9,2), %ymm8\n"
+           "vmovapd %ymm15, (%r13)\n"
+           "vmovupd external(%rip), %xmm2\n"
+           "vxorps %ymm12, %ymm11, %ymm10\n"
+           "vxorpd %xmm3, %xmm2, %xmm1\n"
+           "vaddps %ymm5, %ymm4, %ymm3\n"
+           "vaddpd (%rbp), %ymm7, %ymm6\n"
+           "vaddss %xmm9, %xmm8, %xmm7\n"
+           "vaddsd %xmm11, %xmm10, %xmm9\n"
+           "vsubps %ymm13, %ymm12, %ymm11\n"
+           "vsubpd %xmm15, %xmm14, %xmm13\n"
+           "vmulps %ymm1, %ymm0, %ymm15\n"
+           "vmulpd %xmm3, %xmm2, %xmm1\n"
+           "vdivps %ymm5, %ymm4, %ymm3\n"
+           "vdivpd %xmm7, %xmm6, %xmm5\n");
+    AssemblyEncodeResult x86_att_avx = assembly_encode(
+        arguments->arena, x86_att_avx_source, (AssemblyEncodeOptions){.target = x86_avx_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_avx.diagnostic_count == 0 && x86_att_avx.bytes.length == sizeof(expected_x86_avx) &&
+                               memcmp(x86_att_avx.bytes.pointer, expected_x86_avx, sizeof(expected_x86_avx)) == 0);
+    AssemblyEncodeResult unsupported_avx = assembly_encode(
+        arguments->arena, S8("vaddps ymm0, ymm1, ymm2\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_avx.diagnostic_count == 1 &&
+                               unsupported_avx.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     AssemblyEncodeResult invalid_x86_forms =
         assembly_encode(arguments->arena, S8("mov rax, eax\nadd rax, 0x80000000\nnopq\n"),
                         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -320,6 +391,11 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
         assembly_encode(arguments->arena, S8("seteb %al\nsete %rax\ncmove %al, %bl\ncmoveq (%rax), (%rbx)\nje %rax\n"),
                         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
     BUSTER_TEST(arguments, invalid_x86_conditions.diagnostic_count == 5);
+    AssemblyEncodeResult invalid_x86_avx =
+        assembly_encode(arguments->arena,
+                        S8("vaddps ymm0, xmm1, ymm2\nvaddss ymm0, ymm1, ymm2\nvmovaps [rax], [rbx]\nvaddps rax, ymm1, ymm2\n"),
+                        (AssemblyEncodeOptions){.target = x86_avx_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_x86_avx.diagnostic_count == 4);
 
     Target aarch64_target = {
         .cpu_arch = CPU_ARCH_AARCH64,
