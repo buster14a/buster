@@ -21,6 +21,36 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_loaded_kinds[] = {
     OBJECT_SECTION_READ_ONLY_DATA,
     OBJECT_SECTION_DATA,
     OBJECT_SECTION_ZERO,
+    OBJECT_SECTION_THREAD_LOCAL_DATA,
+    OBJECT_SECTION_THREAD_LOCAL_ZERO,
+};
+
+#define BUSTER_LINK_ELF_SECTION_HEADER_SIZE 64
+#define BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT 8
+#define BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY                                                                                                          \
+    (BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds) + BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT + BUSTER_ARRAY_LENGTH(link_elf_debug_kinds))
+
+typedef struct LinkElfSectionTableLayout LinkElfSectionTableLayout;
+struct LinkElfSectionTableLayout
+{
+    u64 interpreter_offset;
+    u64 interpreter_size;
+    u64 plt_offset;
+    u64 plt_size;
+    u64 dynamic_string_offset;
+    u64 dynamic_string_size;
+    u64 dynamic_symbol_offset;
+    u64 dynamic_symbol_size;
+    u64 hash_offset;
+    u64 hash_size;
+    u64 relocation_offset;
+    u64 relocation_size;
+    u64 got_offset;
+    u64 got_size;
+    u64 dynamic_offset;
+    u64 dynamic_size;
+    bool dynamic;
+    u8 reserved[7];
 };
 
 BUSTER_GLOBAL_LOCAL String8 link_string_copy(Arena* arena, String8 source)
@@ -464,60 +494,195 @@ BUSTER_GLOBAL_LOCAL u32 link_symbol_find(ObjectFile* object, String8 name)
     return UINT32_MAX;
 }
 
-// Appends the merged DWARF sections and an ELF section header table to a
-// finished executable image. Loaded sections keep their program-header-only
-// layout; debug sections live only in the file, after the loaded image.
-// Their relocations are resolved statically here: 64-bit slots receive
-// link-time virtual addresses and 32-bit slots receive offsets into the
-// target debug section.
-BUSTER_GLOBAL_LOCAL void link_elf_debug_append(Arena* arena, NativeExecutableLinkResult* result, ObjectFile* object, u64 image_base, u64 const* section_offsets)
+typedef struct LinkElfSectionDescriptor LinkElfSectionDescriptor;
+struct LinkElfSectionDescriptor
+{
+    String8 name;
+    u64 flags;
+    u64 address;
+    u64 offset;
+    u64 size;
+    u64 alignment;
+    u64 entry_size;
+    u32 type;
+    u32 link;
+    u32 info;
+    u32 reserved;
+};
+
+// Appends merged DWARF data and an ELF section table to a finished image.
+// Loaded bytes retain their program-header layout, while zero-fill and debug
+// sections preserve their virtual and non-loaded representations. Debug
+// relocations are resolved statically here: 64-bit slots receive link-time
+// addresses and 32-bit slots receive offsets into the target debug section.
+BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecutableLinkResult* result, ObjectFile* object, u64 image_base,
+                                                       u64 const* section_offsets, LinkElfSectionTableLayout layout)
 {
     if (result->error != LINK_ERROR_NONE || object->section_count < OBJECT_SECTION_COUNT)
     {
         return;
     }
-    u64 debug_total = 0;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
+    LinkElfSectionDescriptor descriptors[BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY] = {0};
+    u32 descriptor_count = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
     {
-        debug_total += object->sections[link_elf_debug_kinds[index]].data.length;
+        ObjectSectionKind kind = link_elf_loaded_kinds[index];
+        ObjectSection* section = &object->sections[kind];
+        u64 size = BUSTER_MAX(section->data.length, section->virtual_size);
+        u64 offset = section_offsets[kind];
+        bool thread_local = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+        bool writable = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO || thread_local;
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = object_section_name_for_kind(kind),
+            .flags = (kind == OBJECT_SECTION_TEXT ? UINT64_C(0x6) : writable ? UINT64_C(0x3) : UINT64_C(0x2)) |
+                     (thread_local ? UINT64_C(0x400) : 0),
+            .address = size ? image_base + offset : 0,
+            .offset = size ? offset : 0,
+            .size = size,
+            .alignment = section->alignment,
+            .type = object_section_kind_is_zero_fill(kind) ? 8 : 1,
+        };
     }
-    if (!debug_total)
+    if (layout.dynamic)
     {
-        return;
+        u32 dynamic_base = 1 + descriptor_count;
+        u32 dynamic_string_index = dynamic_base + 2;
+        u32 dynamic_symbol_index = dynamic_base + 3;
+        u32 got_index = dynamic_base + 6;
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = S8(".interp"),
+            .flags = 0x2,
+            .address = image_base + layout.interpreter_offset,
+            .offset = layout.interpreter_offset,
+            .size = layout.interpreter_size,
+            .alignment = 1,
+            .type = 1,
+        };
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = S8(".plt"),
+            .flags = 0x6,
+            .address = image_base + layout.plt_offset,
+            .offset = layout.plt_offset,
+            .size = layout.plt_size,
+            .alignment = 16,
+            .entry_size = 16,
+            .type = 1,
+        };
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = S8(".dynstr"),
+            .flags = 0x2,
+            .address = image_base + layout.dynamic_string_offset,
+            .offset = layout.dynamic_string_offset,
+            .size = layout.dynamic_string_size,
+            .alignment = 1,
+            .type = 3,
+        };
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = S8(".dynsym"),
+            .flags = 0x2,
+            .address = image_base + layout.dynamic_symbol_offset,
+            .offset = layout.dynamic_symbol_offset,
+            .size = layout.dynamic_symbol_size,
+            .alignment = 8,
+            .entry_size = 24,
+            .type = 11,
+            .link = dynamic_string_index,
+        };
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = S8(".hash"),
+            .flags = 0x2,
+            .address = image_base + layout.hash_offset,
+            .offset = layout.hash_offset,
+            .size = layout.hash_size,
+            .alignment = 4,
+            .entry_size = 4,
+            .type = 5,
+            .link = dynamic_symbol_index,
+        };
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = S8(".rela.plt"),
+            .flags = 0x2,
+            .address = image_base + layout.relocation_offset,
+            .offset = layout.relocation_offset,
+            .size = layout.relocation_size,
+            .alignment = 8,
+            .entry_size = 24,
+            .type = 4,
+            .link = dynamic_symbol_index,
+            .info = got_index,
+        };
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = S8(".got.plt"),
+            .flags = 0x3,
+            .address = image_base + layout.got_offset,
+            .offset = layout.got_offset,
+            .size = layout.got_size,
+            .alignment = 8,
+            .entry_size = 8,
+            .type = 1,
+        };
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = S8(".dynamic"),
+            .flags = 0x3,
+            .address = image_base + layout.dynamic_offset,
+            .offset = layout.dynamic_offset,
+            .size = layout.dynamic_size,
+            .alignment = 8,
+            .entry_size = 16,
+            .type = 6,
+            .link = dynamic_string_index,
+        };
     }
-    enum
-    {
-        ELF_SECTION_HEADER_SIZE = 64,
-        ELF_DEBUG_SECTION_COUNT = 12,
-        ELF_DEBUG_SECTION_BASE = 5,
-    };
-    BUSTER_CT_CHECK(ELF_DEBUG_SECTION_COUNT == 2 + BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds) + BUSTER_ARRAY_LENGTH(link_elf_debug_kinds));
-    BUSTER_CT_CHECK(ELF_DEBUG_SECTION_BASE == 1 + BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds));
     u64 debug_offsets[BUSTER_ARRAY_LENGTH(link_elf_debug_kinds)];
     u64 cursor = result->executable.length;
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
     {
+        ObjectSection* section = &object->sections[link_elf_debug_kinds[index]];
         debug_offsets[index] = cursor;
-        cursor += object->sections[link_elf_debug_kinds[index]].data.length;
+        if (section->data.length > UINT64_MAX - cursor)
+        {
+            result->error = LINK_ERROR_INVALID_INPUT;
+            return;
+        }
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = object_section_name_for_kind(link_elf_debug_kinds[index]),
+            .offset = cursor,
+            .size = section->data.length,
+            .alignment = section->alignment,
+            .type = 1,
+        };
+        cursor += section->data.length;
     }
     u64 string_offset = cursor;
-    u64 name_offsets[ELF_DEBUG_SECTION_COUNT] = {0};
+    u64 name_offsets[BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY + 2] = {0};
     u64 string_size = 1;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
+    for (u32 index = 0; index < descriptor_count; index += 1)
     {
-        name_offsets[1 + index] = string_size;
-        string_size += object->sections[link_elf_loaded_kinds[index]].name.length + 1;
+        name_offsets[index + 1] = string_size;
+        if (descriptors[index].name.length > UINT64_MAX - string_size - 1)
+        {
+            result->error = LINK_ERROR_INVALID_INPUT;
+            return;
+        }
+        string_size += descriptors[index].name.length + 1;
     }
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
-    {
-        name_offsets[ELF_DEBUG_SECTION_BASE + index] = string_size;
-        string_size += object->sections[link_elf_debug_kinds[index]].name.length + 1;
-    }
-    name_offsets[ELF_DEBUG_SECTION_COUNT - 1] = string_size;
+    u32 string_table_index = descriptor_count + 1;
+    u32 section_count = string_table_index + 1;
+    name_offsets[string_table_index] = string_size;
     string_size += sizeof(".shstrtab");
+    if (string_size > UINT64_MAX - string_offset)
+    {
+        result->error = LINK_ERROR_INVALID_INPUT;
+        return;
+    }
     cursor = align_forward(string_offset + string_size, 8);
     u64 header_offset = cursor;
-    u64 total_size = header_offset + (u64)ELF_DEBUG_SECTION_COUNT * ELF_SECTION_HEADER_SIZE;
+    if ((u64)section_count > (UINT64_MAX - header_offset) / BUSTER_LINK_ELF_SECTION_HEADER_SIZE)
+    {
+        result->error = LINK_ERROR_INVALID_INPUT;
+        return;
+    }
+    u64 total_size = header_offset + (u64)section_count * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
     u8* bytes = arena_allocate(arena, u8, total_size);
     memcpy(bytes, result->executable.pointer, result->executable.length);
     memset(bytes + result->executable.length, 0, total_size - result->executable.length);
@@ -583,56 +748,39 @@ BUSTER_GLOBAL_LOCAL void link_elf_debug_append(Arena* arena, NativeExecutableLin
         }
     }
     u64 name_cursor = string_offset + 1;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
+    for (u32 index = 0; index < descriptor_count; index += 1)
     {
-        String8 name = object->sections[link_elf_loaded_kinds[index]].name;
-        memcpy(bytes + name_cursor, name.pointer, name.length);
-        name_cursor += name.length + 1;
-    }
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
-    {
-        String8 name = object->sections[link_elf_debug_kinds[index]].name;
+        String8 name = descriptors[index].name;
         memcpy(bytes + name_cursor, name.pointer, name.length);
         name_cursor += name.length + 1;
     }
     memcpy(bytes + name_cursor, ".shstrtab", sizeof(".shstrtab"));
-    for (u32 header_index = 1; header_index < ELF_DEBUG_SECTION_COUNT; header_index += 1)
+    for (u32 descriptor_index = 0; descriptor_index < descriptor_count; descriptor_index += 1)
     {
-        u64 offset = header_offset + (u64)header_index * ELF_SECTION_HEADER_SIZE;
+        u32 header_index = descriptor_index + 1;
+        u64 offset = header_offset + (u64)header_index * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
         link_write_u32(bytes, offset, (u32)name_offsets[header_index]);
-        bool loaded = header_index <= BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds);
-        bool string_table = header_index == ELF_DEBUG_SECTION_COUNT - 1;
-        ObjectSectionKind kind = loaded ? link_elf_loaded_kinds[header_index - 1]
-                                 : string_table ? OBJECT_SECTION_COUNT
-                                                : link_elf_debug_kinds[header_index - ELF_DEBUG_SECTION_BASE];
-        bool zero_fill = loaded && object_section_kind_is_zero_fill(kind);
-        link_write_u32(bytes, offset + 4, string_table ? 3 : zero_fill ? 8 : 1);
-        if (loaded)
-        {
-            u64 section_size = BUSTER_MAX(object->sections[kind].data.length, object->sections[kind].virtual_size);
-            link_write_u64(bytes, offset + 8, kind == OBJECT_SECTION_TEXT ? 0x6 : kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO ? 0x3 : 0x2);
-            link_write_u64(bytes, offset + 16, section_size ? image_base + section_offsets[kind] : 0);
-            link_write_u64(bytes, offset + 24, section_size ? section_offsets[kind] : 0);
-            link_write_u64(bytes, offset + 32, section_size);
-            link_write_u64(bytes, offset + 48, object->sections[kind].alignment);
-        }
-        else if (string_table)
-        {
-            link_write_u64(bytes, offset + 24, string_offset);
-            link_write_u64(bytes, offset + 32, string_size);
-            link_write_u64(bytes, offset + 48, 1);
-        }
-        else
-        {
-            link_write_u64(bytes, offset + 24, debug_offsets[header_index - ELF_DEBUG_SECTION_BASE]);
-            link_write_u64(bytes, offset + 32, object->sections[kind].data.length);
-            link_write_u64(bytes, offset + 48, 1);
-        }
+        LinkElfSectionDescriptor* descriptor = &descriptors[descriptor_index];
+        link_write_u32(bytes, offset + 4, descriptor->type);
+        link_write_u64(bytes, offset + 8, descriptor->flags);
+        link_write_u64(bytes, offset + 16, descriptor->address);
+        link_write_u64(bytes, offset + 24, descriptor->offset);
+        link_write_u64(bytes, offset + 32, descriptor->size);
+        link_write_u32(bytes, offset + 40, descriptor->link);
+        link_write_u32(bytes, offset + 44, descriptor->info);
+        link_write_u64(bytes, offset + 48, descriptor->alignment);
+        link_write_u64(bytes, offset + 56, descriptor->entry_size);
     }
+    u64 string_header = header_offset + (u64)string_table_index * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
+    link_write_u32(bytes, string_header, (u32)name_offsets[string_table_index]);
+    link_write_u32(bytes, string_header + 4, 3);
+    link_write_u64(bytes, string_header + 24, string_offset);
+    link_write_u64(bytes, string_header + 32, string_size);
+    link_write_u64(bytes, string_header + 48, 1);
     link_write_u64(bytes, 40, header_offset);
-    link_write_u16(bytes, 58, ELF_SECTION_HEADER_SIZE);
-    link_write_u16(bytes, 60, ELF_DEBUG_SECTION_COUNT);
-    link_write_u16(bytes, 62, ELF_DEBUG_SECTION_COUNT - 1);
+    link_write_u16(bytes, 58, BUSTER_LINK_ELF_SECTION_HEADER_SIZE);
+    link_write_u16(bytes, 60, (u16)section_count);
+    link_write_u16(bytes, 62, (u16)string_table_index);
     result->executable = (ByteSlice){
         .pointer = bytes,
         .length = total_size,
@@ -814,7 +962,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         link_write_u64(bytes, program_header + 40, BUSTER_MAX(data_size, writable_memory_size));
         link_write_u64(bytes, program_header + 48, ELF_PAGE_SIZE);
     }
-    link_elf_debug_append(arena, &result, object, image_base, section_offsets);
+    link_elf_section_table_append(arena, &result, object, image_base, section_offsets,
+                                  (LinkElfSectionTableLayout){0});
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
@@ -929,18 +1078,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 relocation_size = (u64)import_count * ELF_RELOCATION_SIZE;
     u64 read_only_end = relocation_offset + relocation_size;
     section_offsets[OBJECT_SECTION_DATA] = align_forward(read_only_end, ELF_PAGE_SIZE);
-    section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] = align_forward(section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length,
-                                                                      object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment);
-    section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] =
-        section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] +
-        align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
-    u64 got_offset = align_forward(section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length, 8);
+    u64 got_offset = align_forward(section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length, 8);
     u64 got_size = (u64)(ELF_GOT_RESERVED_COUNT + import_count) * sizeof(u64);
     u64 dynamic_offset = align_forward(got_offset + got_size, 8);
     u32 dynamic_count = needed_library_count + 11;
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
-    u64 file_size = dynamic_offset + dynamic_size;
-    section_offsets[OBJECT_SECTION_ZERO] = align_forward(file_size, object->sections[OBJECT_SECTION_ZERO].alignment);
+    section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] = align_forward(dynamic_offset + dynamic_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment);
+    u64 file_size = section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
+    section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] = align_forward(file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
+    u64 thread_local_memory_end = section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
+    section_offsets[OBJECT_SECTION_ZERO] = align_forward(thread_local_memory_end, object->sections[OBJECT_SECTION_ZERO].alignment);
     u64 writable_memory_end = section_offsets[OBJECT_SECTION_ZERO] + object->sections[OBJECT_SECTION_ZERO].virtual_size;
     if (file_size > UINT32_MAX)
     {
@@ -1200,7 +1347,26 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     program_header += ELF_PROGRAM_HEADER_SIZE;
     BUSTER_LINK_PROGRAM_HEADER(0x6474e551, 6, 0, 0, 0, 0, 16);
 #undef BUSTER_LINK_PROGRAM_HEADER
-    link_elf_debug_append(arena, &result, object, image_base, section_offsets);
+    link_elf_section_table_append(arena, &result, object, image_base, section_offsets,
+                                  (LinkElfSectionTableLayout){
+                                      .interpreter_offset = interpreter_offset,
+                                      .interpreter_size = interpreter_size,
+                                      .plt_offset = plt_offset,
+                                      .plt_size = plt_size,
+                                      .dynamic_string_offset = dynamic_string_offset,
+                                      .dynamic_string_size = dynamic_string_size,
+                                      .dynamic_symbol_offset = dynamic_symbol_offset,
+                                      .dynamic_symbol_size = dynamic_symbol_size,
+                                      .hash_offset = hash_offset,
+                                      .hash_size = hash_size,
+                                      .relocation_offset = relocation_offset,
+                                      .relocation_size = relocation_size,
+                                      .got_offset = got_offset,
+                                      .got_size = got_size,
+                                      .dynamic_offset = dynamic_offset,
+                                      .dynamic_size = dynamic_size,
+                                      .dynamic = true,
+                                  });
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
@@ -1393,7 +1559,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         link_write_u64(bytes, program_header + 40, writable_memory_size);
         link_write_u64(bytes, program_header + 48, ELF_PAGE_SIZE);
     }
-    link_elf_debug_append(arena, &result, object, image_base, section_offsets);
+    link_elf_section_table_append(arena, &result, object, image_base, section_offsets,
+                                  (LinkElfSectionTableLayout){0});
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
@@ -1602,7 +1769,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         }
         link_write_u32(bytes, output_offset, 0x94000000 | ((u32)words & 0x03ffffff));
     }
-    link_elf_debug_append(arena, &result, object, image_base, section_offsets);
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;

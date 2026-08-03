@@ -36,6 +36,65 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_test_object_make(Arena* arena, Target target
     };
 }
 
+BUSTER_GLOBAL_LOCAL bool link_test_elf_section_find(ByteSlice image, String8 name, u32* section_index, u64* section_header)
+{
+    if (image.length < 64 || image.pointer[0] != 0x7f || image.pointer[1] != 'E' || image.pointer[2] != 'L' || image.pointer[3] != 'F')
+    {
+        return false;
+    }
+    u64 table_offset = link_read_u64(image.pointer, 40);
+    u16 header_size = 0;
+    u16 section_count = 0;
+    u16 string_index = 0;
+    memcpy(&header_size, image.pointer + 58, sizeof(header_size));
+    memcpy(&section_count, image.pointer + 60, sizeof(section_count));
+    memcpy(&string_index, image.pointer + 62, sizeof(string_index));
+    if (!table_offset || header_size < 64 || string_index >= section_count || table_offset > image.length ||
+        (u64)section_count > (image.length - table_offset) / header_size)
+    {
+        return false;
+    }
+    u64 string_header = table_offset + (u64)string_index * header_size;
+    u64 string_offset = link_read_u64(image.pointer, string_header + 24);
+    u64 string_size = link_read_u64(image.pointer, string_header + 32);
+    if (string_offset > image.length || string_size > image.length - string_offset)
+    {
+        return false;
+    }
+    for (u32 index = 1; index < section_count; index += 1)
+    {
+        u64 header = table_offset + (u64)index * header_size;
+        u32 name_offset = link_read_u32(image.pointer, header);
+        if (name_offset >= string_size)
+        {
+            continue;
+        }
+        u64 length = 0;
+        while ((u64)name_offset + length < string_size && image.pointer[string_offset + name_offset + length])
+        {
+            length += 1;
+        }
+        if ((u64)name_offset + length < string_size && string_equal(
+                                                              (String8){
+                                                                  .pointer = (char8*)image.pointer + string_offset + name_offset,
+                                                                  .length = length,
+                                                              },
+                                                              name))
+        {
+            if (section_index)
+            {
+                *section_index = index;
+            }
+            if (section_header)
+            {
+                *section_header = header;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 #if BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, String8 library, String8 symbol)
 {
@@ -524,6 +583,15 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
     bool aarch64_header_valid = aarch64_executable.executable.length > 20 && aarch64_executable.executable.pointer[0] == 0x7f &&
                                 aarch64_executable.executable.pointer[1] == 'E' && aarch64_executable.executable.pointer[18] == 183;
     BUSTER_TEST(arguments, aarch64_header_valid);
+    u64 aarch64_text_header = 0;
+    u64 aarch64_bss_header = 0;
+    u64 aarch64_debug_info_header = 0;
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_executable.executable, S8(".text"), 0, &aarch64_text_header));
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_executable.executable, S8(".bss"), 0, &aarch64_bss_header));
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_executable.executable, S8(".debug_info"), 0, &aarch64_debug_info_header));
+    BUSTER_TEST(arguments, aarch64_text_header && link_read_u32(aarch64_executable.executable.pointer, aarch64_text_header + 4) == 1);
+    BUSTER_TEST(arguments, aarch64_bss_header && link_read_u32(aarch64_executable.executable.pointer, aarch64_bss_header + 4) == 8);
+    BUSTER_TEST(arguments, aarch64_debug_info_header && link_read_u64(aarch64_executable.executable.pointer, aarch64_debug_info_header + 32) == 0);
     u32 aarch64_libc_instructions[] = {
         0xa9bf7bfd, 0x910003fd, 0x52800540, 0x94000000, 0x5100a800, 0xa8c17bfd, 0xd65f03c0,
     };
@@ -561,6 +629,72 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                     .entry_symbol = S8("main"),
                                                                                 });
     BUSTER_TEST(arguments, aarch64_libc_executable.error == LINK_ERROR_NONE);
+    String8 dynamic_section_names[] = {
+        S8(".interp"), S8(".plt"), S8(".dynstr"), S8(".dynsym"), S8(".hash"), S8(".rela.plt"), S8(".got.plt"), S8(".dynamic"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(dynamic_section_names); index += 1)
+    {
+        BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_libc_executable.executable, dynamic_section_names[index], 0, 0));
+    }
+    u32 dynamic_string_index = 0;
+    u32 dynamic_symbol_index = 0;
+    u32 got_index = 0;
+    u64 dynamic_symbol_header = 0;
+    u64 hash_header = 0;
+    u64 relocation_header = 0;
+    u64 dynamic_header = 0;
+    BUSTER_TEST(arguments,
+                link_test_elf_section_find(aarch64_libc_executable.executable, S8(".dynstr"), &dynamic_string_index, 0));
+    BUSTER_TEST(arguments,
+                link_test_elf_section_find(aarch64_libc_executable.executable, S8(".dynsym"), &dynamic_symbol_index, &dynamic_symbol_header));
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_libc_executable.executable, S8(".got.plt"), &got_index, 0));
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_libc_executable.executable, S8(".hash"), 0, &hash_header));
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_libc_executable.executable, S8(".rela.plt"), 0, &relocation_header));
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_libc_executable.executable, S8(".dynamic"), 0, &dynamic_header));
+    BUSTER_TEST(arguments, dynamic_symbol_header && link_read_u32(aarch64_libc_executable.executable.pointer, dynamic_symbol_header + 40) == dynamic_string_index);
+    BUSTER_TEST(arguments, hash_header && link_read_u32(aarch64_libc_executable.executable.pointer, hash_header + 40) == dynamic_symbol_index);
+    BUSTER_TEST(arguments, relocation_header && link_read_u32(aarch64_libc_executable.executable.pointer, relocation_header + 40) == dynamic_symbol_index &&
+                               link_read_u32(aarch64_libc_executable.executable.pointer, relocation_header + 44) == got_index);
+    BUSTER_TEST(arguments, dynamic_header && link_read_u32(aarch64_libc_executable.executable.pointer, dynamic_header + 40) == dynamic_string_index);
+    ObjectFile aarch64_tls_object = aarch64_libc_object;
+    ObjectSection* aarch64_tls_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
+    memcpy(aarch64_tls_sections, aarch64_libc_object.sections, sizeof(*aarch64_tls_sections) * OBJECT_SECTION_COUNT);
+    aarch64_tls_object.sections = aarch64_tls_sections;
+    u32 initialized_thread_local = 42;
+    aarch64_tls_sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice){
+        .pointer = (u8*)&initialized_thread_local,
+        .length = sizeof(initialized_thread_local),
+    };
+    aarch64_tls_sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size = 32;
+    NativeExecutableLinkResult aarch64_tls_executable = link_native_executable(arguments->arena, &aarch64_tls_object,
+                                                                                (NativeExecutableLinkOptions){
+                                                                                    .entry_symbol = S8("main"),
+                                                                                });
+    BUSTER_TEST(arguments, aarch64_tls_executable.error == LINK_ERROR_NONE);
+    u64 thread_local_data_header = 0;
+    u64 thread_local_zero_header = 0;
+    u64 tls_got_header = 0;
+    u64 tls_dynamic_header = 0;
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_tls_executable.executable, S8(".tdata"), 0, &thread_local_data_header));
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_tls_executable.executable, S8(".tbss"), 0, &thread_local_zero_header));
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_tls_executable.executable, S8(".got.plt"), 0, &tls_got_header));
+    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_tls_executable.executable, S8(".dynamic"), 0, &tls_dynamic_header));
+    u64 thread_local_data_address = thread_local_data_header ? link_read_u64(aarch64_tls_executable.executable.pointer, thread_local_data_header + 16) : 0;
+    u64 thread_local_data_size = thread_local_data_header ? link_read_u64(aarch64_tls_executable.executable.pointer, thread_local_data_header + 32) : 0;
+    u64 thread_local_zero_address = thread_local_zero_header ? link_read_u64(aarch64_tls_executable.executable.pointer, thread_local_zero_header + 16) : 0;
+    u64 thread_local_zero_size = thread_local_zero_header ? link_read_u64(aarch64_tls_executable.executable.pointer, thread_local_zero_header + 32) : 0;
+    u64 tls_got_address = tls_got_header ? link_read_u64(aarch64_tls_executable.executable.pointer, tls_got_header + 16) : 0;
+    u64 tls_got_size = tls_got_header ? link_read_u64(aarch64_tls_executable.executable.pointer, tls_got_header + 32) : 0;
+    u64 tls_dynamic_address = tls_dynamic_header ? link_read_u64(aarch64_tls_executable.executable.pointer, tls_dynamic_header + 16) : 0;
+    u64 tls_dynamic_size = tls_dynamic_header ? link_read_u64(aarch64_tls_executable.executable.pointer, tls_dynamic_header + 32) : 0;
+    BUSTER_TEST(arguments, thread_local_data_header && link_read_u32(aarch64_tls_executable.executable.pointer, thread_local_data_header + 4) == 1 &&
+                               (link_read_u64(aarch64_tls_executable.executable.pointer, thread_local_data_header + 8) & UINT64_C(0x403)) == UINT64_C(0x403));
+    BUSTER_TEST(arguments, thread_local_zero_header && link_read_u32(aarch64_tls_executable.executable.pointer, thread_local_zero_header + 4) == 8 &&
+                               (link_read_u64(aarch64_tls_executable.executable.pointer, thread_local_zero_header + 8) & UINT64_C(0x403)) == UINT64_C(0x403));
+    BUSTER_TEST(arguments, tls_got_address + tls_got_size <= tls_dynamic_address);
+    BUSTER_TEST(arguments, tls_dynamic_address + tls_dynamic_size <= thread_local_data_address);
+    BUSTER_TEST(arguments, thread_local_data_address + thread_local_data_size <= thread_local_zero_address);
+    BUSTER_TEST(arguments, thread_local_zero_size == 32);
     u32 aarch64_data_main_instructions[] = {
         0x58000049, 0x14000003, 0, 0,
     };

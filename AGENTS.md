@@ -414,8 +414,11 @@ has hard design constraints:
   `.debug_info`/`.debug_abbrev`/`.debug_line`/`.debug_str` plus
   `.debug_loc`/`.debug_ranges`, with relocations against local text and
   debug-base symbols, so 32-bit cross-section offsets survive object
-  concatenation. ELF executable writers resolve those relocations statically
-  and append the non-loaded sections with a section header table. Mach-O
+  concatenation. ELF executable writers always append a coherent section
+  header table for loaded code/data, BSS, TLS, loader and dynamic-linking
+  metadata, debug data, and the section-name string table, including for
+  `-g0` images. DWARF relocations are resolved statically before the non-loaded
+  debug payload is appended. Mach-O
   executables carry the same six sections in a read-only, file-backed
   `__DWARF` segment (each section is flagged `S_ATTR_DEBUG`) placed before
   `__LINKEDIT`; its virtual size is page-rounded to satisfy dyld while the
