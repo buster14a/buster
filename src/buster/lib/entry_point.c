@@ -242,6 +242,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     }
 
 #if defined(_WIN32)
+    bool winsock_initialized = false;
     {
         LARGE_INTEGER i;
         if (QueryPerformanceFrequency(&i))
@@ -250,7 +251,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
         }
     }
     WSADATA WinSockData;
-    WSAStartup(MAKEWORD(2, 2), &WinSockData);
+    winsock_initialized = WSAStartup(MAKEWORD(2, 2), &WinSockData) == 0;
 #if defined(_MSC_VER)
     GUID guid = WSAID_MULTIPLE_RIO;
     DWORD rio_byte = 0;
@@ -290,6 +291,30 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     {
         result = entry_point();
     }
+
+    Arena* program_arena = program_state->arena;
+    program_state->arena = 0;
+    program_state->input = (ProgramInput){0};
+    arena_destroy(program_arena, 1);
+
+    thread_context_release(thread_context);
+
+#if defined(__linux__) || defined(__APPLE__)
+    pthread_mutex_destroy(&os_state.entity_mutex);
+#elif defined(_WIN32)
+    DeleteCriticalSection(&os_state.entity_mutex);
+#endif
+    Arena* entity_arena = os_state.entity_arena;
+    Arena* os_arena = os_state.arena;
+    memset(&os_state, 0, sizeof(os_state));
+    arena_destroy(entity_arena, 1);
+    arena_destroy(os_arena, 1);
+#if defined(_WIN32)
+    if (winsock_initialized)
+    {
+        WSACleanup();
+    }
+#endif
 
     return result;
 }

@@ -1872,6 +1872,14 @@ ThreadContext* thread_context_allocate(void)
 
 void thread_context_release(ThreadContext* thread_context)
 {
+    if (!thread_context)
+    {
+        return;
+    }
+    if (thread_context_selected() == thread_context)
+    {
+        thread_context_select(0);
+    }
     u64 i = BUSTER_ARRAY_LENGTH(thread_context->arenas);
     while (i--)
     {

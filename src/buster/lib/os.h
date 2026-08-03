@@ -243,6 +243,7 @@ BUSTER_COLD BUSTER_F_DECL bool is_debugger_present(void);
 BUSTER_F_DECL u64 os_now_microseconds(void);
 
 BUSTER_F_DECL ThreadContext* thread_context_allocate(void);
+BUSTER_F_DECL ThreadContext* thread_context_selected(void);
 BUSTER_F_DECL void thread_context_select(ThreadContext* context);
 BUSTER_F_DECL void thread_context_release(ThreadContext* context);
 BUSTER_F_DECL Arena* thread_context_get_scratch(Arena** conflicts, u64 count);

@@ -904,7 +904,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
 #endif
                     }
 
-                    // TODO: OS deinitialization
+                    // Process-wide thread/TLS, mutex, arena, and socket state
+                    // is released by buster_entry_point after this returns.
                 }
                 else
                 {
