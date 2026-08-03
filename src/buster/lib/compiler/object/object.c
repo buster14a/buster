@@ -350,6 +350,8 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
             return S8("\t.section __DATA,__thread_data\n");
         case OBJECT_SECTION_THREAD_LOCAL_ZERO:
             return S8("\t.section __DATA,__thread_bss\n");
+        case OBJECT_SECTION_UNWIND:
+            return S8("\t.section __TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support\n");
         case OBJECT_SECTION_DEBUG_INFO:
             return S8("\t.section __DWARF,__debug_info\n");
         case OBJECT_SECTION_DEBUG_ABBREV:
@@ -386,6 +388,8 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
     case OBJECT_SECTION_THREAD_LOCAL_ZERO:
         return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .tbss\n")
                                                                                            : S8("\t.section .tbss,\"awT\",@nobits\n");
+    case OBJECT_SECTION_UNWIND:
+        return S8("\t.section .eh_frame,\"a\",@progbits\n");
     case OBJECT_SECTION_DEBUG_INFO:
         return S8("\t.section .debug_info\n");
     case OBJECT_SECTION_DEBUG_ABBREV:
@@ -642,6 +646,7 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
         object_assembly_append_string(buffer, S8("\n"));
         return true;
     case OBJECT_RELOCATION_X86_64_PC32:
+    case OBJECT_RELOCATION_AARCH64_PREL32:
     case OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
         object_assembly_append_string(buffer, S8("\t.long "));
         object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
@@ -2981,6 +2986,8 @@ String8 object_section_name_for_kind(ObjectSectionKind kind)
         return S8(".tdata");
     case OBJECT_SECTION_THREAD_LOCAL_ZERO:
         return S8(".tbss");
+    case OBJECT_SECTION_UNWIND:
+        return S8(".eh_frame");
     case OBJECT_SECTION_DEBUG_INFO:
         return S8(".debug_info");
     case OBJECT_SECTION_DEBUG_ABBREV:
@@ -3005,7 +3012,7 @@ String8 object_section_name_for_kind(ObjectSectionKind kind)
 
 u32 object_section_default_alignment(ObjectSectionKind kind)
 {
-    return object_section_kind_is_debug(kind) ? 1 : 16;
+    return object_section_kind_is_debug(kind) ? 1 : kind == OBJECT_SECTION_UNWIND ? 8 : 16;
 }
 
 bool object_section_kind_is_zero_fill(ObjectSectionKind kind)
@@ -3119,10 +3126,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             return result;
         }
         String8 name = object_read_string(bytes, section_string_offset, section_string_size, name_offset);
-        bool ignored = string_equal(name, S8(".eh_frame")) || string_starts_with_sequence(name, S8(".gcc_except_table")) ||
-                       string_starts_with_sequence(name, S8(".ARM.exidx")) || string_starts_with_sequence(name, S8(".ARM.extab"));
+        bool unwind = string_equal(name, S8(".eh_frame"));
+        bool unwind_type = section_type == 1 || (target.cpu_arch == CPU_ARCH_X86_64 && section_type == 0x70000001);
+        bool ignored = string_starts_with_sequence(name, S8(".gcc_except_table")) || string_starts_with_sequence(name, S8(".ARM.exidx")) ||
+                       string_starts_with_sequence(name, S8(".ARM.extab"));
         ObjectSectionKind debug_kind = flags & 0x2 ? OBJECT_SECTION_COUNT : object_debug_section_kind_from_name(name);
-        if ((!(flags & 0x2) && debug_kind == OBJECT_SECTION_COUNT) || (section_type != 1 && section_type != 8) || ignored)
+        if ((!(flags & 0x2) && debug_kind == OBJECT_SECTION_COUNT) || (unwind ? !unwind_type : section_type != 1 && section_type != 8) || ignored)
         {
             continue;
         }
@@ -3134,7 +3143,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         {
             return result;
         }
-        ObjectSectionKind kind = debug_kind != OBJECT_SECTION_COUNT ? debug_kind
+        ObjectSectionKind kind = unwind                             ? OBJECT_SECTION_UNWIND
+                                 : debug_kind != OBJECT_SECTION_COUNT ? debug_kind
                                  : flags & 0x400                    ? (section_type == 8 ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                  : flags & 0x4                      ? OBJECT_SECTION_TEXT
                                  : section_type == 8                ? OBJECT_SECTION_ZERO
@@ -3354,6 +3364,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             {
                 kind = relocation_type == 257                             ? OBJECT_RELOCATION_ABSOLUTE64
                        : relocation_type == 258                           ? OBJECT_RELOCATION_ABSOLUTE32
+                       : relocation_type == 261                           ? OBJECT_RELOCATION_AARCH64_PREL32
                        : relocation_type == 282 || relocation_type == 283 ? OBJECT_RELOCATION_AARCH64_CALL26
                        : relocation_type == 549                           ? OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12
                        : relocation_type == 551                           ? OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
@@ -4388,8 +4399,13 @@ bool object_section_kind_is_debug(ObjectSectionKind kind)
            kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || kind == OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
 }
 
-BUSTER_GLOBAL_LOCAL void object_debug_sections_initialize(ObjectFile* object)
+BUSTER_GLOBAL_LOCAL void object_metadata_sections_initialize(ObjectFile* object)
 {
+    object->sections[OBJECT_SECTION_UNWIND] = (ObjectSection){
+        .name = object_section_name_for_kind(OBJECT_SECTION_UNWIND),
+        .kind = OBJECT_SECTION_UNWIND,
+        .alignment = object_section_default_alignment(OBJECT_SECTION_UNWIND),
+    };
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
         if (!object_section_kind_is_debug((ObjectSectionKind)kind))
@@ -4549,6 +4565,30 @@ BUSTER_GLOBAL_LOCAL void object_append_dwarf(ObjectFile* object, DwarfResult bui
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiResult built)
+{
+    if (!built.valid)
+    {
+        return false;
+    }
+    object->sections[OBJECT_SECTION_UNWIND].data = built.bytes;
+    for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
+    {
+        DwarfCfiRelocation relocation = built.relocations[relocation_index];
+        if (relocation.function >= object->symbol_count)
+        {
+            return false;
+        }
+        object->relocations[object->relocation_count++] = (ObjectRelocation){
+            .offset = relocation.offset,
+            .section = OBJECT_SECTION_UNWIND,
+            .symbol = relocation.function,
+            .kind = object->target.cpu_arch == CPU_ARCH_X86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_PREL32,
+        };
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
 {
     if (module->function_count != module->entry_count || (module->function_count && (!module->functions || !module->entries)))
@@ -4657,7 +4697,21 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
         .kind = OBJECT_SECTION_THREAD_LOCAL_ZERO,
         .alignment = thread_local_alignment,
     };
-    object_debug_sections_initialize(&result);
+    object_metadata_sections_initialize(&result);
+    DwarfCfiResult cfi = {0};
+    if (object_format_for_target(target) == OBJECT_FORMAT_ELF64 && module->function_count)
+    {
+        cfi = dwarf_cfi_build(arena, (DwarfCfiInput){
+                                         .functions = module->functions,
+                                         .target = target,
+                                         .function_count = module->function_count,
+                                     });
+        if (!cfi.valid)
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
     DwarfResult dwarf = {0};
     CodeviewResult codeview = {0};
     if (module->debug_info && analysis->module.source_count && (module->entry_count || module->global_count))
@@ -4761,7 +4815,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
                                        });
         }
     }
-    u32 dwarf_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0);
+    u32 dwarf_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count;
     u32 symbol_capacity =
         module->entry_count + module->relocation_count + (module->data_relocation_count ? 1 : 0) + (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0);
     result.symbols = arena_allocate(arena, ObjectSymbol, symbol_capacity);
@@ -4884,6 +4938,11 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
     }
     object_append_dwarf(&result, dwarf);
     object_append_codeview(&result, codeview);
+    if (cfi.valid && !object_append_dwarf_cfi(&result, cfi))
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+        return result;
+    }
     object_debug_module_set(arena, &result, analysis->module.source_count ? analysis->module.sources[0].path : S8("buster.obj"), module->code.length);
     return result;
 }
@@ -4965,7 +5024,21 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         .kind = OBJECT_SECTION_THREAD_LOCAL_ZERO,
         .alignment = thread_local_alignment,
     };
-    object_debug_sections_initialize(&result);
+    object_metadata_sections_initialize(&result);
+    DwarfCfiResult cfi = {0};
+    if (object_format_for_target(target) == OBJECT_FORMAT_ELF64 && module->function_count)
+    {
+        cfi = dwarf_cfi_build(arena, (DwarfCfiInput){
+                                         .functions = module->functions,
+                                         .target = target,
+                                         .function_count = module->function_count,
+                                     });
+        if (!cfi.valid)
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
     DwarfResult dwarf = {0};
     CodeviewResult codeview = {0};
     if (module->debug_info && program->sources.count && (module->entry_count || module->global_count))
@@ -5101,7 +5174,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                        });
         }
     }
-    u32 dwarf_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0);
+    u32 dwarf_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count;
     bool apple_thread_local = false;
     if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
     {
@@ -5263,6 +5336,11 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     }
     object_append_dwarf(&result, dwarf);
     object_append_codeview(&result, codeview);
+    if (cfi.valid && !object_append_dwarf_cfi(&result, cfi))
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+        return result;
+    }
     object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
     return result;
 }
@@ -5278,6 +5356,7 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
                                                            : 0;
     }
     return kind == OBJECT_RELOCATION_AARCH64_CALL26                 ? 283
+           : kind == OBJECT_RELOCATION_AARCH64_PREL32               ? 261
            : kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ? 549
            : kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ? 551
            : kind == OBJECT_RELOCATION_ABSOLUTE64                   ? 257
@@ -5457,6 +5536,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
             if (object_section_kind_is_zero_fill(source->kind))
             {
                 type = 8;
+            }
+            else if (source->kind == OBJECT_SECTION_UNWIND && object->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                type = 0x70000001;
             }
             flags = source->kind == OBJECT_SECTION_TEXT                                                                    ? 0x6
                     : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? 0x403
@@ -6024,7 +6107,14 @@ ObjectExecutable object_link_executable(ObjectFile* object)
         {
             continue;
         }
-        if (relocation->section != OBJECT_SECTION_TEXT || relocation->symbol >= object->symbol_count)
+        if (relocation->section >= object->section_count || relocation->symbol >= object->symbol_count)
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            break;
+        }
+        u64 relocation_size = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        ObjectSection* source_section = object->sections + relocation->section;
+        if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
@@ -6035,7 +6125,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             result.error = OBJECT_ERROR_UNRESOLVED_SYMBOL;
             break;
         }
-        u8* patch = (u8*)address + relocation->offset;
+        u8* patch = (u8*)address + section_offsets[relocation->section] + relocation->offset;
         if (symbol->section >= object->section_count)
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
@@ -6064,6 +6154,17 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             }
             u32 instruction = 0x94000000 | ((u32)words & 0x03ffffff);
             memcpy(patch, &instruction, sizeof(instruction));
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+        {
+            s64 displacement = target - patch + relocation->addend;
+            if (displacement < INT32_MIN || displacement > INT32_MAX)
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            s32 value = (s32)displacement;
+            memcpy(patch, &value, sizeof(value));
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {

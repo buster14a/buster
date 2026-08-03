@@ -1465,20 +1465,27 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, found_aarch64_call_relocation);
     BUSTER_TEST(arguments, found_aarch64_absolute_relocation);
-    for (u32 object_format_index = 0; object_format_index < BUSTER_ARRAY_LENGTH(object_formats); object_format_index += 1)
-    {
-        ObjectArtifact artifact = object_write(arguments->arena, &aapcs64_object, object_formats[object_format_index]);
-        BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
-        BUSTER_TEST(arguments, artifact.bytes.length > aapcs64_abi_module.code.length);
-    }
+    ObjectArtifact aapcs64_artifact = object_write(arguments->arena, &aapcs64_object, OBJECT_FORMAT_ELF64);
+    BUSTER_TEST(arguments, aapcs64_artifact.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, aapcs64_artifact.bytes.length > aapcs64_abi_module.code.length);
     Target darwin_target = aarch64_target;
     darwin_target.os = OPERATING_SYSTEM_MACOS;
     CodegenModule darwin_abi_module = codegen_generate_module(arguments->arena, &analysis, &module, darwin_target, (CodegenModuleOptions){0});
     BUSTER_TEST(arguments, darwin_abi_module.error == CODEGEN_ERROR_NONE);
+    ObjectFile darwin_aarch64_object = object_from_codegen_module(arguments->arena, &analysis, &darwin_abi_module, darwin_target);
+    BUSTER_TEST(arguments, darwin_aarch64_object.error == OBJECT_ERROR_NONE);
+    ObjectArtifact darwin_aarch64_artifact = object_write(arguments->arena, &darwin_aarch64_object, OBJECT_FORMAT_MACH_O64);
+    BUSTER_TEST(arguments, darwin_aarch64_artifact.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, darwin_aarch64_artifact.bytes.length > darwin_abi_module.code.length);
     Target windows_aarch64_target = aarch64_target;
     windows_aarch64_target.os = OPERATING_SYSTEM_WINDOWS;
     CodegenModule windows_aarch64_abi_module = codegen_generate_module(arguments->arena, &analysis, &module, windows_aarch64_target, (CodegenModuleOptions){0});
     BUSTER_TEST(arguments, windows_aarch64_abi_module.error == CODEGEN_ERROR_NONE);
+    ObjectFile windows_aarch64_object = object_from_codegen_module(arguments->arena, &analysis, &windows_aarch64_abi_module, windows_aarch64_target);
+    BUSTER_TEST(arguments, windows_aarch64_object.error == OBJECT_ERROR_NONE);
+    ObjectArtifact windows_aarch64_artifact = object_write(arguments->arena, &windows_aarch64_object, OBJECT_FORMAT_COFF);
+    BUSTER_TEST(arguments, windows_aarch64_artifact.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, windows_aarch64_artifact.bytes.length > windows_aarch64_abi_module.code.length);
     AnalysisEntity* caller_entity = codegen_test_entity_find(&analysis, S8("call_chain"));
     BUSTER_TEST(arguments, caller_entity != 0);
     AnalysisEntity* call_many_entity = codegen_test_entity_find(&analysis, S8("call_many"));

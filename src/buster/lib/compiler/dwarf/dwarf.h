@@ -6,6 +6,7 @@
 #include <buster/lib/target.h>
 
 typedef struct DebugModel DebugModel;
+typedef struct CodegenFunctionDescriptor CodegenFunctionDescriptor;
 
 typedef enum DwarfSectionKind
 {
@@ -83,4 +84,32 @@ struct DwarfResult
     u8 reserved[3];
 };
 
+typedef struct DwarfCfiRelocation DwarfCfiRelocation;
+struct DwarfCfiRelocation
+{
+    u64 offset;
+    u32 function;
+    u32 reserved;
+};
+
+typedef struct DwarfCfiInput DwarfCfiInput;
+struct DwarfCfiInput
+{
+    CodegenFunctionDescriptor* functions;
+    Target target;
+    u32 function_count;
+    u32 reserved;
+};
+
+typedef struct DwarfCfiResult DwarfCfiResult;
+struct DwarfCfiResult
+{
+    ByteSlice bytes;
+    DwarfCfiRelocation* relocations;
+    u32 relocation_count;
+    bool valid;
+    u8 reserved[3];
+};
+
 BUSTER_F_DECL DwarfResult dwarf_build(Arena* arena, DwarfInput input);
+BUSTER_F_DECL DwarfCfiResult dwarf_cfi_build(Arena* arena, DwarfCfiInput input);

@@ -417,11 +417,14 @@ has hard design constraints:
   `.debug_info`/`.debug_abbrev`/`.debug_line`/`.debug_str` plus
   `.debug_loc`/`.debug_ranges`, with relocations against local text and
   debug-base symbols, so 32-bit cross-section offsets survive object
-  concatenation. ELF executable writers always append a coherent section
-  header table for loaded code/data, BSS, TLS, loader and dynamic-linking
-  metadata, debug data, and the section-name string table, including for
-  `-g0` images. DWARF relocations are resolved statically before the non-loaded
-  debug payload is appended. Mach-O
+  concatenation. ELF objects also emit `.eh_frame` independently of source
+  debug information and preserve its x86-64 PC-relative and AArch64 PREL32
+  relocations through object reading and merging. ELF executable writers
+  resolve those relocations into the loaded unwind section and always append a
+  coherent section header table for loaded code/data, BSS, TLS, loader and
+  dynamic-linking metadata, debug data, and the section-name string table,
+  including for `-g0` images. DWARF relocations are resolved statically before
+  the non-loaded debug payload is appended. Mach-O
   executables carry the same six sections in a read-only, file-backed
   `__DWARF` segment (each section is flagged `S_ATTR_DEBUG`) placed before
   `__LINKEDIT`; its virtual size is page-rounded to satisfy dyld while the
@@ -536,7 +539,7 @@ Compiler (`src/buster/lib/compiler/`):
 | `ir/ir.{c,h}` | Buster semantic-to-IR lowering, IR validation, and printing. Fixture-wide and structural tests live in `src/buster/tests/compiler/ir/ir_test.c`. |
 | `ir/interpreter.{c,h}`, `ir/interpreter_internal.h` | Bounded, explicit-stack runtime IR interpreter and its private test seam/types. Tests live in `interpreter_test.{c,h}`. |
 | `debug/debug.{c,h}` | Target-neutral debug type, scope, variable, inline-site, source, and location model built from canonical IR or Buster analysis. |
-| `dwarf/dwarf.{c,h}` | DWARF 4 emitter for the neutral debug model plus the legacy `DwarfFunction`/`DwarfLineEntry` descriptors also consumed by CodeView. Produces debug section blobs and relocations. |
+| `dwarf/dwarf.{c,h}` | DWARF 4 source-debug and call-frame-information emitter. Produces debug sections plus target-neutral `.eh_frame` bytes and relocations from codegen function descriptors. |
 | `codeview/codeview.{c,h}` | CodeView C13 emitter for Windows targets: `.debug$S` symbol/line/checksum/string subsections and `.debug$T`, with per-function `SECREL32`/`SECTION` relocation slots. |
 | `pdb/pdb.{c,h}` | PDB writer: MSF container plus the info, TPI, DBI, IPI, globals, publics, section-header, module and `/names` streams. Repackages CodeView modules and remaps checksum entries onto the PDB string table. |
 | `object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers/readers; assembly printing; in-memory object linking. |

@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
+#include <buster/lib/compiler/codegen/codegen.h>
 
 
 BUSTER_GLOBAL_LOCAL bool dwarf_test_read_uleb128(ByteSlice bytes, u64* offset, u64* value)
@@ -444,5 +445,101 @@ BUSTER_TEST_F_DECL UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                                                                     .language = 0x000c,
                                                                 });
     BUSTER_TEST(arguments, globals_built.valid && globals_built.sections[DWARF_SECTION_INFO].length > 16);
+
+    CodegenUnwindAction x64_actions[] = {
+        {.code_offset = 1, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},
+        {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 5},
+        {.code_offset = 11, .value = 32, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+    };
+    CodegenFunctionDescriptor x64_cfi_function = {
+        .unwind_actions = x64_actions,
+        .code_size = 32,
+        .prolog_size = 11,
+        .unwind_action_count = BUSTER_ARRAY_LENGTH(x64_actions),
+    };
+    DwarfCfiResult x64_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                                   .functions = &x64_cfi_function,
+                                                                   .target = {.cpu_arch = CPU_ARCH_X86_64},
+                                                                   .function_count = 1,
+                                                               });
+    BUSTER_TEST(arguments, x64_cfi.valid);
+    BUSTER_TEST(arguments, x64_cfi.bytes.length >= 40);
+    BUSTER_TEST(arguments, x64_cfi.relocation_count == 1);
+    if (x64_cfi.valid && x64_cfi.bytes.length >= 12 && x64_cfi.relocation_count == 1)
+    {
+        BUSTER_TEST(arguments, x64_cfi.bytes.pointer[8] == 1);
+        BUSTER_TEST(arguments, x64_cfi.bytes.pointer[9] == 'z' && x64_cfi.bytes.pointer[10] == 'R' && x64_cfi.bytes.pointer[11] == 0);
+        BUSTER_TEST(arguments, x64_cfi.relocations[0].offset + 4 <= x64_cfi.bytes.length);
+        u32 initial_location = UINT32_MAX;
+        memcpy(&initial_location, x64_cfi.bytes.pointer + x64_cfi.relocations[0].offset, sizeof(initial_location));
+        BUSTER_TEST(arguments, initial_location == 0);
+    }
+
+    CodegenUnwindAction a64_actions[] = {
+        {.code_offset = 4, .value = 16, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 29},
+        {.code_offset = 4, .value = 8, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 30},
+        {.code_offset = 8, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 29},
+        {.code_offset = 12, .value = 32, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 16, .value = 32, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 28},
+    };
+    CodegenFunctionDescriptor a64_cfi_function = {
+        .unwind_actions = a64_actions,
+        .code_size = 64,
+        .prolog_size = 16,
+        .unwind_action_count = BUSTER_ARRAY_LENGTH(a64_actions),
+    };
+    DwarfCfiResult a64_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                                   .functions = &a64_cfi_function,
+                                                                   .target = {.cpu_arch = CPU_ARCH_AARCH64},
+                                                                   .function_count = 1,
+                                                               });
+    BUSTER_TEST(arguments, a64_cfi.valid);
+    BUSTER_TEST(arguments, a64_cfi.bytes.length >= 40);
+    BUSTER_TEST(arguments, a64_cfi.relocation_count == 1);
+
+    CodegenUnwindAction invalid_cfi_action = {
+        .code_offset = 4,
+        .value = 24,
+        .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER,
+        .register_index = 30,
+    };
+    CodegenFunctionDescriptor invalid_cfi_function = {
+        .unwind_actions = &invalid_cfi_action,
+        .code_size = 8,
+        .prolog_size = 4,
+        .unwind_action_count = 1,
+    };
+    DwarfCfiResult invalid_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                                      .functions = &invalid_cfi_function,
+                                                                      .target = {.cpu_arch = CPU_ARCH_AARCH64},
+                                                                      .function_count = 1,
+                                                                  });
+    BUSTER_TEST(arguments, !invalid_cfi.valid);
+
+    invalid_cfi_function.prolog_size = invalid_cfi_function.code_size + 1;
+    invalid_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                        .functions = &invalid_cfi_function,
+                                                        .target = {.cpu_arch = CPU_ARCH_AARCH64},
+                                                        .function_count = 1,
+                                                    });
+    BUSTER_TEST(arguments, !invalid_cfi.valid);
+
+    CodegenUnwindAction unaligned_x64_actions[] = {
+        {.code_offset = 1, .value = 4, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 2, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},
+    };
+    CodegenFunctionDescriptor unaligned_x64_function = {
+        .unwind_actions = unaligned_x64_actions,
+        .code_size = 8,
+        .prolog_size = 2,
+        .unwind_action_count = BUSTER_ARRAY_LENGTH(unaligned_x64_actions),
+    };
+    invalid_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                        .functions = &unaligned_x64_function,
+                                                        .target = {.cpu_arch = CPU_ARCH_X86_64},
+                                                        .function_count = 1,
+                                                    });
+    BUSTER_TEST(arguments, !invalid_cfi.valid);
     return result;
 }

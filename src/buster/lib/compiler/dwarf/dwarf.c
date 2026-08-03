@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/dwarf/dwarf.h>
+#include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/string.h>
@@ -200,6 +201,285 @@ BUSTER_GLOBAL_LOCAL void dwarf_write_u32_at(DwarfBuffer* buffer, u64 offset, u32
         return;
     }
     memcpy(buffer->bytes + offset, &value, sizeof(value));
+}
+
+BUSTER_GLOBAL_LOCAL void dwarf_cfi_emit_advance(DwarfBuffer* buffer, u32 amount)
+{
+    if (!amount)
+    {
+        return;
+    }
+    if (amount <= 0x3f)
+    {
+        dwarf_emit_u8(buffer, (u8)(0x40 | amount));
+    }
+    else if (amount <= UINT8_MAX)
+    {
+        dwarf_emit_u8(buffer, 0x02);
+        dwarf_emit_u8(buffer, (u8)amount);
+    }
+    else if (amount <= UINT16_MAX)
+    {
+        dwarf_emit_u8(buffer, 0x03);
+        dwarf_emit_u16(buffer, (u16)amount);
+    }
+    else
+    {
+        dwarf_emit_u8(buffer, 0x04);
+        dwarf_emit_u32(buffer, amount);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void dwarf_cfi_emit_register_offset(DwarfBuffer* buffer, u32 dwarf_register, u64 factored_offset)
+{
+    if (dwarf_register <= 0x3f)
+    {
+        dwarf_emit_u8(buffer, (u8)(0x80 | dwarf_register));
+    }
+    else
+    {
+        dwarf_emit_u8(buffer, 0x05);
+        dwarf_emit_uleb128(buffer, dwarf_register);
+    }
+    dwarf_emit_uleb128(buffer, factored_offset);
+}
+
+BUSTER_GLOBAL_LOCAL u32 dwarf_cfi_register(Target target, u8 codegen_register, bool* valid)
+{
+    if (target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        if (codegen_register <= 31)
+        {
+            return codegen_register;
+        }
+    }
+    else if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        static u8 const dwarf_registers[] = {
+            0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11,
+        };
+        if (codegen_register < BUSTER_ARRAY_LENGTH(dwarf_registers))
+        {
+            return dwarf_registers[codegen_register];
+        }
+    }
+    *valid = false;
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool dwarf_cfi_function_valid(CodegenFunctionDescriptor* function)
+{
+    if (function->prolog_size > function->code_size || (function->unwind_action_count && !function->unwind_actions))
+    {
+        return false;
+    }
+    u32 previous_offset = 0;
+    for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
+    {
+        CodegenUnwindAction* action = function->unwind_actions + action_index;
+        if (action->kind >= CODEGEN_UNWIND_ACTION_COUNT || action->code_offset < previous_offset || action->code_offset > function->prolog_size ||
+            (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK && !action->value))
+        {
+            return false;
+        }
+        previous_offset = action->code_offset;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool dwarf_cfi_emit_fde_actions(DwarfBuffer* buffer, Target target, CodegenFunctionDescriptor* function)
+{
+    u64 entry_cfa_offset = target.cpu_arch == CPU_ARCH_X86_64 ? 8 : 0;
+    u64 stack_depth = 0;
+    u32 stack_register = target.cpu_arch == CPU_ARCH_X86_64 ? 7 : 31;
+    u32 current_offset = 0;
+    bool cfa_uses_stack = true;
+    bool valid = true;
+    for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
+    {
+        CodegenUnwindAction* action = function->unwind_actions + action_index;
+        if (action->code_offset < current_offset)
+        {
+            return false;
+        }
+        dwarf_cfi_emit_advance(buffer, action->code_offset - current_offset);
+        current_offset = action->code_offset;
+        if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
+        {
+            if (stack_depth > UINT64_MAX - 8)
+            {
+                return false;
+            }
+            stack_depth += 8;
+            if (cfa_uses_stack)
+            {
+                dwarf_emit_u8(buffer, 0x0e);
+                dwarf_emit_uleb128(buffer, entry_cfa_offset + stack_depth);
+            }
+            u64 cfa_distance = entry_cfa_offset + stack_depth;
+            u32 dwarf_register = dwarf_cfi_register(target, action->register_index, &valid);
+            if (!valid || cfa_distance % 8)
+            {
+                return false;
+            }
+            dwarf_cfi_emit_register_offset(buffer, dwarf_register, cfa_distance / 8);
+        }
+        else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
+        {
+            if (stack_depth > UINT64_MAX - action->value)
+            {
+                return false;
+            }
+            stack_depth += action->value;
+            if (cfa_uses_stack)
+            {
+                dwarf_emit_u8(buffer, 0x0e);
+                dwarf_emit_uleb128(buffer, entry_cfa_offset + stack_depth);
+            }
+        }
+        else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+        {
+            u64 cfa_distance = entry_cfa_offset + stack_depth;
+            if (action->value > cfa_distance || (cfa_distance - action->value) % 8)
+            {
+                return false;
+            }
+            u32 dwarf_register = dwarf_cfi_register(target, action->register_index, &valid);
+            if (!valid)
+            {
+                return false;
+            }
+            dwarf_cfi_emit_register_offset(buffer, dwarf_register, (cfa_distance - action->value) / 8);
+        }
+        else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
+        {
+            u64 cfa_distance = entry_cfa_offset + stack_depth;
+            if (action->value > cfa_distance)
+            {
+                return false;
+            }
+            u32 dwarf_register = dwarf_cfi_register(target, action->register_index, &valid);
+            if (!valid)
+            {
+                return false;
+            }
+            dwarf_emit_u8(buffer, 0x0c);
+            dwarf_emit_uleb128(buffer, dwarf_register);
+            dwarf_emit_uleb128(buffer, cfa_distance - action->value);
+            cfa_uses_stack = dwarf_register == stack_register;
+        }
+        else
+        {
+            return false;
+        }
+        if (!valid || buffer->error)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+DwarfCfiResult dwarf_cfi_build(Arena* arena, DwarfCfiInput input)
+{
+    DwarfCfiResult result = {0};
+    if (!arena || (input.function_count && !input.functions) ||
+        (input.target.cpu_arch != CPU_ARCH_X86_64 && input.target.cpu_arch != CPU_ARCH_AARCH64))
+    {
+        return result;
+    }
+    u64 capacity = 64;
+    for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
+    {
+        CodegenFunctionDescriptor* function = input.functions + function_index;
+        u64 action_bytes = (u64)function->unwind_action_count * 24;
+        if (function->code_size > INT32_MAX || action_bytes > UINT64_MAX - 64 || capacity > UINT64_MAX - 64 - action_bytes ||
+            !dwarf_cfi_function_valid(function))
+        {
+            return result;
+        }
+        capacity += 64 + action_bytes;
+    }
+    DwarfBuffer buffer = {
+        .bytes = arena_allocate(arena, u8, capacity),
+        .capacity = capacity,
+    };
+    result.relocations = arena_allocate(arena, DwarfCfiRelocation, input.function_count);
+
+    u64 cie_start = buffer.count;
+    dwarf_emit_u32(&buffer, 0);
+    dwarf_emit_u32(&buffer, 0);
+    dwarf_emit_u8(&buffer, 1);
+    dwarf_emit_u8(&buffer, 'z');
+    dwarf_emit_u8(&buffer, 'R');
+    dwarf_emit_u8(&buffer, 0);
+    dwarf_emit_uleb128(&buffer, 1);
+    dwarf_emit_sleb128(&buffer, -8);
+    dwarf_emit_uleb128(&buffer, input.target.cpu_arch == CPU_ARCH_X86_64 ? 16 : 30);
+    dwarf_emit_uleb128(&buffer, 1);
+    dwarf_emit_u8(&buffer, 0x1b);
+    dwarf_emit_u8(&buffer, 0x0c);
+    dwarf_emit_uleb128(&buffer, input.target.cpu_arch == CPU_ARCH_X86_64 ? 7 : 31);
+    dwarf_emit_uleb128(&buffer, input.target.cpu_arch == CPU_ARCH_X86_64 ? 8 : 0);
+    if (input.target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        dwarf_cfi_emit_register_offset(&buffer, 16, 1);
+    }
+    while (buffer.count % 8)
+    {
+        dwarf_emit_u8(&buffer, 0);
+    }
+    if (buffer.count - cie_start - 4 > UINT32_MAX)
+    {
+        buffer.error = true;
+    }
+    else
+    {
+        dwarf_write_u32_at(&buffer, cie_start, (u32)(buffer.count - cie_start - 4));
+    }
+
+    for (u32 function_index = 0; function_index < input.function_count && !buffer.error; function_index += 1)
+    {
+        CodegenFunctionDescriptor* function = input.functions + function_index;
+        u64 fde_start = buffer.count;
+        dwarf_emit_u32(&buffer, 0);
+        u64 cie_pointer_offset = buffer.count;
+        u64 cie_distance = cie_pointer_offset - cie_start;
+        if (cie_distance > UINT32_MAX)
+        {
+            buffer.error = true;
+            break;
+        }
+        dwarf_emit_u32(&buffer, (u32)cie_distance);
+        result.relocations[result.relocation_count++] = (DwarfCfiRelocation){
+            .offset = buffer.count,
+            .function = function_index,
+        };
+        dwarf_emit_u32(&buffer, 0);
+        dwarf_emit_u32(&buffer, function->code_size);
+        dwarf_emit_uleb128(&buffer, 0);
+        if (!dwarf_cfi_emit_fde_actions(&buffer, input.target, function))
+        {
+            buffer.error = true;
+            break;
+        }
+        while (buffer.count % 8)
+        {
+            dwarf_emit_u8(&buffer, 0);
+        }
+        if (buffer.count - fde_start - 4 > UINT32_MAX)
+        {
+            buffer.error = true;
+            break;
+        }
+        dwarf_write_u32_at(&buffer, fde_start, (u32)(buffer.count - fde_start - 4));
+    }
+    result.bytes = (ByteSlice){
+        .pointer = buffer.bytes,
+        .length = buffer.count,
+    };
+    result.valid = !buffer.error;
+    return result;
 }
 
 typedef struct DwarfStringTable DwarfStringTable;

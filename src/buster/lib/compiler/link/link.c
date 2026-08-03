@@ -23,6 +23,7 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_loaded_kinds[] = {
     OBJECT_SECTION_ZERO,
     OBJECT_SECTION_THREAD_LOCAL_DATA,
     OBJECT_SECTION_THREAD_LOCAL_ZERO,
+    OBJECT_SECTION_UNWIND,
 };
 
 #define BUSTER_LINK_ELF_SECTION_HEADER_SIZE 64
@@ -123,6 +124,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     section_alignments[OBJECT_SECTION_ZERO] = 1;
     section_alignments[OBJECT_SECTION_THREAD_LOCAL_DATA] = 1;
     section_alignments[OBJECT_SECTION_THREAD_LOCAL_ZERO] = 1;
+    section_alignments[OBJECT_SECTION_UNWIND] = 1;
     u64 total_symbols = 0;
     u64 total_relocations = 0;
     u64 total_debug_modules = 0;
@@ -834,7 +836,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + sizeof(entry_stub), object->sections[OBJECT_SECTION_TEXT].alignment);
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length,
                                                                    object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
-    u64 read_only_end = section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length;
+    section_offsets[OBJECT_SECTION_UNWIND] =
+        align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length,
+                      object->sections[OBJECT_SECTION_UNWIND].alignment);
+    u64 read_only_end = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
     section_offsets[OBJECT_SECTION_DATA] = align_forward(read_only_end, ELF_PAGE_SIZE);
     u64 file_size = object->sections[OBJECT_SECTION_DATA].data.length ? section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length
                                                                       : read_only_end;
@@ -1045,7 +1050,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
     u64 plt_size = (u64)(import_count + 1) * ELF_PLT_ENTRY_SIZE;
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(plt_offset + plt_size, object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
-    u64 interpreter_offset = section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length;
+    section_offsets[OBJECT_SECTION_UNWIND] =
+        align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length,
+                      object->sections[OBJECT_SECTION_UNWIND].alignment);
+    u64 interpreter_offset = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
     u64 interpreter_size = sizeof(interpreter);
     if (options.dynamic_library_count == UINT32_MAX)
     {
@@ -1430,7 +1438,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + sizeof(entry_stub), object->sections[OBJECT_SECTION_TEXT].alignment);
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length,
                                                                    object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
-    u64 read_only_end = section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length;
+    section_offsets[OBJECT_SECTION_UNWIND] =
+        align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length,
+                      object->sections[OBJECT_SECTION_UNWIND].alignment);
+    u64 read_only_end = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
     section_offsets[OBJECT_SECTION_DATA] = align_forward(read_only_end, ELF_PAGE_SIZE);
     u64 file_size = object->sections[OBJECT_SECTION_DATA].data.length ? section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length
                                                                       : read_only_end;
@@ -1511,6 +1522,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
                 return result;
             }
             link_write_u32(bytes, output_offset, 0x94000000 | ((u32)words & 0x03ffffff));
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+        {
+            s64 value = (s64)symbol_address + relocation->addend - (s64)place_address;
+            if (value < INT32_MIN || value > INT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)(s32)value);
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
@@ -1606,6 +1627,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     {
         converted_relocations[index] = object->relocations[index];
         if (converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_CALL26)
+        {
+            converted_relocations[index].kind = OBJECT_RELOCATION_X86_64_PC32;
+        }
+        else if (converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
             converted_relocations[index].kind = OBJECT_RELOCATION_X86_64_PC32;
         }

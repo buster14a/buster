@@ -393,15 +393,58 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
                                                             });
     BUSTER_TEST(arguments, separate_object.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, separate_object.symbol_count == 2);
+    BUSTER_TEST(arguments, separate_object.sections[OBJECT_SECTION_UNWIND].data.length > 0);
     bool separate_symbol_is_undefined = false;
     if (separate_object.symbols && separate_object.symbol_count >= 2)
     {
         separate_symbol_is_undefined = separate_object.symbols[1].section == OBJECT_SECTION_UNDEFINED;
     }
     BUSTER_TEST(arguments, separate_symbol_is_undefined);
-    BUSTER_TEST(arguments, separate_object.relocation_count == 1);
+    BUSTER_TEST(arguments, separate_object.relocation_count == 2);
+    bool separate_cfi_relocation = false;
+    for (u32 relocation_index = 0; relocation_index < separate_object.relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* candidate = separate_object.relocations + relocation_index;
+        separate_cfi_relocation |= candidate->section == OBJECT_SECTION_UNWIND && candidate->symbol == 0 &&
+                                   candidate->kind == OBJECT_RELOCATION_X86_64_PC32;
+    }
+    BUSTER_TEST(arguments, separate_cfi_relocation);
     ObjectArtifact separate_elf = object_write(arguments->arena, &separate_object, OBJECT_FORMAT_ELF64);
     BUSTER_TEST(arguments, separate_elf.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, object_bytes_contain(separate_elf.bytes, S8(".eh_frame")));
+    BUSTER_TEST(arguments, object_bytes_contain(separate_elf.bytes, S8(".rela.eh_frame")));
+    ObjectFile separate_roundtrip = object_read(arguments->arena, separate_elf.bytes, separate_object.target);
+    BUSTER_TEST(arguments, separate_roundtrip.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, separate_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length ==
+                               separate_object.sections[OBJECT_SECTION_UNWIND].data.length);
+    bool separate_roundtrip_cfi = false;
+    for (u32 relocation_index = 0; relocation_index < separate_roundtrip.relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* candidate = separate_roundtrip.relocations + relocation_index;
+        separate_roundtrip_cfi |= candidate->section == OBJECT_SECTION_UNWIND && candidate->kind == OBJECT_RELOCATION_X86_64_PC32;
+    }
+    BUSTER_TEST(arguments, separate_roundtrip_cfi);
+
+    CodegenModule a64_cfi_module = separate_module;
+    a64_cfi_module.relocations = 0;
+    a64_cfi_module.relocation_count = 0;
+    a64_cfi_module.abi = CODEGEN_ABI_AARCH64_AAPCS64;
+    ObjectFile a64_cfi_object = object_from_codegen_module(arguments->arena, &separate_analysis, &a64_cfi_module,
+                                                           (Target){
+                                                               .cpu_arch = CPU_ARCH_AARCH64,
+                                                               .os = OPERATING_SYSTEM_LINUX,
+                                                           });
+    BUSTER_TEST(arguments, a64_cfi_object.error == OBJECT_ERROR_NONE);
+    ObjectArtifact a64_cfi_elf = object_write(arguments->arena, &a64_cfi_object, OBJECT_FORMAT_ELF64);
+    BUSTER_TEST(arguments, a64_cfi_elf.error == OBJECT_ERROR_NONE);
+    ObjectFile a64_cfi_roundtrip = object_read(arguments->arena, a64_cfi_elf.bytes, a64_cfi_object.target);
+    BUSTER_TEST(arguments, a64_cfi_roundtrip.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, a64_cfi_roundtrip.relocation_count == 1);
+    if (a64_cfi_roundtrip.relocation_count == 1)
+    {
+        BUSTER_TEST(arguments, a64_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
+        BUSTER_TEST(arguments, a64_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
+    }
     CodegenFunctionDescriptor invalid_function = separate_function;
     invalid_function.prolog_size = invalid_function.code_size + 1;
     CodegenModule invalid_module = separate_module;

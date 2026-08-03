@@ -405,6 +405,64 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
         link_test_object_make(arguments->arena, target, answer_bytes, answer_symbols, BUSTER_ARRAY_LENGTH(answer_symbols), 0, 0),
         link_test_object_make(arguments->arena, target, main_bytes, main_symbols, BUSTER_ARRAY_LENGTH(main_symbols), &main_relocation, 1),
     };
+#if BUSTER_LINUX
+    CodegenUnwindAction main_unwind_actions[4] = {0};
+    u32 main_unwind_action_count = 0;
+#if BUSTER_CPU_ARCH_AARCH64
+    main_unwind_actions[0] = (CodegenUnwindAction){.code_offset = 4, .value = 16, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK};
+    main_unwind_actions[1] = (CodegenUnwindAction){.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 29};
+    main_unwind_actions[2] = (CodegenUnwindAction){.code_offset = 4, .value = 8, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 30};
+    main_unwind_actions[3] = (CodegenUnwindAction){.code_offset = 8, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 29};
+    main_unwind_action_count = BUSTER_ARRAY_LENGTH(main_unwind_actions);
+#endif
+    CodegenFunctionDescriptor answer_descriptor = {
+        .code_size = (u32)answer_bytes.length,
+    };
+    CodegenFunctionDescriptor main_descriptor = {
+        .unwind_actions = main_unwind_actions,
+        .code_size = (u32)main_bytes.length,
+        .prolog_size = main_unwind_action_count ? 8 : 0,
+        .unwind_action_count = main_unwind_action_count,
+    };
+    DwarfCfiResult answer_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                                      .functions = &answer_descriptor,
+                                                                      .target = target,
+                                                                      .function_count = 1,
+                                                                  });
+    DwarfCfiResult main_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                                    .functions = &main_descriptor,
+                                                                    .target = target,
+                                                                    .function_count = 1,
+                                                                });
+    BUSTER_TEST(arguments, answer_cfi.valid && answer_cfi.relocation_count == 1);
+    BUSTER_TEST(arguments, main_cfi.valid && main_cfi.relocation_count == 1);
+    ObjectRelocation answer_relocation = {
+        .offset = answer_cfi.relocations[0].offset,
+        .section = OBJECT_SECTION_UNWIND,
+        .symbol = 0,
+        .kind = target.cpu_arch == CPU_ARCH_X86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_PREL32,
+    };
+    ObjectRelocation main_relocations[] = {
+        main_relocation,
+        {
+            .offset = main_cfi.relocations[0].offset,
+            .section = OBJECT_SECTION_UNWIND,
+            .symbol = 0,
+            .kind = target.cpu_arch == CPU_ARCH_X86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_PREL32,
+        },
+    };
+    ObjectFile cfi_objects[] = {
+        link_test_object_make(arguments->arena, target, answer_bytes, answer_symbols, BUSTER_ARRAY_LENGTH(answer_symbols), &answer_relocation, 1),
+        link_test_object_make(arguments->arena, target, main_bytes, main_symbols, BUSTER_ARRAY_LENGTH(main_symbols), main_relocations,
+                              BUSTER_ARRAY_LENGTH(main_relocations)),
+    };
+    cfi_objects[0].sections[OBJECT_SECTION_UNWIND].data = answer_cfi.bytes;
+    cfi_objects[1].sections[OBJECT_SECTION_UNWIND].data = main_cfi.bytes;
+    LinkObjectResult cfi_linked = link_objects(arguments->arena, cfi_objects, BUSTER_ARRAY_LENGTH(cfi_objects), (LinkOptions){0});
+    BUSTER_TEST(arguments, cfi_linked.error == LINK_ERROR_NONE);
+    BUSTER_TEST(arguments, cfi_linked.object.relocation_count == 3);
+    BUSTER_TEST(arguments, cfi_linked.object.sections[OBJECT_SECTION_UNWIND].data.length == answer_cfi.bytes.length + main_cfi.bytes.length);
+#endif
     LinkObjectResult linked = link_objects(arguments->arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
     BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
     BUSTER_TEST(arguments, linked.object.symbol_count == 2);
@@ -1032,7 +1090,7 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
 #endif
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
     String8 native_output_path = link_test_temporary_executable_path(arguments->arena, S8("buster-native-link-test"), S8(""));
-    NativeExecutableLinkResult native_executable = link_native_executable(arguments->arena, &linked.object,
+    NativeExecutableLinkResult native_executable = link_native_executable(arguments->arena, &cfi_linked.object,
                                                                           (NativeExecutableLinkOptions){
                                                                               .output_path = native_output_path,
                                                                               .entry_symbol = S8("main"),
@@ -1041,6 +1099,36 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, native_executable.executable.length >= 4);
     if (native_executable.error == LINK_ERROR_NONE)
     {
+        u32 unwind_section_index = 0;
+        u64 unwind_section_header = 0;
+        u32 text_section_index = 0;
+        u64 text_section_header = 0;
+        bool unwind_section_found = link_test_elf_section_find(native_executable.executable, S8(".eh_frame"), &unwind_section_index, &unwind_section_header);
+        bool text_section_found = link_test_elf_section_find(native_executable.executable, S8(".text"), &text_section_index, &text_section_header);
+        BUSTER_TEST(arguments, unwind_section_found);
+        BUSTER_TEST(arguments, text_section_found);
+        if (unwind_section_found && text_section_found)
+        {
+            u64 unwind_flags = link_read_u64(native_executable.executable.pointer, unwind_section_header + 8);
+            u64 unwind_address = link_read_u64(native_executable.executable.pointer, unwind_section_header + 16);
+            u64 unwind_offset = link_read_u64(native_executable.executable.pointer, unwind_section_header + 24);
+            u64 unwind_size = link_read_u64(native_executable.executable.pointer, unwind_section_header + 32);
+            u64 text_address = link_read_u64(native_executable.executable.pointer, text_section_header + 16);
+            BUSTER_TEST(arguments, unwind_flags == 0x2);
+            BUSTER_TEST(arguments, unwind_size == cfi_linked.object.sections[OBJECT_SECTION_UNWIND].data.length);
+            if (unwind_offset + answer_cfi.relocations[0].offset + 4 <= native_executable.executable.length)
+            {
+                s32 displacement = 0;
+                memcpy(&displacement, native_executable.executable.pointer + unwind_offset + answer_cfi.relocations[0].offset, sizeof(displacement));
+                BUSTER_TEST(arguments,
+                            (s64)unwind_address + (s64)answer_cfi.relocations[0].offset + displacement ==
+                                (s64)text_address + (s64)cfi_linked.object.symbols[0].value);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, false);
+            }
+        }
         String8 run_arguments[] = {
             native_output_path,
         };
