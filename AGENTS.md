@@ -132,14 +132,15 @@ enabled.
   the hardcoded `parser_file_test_cases` list in
   `src/buster/lib/compiler/frontend/buster/parser.c` (covered by
   `parser_file_tests()`) **and** bump `PARSER_FILE_TEST_CASE_COUNT` in
-  `parser.h` to match — the header declares the list with that fixed size, so
-  forgetting it only fails the unity/Release build, not Debug. Valid fixtures
-  must also be appended to
-  `analysis_fixture_tests` in `analysis.c` with their exact semantic diagnostic
-  count and to `ir_fixture_tests` in `ir.c`; this keeps the complete frontend
-  pipeline covered. Invalid-syntax fixtures live in `tests/errors/` and use the
-  parser list with exact expected diagnostics plus an expected recovered AST
-  expression. Commented-out entries there are known-failing/WIP.
+  `parser.h` to match — a compile-time equality check beside the array catches
+  drift in every build. Valid fixtures must also be appended to
+  `analysis_fixture_tests` in
+  `src/buster/tests/compiler/frontend/buster/analysis_test.c` with their exact
+  semantic diagnostic count and to `ir_fixture_tests` in
+  `src/buster/tests/compiler/ir/ir_test.c`; this keeps the complete frontend
+  pipeline covered. Invalid-syntax fixtures live in `tests/errors/` and use
+  the parser list with exact expected diagnostics plus an expected recovered
+  AST expression. Commented-out entries there are known-failing/WIP.
 - CI (`.forgejo/workflows/ci.yml`, Forgejo not GitHub) runs
   `./build.sh test_all_combinations_ci` on Linux/macOS/Windows plus
   Debug+Release on an Android emulator and the iOS simulator, on every push.
@@ -484,7 +485,7 @@ Top level:
 | `src/buster/apps/` | Application entrypoints and standalone tools. |
 | `src/buster/lib/` | Reusable runtime, UI, platform, compiler, and rendering code. |
 | `src/buster/tests/` | Include-only test harness and module test pairs. |
-| `tests/` | Runtime compiler fixture corpus: `.bbb` programs, C fixtures, and `assembly.S` for the asm frontend. Test implementations themselves live under `src/buster/tests/`. |
+| `tests/` | Runtime compiler fixture corpus: `.bbb` language programs and C frontend/driver fixtures. Test implementations themselves live under `src/buster/tests/`. |
 | `android/`, `ios/` | Manifest/plist plus CI scripts to package, install, and run the on-device/simulator test suite. |
 | `.forgejo/workflows/ci.yml` | CI pipeline, including the per-platform `Perf` steps. |
 | `.forgejo/scripts/` | `perf_step.sh` (clean Debug/Release `ide` builds + separately run `bench_all`), `record_perf.sh` (perf-history compare/append/push — see Performance tracking above). |
@@ -500,6 +501,7 @@ Top level:
 | `apple_runtime.h` | Objective-C runtime includes and ABI-compatible scalar/geometry types shared by Apple windowing and Metal. |
 | `os.{c,h}`, `entry_point.{c,h}` | OS abstraction (processes, virtual memory) and per-platform entry glue (`main`, NativeActivity, UIKit). |
 | `arena.{c,h}`, `string.{c,h}`, `integer.{c,h}`, `float.{c,h}`, `hash.{c,h}`, `simd.{c,h}`, `file.{c,h}`, `time.{c,h}` | Arena allocator; `String8` operations and `string_print` (`{S8}` placeholders); numeric parse/format; hashing; SIMD; file IO; clocks. |
+| `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/data-layout descriptions, CPU models/features, and per-architecture instruction encoders. |
 
 UI / graphics:
 
@@ -509,26 +511,26 @@ UI / graphics:
 | `window.{c,h}`, `window/internal.h`, `window/*.c` | Shared window/event front door, private backend contract, and xcb/xkbcommon, AppKit/UIKit, Win32, Android, and null backends. |
 | `rendering.{c,h}`, `rendering/internal.h`, `rendering/*.c` | Shared CPU-side renderer front door, private backend contract, and Vulkan, Metal, D3D12, and null backends selected at compile time. |
 | `truetype.{c,h}`, `font_provider.{c,h}` | From-scratch TrueType rasterizer; system font discovery (fontconfig on Linux). |
-| `shaders/` | `rect.slang` (Slang source, compiled by `slangc`), `rect.vert`/`.frag` (GLSL fallback), and their shared `rect_shared.glsl` declarations. Android uses an SSBO vertex path (`BUSTER_VULKAN_VERTEX_SSBO`, Adreno workaround). |
+| `shaders/` | `rect.slang` is the shared Slang source for SPIR-V, Metal, and HLSL outputs; `rect_shared.h` contains declarations shared with C. Android selects its SSBO vertex path with `BUSTER_VULKAN_VERTEX_SSBO` (Adreno workaround). Generated `rect.vert.*`/`rect.frag.*` files live under `build/shaders/`, never in the source directory. |
 
 Compiler (`src/buster/lib/compiler/`):
 
 | Path | Contents |
 |---|---|
-| `compiler/frontend/buster/parser.{c,h}` | Lexer + state-machine parser; owns `parser_file_tests()` and the `.bbb` test list. `main.c` there is a scratch main, not built. |
-| `compiler/frontend/asm/asm_main.c` | Assembly frontend prototype; not wired into the build. |
-| `compiler/frontend/c/c.{c,h}` | GNU C frontend in progress: source translation, preprocessing tokens/macros/includes/conditionals, non-recursive external-declaration parsing with strong IDs, flattened scalar/pointer/array/function/aggregate types, nested lexical scopes with entity-based identifier binding and canonical redeclarations, and target-aware shared-IR lowering for scalar/pointer/aggregate parameters, locals, static-storage objects, explicit conversions, array decay/indexing, chained field access, control flow, short-circuit and conditional expressions, direct calls, and constant aggregate initialization. |
-| `compiler/frontend/buster/analysis.{c,h}` | Semantic analysis. |
-| `compiler/ir/ir.{c,h}` | Typed control-flow IR, semantic lowering, validation, printing, and fixture-wide IR tests. |
-| `compiler/dwarf/dwarf.{c,h}` | DWARF 4 emitter: one compile unit with subprogram DIEs plus a single-sequence line program, expressed as debug section blobs with text-base address slots and cross-section 32-bit offset relocations. Owns the neutral `DwarfFunction`/`DwarfLineEntry` descriptors both debug backends consume. |
-| `compiler/codeview/codeview.{c,h}` | CodeView C13 emitter for Windows targets: `.debug$S` symbol/line/checksum/string subsections and `.debug$T`, with per-function `SECREL32`/`SECTION` relocation slots. |
-| `compiler/pdb/pdb.{c,h}` | PDB writer: MSF container plus the info, TPI, DBI, IPI, globals, publics, section-header, module and `/names` streams. Repackages a CodeView blob into the module stream and remaps checksum entries onto the PDB string table. |
-| `compiler/object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers; in-memory object linking. |
-| `compiler/link/link.{c,h}` | Multi-object section merging and symbol resolution; from-scratch libc-backed ELF64, PE32+, and Mach-O executable writers. |
-| `compiler/driver/driver.{c,h}` | End-to-end source-to-object compilation and libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported target, and multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset. |
-| `compiler/codegen/codegen.{c,h}`, `compiler/codegen/codegen_internal.h` | Direct-IR ABI classification, native instruction emission, executable-memory support, and the private codegen test seam/types. Tests live in `codegen_test.{c,h}`. |
-| `compiler/ir/interpreter.{c,h}`, `compiler/ir/interpreter_internal.h` | Bounded, explicit-stack runtime IR interpreter and its private test seam/types. Tests live in `interpreter_test.{c,h}`. |
-| `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/ABI descriptions and per-arch instruction encoders. |
+| `frontend/buster/parser.{c,h}` | Lexer + explicit-stack parser; owns the `.bbb` fixture array and parser benchmarks. `parser_file_tests()` lives in `src/buster/tests/compiler/frontend/buster/parser_test.c`. |
+| `frontend/c/c.{c,h}` | GNU C frontend in progress: source translation, preprocessing tokens/macros/includes/conditionals, non-recursive external-declaration parsing with strong IDs, flattened scalar/pointer/array/function/aggregate types, nested lexical scopes with entity-based identifier binding and canonical redeclarations, and target-aware shared-IR lowering for scalar/pointer/aggregate parameters, locals, static-storage objects, explicit conversions, array decay/indexing, chained field access, control flow, short-circuit and conditional expressions, direct calls, and constant aggregate initialization. |
+| `frontend/buster/analysis.{c,h}` | Buster semantic indexing, interface resolution, body analysis, layouts, ABI classification, specialization, and dependency scheduling. Fixture-wide tests live in `src/buster/tests/compiler/frontend/buster/analysis_test.c`. |
+| `ir/model.h` | Format-neutral canonical typed IR data model shared by frontends, codegen, debug metadata, objects, and the interpreter. |
+| `ir/ir.{c,h}` | Buster semantic-to-IR lowering, IR validation, and printing. Fixture-wide and structural tests live in `src/buster/tests/compiler/ir/ir_test.c`. |
+| `ir/interpreter.{c,h}`, `ir/interpreter_internal.h` | Bounded, explicit-stack runtime IR interpreter and its private test seam/types. Tests live in `interpreter_test.{c,h}`. |
+| `debug/debug.{c,h}` | Target-neutral debug type, scope, variable, inline-site, source, and location model built from canonical IR or Buster analysis. |
+| `dwarf/dwarf.{c,h}` | DWARF 4 emitter for the neutral debug model plus the legacy `DwarfFunction`/`DwarfLineEntry` descriptors also consumed by CodeView. Produces debug section blobs and relocations. |
+| `codeview/codeview.{c,h}` | CodeView C13 emitter for Windows targets: `.debug$S` symbol/line/checksum/string subsections and `.debug$T`, with per-function `SECREL32`/`SECTION` relocation slots. |
+| `pdb/pdb.{c,h}` | PDB writer: MSF container plus the info, TPI, DBI, IPI, globals, publics, section-header, module and `/names` streams. Repackages CodeView modules and remaps checksum entries onto the PDB string table. |
+| `object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers/readers; assembly printing; in-memory object linking. |
+| `link/link.{c,h}` | Multi-object section merging and symbol resolution; from-scratch libc-backed ELF64, PE32+, and Mach-O executable writers. |
+| `driver/driver.{c,h}` | End-to-end source-to-object compilation and libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported target, and multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset. |
+| `codegen/codegen.{c,h}`, `codegen/codegen_internal.h` | Direct typed-IR ABI translation, conservative register allocation, native x86-64/AArch64 emission, executable-memory support, and private codegen test seams. Tests live in `codegen_test.{c,h}`. |
 
 Applications and standalone tools:
 
