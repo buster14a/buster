@@ -292,6 +292,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
         result = entry_point();
     }
 
+#if !BUSTER_IOS && !BUSTER_ANDROID
+    // Mobile entry points terminate or return through their platform-owned
+    // process lifecycle after this function. In particular, the iOS worker
+    // still emits its CI result marker, so it must retain the thread context.
     Arena* program_arena = program_state->arena;
     program_state->arena = 0;
     program_state->input = (ProgramInput){0};
@@ -314,6 +318,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     {
         WSACleanup();
     }
+#endif
 #endif
 
     return result;
