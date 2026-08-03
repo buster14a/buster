@@ -568,8 +568,6 @@ void android_main(struct android_app* app)
 }
 #endif
 #else
-#include <setjmp.h>
-
 // Some libc headers (glibc) wrap these in function-like macros; the
 // replacement definitions below need the plain names.
 #undef memset
@@ -718,14 +716,6 @@ BUSTER_EXPORT double frexp(double x, int* e)
     double result;
     memcpy(&result, &bits, sizeof(result));
     return result;
-}
-
-BUSTER_NORETURN BUSTER_EXPORT void longjmp(jmp_buf env, int val)
-{
-    // TODO:
-    BUSTER_UNUSED(env);
-    BUSTER_UNUSED(val);
-    BUSTER_TRAP();
 }
 
 BUSTER_EXPORT void* memchr(const void* s, int c, size_t n)
