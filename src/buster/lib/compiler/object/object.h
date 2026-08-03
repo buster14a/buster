@@ -44,6 +44,7 @@ typedef enum ObjectSectionKind
 BUSTER_F_DECL bool object_section_kind_is_debug(ObjectSectionKind kind);
 BUSTER_F_DECL String8 object_section_name_for_kind(ObjectSectionKind kind);
 BUSTER_F_DECL u32 object_section_default_alignment(ObjectSectionKind kind);
+BUSTER_TEST_F_DECL AnalysisEntity* object_entity_find(AnalysisResult* analysis, AnalysisEntityId entity);
 
 typedef enum ObjectSymbolKind
 {

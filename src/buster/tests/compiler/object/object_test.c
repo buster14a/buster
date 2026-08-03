@@ -20,6 +20,19 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
+    AnalysisResult missing_entities = {0};
+    missing_entities.module.id.value = 7;
+    missing_entities.module.entity_count = 1;
+    BUSTER_TEST(arguments, !object_entity_find(&missing_entities, (AnalysisEntityId){.module.value = 7}));
+    missing_entities.module.import_count = 1;
+    BUSTER_TEST(arguments, !object_entity_find(&missing_entities, (AnalysisEntityId){.module.value = 8}));
+    AnalysisImport missing_import_entities[] = {{0}};
+    AnalysisResult imported_missing_entities = {0};
+    imported_missing_entities.module.id.value = 8;
+    imported_missing_entities.module.entity_count = 1;
+    missing_import_entities[0].target = &imported_missing_entities;
+    missing_entities.module.imports = missing_import_entities;
+    BUSTER_TEST(arguments, !object_entity_find(&missing_entities, (AnalysisEntityId){.module.value = 8}));
     u8 x86_text[] = {
         0xe8, 0, 0, 0, 0, 0xc3, 0xb8, 42, 0, 0, 0, 0xc3,
     };

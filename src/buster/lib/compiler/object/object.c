@@ -4327,17 +4327,29 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL AnalysisEntity* object_entity_find(AnalysisResult* analysis, AnalysisEntityId entity)
+BUSTER_TEST_F_DECL AnalysisEntity* object_entity_find(AnalysisResult* analysis, AnalysisEntityId entity)
 {
-    if (entity.module.value == analysis->module.id.value && entity.index.value < analysis->module.entity_count)
+    if (entity.module.value == analysis->module.id.value)
     {
+        if (!analysis->module.entities || entity.index.value >= analysis->module.entity_count)
+        {
+            return 0;
+        }
         return analysis->module.entities + entity.index.value;
+    }
+    if (!analysis->module.imports)
+    {
+        return 0;
     }
     for (u32 import_index = 0; import_index < analysis->module.import_count; import_index += 1)
     {
         AnalysisResult* imported = analysis->module.imports[import_index].target;
-        if (imported && imported->module.id.value == entity.module.value && entity.index.value < imported->module.entity_count)
+        if (imported && imported->module.id.value == entity.module.value)
         {
+            if (!imported->module.entities || entity.index.value >= imported->module.entity_count)
+            {
+                return 0;
+            }
             return imported->module.entities + entity.index.value;
         }
     }
