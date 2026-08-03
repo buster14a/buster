@@ -13,6 +13,12 @@
 BUSTER_TEST_F_DECL UnitTestResult window_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+#if BUSTER_LINUX
+    BUSTER_TEST(arguments, wm_x11_utf8_result_length(-1, 64) == 0);
+    BUSTER_TEST(arguments, wm_x11_utf8_result_length(0, 64) == 0);
+    BUSTER_TEST(arguments, wm_x11_utf8_result_length(3, 64) == 3);
+    BUSTER_TEST(arguments, wm_x11_utf8_result_length(64, 64) == 0);
+#endif
 #if defined(_WIN32)
     struct WmWin32KeyTestCase
     {

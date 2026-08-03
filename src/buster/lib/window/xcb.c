@@ -1,5 +1,10 @@
 #include <buster/lib/window/internal.h>
 
+BUSTER_TEST_F_DECL u64 wm_x11_utf8_result_length(int result, u64 capacity)
+{
+    return result > 0 && (u64)result < capacity ? (u64)result : 0;
+}
+
 BUSTER_GLOBAL_LOCAL WmWindowHandle* wm_x11_window_from_xcb(WmHandle* handle, xcb_window_t window)
 {
     WmWindowHandle* result = 0;
@@ -1165,14 +1170,12 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                                 }
                             }
 
-                            if (composed_text_length < 0)
-                            {
-                                BUSTER_TODO();
-                            }
+                            // XKB reports conversion failures with a negative
+                            // result. Drop only the text event; callers still
+                            // receive the corresponding physical key event.
+                            u64 text_length = wm_x11_utf8_result_length(composed_text_length, sizeof(text_buffer));
 
-                            u64 text_length = (u64)composed_text_length;
-
-                            if (text_length > 0 && (u64)text_length < sizeof(text_buffer))
+                            if (text_length > 0)
                             {
                                 String8 text = string_duplicate_arena(arena, string_from_pointer_length(text_buffer, text_length), false);
                                 wm_event_push(windowing, (WmEvent){
