@@ -420,11 +420,12 @@ has hard design constraints:
   concatenation. ELF objects also emit `.eh_frame` independently of source
   debug information and preserve its x86-64 PC-relative and AArch64 PREL32
   relocations through object reading and merging. ELF executable writers
-  resolve those relocations into the loaded unwind section and always append a
-  coherent section header table for loaded code/data, BSS, TLS, loader and
-  dynamic-linking metadata, debug data, and the section-name string table,
-  including for `-g0` images. DWARF relocations are resolved statically before
-  the non-loaded debug payload is appended. Mach-O
+  resolve those relocations into the loaded unwind section, emit a sorted
+  `.eh_frame_hdr` plus `PT_GNU_EH_FRAME`, and always append a coherent section
+  header table for loaded code/data, BSS, TLS, loader and dynamic-linking
+  metadata, debug data, and the section-name string table, including for `-g0`
+  images. DWARF relocations are resolved statically before the non-loaded debug
+  payload is appended. Mach-O
   executables carry the same six sections in a read-only, file-backed
   `__DWARF` segment (each section is flagged `S_ATTR_DEBUG`) placed before
   `__LINKEDIT`; its virtual size is page-rounded to satisfy dyld while the

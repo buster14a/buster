@@ -462,6 +462,54 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, cfi_linked.error == LINK_ERROR_NONE);
     BUSTER_TEST(arguments, cfi_linked.object.relocation_count == 3);
     BUSTER_TEST(arguments, cfi_linked.object.sections[OBJECT_SECTION_UNWIND].data.length == answer_cfi.bytes.length + main_cfi.bytes.length);
+
+    Target a64_elf_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    u32 a64_return = 0xd65f03c0;
+    ObjectSymbol a64_main_symbol = {
+        .name = S8("main"),
+        .size = sizeof(a64_return),
+        .section = OBJECT_SECTION_TEXT,
+        .kind = OBJECT_SYMBOL_FUNCTION,
+        .global = true,
+    };
+    CodegenFunctionDescriptor a64_descriptor = {
+        .code_size = sizeof(a64_return),
+    };
+    DwarfCfiResult a64_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                                    .functions = &a64_descriptor,
+                                                                    .target = a64_elf_target,
+                                                                    .function_count = 1,
+                                                                });
+    BUSTER_TEST(arguments, a64_cfi.valid && a64_cfi.relocation_count == 1);
+    ObjectRelocation a64_cfi_relocation = {
+        .offset = a64_cfi.relocations[0].offset,
+        .section = OBJECT_SECTION_UNWIND,
+        .symbol = 0,
+        .kind = OBJECT_RELOCATION_AARCH64_PREL32,
+    };
+    ObjectFile a64_elf_object = link_test_object_make(arguments->arena, a64_elf_target,
+                                                      (ByteSlice){
+                                                          .pointer = (u8*)&a64_return,
+                                                          .length = sizeof(a64_return),
+                                                      },
+                                                      &a64_main_symbol, 1, &a64_cfi_relocation, 1);
+    a64_elf_object.sections[OBJECT_SECTION_UNWIND].data = a64_cfi.bytes;
+    NativeExecutableLinkResult a64_elf_executable = link_native_executable(arguments->arena, &a64_elf_object,
+                                                                           (NativeExecutableLinkOptions){
+                                                                               .entry_symbol = S8("main"),
+                                                                           });
+    BUSTER_TEST(arguments, a64_elf_executable.error == LINK_ERROR_NONE);
+    BUSTER_TEST(arguments, a64_elf_executable.executable.length >= 64);
+    if (a64_elf_executable.error == LINK_ERROR_NONE)
+    {
+        u32 a64_header_index = 0;
+        u64 a64_header = 0;
+        BUSTER_TEST(arguments, a64_elf_executable.executable.pointer[18] == 183 && a64_elf_executable.executable.pointer[19] == 0);
+        BUSTER_TEST(arguments, link_test_elf_section_find(a64_elf_executable.executable, S8(".eh_frame_hdr"), &a64_header_index, &a64_header));
+    }
 #endif
     LinkObjectResult linked = link_objects(arguments->arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
     BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
@@ -1101,21 +1149,73 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
     {
         u32 unwind_section_index = 0;
         u64 unwind_section_header = 0;
+        u32 unwind_header_section_index = 0;
+        u64 unwind_header_section_header = 0;
         u32 text_section_index = 0;
         u64 text_section_header = 0;
         bool unwind_section_found = link_test_elf_section_find(native_executable.executable, S8(".eh_frame"), &unwind_section_index, &unwind_section_header);
+        bool unwind_header_section_found =
+            link_test_elf_section_find(native_executable.executable, S8(".eh_frame_hdr"), &unwind_header_section_index, &unwind_header_section_header);
         bool text_section_found = link_test_elf_section_find(native_executable.executable, S8(".text"), &text_section_index, &text_section_header);
         BUSTER_TEST(arguments, unwind_section_found);
+        BUSTER_TEST(arguments, unwind_header_section_found);
         BUSTER_TEST(arguments, text_section_found);
-        if (unwind_section_found && text_section_found)
+        if (unwind_section_found && unwind_header_section_found && text_section_found)
         {
             u64 unwind_flags = link_read_u64(native_executable.executable.pointer, unwind_section_header + 8);
             u64 unwind_address = link_read_u64(native_executable.executable.pointer, unwind_section_header + 16);
             u64 unwind_offset = link_read_u64(native_executable.executable.pointer, unwind_section_header + 24);
             u64 unwind_size = link_read_u64(native_executable.executable.pointer, unwind_section_header + 32);
+            u64 unwind_header_address = link_read_u64(native_executable.executable.pointer, unwind_header_section_header + 16);
+            u64 unwind_header_offset = link_read_u64(native_executable.executable.pointer, unwind_header_section_header + 24);
+            u64 unwind_header_size = link_read_u64(native_executable.executable.pointer, unwind_header_section_header + 32);
             u64 text_address = link_read_u64(native_executable.executable.pointer, text_section_header + 16);
             BUSTER_TEST(arguments, unwind_flags == 0x2);
             BUSTER_TEST(arguments, unwind_size == cfi_linked.object.sections[OBJECT_SECTION_UNWIND].data.length);
+            BUSTER_TEST(arguments, unwind_header_size == 28);
+            if (unwind_header_offset + unwind_header_size <= native_executable.executable.length)
+            {
+                u8* header = native_executable.executable.pointer + unwind_header_offset;
+                BUSTER_TEST(arguments, header[0] == 1 && header[1] == 0x1b && header[2] == 0x03 && header[3] == 0x3b);
+                BUSTER_TEST(arguments, link_read_u32(header, 8) == 2);
+                s32 frame_displacement = 0;
+                s32 first_function = 0;
+                s32 first_fde = 0;
+                s32 second_function = 0;
+                s32 second_fde = 0;
+                memcpy(&frame_displacement, header + 4, sizeof(frame_displacement));
+                memcpy(&first_function, header + 12, sizeof(first_function));
+                memcpy(&first_fde, header + 16, sizeof(first_fde));
+                memcpy(&second_function, header + 20, sizeof(second_function));
+                memcpy(&second_fde, header + 24, sizeof(second_fde));
+                BUSTER_TEST(arguments, (s64)unwind_header_address + 4 + frame_displacement == (s64)unwind_address);
+                BUSTER_TEST(arguments, first_function < second_function);
+                BUSTER_TEST(arguments,
+                            (s64)unwind_header_address + first_fde ==
+                                (s64)unwind_address + (s64)answer_cfi.relocations[0].offset - 8);
+                BUSTER_TEST(arguments,
+                            (s64)unwind_header_address + second_fde ==
+                                (s64)unwind_address + (s64)answer_cfi.bytes.length + (s64)main_cfi.relocations[0].offset - 8);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, false);
+            }
+            bool unwind_program_header_found = false;
+            u64 program_header_offset = link_read_u64(native_executable.executable.pointer, 32);
+            u32 program_header_size = native_executable.executable.pointer[54] | ((u32)native_executable.executable.pointer[55] << 8);
+            u32 program_header_count = native_executable.executable.pointer[56] | ((u32)native_executable.executable.pointer[57] << 8);
+            for (u32 program_header_index = 0; program_header_index < program_header_count; program_header_index += 1)
+            {
+                u64 header_offset = program_header_offset + (u64)program_header_index * program_header_size;
+                if (header_offset + program_header_size <= native_executable.executable.length &&
+                    link_read_u32(native_executable.executable.pointer, header_offset) == 0x6474e550)
+                {
+                    unwind_program_header_found = link_read_u64(native_executable.executable.pointer, header_offset + 8) == unwind_header_offset &&
+                                                  link_read_u64(native_executable.executable.pointer, header_offset + 32) == unwind_header_size;
+                }
+            }
+            BUSTER_TEST(arguments, unwind_program_header_found);
             if (unwind_offset + answer_cfi.relocations[0].offset + 4 <= native_executable.executable.length)
             {
                 s32 displacement = 0;

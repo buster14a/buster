@@ -29,11 +29,13 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_loaded_kinds[] = {
 #define BUSTER_LINK_ELF_SECTION_HEADER_SIZE 64
 #define BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT 8
 #define BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY                                                                                                          \
-    (BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds) + BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT + BUSTER_ARRAY_LENGTH(link_elf_debug_kinds))
+    (BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds) + 1 + BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT + BUSTER_ARRAY_LENGTH(link_elf_debug_kinds))
 
 typedef struct LinkElfSectionTableLayout LinkElfSectionTableLayout;
 struct LinkElfSectionTableLayout
 {
+    u64 eh_frame_header_offset;
+    u64 eh_frame_header_size;
     u64 interpreter_offset;
     u64 interpreter_size;
     u64 plt_offset;
@@ -52,6 +54,25 @@ struct LinkElfSectionTableLayout
     u64 dynamic_size;
     bool dynamic;
     u8 reserved[7];
+};
+
+typedef struct LinkElfEhFrameEntry LinkElfEhFrameEntry;
+struct LinkElfEhFrameEntry
+{
+    u64 fde_offset;
+    u64 function_address;
+    u32 relocation;
+    u32 reserved;
+};
+
+typedef struct LinkElfEhFrameTable LinkElfEhFrameTable;
+struct LinkElfEhFrameTable
+{
+    LinkElfEhFrameEntry* entries;
+    LinkElfEhFrameEntry* scratch;
+    u32 count;
+    bool valid;
+    u8 reserved[3];
 };
 
 BUSTER_GLOBAL_LOCAL String8 link_string_copy(Arena* arena, String8 source)
@@ -496,6 +517,272 @@ BUSTER_GLOBAL_LOCAL u32 link_symbol_find(ObjectFile* object, String8 name)
     return UINT32_MAX;
 }
 
+BUSTER_GLOBAL_LOCAL bool link_elf_uleb_read(ByteSlice data, u64 end, u64* cursor, u64* value)
+{
+    u64 result = 0;
+    u32 shift = 0;
+    for (u32 byte_index = 0; byte_index < 10; byte_index += 1)
+    {
+        if (*cursor >= end || *cursor >= data.length)
+        {
+            return false;
+        }
+        u8 byte = data.pointer[(*cursor)++];
+        u64 payload = byte & 0x7f;
+        if (shift >= 64 || payload > (UINT64_MAX >> shift))
+        {
+            return false;
+        }
+        result |= payload << shift;
+        if (!(byte & 0x80))
+        {
+            *value = result;
+            return true;
+        }
+        shift += 7;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_elf_cie_has_pcrel_sdata4(ByteSlice data, u64 cie_offset)
+{
+    if (cie_offset > data.length || data.length - cie_offset < 12)
+    {
+        return false;
+    }
+    u32 length = link_read_u32(data.pointer, cie_offset);
+    if (length < 8 || length > data.length - cie_offset - 4 || link_read_u32(data.pointer, cie_offset + 4) != 0)
+    {
+        return false;
+    }
+    u64 end = cie_offset + 4 + length;
+    u64 cursor = cie_offset + 8;
+    if (data.pointer[cursor++] != 1 || end - cursor < 3 || data.pointer[cursor] != 'z' || data.pointer[cursor + 1] != 'R' || data.pointer[cursor + 2] != 0)
+    {
+        return false;
+    }
+    cursor += 3;
+    u64 ignored = 0;
+    if (!link_elf_uleb_read(data, end, &cursor, &ignored) || !link_elf_uleb_read(data, end, &cursor, &ignored) ||
+        !link_elf_uleb_read(data, end, &cursor, &ignored))
+    {
+        return false;
+    }
+    u64 augmentation_size = 0;
+    return link_elf_uleb_read(data, end, &cursor, &augmentation_size) && augmentation_size == 1 && cursor < end && data.pointer[cursor] == 0x1b;
+}
+
+BUSTER_GLOBAL_LOCAL LinkElfEhFrameTable link_elf_eh_frame_table_build(Arena* arena, ObjectFile* object)
+{
+    LinkElfEhFrameTable result = {0};
+    if (!arena || !object || object->section_count <= OBJECT_SECTION_UNWIND)
+    {
+        return result;
+    }
+    ByteSlice data = object->sections[OBJECT_SECTION_UNWIND].data;
+    if (!data.length)
+    {
+        result.valid = true;
+        return result;
+    }
+    if (object->relocation_count > (UINT32_C(1) << 30))
+    {
+        return result;
+    }
+    result.entries = arena_allocate(arena, LinkElfEhFrameEntry, object->relocation_count);
+    result.scratch = arena_allocate(arena, LinkElfEhFrameEntry, object->relocation_count);
+    u32 relocation_map_capacity = 1;
+    while (relocation_map_capacity < object->relocation_count * 2)
+    {
+        relocation_map_capacity <<= 1;
+    }
+    u32* relocation_map = arena_allocate(arena, u32, relocation_map_capacity);
+    memset(relocation_map, 0xff, sizeof(*relocation_map) * relocation_map_capacity);
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (relocation->section != OBJECT_SECTION_UNWIND ||
+            (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_AARCH64_PREL32))
+        {
+            continue;
+        }
+        u32 slot = (u32)((relocation->offset ^ (relocation->offset >> 32)) * UINT64_C(11400714819323198485)) & (relocation_map_capacity - 1);
+        while (relocation_map[slot] != UINT32_MAX)
+        {
+            if (object->relocations[relocation_map[slot]].offset == relocation->offset)
+            {
+                return result;
+            }
+            slot = (slot + 1) & (relocation_map_capacity - 1);
+        }
+        relocation_map[slot] = relocation_index;
+    }
+    u64 cursor = 0;
+    while (cursor < data.length)
+    {
+        if (data.length - cursor < 4)
+        {
+            return result;
+        }
+        u32 length = link_read_u32(data.pointer, cursor);
+        if (!length)
+        {
+            cursor += 4;
+            continue;
+        }
+        if (length == UINT32_MAX || length > data.length - cursor - 4 || length < 4)
+        {
+            return result;
+        }
+        u64 record_end = cursor + 4 + length;
+        u32 cie_pointer = link_read_u32(data.pointer, cursor + 4);
+        if (cie_pointer)
+        {
+            u64 cie_pointer_offset = cursor + 4;
+            if (cie_pointer > cie_pointer_offset || record_end - cursor < 12 || !link_elf_cie_has_pcrel_sdata4(data, cie_pointer_offset - cie_pointer))
+            {
+                return result;
+            }
+            u64 initial_location = cursor + 8;
+            u32 relocation_slot = (u32)((initial_location ^ (initial_location >> 32)) * UINT64_C(11400714819323198485)) & (relocation_map_capacity - 1);
+            while (relocation_map[relocation_slot] != UINT32_MAX &&
+                   object->relocations[relocation_map[relocation_slot]].offset != initial_location)
+            {
+                relocation_slot = (relocation_slot + 1) & (relocation_map_capacity - 1);
+            }
+            u32 matched_relocation = relocation_map[relocation_slot];
+            if (matched_relocation == UINT32_MAX || object->relocations[matched_relocation].symbol >= object->symbol_count || result.count == UINT32_MAX)
+            {
+                return result;
+            }
+            result.entries[result.count++] = (LinkElfEhFrameEntry){
+                .fde_offset = cursor,
+                .relocation = matched_relocation,
+            };
+        }
+        cursor = record_end;
+    }
+    result.valid = true;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_elf_signed_difference(u64 left, u64 right, s32* output)
+{
+    if (left >= right)
+    {
+        u64 difference = left - right;
+        if (difference > INT32_MAX)
+        {
+            return false;
+        }
+        *output = (s32)difference;
+        return true;
+    }
+    u64 difference = right - left;
+    if (difference > UINT64_C(2147483648))
+    {
+        return false;
+    }
+    *output = difference == UINT64_C(2147483648) ? INT32_MIN : -(s32)difference;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_count, LinkElfEhFrameTable* table, ObjectFile* object, u64 image_base,
+                                                        u64 const* section_offsets, u64 header_offset)
+{
+    u64 header_size = table->count ? 12 + (u64)table->count * 8 : 0;
+    if (!table->valid || !header_size || header_offset > byte_count || header_size > byte_count - header_offset)
+    {
+        return !header_size && table->valid;
+    }
+    u64 header_address = image_base + header_offset;
+    for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
+    {
+        LinkElfEhFrameEntry* entry = table->entries + entry_index;
+        ObjectRelocation* relocation = object->relocations + entry->relocation;
+        ObjectSymbol* symbol = object->symbols + relocation->symbol;
+        if (symbol->section >= OBJECT_SECTION_COUNT)
+        {
+            return false;
+        }
+        u64 address = image_base + section_offsets[symbol->section] + symbol->value;
+        if (relocation->addend >= 0)
+        {
+            if ((u64)relocation->addend > UINT64_MAX - address)
+            {
+                return false;
+            }
+            address += (u64)relocation->addend;
+        }
+        else
+        {
+            u64 magnitude = (u64)(-(relocation->addend + 1)) + 1;
+            if (magnitude > address)
+            {
+                return false;
+            }
+            address -= magnitude;
+        }
+        entry->function_address = address;
+    }
+    LinkElfEhFrameEntry* source = table->entries;
+    LinkElfEhFrameEntry* destination = table->scratch;
+    for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+    {
+        u32 counts[256] = {0};
+        u32 offsets[256];
+        u32 shift = byte_index * 8;
+        for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
+        {
+            counts[(source[entry_index].function_address >> shift) & 0xff] += 1;
+        }
+        u32 offset = 0;
+        for (u32 bucket = 0; bucket < BUSTER_ARRAY_LENGTH(counts); bucket += 1)
+        {
+            offsets[bucket] = offset;
+            offset += counts[bucket];
+        }
+        for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
+        {
+            u32 bucket = (source[entry_index].function_address >> shift) & 0xff;
+            destination[offsets[bucket]++] = source[entry_index];
+        }
+        LinkElfEhFrameEntry* swap = source;
+        source = destination;
+        destination = swap;
+    }
+    table->entries = source;
+    bytes[header_offset] = 1;
+    bytes[header_offset + 1] = 0x1b;
+    bytes[header_offset + 2] = 0x03;
+    bytes[header_offset + 3] = 0x3b;
+    s32 relative = 0;
+    u64 unwind_address = image_base + section_offsets[OBJECT_SECTION_UNWIND];
+    if (!link_elf_signed_difference(unwind_address, header_address + 4, &relative))
+    {
+        return false;
+    }
+    link_write_u32(bytes, header_offset + 4, (u32)relative);
+    link_write_u32(bytes, header_offset + 8, table->count);
+    for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
+    {
+        LinkElfEhFrameEntry* entry = table->entries + entry_index;
+        u64 output = header_offset + 12 + (u64)entry_index * 8;
+        u64 fde_address = unwind_address + entry->fde_offset;
+        if (!link_elf_signed_difference(entry->function_address, header_address, &relative))
+        {
+            return false;
+        }
+        link_write_u32(bytes, output, (u32)relative);
+        if (!link_elf_signed_difference(fde_address, header_address, &relative))
+        {
+            return false;
+        }
+        link_write_u32(bytes, output + 4, (u32)relative);
+    }
+    return true;
+}
+
 typedef struct LinkElfSectionDescriptor LinkElfSectionDescriptor;
 struct LinkElfSectionDescriptor
 {
@@ -543,6 +830,18 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             .size = size,
             .alignment = section->alignment,
             .type = object_section_kind_is_zero_fill(kind) ? 8 : 1,
+        };
+    }
+    if (layout.eh_frame_header_size)
+    {
+        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+            .name = S8(".eh_frame_hdr"),
+            .flags = 0x2,
+            .address = image_base + layout.eh_frame_header_offset,
+            .offset = layout.eh_frame_header_offset,
+            .size = layout.eh_frame_header_size,
+            .alignment = 4,
+            .type = 1,
         };
     }
     if (layout.dynamic)
@@ -828,17 +1127,24 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         result.symbol = entry_name;
         return result;
     }
+    LinkElfEhFrameTable eh_frame_table = link_elf_eh_frame_table_build(arena, object);
+    if (!eh_frame_table.valid)
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
+    u64 eh_frame_header_size = eh_frame_table.count ? 12 + (u64)eh_frame_table.count * 8 : 0;
     bool has_writable = object->sections[OBJECT_SECTION_DATA].data.length || object->sections[OBJECT_SECTION_ZERO].virtual_size;
-    u32 program_header_count = has_writable ? 2 : 1;
+    u32 load_program_header_count = has_writable ? 2 : 1;
+    u32 program_header_count = load_program_header_count + (eh_frame_header_size != 0);
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 entry_stub_offset = align_forward(header_end, 16);
     section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + sizeof(entry_stub), object->sections[OBJECT_SECTION_TEXT].alignment);
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length,
                                                                    object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
-    section_offsets[OBJECT_SECTION_UNWIND] =
-        align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length,
-                      object->sections[OBJECT_SECTION_UNWIND].alignment);
+    u64 eh_frame_header_offset = align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length, 4);
+    section_offsets[OBJECT_SECTION_UNWIND] = align_forward(eh_frame_header_offset + eh_frame_header_size, object->sections[OBJECT_SECTION_UNWIND].alignment);
     u64 read_only_end = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
     section_offsets[OBJECT_SECTION_DATA] = align_forward(read_only_end, ELF_PAGE_SIZE);
     u64 file_size = object->sections[OBJECT_SECTION_DATA].data.length ? section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length
@@ -929,6 +1235,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
     }
+    if (!link_elf_eh_frame_header_write(bytes, file_size, &eh_frame_table, object, image_base, section_offsets, eh_frame_header_offset))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     bytes[0] = 0x7f;
     bytes[1] = 'E';
     bytes[2] = 'L';
@@ -952,7 +1263,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     link_write_u64(bytes, program_header + 32, read_only_end);
     link_write_u64(bytes, program_header + 40, read_only_end);
     link_write_u64(bytes, program_header + 48, ELF_PAGE_SIZE);
-    if (program_header_count == 2)
+    if (load_program_header_count == 2)
     {
         program_header += ELF_PROGRAM_HEADER_SIZE;
         u64 data_size = object->sections[OBJECT_SECTION_DATA].data.length;
@@ -967,8 +1278,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         link_write_u64(bytes, program_header + 40, BUSTER_MAX(data_size, writable_memory_size));
         link_write_u64(bytes, program_header + 48, ELF_PAGE_SIZE);
     }
+    if (eh_frame_header_size)
+    {
+        program_header = ELF_HEADER_SIZE + (u64)load_program_header_count * ELF_PROGRAM_HEADER_SIZE;
+        link_write_u32(bytes, program_header, 0x6474e550);
+        link_write_u32(bytes, program_header + 4, 4);
+        link_write_u64(bytes, program_header + 8, eh_frame_header_offset);
+        link_write_u64(bytes, program_header + 16, image_base + eh_frame_header_offset);
+        link_write_u64(bytes, program_header + 24, image_base + eh_frame_header_offset);
+        link_write_u64(bytes, program_header + 32, eh_frame_header_size);
+        link_write_u64(bytes, program_header + 40, eh_frame_header_size);
+        link_write_u64(bytes, program_header + 48, 4);
+    }
     link_elf_section_table_append(arena, &result, object, image_base, section_offsets,
-                                  (LinkElfSectionTableLayout){0});
+                                  (LinkElfSectionTableLayout){
+                                      .eh_frame_header_offset = eh_frame_header_offset,
+                                      .eh_frame_header_size = eh_frame_header_size,
+                                  });
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
@@ -984,7 +1310,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         ELF_HEADER_SIZE = 64,
         ELF_PROGRAM_HEADER_SIZE = 56,
-        ELF_PROGRAM_HEADER_COUNT = 7,
+        ELF_BASE_PROGRAM_HEADER_COUNT = 7,
         ELF_PAGE_SIZE = 4096,
         ELF_MACHINE_X86_64 = 62,
         ELF_SYMBOL_SIZE = 24,
@@ -1043,16 +1369,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         result.symbol = entry_name;
         return result;
     }
-    u64 header_end = ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_COUNT * ELF_PROGRAM_HEADER_SIZE;
+    LinkElfEhFrameTable eh_frame_table = link_elf_eh_frame_table_build(arena, object);
+    if (!eh_frame_table.valid)
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
+    u64 eh_frame_header_size = eh_frame_table.count ? 12 + (u64)eh_frame_table.count * 8 : 0;
+    u32 program_header_count = ELF_BASE_PROGRAM_HEADER_COUNT + (eh_frame_header_size != 0);
+    u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 entry_stub_offset = align_forward(header_end, 16);
     section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + sizeof(entry_stub), object->sections[OBJECT_SECTION_TEXT].alignment);
     u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
     u64 plt_size = (u64)(import_count + 1) * ELF_PLT_ENTRY_SIZE;
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(plt_offset + plt_size, object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
-    section_offsets[OBJECT_SECTION_UNWIND] =
-        align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length,
-                      object->sections[OBJECT_SECTION_UNWIND].alignment);
+    u64 eh_frame_header_offset = align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length, 4);
+    section_offsets[OBJECT_SECTION_UNWIND] = align_forward(eh_frame_header_offset + eh_frame_header_size, object->sections[OBJECT_SECTION_UNWIND].alignment);
     u64 interpreter_offset = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
     u64 interpreter_size = sizeof(interpreter);
     if (options.dynamic_library_count == UINT32_MAX)
@@ -1280,6 +1613,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
     }
+    if (!link_elf_eh_frame_header_write(bytes, file_size, &eh_frame_table, object, image_base, section_offsets, eh_frame_header_offset))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     u64 dynamic_cursor = dynamic_offset;
 #define BUSTER_LINK_DYNAMIC(tag, value)                                                                                                                        \
     do                                                                                                                                                         \
@@ -1318,7 +1656,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     link_write_u64(bytes, 32, ELF_HEADER_SIZE);
     link_write_u16(bytes, 52, ELF_HEADER_SIZE);
     link_write_u16(bytes, 54, ELF_PROGRAM_HEADER_SIZE);
-    link_write_u16(bytes, 56, ELF_PROGRAM_HEADER_COUNT);
+    link_write_u16(bytes, 56, (u16)program_header_count);
     u64 program_header = ELF_HEADER_SIZE;
 #define BUSTER_LINK_PROGRAM_HEADER(type, flags, offset, address, file_bytes, memory_bytes, alignment)                                                         \
     do                                                                                                                                                         \
@@ -1333,8 +1671,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         link_write_u64(bytes, program_header + 48, (alignment));                                                                                               \
         program_header += ELF_PROGRAM_HEADER_SIZE;                                                                                                             \
     } while (0)
-    BUSTER_LINK_PROGRAM_HEADER(6, 4, ELF_HEADER_SIZE, image_base + ELF_HEADER_SIZE, ELF_PROGRAM_HEADER_COUNT * ELF_PROGRAM_HEADER_SIZE,
-                               ELF_PROGRAM_HEADER_COUNT * ELF_PROGRAM_HEADER_SIZE, 8);
+    BUSTER_LINK_PROGRAM_HEADER(6, 4, ELF_HEADER_SIZE, image_base + ELF_HEADER_SIZE, (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE,
+                               (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE, 8);
     BUSTER_LINK_PROGRAM_HEADER(3, 4, interpreter_offset, image_base + interpreter_offset, interpreter_size, interpreter_size, 1);
     BUSTER_LINK_PROGRAM_HEADER(1, 5, 0, image_base, read_only_end, read_only_end, ELF_PAGE_SIZE);
     BUSTER_LINK_PROGRAM_HEADER(1, 6, section_offsets[OBJECT_SECTION_DATA], image_base + section_offsets[OBJECT_SECTION_DATA],
@@ -1353,10 +1691,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     link_write_u64(bytes, program_header + 48,
                    BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment));
     program_header += ELF_PROGRAM_HEADER_SIZE;
+    if (eh_frame_header_size)
+    {
+        BUSTER_LINK_PROGRAM_HEADER(0x6474e550, 4, eh_frame_header_offset, image_base + eh_frame_header_offset, eh_frame_header_size, eh_frame_header_size, 4);
+    }
     BUSTER_LINK_PROGRAM_HEADER(0x6474e551, 6, 0, 0, 0, 0, 16);
 #undef BUSTER_LINK_PROGRAM_HEADER
     link_elf_section_table_append(arena, &result, object, image_base, section_offsets,
                                   (LinkElfSectionTableLayout){
+                                      .eh_frame_header_offset = eh_frame_header_offset,
+                                      .eh_frame_header_size = eh_frame_header_size,
                                       .interpreter_offset = interpreter_offset,
                                       .interpreter_size = interpreter_size,
                                       .plt_offset = plt_offset,
@@ -1430,17 +1774,24 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         result.symbol = entry_name;
         return result;
     }
+    LinkElfEhFrameTable eh_frame_table = link_elf_eh_frame_table_build(arena, object);
+    if (!eh_frame_table.valid)
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
+    u64 eh_frame_header_size = eh_frame_table.count ? 12 + (u64)eh_frame_table.count * 8 : 0;
     bool has_writable = object->sections[OBJECT_SECTION_DATA].data.length || object->sections[OBJECT_SECTION_ZERO].virtual_size;
-    u32 program_header_count = has_writable ? 2 : 1;
+    u32 load_program_header_count = has_writable ? 2 : 1;
+    u32 program_header_count = load_program_header_count + (eh_frame_header_size != 0);
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 entry_stub_offset = align_forward(header_end, 16);
     section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + sizeof(entry_stub), object->sections[OBJECT_SECTION_TEXT].alignment);
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length,
                                                                    object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
-    section_offsets[OBJECT_SECTION_UNWIND] =
-        align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length,
-                      object->sections[OBJECT_SECTION_UNWIND].alignment);
+    u64 eh_frame_header_offset = align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length, 4);
+    section_offsets[OBJECT_SECTION_UNWIND] = align_forward(eh_frame_header_offset + eh_frame_header_size, object->sections[OBJECT_SECTION_UNWIND].alignment);
     u64 read_only_end = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
     section_offsets[OBJECT_SECTION_DATA] = align_forward(read_only_end, ELF_PAGE_SIZE);
     u64 file_size = object->sections[OBJECT_SECTION_DATA].data.length ? section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length
@@ -1543,6 +1894,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             return result;
         }
     }
+    if (!link_elf_eh_frame_header_write(bytes, file_size, &eh_frame_table, object, image_base, section_offsets, eh_frame_header_offset))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     bytes[0] = 0x7f;
     bytes[1] = 'E';
     bytes[2] = 'L';
@@ -1566,7 +1922,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     link_write_u64(bytes, program_header + 32, read_only_end);
     link_write_u64(bytes, program_header + 40, read_only_end);
     link_write_u64(bytes, program_header + 48, ELF_PAGE_SIZE);
-    if (program_header_count == 2)
+    if (load_program_header_count == 2)
     {
         program_header += ELF_PROGRAM_HEADER_SIZE;
         u64 writable_file_size = file_size > section_offsets[OBJECT_SECTION_DATA] ? file_size - section_offsets[OBJECT_SECTION_DATA] : 0;
@@ -1580,8 +1936,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         link_write_u64(bytes, program_header + 40, writable_memory_size);
         link_write_u64(bytes, program_header + 48, ELF_PAGE_SIZE);
     }
+    if (eh_frame_header_size)
+    {
+        program_header = ELF_HEADER_SIZE + (u64)load_program_header_count * ELF_PROGRAM_HEADER_SIZE;
+        link_write_u32(bytes, program_header, 0x6474e550);
+        link_write_u32(bytes, program_header + 4, 4);
+        link_write_u64(bytes, program_header + 8, eh_frame_header_offset);
+        link_write_u64(bytes, program_header + 16, image_base + eh_frame_header_offset);
+        link_write_u64(bytes, program_header + 24, image_base + eh_frame_header_offset);
+        link_write_u64(bytes, program_header + 32, eh_frame_header_size);
+        link_write_u64(bytes, program_header + 40, eh_frame_header_size);
+        link_write_u64(bytes, program_header + 48, 4);
+    }
     link_elf_section_table_append(arena, &result, object, image_base, section_offsets,
-                                  (LinkElfSectionTableLayout){0});
+                                  (LinkElfSectionTableLayout){
+                                      .eh_frame_header_offset = eh_frame_header_offset,
+                                      .eh_frame_header_size = eh_frame_header_size,
+                                  });
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
@@ -1610,7 +1981,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     {
         ELF_HEADER_SIZE = 64,
         ELF_PROGRAM_HEADER_SIZE = 56,
-        ELF_PROGRAM_HEADER_COUNT = 7,
         ELF_DYNAMIC_SIZE = 16,
         ELF_DYNAMIC_COUNT = 12,
         ELF_RELOCATION_SIZE = 24,
@@ -1651,7 +2021,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     }
     u8* bytes = result.executable.pointer;
     u64 image_base = 0x400000;
-    u64 header_end = ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_COUNT * ELF_PROGRAM_HEADER_SIZE;
+    u32 program_header_count = bytes[56] | ((u32)bytes[57] << 8);
+    u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 entry_stub_offset = align_forward(header_end, 16);
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + 35, object->sections[OBJECT_SECTION_TEXT].alignment);
