@@ -81,6 +81,7 @@ struct AssemblyEncodeResult
 
 // Encodes one source buffer without retaining parser scratch. Labels defined in
 // the buffer are resolved immediately; unresolved names remain as relocations.
-// The initial instruction vocabulary is deliberately small; generated ISA
-// tables extend this same representation without changing the public contract.
+// Scalar x86 register/immediate forms and the bootstrap AArch64 control-flow
+// forms use the same instruction-local representation that generated ISA
+// tables extend without changing this public contract.
 BUSTER_F_DECL AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options);
