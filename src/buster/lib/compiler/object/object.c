@@ -4549,12 +4549,44 @@ BUSTER_GLOBAL_LOCAL void object_append_dwarf(ObjectFile* object, DwarfResult bui
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
+{
+    if (module->function_count != module->entry_count || (module->function_count && (!module->functions || !module->entries)))
+    {
+        return false;
+    }
+    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    {
+        CodegenModuleEntry* entry = module->entries + function_index;
+        CodegenFunctionDescriptor* function = module->functions + function_index;
+        if (function->symbol.value != entry->symbol.value || function->code_offset != entry->offset || function->code_offset > module->code.length ||
+            function->code_size > module->code.length - function->code_offset || function->prolog_size > function->code_size ||
+            (function->unwind_action_count && !function->unwind_actions))
+        {
+            return false;
+        }
+        u32 previous_offset = 0;
+        for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
+        {
+            CodegenUnwindAction* action = function->unwind_actions + action_index;
+            if (action->kind >= CODEGEN_UNWIND_ACTION_COUNT || action->code_offset < previous_offset || action->code_offset > function->prolog_size ||
+                (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK && !action->value))
+            {
+                return false;
+            }
+            previous_offset = action->code_offset;
+        }
+    }
+    return true;
+}
+
 ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, CodegenModule* module, Target target)
 {
     ObjectFile result = {
         .target = target,
     };
-    if (!arena || !analysis || !module || module->error != CODEGEN_ERROR_NONE || (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
+    if (!arena || !analysis || !module || module->error != CODEGEN_ERROR_NONE || !object_codegen_functions_valid(module) ||
+        (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
     {
         result.error = OBJECT_ERROR_INVALID_INPUT;
         return result;
@@ -4640,7 +4672,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
         for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
         {
             CodegenModuleEntry* entry = module->entries + entry_index;
-            u64 end = entry_index + 1 < module->entry_count ? module->entries[entry_index + 1].offset : module->code.length;
+            u64 end = entry->offset + module->functions[entry_index].code_size;
             AnalysisEntity* definition = object_entity_find(analysis, entry->entity);
             functions[entry_index] = (DwarfFunction){
                 .name = definition ? definition->name : object_entity_name(arena, analysis, entry->entity, entry->instantiation),
@@ -4736,7 +4768,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
     for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
     {
         CodegenModuleEntry* entry = module->entries + entry_index;
-        u64 end = entry_index + 1 < module->entry_count ? module->entries[entry_index + 1].offset : module->code.length;
+        u64 end = entry->offset + module->functions[entry_index].code_size;
         result.symbols[result.symbol_count++] = (ObjectSymbol){
             .name = object_entity_name(arena, analysis, entry->entity, entry->instantiation),
             .value = entry->offset,
@@ -4861,7 +4893,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     ObjectFile result = {
         .target = target,
     };
-    if (!arena || !program || !module || module->error != CODEGEN_ERROR_NONE || module->data_relocation_count ||
+    if (!arena || !program || !module || module->error != CODEGEN_ERROR_NONE || module->data_relocation_count || !object_codegen_functions_valid(module) ||
         (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
     {
         result.error = OBJECT_ERROR_INVALID_INPUT;
@@ -4986,7 +5018,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
         {
             CodegenModuleEntry* entry = module->entries + entry_index;
-            u64 end = entry_index + 1 < module->entry_count ? module->entries[entry_index + 1].offset : module->code.length;
+            u64 end = entry->offset + module->functions[entry_index].code_size;
             IrSymbol* entry_symbol = ir_symbol_from_id(&program->symbols, entry->symbol);
             IrSourceRange declaration = entry->symbol.value < program->symbols.count ? declaration_sources[entry->symbol.value] : (IrSourceRange){0};
             functions[entry_index] = (DwarfFunction){
@@ -5089,7 +5121,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             result.error = OBJECT_ERROR_INVALID_INPUT;
             return result;
         }
-        u64 end = entry_index + 1 < module->entry_count ? module->entries[entry_index + 1].offset : module->code.length;
+        u64 end = entry.offset + module->functions[entry_index].code_size;
         result.symbols[result.symbol_count++] = (ObjectSymbol){
             .name = symbol->link_name.length ? symbol->link_name : symbol->name,
             .value = entry.offset,

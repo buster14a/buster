@@ -14,6 +14,22 @@ BUSTER_GLOBAL_LOCAL u32 codegen_align_u32(u32 value, u32 alignment)
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
+BUSTER_GLOBAL_LOCAL bool codegen_unwind_action_append(CodegenFunctionDescriptor* descriptor, u32 capacity, u32 code_offset,
+                                                       CodegenUnwindActionKind kind, u8 register_index, u32 value)
+{
+    if (descriptor->unwind_action_count >= capacity)
+    {
+        return false;
+    }
+    descriptor->unwind_actions[descriptor->unwind_action_count++] = (CodegenUnwindAction){
+        .code_offset = code_offset,
+        .value = value,
+        .kind = kind,
+        .register_index = register_index,
+    };
+    return true;
+}
+
 CodegenAbi codegen_abi_for_target(Target target)
 {
     switch (target.cpu_arch)
@@ -977,7 +993,8 @@ BUSTER_GLOBAL_LOCAL void x64_emit_store_abi_part(X64Builder* builder, IrValueId 
     }
 }
 
-BUSTER_GLOBAL_LOCAL void x64_emit_stack_adjust(X64Builder* builder, u32 size, bool subtract)
+BUSTER_GLOBAL_LOCAL void x64_emit_stack_adjust_described(X64Builder* builder, u32 size, bool subtract, CodegenFunctionDescriptor* descriptor,
+                                                         u32 action_capacity)
 {
     if (!subtract)
     {
@@ -1012,12 +1029,23 @@ BUSTER_GLOBAL_LOCAL void x64_emit_stack_adjust(X64Builder* builder, u32 size, bo
         {
             codegen_emit_u32(&builder->buffer, chunk);
         }
+        if (descriptor && !codegen_unwind_action_append(descriptor, action_capacity, (u32)builder->buffer.count,
+                                                        CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, chunk))
+        {
+            builder->buffer.error = CODEGEN_ERROR_CAPACITY;
+            return;
+        }
         codegen_emit_u8(&builder->buffer, 0xf6);
         codegen_emit_u8(&builder->buffer, 0x04);
         codegen_emit_u8(&builder->buffer, 0x24);
         codegen_emit_u8(&builder->buffer, 0);
         size -= chunk;
     }
+}
+
+BUSTER_GLOBAL_LOCAL void x64_emit_stack_adjust(X64Builder* builder, u32 size, bool subtract)
+{
+    x64_emit_stack_adjust_described(builder, size, subtract, 0, 0);
 }
 
 BUSTER_GLOBAL_LOCAL void x64_emit_store_rsp(X64Builder* builder, X64Register source, u32 offset)
@@ -3655,11 +3683,29 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, Analys
         .target = target,
         .last_wide_vector_result = IR_VALUE_ID_INVALID,
     };
+    u32 unwind_action_capacity = 2 + frame_size / 4096 + (frame_size % 4096 != 0);
+    result.descriptor = (CodegenFunctionDescriptor){
+        .unwind_actions = arena_allocate(arena, CodegenUnwindAction, unwind_action_capacity),
+        .symbol = function->symbol,
+    };
     codegen_emit_u8(&builder.buffer, 0x55);
+    if (!codegen_unwind_action_append(&result.descriptor, unwind_action_capacity, (u32)builder.buffer.count, CODEGEN_UNWIND_ACTION_PUSH_REGISTER,
+                                      X64_REGISTER_RBP, 0))
+    {
+        result.error = CODEGEN_ERROR_CAPACITY;
+        return result;
+    }
     codegen_emit_u8(&builder.buffer, 0x48);
     codegen_emit_u8(&builder.buffer, 0x89);
     codegen_emit_u8(&builder.buffer, 0xe5);
-    x64_emit_stack_adjust(&builder, frame_size, true);
+    if (!codegen_unwind_action_append(&result.descriptor, unwind_action_capacity, (u32)builder.buffer.count,
+                                      CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_REGISTER_RBP, 0))
+    {
+        result.error = CODEGEN_ERROR_CAPACITY;
+        return result;
+    }
+    x64_emit_stack_adjust_described(&builder, frame_size, true, &result.descriptor, unwind_action_capacity);
+    result.descriptor.prolog_size = (u32)builder.buffer.count;
     if (signature.result.indirect)
     {
         X64Register source = abi == CODEGEN_ABI_X86_64_WINDOWS ? X64_REGISTER_RCX : X64_REGISTER_RDI;
@@ -3738,6 +3784,7 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, Analys
         .pointer = builder.buffer.bytes,
         .length = builder.buffer.count,
     };
+    result.descriptor.code_size = (u32)result.code.length;
     result.error = builder.buffer.error;
     result.stack_frame_size = frame_size;
     result.first_call_relocation = builder.first_call_relocation;
@@ -3912,18 +3959,31 @@ BUSTER_GLOBAL_LOCAL void a64_emit_constant(CodegenBuffer* buffer, u32 target, u6
     }
 }
 
-BUSTER_GLOBAL_LOCAL void a64_emit_stack_adjust(CodegenBuffer* buffer, u32 size, bool subtract)
+BUSTER_GLOBAL_LOCAL void a64_emit_stack_adjust_described(CodegenBuffer* buffer, u32 size, bool subtract, CodegenFunctionDescriptor* descriptor,
+                                                         u32 action_capacity)
 {
     while (size)
     {
         u32 chunk = BUSTER_MIN(size, 4095);
         a64_emit_instruction_word(buffer, (subtract ? 0xd10003ff : 0x910003ff) | (chunk << 10));
+        if (subtract && descriptor &&
+            !codegen_unwind_action_append(descriptor, action_capacity, (u32)buffer->count - descriptor->code_offset,
+                                          CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, chunk))
+        {
+            buffer->error = CODEGEN_ERROR_CAPACITY;
+            return;
+        }
         if (subtract)
         {
             a64_emit_instruction_word(buffer, 0xf90003ff);
         }
         size -= chunk;
     }
+}
+
+BUSTER_GLOBAL_LOCAL void a64_emit_stack_adjust(CodegenBuffer* buffer, u32 size, bool subtract)
+{
+    a64_emit_stack_adjust_described(buffer, size, subtract, 0, 0);
 }
 
 BUSTER_GLOBAL_LOCAL void a64_emit_stack_address(CodegenBuffer* buffer, u32 target, u32 offset)
@@ -4685,12 +4745,34 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
     CodegenCallRelocation* last_call_relocation = 0;
     CodegenDataRelocation* first_data_relocation = 0;
     CodegenDataRelocation* last_data_relocation = 0;
+    u32 unwind_action_capacity = 4 + frame_size / 4095 + (frame_size % 4095 != 0);
+    result.descriptor = (CodegenFunctionDescriptor){
+        .unwind_actions = arena_allocate(arena, CodegenUnwindAction, unwind_action_capacity),
+        .symbol = function->symbol,
+    };
     a64_emit_instruction_word(&buffer, 0xa9bf7bfd);
+    bool unwind_valid = codegen_unwind_action_append(&result.descriptor, unwind_action_capacity, (u32)buffer.count,
+                                                     CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, 16);
+    unwind_valid = codegen_unwind_action_append(&result.descriptor, unwind_action_capacity, (u32)buffer.count,
+                                                CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 29, 0) &&
+                   unwind_valid;
+    unwind_valid = codegen_unwind_action_append(&result.descriptor, unwind_action_capacity, (u32)buffer.count,
+                                                CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 30, 8) &&
+                   unwind_valid;
     a64_emit_instruction_word(&buffer, 0x910003fd);
+    unwind_valid = codegen_unwind_action_append(&result.descriptor, unwind_action_capacity, (u32)buffer.count,
+                                                CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, 29, 0) &&
+                   unwind_valid;
+    if (!unwind_valid)
+    {
+        result.error = CODEGEN_ERROR_CAPACITY;
+        return result;
+    }
     if (frame_size)
     {
-        a64_emit_stack_adjust(&buffer, frame_size, true);
+        a64_emit_stack_adjust_described(&buffer, frame_size, true, &result.descriptor, unwind_action_capacity);
     }
+    result.descriptor.prolog_size = (u32)buffer.count;
     for (u32 index = 0; index < incoming_integer_register_count; index += 1)
     {
         a64_emit_store_offset(&buffer, index, incoming_integer_register_base + index * 8);
@@ -6019,6 +6101,7 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
         .pointer = buffer.bytes,
         .length = buffer.count,
     };
+    result.descriptor.code_size = (u32)result.code.length;
     result.error = buffer.error;
     result.stack_frame_size = frame_size;
     result.first_call_relocation = first_call_relocation;
@@ -6101,6 +6184,7 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
     }
     CodegenFunction* generated = arena_allocate(arena, CodegenFunction, module->function_count);
     result.entries = arena_allocate(arena, CodegenModuleEntry, module->function_count);
+    result.functions = arena_allocate(arena, CodegenFunctionDescriptor, module->function_count);
     u64 total_size = 0;
     u64 total_read_only_data_size = 0;
     u32 relocation_capacity = 0;
@@ -6143,6 +6227,9 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
             .symbol = function->symbol,
             .offset = (u32)total_size,
         };
+        result.functions[result.function_count] = generated[index].descriptor;
+        result.functions[result.function_count].code_offset = (u32)total_size;
+        result.function_count += 1;
         total_size += generated[index].code.length;
         if (total_size > UINT32_MAX)
         {
@@ -6410,12 +6497,20 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_integer_aggregate_parts(IrProgram* pr
     return true;
 }
 
-BUSTER_TEST_F_DECL void codegen_canonical_a64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
+BUSTER_GLOBAL_LOCAL void codegen_canonical_a64_adjust_stack_described(CodegenBuffer* buffer, u32 byte_count, bool subtract,
+                                                                      CodegenFunctionDescriptor* descriptor, u32 action_capacity)
 {
     while (byte_count)
     {
         u32 chunk = BUSTER_MIN(byte_count, 4080u);
         codegen_emit_u32(buffer, (subtract ? 0xd10003ff : 0x910003ff) | (chunk << 10));
+        if (subtract && descriptor &&
+            !codegen_unwind_action_append(descriptor, action_capacity, (u32)buffer->count - descriptor->code_offset,
+                                          CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, chunk))
+        {
+            buffer->error = CODEGEN_ERROR_CAPACITY;
+            return;
+        }
         if (subtract)
         {
             codegen_emit_u32(buffer, 0xf90003ff);
@@ -6424,7 +6519,13 @@ BUSTER_TEST_F_DECL void codegen_canonical_a64_adjust_stack(CodegenBuffer* buffer
     }
 }
 
-BUSTER_TEST_F_DECL void codegen_canonical_x64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
+BUSTER_TEST_F_DECL void codegen_canonical_a64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
+{
+    codegen_canonical_a64_adjust_stack_described(buffer, byte_count, subtract, 0, 0);
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_adjust_stack_described(CodegenBuffer* buffer, u32 byte_count, bool subtract,
+                                                                      CodegenFunctionDescriptor* descriptor, u32 action_capacity)
 {
     if (!subtract)
     {
@@ -6459,12 +6560,23 @@ BUSTER_TEST_F_DECL void codegen_canonical_x64_adjust_stack(CodegenBuffer* buffer
         {
             codegen_emit_u32(buffer, chunk);
         }
+        if (descriptor && !codegen_unwind_action_append(descriptor, action_capacity, (u32)buffer->count - descriptor->code_offset,
+                                                        CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, chunk))
+        {
+            buffer->error = CODEGEN_ERROR_CAPACITY;
+            return;
+        }
         codegen_emit_u8(buffer, 0xf6);
         codegen_emit_u8(buffer, 0x04);
         codegen_emit_u8(buffer, 0x24);
         codegen_emit_u8(buffer, 0);
         byte_count -= chunk;
     }
+}
+
+BUSTER_TEST_F_DECL void codegen_canonical_x64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
+{
+    codegen_canonical_x64_adjust_stack_described(buffer, byte_count, subtract, 0, 0);
 }
 
 BUSTER_TEST_F_DECL void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset)
@@ -7749,7 +7861,9 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     {
         assembly_capacity += module->assemblies[assembly_index].source.length;
     }
-    result.entries = arena_allocate(arena, CodegenModuleEntry, module->function_count + (u32)BUSTER_MIN(assembly_capacity, UINT32_MAX));
+    u32 entry_capacity = module->function_count + (u32)BUSTER_MIN(assembly_capacity, UINT32_MAX - module->function_count);
+    result.entries = arena_allocate(arena, CodegenModuleEntry, entry_capacity);
+    result.functions = arena_allocate(arena, CodegenFunctionDescriptor, entry_capacity);
     u32 instruction_count = 0;
     u64 debug_location_capacity_64 = 0;
     u64 stack_probe_capacity = 0;
@@ -8017,8 +8131,23 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         u32 frame_size = (u32)frame_size_64;
         if (target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS)
         {
+            if (frame_size > UINT32_MAX - 32)
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
             frame_size += 32;
         }
+        u32 stack_action_count = target.cpu_arch == CPU_ARCH_X86_64 ? frame_size / 4096 + (frame_size % 4096 != 0)
+                                                                    : frame_size / 4080 + (frame_size % 4080 != 0);
+        u32 unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 2u : 5u) + stack_action_count;
+        CodegenFunctionDescriptor* descriptor = result.functions + result.function_count;
+        result.function_count += 1;
+        *descriptor = (CodegenFunctionDescriptor){
+            .unwind_actions = arena_allocate(arena, CodegenUnwindAction, unwind_action_capacity),
+            .symbol = function->symbol,
+            .code_offset = result.entries[result.entry_count - 1].offset,
+        };
         result.statistics.function_count += 1;
         result.statistics.instruction_count += function->instruction_count;
         result.statistics.value_count += function->value_count;
@@ -8028,10 +8157,22 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         if (target.cpu_arch == CPU_ARCH_X86_64)
         {
             codegen_emit_u8(&buffer, 0x55);
+            bool unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity,
+                                                             (u32)buffer.count - descriptor->code_offset,
+                                                             CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_RBP, 0);
             codegen_emit_u8(&buffer, 0x48);
             codegen_emit_u8(&buffer, 0x89);
             codegen_emit_u8(&buffer, 0xe5);
-            codegen_canonical_x64_adjust_stack(&buffer, frame_size, true);
+            unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, (u32)buffer.count - descriptor->code_offset,
+                                                        CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_REGISTER_RBP, 0) &&
+                           unwind_valid;
+            codegen_canonical_x64_adjust_stack_described(&buffer, frame_size, true, descriptor, unwind_action_capacity);
+            descriptor->prolog_size = (u32)buffer.count - descriptor->code_offset;
+            if (!unwind_valid || buffer.error != CODEGEN_ERROR_NONE)
+            {
+                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
             if (canonical_va_save_displacement)
             {
                 static u8 const gp_registers[] = {
@@ -8082,17 +8223,38 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         else
         {
             codegen_emit_u32(&buffer, 0xa9bf7bfd);
+            bool unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity,
+                                                             (u32)buffer.count - descriptor->code_offset,
+                                                             CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, 16);
+            unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, (u32)buffer.count - descriptor->code_offset,
+                                                        CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 29, 0) &&
+                           unwind_valid;
+            unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, (u32)buffer.count - descriptor->code_offset,
+                                                        CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 30, 8) &&
+                           unwind_valid;
             codegen_emit_u32(&buffer, 0x910003fd);
+            unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, (u32)buffer.count - descriptor->code_offset,
+                                                        CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, 29, 0) &&
+                           unwind_valid;
             if (frame_size)
             {
-                codegen_canonical_a64_adjust_stack(&buffer, frame_size, true);
+                codegen_canonical_a64_adjust_stack_described(&buffer, frame_size, true, descriptor, unwind_action_capacity);
             }
             if (!codegen_canonical_a64_memory_operation(&buffer, 28, aarch64_frame_base_save_offset, 8, true, false))
             {
                 result.error = CODEGEN_ERROR_CAPACITY;
                 return result;
             }
+            unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, (u32)buffer.count - descriptor->code_offset,
+                                                        CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 28, aarch64_frame_base_save_offset) &&
+                           unwind_valid;
             codegen_emit_u32(&buffer, 0x910003fc);
+            descriptor->prolog_size = (u32)buffer.count - descriptor->code_offset;
+            if (!unwind_valid || buffer.error != CODEGEN_ERROR_NONE)
+            {
+                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
             if (aarch64_indirect_return)
             {
                 if (!codegen_canonical_a64_frame_memory_operation(&buffer, 8, aarch64_hidden_result_offset, 8, true, false))
@@ -13099,10 +13261,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 memcpy(buffer.bytes + patch.offset, &instruction, sizeof(instruction));
             }
         }
+        descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
         if (options.debug_info)
         {
-            u32 function_start = result.entries[result.entry_count - 1].offset;
-            codegen_record_canonical_locations(&result, function, value_offsets, block_offsets, function_start, (u32)buffer.count, target, frame_size,
+            codegen_record_canonical_locations(&result, function, value_offsets, block_offsets, descriptor->code_offset, (u32)buffer.count, target, frame_size,
                                                debug_location_capacity);
         }
     }
@@ -13113,6 +13275,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
             return result;
         }
+    }
+    while (result.function_count < result.entry_count)
+    {
+        u32 function_index = result.function_count;
+        CodegenModuleEntry* entry = result.entries + function_index;
+        u32 end = function_index + 1 < result.entry_count ? result.entries[function_index + 1].offset : (u32)buffer.count;
+        result.functions[result.function_count++] = (CodegenFunctionDescriptor){
+            .symbol = entry->symbol,
+            .code_offset = entry->offset,
+            .code_size = end - entry->offset,
+        };
     }
     result.code = (ByteSlice){
         .pointer = buffer.bytes,

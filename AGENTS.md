@@ -365,7 +365,10 @@ has hard design constraints:
   allocation of same-block scalar IR values to backend-owned caller-saved
   registers. Values crossing calls or control-flow edges, aggregates, and
   excess live values retain stack slots as spill storage; block parameters are
-  resolved with parallel edge copies. Executable tests use writable memory
+  resolved with parallel edge copies. Codegen publishes format-neutral function
+  descriptors with exact code ranges and ordered prolog unwind actions; object
+  formats consume those descriptors instead of inferring sizes from the next
+  symbol. Executable tests use writable memory
   only while copying code, then switch it to read/execute before calling it.
 - Standalone code generation must consume target layouts before allocating
   locals or aggregate backing storage. Analysis-backed IR ABI decisions come

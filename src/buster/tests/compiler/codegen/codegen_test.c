@@ -637,6 +637,26 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, generated.code.length > 0);
     BUSTER_TEST(arguments, generated.register_value_count > 0);
     BUSTER_TEST(arguments, generated.spilled_value_count > 0);
+    BUSTER_TEST(arguments, generated.descriptor.code_offset == 0);
+    BUSTER_TEST(arguments, generated.descriptor.code_size == generated.code.length);
+    BUSTER_TEST(arguments, generated.descriptor.prolog_size <= generated.descriptor.code_size);
+    BUSTER_TEST(arguments, generated.descriptor.unwind_action_count >= 2);
+    if (generated.descriptor.unwind_action_count >= 2)
+    {
+        CodegenUnwindAction* push = generated.descriptor.unwind_actions;
+        CodegenUnwindAction* frame = generated.descriptor.unwind_actions + 1;
+        BUSTER_TEST(arguments, push->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER && push->register_index == X64_REGISTER_RBP && push->code_offset == 1);
+        BUSTER_TEST(arguments,
+                    frame->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && frame->register_index == X64_REGISTER_RBP && frame->code_offset == 4);
+        u32 allocated = 0;
+        for (u32 action_index = 2; action_index < generated.descriptor.unwind_action_count; action_index += 1)
+        {
+            CodegenUnwindAction* action = generated.descriptor.unwind_actions + action_index;
+            BUSTER_TEST(arguments, action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK);
+            allocated += action->value;
+        }
+        BUSTER_TEST(arguments, allocated == generated.stack_frame_size);
+    }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
     CodegenExecutable executable = codegen_make_executable(generated);
     BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
@@ -946,6 +966,25 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_generated.error == CODEGEN_ERROR_NONE);
     BUSTER_TEST(arguments, aarch64_generated.code.length >= 4);
     BUSTER_TEST(arguments, aarch64_generated.register_value_count > 0);
+    BUSTER_TEST(arguments, aarch64_generated.descriptor.code_size == aarch64_generated.code.length);
+    BUSTER_TEST(arguments, aarch64_generated.descriptor.unwind_action_count >= 4);
+    if (aarch64_generated.descriptor.unwind_action_count >= 4)
+    {
+        CodegenUnwindAction* actions = aarch64_generated.descriptor.unwind_actions;
+        BUSTER_TEST(arguments, actions[0].kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK && actions[0].value == 16 && actions[0].code_offset == 4);
+        BUSTER_TEST(arguments,
+                    actions[1].kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER && actions[1].register_index == 29 && actions[1].value == 0);
+        BUSTER_TEST(arguments,
+                    actions[2].kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER && actions[2].register_index == 30 && actions[2].value == 8);
+        BUSTER_TEST(arguments, actions[3].kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && actions[3].register_index == 29 && actions[3].code_offset == 8);
+        u32 allocated = 0;
+        for (u32 action_index = 0; action_index < aarch64_generated.descriptor.unwind_action_count; action_index += 1)
+        {
+            CodegenUnwindAction* action = actions + action_index;
+            allocated += action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK ? action->value : 0;
+        }
+        BUSTER_TEST(arguments, allocated == aarch64_generated.stack_frame_size + 16);
+    }
     AnalysisEntity* pressure_entity = codegen_test_entity_find(&analysis, S8("register_pressure"));
     IrFunction* pressure_function = pressure_entity ? codegen_test_function_find(&module, pressure_entity->id) : 0;
     BUSTER_TEST(arguments, pressure_function != 0);
@@ -1350,8 +1389,26 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
 #endif
     CodegenModule generated_module = codegen_generate_module(arguments->arena, &analysis, &module, target, (CodegenModuleOptions){0});
     BUSTER_TEST(arguments, generated_module.error == CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments, generated_module.function_count == generated_module.entry_count);
+    for (u32 function_index = 0; function_index < generated_module.function_count; function_index += 1)
+    {
+        CodegenFunctionDescriptor* descriptor = generated_module.functions + function_index;
+        CodegenModuleEntry* entry = generated_module.entries + function_index;
+        BUSTER_TEST(arguments, descriptor->symbol.value == entry->symbol.value);
+        BUSTER_TEST(arguments, descriptor->code_offset == entry->offset);
+        BUSTER_TEST(arguments, descriptor->code_offset + descriptor->code_size <= generated_module.code.length);
+        BUSTER_TEST(arguments, descriptor->prolog_size <= descriptor->code_size);
+        if (function_index + 1 < generated_module.function_count)
+        {
+            BUSTER_TEST(arguments, descriptor->code_offset + descriptor->code_size <= generated_module.functions[function_index + 1].code_offset);
+        }
+    }
     ObjectFile generated_object = object_from_codegen_module(arguments->arena, &analysis, &generated_module, target);
     BUSTER_TEST(arguments, generated_object.error == OBJECT_ERROR_NONE);
+    for (u32 function_index = 0; function_index < generated_module.function_count && function_index < generated_object.symbol_count; function_index += 1)
+    {
+        BUSTER_TEST(arguments, generated_object.symbols[function_index].size == generated_module.functions[function_index].code_size);
+    }
     BUSTER_TEST(arguments, generated_object.sections[OBJECT_SECTION_READ_ONLY_DATA].data.length >= 5);
     BUSTER_TEST(arguments, generated_object.relocation_count > generated_module.relocation_count);
     bool found_exported_string_symbol = false;

@@ -364,6 +364,9 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
     CodegenModuleEntry separate_entry = {
         .entity = defined_entity.id,
     };
+    CodegenFunctionDescriptor separate_function = {
+        .code_size = (u32)sizeof(separate_code),
+    };
     CodegenModuleRelocation separate_relocation = {
         .entity =
             {
@@ -376,9 +379,11 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
     CodegenModule separate_module = {
         .code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(separate_code),
         .entries = &separate_entry,
+        .functions = &separate_function,
         .relocations = &separate_relocation,
         .abi = CODEGEN_ABI_X86_64_SYSTEM_V,
         .entry_count = 1,
+        .function_count = 1,
         .relocation_count = 1,
     };
     ObjectFile separate_object = object_from_codegen_module(arguments->arena, &separate_analysis, &separate_module,
@@ -397,5 +402,15 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, separate_object.relocation_count == 1);
     ObjectArtifact separate_elf = object_write(arguments->arena, &separate_object, OBJECT_FORMAT_ELF64);
     BUSTER_TEST(arguments, separate_elf.error == OBJECT_ERROR_NONE);
+    CodegenFunctionDescriptor invalid_function = separate_function;
+    invalid_function.prolog_size = invalid_function.code_size + 1;
+    CodegenModule invalid_module = separate_module;
+    invalid_module.functions = &invalid_function;
+    ObjectFile invalid_object = object_from_codegen_module(arguments->arena, &separate_analysis, &invalid_module,
+                                                           (Target){
+                                                               .cpu_arch = CPU_ARCH_X86_64,
+                                                               .os = OPERATING_SYSTEM_LINUX,
+                                                           });
+    BUSTER_TEST(arguments, invalid_object.error == OBJECT_ERROR_INVALID_INPUT);
     return result;
 }

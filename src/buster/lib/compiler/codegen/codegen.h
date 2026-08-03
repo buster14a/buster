@@ -76,6 +76,39 @@ struct CodegenAbiSignature
 };
 
 typedef struct CodegenFunction CodegenFunction;
+typedef enum CodegenUnwindActionKind
+{
+    CODEGEN_UNWIND_ACTION_PUSH_REGISTER,
+    CODEGEN_UNWIND_ACTION_SAVE_REGISTER,
+    CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER,
+    CODEGEN_UNWIND_ACTION_ALLOCATE_STACK,
+    CODEGEN_UNWIND_ACTION_COUNT,
+} CodegenUnwindActionKind;
+
+typedef struct CodegenUnwindAction CodegenUnwindAction;
+struct CodegenUnwindAction
+{
+    // Offset of the first instruction after this prolog operation.
+    u32 code_offset;
+    // Stack bytes for ALLOCATE_STACK, or the post-operation SP-relative
+    // offset for SAVE_REGISTER and SET_FRAME_POINTER.
+    u32 value;
+    CodegenUnwindActionKind kind;
+    u8 register_index;
+    u8 reserved[3];
+};
+
+typedef struct CodegenFunctionDescriptor CodegenFunctionDescriptor;
+struct CodegenFunctionDescriptor
+{
+    CodegenUnwindAction* unwind_actions;
+    IrSymbolId symbol;
+    u32 code_offset;
+    u32 code_size;
+    u32 prolog_size;
+    u32 unwind_action_count;
+};
+
 typedef struct CodegenCallRelocation CodegenCallRelocation;
 typedef enum CodegenDataRelocationKind
 {
@@ -117,6 +150,7 @@ struct CodegenFunction
 {
     ByteSlice code;
     ByteSlice read_only_data;
+    CodegenFunctionDescriptor descriptor;
     CodegenCallRelocation* first_call_relocation;
     CodegenDataRelocation* first_data_relocation;
     CodegenLineEntry* line_entries;
@@ -218,6 +252,7 @@ struct CodegenModule
     ByteSlice thread_local_data;
     u64 thread_local_zero_size;
     CodegenModuleEntry* entries;
+    CodegenFunctionDescriptor* functions;
     CodegenModuleGlobal* globals;
     CodegenModuleRelocation* relocations;
     CodegenModuleDataRelocation* data_relocations;
@@ -234,6 +269,7 @@ struct CodegenModule
     IrInstructionId failed_instruction;
     IrOpcode failed_opcode;
     u32 entry_count;
+    u32 function_count;
     u32 global_count;
     u32 relocation_count;
     u32 data_relocation_count;
