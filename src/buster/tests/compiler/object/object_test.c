@@ -26,7 +26,7 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !object_entity_find(&missing_entities, (AnalysisEntityId){.module.value = 7}));
     missing_entities.module.import_count = 1;
     BUSTER_TEST(arguments, !object_entity_find(&missing_entities, (AnalysisEntityId){.module.value = 8}));
-    AnalysisImport missing_import_entities[] = {{0}};
+    AnalysisImport missing_import_entities[1] = {0};
     AnalysisResult imported_missing_entities = {0};
     imported_missing_entities.module.id.value = 8;
     imported_missing_entities.module.entity_count = 1;
