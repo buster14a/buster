@@ -82,40 +82,8 @@ if ! emulator -list-avds | grep -Fx -- "$avd_name" >/dev/null; then
 
     echo "Creating Android AVD '$avd_name' from '$system_image' with device '$device_profile'..."
     if ! echo no | avdmanager create avd --force --name "$avd_name" --package "$system_image" --device "$device_profile"; then
-        echo "warning: avdmanager failed; creating a minimal CI AVD directly" >&2
-        avd_directory="$ANDROID_AVD_HOME/$avd_name.avd"
-        mkdir -p "$avd_directory"
-        cat >"$ANDROID_AVD_HOME/$avd_name.ini" <<EOF
-avd.ini.encoding=UTF-8
-path=$avd_directory
-target=$system_image_platform
-EOF
-        cat >"$avd_directory/config.ini" <<EOF
-AvdId=$avd_name
-abi.type=$system_image_abi
-avd.ini.displayname=$avd_name
-avd.ini.encoding=UTF-8
-disk.dataPartition.size=6G
-fastboot.forceColdBoot=yes
-hw.cpu.arch=$system_image_abi
-hw.device.name=$device_profile
-hw.gpu.enabled=yes
-hw.gpu.mode=auto
-hw.keyboard=yes
-hw.lcd.density=420
-hw.lcd.height=2400
-hw.lcd.width=1080
-hw.mainKeys=no
-hw.ramSize=2048
-image.sysdir.1=system-images/$system_image_platform/$system_image_tag/$system_image_abi/
-runtime.network.latency=none
-runtime.network.speed=full
-sdcard.size=512M
-showDeviceFrame=no
-tag.id=$system_image_tag
-tag.display=$system_image_tag
-vm.heapSize=256
-EOF
+        echo "error: failed to create Android AVD '$avd_name'" >&2
+        exit 1
     fi
     if ! emulator -list-avds | grep -Fx -- "$avd_name" >/dev/null; then
         echo "error: avdmanager reported success, but emulator still cannot see Android AVD '$avd_name'" >&2
@@ -128,10 +96,11 @@ EOF
 fi
 
 echo "Android emulator acceleration check:"
-set +e
-accel_output=$(emulator -accel-check 2>&1)
-accel_status=$?
-set -e
+if accel_output=$(emulator -accel-check 2>&1); then
+    accel_status=0
+else
+    accel_status=$?
+fi
 printf '%s\n' "$accel_output"
 if [[ $accel_status -ne 0 && $system_image == *x86* ]]; then
     echo "error: Android x86/x86_64 emulators require hardware acceleration, but it is not available" >&2

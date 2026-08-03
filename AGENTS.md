@@ -181,10 +181,11 @@ enabled.
   the CI log (or run manually) for a human to read when the aggregate
   numbers below say something regressed.
 - CI's `Perf` steps (one per platform, see `.forgejo/workflows/ci.yml` and
-  `.forgejo/scripts/perf_step.sh`) build **both Debug and Release**
-  (sanitize/fuzz off, `--instrument --time-trace` on) in dedicated
-  `build/perf-<Config>` directories, run `bench_all`, print the two
-  diagnostics above, and hand the numbers to
+  `.forgejo/scripts/perf_step.sh`) build **both Debug and Release** when the
+  preceding work succeeds (sanitize/fuzz off, `--instrument --time-trace` on)
+  in dedicated `build/perf-<Config>` directories. A failure stops that server
+  immediately; matrix servers remain independent. Each completed config runs
+  `bench_all`, prints the two diagnostics above, and hands the numbers to
   `.forgejo/scripts/record_perf.sh`. That script compares the run against
   the same `(runner, config)`'s own rolling history on the orphan
   `perf-history` git branch — one row per metric, not one wide line per run

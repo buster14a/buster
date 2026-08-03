@@ -38,19 +38,20 @@ rm -f "${aligned_apk}" "${output_apk}"
 "${zipalign}" -f 4 "${unsigned_apk}" "${aligned_apk}"
 
 echo "Signing ${output_apk} with apksigner (timeout ${sign_timeout_seconds}s)"
-set +e
-JAVA_TOOL_OPTIONS=${java_tool_options} timeout --kill-after=10s "${sign_timeout_seconds}" \
-    "${apksigner}" sign --verbose \
-    --ks "${keystore}" \
-    --ks-pass pass:android \
-    --key-pass pass:android \
-    --v1-signing-enabled true \
-    --v2-signing-enabled true \
-    --v3-signing-enabled true \
-    --out "${output_apk}" \
-    "${aligned_apk}"
-sign_status=$?
-set -e
+if JAVA_TOOL_OPTIONS=${java_tool_options} timeout --kill-after=10s "${sign_timeout_seconds}" \
+        "${apksigner}" sign --verbose \
+        --ks "${keystore}" \
+        --ks-pass pass:android \
+        --key-pass pass:android \
+        --v1-signing-enabled true \
+        --v2-signing-enabled true \
+        --v3-signing-enabled true \
+        --out "${output_apk}" \
+        "${aligned_apk}"; then
+    sign_status=0
+else
+    sign_status=$?
+fi
 
 case "${sign_status}" in
     0) ;;

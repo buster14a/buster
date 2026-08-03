@@ -25,12 +25,15 @@ console_log=${BUSTER_IOS_CONSOLE_LOG:-${log_dir%/}/buster-ios-console.log}
 
 # macOS runners do not always ship GNU `timeout`; prefer it (or coreutils
 # `gtimeout`) when present so a stuck simulator fails fast instead of hanging
-# silently under Ninja's output buffering, but fall back to running unbounded.
+# silently under Ninja's output buffering.
 timeout_bin=
 if command -v timeout >/dev/null 2>&1; then
     timeout_bin=timeout
 elif command -v gtimeout >/dev/null 2>&1; then
     timeout_bin=gtimeout
+else
+    echo "error: timeout or gtimeout is required for bounded iOS simulator CI" >&2
+    exit 1
 fi
 
 run_with_timeout() {
@@ -97,7 +100,10 @@ if [[ -z $udid ]]; then
     # masking a misconfigured runner as a long hang.
     if [[ -z $runtime_and_device && ${BUSTER_IOS_DOWNLOAD_RUNTIME:-0} != 0 ]]; then
         echo "No iOS simulator runtime installed; downloading one via xcodebuild..."
-        xcodebuild -downloadPlatform iOS || xcrun simctl runtime add "iOS" || true
+        if ! xcodebuild -downloadPlatform iOS && ! xcrun simctl runtime add "iOS"; then
+            echo "error: failed to download an iOS simulator runtime" >&2
+            exit 1
+        fi
         runtime_and_device=$(find_runtime_and_device)
     fi
     if [[ -z $runtime_and_device ]]; then
@@ -127,18 +133,11 @@ xcrun simctl shutdown all 2>/dev/null || true
 xcrun simctl delete unavailable 2>/dev/null || true
 
 xcrun simctl boot "$udid" 2>/dev/null || true
-if ! run_with_timeout "$boot_timeout_seconds" xcrun simctl bootstatus "$udid" -b; then
-    # One retry after forcing everything else down, in case memory was the cause.
-    echo "Boot failed; shutting down all simulators and retrying once..." >&2
-    xcrun simctl shutdown all 2>/dev/null || true
-    sleep 5
-    xcrun simctl boot "$udid" 2>/dev/null || true
-    run_with_timeout "$boot_timeout_seconds" xcrun simctl bootstatus "$udid" -b
-fi
+run_with_timeout "$boot_timeout_seconds" xcrun simctl bootstatus "$udid" -b
 
 # Recent simulators require at least an ad-hoc signature to launch the app.
 run_with_timeout "$codesign_timeout_seconds" \
-    codesign --force --sign - --timestamp=none "$app_bundle" >/dev/null 2>&1 || true
+    codesign --force --sign - --timestamp=none "$app_bundle" >/dev/null 2>&1
 
 echo "Installing $app_bundle"
 run_with_timeout "$install_timeout_seconds" xcrun simctl install "$udid" "$app_bundle"
@@ -150,11 +149,13 @@ echo "Launching $bundle_id (timeout ${launch_timeout_seconds}s)"
 # to the app's argv and is what puts the IDE into test mode (process_arguments ->
 # ide_state.test): without it the GUI render loop runs forever (loop_times =
 # UINT64_MAX) and the BUSTER_IOS_RESULT marker is never printed.
-set +e
-run_with_timeout "$launch_timeout_seconds" xcrun simctl launch --console-pty "$udid" "$bundle_id" test 2>&1 | tee "$console_log"
-set -e
+if run_with_timeout "$launch_timeout_seconds" xcrun simctl launch --console-pty "$udid" "$bundle_id" test 2>&1 | tee "$console_log"; then
+    launch_status=0
+else
+    launch_status=$?
+fi
 
-if grep -qF "$result_marker_success" "$console_log"; then
+if [[ $launch_status -eq 0 ]] && grep -qF "$result_marker_success" "$console_log"; then
     echo "iOS tests passed."
     exit 0
 fi
@@ -164,6 +165,7 @@ if grep -qF "$result_marker_failure" "$console_log"; then
 fi
 
 echo "error: did not observe a buster test result marker within ${launch_timeout_seconds}s." >&2
+echo "iOS simulator launch exited with status ${launch_status}." >&2
 echo "----- console log tail -----" >&2
 tail -n 60 "$console_log" >&2 || true
 exit 1

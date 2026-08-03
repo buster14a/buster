@@ -11,6 +11,8 @@ jobs:
   test:
     timeout-minutes: 30
     strategy:
+      # A failing runner stops its own job, while the other matrix runners
+      # continue independently and report their own result.
       fail-fast: false
       matrix:
         runner: [x86_64-linux-dedicated, x86_64-linux, aarch64-macos-mini, x86_64-windows-znver5]
@@ -33,6 +35,8 @@ jobs:
           BUSTER_ANDROID_EMULATOR_LOG: build/android-emulator.log
           BUSTER_ANDROID_EMULATOR_STARTED_MARKER: build/android-emulator.started
         run: |
+          set -euo pipefail
+
           cleanup_android_emulator() {
             status=$?
             if [[ $status -ne 0 && -f "${BUSTER_ANDROID_EMULATOR_LOG:-}" ]]; then
@@ -63,12 +67,14 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           PUSH_HISTORY: ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
         run: |
+          set -euo pipefail
           source /opt/vulkan-sdk/current/setup-env.sh
           ./.forgejo/scripts/perf_step.sh
       - name: Test (Linux)
         shell: bash
         if: ${{ matrix.runner == 'x86_64-linux' }}
         run: |
+          set -euo pipefail
           ./build.sh test_all_combinations_ci --verbose=1
       - name: Perf (macOS)
         shell: bash
@@ -79,23 +85,27 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           PUSH_HISTORY: ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
         run: |
+          set -euo pipefail
           source /opt/vulkan-sdk/current/setup-env.sh
           ./.forgejo/scripts/perf_step.sh
       - name: Test (macOS)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
+          set -euo pipefail
           ./build.sh test_all_combinations_ci --verbose=1
       - name: Self-host (macOS)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
+          set -euo pipefail
           source /opt/vulkan-sdk/current/setup-env.sh
           ./build.sh test_self_host --config Release
       - name: Test (iOS simulator)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
+          set -euo pipefail
           for build_config in Debug Release; do
             echo "Running iOS ${build_config} tests"
             BUSTER_IOS_BUILD_CONFIG="$build_config" ./ios/test_ci.sh
@@ -146,11 +156,11 @@ jobs:
           # A generate/build failure must stop this config immediately:
           # continuing would record a garbage COMPILE_MILLISECONDS into
           # perf history or surface later as a confusing "no BENCH line".
-          $overallExitCode = 0
-
           foreach ($config in @('Debug', 'Release')) {
             $buildDir = "build/perf-$config"
-            Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $buildDir) {
+              Remove-Item -Recurse -Force $buildDir -ErrorAction Stop
+            }
 
             $genStart = Get-Date
             ./build.ps1 generate --build-dir $buildDir --config $config --no-sanitize --no-fuzz --instrument --time-trace
@@ -202,7 +212,5 @@ jobs:
             $env:REPO_PUSH_URL = "https://x-access-token:$($env:PERF_HISTORY_TOKEN)@$serverHost/${{ github.repository }}.git"
 
             bash ./.forgejo/scripts/record_perf.sh
-            if ($LASTEXITCODE -ne 0) { $overallExitCode = $LASTEXITCODE }
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-
-          if ($overallExitCode -ne 0) { exit $overallExitCode }

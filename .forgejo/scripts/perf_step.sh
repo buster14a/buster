@@ -20,10 +20,6 @@ host="${GITHUB_SERVER_URL#https://}"
 host="${host#http://}"
 export REPO_PUSH_URL="https://x-access-token:${PERF_HISTORY_TOKEN}@${host}/${GITHUB_REPOSITORY}.git"
 
-# Both configs must always run and record. Keep genuine record/push failures
-# until both configurations have had an opportunity to run.
-overall_result=0
-
 for config in Debug Release; do
     build_dir="build/perf-${config}"
     rm -rf "$build_dir"
@@ -56,12 +52,14 @@ for config in Debug Release; do
     rm -f "$timing_file"
 
     echo "--- Where compile time went ($config) ---"
-    ./build.sh ninja_log_summary "$build_dir" --limit 15 || true
+    ./build.sh ninja_log_summary "$build_dir" --limit 15
 
     json_files=$(find "$build_dir" -name '*.json' -path '*CMakeFiles*ide.dir*')
-    if [[ -n "$json_files" ]]; then
-        ./build.sh time_trace_summary $json_files --limit 15 || true
+    if [[ -z "$json_files" ]]; then
+        echo "error: no compiler time-trace JSON files found in $build_dir" >&2
+        exit 1
     fi
+    ./build.sh time_trace_summary $json_files --limit 15
 
     # Keep benchmark execution outside the compile timer and after the build
     # diagnostics. `bench_all` depends on the already up-to-date `ide`, so this
@@ -86,9 +84,5 @@ for config in Debug Release; do
     # Per-config totals; Debug and Release each report their own, never summed.
     echo "PERF_TOTAL config=$config generation_milliseconds=$generation_milliseconds ide_build_milliseconds=$ide_build_milliseconds compile_milliseconds=$COMPILE_MILLISECONDS bench_run_milliseconds=$BENCH_RUN_MILLISECONDS"
 
-    if ! ./.forgejo/scripts/record_perf.sh; then
-        overall_result=1
-    fi
+    ./.forgejo/scripts/record_perf.sh
 done
-
-exit "$overall_result"

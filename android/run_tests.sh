@@ -48,8 +48,6 @@ fi
 adb_with_timeout "$adb_command_timeout_seconds" shell am force-stop "$package" >/dev/null 2>&1 || true
 adb_with_timeout "$adb_command_timeout_seconds" logcat -c
 
-set +e
-set -o pipefail
 timeout "$timeout_seconds" "$adb" logcat -v time -s buster:I '*:S' | while IFS= read -r line; do
     printf '%s\n' "$line"
     case "$line" in
@@ -64,15 +62,23 @@ monitor_pid=$!
 # Do not use `am start -W` here: on some emulator builds the wait-for-launch
 # shell command can lose its adb connection even though the activity started and
 # is still producing the logcat test result we actually care about.
-adb_with_timeout "$adb_command_timeout_seconds" shell "am start -n $(android_shell_quote "$activity") --es buster_args $(android_shell_quote "$test_args")"
-start_status=$?
+if adb_with_timeout "$adb_command_timeout_seconds" shell "am start -n $(android_shell_quote "$activity") --es buster_args $(android_shell_quote "$test_args")"; then
+    start_status=0
+else
+    start_status=$?
+fi
 if [[ $start_status -ne 0 ]]; then
-    echo "warning: am start exited with status ${start_status}; waiting for Android test result from logcat" >&2
+    echo "error: am start failed with status ${start_status}" >&2
+    kill "$monitor_pid" 2>/dev/null || true
+    wait "$monitor_pid" 2>/dev/null || true
+    exit "$start_status"
 fi
 
-wait "$monitor_pid"
-status=$?
-set -e
+if wait "$monitor_pid"; then
+    status=0
+else
+    status=$?
+fi
 
 adb_with_timeout "$adb_command_timeout_seconds" shell am force-stop "$package" >/dev/null 2>&1 || true
 
@@ -86,9 +92,6 @@ case "$status" in
         ;;
     124)
         echo "Android GUI tests timed out after ${timeout_seconds}s" >&2
-        if [[ $start_status -ne 0 ]]; then
-            echo "am start had exited with status ${start_status}" >&2
-        fi
         exit 1
         ;;
     *)

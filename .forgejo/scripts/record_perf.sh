@@ -126,6 +126,20 @@ git -C "$work_dir" remote add origin "$REPO_PUSH_URL"
 if git -C "$work_dir" fetch -q origin "$HISTORY_BRANCH" 2>/dev/null; then
     git -C "$work_dir" checkout -q -B "$HISTORY_BRANCH" FETCH_HEAD
 else
+    # A missing branch is the only fetch failure that can be recovered from.
+    # Do not turn authentication, network, or remote failures into a false
+    # empty baseline.
+    if git -C "$work_dir" ls-remote --exit-code -q origin "refs/heads/$HISTORY_BRANCH" >/dev/null 2>&1; then
+        echo "record_perf.sh: failed to fetch existing $HISTORY_BRANCH branch" >&2
+        exit 1
+    else
+        remote_status=$?
+        if [[ "$remote_status" -ne 2 ]]; then
+            echo "record_perf.sh: could not query $HISTORY_BRANCH on the perf-history remote" >&2
+            exit 1
+        fi
+    fi
+
     echo "record_perf.sh: no existing $HISTORY_BRANCH branch, starting one"
     git -C "$work_dir" checkout -q --orphan "$HISTORY_BRANCH"
 fi
@@ -196,9 +210,11 @@ if [[ "$PUSH_HISTORY" == "1" ]]; then
         if [[ "$attempt" -gt 1 ]]; then
             # Someone else pushed between our read and our write: resync
             # onto their tip and re-append our rows on top of it.
-            if git -C "$work_dir" fetch -q origin "$HISTORY_BRANCH" 2>/dev/null; then
-                git -C "$work_dir" checkout -q -B "$HISTORY_BRANCH" FETCH_HEAD
+            if ! git -C "$work_dir" fetch -q origin "$HISTORY_BRANCH" 2>/dev/null; then
+                echo "record_perf.sh: failed to resync perf history before push retry" >&2
+                exit 1
             fi
+            git -C "$work_dir" checkout -q -B "$HISTORY_BRANCH" FETCH_HEAD
         fi
 
         for row in "${new_rows[@]}"; do

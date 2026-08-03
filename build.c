@@ -4160,6 +4160,14 @@ ProcessResult entry_point(void)
 
         for (ProcessRun* run = step->first_process; run; run = run->next)
         {
+            // A failed process or callback stops this server's build graph.
+            // Runs already in the current batch are still waited for so they
+            // can reap their children, but no later work is scheduled.
+            if (result != PROCESS_RESULT_SUCCESS)
+            {
+                break;
+            }
+
             if (run->callback)
             {
                 for (ProcessRun* wait = first_pending; wait != run; wait = wait->next)
@@ -4232,7 +4240,7 @@ ProcessResult entry_point(void)
             }
         }
 
-        if (result != PROCESS_RESULT_SUCCESS && step == build_graph->first_step)
+        if (result != PROCESS_RESULT_SUCCESS)
         {
             break;
         }
