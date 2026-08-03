@@ -610,6 +610,76 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, a64_elf_executable.executable.pointer[18] == 183 && a64_elf_executable.executable.pointer[19] == 0);
         BUSTER_TEST(arguments, link_test_elf_section_find(a64_elf_executable.executable, S8(".eh_frame_hdr"), &a64_header_index, &a64_header));
     }
+
+    Target a64_pe_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .os = OPERATING_SYSTEM_WINDOWS,
+    };
+    u32 a64_pe_code[] = {
+        0xa9bf7bfd,
+        0x910003fd,
+        0xa8c17bfd,
+        0xd65f03c0,
+    };
+    u8 a64_pe_pdata[8] = {0};
+    u8 a64_pe_xdata[] = {
+        0x04, 0x00, 0x40, 0x08, 0x02, 0x00, 0x40, 0x00, 0xe1, 0x81, 0xe4, 0x00,
+    };
+    ObjectSymbol a64_pe_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = sizeof(a64_pe_code),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8(".La64_xdata"),
+            .size = sizeof(a64_pe_xdata),
+            .section = OBJECT_SECTION_WINDOWS_XDATA,
+            .kind = OBJECT_SYMBOL_DATA,
+        },
+    };
+    ObjectRelocation a64_pe_relocations[] = {
+        {
+            .section = OBJECT_SECTION_WINDOWS_PDATA,
+            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+        },
+        {
+            .offset = 4,
+            .section = OBJECT_SECTION_WINDOWS_PDATA,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+        },
+    };
+    ObjectFile a64_pe_object = link_test_object_make(arguments->arena, a64_pe_target,
+                                                     (ByteSlice){
+                                                         .pointer = (u8*)a64_pe_code,
+                                                         .length = sizeof(a64_pe_code),
+                                                     },
+                                                     a64_pe_symbols, BUSTER_ARRAY_LENGTH(a64_pe_symbols), a64_pe_relocations,
+                                                     BUSTER_ARRAY_LENGTH(a64_pe_relocations));
+    a64_pe_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(a64_pe_pdata);
+    a64_pe_object.sections[OBJECT_SECTION_WINDOWS_PDATA].virtual_size = sizeof(a64_pe_pdata);
+    a64_pe_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(a64_pe_xdata);
+    a64_pe_object.sections[OBJECT_SECTION_WINDOWS_XDATA].virtual_size = sizeof(a64_pe_xdata);
+    NativeExecutableLinkResult a64_pe_executable = link_native_executable(arguments->arena, &a64_pe_object,
+                                                                          (NativeExecutableLinkOptions){
+                                                                              .entry_symbol = S8("main"),
+                                                                          });
+    BUSTER_TEST(arguments, a64_pe_executable.error == LINK_ERROR_NONE);
+    u32 a64_pdata_rva = 0;
+    u32 a64_pdata_raw = 0;
+    u32 a64_xdata_rva = 0;
+    BUSTER_TEST(arguments, link_test_pe_section_find(a64_pe_executable.executable, S8(".pdata"), &a64_pdata_rva, &a64_pdata_raw));
+    BUSTER_TEST(arguments, link_test_pe_section_find(a64_pe_executable.executable, S8(".xdata"), &a64_xdata_rva, 0));
+    BUSTER_TEST(arguments, a64_pe_executable.executable.length > 0x128 && link_read_u32(a64_pe_executable.executable.pointer, 0x120) == a64_pdata_rva &&
+                               link_read_u32(a64_pe_executable.executable.pointer, 0x124) == 16);
+    if (a64_pdata_raw <= a64_pe_executable.executable.length && 16 <= a64_pe_executable.executable.length - a64_pdata_raw)
+    {
+        BUSTER_TEST(arguments, link_read_u32(a64_pe_executable.executable.pointer, a64_pdata_raw + 4) == a64_xdata_rva);
+        BUSTER_TEST(arguments, link_read_u32(a64_pe_executable.executable.pointer, a64_pdata_raw + 12) == a64_xdata_rva + 8);
+    }
 #endif
     LinkObjectResult linked = link_objects(arguments->arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
     BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
@@ -708,16 +778,20 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, link_test_pe_section_find(pe_executable.executable, S8(".pdata"), &pe_pdata_rva, &pe_pdata_raw));
     BUSTER_TEST(arguments, link_test_pe_section_find(pe_executable.executable, S8(".xdata"), &pe_xdata_rva, 0));
     BUSTER_TEST(arguments, pe_executable.executable.length > 0x128 && link_read_u32(pe_executable.executable.pointer, 0x120) == pe_pdata_rva &&
-                               link_read_u32(pe_executable.executable.pointer, 0x124) == sizeof(pe_unwind_pdata));
-    BUSTER_TEST(arguments, pe_pdata_raw <= pe_executable.executable.length && sizeof(pe_unwind_pdata) <= pe_executable.executable.length - pe_pdata_raw);
-    if (pe_pdata_raw <= pe_executable.executable.length && sizeof(pe_unwind_pdata) <= pe_executable.executable.length - pe_pdata_raw &&
+                               link_read_u32(pe_executable.executable.pointer, 0x124) == sizeof(pe_unwind_pdata) + 12);
+    BUSTER_TEST(arguments, pe_pdata_raw <= pe_executable.executable.length && sizeof(pe_unwind_pdata) + 12 <= pe_executable.executable.length - pe_pdata_raw);
+    if (pe_pdata_raw <= pe_executable.executable.length && sizeof(pe_unwind_pdata) + 12 <= pe_executable.executable.length - pe_pdata_raw &&
         pe_main_symbol != UINT32_MAX)
     {
-        u32 function_rva = link_read_u32(pe_executable.executable.pointer, pe_pdata_raw);
-        u32 function_end_rva = link_read_u32(pe_executable.executable.pointer, pe_pdata_raw + 4);
-        u32 unwind_rva = link_read_u32(pe_executable.executable.pointer, pe_pdata_raw + 8);
+        u32 startup_rva = link_read_u32(pe_executable.executable.pointer, pe_pdata_raw);
+        u32 startup_end_rva = link_read_u32(pe_executable.executable.pointer, pe_pdata_raw + 4);
+        u32 startup_unwind_rva = link_read_u32(pe_executable.executable.pointer, pe_pdata_raw + 8);
+        u32 function_rva = link_read_u32(pe_executable.executable.pointer, pe_pdata_raw + 12);
+        u32 function_end_rva = link_read_u32(pe_executable.executable.pointer, pe_pdata_raw + 16);
+        u32 unwind_rva = link_read_u32(pe_executable.executable.pointer, pe_pdata_raw + 20);
+        BUSTER_TEST(arguments, startup_end_rva > startup_rva && startup_unwind_rva == pe_xdata_rva);
         BUSTER_TEST(arguments, function_end_rva - function_rva == windows_object.symbols[pe_main_symbol].size);
-        BUSTER_TEST(arguments, unwind_rva == pe_xdata_rva);
+        BUSTER_TEST(arguments, unwind_rva == pe_xdata_rva + 8);
     }
     u8 const pe_argv_mode_prefix[] = {
         0x48, 0x83, 0xec, 0x38, 0x31, 0xc9, 0xff, 0xc1,

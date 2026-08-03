@@ -82,6 +82,7 @@ typedef enum CodegenUnwindActionKind
     CODEGEN_UNWIND_ACTION_SAVE_REGISTER,
     CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER,
     CODEGEN_UNWIND_ACTION_ALLOCATE_STACK,
+    CODEGEN_UNWIND_ACTION_NOP,
     CODEGEN_UNWIND_ACTION_COUNT,
 } CodegenUnwindActionKind;
 
@@ -102,11 +103,13 @@ typedef struct CodegenFunctionDescriptor CodegenFunctionDescriptor;
 struct CodegenFunctionDescriptor
 {
     CodegenUnwindAction* unwind_actions;
+    u32* epilog_offsets;
     IrSymbolId symbol;
     u32 code_offset;
     u32 code_size;
     u32 prolog_size;
     u32 unwind_action_count;
+    u32 epilog_count;
 };
 
 typedef struct CodegenCallRelocation CodegenCallRelocation;

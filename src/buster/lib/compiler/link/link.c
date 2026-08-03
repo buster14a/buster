@@ -2483,22 +2483,24 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     u64 tls_initialized_size = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
     u64 tls_virtual_size = object_section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
     u64 tls_raw_size = align_forward(BUSTER_MAX(tls_initialized_size, 1), PE_FILE_ALIGNMENT);
-    u64 pdata_virtual_size = object->sections[OBJECT_SECTION_WINDOWS_PDATA].data.length;
+    u32 runtime_function_size = aarch64 ? 8 : 12;
+    u32 startup_xdata_size = 8;
+    u64 pdata_virtual_size = runtime_function_size + object->sections[OBJECT_SECTION_WINDOWS_PDATA].data.length;
     u64 pdata_raw_size = align_forward(pdata_virtual_size, PE_FILE_ALIGNMENT);
-    u64 xdata_virtual_size = object->sections[OBJECT_SECTION_WINDOWS_XDATA].data.length;
+    u64 xdata_virtual_size = startup_xdata_size + object->sections[OBJECT_SECTION_WINDOWS_XDATA].data.length;
     u64 xdata_raw_size = align_forward(xdata_virtual_size, PE_FILE_ALIGNMENT);
-    if (pdata_virtual_size % 12)
+    if (object->sections[OBJECT_SECTION_WINDOWS_PDATA].data.length % runtime_function_size)
     {
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;
     }
     section_rvas[PE_SECTION_PDATA] = (u32)align_forward(section_rvas[PE_SECTION_TLS] + BUSTER_MAX(tls_virtual_size, 1), PE_SECTION_ALIGNMENT);
     section_raw_offsets[PE_SECTION_PDATA] = section_raw_offsets[PE_SECTION_TLS] + (u32)tls_raw_size;
-    object_section_offsets[OBJECT_SECTION_WINDOWS_PDATA] = 0;
+    object_section_offsets[OBJECT_SECTION_WINDOWS_PDATA] = runtime_function_size;
     section_rvas[PE_SECTION_XDATA] =
         (u32)align_forward(section_rvas[PE_SECTION_PDATA] + BUSTER_MAX(pdata_virtual_size, 1), PE_SECTION_ALIGNMENT);
     section_raw_offsets[PE_SECTION_XDATA] = section_raw_offsets[PE_SECTION_PDATA] + (u32)pdata_raw_size;
-    object_section_offsets[OBJECT_SECTION_WINDOWS_XDATA] = 0;
+    object_section_offsets[OBJECT_SECTION_WINDOWS_XDATA] = startup_xdata_size;
     section_rvas[PE_SECTION_IMPORT] =
         (u32)align_forward(section_rvas[PE_SECTION_XDATA] + BUSTER_MAX(xdata_virtual_size, 1), PE_SECTION_ALIGNMENT);
     section_raw_offsets[PE_SECTION_IMPORT] = section_raw_offsets[PE_SECTION_XDATA] + (u32)xdata_raw_size;
@@ -2576,6 +2578,27 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             }
             memcpy(bytes + section_raw_offsets[output_section] + object_section_offsets[section], data.pointer, data.length);
         }
+    }
+    u64 startup_pdata_raw = section_raw_offsets[PE_SECTION_PDATA];
+    u64 startup_xdata_raw = section_raw_offsets[PE_SECTION_XDATA];
+    link_write_u32(bytes, startup_pdata_raw, section_rvas[PE_SECTION_TEXT] + (u32)entry_stub_offset);
+    if (aarch64)
+    {
+        link_write_u32(bytes, startup_pdata_raw + 4, section_rvas[PE_SECTION_XDATA]);
+        link_write_u32(bytes, startup_xdata_raw, 5 | (1u << 27));
+        bytes[startup_xdata_raw + 4] = 0xe1;
+        bytes[startup_xdata_raw + 5] = 0x81;
+        bytes[startup_xdata_raw + 6] = 0xe4;
+    }
+    else
+    {
+        link_write_u32(bytes, startup_pdata_raw + 4, section_rvas[PE_SECTION_TEXT] + (u32)(entry_stub_offset + entry_stub_size));
+        link_write_u32(bytes, startup_pdata_raw + 8, section_rvas[PE_SECTION_XDATA]);
+        bytes[startup_xdata_raw] = 1;
+        bytes[startup_xdata_raw + 1] = 4;
+        bytes[startup_xdata_raw + 2] = 1;
+        bytes[startup_xdata_raw + 4] = 4;
+        bytes[startup_xdata_raw + 5] = 0x62;
     }
     u32 import_section_rva = section_rvas[PE_SECTION_IMPORT];
     u64 import_section_raw = section_raw_offsets[PE_SECTION_IMPORT];

@@ -968,6 +968,12 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_generated.register_value_count > 0);
     BUSTER_TEST(arguments, aarch64_generated.descriptor.code_size == aarch64_generated.code.length);
     BUSTER_TEST(arguments, aarch64_generated.descriptor.unwind_action_count >= 4);
+    BUSTER_TEST(arguments, aarch64_generated.descriptor.epilog_count != 0 && aarch64_generated.descriptor.epilog_offsets != 0);
+    for (u32 epilog_index = 0; epilog_index < aarch64_generated.descriptor.epilog_count; epilog_index += 1)
+    {
+        BUSTER_TEST(arguments, aarch64_generated.descriptor.epilog_offsets[epilog_index] >= aarch64_generated.descriptor.prolog_size &&
+                                   aarch64_generated.descriptor.epilog_offsets[epilog_index] < aarch64_generated.descriptor.code_size);
+    }
     if (aarch64_generated.descriptor.unwind_action_count >= 4)
     {
         CodegenUnwindAction* actions = aarch64_generated.descriptor.unwind_actions;

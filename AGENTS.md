@@ -366,9 +366,11 @@ has hard design constraints:
   registers. Values crossing calls or control-flow edges, aggregates, and
   excess live values retain stack slots as spill storage; block parameters are
   resolved with parallel edge copies. Codegen publishes format-neutral function
-  descriptors with exact code ranges and ordered prolog unwind actions; object
-  formats consume those descriptors instead of inferring sizes from the next
-  symbol. Executable tests use writable memory
+  descriptors with exact code ranges, ordered prolog unwind actions, and
+  AArch64 epilog offsets; object formats consume those descriptors instead of
+  inferring sizes from the next symbol. Unwind `nop` actions describe prolog
+  instructions that do not change unwind state but must remain positionally
+  visible to the Windows AArch64 unwinder. Executable tests use writable memory
   only while copying code, then switch it to read/execute before calling it.
 - Standalone code generation must consume target layouts before allocating
   locals or aggregate backing storage. Analysis-backed IR ABI decisions come
@@ -467,6 +469,14 @@ has hard design constraints:
   frames use a constant-size inline guard-page probe loop followed by one
   described stack allocation so the prolog remains representable by the x64
   unwind format.
+- Windows AArch64 emits ordered 8-byte `.pdata` runtime-function entries and
+  full `.xdata` records with explicit prolog operations and epilog scopes.
+  Large frames use a constant-size inline guard-page probe followed by one
+  `alloc_l`; its probe instructions and frame-base moves have matching unwind
+  `nop` entries, and the x28 save uses a reserved low frame slot so it remains
+  directly encodable. The PE writer prepends unwind records for its
+  architecture-specific process-entry stub on both Windows architectures and
+  points the exception directory at the complete table.
 - `object_section_name_for_kind` and `object_section_default_alignment` are
   the single source of truth for section naming and defaults. Use them when
   adding a section kind rather than adding another local table, otherwise

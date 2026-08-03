@@ -516,6 +516,63 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
     }
 
+    u8 windows_arm64_code[64] = {0};
+    u32 windows_arm64_epilog = 48;
+    CodegenUnwindAction windows_arm64_actions[] = {
+        {.code_offset = 4, .value = 16, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 29},
+        {.code_offset = 4, .value = 8, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 30},
+        {.code_offset = 8, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 29},
+        {.code_offset = 12, .value = 48, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 16, .kind = CODEGEN_UNWIND_ACTION_NOP},
+        {.code_offset = 20, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 28},
+        {.code_offset = 24, .kind = CODEGEN_UNWIND_ACTION_NOP},
+    };
+    CodegenFunctionDescriptor windows_arm64_function = {
+        .unwind_actions = windows_arm64_actions,
+        .epilog_offsets = &windows_arm64_epilog,
+        .code_size = sizeof(windows_arm64_code),
+        .prolog_size = 24,
+        .unwind_action_count = BUSTER_ARRAY_LENGTH(windows_arm64_actions),
+        .epilog_count = 1,
+    };
+    CodegenModule windows_arm64_module = {
+        .code = BUSTER_ARRAY_TO_SLICE(windows_arm64_code),
+        .entries = &separate_entry,
+        .functions = &windows_arm64_function,
+        .abi = CODEGEN_ABI_AARCH64_WINDOWS,
+        .entry_count = 1,
+        .function_count = 1,
+    };
+    Target windows_arm64_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .os = OPERATING_SYSTEM_WINDOWS,
+    };
+    ObjectFile windows_arm64_object =
+        object_from_codegen_module(arguments->arena, &separate_analysis, &windows_arm64_module, windows_arm64_target);
+    BUSTER_TEST(arguments, windows_arm64_object.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, windows_arm64_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 8);
+    u8 expected_windows_arm64_xdata[] = {
+        0x10, 0x00, 0x40, 0x20, 0x0c, 0x00, 0x00, 0x02, 0xe3, 0xd2, 0x40, 0xe3, 0x03, 0xe1, 0x81, 0xe4, 0xe3, 0xd2, 0x40, 0x03,
+        0x81, 0xe4, 0x00, 0x00,
+    };
+    ByteSlice windows_arm64_xdata = windows_arm64_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    BUSTER_TEST(arguments, windows_arm64_xdata.length == sizeof(expected_windows_arm64_xdata) &&
+                               memcmp(windows_arm64_xdata.pointer, expected_windows_arm64_xdata, sizeof(expected_windows_arm64_xdata)) == 0);
+    BUSTER_TEST(arguments, windows_arm64_object.relocation_count == 2);
+    ObjectArtifact windows_arm64_coff = object_write(arguments->arena, &windows_arm64_object, OBJECT_FORMAT_COFF);
+    BUSTER_TEST(arguments, windows_arm64_coff.error == OBJECT_ERROR_NONE);
+    ObjectFile windows_arm64_roundtrip = object_read(arguments->arena, windows_arm64_coff.bytes, windows_arm64_target);
+    BUSTER_TEST(arguments, windows_arm64_roundtrip.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, windows_arm64_roundtrip.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 8);
+    BUSTER_TEST(arguments, windows_arm64_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_arm64_xdata));
+    BUSTER_TEST(arguments, windows_arm64_roundtrip.relocation_count == 2);
+    for (u32 relocation_index = 0; relocation_index < windows_arm64_roundtrip.relocation_count; relocation_index += 1)
+    {
+        BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
+        BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+    }
+
     CodegenModule mach_cfi_module = separate_module;
     mach_cfi_module.relocations = 0;
     mach_cfi_module.relocation_count = 0;

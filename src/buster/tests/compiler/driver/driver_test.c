@@ -787,6 +787,44 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
         }
         scratch_end(codeview_temporary);
     }
+    // Windows ARM64 uses full unwind records so non-canonical frame-base
+    // saves, page touches, and every emitted epilog remain explicit.
+    {
+        TemporalArena arm64_unwind_temporary = scratch_begin(&arguments->arena, 1);
+        String8 arm64_unwind_object_path = buster_test_temporary_path(arm64_unwind_temporary.arena, S8("buster-c-arm64-unwind"), S8(".o"));
+        String8 arm64_unwind_command_line[] = {
+            S8("-target"), S8("aarch64-windows"), S8("-c"), S8("-g0"), S8("-o"), arm64_unwind_object_path, S8("tests/basic_c_operations.c"),
+        };
+        CompilerDriverResult arm64_unwind_compile = compiler_driver_execute_invocation(
+            arm64_unwind_temporary.arena,
+            compiler_driver_parse_arguments(arm64_unwind_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arm64_unwind_command_line)));
+        BUSTER_TEST(arguments, arm64_unwind_compile.error == COMPILER_DRIVER_ERROR_NONE);
+        if (arm64_unwind_compile.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            ObjectFile* arm64_unwind_object = &arm64_unwind_compile.object;
+            ByteSlice arm64_pdata = arm64_unwind_object->sections[OBJECT_SECTION_WINDOWS_PDATA].data;
+            ByteSlice arm64_xdata = arm64_unwind_object->sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+            BUSTER_TEST(arguments, arm64_pdata.length >= 8 && arm64_pdata.length % 8 == 0);
+            BUSTER_TEST(arguments, arm64_xdata.length >= 8);
+            bool arm64_large_allocation = false;
+            for (u64 byte_index = 0; byte_index < arm64_xdata.length; byte_index += 1)
+            {
+                arm64_large_allocation |= arm64_xdata.pointer[byte_index] == 0xe0;
+            }
+            BUSTER_TEST(arguments, arm64_large_allocation);
+            u32 arm64_unwind_relocations = 0;
+            for (u32 relocation_index = 0; relocation_index < arm64_unwind_object->relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation* relocation = arm64_unwind_object->relocations + relocation_index;
+                arm64_unwind_relocations += relocation->section == OBJECT_SECTION_WINDOWS_PDATA &&
+                                            relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB;
+            }
+            BUSTER_TEST(arguments, arm64_unwind_relocations == arm64_pdata.length / 4);
+            ByteSlice arm64_unwind_file = file_read(arm64_unwind_temporary.arena, arm64_unwind_object_path, (FileReadOptions){0});
+            BUSTER_TEST(arguments, arm64_unwind_file.length != 0 && arm64_unwind_file.length < BUSTER_MB(1));
+        }
+        scratch_end(arm64_unwind_temporary);
+    }
     // Recording line rows must not change the code that is generated for
     // them: the machine code has to be identical with and without -g.
     {
