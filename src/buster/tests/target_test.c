@@ -69,6 +69,7 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, cpu_model_from_string(S8("znver5")) == CPU_MODEL_AMD_ZEN_5);
     BUSTER_TEST(arguments, cpu_model_from_string(S8("apple-m4")) == CPU_MODEL_A64_APPLE_M4);
     BUSTER_TEST(arguments, cpu_model_from_string(S8("not-a-processor")) == CPU_MODEL_ERROR);
+    BUSTER_STRING_TEST(arguments, cpu_model_to_string_os(CPU_MODEL_ERROR), S8("error"));
     BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_ERROR) == CPU_MODEL_NATIVE);
     BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_AMD_ZEN_5) == CPU_MODEL_AMD_ZEN_5);
     BUSTER_TEST(arguments, cpu_model_supports_arch(CPU_MODEL_AMD_ZEN_5, CPU_ARCH_X86_64));

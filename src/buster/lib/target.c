@@ -606,10 +606,10 @@ String8 cpu_model_to_string_os(CpuModel model)
     {
         break;
     case CPU_MODEL_COUNT:
-        return S8("count"); // TODO: crash?
+        BUSTER_UNREACHABLE();
         break;
     case CPU_MODEL_ERROR:
-        return S8("error"); // TODO: crash?
+        return S8("error");
         break;
     case CPU_MODEL_BASELINE:
         return S8("baseline");
