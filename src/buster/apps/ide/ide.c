@@ -993,6 +993,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, ide_state.cc_arguments);
     CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
+    if (compile.warning.length)
+    {
+        string_print(S8("{S8}"), compile.warning);
+    }
     if (compile.error != COMPILER_DRIVER_ERROR_NONE)
     {
         string_print(S8("cc: error: {S8}\n"), compile.diagnostic);

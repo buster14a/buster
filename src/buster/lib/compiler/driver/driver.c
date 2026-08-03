@@ -1009,6 +1009,44 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
     };
 }
 
+BUSTER_GLOBAL_LOCAL void compiler_driver_append_warning(Arena* arena, String8* warnings, String8 path, CDiagnostic diagnostic)
+{
+    if (!arena || !warnings || diagnostic.severity != C_DIAGNOSTIC_WARNING)
+    {
+        return;
+    }
+    String8 formatted = string_format(arena, S8("{S8}:{u32}:{u32}: warning: {S8}\n"), path, diagnostic.location.line, diagnostic.location.column,
+                                      diagnostic.message);
+    u64 length = warnings->length + formatted.length;
+    char8* text = arena_allocate(arena, char8, length + 1);
+    if (warnings->length)
+    {
+        memcpy(text, warnings->pointer, warnings->length);
+    }
+    if (formatted.length)
+    {
+        memcpy(text + warnings->length, formatted.pointer, formatted.length);
+    }
+    text[length] = 0;
+    *warnings = (String8){
+        .pointer = text,
+        .length = length,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL CDiagnostic* compiler_driver_first_preprocess_error(CPreprocessResult preprocess)
+{
+    for (u64 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
+    {
+        CDiagnostic* diagnostic = preprocess.diagnostics + diagnostic_index;
+        if (diagnostic->severity != C_DIAGNOSTIC_WARNING)
+        {
+            return diagnostic;
+        }
+    }
+    return 0;
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, String8 input);
 
 static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write)
@@ -1056,13 +1094,18 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                 });
-    if (preprocess.diagnostic_count)
+    for (u64 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
     {
-        CDiagnostic diagnostic = preprocess.diagnostics[0];
+        compiler_driver_append_warning(arena, &result.warning, invocation.input_paths[0], preprocess.diagnostics[diagnostic_index]);
+    }
+    result.tokenizer_warning_count = (u32)preprocess.warning_count;
+    if (preprocess.error_count)
+    {
+        CDiagnostic* diagnostic = compiler_driver_first_preprocess_error(preprocess);
         result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
-        result.tokenizer_error_count = (u32)preprocess.diagnostic_count;
-        result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), invocation.input_paths[0], diagnostic.location.line, diagnostic.location.column,
-                                          diagnostic.message);
+        result.tokenizer_error_count = (u32)preprocess.error_count;
+        result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), invocation.input_paths[0], diagnostic->location.line, diagnostic->location.column,
+                                          diagnostic->message);
         goto end;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
@@ -1741,8 +1784,24 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         CompilerDriverResult unit = compiler_driver_execute_c_single(unit_arena, single, suppress_object_write);
         result.tokenizer_error_count += unit.tokenizer_error_count;
+        result.tokenizer_warning_count += unit.tokenizer_warning_count;
         result.parser_diagnostic_count += unit.parser_diagnostic_count;
         result.analysis_diagnostic_count += unit.analysis_diagnostic_count;
+        if (unit.warning.length)
+        {
+            u64 warning_length = result.warning.length + unit.warning.length;
+            char8* warning = arena_allocate(arena, char8, warning_length + 1);
+            if (result.warning.length)
+            {
+                memcpy(warning, result.warning.pointer, result.warning.length);
+            }
+            memcpy(warning + result.warning.length, unit.warning.pointer, unit.warning.length);
+            warning[warning_length] = 0;
+            result.warning = (String8){
+                .pointer = warning,
+                .length = warning_length,
+            };
+        }
         result.codegen_statistics.instruction_count += unit.codegen_statistics.instruction_count;
         result.codegen_statistics.value_count += unit.codegen_statistics.value_count;
         result.codegen_statistics.stack_value_bytes += unit.codegen_statistics.stack_value_bytes;
@@ -1759,10 +1818,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             if (unit.diagnostic.length)
             {
-                unit.diagnostic = string_duplicate_arena(arena, unit.diagnostic, false);
+                result.diagnostic = string_duplicate_arena(arena, unit.diagnostic, false);
             }
+            result.error = unit.error;
+            result.codegen_error = unit.codegen_error;
+            result.object_error = unit.object_error;
             arena_destroy(unit_arena, 1);
-            return unit;
+            return result;
         }
         if (unit.has_object)
         {

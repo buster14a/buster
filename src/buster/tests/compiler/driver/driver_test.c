@@ -254,6 +254,37 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     CompilerDriverResult preprocess = compiler_driver_execute_invocation(arguments->arena, preprocess_invocation);
     BUSTER_TEST(arguments, preprocess.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(preprocess.output, S8("int answer = 37 ;")) != BUSTER_STRING_NO_MATCH);
+    String8 warning_command_line[] = {
+        S8("-fsyntax-only"),
+        S8("tests/basic_c_preprocessor_warning.c"),
+    };
+    CompilerDriverResult warning = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(warning_command_line)));
+    BUSTER_TEST(arguments, warning.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, warning.tokenizer_error_count == 0);
+    BUSTER_TEST(arguments, warning.tokenizer_warning_count == 1);
+    BUSTER_TEST(arguments, string_first_sequence(warning.warning, S8("warning: expanded driver warning")) != BUSTER_STRING_NO_MATCH);
+    String8 warning_cross_target_command_line[] = {
+        S8("-E"),
+        S8("-target"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("tests/basic_c_preprocessor_warning.c"),
+    };
+    CompilerDriverResult warning_cross_target = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(warning_cross_target_command_line)));
+    BUSTER_TEST(arguments, warning_cross_target.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, warning_cross_target.tokenizer_error_count == 0);
+    BUSTER_TEST(arguments, warning_cross_target.tokenizer_warning_count == 1);
+    BUSTER_TEST(arguments, string_first_sequence(warning_cross_target.output, S8("int main ( void )")) != BUSTER_STRING_NO_MATCH);
+    String8 error_command_line[] = {
+        S8("-fsyntax-only"),
+        S8("tests/basic_c_preprocessor_error.c"),
+    };
+    CompilerDriverResult preprocessor_error = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(error_command_line)));
+    BUSTER_TEST(arguments, preprocessor_error.error == COMPILER_DRIVER_ERROR_TOKENIZE);
+    BUSTER_TEST(arguments, preprocessor_error.tokenizer_error_count == 1);
+    BUSTER_TEST(arguments, string_first_sequence(preprocessor_error.diagnostic, S8("expanded driver error")) != BUSTER_STRING_NO_MATCH);
     String8 syntax_command_line[] = {
         S8("-fsyntax-only"),
         S8("tests/basic_c_driver.c"),

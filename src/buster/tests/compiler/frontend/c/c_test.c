@@ -259,6 +259,135 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     CParseResult pragma_pack_parse = c_parse(arguments->arena, pragma_pack);
     BUSTER_TEST(arguments, pragma_pack_parse.diagnostic_count == 0);
 
+    CPreprocessorDefinition diagnostic_text = {
+        .name = S8("DIAGNOSTIC_TEXT"),
+        .value = S8("expanded warning"),
+    };
+    CPreprocessResult preprocess_diagnostics = c_preprocess(arguments->arena,
+                                                            S8("#warning direct warning\n"
+                                                               "#warning DIAGNOSTIC_TEXT\n"
+                                                               "#if 0\n"
+                                                               "#error inactive error\n"
+                                                               "#warning inactive warning\n"
+                                                               "#endif\n"
+                                                               "int diagnostic_value;\n"),
+                                                            (CPreprocessOptions){
+                                                                .definitions = &diagnostic_text,
+                                                                .definition_count = 1,
+                                                            });
+    BUSTER_TEST(arguments, preprocess_diagnostics.diagnostic_count == 2);
+    BUSTER_TEST(arguments, preprocess_diagnostics.error_count == 0);
+    BUSTER_TEST(arguments, preprocess_diagnostics.warning_count == 2);
+    if (preprocess_diagnostics.diagnostic_count == 2)
+    {
+        BUSTER_TEST(arguments, preprocess_diagnostics.diagnostics[0].kind == C_DIAGNOSTIC_PREPROCESSOR_WARNING);
+        BUSTER_TEST(arguments, preprocess_diagnostics.diagnostics[0].severity == C_DIAGNOSTIC_WARNING);
+        BUSTER_STRING_TEST(arguments, preprocess_diagnostics.diagnostics[0].message, S8("direct warning"));
+        BUSTER_TEST(arguments, preprocess_diagnostics.diagnostics[1].kind == C_DIAGNOSTIC_PREPROCESSOR_WARNING);
+        BUSTER_TEST(arguments, preprocess_diagnostics.diagnostics[1].severity == C_DIAGNOSTIC_WARNING);
+        BUSTER_STRING_TEST(arguments, preprocess_diagnostics.diagnostics[1].message, S8("expanded warning"));
+    }
+    CPreprocessResult preprocess_error = c_preprocess(arguments->arena,
+                                                      S8("#define ERROR_TEXT expanded error\n"
+                                                         "#error ERROR_TEXT\n"
+                                                         "#warning trailing warning\n"
+                                                         "int after_error;\n"),
+                                                      (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, preprocess_error.diagnostic_count == 2);
+    BUSTER_TEST(arguments, preprocess_error.error_count == 1);
+    BUSTER_TEST(arguments, preprocess_error.warning_count == 1);
+    if (preprocess_error.diagnostic_count == 2)
+    {
+        BUSTER_TEST(arguments, preprocess_error.diagnostics[0].kind == C_DIAGNOSTIC_PREPROCESSOR_ERROR);
+        BUSTER_TEST(arguments, preprocess_error.diagnostics[0].severity == C_DIAGNOSTIC_ERROR);
+        BUSTER_STRING_TEST(arguments, preprocess_error.diagnostics[0].message, S8("expanded error"));
+    }
+
+    CPreprocessResult expanded_pragmas = c_preprocess(arguments->arena,
+                                                      S8("#define PACK_DIRECTIVE \"pack(push, 4)\"\n"
+                                                         "#define SAVED_VALUE 1\n"
+                                                         "#define SAVED_FUNCTION(value) value + 1\n"
+                                                         "_Pragma(PACK_DIRECTIVE)\n"
+                                                         "_Pragma(\"push_macro(\\\"SAVED_VALUE\\\")\")\n"
+                                                         "_Pragma(\"push_macro(\\\"SAVED_FUNCTION\\\")\")\n"
+                                                         "#define SAVED_VALUE 2\n"
+                                                         "#define SAVED_FUNCTION(value, extra) value + extra\n"
+                                                         "typedef struct { char byte; long long value; } ExpandedPacked;\n"
+                                                         "_Pragma(\"pack(push, 8)\") typedef struct { char byte; long long value; } ExpandedInlinePacked; _Pragma(\"pack(pop)\")\n"
+                                                         "_Pragma(\"pop_macro(\\\"SAVED_FUNCTION\\\")\")\n"
+                                                         "_Pragma(\"pop_macro(\\\"SAVED_VALUE\\\")\")\n"
+                                                         "SAVED_VALUE SAVED_FUNCTION(2)\n"
+                                                         "_Pragma(\"pack(pop)\")\n"
+                                                         "typedef struct { char byte; long long value; } ExpandedNatural;\n"),
+                                                      (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, expanded_pragmas.diagnostic_count == 0);
+    BUSTER_TEST(arguments, expanded_pragmas.token_count != 0);
+    bool expanded_packed_alignment_seen = false;
+    bool expanded_inline_packed_alignment_seen = false;
+    bool expanded_natural_alignment_seen = false;
+    bool restored_value_seen = false;
+    bool restored_function_seen = false;
+    for (u32 token_index = 0; token_index < expanded_pragmas.token_count; token_index += 1)
+    {
+        CToken token = expanded_pragmas.tokens[token_index];
+        expanded_packed_alignment_seen |= string_equal(token.spelling, S8("ExpandedPacked")) && token.pack_alignment == 4;
+        expanded_inline_packed_alignment_seen |= string_equal(token.spelling, S8("ExpandedInlinePacked")) && token.pack_alignment == 8;
+        expanded_natural_alignment_seen |= string_equal(token.spelling, S8("ExpandedNatural")) && token.pack_alignment == 0;
+        restored_value_seen |= string_equal(token.spelling, S8("1"));
+        restored_function_seen |= string_equal(token.spelling, S8("+"));
+        BUSTER_TEST(arguments, token.kind != C_TOKEN_PRAGMA);
+    }
+    BUSTER_TEST(arguments, expanded_packed_alignment_seen);
+    BUSTER_TEST(arguments, expanded_inline_packed_alignment_seen);
+    BUSTER_TEST(arguments, expanded_natural_alignment_seen);
+    BUSTER_TEST(arguments, restored_value_seen);
+    BUSTER_TEST(arguments, restored_function_seen);
+
+    CPreprocessResult windows_pragmas = c_preprocess(arguments->arena,
+                                                     S8("__pragma(pack(push, 2))\n"
+                                                        "#pragma GCC diagnostic push\n"
+                                                        "#pragma clang diagnostic ignored \"-Wunknown\"\n"
+                                                        "#pragma visibility push(default)\n"
+                                                        "#pragma warning(disable: 4100)\n"
+                                                        "#pragma comment(lib, \"ignored\")\n"
+                                                        "#pragma region ignored\n"
+                                                        "#pragma endregion\n"
+                                                        "#pragma omp parallel\n"
+                                                        "typedef struct { char byte; long long value; } WindowsPacked;\n"
+                                                        "__pragma(pack(pop))\n"
+                                                        "typedef struct { char byte; long long value; } WindowsNatural;\n"),
+                                                     (CPreprocessOptions){
+                                                         .target = {
+                                                             .cpu_arch = CPU_ARCH_X86_64,
+                                                             .os = OPERATING_SYSTEM_WINDOWS,
+                                                         },
+                                                     });
+    BUSTER_TEST(arguments, windows_pragmas.diagnostic_count == 0);
+    bool windows_packed_alignment_seen = false;
+    bool windows_natural_alignment_seen = false;
+    for (u32 token_index = 0; token_index < windows_pragmas.token_count; token_index += 1)
+    {
+        CToken token = windows_pragmas.tokens[token_index];
+        windows_packed_alignment_seen |= string_equal(token.spelling, S8("WindowsPacked")) && token.pack_alignment == 2;
+        windows_natural_alignment_seen |= string_equal(token.spelling, S8("WindowsNatural")) && token.pack_alignment == 0;
+    }
+    BUSTER_TEST(arguments, windows_packed_alignment_seen);
+    BUSTER_TEST(arguments, windows_natural_alignment_seen);
+
+    CPreprocessResult cross_target_clang_macros = c_preprocess(arguments->arena,
+                                                                S8("#if defined(__clang__) && __clang_major__ == 18\n"
+                                                                   "int clang_compatibility;\n"
+                                                                   "#else\n"
+                                                                   "#error missing clang compatibility macros\n"
+                                                                   "#endif\n"),
+                                                                (CPreprocessOptions){
+                                                                    .target = {
+                                                                        .cpu_arch = CPU_ARCH_X86_64,
+                                                                        .os = OPERATING_SYSTEM_LINUX,
+                                                                    },
+                                                                });
+    BUSTER_TEST(arguments, cross_target_clang_macros.diagnostic_count == 0);
+
     CPreprocessResult unmatched_conditional = c_preprocess(arguments->arena, S8("#if 1\nvalue\n"), (CPreprocessOptions){0});
     BUSTER_TEST(arguments, unmatched_conditional.diagnostic_count == 1);
     if (unmatched_conditional.diagnostic_count)

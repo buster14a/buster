@@ -100,6 +100,7 @@ typedef struct CompilerDriverResult CompilerDriverResult;
 struct CompilerDriverResult
 {
     String8 diagnostic;
+    String8 warning;
     String8 output;
     NativeExecutableLinkResult native_link;
     ObjectFile object;
@@ -108,6 +109,7 @@ struct CompilerDriverResult
     CodegenError codegen_error;
     ObjectError object_error;
     u32 tokenizer_error_count;
+    u32 tokenizer_warning_count;
     u32 parser_diagnostic_count;
     u32 analysis_diagnostic_count;
     bool has_object;

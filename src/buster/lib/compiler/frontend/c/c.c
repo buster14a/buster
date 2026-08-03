@@ -155,6 +155,7 @@ BUSTER_GLOBAL_LOCAL void c_diagnostic_push(CLexResult* result, Arena* diagnostic
         .message = message,
         .location = translated.locations[offset],
         .kind = kind,
+        .severity = C_DIAGNOSTIC_ERROR,
     };
 }
 
@@ -412,6 +413,23 @@ struct CMacro
     bool disabled;
     bool function_like;
     bool variadic;
+    bool pragma_like;
+};
+
+typedef struct CMacroPushMacro CMacroPushMacro;
+struct CMacroPushMacro
+{
+    CMacroPushMacro* previous;
+    CMacro* macro;
+    String8 name;
+    CToken* replacement;
+    String8* parameters;
+    u32 replacement_count;
+    u32 parameter_count;
+    bool defined;
+    bool function_like;
+    bool variadic;
+    bool pragma_like;
 };
 
 BUSTER_GLOBAL_LOCAL u64 c_macro_name_hash(String8 name)
@@ -592,13 +610,41 @@ BUSTER_GLOBAL_LOCAL void c_macro_define_object_text(Arena* arena, CMacro** first
     c_macro_define(arena, first, last, name, lex.tokens, replacement_count, 0, 0, false, false);
 }
 
-BUSTER_GLOBAL_LOCAL void c_preprocess_diagnostic_push(CPreprocessResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
+BUSTER_GLOBAL_LOCAL void c_preprocess_diagnostic_push_severity(CPreprocessResult* result, CSourceLocation location, CDiagnosticKind kind,
+                                                               CDiagnosticSeverity severity, String8 message)
 {
     result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
         .message = message,
         .location = location,
         .kind = kind,
+        .severity = severity,
     };
+    if (severity == C_DIAGNOSTIC_WARNING)
+    {
+        result->warning_count += 1;
+    }
+    else
+    {
+        result->error_count += 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void c_preprocess_diagnostic_push(CPreprocessResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
+{
+    c_preprocess_diagnostic_push_severity(result, location, kind, C_DIAGNOSTIC_ERROR, message);
+}
+
+BUSTER_GLOBAL_LOCAL void c_preprocess_diagnostic_copy(CPreprocessResult* result, CDiagnostic diagnostic)
+{
+    result->diagnostics[result->diagnostic_count++] = diagnostic;
+    if (diagnostic.severity == C_DIAGNOSTIC_WARNING)
+    {
+        result->warning_count += 1;
+    }
+    else
+    {
+        result->error_count += 1;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void c_preprocess_output_push(Arena* arena, CPreprocessTokenNode** first, CPreprocessTokenNode** last, CToken token, u64* count)
@@ -911,6 +957,66 @@ BUSTER_GLOBAL_LOCAL bool c_macro_replacement_tokens(Arena* arena, CMacro* macro,
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL CToken c_macro_pragma_token(Arena* arena, CMacro* macro, CMacroArgument argument, CToken invocation)
+{
+    CToken result = invocation;
+    result.kind = C_TOKEN_PRAGMA;
+    result.spelling = (String8){0};
+    CToken* tokens = argument.expanded_tokens;
+    u64 token_count = argument.expanded_token_count;
+    if (string_equal(macro->name, S8("_Pragma")))
+    {
+        if (token_count == 1 && tokens[0].kind == C_TOKEN_STRING_LITERAL && tokens[0].spelling.length >= 2)
+        {
+            String8 inner = {
+                .pointer = tokens[0].spelling.pointer + 1,
+                .length = tokens[0].spelling.length - 2,
+            };
+            char8* spelling = arena_allocate(arena, char8, inner.length + 1);
+            u64 output = 0;
+            for (u64 index = 0; index < inner.length; index += 1)
+            {
+                if (inner.pointer[index] == '\\' && index + 1 < inner.length)
+                {
+                    index += 1;
+                }
+                spelling[output++] = inner.pointer[index];
+            }
+            spelling[output] = 0;
+            result.spelling = (String8){
+                .pointer = spelling,
+                .length = output,
+            };
+        }
+        return result;
+    }
+    u64 length = 0;
+    for (u64 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        length += tokens[token_index].spelling.length + (token_index != 0);
+    }
+    if (length)
+    {
+        char8* spelling = arena_allocate(arena, char8, length + 1);
+        u64 output = 0;
+        for (u64 token_index = 0; token_index < token_count; token_index += 1)
+        {
+            if (token_index)
+            {
+                spelling[output++] = ' ';
+            }
+            memcpy(spelling + output, tokens[token_index].spelling.pointer, tokens[token_index].spelling.length);
+            output += tokens[token_index].spelling.length;
+        }
+        spelling[output] = 0;
+        result.spelling = (String8){
+            .pointer = spelling,
+            .length = output,
+        };
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_preprocess_expand(Arena* arena, CMacro* first_macro, CToken* input, u32 input_count, CPreprocessTokenNode** first_output,
                                              CPreprocessTokenNode** last_output, u64* output_count, u32 expansion_limit, CPreprocessResult* result)
 {
@@ -969,6 +1075,16 @@ BUSTER_GLOBAL_LOCAL bool c_preprocess_expand(Arena* arena, CMacro* first_macro, 
             if (!c_macro_replacement_tokens(arena, macro, continuation->arguments, invocation.location, result, &replacement_tokens, &replacement_count))
             {
                 return false;
+            }
+            if (macro->pragma_like)
+            {
+                if (continuation->argument_count == 1)
+                {
+                    CToken pragma = c_macro_pragma_token(arena, macro, continuation->arguments[0], invocation);
+                    c_preprocess_output_push(arena, &parent->first_output, &parent->last_output, pragma, &parent->output_count);
+                }
+                context = parent;
+                continue;
             }
             macro->disabled = true;
             c_macro_expansion_task_push(arena, &parent->top, (CToken){0}, macro, C_MACRO_EXPANSION_ENABLE);
@@ -1359,11 +1475,28 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_apply(CConditionalOperator operation, u64
     return true;
 }
 
+typedef enum CIncludeSearchKind
+{
+    C_INCLUDE_SEARCH_NONE,
+    C_INCLUDE_SEARCH_QUOTED,
+    C_INCLUDE_SEARCH_INCLUDE_PATH,
+    C_INCLUDE_SEARCH_BUILTIN,
+    C_INCLUDE_SEARCH_SYSTEM_PATH,
+} CIncludeSearchKind;
+
+typedef struct CIncludeSearchOrigin CIncludeSearchOrigin;
+struct CIncludeSearchOrigin
+{
+    CIncludeSearchKind kind;
+    u32 index;
+};
+
 BUSTER_GLOBAL_LOCAL bool c_include_resolve(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, bool quoted, String8* path_out,
-                                           String8* source_out, FileMapRead* map_out);
+                                           String8* source_out, FileMapRead* map_out, CIncludeSearchOrigin* origin_out);
 
 BUSTER_GLOBAL_LOCAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, String8* path_out,
-                                                String8* source_out, FileMapRead* map_out);
+                                                String8* source_out, FileMapRead* map_out, CIncludeSearchOrigin origin,
+                                                CIncludeSearchOrigin* origin_out);
 
 BUSTER_GLOBAL_LOCAL bool c_include_name(Arena* arena, CToken* tokens, u32 token_count, String8* name_out, bool* quoted_out);
 
@@ -1409,7 +1542,7 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_attribute_supported(String8 name)
 }
 
 BUSTER_GLOBAL_LOCAL bool c_conditional_feature_operators(Arena* arena, CMacro* first_macro, CPreprocessTokenNode* first, CPreprocessOptions* options,
-                                                         String8 including_path)
+                                                         String8 including_path, CIncludeSearchOrigin including_origin)
 {
     for (CPreprocessTokenNode* node = first; node; node = node->next)
     {
@@ -1500,8 +1633,8 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_feature_operators(Arena* arena, CMacro* f
             String8 resolved_source = {0};
             supported = c_include_name(arena, arguments, argument_count, &include_name, &quoted) &&
                         options &&
-                        (has_include_next ? c_include_resolve_next(arena, *options, including_path, include_name, &resolved_path, &resolved_source, 0)
-                                          : c_include_resolve(arena, *options, including_path, include_name, quoted, &resolved_path, &resolved_source, 0));
+                        (has_include_next ? c_include_resolve_next(arena, *options, including_path, include_name, &resolved_path, &resolved_source, 0, including_origin, 0)
+                                          : c_include_resolve(arena, *options, including_path, include_name, quoted, &resolved_path, &resolved_source, 0, 0));
         }
         else if ((has_builtin || has_attribute) && argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER)
         {
@@ -1535,7 +1668,7 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_feature_operators(Arena* arena, CMacro* f
 
 BUSTER_GLOBAL_LOCAL bool c_integer_expression_evaluate_with_features(Arena* arena, CMacro* first_macro, CToken* tokens, u32 token_count, u32 expansion_limit,
                                                                      CPreprocessResult* result, CPreprocessOptions* options, String8 including_path,
-                                                                     u64* value_out)
+                                                                     CIncludeSearchOrigin including_origin, u64* value_out)
 {
     CToken* transformed = arena_allocate(arena, CToken, token_count);
     u32 transformed_count = 0;
@@ -1578,7 +1711,7 @@ BUSTER_GLOBAL_LOCAL bool c_integer_expression_evaluate_with_features(Arena* aren
     {
         return false;
     }
-    if (!c_conditional_feature_operators(arena, first_macro, first_expanded, options, including_path))
+    if (!c_conditional_feature_operators(arena, first_macro, first_expanded, options, including_path, including_origin))
     {
         return false;
     }
@@ -1749,15 +1882,18 @@ BUSTER_GLOBAL_LOCAL bool c_integer_expression_evaluate_with_features(Arena* aren
 BUSTER_GLOBAL_LOCAL bool c_integer_expression_evaluate(Arena* arena, CMacro* first_macro, CToken* tokens, u32 token_count, u32 expansion_limit,
                                                        CPreprocessResult* result, u64* value_out)
 {
-    return c_integer_expression_evaluate_with_features(arena, first_macro, tokens, token_count, expansion_limit, result, 0, (String8){0}, value_out);
+    return c_integer_expression_evaluate_with_features(arena, first_macro, tokens, token_count, expansion_limit, result, 0, (String8){0},
+                                                       (CIncludeSearchOrigin){0}, value_out);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_conditional_evaluate(Arena* arena, CMacro* first_macro, CToken* tokens, u32 token_count, u32 expansion_limit,
-                                                CPreprocessResult* result, CPreprocessOptions options, String8 including_path, bool* value_out)
+                                                CPreprocessResult* result, CPreprocessOptions options, String8 including_path,
+                                                CIncludeSearchOrigin including_origin, bool* value_out)
 {
     u64 value = 0;
     bool valid =
-        c_integer_expression_evaluate_with_features(arena, first_macro, tokens, token_count, expansion_limit, result, &options, including_path, &value);
+        c_integer_expression_evaluate_with_features(arena, first_macro, tokens, token_count, expansion_limit, result, &options, including_path, including_origin,
+                                                    &value);
     *value_out = value != 0;
     return valid;
 }
@@ -1800,6 +1936,7 @@ struct CPreprocessSourceFrame
     u32 depth;
     bool line_start;
     FileMapRead source_map;
+    CIncludeSearchOrigin include_origin;
 };
 
 typedef struct CPragmaPackStack CPragmaPackStack;
@@ -1808,6 +1945,354 @@ struct CPragmaPackStack
     CPragmaPackStack* previous;
     u32 alignment;
 };
+
+typedef struct CPreprocessPragmaContext CPreprocessPragmaContext;
+struct CPreprocessPragmaContext
+{
+    Arena* arena;
+    CMacro** first_macro;
+    CMacro** last_macro;
+    CMacroPushMacro** macro_push_stack;
+    CPragmaPackStack** pack_stack;
+    u32* pack_alignment;
+    String8* once_paths;
+    u32* once_path_count;
+    u32 once_path_capacity;
+    String8 current_path;
+};
+
+BUSTER_GLOBAL_LOCAL bool c_preprocess_pragma_macro_name(CToken* tokens, u32 token_count, String8* name_out)
+{
+    if (token_count == 4 && tokens[0].kind == C_TOKEN_IDENTIFIER && tokens[1].kind == C_TOKEN_PUNCTUATOR &&
+        c_token_spelling_equal(tokens[1], S8("(")) && tokens[2].kind == C_TOKEN_STRING_LITERAL && tokens[2].spelling.length >= 2 &&
+        tokens[3].kind == C_TOKEN_PUNCTUATOR && c_token_spelling_equal(tokens[3], S8(")")))
+    {
+        *name_out = (String8){
+            .pointer = tokens[2].spelling.pointer + 1,
+            .length = tokens[2].spelling.length - 2,
+        };
+        return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL void c_macro_push_definition(CPreprocessPragmaContext context, String8 name)
+{
+    CMacro* macro = c_macro_find(*context.first_macro, name);
+    CMacroPushMacro* entry = arena_allocate(context.arena, CMacroPushMacro, 1);
+    *entry = (CMacroPushMacro){
+        .previous = *context.macro_push_stack,
+        .macro = macro,
+        .name = string_duplicate_arena(context.arena, name, false),
+        .defined = macro && macro->defined,
+        .function_like = macro && macro->function_like,
+        .variadic = macro && macro->variadic,
+        .pragma_like = macro && macro->pragma_like,
+    };
+    if (macro && macro->replacement_count)
+    {
+        entry->replacement_count = macro->replacement_count;
+        entry->replacement = arena_allocate(context.arena, CToken, entry->replacement_count);
+        memcpy(entry->replacement, macro->replacement, sizeof(*entry->replacement) * entry->replacement_count);
+    }
+    if (macro && macro->parameter_count)
+    {
+        entry->parameter_count = macro->parameter_count;
+        entry->parameters = arena_allocate(context.arena, String8, entry->parameter_count);
+        memcpy(entry->parameters, macro->parameters, sizeof(*entry->parameters) * entry->parameter_count);
+    }
+    *context.macro_push_stack = entry;
+}
+
+BUSTER_GLOBAL_LOCAL void c_macro_clear_definition(CMacro* macro)
+{
+    if (!macro)
+    {
+        return;
+    }
+    macro->replacement = 0;
+    macro->parameters = 0;
+    macro->replacement_count = 0;
+    macro->parameter_count = 0;
+    macro->defined = false;
+    macro->function_like = false;
+    macro->variadic = false;
+    macro->pragma_like = false;
+}
+
+BUSTER_GLOBAL_LOCAL void c_macro_pop_definition(CPreprocessPragmaContext context, String8 name)
+{
+    CMacroPushMacro** cursor = context.macro_push_stack;
+    while (*cursor && !string_equal((*cursor)->name, name))
+    {
+        cursor = &(*cursor)->previous;
+    }
+    if (!*cursor)
+    {
+        return;
+    }
+    CMacroPushMacro* entry = *cursor;
+    *cursor = entry->previous;
+    if (!entry->macro)
+    {
+        c_macro_clear_definition(c_macro_find(*context.first_macro, name));
+        return;
+    }
+    CMacro* macro = entry->macro;
+    macro->replacement = entry->replacement;
+    macro->parameters = entry->parameters;
+    macro->replacement_count = entry->replacement_count;
+    macro->parameter_count = entry->parameter_count;
+    macro->defined = entry->defined;
+    macro->function_like = entry->function_like;
+    macro->variadic = entry->variadic;
+    macro->pragma_like = entry->pragma_like;
+    macro->disabled = false;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_preprocess_pragma_pack_value(CToken token, u32* value_out)
+{
+    u64 value = 0;
+    bool valid = token.kind == C_TOKEN_PREPROCESSING_NUMBER && c_conditional_number(token.spelling, &value) && value <= UINT32_MAX && value &&
+                 !(value & (value - 1));
+    if (valid)
+    {
+        *value_out = (u32)value;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL void c_preprocess_pragma_pack(CPreprocessPragmaContext context, CToken* tokens, u32 token_count)
+{
+    if (token_count < 3 || tokens[0].kind != C_TOKEN_IDENTIFIER || !string_equal(tokens[0].spelling, S8("pack")) ||
+        !c_token_is_punctuator(tokens[1], S8("(")) || !c_token_is_punctuator(tokens[token_count - 1], S8(")")))
+    {
+        return;
+    }
+    CToken* arguments = tokens + 2;
+    u32 argument_count = token_count - 3;
+    if (!argument_count)
+    {
+        *context.pack_alignment = 0;
+        return;
+    }
+    bool push = argument_count >= 1 && arguments[0].kind == C_TOKEN_IDENTIFIER && string_equal(arguments[0].spelling, S8("push"));
+    bool pop = argument_count >= 1 && arguments[0].kind == C_TOKEN_IDENTIFIER && string_equal(arguments[0].spelling, S8("pop"));
+    u32 value_index = UINT32_MAX;
+    if (push)
+    {
+        if (argument_count == 1)
+        {
+            value_index = UINT32_MAX;
+        }
+        else if (argument_count == 3 && c_token_is_punctuator(arguments[1], S8(",")))
+        {
+            value_index = 2;
+        }
+        else if (argument_count == 5 && c_token_is_punctuator(arguments[1], S8(",")) && arguments[2].kind == C_TOKEN_IDENTIFIER &&
+                 c_token_is_punctuator(arguments[3], S8(",")))
+        {
+            value_index = 4;
+        }
+        else
+        {
+            return;
+        }
+        u32 value = 0;
+        bool valid_value = value_index != UINT32_MAX && c_preprocess_pragma_pack_value(arguments[value_index], &value);
+        if (value_index != UINT32_MAX && !valid_value)
+        {
+            return;
+        }
+        CPragmaPackStack* entry = arena_allocate(context.arena, CPragmaPackStack, 1);
+        *entry = (CPragmaPackStack){
+            .previous = *context.pack_stack,
+            .alignment = *context.pack_alignment,
+        };
+        *context.pack_stack = entry;
+        if (valid_value)
+        {
+            *context.pack_alignment = value;
+        }
+        return;
+    }
+    if (pop)
+    {
+        if (argument_count != 1 && !(argument_count == 3 && c_token_is_punctuator(arguments[1], S8(",")) && arguments[2].kind == C_TOKEN_IDENTIFIER))
+        {
+            return;
+        }
+        if (*context.pack_stack)
+        {
+            *context.pack_alignment = (*context.pack_stack)->alignment;
+            *context.pack_stack = (*context.pack_stack)->previous;
+        }
+        return;
+    }
+    if (argument_count == 1)
+    {
+        u32 value = 0;
+        if (c_preprocess_pragma_pack_value(arguments[0], &value))
+        {
+            *context.pack_alignment = value;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void c_preprocess_handle_pragma(CPreprocessPragmaContext context, CToken* tokens, u32 token_count)
+{
+    if (!token_count)
+    {
+        return;
+    }
+    if (token_count == 1 && tokens[0].kind == C_TOKEN_IDENTIFIER && string_equal(tokens[0].spelling, S8("once")))
+    {
+        bool found = false;
+        for (u32 index = 0; index < *context.once_path_count; index += 1)
+        {
+            found |= string_equal(context.once_paths[index], context.current_path);
+        }
+        if (!found && *context.once_path_count < context.once_path_capacity)
+        {
+            u32 once_path_index = *context.once_path_count;
+            context.once_paths[once_path_index] = context.current_path;
+            *context.once_path_count = once_path_index + 1;
+        }
+        return;
+    }
+    if (tokens[0].kind == C_TOKEN_IDENTIFIER && string_equal(tokens[0].spelling, S8("push_macro")))
+    {
+        String8 name = {0};
+        if (c_preprocess_pragma_macro_name(tokens, token_count, &name))
+        {
+            c_macro_push_definition(context, name);
+        }
+        return;
+    }
+    if (tokens[0].kind == C_TOKEN_IDENTIFIER && string_equal(tokens[0].spelling, S8("pop_macro")))
+    {
+        String8 name = {0};
+        if (c_preprocess_pragma_macro_name(tokens, token_count, &name))
+        {
+            c_macro_pop_definition(context, name);
+        }
+        return;
+    }
+    if (tokens[0].kind == C_TOKEN_IDENTIFIER && string_equal(tokens[0].spelling, S8("pack")))
+    {
+        c_preprocess_pragma_pack(context, tokens, token_count);
+    }
+    // GCC/Clang/MSVC diagnostic, visibility, system-header, warning,
+    // comment, region, and OpenMP pragmas are compatibility no-ops. Unknown
+    // pragma bodies are intentionally ignored as well.
+}
+
+BUSTER_GLOBAL_LOCAL void c_preprocess_pragma_marker(CPreprocessPragmaContext context, CToken marker)
+{
+    if (!marker.spelling.length)
+    {
+        return;
+    }
+    CLexResult lex = c_lex(context.arena, marker.spelling);
+    u32 token_count = 0;
+    while (token_count < lex.token_count && lex.tokens[token_count].kind != C_TOKEN_NEWLINE && lex.tokens[token_count].kind != C_TOKEN_END_OF_FILE)
+    {
+        token_count += 1;
+    }
+    c_preprocess_handle_pragma(context, lex.tokens, token_count);
+}
+
+BUSTER_GLOBAL_LOCAL void c_preprocess_process_expanded_line(CPreprocessPragmaContext context, CPreprocessTokenNode* first_line,
+                                                            CPreprocessTokenNode** first_output, CPreprocessTokenNode** last_output, u64* output_count)
+{
+    for (CPreprocessTokenNode* node = first_line; node;)
+    {
+        CPreprocessTokenNode* next = node->next;
+        if (node->token.kind == C_TOKEN_PRAGMA)
+        {
+            c_preprocess_pragma_marker(context, node->token);
+        }
+        else
+        {
+            node->token.pack_alignment = *context.pack_alignment;
+            node->next = 0;
+            if (*last_output)
+            {
+                (*last_output)->next = node;
+            }
+            else
+            {
+                *first_output = node;
+            }
+            *last_output = node;
+            *output_count += 1;
+        }
+        node = next;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_preprocess_tokens_from_nodes(CPreprocessTokenNode* first, Arena* arena, CToken** tokens_out)
+{
+    u32 token_count = 0;
+    for (CPreprocessTokenNode* node = first; node; node = node->next)
+    {
+        token_count += node->token.kind != C_TOKEN_PRAGMA;
+    }
+    CToken* tokens = arena_allocate(arena, CToken, token_count);
+    u32 output = 0;
+    for (CPreprocessTokenNode* node = first; node; node = node->next)
+    {
+        if (node->token.kind != C_TOKEN_PRAGMA)
+        {
+            tokens[output++] = node->token;
+        }
+    }
+    *tokens_out = tokens;
+    return token_count;
+}
+
+BUSTER_GLOBAL_LOCAL String8 c_preprocess_message_from_nodes(Arena* arena, CPreprocessTokenNode* first)
+{
+    u64 length = 0;
+    u64 token_count = 0;
+    for (CPreprocessTokenNode* node = first; node; node = node->next)
+    {
+        if (node->token.kind != C_TOKEN_PRAGMA)
+        {
+            length += node->token.spelling.length;
+            token_count += 1;
+        }
+    }
+    if (!token_count)
+    {
+        return (String8){0};
+    }
+    length += token_count - 1;
+    char8* message = arena_allocate(arena, char8, length + 1);
+    u64 output = 0;
+    u64 emitted = 0;
+    for (CPreprocessTokenNode* node = first; node; node = node->next)
+    {
+        if (node->token.kind == C_TOKEN_PRAGMA)
+        {
+            continue;
+        }
+        if (emitted++)
+        {
+            message[output++] = ' ';
+        }
+        if (node->token.spelling.length)
+        {
+            memcpy(message + output, node->token.spelling.pointer, node->token.spelling.length);
+            output += node->token.spelling.length;
+        }
+    }
+    message[output] = 0;
+    return (String8){
+        .pointer = message,
+        .length = output,
+    };
+}
 
 BUSTER_GLOBAL_LOCAL CSourceLocation c_preprocess_logical_location(CPreprocessSourceFrame* frame, CSourceLocation location)
 {
@@ -2033,11 +2518,15 @@ BUSTER_GLOBAL_LOCAL bool c_include_builtin(String8 name, String8* path_out, Stri
 }
 
 BUSTER_GLOBAL_LOCAL bool c_include_resolve(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, bool quoted, String8* path_out,
-                                           String8* source_out, FileMapRead* map_out)
+                                           String8* source_out, FileMapRead* map_out, CIncludeSearchOrigin* origin_out)
 {
     if (map_out)
     {
         *map_out = (FileMapRead){0};
+    }
+    if (origin_out)
+    {
+        *origin_out = (CIncludeSearchOrigin){0};
     }
     if (c_path_is_absolute(name))
     {
@@ -2045,23 +2534,39 @@ BUSTER_GLOBAL_LOCAL bool c_include_resolve(Arena* arena, CPreprocessOptions opti
     }
     if (quoted && c_include_read(arena, c_path_directory(including_path), name, path_out, source_out, map_out))
     {
+        if (origin_out)
+        {
+            *origin_out = (CIncludeSearchOrigin){.kind = C_INCLUDE_SEARCH_QUOTED};
+        }
         return true;
     }
     for (u32 index = 0; index < options.include_path_count; index += 1)
     {
         if (c_include_read(arena, options.include_paths[index], name, path_out, source_out, map_out))
         {
+            if (origin_out)
+            {
+                *origin_out = (CIncludeSearchOrigin){.kind = C_INCLUDE_SEARCH_INCLUDE_PATH, .index = index};
+            }
             return true;
         }
     }
     if (c_include_builtin(name, path_out, source_out))
     {
+        if (origin_out)
+        {
+            *origin_out = (CIncludeSearchOrigin){.kind = C_INCLUDE_SEARCH_BUILTIN};
+        }
         return true;
     }
     for (u32 index = 0; index < options.system_include_path_count; index += 1)
     {
         if (c_include_read(arena, options.system_include_paths[index], name, path_out, source_out, map_out))
         {
+            if (origin_out)
+            {
+                *origin_out = (CIncludeSearchOrigin){.kind = C_INCLUDE_SEARCH_SYSTEM_PATH, .index = index};
+            }
             return true;
         }
     }
@@ -2069,39 +2574,64 @@ BUSTER_GLOBAL_LOCAL bool c_include_resolve(Arena* arena, CPreprocessOptions opti
 }
 
 BUSTER_GLOBAL_LOCAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, String8* path_out,
-                                                String8* source_out, FileMapRead* map_out)
+                                                String8* source_out, FileMapRead* map_out, CIncludeSearchOrigin origin,
+                                                CIncludeSearchOrigin* origin_out)
 {
+    BUSTER_UNUSED(including_path);
     if (map_out)
     {
         *map_out = (FileMapRead){0};
     }
-    String8 current_directory = c_path_directory(including_path);
-    bool current_found = false;
-    for (u32 index = 0; index < options.include_path_count; index += 1)
+    if (origin_out)
     {
-        if (!current_found)
-        {
-            current_found = string_equal(current_directory, options.include_paths[index]);
-            continue;
-        }
+        *origin_out = (CIncludeSearchOrigin){0};
+    }
+    u32 include_start = 0;
+    u32 system_start = 0;
+    if (origin.kind == C_INCLUDE_SEARCH_INCLUDE_PATH)
+    {
+        include_start = origin.index < options.include_path_count ? origin.index + 1 : options.include_path_count;
+    }
+    else if (origin.kind == C_INCLUDE_SEARCH_SYSTEM_PATH)
+    {
+        include_start = options.include_path_count;
+        system_start = origin.index < options.system_include_path_count ? origin.index + 1 : options.system_include_path_count;
+    }
+    else if (origin.kind == C_INCLUDE_SEARCH_BUILTIN)
+    {
+        include_start = options.include_path_count;
+    }
+    for (u32 index = include_start; index < options.include_path_count; index += 1)
+    {
         if (c_include_read(arena, options.include_paths[index], name, path_out, source_out, map_out))
         {
+            if (origin_out)
+            {
+                *origin_out = (CIncludeSearchOrigin){.kind = C_INCLUDE_SEARCH_INCLUDE_PATH, .index = index};
+            }
             return true;
         }
     }
-    for (u32 index = 0; index < options.system_include_path_count; index += 1)
+    if (origin.kind != C_INCLUDE_SEARCH_SYSTEM_PATH && c_include_builtin(name, path_out, source_out))
     {
-        if (!current_found)
+        if (origin_out)
         {
-            current_found = string_equal(current_directory, options.system_include_paths[index]);
-            continue;
+            *origin_out = (CIncludeSearchOrigin){.kind = C_INCLUDE_SEARCH_BUILTIN};
         }
+        return true;
+    }
+    for (u32 index = system_start; index < options.system_include_path_count; index += 1)
+    {
         if (c_include_read(arena, options.system_include_paths[index], name, path_out, source_out, map_out))
         {
+            if (origin_out)
+            {
+                *origin_out = (CIncludeSearchOrigin){.kind = C_INCLUDE_SEARCH_SYSTEM_PATH, .index = index};
+            }
             return true;
         }
     }
-    return c_include_builtin(name, path_out, source_out);
+    return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_include_name(Arena* arena, CToken* tokens, u32 token_count, String8* name_out, bool* quoted_out)
@@ -2403,7 +2933,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     result.diagnostics = arena_allocate(arena, CDiagnostic, source.length + options.definition_count + 4096);
     for (u64 diagnostic_index = 0; diagnostic_index < root_lex.diagnostic_count; diagnostic_index += 1)
     {
-        result.diagnostics[result.diagnostic_count++] = root_lex.diagnostics[diagnostic_index];
+        c_preprocess_diagnostic_copy(&result, root_lex.diagnostics[diagnostic_index]);
     }
     CMacro* first_macro = 0;
     CMacro* last_macro = 0;
@@ -2486,10 +3016,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     }
     String8* pragma_parameters = arena_allocate(arena, String8, 1);
     pragma_parameters[0] = S8("value");
-    c_macro_define(arena, &first_macro, &last_macro, S8("_Pragma"), 0, 0, pragma_parameters, 1, true, false);
+    CMacro* pragma_macro = c_macro_define(arena, &first_macro, &last_macro, S8("_Pragma"), 0, 0, pragma_parameters, 1, true, false);
+    pragma_macro->pragma_like = true;
     if (options.target.os == OPERATING_SYSTEM_WINDOWS)
     {
-        c_macro_define(arena, &first_macro, &last_macro, S8("__pragma"), 0, 0, pragma_parameters, 1, true, false);
+        CMacro* windows_pragma_macro = c_macro_define(arena, &first_macro, &last_macro, S8("__pragma"), 0, 0, pragma_parameters, 1, true, false);
+        windows_pragma_macro->pragma_like = true;
         c_macro_define(arena, &first_macro, &last_macro, S8("C_ASSERT"), 0, 0, pragma_parameters, 1, true, false);
         static char const* c_windows_calling_convention_names[] = {
             "__cdecl", "__stdcall", "__fastcall", "__thiscall", "__vectorcall", "__ptr32", "__ptr64", "__unaligned", "_W64",
@@ -2562,6 +3094,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__ORDER_LITTLE_ENDIAN__", S8("1234"));
     C_DEFINE_TYPE_MACRO("__ORDER_BIG_ENDIAN__", S8("4321"));
     C_DEFINE_TYPE_MACRO("__BYTE_ORDER__", layout.endianness == TARGET_ENDIAN_LITTLE ? S8("__ORDER_LITTLE_ENDIAN__") : S8("__ORDER_BIG_ENDIAN__"));
+    C_DEFINE_TYPE_MACRO("__clang__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__clang_major__", S8("18"));
     if (!layout.plain_char_is_signed)
     {
         C_DEFINE_TYPE_MACRO("__CHAR_UNSIGNED__", S8("1"));
@@ -2572,8 +3106,6 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         C_DEFINE_TYPE_MACRO("__int16", S8("short"));
         C_DEFINE_TYPE_MACRO("__int32", S8("int"));
         C_DEFINE_TYPE_MACRO("__int64", S8("long long"));
-        C_DEFINE_TYPE_MACRO("__clang__", S8("1"));
-        C_DEFINE_TYPE_MACRO("__clang_major__", S8("18"));
         C_DEFINE_TYPE_MACRO("_MSC_VER", S8("1940"));
         C_DEFINE_TYPE_MACRO("_MSC_FULL_VER", S8("194000000"));
         C_DEFINE_TYPE_MACRO("_MSC_EXTENSIONS", S8("1"));
@@ -2673,6 +3205,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CPreprocessTokenNode* last_output = 0;
     u64 output_count = 0;
     CPragmaPackStack* pack_stack = 0;
+    CMacroPushMacro* macro_push_stack = 0;
     u32 pack_alignment = 0;
     u32 expansion_limit = options.expansion_limit ? options.expansion_limit : 65536;
     bool expansion_ok = true;
@@ -2689,8 +3222,20 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     u32 include_depth_limit = options.include_depth_limit ? options.include_depth_limit : 256;
     String8* once_paths = arena_allocate(arena, String8, source.length + 1);
     u32 once_path_count = 0;
+    CPreprocessPragmaContext pragma_context = {
+        .arena = arena,
+        .first_macro = &first_macro,
+        .last_macro = &last_macro,
+        .macro_push_stack = &macro_push_stack,
+        .pack_stack = &pack_stack,
+        .pack_alignment = &pack_alignment,
+        .once_paths = once_paths,
+        .once_path_count = &once_path_count,
+        .once_path_capacity = (u32)BUSTER_MIN(source.length + 1, (u64)UINT32_MAX),
+    };
     while (source_frame)
     {
+        pragma_context.current_path = source_frame->path;
         CLexResult lex = source_frame->lex;
         u64 token_index = source_frame->token_index;
         bool line_start = source_frame->line_start;
@@ -2748,6 +3293,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 bool is_import = c_token_spelling_equal(directive, S8("import"));
                 bool is_line = is_line_marker || c_token_spelling_equal(directive, S8("line"));
                 bool is_pragma = c_token_spelling_equal(directive, S8("pragma"));
+                bool is_error = c_token_spelling_equal(directive, S8("error"));
+                bool is_warning = c_token_spelling_equal(directive, S8("warning"));
                 if (is_if || is_ifdef || is_ifndef)
                 {
                     bool condition_value = false;
@@ -2757,7 +3304,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                         if (active)
                         {
                             valid = c_conditional_evaluate(arena, first_macro, lex.tokens + token_index, (u32)(line_end - token_index), expansion_limit,
-                                                           &result, options, source_frame->path, &condition_value);
+                                                           &result, options, source_frame->path, source_frame->include_origin, &condition_value);
                         }
                     }
                     else if (token_index + 1 != line_end || lex.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
@@ -2801,7 +3348,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                         if (evaluate)
                         {
                             valid = c_conditional_evaluate(arena, first_macro, lex.tokens + token_index, (u32)(line_end - token_index), expansion_limit,
-                                                           &result, options, source_frame->path, &condition_value);
+                                                           &result, options, source_frame->path, source_frame->include_origin, &condition_value);
                         }
                         if (!valid)
                         {
@@ -2837,6 +3384,18 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                     {
                         conditional = conditional->previous;
                     }
+                }
+                else if (active && (is_error || is_warning))
+                {
+                    CPreprocessTokenNode* first_message = 0;
+                    CPreprocessTokenNode* last_message = 0;
+                    u64 message_token_count = 0;
+                    c_preprocess_expand(arena, first_macro, lex.tokens + token_index, (u32)(line_end - token_index), &first_message, &last_message,
+                                        &message_token_count, expansion_limit, &result);
+                    c_preprocess_diagnostic_push_severity(&result, directive.location,
+                                                           is_error ? C_DIAGNOSTIC_PREPROCESSOR_ERROR : C_DIAGNOSTIC_PREPROCESSOR_WARNING,
+                                                           is_error ? C_DIAGNOSTIC_ERROR : C_DIAGNOSTIC_WARNING,
+                                                           c_preprocess_message_from_nodes(arena, first_message));
                 }
                 else if (active && is_line)
                 {
@@ -2938,10 +3497,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                         String8 include_path = {0};
                         String8 include_source = {0};
                         FileMapRead include_source_map = {0};
+                        CIncludeSearchOrigin include_origin = {0};
                         bool include_resolved =
-                            is_include_next ? c_include_resolve_next(arena, options, source_frame->path, include_name, &include_path, &include_source, &include_source_map)
+                            is_include_next ? c_include_resolve_next(arena, options, source_frame->path, include_name, &include_path, &include_source, &include_source_map,
+                                                                      source_frame->include_origin, &include_origin)
                                             : c_include_resolve(arena, options, source_frame->path, include_name, quoted, &include_path, &include_source,
-                                                                &include_source_map);
+                                                                &include_source_map, &include_origin);
                         if (!include_resolved)
                         {
                             c_preprocess_diagnostic_push(&result, directive.location, C_DIAGNOSTIC_INCLUDE_NOT_FOUND,
@@ -2963,7 +3524,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                             {
                                 CDiagnostic diagnostic = include_lex.diagnostics[index];
                                 diagnostic.message = string_format(arena, S8("{S8}: {S8}"), include_path, diagnostic.message);
-                                result.diagnostics[result.diagnostic_count++] = diagnostic;
+                                c_preprocess_diagnostic_copy(&result, diagnostic);
                             }
                             if (!include_once)
                             {
@@ -2977,6 +3538,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                     .source_map = include_source_map,
                                     .depth = source_frame->depth + 1,
                                     .line_start = true,
+                                    .include_origin = include_origin,
                                 };
                             }
                             else
@@ -2988,57 +3550,28 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 }
                 else if (active && is_pragma)
                 {
-                    if (token_index + 1 == line_end && c_token_spelling_equal(lex.tokens[token_index], S8("once")))
+                    CPreprocessTokenNode* first_pragma = 0;
+                    CPreprocessTokenNode* last_pragma = 0;
+                    u64 pragma_token_count = 0;
+                    bool pragma_expanded = c_preprocess_expand(arena, first_macro, lex.tokens + token_index, (u32)(line_end - token_index), &first_pragma,
+                                                               &last_pragma, &pragma_token_count, expansion_limit, &result);
+                    CToken* pragma_tokens = 0;
+                    u32 expanded_pragma_count = c_preprocess_tokens_from_nodes(first_pragma, arena, &pragma_tokens);
+                    if (pragma_expanded)
                     {
-                        bool found = false;
-                        for (u32 once_index = 0; once_index < once_path_count; once_index += 1)
-                        {
-                            found |= string_equal(once_paths[once_index], source_frame->path);
-                        }
-                        if (!found)
-                        {
-                            once_paths[once_path_count++] = source_frame->path;
-                        }
-                    }
-                    else if (token_index + 3 <= line_end && c_token_spelling_equal(lex.tokens[token_index], S8("pack")) &&
-                             c_token_is_punctuator(lex.tokens[token_index + 1], S8("(")) && c_token_is_punctuator(lex.tokens[line_end - 1], S8(")")))
-                    {
-                        u32 argument_count = (u32)(line_end - token_index - 3);
-                        CToken* arguments = lex.tokens + token_index + 2;
-                        bool push = argument_count >= 1 && arguments[0].kind == C_TOKEN_IDENTIFIER && string_equal(arguments[0].spelling, S8("push"));
-                        bool pop = argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER && string_equal(arguments[0].spelling, S8("pop"));
-                        u32 value_index = push ? 2 : 0;
-                        bool comma = !push || (argument_count == 3 && c_token_is_punctuator(arguments[1], S8(",")));
-                        bool has_value = value_index < argument_count && arguments[value_index].kind == C_TOKEN_PREPROCESSING_NUMBER;
-                        u64 value = 0;
-                        bool valid_value = has_value && c_conditional_number(arguments[value_index].spelling, &value) && value <= UINT32_MAX && value &&
-                                           !(value & (value - 1));
-                        if (push && (argument_count == 1 || (comma && valid_value)))
-                        {
-                            CPragmaPackStack* entry = arena_allocate(arena, CPragmaPackStack, 1);
-                            *entry = (CPragmaPackStack){
-                                .previous = pack_stack,
-                                .alignment = pack_alignment,
-                            };
-                            pack_stack = entry;
-                            if (valid_value)
-                            {
-                                pack_alignment = (u32)value;
-                            }
-                        }
-                        else if (pop && pack_stack)
-                        {
-                            pack_alignment = pack_stack->alignment;
-                            pack_stack = pack_stack->previous;
-                        }
-                        else if (!argument_count)
-                        {
-                            pack_alignment = 0;
-                        }
-                        else if (argument_count == 1 && valid_value)
-                        {
-                            pack_alignment = (u32)value;
-                        }
+                        c_preprocess_handle_pragma((CPreprocessPragmaContext){
+                                                       .arena = arena,
+                                                       .first_macro = &first_macro,
+                                                       .last_macro = &last_macro,
+                                                       .macro_push_stack = &macro_push_stack,
+                                                       .pack_stack = &pack_stack,
+                                                       .pack_alignment = &pack_alignment,
+                                                       .once_paths = once_paths,
+                                                       .once_path_count = &once_path_count,
+                                                       .once_path_capacity = pragma_context.once_path_capacity,
+                                                       .current_path = source_frame->path,
+                                                   },
+                                                   pragma_tokens, expanded_pragma_count);
                     }
                 }
                 else if (active)
@@ -3117,8 +3650,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 logical_tokens[logical_token_count - 1].pack_alignment = pack_alignment;
             }
         }
-        expansion_ok =
-            c_preprocess_expand(arena, first_macro, logical_tokens, logical_token_count, &first_output, &last_output, &output_count, expansion_limit, &result);
+        CPreprocessTokenNode* first_line = 0;
+        CPreprocessTokenNode* last_line = 0;
+        u64 line_output_count = 0;
+        expansion_ok = c_preprocess_expand(arena, first_macro, logical_tokens, logical_token_count, &first_line, &last_line, &line_output_count, expansion_limit, &result);
+        if (expansion_ok)
+        {
+            c_preprocess_process_expanded_line(pragma_context, first_line, &first_output, &last_output, &output_count);
+        }
         source_frame->token_index = logical_end;
         if (!expansion_ok)
         {
@@ -25781,6 +26320,10 @@ String8 c_token_kind_name(CTokenKind kind)
     case C_TOKEN_NEWLINE:
     {
         return S8("newline");
+    }
+    case C_TOKEN_PRAGMA:
+    {
+        return S8("pragma");
     }
     case C_TOKEN_KIND_COUNT:
     {

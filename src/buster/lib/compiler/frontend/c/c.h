@@ -13,6 +13,9 @@ typedef enum CTokenKind
     C_TOKEN_STRING_LITERAL,
     C_TOKEN_PUNCTUATOR,
     C_TOKEN_NEWLINE,
+    // Internal preprocessing marker produced by _Pragma/__pragma.  It is
+    // consumed before the public preprocessing token stream is published.
+    C_TOKEN_PRAGMA,
     C_TOKEN_KIND_COUNT,
 } CTokenKind;
 
@@ -66,8 +69,21 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
     C_DIAGNOSTIC_INVALID_CONSTEXPR,
     C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+    C_DIAGNOSTIC_PREPROCESSOR_ERROR,
+    C_DIAGNOSTIC_PREPROCESSOR_WARNING,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
+
+typedef enum CDiagnosticSeverity
+{
+    C_DIAGNOSTIC_ERROR,
+    C_DIAGNOSTIC_WARNING,
+} CDiagnosticSeverity;
+
+// Keep the descriptive spelling available to callers that prefer to make the
+// severity explicit at a use site.
+#define C_DIAGNOSTIC_SEVERITY_ERROR C_DIAGNOSTIC_ERROR
+#define C_DIAGNOSTIC_SEVERITY_WARNING C_DIAGNOSTIC_WARNING
 
 typedef struct CDiagnostic CDiagnostic;
 struct CDiagnostic
@@ -75,6 +91,7 @@ struct CDiagnostic
     String8 message;
     CSourceLocation location;
     CDiagnosticKind kind;
+    CDiagnosticSeverity severity;
     u32 reserved;
 };
 
@@ -135,6 +152,8 @@ struct CPreprocessResult
     TargetDataLayout data_layout;
     u64 token_count;
     u64 diagnostic_count;
+    u64 error_count;
+    u64 warning_count;
     u32 file_count;
     CPreprocessDialect dialect;
 };
