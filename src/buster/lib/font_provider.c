@@ -49,17 +49,116 @@ extern FcResult FcPatternGetString(const FcPattern* p, const char* object, int n
 #include <fontconfig/fontconfig.h>
 #endif
 
+#define BUSTER_FONT_CANDIDATE_CAPACITY 32u
+
 BUSTER_GLOBAL_LOCAL bool font_config_initialized = false;
+
+BUSTER_GLOBAL_LOCAL bool font_path_is_usable(String8 path)
+{
+    bool result = false;
+    if (path.pointer && path.length)
+    {
+#if BUSTER_IOS
+        // iOS font paths are resources in the application bundle. file_read()
+        // knows how to resolve those relative paths, while os_file_open() only
+        // sees the process working directory.
+        if (path.pointer[0] != '/')
+        {
+            ByteSlice file = file_read(os_state.arena, path, (FileReadOptions){0});
+            result = file.pointer != 0 && file.length != 0;
+        }
+        else
+#endif
+        {
+            OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+            if (file)
+            {
+                result = os_file_get_size(file) != 0;
+                os_file_close(file);
+            }
+        }
+    }
+    return result;
+}
+
+#if BUSTER_WINDOWS || BUSTER_MACOS
+BUSTER_GLOBAL_LOCAL String8 font_path_join(Arena* arena, String8 directory, String8 file)
+{
+    String8 separator = S8("/");
+    if (directory.length && (directory.pointer[directory.length - 1] == '/' || directory.pointer[directory.length - 1] == '\\'))
+    {
+        separator = S8("");
+    }
+
+    String8 parts[] = {directory, separator, file};
+    return string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL void font_candidate_append(String8* candidates, u64* count, String8 path)
+{
+    if (path.pointer && path.length)
+    {
+        BUSTER_CHECK(*count < BUSTER_FONT_CANDIDATE_CAPACITY);
+        candidates[*count] = path;
+        *count += 1;
+    }
+}
+
+#if BUSTER_WINDOWS || BUSTER_MACOS
+BUSTER_GLOBAL_LOCAL void font_candidate_append_file(Arena* arena, String8* candidates, u64* count, String8 directory, String8 file)
+{
+    font_candidate_append(candidates, count, font_path_join(arena, directory, file));
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL String8 font_select_first_usable(String8* candidates, u64 count, u64 first_candidate)
+{
+    String8 result = {0};
+    for (u64 i = first_candidate; i < count; i += 1)
+    {
+        if (font_path_is_usable(candidates[i]))
+        {
+            result = string_duplicate_arena(os_state.arena, candidates[i], true);
+            break;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void font_print_attempted_paths(String8* candidates, u64 count)
+{
+    string_print(S8("No usable monospace font was found. Attempted locations:\n"));
+    if (!count)
+    {
+        string_print(S8("  (none)\n"));
+    }
+    else
+    {
+        for (u64 i = 0; i < count; i += 1)
+        {
+            string_print(S8("  {S8}\n"), candidates[i]);
+        }
+    }
+}
 
 String8 font_file_get_path(Arena* arena, FontIndex index)
 {
     BUSTER_GLOBAL_LOCAL String8 table[(u64)FONT_INDEX_COUNT] = {0};
 
+    BUSTER_UNUSED(arena);
+    BUSTER_CHECK(os_state.arena != 0);
+    BUSTER_CHECK((u64)index < (u64)FONT_INDEX_COUNT);
+
     if (!font_config_initialized)
     {
         font_config_initialized = true;
+        TemporalArena temp = scratch_begin(0, 0);
+        String8 candidates[BUSTER_FONT_CANDIDATE_CAPACITY] = {0};
+        u64 candidate_count = 0;
+
 #if BUSTER_USE_FONTCONFIG
-        BUSTER_UNUSED(arena);
+        font_candidate_append(candidates, &candidate_count, S8("fontconfig: Fira Code (Regular)"));
         if (FcInit())
         {
             FcPattern* pat = FcPatternCreate();
@@ -68,7 +167,7 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
                 const char* family = "Fira Code";
                 const char* style = "Regular";
                 FcPatternAddString(pat, FC_FAMILY, (const FcChar8*)family);
-                // Try to request "Regular" but allow fontconfig to substitute
+                // Try to request "Regular" but allow fontconfig to substitute.
                 if (style && style[0])
                 {
                     FcPatternAddString(pat, FC_STYLE, (const FcChar8*)style);
@@ -79,16 +178,15 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
 
                 FcResult result = FcResultNoMatch;
                 FcPattern* match = FcFontMatch(NULL, pat, &result);
-
                 if (match)
                 {
                     FcChar8* file = NULL;
-                    if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch)
+                    if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch && file)
                     {
-                        // The path is cached in the function-local static table
-                        // across calls, so it must not live in the (possibly
-                        // reset) caller arena; use the process-lifetime arena.
-                        table[(u64)FONT_INDEX_MONO] = string_duplicate_arena(os_state.arena, string_from_pointer((char*)file), true);
+                        String8 path = string_from_pointer((char8*)file);
+                        // Keep the attempted path valid after FcFini() so a
+                        // failed probe can still be reported below.
+                        font_candidate_append(candidates, &candidate_count, string_duplicate_arena(temp.arena, path, true));
                     }
                     FcPatternDestroy(match);
                 }
@@ -97,35 +195,81 @@ String8 font_file_get_path(Arena* arena, FontIndex index)
             }
             FcFini();
         }
-#elif defined(_WIN32)
-        String8 mono_candidates[] = {
-            S8("C:/Windows/Fonts/FiraCode-Regular.ttf"),
-            S8("C:/Users/david/AppData/Local/Microsoft/Windows/Fonts/FiraCode-Regular.ttf"),
-        };
+        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 1);
+#elif BUSTER_WINDOWS
+        String8 windir = os_get_environment_variable(S8("WINDIR"));
+        if (!windir.length)
+        {
+            windir = S8("C:/Windows");
+        }
+        String8 system_fonts = font_path_join(temp.arena, windir, S8("Fonts"));
+        String8 local_app_data = os_get_environment_variable(S8("LOCALAPPDATA"));
+        String8 user_fonts = {0};
+        if (local_app_data.length)
+        {
+            user_fonts = font_path_join(temp.arena, local_app_data, S8("Microsoft/Windows/Fonts"));
+        }
 
-        // TODO
-        BUSTER_UNUSED(arena);
-        table[(uint64_t)FONT_INDEX_MONO] = mono_candidates[0];
-        font_config_initialized = true;
-#elif defined(__APPLE__) && BUSTER_IOS
-        BUSTER_UNUSED(arena);
+        font_candidate_append_file(temp.arena, candidates, &candidate_count, system_fonts, S8("FiraCode-Regular.ttf"));
+        if (user_fonts.length)
+        {
+            font_candidate_append_file(temp.arena, candidates, &candidate_count, user_fonts, S8("FiraCode-Regular.ttf"));
+        }
+
+        // These are installed with common Windows releases and provide a
+        // usable monospace fallback when FiraCode is not installed.
+        String8 fallback_files[] = {
+            S8("CascadiaMono.ttf"),
+            S8("CascadiaCode.ttf"),
+            S8("Consolas.ttf"),
+            S8("lucon.ttf"),
+            S8("cour.ttf"),
+        };
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(fallback_files); i += 1)
+        {
+            font_candidate_append_file(temp.arena, candidates, &candidate_count, system_fonts, fallback_files[i]);
+        }
+        if (user_fonts.length)
+        {
+            for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(fallback_files); i += 1)
+            {
+                font_candidate_append_file(temp.arena, candidates, &candidate_count, user_fonts, fallback_files[i]);
+            }
+        }
+        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+#elif BUSTER_IOS
         // Bundled into the app's Resources by CMake; resolved via file_read's
         // bundle-path lookup. See BUSTER_IOS_FONT in CMakeLists.txt.
-        table[(uint64_t)FONT_INDEX_MONO] = S8("FiraCode-Regular.ttf");
-        font_config_initialized = true;
-#elif defined(__APPLE__)
-        BUSTER_UNUSED(arena);
-        table[(uint64_t)FONT_INDEX_MONO] = S8("/Library/Fonts/FiraCode-Regular.ttf");
-        font_config_initialized = true;
+        font_candidate_append(candidates, &candidate_count, S8("FiraCode-Regular.ttf"));
+        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+#elif BUSTER_MACOS
+        font_candidate_append_file(temp.arena, candidates, &candidate_count, S8("/Library/Fonts"), S8("FiraCode-Regular.ttf"));
+
+        String8 home = os_get_environment_variable(S8("HOME"));
+        if (home.length)
+        {
+            String8 user_fonts = font_path_join(temp.arena, home, S8("Library/Fonts"));
+            font_candidate_append_file(temp.arena, candidates, &candidate_count, user_fonts, S8("FiraCode-Regular.ttf"));
+        }
+
+        String8 system_fonts = S8("/System/Library/Fonts");
+        font_candidate_append_file(temp.arena, candidates, &candidate_count, system_fonts, S8("SFNSMono.ttf"));
+        font_candidate_append_file(temp.arena, candidates, &candidate_count, system_fonts, S8("Menlo.ttc"));
+        font_candidate_append_file(temp.arena, candidates, &candidate_count, system_fonts, S8("Monaco.ttf"));
+        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
 #elif BUSTER_ANDROID
-        BUSTER_UNUSED(arena);
-        table[(uint64_t)FONT_INDEX_MONO] = S8("/system/fonts/DroidSansMono.ttf");
-        font_config_initialized = true;
-#else
-        BUSTER_UNUSED(arena);
-        table[(uint64_t)FONT_INDEX_MONO] = (String8){0};
-        font_config_initialized = true;
+        font_candidate_append(candidates, &candidate_count, S8("/system/fonts/DroidSansMono.ttf"));
+        font_candidate_append(candidates, &candidate_count, S8("/system/fonts/RobotoMono-Regular.ttf"));
+        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
 #endif
+
+        if (!table[(u64)FONT_INDEX_MONO].pointer)
+        {
+            font_print_attempted_paths(candidates, candidate_count);
+            os_fail_message(S8("no usable monospace font was found"));
+        }
+
+        scratch_end(temp);
     }
 
     BUSTER_CHECK(font_config_initialized);

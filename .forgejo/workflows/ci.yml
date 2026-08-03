@@ -46,7 +46,17 @@ jobs:
             if [[ -f "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER" ]]; then
               android_sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/android-sdk}}
               export PATH="$android_sdk/platform-tools:$PATH"
-              adb emu kill || true
+              cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}}
+              if timeout --kill-after=1s "${cleanup_timeout_seconds}s" adb emu kill; then
+                :
+              else
+                cleanup_status=$?
+                if [[ $cleanup_status -eq 124 || $cleanup_status -eq 137 ]]; then
+                  echo "warning: adb emu kill timed out after ${cleanup_timeout_seconds}s; continuing cleanup" >&2
+                else
+                  echo "warning: adb emu kill failed with exit status $cleanup_status; continuing cleanup" >&2
+                fi
+              fi
               rm -f "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER"
             fi
             exit "$status"
