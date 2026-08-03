@@ -41,6 +41,7 @@ typedef enum AssemblyOperandKind
 {
     ASSEMBLY_OPERAND_NONE,
     ASSEMBLY_OPERAND_REGISTER,
+    ASSEMBLY_OPERAND_MEMORY,
     ASSEMBLY_OPERAND_EXPRESSION,
     ASSEMBLY_OPERAND_COUNT,
 } AssemblyOperandKind;
@@ -61,10 +62,25 @@ struct AssemblyRegister
     u8 width;
 };
 
+typedef struct AssemblyMemory AssemblyMemory;
+struct AssemblyMemory
+{
+    AssemblyExpression displacement;
+    AssemblyRegister base;
+    AssemblyRegister index;
+    u8 scale;
+    u8 width;
+    bool has_base;
+    bool has_index;
+    bool rip_relative;
+    u8 reserved;
+};
+
 typedef struct AssemblyOperand AssemblyOperand;
 struct AssemblyOperand
 {
     AssemblyExpression expression;
+    AssemblyMemory memory;
     AssemblyRegister reg;
     AssemblyOperandKind kind;
 };
@@ -375,6 +391,251 @@ BUSTER_GLOBAL_LOCAL bool assembly_register_parse(String8 text, AssemblySyntax sy
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_x86_rip_parse(String8 text, AssemblySyntax syntax)
+{
+    text = assembly_trim(text);
+    if (syntax == ASSEMBLY_SYNTAX_ATT)
+    {
+        if (!text.length || text.pointer[0] != '%')
+        {
+            return false;
+        }
+        text.pointer += 1;
+        text.length -= 1;
+    }
+    return assembly_word_equal(text, S8("rip"));
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_scale_parse(String8 text, u8* result)
+{
+    s64 value = 0;
+    if (!assembly_parse_s64(text, &value) || (value != 1 && value != 2 && value != 4 && value != 8))
+    {
+        return false;
+    }
+    *result = (u8)value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_expression_merge(AssemblyBuilder* builder, AssemblyExpression* destination, String8 text, bool subtract)
+{
+    AssemblyExpression expression = {0};
+    if (!assembly_expression_parse(builder, text, &expression) || (destination->has_symbol && expression.has_symbol))
+    {
+        return false;
+    }
+    if (subtract && expression.has_symbol)
+    {
+        return false;
+    }
+    if ((!subtract && expression.addend > 0 && destination->addend > INT64_MAX - expression.addend) ||
+        (!subtract && expression.addend < 0 && destination->addend < INT64_MIN - expression.addend) ||
+        (subtract && expression.addend < 0 && destination->addend > INT64_MAX + expression.addend) ||
+        (subtract && expression.addend > 0 && destination->addend < INT64_MIN + expression.addend))
+    {
+        return false;
+    }
+    if (subtract && expression.addend == INT64_MIN)
+    {
+        destination->addend += INT64_MAX;
+        destination->addend += 1;
+    }
+    else
+    {
+        destination->addend += subtract ? -expression.addend : expression.addend;
+    }
+    if (expression.has_symbol)
+    {
+        destination->has_symbol = true;
+        destination->symbol = expression.symbol;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_intel(AssemblyBuilder* builder, String8 text, AssemblyMemory* result)
+{
+    text = assembly_trim(text);
+    static const struct
+    {
+        String8 prefix;
+        u8 width;
+    } qualifiers[] = {
+        {S8_INITIALIZER("byte ptr"), 8},
+        {S8_INITIALIZER("word ptr"), 16},
+        {S8_INITIALIZER("dword ptr"), 32},
+        {S8_INITIALIZER("qword ptr"), 64},
+    };
+    for (u32 qualifier_index = 0; qualifier_index < BUSTER_ARRAY_LENGTH(qualifiers); qualifier_index += 1)
+    {
+        String8 prefix = qualifiers[qualifier_index].prefix;
+        if (text.length > prefix.length && assembly_word_equal(string_slice(text, 0, prefix.length), prefix) &&
+            assembly_space(text.pointer[prefix.length]))
+        {
+            result->width = qualifiers[qualifier_index].width;
+            text = assembly_trim(string_slice(text, prefix.length, text.length));
+            break;
+        }
+    }
+    if (text.length < 2 || text.pointer[0] != '[' || text.pointer[text.length - 1] != ']')
+    {
+        return false;
+    }
+    text = assembly_trim(string_slice(text, 1, text.length - 1));
+    if (!text.length)
+    {
+        return false;
+    }
+    result->scale = 1;
+    u64 cursor = 0;
+    bool subtract = false;
+    while (cursor < text.length)
+    {
+        while (cursor < text.length && assembly_space(text.pointer[cursor]))
+        {
+            cursor += 1;
+        }
+        if (cursor < text.length && (text.pointer[cursor] == '+' || text.pointer[cursor] == '-'))
+        {
+            subtract = text.pointer[cursor] == '-';
+            cursor += 1;
+        }
+        u64 end = cursor;
+        while (end < text.length && text.pointer[end] != '+' && text.pointer[end] != '-')
+        {
+            end += 1;
+        }
+        String8 term = assembly_trim(string_slice(text, cursor, end));
+        if (!term.length)
+        {
+            return false;
+        }
+        u64 star = string_first_code_unit(term, '*');
+        AssemblyRegister reg = {0};
+        if (star < term.length)
+        {
+            String8 register_text = assembly_trim(string_slice(term, 0, star));
+            String8 scale_text = assembly_trim(string_slice(term, star + 1, term.length));
+            if (subtract || result->has_index || !assembly_register_parse(register_text, ASSEMBLY_SYNTAX_INTEL, &reg) || reg.width != 64 ||
+                !assembly_x86_scale_parse(scale_text, &result->scale) || reg.index == 4)
+            {
+                return false;
+            }
+            result->index = reg;
+            result->has_index = true;
+        }
+        else if (assembly_x86_rip_parse(term, ASSEMBLY_SYNTAX_INTEL))
+        {
+            if (subtract || result->rip_relative || result->has_base || result->has_index)
+            {
+                return false;
+            }
+            result->rip_relative = true;
+        }
+        else if (assembly_register_parse(term, ASSEMBLY_SYNTAX_INTEL, &reg))
+        {
+            if (subtract || reg.width != 64)
+            {
+                return false;
+            }
+            if (!result->has_base)
+            {
+                result->base = reg;
+                result->has_base = true;
+            }
+            else if (!result->has_index && reg.index != 4)
+            {
+                result->index = reg;
+                result->has_index = true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        else if (!assembly_expression_merge(builder, &result->displacement, term, subtract))
+        {
+            return false;
+        }
+        cursor = end;
+        subtract = false;
+    }
+    return !result->rip_relative || (!result->has_base && !result->has_index);
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_att(AssemblyBuilder* builder, String8 text, AssemblyMemory* result)
+{
+    text = assembly_trim(text);
+    u64 open = string_first_code_unit(text, '(');
+    if (open == text.length || text.length < open + 2 || text.pointer[text.length - 1] != ')')
+    {
+        return false;
+    }
+    String8 displacement = assembly_trim(string_slice(text, 0, open));
+    if (displacement.length && !assembly_expression_parse(builder, displacement, &result->displacement))
+    {
+        return false;
+    }
+    String8 address = string_slice(text, open + 1, text.length - 1);
+    String8 fields[3] = {0};
+    u32 field_count = 0;
+    u64 field_start = 0;
+    for (;;)
+    {
+        u64 field_end = field_start;
+        while (field_end < address.length && address.pointer[field_end] != ',')
+        {
+            field_end += 1;
+        }
+        if (field_count >= BUSTER_ARRAY_LENGTH(fields))
+        {
+            return false;
+        }
+        fields[field_count++] = assembly_trim(string_slice(address, field_start, field_end));
+        if (field_end == address.length)
+        {
+            break;
+        }
+        field_start = field_end + 1;
+    }
+    if (fields[0].length)
+    {
+        if (assembly_x86_rip_parse(fields[0], ASSEMBLY_SYNTAX_ATT))
+        {
+            result->rip_relative = true;
+        }
+        else if (!assembly_register_parse(fields[0], ASSEMBLY_SYNTAX_ATT, &result->base) || result->base.width != 64)
+        {
+            return false;
+        }
+        else
+        {
+            result->has_base = true;
+        }
+    }
+    result->scale = 1;
+    if (field_count >= 2 && fields[1].length)
+    {
+        if (result->rip_relative || !assembly_register_parse(fields[1], ASSEMBLY_SYNTAX_ATT, &result->index) ||
+            result->index.width != 64 || result->index.index == 4)
+        {
+            return false;
+        }
+        result->has_index = true;
+    }
+    if (field_count == 3 && fields[2].length && (!result->has_index || !assembly_x86_scale_parse(fields[2], &result->scale)))
+    {
+        return false;
+    }
+    return result->rip_relative || result->has_base || result->has_index;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse(AssemblyBuilder* builder, String8 text, AssemblySyntax syntax, AssemblyMemory* result)
+{
+    *result = (AssemblyMemory){0};
+    return syntax == ASSEMBLY_SYNTAX_ATT ? assembly_x86_memory_parse_att(builder, text, result)
+                                         : assembly_x86_memory_parse_intel(builder, text, result);
+}
+
 typedef struct AssemblyInstructionInfo AssemblyInstructionInfo;
 struct AssemblyInstructionInfo
 {
@@ -475,6 +736,65 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_rex_needed(u8 width, AssemblyRegister firs
     return width == 64 || first.index >= 8 || second.index >= 8 || (width == 8 && (first.index >= 4 || second.index >= 4));
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_displacement_size(AssemblyMemory memory, u32* result)
+{
+    if (memory.rip_relative || !memory.has_base)
+    {
+        if (!memory.displacement.has_symbol && (memory.displacement.addend < INT32_MIN || memory.displacement.addend > INT32_MAX))
+        {
+            return false;
+        }
+        *result = 4;
+        return true;
+    }
+    if (memory.displacement.has_symbol)
+    {
+        *result = 4;
+    }
+    else if (!memory.displacement.addend && (memory.base.index & 7) != 5)
+    {
+        *result = 0;
+    }
+    else if (memory.displacement.addend >= INT8_MIN && memory.displacement.addend <= INT8_MAX)
+    {
+        *result = 1;
+    }
+    else if (memory.displacement.addend >= INT32_MIN && memory.displacement.addend <= INT32_MAX)
+    {
+        *result = 4;
+    }
+    else
+    {
+        return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_encoding_size(AssemblyMemory memory, u32* result)
+{
+    u32 displacement_size = 0;
+    if (!assembly_x86_memory_displacement_size(memory, &displacement_size))
+    {
+        return false;
+    }
+    bool sib = !memory.rip_relative && (memory.has_index || !memory.has_base || (memory.base.index & 7) == 4);
+    *result = 1 + (sib ? 1 : 0) + displacement_size;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_rex_needed(u8 width, AssemblyRegister reg, AssemblyMemory memory)
+{
+    return width == 64 || reg.index >= 8 || (memory.has_base && memory.base.index >= 8) ||
+           (memory.has_index && memory.index.index >= 8) || (width == 8 && reg.index >= 4);
+}
+
+BUSTER_GLOBAL_LOCAL u8 assembly_operand_width(AssemblyOperand operand)
+{
+    return operand.kind == ASSEMBLY_OPERAND_REGISTER ? operand.reg.width
+           : operand.kind == ASSEMBLY_OPERAND_MEMORY ? operand.memory.width
+                                                      : 0;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_x86_immediate_fits(s64 value, u8 width, bool signed_only)
 {
     if (width == 64)
@@ -515,6 +835,18 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
             instruction->size = first->reg.index >= 8 ? 3 : 2;
             return true;
         }
+        if (first->kind == ASSEMBLY_OPERAND_MEMORY && (!first->memory.width || first->memory.width == 64))
+        {
+            u32 address_size = 0;
+            if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
+            {
+                return false;
+            }
+            instruction->width = 64;
+            first->memory.width = 64;
+            instruction->size = (assembly_x86_memory_rex_needed(0, (AssemblyRegister){0}, first->memory) ? 1 : 0) + 1 + address_size;
+            return true;
+        }
         return false;
     }
     if (opcode == ASSEMBLY_OPCODE_X86_PUSH || opcode == ASSEMBLY_OPCODE_X86_POP)
@@ -530,38 +862,80 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     if (opcode == ASSEMBLY_OPCODE_X86_INC || opcode == ASSEMBLY_OPCODE_X86_DEC || opcode == ASSEMBLY_OPCODE_X86_NEG ||
         opcode == ASSEMBLY_OPCODE_X86_NOT)
     {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER)
+        instruction->width = assembly_operand_width(*first);
+        if (!instruction->width || (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY))
         {
             return false;
         }
-        instruction->width = first->reg.width;
-        instruction->size = (instruction->width == 16 ? 1 : 0) + (assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0}) ? 1 : 0) + 2;
+        u32 address_size = 1;
+        bool rex = first->kind == ASSEMBLY_OPERAND_REGISTER
+                       ? assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0})
+                       : assembly_x86_memory_rex_needed(instruction->width, (AssemblyRegister){0}, first->memory);
+        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->size = (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) + 1 + address_size;
         return true;
     }
     if (opcode == ASSEMBLY_OPCODE_X86_SHL || opcode == ASSEMBLY_OPCODE_X86_SHR || opcode == ASSEMBLY_OPCODE_X86_SAR)
     {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER || second->kind != ASSEMBLY_OPERAND_EXPRESSION || second->expression.has_symbol ||
+        instruction->width = assembly_operand_width(*first);
+        if (!instruction->width || (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
+            second->kind != ASSEMBLY_OPERAND_EXPRESSION || second->expression.has_symbol ||
             second->expression.addend < 0 || second->expression.addend > UINT8_MAX)
         {
             return false;
         }
-        instruction->width = first->reg.width;
-        instruction->size = (instruction->width == 16 ? 1 : 0) + (assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0}) ? 1 : 0) +
-                            (second->expression.addend == 1 ? 2 : 3);
+        u32 address_size = 1;
+        bool rex = first->kind == ASSEMBLY_OPERAND_REGISTER
+                       ? assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0})
+                       : assembly_x86_memory_rex_needed(instruction->width, (AssemblyRegister){0}, first->memory);
+        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->size = (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) + 1 + address_size +
+                            (second->expression.addend == 1 ? 0 : 1);
         return true;
     }
-    if (first->kind != ASSEMBLY_OPERAND_REGISTER)
+    if (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY)
     {
         return false;
     }
-    instruction->width = first->reg.width;
-    if (second->kind == ASSEMBLY_OPERAND_REGISTER)
+    instruction->width = assembly_operand_width(*first);
+    if (!instruction->width)
     {
-        if (second->reg.width != instruction->width || (opcode != ASSEMBLY_OPCODE_X86_MOV && opcode != ASSEMBLY_OPCODE_X86_ADD &&
-                                                        opcode != ASSEMBLY_OPCODE_X86_SUB && opcode != ASSEMBLY_OPCODE_X86_AND &&
-                                                        opcode != ASSEMBLY_OPCODE_X86_OR && opcode != ASSEMBLY_OPCODE_X86_XOR &&
-                                                        opcode != ASSEMBLY_OPCODE_X86_CMP && opcode != ASSEMBLY_OPCODE_X86_TEST &&
-                                                        opcode != ASSEMBLY_OPCODE_X86_IMUL))
+        instruction->width = assembly_operand_width(*second);
+    }
+    if (!instruction->width)
+    {
+        return false;
+    }
+    if (first->kind == ASSEMBLY_OPERAND_MEMORY)
+    {
+        if (first->memory.width && first->memory.width != instruction->width)
+        {
+            return false;
+        }
+        first->memory.width = instruction->width;
+    }
+    if (second->kind == ASSEMBLY_OPERAND_MEMORY)
+    {
+        if (second->memory.width && second->memory.width != instruction->width)
+        {
+            return false;
+        }
+        second->memory.width = instruction->width;
+    }
+    if (second->kind == ASSEMBLY_OPERAND_REGISTER || second->kind == ASSEMBLY_OPERAND_MEMORY)
+    {
+        if ((second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.width != instruction->width) ||
+            (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY) ||
+            (opcode == ASSEMBLY_OPCODE_X86_IMUL && first->kind != ASSEMBLY_OPERAND_REGISTER) ||
+            (opcode != ASSEMBLY_OPCODE_X86_MOV && opcode != ASSEMBLY_OPCODE_X86_ADD && opcode != ASSEMBLY_OPCODE_X86_SUB &&
+             opcode != ASSEMBLY_OPCODE_X86_AND && opcode != ASSEMBLY_OPCODE_X86_OR && opcode != ASSEMBLY_OPCODE_X86_XOR &&
+             opcode != ASSEMBLY_OPCODE_X86_CMP && opcode != ASSEMBLY_OPCODE_X86_TEST && opcode != ASSEMBLY_OPCODE_X86_IMUL))
         {
             return false;
         }
@@ -569,8 +943,18 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
         {
             return false;
         }
-        instruction->size = (instruction->width == 16 ? 1 : 0) + (assembly_x86_rex_needed(instruction->width, first->reg, second->reg) ? 1 : 0) +
-                            (opcode == ASSEMBLY_OPCODE_X86_IMUL ? 3 : 2);
+        AssemblyRegister reg = opcode == ASSEMBLY_OPCODE_X86_IMUL || second->kind == ASSEMBLY_OPERAND_MEMORY ? first->reg : second->reg;
+        AssemblyOperand* rm = opcode == ASSEMBLY_OPCODE_X86_IMUL || second->kind == ASSEMBLY_OPERAND_MEMORY ? second : first;
+        u32 address_size = 1;
+        bool rex = rm->kind == ASSEMBLY_OPERAND_REGISTER
+                       ? assembly_x86_rex_needed(instruction->width, reg, rm->reg)
+                       : assembly_x86_memory_rex_needed(instruction->width, reg, rm->memory);
+        if (rm->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(rm->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->size = (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) +
+                            (opcode == ASSEMBLY_OPCODE_X86_IMUL ? 2 : 1) + address_size;
         return true;
     }
     if (second->kind != ASSEMBLY_OPERAND_EXPRESSION || second->expression.has_symbol || opcode == ASSEMBLY_OPCODE_X86_IMUL)
@@ -580,13 +964,21 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     s64 immediate = second->expression.addend;
     if (opcode == ASSEMBLY_OPCODE_X86_MOV)
     {
-        if (!assembly_x86_immediate_fits(immediate, instruction->width, false))
+        u8 immediate_width = first->kind == ASSEMBLY_OPERAND_MEMORY && instruction->width == 64 ? 32 : instruction->width;
+        if (!assembly_x86_immediate_fits(immediate, immediate_width, first->kind == ASSEMBLY_OPERAND_MEMORY && instruction->width == 64))
         {
             return false;
         }
-        u32 immediate_size = instruction->width / 8;
-        instruction->size = (instruction->width == 16 ? 1 : 0) +
-                            (assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0}) ? 1 : 0) + 1 + immediate_size;
+        u32 address_size = 1;
+        bool rex = first->kind == ASSEMBLY_OPERAND_REGISTER
+                       ? assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0})
+                       : assembly_x86_memory_rex_needed(instruction->width, (AssemblyRegister){0}, first->memory);
+        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->size = (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) + 1 +
+                            (first->kind == ASSEMBLY_OPERAND_MEMORY ? address_size : 0) + immediate_width / 8;
         return true;
     }
     if (opcode != ASSEMBLY_OPCODE_X86_ADD && opcode != ASSEMBLY_OPCODE_X86_SUB && opcode != ASSEMBLY_OPCODE_X86_AND &&
@@ -602,8 +994,15 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
         return false;
     }
     u32 immediate_size = opcode != ASSEMBLY_OPCODE_X86_TEST && immediate >= INT8_MIN && immediate <= INT8_MAX ? 1 : full_immediate_width / 8;
-    instruction->size = (instruction->width == 16 ? 1 : 0) +
-                        (assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0}) ? 1 : 0) + 2 + immediate_size;
+    u32 address_size = 1;
+    bool rex = first->kind == ASSEMBLY_OPERAND_REGISTER
+                   ? assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0})
+                   : assembly_x86_memory_rex_needed(instruction->width, (AssemblyRegister){0}, first->memory);
+    if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
+    {
+        return false;
+    }
+    instruction->size = (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) + 1 + address_size + immediate_size;
     return true;
 }
 
@@ -640,8 +1039,26 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     while (operand_start < operands.length && parsed_operand_count < BUSTER_ARRAY_LENGTH(instruction.operands))
     {
         u64 operand_end = operand_start;
-        while (operand_end < operands.length && operands.pointer[operand_end] != ',')
+        u32 delimiter_depth = 0;
+        while (operand_end < operands.length)
         {
+            char8 character = operands.pointer[operand_end];
+            if (character == '(' || character == '[')
+            {
+                delimiter_depth += 1;
+            }
+            else if (character == ')' || character == ']')
+            {
+                if (!delimiter_depth)
+                {
+                    break;
+                }
+                delimiter_depth -= 1;
+            }
+            else if (character == ',' && !delimiter_depth)
+            {
+                break;
+            }
             operand_end += 1;
         }
         String8 text = assembly_trim(string_slice(operands, operand_start, operand_end));
@@ -657,7 +1074,15 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
             text.pointer += 1;
             text.length -= 1;
         }
-        if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_register_parse(text, syntax, &operand->reg))
+        if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_memory_parse(builder, text, syntax, &operand->memory))
+        {
+            if (branch && syntax == ASSEMBLY_SYNTAX_ATT && !indirect)
+            {
+                break;
+            }
+            operand->kind = ASSEMBLY_OPERAND_MEMORY;
+        }
+        else if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_register_parse(text, syntax, &operand->reg))
         {
             if (syntax == ASSEMBLY_SYNTAX_ATT && branch && !indirect)
             {
@@ -719,6 +1144,16 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
                                     (u32)operands.length, S8("register width does not match mnemonic suffix"));
                 return;
+            }
+            if (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_MEMORY)
+            {
+                if (instruction.operands[operand_index].memory.width && instruction.operands[operand_index].memory.width != info.suffix_width)
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                        (u32)operands.length, S8("memory width does not match mnemonic suffix"));
+                    return;
+                }
+                instruction.operands[operand_index].memory.width = info.suffix_width;
             }
         }
     }
@@ -857,6 +1292,21 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_emit_prefix(AssemblyBuilder* builder, u8 w
     }
 }
 
+BUSTER_GLOBAL_LOCAL void assembly_x86_emit_memory_prefix(AssemblyBuilder* builder, u8 width, AssemblyRegister reg, AssemblyMemory memory)
+{
+    if (width == 16)
+    {
+        assembly_emit_byte(builder, 0x66);
+    }
+    if (assembly_x86_memory_rex_needed(width, reg, memory))
+    {
+        u8 rex = UINT8_C(0x40) | (width == 64 ? UINT8_C(0x08) : 0) | (reg.index >= 8 ? UINT8_C(0x04) : 0) |
+                 (memory.has_index && memory.index.index >= 8 ? UINT8_C(0x02) : 0) |
+                 (memory.has_base && memory.base.index >= 8 ? UINT8_C(0x01) : 0);
+        assembly_emit_byte(builder, rex);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void assembly_x86_emit_modrm(AssemblyBuilder* builder, u8 reg, u8 rm)
 {
     assembly_emit_byte(builder, (u8)(UINT8_C(0xc0) | ((reg & 7) << 3) | (rm & 7)));
@@ -911,6 +1361,80 @@ BUSTER_GLOBAL_LOCAL bool assembly_relocation_append(AssemblyBuilder* builder, u6
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_memory(AssemblyBuilder* builder, AssemblyInstruction* instruction, u8 reg, AssemblyMemory memory)
+{
+    u32 displacement_size = 0;
+    if (!assembly_x86_memory_displacement_size(memory, &displacement_size))
+    {
+        return false;
+    }
+    bool sib = !memory.rip_relative && (memory.has_index || !memory.has_base || (memory.base.index & 7) == 4);
+    u8 mod = displacement_size == 0 ? 0 : displacement_size == 1 ? 1 : 2;
+    if (memory.rip_relative || !memory.has_base)
+    {
+        mod = 0;
+    }
+    u8 rm = memory.rip_relative ? 5 : sib ? 4 : (u8)(memory.base.index & 7);
+    assembly_emit_byte(builder, (u8)((mod << 6) | ((reg & 7) << 3) | rm));
+    if (sib)
+    {
+        u8 scale = memory.scale == 8 ? 3 : memory.scale == 4 ? 2 : memory.scale == 2 ? 1 : 0;
+        u8 index = memory.has_index ? (u8)(memory.index.index & 7) : 4;
+        u8 base = memory.has_base ? (u8)(memory.base.index & 7) : 5;
+        assembly_emit_byte(builder, (u8)((scale << 6) | (index << 3) | base));
+    }
+    if (displacement_size)
+    {
+        u64 relocation_offset = builder->output_count;
+        s64 value = memory.displacement.addend;
+        if (memory.displacement.has_symbol)
+        {
+            if (assembly_expression_target(builder, memory.displacement, &value))
+            {
+                if (memory.rip_relative)
+                {
+                    s64 next = (s64)(instruction->offset + instruction->size);
+                    if (value < next + INT32_MIN || value > next + INT32_MAX)
+                    {
+                        return false;
+                    }
+                    value -= next;
+                }
+            }
+            else if (!assembly_relocation_append(builder, relocation_offset, memory.displacement,
+                                                  memory.rip_relative ? ASSEMBLY_RELOCATION_X86_PC32 : ASSEMBLY_RELOCATION_X86_32,
+                                                  memory.rip_relative ? -4 : 0))
+            {
+                return false;
+            }
+            else
+            {
+                value = 0;
+            }
+        }
+        if (displacement_size == 1 && (value < INT8_MIN || value > INT8_MAX))
+        {
+            return false;
+        }
+        if (displacement_size == 4 && (value < INT32_MIN || value > INT32_MAX))
+        {
+            return false;
+        }
+        assembly_emit_immediate(builder, (u64)value, displacement_size);
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_rm(AssemblyBuilder* builder, AssemblyInstruction* instruction, u8 reg, AssemblyOperand operand)
+{
+    if (operand.kind == ASSEMBLY_OPERAND_REGISTER)
+    {
+        assembly_x86_emit_modrm(builder, reg, operand.reg.index);
+        return true;
+    }
+    return operand.kind == ASSEMBLY_OPERAND_MEMORY && assembly_x86_emit_memory(builder, instruction, reg, operand.memory);
+}
+
 BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
 {
     for (u32 instruction_index = 0; instruction_index < builder->instruction_count; instruction_index += 1)
@@ -938,6 +1462,18 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 assembly_x86_emit_prefix(builder, 0, (AssemblyRegister){0}, operand.reg);
                 assembly_emit_byte(builder, 0xff);
                 assembly_x86_emit_modrm(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_CALL ? 2 : 4, operand.reg.index);
+                continue;
+            }
+            if (operand.kind == ASSEMBLY_OPERAND_MEMORY)
+            {
+                assembly_x86_emit_memory_prefix(builder, 0, (AssemblyRegister){0}, operand.memory);
+                assembly_emit_byte(builder, 0xff);
+                if (!assembly_x86_emit_memory(builder, instruction, instruction->opcode == ASSEMBLY_OPCODE_X86_CALL ? 2 : 4, operand.memory))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                        S8("x86 memory displacement is out of range"));
+                    return;
+                }
                 continue;
             }
             assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_CALL ? 0xe8 : 0xe9);
@@ -995,7 +1531,14 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             if (instruction->opcode == ASSEMBLY_OPCODE_X86_INC || instruction->opcode == ASSEMBLY_OPCODE_X86_DEC ||
                 instruction->opcode == ASSEMBLY_OPCODE_X86_NEG || instruction->opcode == ASSEMBLY_OPCODE_X86_NOT)
             {
-                assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, first.reg);
+                if (first.kind == ASSEMBLY_OPERAND_MEMORY)
+                {
+                    assembly_x86_emit_memory_prefix(builder, instruction->width, (AssemblyRegister){0}, first.memory);
+                }
+                else
+                {
+                    assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, first.reg);
+                }
                 bool byte = instruction->width == 8;
                 bool increment = instruction->opcode == ASSEMBLY_OPCODE_X86_INC || instruction->opcode == ASSEMBLY_OPCODE_X86_DEC;
                 assembly_emit_byte(builder, increment ? (byte ? 0xfe : 0xff) : (byte ? 0xf6 : 0xf7));
@@ -1003,29 +1546,54 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                                : instruction->opcode == ASSEMBLY_OPCODE_X86_DEC ? 1
                                : instruction->opcode == ASSEMBLY_OPCODE_X86_NOT ? 2
                                                                                 : 3;
-                assembly_x86_emit_modrm(builder, extension, first.reg.index);
+                if (!assembly_x86_emit_rm(builder, instruction, extension, first))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                        S8("x86 memory displacement is out of range"));
+                    return;
+                }
                 continue;
             }
             if (instruction->opcode == ASSEMBLY_OPCODE_X86_SHL || instruction->opcode == ASSEMBLY_OPCODE_X86_SHR ||
                 instruction->opcode == ASSEMBLY_OPCODE_X86_SAR)
             {
-                assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, first.reg);
+                if (first.kind == ASSEMBLY_OPERAND_MEMORY)
+                {
+                    assembly_x86_emit_memory_prefix(builder, instruction->width, (AssemblyRegister){0}, first.memory);
+                }
+                else
+                {
+                    assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, first.reg);
+                }
                 bool one = second.expression.addend == 1;
                 assembly_emit_byte(builder, one ? (instruction->width == 8 ? 0xd0 : 0xd1) : (instruction->width == 8 ? 0xc0 : 0xc1));
                 u8 extension = instruction->opcode == ASSEMBLY_OPCODE_X86_SHL ? 4 : instruction->opcode == ASSEMBLY_OPCODE_X86_SHR ? 5 : 7;
-                assembly_x86_emit_modrm(builder, extension, first.reg.index);
+                if (!assembly_x86_emit_rm(builder, instruction, extension, first))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                        S8("x86 memory displacement is out of range"));
+                    return;
+                }
                 if (!one)
                 {
                     assembly_emit_byte(builder, (u8)second.expression.addend);
                 }
                 continue;
             }
-            if (second.kind == ASSEMBLY_OPERAND_REGISTER)
+            if (second.kind == ASSEMBLY_OPERAND_REGISTER || second.kind == ASSEMBLY_OPERAND_MEMORY)
             {
                 bool imul = instruction->opcode == ASSEMBLY_OPCODE_X86_IMUL;
-                AssemblyRegister reg = imul ? first.reg : second.reg;
-                AssemblyRegister rm = imul ? second.reg : first.reg;
-                assembly_x86_emit_prefix(builder, instruction->width, reg, rm);
+                bool load = second.kind == ASSEMBLY_OPERAND_MEMORY;
+                AssemblyRegister reg = imul || load ? first.reg : second.reg;
+                AssemblyOperand rm = imul || load ? second : first;
+                if (rm.kind == ASSEMBLY_OPERAND_MEMORY)
+                {
+                    assembly_x86_emit_memory_prefix(builder, instruction->width, reg, rm.memory);
+                }
+                else
+                {
+                    assembly_x86_emit_prefix(builder, instruction->width, reg, rm.reg);
+                }
                 if (imul)
                 {
                     assembly_emit_byte(builder, 0x0f);
@@ -1045,23 +1613,54 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                     {
                         opcode -= 1;
                     }
+                    if (load && instruction->opcode != ASSEMBLY_OPCODE_X86_TEST)
+                    {
+                        opcode += 2;
+                    }
                     assembly_emit_byte(builder, opcode);
                 }
-                assembly_x86_emit_modrm(builder, reg.index, rm.index);
+                if (!assembly_x86_emit_rm(builder, instruction, reg.index, rm))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                        S8("x86 memory displacement is out of range"));
+                    return;
+                }
                 continue;
             }
             s64 immediate = second.expression.addend;
             if (instruction->opcode == ASSEMBLY_OPCODE_X86_MOV)
             {
-                assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, first.reg);
-                assembly_emit_byte(builder, (u8)((instruction->width == 8 ? 0xb0 : 0xb8) + (first.reg.index & 7)));
-                assembly_emit_immediate(builder, (u64)immediate, instruction->width / 8);
+                if (first.kind == ASSEMBLY_OPERAND_MEMORY)
+                {
+                    assembly_x86_emit_memory_prefix(builder, instruction->width, (AssemblyRegister){0}, first.memory);
+                    assembly_emit_byte(builder, instruction->width == 8 ? 0xc6 : 0xc7);
+                    if (!assembly_x86_emit_memory(builder, instruction, 0, first.memory))
+                    {
+                        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                            S8("x86 memory displacement is out of range"));
+                        return;
+                    }
+                    assembly_emit_immediate(builder, (u64)immediate, instruction->width == 64 ? 4 : instruction->width / 8);
+                }
+                else
+                {
+                    assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, first.reg);
+                    assembly_emit_byte(builder, (u8)((instruction->width == 8 ? 0xb0 : 0xb8) + (first.reg.index & 7)));
+                    assembly_emit_immediate(builder, (u64)immediate, instruction->width / 8);
+                }
                 continue;
             }
             bool test = instruction->opcode == ASSEMBLY_OPCODE_X86_TEST;
             u8 full_immediate_width = instruction->width == 64 ? 32 : instruction->width;
             u8 immediate_size = !test && immediate >= INT8_MIN && immediate <= INT8_MAX ? 1 : (u8)(full_immediate_width / 8);
-            assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, first.reg);
+            if (first.kind == ASSEMBLY_OPERAND_MEMORY)
+            {
+                assembly_x86_emit_memory_prefix(builder, instruction->width, (AssemblyRegister){0}, first.memory);
+            }
+            else
+            {
+                assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, first.reg);
+            }
             assembly_emit_byte(builder, test ? (instruction->width == 8 ? 0xf6 : 0xf7)
                                              : immediate_size == 1 ? (instruction->width == 8 ? 0x80 : 0x83)
                                                                    : (instruction->width == 8 ? 0x80 : 0x81));
@@ -1072,7 +1671,12 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                            : instruction->opcode == ASSEMBLY_OPCODE_X86_XOR ? 6
                            : instruction->opcode == ASSEMBLY_OPCODE_X86_CMP ? 7
                                                                             : 0;
-            assembly_x86_emit_modrm(builder, extension, first.reg.index);
+            if (!assembly_x86_emit_rm(builder, instruction, extension, first))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                    S8("x86 memory displacement is out of range"));
+                return;
+            }
             assembly_emit_immediate(builder, (u64)immediate, immediate_size);
             continue;
         }

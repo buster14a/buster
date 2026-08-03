@@ -37,6 +37,7 @@ struct AssemblyDiagnostic
 typedef enum AssemblyRelocationKind
 {
     ASSEMBLY_RELOCATION_X86_PC32,
+    ASSEMBLY_RELOCATION_X86_32,
     ASSEMBLY_RELOCATION_AARCH64_BRANCH26,
     ASSEMBLY_RELOCATION_COUNT,
 } AssemblyRelocationKind;
