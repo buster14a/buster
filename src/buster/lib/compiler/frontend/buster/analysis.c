@@ -7878,6 +7878,20 @@ BUSTER_GLOBAL_LOCAL AnalysisInstantiation* analysis_instantiation_from_id(Analys
     return 0;
 }
 
+BUSTER_GLOBAL_LOCAL AnalysisBody* analysis_program_job_body(AnalysisResult* module, AnalysisJob* job)
+{
+    if (job->kind != ANALYSIS_JOB_BODY || job->entity.index.value >= module->module.entity_count)
+    {
+        return 0;
+    }
+    if (job->instantiation.value != ANALYSIS_ID_UNDERLYING_INVALID)
+    {
+        AnalysisInstantiation* instantiation = analysis_instantiation_from_id(module, job->instantiation);
+        return instantiation ? &instantiation->body : 0;
+    }
+    return module->module.bodies ? module->module.bodies + job->entity.index.value : 0;
+}
+
 BUSTER_GLOBAL_LOCAL void analysis_program_schedule_worker(void* raw_worker)
 {
     AnalysisProgramScheduleWorker* worker = (AnalysisProgramScheduleWorker*)raw_worker;
@@ -8011,11 +8025,9 @@ AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena,
                     }
                 }
             }
-            else if (job->kind == ANALYSIS_JOB_BODY && job->entity.index.value < module->module.entity_count)
+            else if (job->kind == ANALYSIS_JOB_BODY)
             {
-                AnalysisInstantiation* instantiation =
-                    job->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID ? 0 : analysis_instantiation_from_id(module, job->instantiation);
-                AnalysisBody* body = instantiation ? &instantiation->body : module->module.bodies + job->entity.index.value;
+                AnalysisBody* body = analysis_program_job_body(module, job);
                 if (body)
                 {
                     for (u32 dependency_index = 0; dependency_index < body->dependency_count; dependency_index += 1)
@@ -8080,11 +8092,9 @@ AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena,
                     }
                 }
             }
-            else if (job->kind == ANALYSIS_JOB_BODY && job->entity.index.value < module->module.entity_count)
+            else if (job->kind == ANALYSIS_JOB_BODY)
             {
-                AnalysisInstantiation* instantiation =
-                    job->instantiation.value == ANALYSIS_ID_UNDERLYING_INVALID ? 0 : analysis_instantiation_from_id(module, job->instantiation);
-                AnalysisBody* body = instantiation ? &instantiation->body : module->module.bodies + job->entity.index.value;
+                AnalysisBody* body = analysis_program_job_body(module, job);
                 if (body)
                 {
                     for (u32 dependency_index = 0; dependency_index < body->dependency_count; dependency_index += 1)

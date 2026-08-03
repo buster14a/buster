@@ -768,6 +768,21 @@ BUSTER_TEST_F_DECL UnitTestResult analysis_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !program_schedule.has_cycle);
     BUSTER_TEST(arguments, program_schedule.execution_count == namespace_math.job_count + namespace_app.job_count + namespace_app_two.job_count);
     BUSTER_TEST(arguments, program_schedule.wave_count >= 2);
+
+    // Interface-only/cached module results need not retain ordinary body
+    // storage. Specialized jobs still resolve their instantiation bodies.
+    AnalysisBody* namespace_math_bodies = namespace_math.module.bodies;
+    namespace_math.module.bodies = 0;
+    AnalysisResult* absent_body_modules[] = {&namespace_math};
+    AnalysisProgram absent_body_program = {
+        .module_results = absent_body_modules,
+        .module_count = BUSTER_ARRAY_LENGTH(absent_body_modules),
+    };
+    AnalysisProgramScheduleResult absent_body_schedule = analysis_execute_program_jobs(arguments->arena, &absent_body_program, 4, 0, 0);
+    BUSTER_TEST(arguments, !absent_body_schedule.has_cycle);
+    BUSTER_TEST(arguments, absent_body_schedule.execution_count == namespace_math.job_count);
+    namespace_math.module.bodies = namespace_math_bodies;
+
     AnalysisEntity* namespace_use = analysis_value_entity_find(&namespace_app, S8("use"));
     BUSTER_TEST(arguments, namespace_use != 0);
     if (namespace_use)
