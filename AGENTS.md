@@ -425,8 +425,15 @@ has hard design constraints:
   header table for loaded code/data, BSS, TLS, loader and dynamic-linking
   metadata, debug data, and the section-name string table, including for `-g0`
   images. DWARF relocations are resolved statically before the non-loaded debug
-  payload is appended. Mach-O
-  executables carry the same six sections in a read-only, file-backed
+  payload is appended. Mach-O objects and final images likewise carry
+  `__TEXT,__eh_frame` independently of source debug information; arm64
+  relocatable objects represent PREL32 fields with the canonical paired
+  `ARM64_RELOC_SUBTRACTOR`/`ARM64_RELOC_UNSIGNED` form. The Mach-O reader
+  converts supported external `__LD,__compact_unwind` frame-pointer and
+  frameless rows into neutral DWARF CFI, and rejects personality/LSDA,
+  authenticated-frame, vector-save, and unfamiliar-prolog encodings rather
+  than silently dropping unwind coverage. Mach-O executables carry the same
+  six source-debug sections in a read-only, file-backed
   `__DWARF` segment (each section is flagged `S_ATTR_DEBUG`) placed before
   `__LINKEDIT`; its virtual size is page-rounded to satisfy dyld while the
   ad-hoc code signature covers the complete image. LLDB reads DWARF straight

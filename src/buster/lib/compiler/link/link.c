@@ -3131,7 +3131,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         MACH_HEADER_SIZE = 32,
         MACH_SEGMENT_COMMAND_SIZE = 72,
         MACH_SECTION_SIZE = 80,
-        MACH_TEXT_COMMAND_SIZE = 152,
         MACH_DYLD_INFO_COMMAND_SIZE = 48,
         MACH_DYLINKER_COMMAND_SIZE = 32,
         MACH_DYLIB_COMMAND_SIZE = 56,
@@ -3208,6 +3207,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     }
     u32 data_section_count = 4 + (thread_local_count ? 3 : 0);
     u64 data_command_size = MACH_SEGMENT_COMMAND_SIZE + (u64)data_section_count * MACH_SECTION_SIZE;
+    bool has_unwind = object->sections[OBJECT_SECTION_UNWIND].data.length != 0;
+    u64 text_command_size = MACH_SEGMENT_COMMAND_SIZE + (has_unwind ? 2 : 1) * MACH_SECTION_SIZE;
     // Debug sections travel in their own read-only __DWARF segment.  The
     // segment is file-backed and page-rounded (rather than unmapped), which
     // keeps the image acceptable to dyld while retaining the section names
@@ -3246,7 +3247,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         }
         extra_dylib_command_size += align_forward(24 + library.length + 1, 8);
     }
-    u64 command_size = 2 * MACH_SEGMENT_COMMAND_SIZE + MACH_TEXT_COMMAND_SIZE + data_command_size + dwarf_command_size + MACH_DYLD_INFO_COMMAND_SIZE +
+    u64 command_size = 2 * MACH_SEGMENT_COMMAND_SIZE + text_command_size + data_command_size + dwarf_command_size + MACH_DYLD_INFO_COMMAND_SIZE +
                        MACH_DYLINKER_COMMAND_SIZE + MACH_DYLIB_COMMAND_SIZE + extra_dylib_command_size + MACH_MAIN_COMMAND_SIZE +
                        MACH_BUILD_VERSION_COMMAND_SIZE + MACH_SYMTAB_COMMAND_SIZE + MACH_DYSYMTAB_COMMAND_SIZE + MACH_CODE_SIGNATURE_COMMAND_SIZE;
     u64 header_end = MACH_HEADER_SIZE + command_size;
@@ -3254,7 +3255,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     section_offsets[OBJECT_SECTION_TEXT] = align_forward(header_end, object->sections[OBJECT_SECTION_TEXT].alignment);
     u32 stub_size = object->target.cpu_arch == CPU_ARCH_X86_64 ? MACH_STUB_X86_64_SIZE : MACH_STUB_AARCH64_SIZE;
     u64 stub_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
-    u64 text_end = stub_offset + (u64)import_count * stub_size;
+    u64 stub_end = stub_offset + (u64)import_count * stub_size;
+    section_offsets[OBJECT_SECTION_UNWIND] = has_unwind ? align_forward(stub_end, object->sections[OBJECT_SECTION_UNWIND].alignment) : stub_end;
+    u64 text_end = has_unwind ? section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length : stub_end;
     u64 data_file_offset = align_forward(text_end, MACH_PAGE_SIZE);
     section_offsets[OBJECT_SECTION_DATA] = data_file_offset;
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] =
@@ -3622,7 +3625,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         }
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         u64 place_address = image_base + output_offset;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 ||
+            relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
             s64 value = (s64)symbol_address + relocation->addend - (s64)place_address;
             if (value < INT32_MIN || value > INT32_MAX)
@@ -3738,17 +3742,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     } while (0)
     BUSTER_LINK_MACH_SEGMENT("__PAGEZERO", 0, image_base, 0, 0, 0, 0);
     link_write_u32(bytes, command, 0x19);
-    link_write_u32(bytes, command + 4, MACH_TEXT_COMMAND_SIZE);
+    link_write_u32(bytes, command + 4, (u32)text_command_size);
     link_mach_name_write(bytes, command + 8, "__TEXT");
     link_write_u64(bytes, command + 24, image_base);
     link_write_u64(bytes, command + 32, data_file_offset);
     link_write_u64(bytes, command + 48, data_file_offset);
     link_write_u32(bytes, command + 56, 5);
     link_write_u32(bytes, command + 60, 5);
-    link_write_u32(bytes, command + 64, 1);
+    link_write_u32(bytes, command + 64, has_unwind ? 2 : 1);
     link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE, "__text", "__TEXT", image_base + section_offsets[OBJECT_SECTION_TEXT],
-                            text_end - section_offsets[OBJECT_SECTION_TEXT], (u32)section_offsets[OBJECT_SECTION_TEXT], 4, 0x80000400, 0, 0);
-    command += MACH_TEXT_COMMAND_SIZE;
+                            stub_end - section_offsets[OBJECT_SECTION_TEXT], (u32)section_offsets[OBJECT_SECTION_TEXT], 4, 0x80000400, 0, 0);
+    if (has_unwind)
+    {
+        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + MACH_SECTION_SIZE, "__eh_frame", "__TEXT",
+                                image_base + section_offsets[OBJECT_SECTION_UNWIND], object->sections[OBJECT_SECTION_UNWIND].data.length,
+                                (u32)section_offsets[OBJECT_SECTION_UNWIND], 3, 0x6800000b, 0, 0);
+    }
+    command += text_command_size;
     link_write_u32(bytes, command, 0x19);
     link_write_u32(bytes, command + 4, (u32)data_command_size);
     link_mach_name_write(bytes, command + 8, "__DATA");

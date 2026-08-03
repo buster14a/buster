@@ -16,6 +16,28 @@ BUSTER_GLOBAL_LOCAL bool object_bytes_contain(ByteSlice bytes, String8 value)
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool object_test_mach_compact_section_rewrite(ByteSlice bytes)
+{
+    u64 section = 32 + 72 + (u64)OBJECT_SECTION_READ_ONLY_DATA * 80;
+    u32 magic = 0;
+    u32 command = 0;
+    if (bytes.length >= 36)
+    {
+        memcpy(&magic, bytes.pointer, sizeof(magic));
+        memcpy(&command, bytes.pointer + 32, sizeof(command));
+    }
+    if (bytes.length < section + 80 || magic != 0xfeedfacf || command != 0x19)
+    {
+        return false;
+    }
+    memset(bytes.pointer + section, 0, 32);
+    memcpy(bytes.pointer + section, "__compact_unwind", sizeof("__compact_unwind") - 1);
+    memcpy(bytes.pointer + section + 16, "__LD", sizeof("__LD") - 1);
+    u32 flags = 0x020000;
+    memcpy(bytes.pointer + section + 64, &flags, sizeof(flags));
+    return true;
+}
+
 BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -425,6 +447,30 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, separate_roundtrip_cfi);
 
+    CodegenModule mach_cfi_module = separate_module;
+    mach_cfi_module.relocations = 0;
+    mach_cfi_module.relocation_count = 0;
+    ObjectFile mach_cfi_object = object_from_codegen_module(arguments->arena, &separate_analysis, &mach_cfi_module,
+                                                            (Target){
+                                                                .cpu_arch = CPU_ARCH_X86_64,
+                                                                .os = OPERATING_SYSTEM_MACOS,
+                                                            });
+    BUSTER_TEST(arguments, mach_cfi_object.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.length > 0);
+    ObjectArtifact mach_cfi_artifact = object_write(arguments->arena, &mach_cfi_object, OBJECT_FORMAT_MACH_O64);
+    BUSTER_TEST(arguments, mach_cfi_artifact.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, object_bytes_contain(mach_cfi_artifact.bytes, S8("__eh_frame")));
+    ObjectFile mach_cfi_roundtrip = object_read(arguments->arena, mach_cfi_artifact.bytes, mach_cfi_object.target);
+    BUSTER_TEST(arguments, mach_cfi_roundtrip.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, mach_cfi_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length ==
+                               mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.length);
+    BUSTER_TEST(arguments, mach_cfi_roundtrip.relocation_count == 1);
+    if (mach_cfi_roundtrip.relocation_count == 1)
+    {
+        BUSTER_TEST(arguments, mach_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
+        BUSTER_TEST(arguments, mach_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
+    }
+
     CodegenModule a64_cfi_module = separate_module;
     a64_cfi_module.relocations = 0;
     a64_cfi_module.relocation_count = 0;
@@ -445,6 +491,148 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, a64_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
         BUSTER_TEST(arguments, a64_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
     }
+    ObjectFile a64_mach_cfi_object = object_from_codegen_module(arguments->arena, &separate_analysis, &a64_cfi_module,
+                                                                (Target){
+                                                                    .cpu_arch = CPU_ARCH_AARCH64,
+                                                                    .os = OPERATING_SYSTEM_MACOS,
+                                                                });
+    BUSTER_TEST(arguments, a64_mach_cfi_object.error == OBJECT_ERROR_NONE);
+    ObjectArtifact a64_mach_cfi_artifact = object_write(arguments->arena, &a64_mach_cfi_object, OBJECT_FORMAT_MACH_O64);
+    BUSTER_TEST(arguments, a64_mach_cfi_artifact.error == OBJECT_ERROR_NONE);
+    u64 a64_mach_cfi_section_header = 32 + 72 + (u64)OBJECT_SECTION_UNWIND * 80;
+    u32 a64_mach_cfi_flags = 0;
+    if (a64_mach_cfi_section_header + 68 <= a64_mach_cfi_artifact.bytes.length)
+    {
+        memcpy(&a64_mach_cfi_flags, a64_mach_cfi_artifact.bytes.pointer + a64_mach_cfi_section_header + 64, sizeof(a64_mach_cfi_flags));
+    }
+    BUSTER_TEST(arguments, a64_mach_cfi_flags == 0x6800000b);
+    ObjectFile a64_mach_cfi_roundtrip = object_read(arguments->arena, a64_mach_cfi_artifact.bytes, a64_mach_cfi_object.target);
+    BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length ==
+                               a64_mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.length);
+    BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.relocation_count == 1);
+    if (a64_mach_cfi_roundtrip.relocation_count == 1)
+    {
+        BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
+        BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
+    }
+    u8 compact_x64_code[] = {
+        0x55, 0x48, 0x89, 0xe5, 0xc3,
+    };
+    CodegenFunctionDescriptor compact_x64_descriptor = {0};
+    BUSTER_TEST(arguments, object_mach_compact_decode(arguments->arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_x64_code), 0,
+                                                      (u32)sizeof(compact_x64_code), 0x01000000,
+                                                      (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}, &compact_x64_descriptor));
+    BUSTER_TEST(arguments, compact_x64_descriptor.unwind_action_count == 2 && compact_x64_descriptor.prolog_size == 4);
+    BUSTER_TEST(arguments, !object_mach_compact_decode(arguments->arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_x64_code), 0,
+                                                       (u32)sizeof(compact_x64_code), 0x01000001,
+                                                       (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}, &compact_x64_descriptor));
+    u32 compact_a64_code[] = {
+        0xd10083ff, 0xa9017bfd, 0x910043fd, 0xd65f03c0,
+    };
+    CodegenFunctionDescriptor compact_a64_descriptor = {0};
+    BUSTER_TEST(arguments, object_mach_compact_decode(arguments->arena,
+                                                      (ByteSlice){.pointer = (u8*)compact_a64_code, .length = sizeof(compact_a64_code)}, 0,
+                                                      (u32)sizeof(compact_a64_code), 0x04000000,
+                                                      (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}, &compact_a64_descriptor));
+    BUSTER_TEST(arguments, compact_a64_descriptor.unwind_action_count == 4 && compact_a64_descriptor.prolog_size == 12);
+    DwarfCfiResult compact_a64_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                                           .functions = &compact_a64_descriptor,
+                                                                           .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+                                                                           .function_count = 1,
+                                                                       });
+    BUSTER_TEST(arguments, compact_a64_cfi.valid);
+    u32 compact_a64_saved_code[] = {
+        0xa9be6ffc, 0xa9017bfd, 0x910043fd, 0xd65f03c0,
+    };
+    BUSTER_TEST(arguments, object_mach_compact_decode(arguments->arena,
+                                                      (ByteSlice){.pointer = (u8*)compact_a64_saved_code, .length = sizeof(compact_a64_saved_code)}, 0,
+                                                      (u32)sizeof(compact_a64_saved_code), 0x04000010,
+                                                      (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}, &compact_a64_descriptor));
+    BUSTER_TEST(arguments, compact_a64_descriptor.unwind_action_count == 6);
+    u32 compact_a64_leaf_code[] = {
+        0xd10083ff, 0xd65f03c0,
+    };
+    BUSTER_TEST(arguments, object_mach_compact_decode(arguments->arena,
+                                                      (ByteSlice){.pointer = (u8*)compact_a64_leaf_code, .length = sizeof(compact_a64_leaf_code)}, 0,
+                                                      (u32)sizeof(compact_a64_leaf_code), 0x02002000,
+                                                      (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}, &compact_a64_descriptor));
+    BUSTER_TEST(arguments, compact_a64_descriptor.unwind_action_count == 1 && compact_a64_descriptor.prolog_size == 4);
+    BUSTER_TEST(arguments, !object_mach_compact_decode(arguments->arena,
+                                                       (ByteSlice){.pointer = (u8*)compact_a64_code, .length = sizeof(compact_a64_code)}, 0,
+                                                       (u32)sizeof(compact_a64_code), 0x05000000,
+                                                       (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}, &compact_a64_descriptor));
+    u8 compact_x64_entry[32] = {0};
+    u32 compact_x64_size = (u32)sizeof(compact_x64_code);
+    u32 compact_x64_encoding = 0x01000000;
+    memcpy(compact_x64_entry + 8, &compact_x64_size, sizeof(compact_x64_size));
+    memcpy(compact_x64_entry + 12, &compact_x64_encoding, sizeof(compact_x64_encoding));
+    ObjectSection* compact_x64_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
+    memcpy(compact_x64_sections, mach_cfi_object.sections, sizeof(*compact_x64_sections) * OBJECT_SECTION_COUNT);
+    compact_x64_sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_x64_code);
+    compact_x64_sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_x64_entry);
+    compact_x64_sections[OBJECT_SECTION_UNWIND].data = (ByteSlice){0};
+    ObjectSymbol compact_x64_symbol = {
+        .name = S8("compact_x64"),
+        .size = sizeof(compact_x64_code),
+        .section = OBJECT_SECTION_TEXT,
+        .kind = OBJECT_SYMBOL_FUNCTION,
+        .global = true,
+    };
+    ObjectRelocation compact_x64_relocation = {
+        .section = OBJECT_SECTION_READ_ONLY_DATA,
+        .symbol = 0,
+        .kind = OBJECT_RELOCATION_ABSOLUTE64,
+    };
+    ObjectFile compact_x64_object = mach_cfi_object;
+    compact_x64_object.sections = compact_x64_sections;
+    compact_x64_object.symbols = &compact_x64_symbol;
+    compact_x64_object.relocations = &compact_x64_relocation;
+    compact_x64_object.symbol_count = 1;
+    compact_x64_object.relocation_count = 1;
+    ObjectArtifact compact_x64_artifact = object_write(arguments->arena, &compact_x64_object, OBJECT_FORMAT_MACH_O64);
+    BUSTER_TEST(arguments, compact_x64_artifact.error == OBJECT_ERROR_NONE && object_test_mach_compact_section_rewrite(compact_x64_artifact.bytes));
+    ObjectFile compact_x64_roundtrip = object_read(arguments->arena, compact_x64_artifact.bytes, compact_x64_object.target);
+    BUSTER_TEST(arguments, compact_x64_roundtrip.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, compact_x64_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length > 0);
+    BUSTER_TEST(arguments, compact_x64_roundtrip.relocation_count == 1 &&
+                               compact_x64_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
+
+    u8 compact_a64_entry[32] = {0};
+    u32 compact_a64_size = (u32)sizeof(compact_a64_code);
+    u32 compact_a64_encoding = 0x04000000;
+    memcpy(compact_a64_entry + 8, &compact_a64_size, sizeof(compact_a64_size));
+    memcpy(compact_a64_entry + 12, &compact_a64_encoding, sizeof(compact_a64_encoding));
+    ObjectSection* compact_a64_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
+    memcpy(compact_a64_sections, a64_mach_cfi_object.sections, sizeof(*compact_a64_sections) * OBJECT_SECTION_COUNT);
+    compact_a64_sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = (u8*)compact_a64_code, .length = sizeof(compact_a64_code)};
+    compact_a64_sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_a64_entry);
+    compact_a64_sections[OBJECT_SECTION_UNWIND].data = (ByteSlice){0};
+    ObjectSymbol compact_a64_symbol = {
+        .name = S8("compact_a64"),
+        .size = sizeof(compact_a64_code),
+        .section = OBJECT_SECTION_TEXT,
+        .kind = OBJECT_SYMBOL_FUNCTION,
+        .global = true,
+    };
+    ObjectRelocation compact_a64_relocation = {
+        .section = OBJECT_SECTION_READ_ONLY_DATA,
+        .symbol = 0,
+        .kind = OBJECT_RELOCATION_ABSOLUTE64,
+    };
+    ObjectFile compact_a64_object = a64_mach_cfi_object;
+    compact_a64_object.sections = compact_a64_sections;
+    compact_a64_object.symbols = &compact_a64_symbol;
+    compact_a64_object.relocations = &compact_a64_relocation;
+    compact_a64_object.symbol_count = 1;
+    compact_a64_object.relocation_count = 1;
+    ObjectArtifact compact_a64_artifact = object_write(arguments->arena, &compact_a64_object, OBJECT_FORMAT_MACH_O64);
+    BUSTER_TEST(arguments, compact_a64_artifact.error == OBJECT_ERROR_NONE && object_test_mach_compact_section_rewrite(compact_a64_artifact.bytes));
+    ObjectFile compact_a64_roundtrip = object_read(arguments->arena, compact_a64_artifact.bytes, compact_a64_object.target);
+    BUSTER_TEST(arguments, compact_a64_roundtrip.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, compact_a64_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length > 0);
+    BUSTER_TEST(arguments, compact_a64_roundtrip.relocation_count == 1 &&
+                               compact_a64_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
     CodegenFunctionDescriptor invalid_function = separate_function;
     invalid_function.prolog_size = invalid_function.code_size + 1;
     CodegenModule invalid_module = separate_module;

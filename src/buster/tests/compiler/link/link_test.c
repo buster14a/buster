@@ -95,6 +95,61 @@ BUSTER_GLOBAL_LOCAL bool link_test_elf_section_find(ByteSlice image, String8 nam
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool link_test_mach_section_find(ByteSlice image, String8 segment_name, String8 section_name, u64* section_header)
+{
+    if (image.length < 32 || link_read_u32(image.pointer, 0) != 0xfeedfacf)
+    {
+        return false;
+    }
+    u32 command_count = link_read_u32(image.pointer, 16);
+    u64 command = 32;
+    for (u32 command_index = 0; command_index < command_count; command_index += 1)
+    {
+        if (command > image.length || 8 > image.length - command)
+        {
+            return false;
+        }
+        u32 kind = link_read_u32(image.pointer, command);
+        u32 size = link_read_u32(image.pointer, command + 4);
+        if (size < 8 || size > image.length - command)
+        {
+            return false;
+        }
+        if (kind == 0x19 && size >= 72)
+        {
+            u32 section_count = link_read_u32(image.pointer, command + 64);
+            if ((u64)section_count > (size - 72) / 80)
+            {
+                return false;
+            }
+            for (u32 index = 0; index < section_count; index += 1)
+            {
+                u64 section = command + 72 + (u64)index * 80;
+                String8 candidate_section = {.pointer = (char8*)image.pointer + section, .length = 0};
+                String8 candidate_segment = {.pointer = (char8*)image.pointer + section + 16, .length = 0};
+                while (candidate_section.length < 16 && candidate_section.pointer[candidate_section.length])
+                {
+                    candidate_section.length += 1;
+                }
+                while (candidate_segment.length < 16 && candidate_segment.pointer[candidate_segment.length])
+                {
+                    candidate_segment.length += 1;
+                }
+                if (string_equal(candidate_segment, segment_name) && string_equal(candidate_section, section_name))
+                {
+                    if (section_header)
+                    {
+                        *section_header = section;
+                    }
+                    return true;
+                }
+            }
+        }
+        command += size;
+    }
+    return false;
+}
+
 #if BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, String8 library, String8 symbol)
 {
@@ -893,6 +948,48 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
                                      aarch64_mach_executable.executable.pointer[1] == 0xfa && aarch64_mach_executable.executable.pointer[2] == 0xed &&
                                      aarch64_mach_executable.executable.pointer[3] == 0xfe && (aarch64_mach_executable.executable.pointer[26] & 0x20) != 0;
     BUSTER_TEST(arguments, aarch64_mach_header_valid);
+    CodegenFunctionDescriptor aarch64_mach_cfi_descriptor = {
+        .code_size = (u32)sizeof(aarch64_main_instructions),
+    };
+    DwarfCfiResult aarch64_mach_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                                            .functions = &aarch64_mach_cfi_descriptor,
+                                                                            .target = aarch64_mach_object.target,
+                                                                            .function_count = 1,
+                                                                        });
+    BUSTER_TEST(arguments, aarch64_mach_cfi.valid && aarch64_mach_cfi.relocation_count == 1);
+    ObjectRelocation aarch64_mach_cfi_relocation = {
+        .offset = aarch64_mach_cfi.relocations[0].offset,
+        .section = OBJECT_SECTION_UNWIND,
+        .symbol = 0,
+        .kind = OBJECT_RELOCATION_AARCH64_PREL32,
+    };
+    ObjectFile aarch64_mach_cfi_object = aarch64_mach_object;
+    ObjectSection* aarch64_mach_cfi_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
+    memcpy(aarch64_mach_cfi_sections, aarch64_mach_object.sections, sizeof(*aarch64_mach_cfi_sections) * OBJECT_SECTION_COUNT);
+    aarch64_mach_cfi_object.sections = aarch64_mach_cfi_sections;
+    aarch64_mach_cfi_sections[OBJECT_SECTION_UNWIND].data = aarch64_mach_cfi.bytes;
+    aarch64_mach_cfi_object.relocations = &aarch64_mach_cfi_relocation;
+    aarch64_mach_cfi_object.relocation_count = 1;
+    NativeExecutableLinkResult aarch64_mach_cfi_executable = link_native_executable(arguments->arena, &aarch64_mach_cfi_object,
+                                                                                   (NativeExecutableLinkOptions){
+                                                                                       .entry_symbol = S8("main"),
+                                                                                   });
+    BUSTER_TEST(arguments, aarch64_mach_cfi_executable.error == LINK_ERROR_NONE);
+    u64 aarch64_mach_cfi_section = 0;
+    bool aarch64_mach_cfi_found =
+        link_test_mach_section_find(aarch64_mach_cfi_executable.executable, S8("__TEXT"), S8("__eh_frame"), &aarch64_mach_cfi_section);
+    BUSTER_TEST(arguments, aarch64_mach_cfi_found);
+    if (aarch64_mach_cfi_found)
+    {
+        BUSTER_TEST(arguments, link_read_u32(aarch64_mach_cfi_executable.executable.pointer, aarch64_mach_cfi_section + 64) == 0x6800000b);
+        u64 unwind_address = link_read_u64(aarch64_mach_cfi_executable.executable.pointer, aarch64_mach_cfi_section + 32);
+        u64 unwind_offset = link_read_u32(aarch64_mach_cfi_executable.executable.pointer, aarch64_mach_cfi_section + 48);
+        s32 function_displacement = 0;
+        memcpy(&function_displacement, aarch64_mach_cfi_executable.executable.pointer + unwind_offset + aarch64_mach_cfi.relocations[0].offset,
+               sizeof(function_displacement));
+        BUSTER_TEST(arguments, (s64)unwind_address + (s64)aarch64_mach_cfi.relocations[0].offset + function_displacement ==
+                                   (s64)UINT64_C(0x100000000) + (s64)align_forward(32 + link_read_u32(aarch64_mach_cfi_executable.executable.pointer, 20), 16));
+    }
     u32 aarch64_mach_data_instructions[] = {
         0x58000049, 0x14000003, 0, 0, 0x52800000, 0xd65f03c0,
     };

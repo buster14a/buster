@@ -3742,6 +3742,203 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool object_mach_compact_action_append(CodegenFunctionDescriptor* descriptor, u32 capacity, u32 code_offset,
+                                                           CodegenUnwindActionKind kind, u8 register_index, u32 value)
+{
+    if (descriptor->unwind_action_count >= capacity)
+    {
+        return false;
+    }
+    descriptor->unwind_actions[descriptor->unwind_action_count++] = (CodegenUnwindAction){
+        .code_offset = code_offset,
+        .value = value,
+        .kind = kind,
+        .register_index = register_index,
+    };
+    return true;
+}
+
+BUSTER_TEST_F_DECL bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offset, u32 function_size, u32 encoding, Target target,
+                                                   CodegenFunctionDescriptor* descriptor)
+{
+    enum
+    {
+        ACTION_CAPACITY = 32,
+        X64_RBP_REGISTER = 5,
+    };
+    if (!arena || !descriptor || function_offset > text.length || function_size > text.length - function_offset || (encoding & 0xf0000000))
+    {
+        return false;
+    }
+    *descriptor = (CodegenFunctionDescriptor){
+        .unwind_actions = arena_allocate(arena, CodegenUnwindAction, ACTION_CAPACITY),
+        .code_offset = function_offset,
+        .code_size = function_size,
+    };
+    u8* code = text.pointer + function_offset;
+    if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        // The frame-pointer compact form does not encode prolog positions.
+        // Accept the canonical push/move sequence and reject register saves,
+        // whose RBP-relative locations cannot be represented by the neutral
+        // SP-relative descriptor.
+        if ((encoding & 0x0f000000) != 0x01000000 || (encoding & 0x00007fff) || function_size < 4 || code[0] != 0x55 || code[1] != 0x48 ||
+            !((code[2] == 0x89 && code[3] == 0xe5) || (code[2] == 0x8b && code[3] == 0xec)))
+        {
+            return false;
+        }
+        bool valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, 1, CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_RBP_REGISTER, 0);
+        valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, 4, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_RBP_REGISTER, 0) && valid;
+        descriptor->prolog_size = 4;
+        return valid;
+    }
+    if (target.cpu_arch != CPU_ARCH_AARCH64 || function_size % 4)
+    {
+        return false;
+    }
+    u32 mode = encoding & 0x0f000000;
+    if (mode == 0x02000000)
+    {
+        if (encoding & 0x00000fff)
+        {
+            return false;
+        }
+        u32 expected_stack = ((encoding & 0x00fff000) >> 12) * 16;
+        u32 stack_size = 0;
+        u32 cursor = 0;
+        while (stack_size < expected_stack && cursor + 4 <= function_size)
+        {
+            u32 instruction = 0;
+            memcpy(&instruction, code + cursor, sizeof(instruction));
+            if ((instruction & UINT32_C(0xff8003ff)) != UINT32_C(0xd10003ff))
+            {
+                return false;
+            }
+            u32 amount = (instruction >> 10) & 0xfff;
+            if (instruction & (1u << 22))
+            {
+                amount <<= 12;
+            }
+            if (!amount || amount > expected_stack - stack_size)
+            {
+                return false;
+            }
+            cursor += 4;
+            stack_size += amount;
+            if (!object_mach_compact_action_append(descriptor, ACTION_CAPACITY, cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, amount))
+            {
+                return false;
+            }
+        }
+        descriptor->prolog_size = cursor;
+        return stack_size == expected_stack;
+    }
+    if (mode != 0x04000000 || (encoding & 0x00000f00) || (encoding & 0x000000e0))
+    {
+        return false;
+    }
+    u32 expected_pairs = encoding & 0x1f;
+    u32 seen_pairs = 0;
+    u32 stack_size = 0;
+    u32 cursor = 0;
+    bool frame_pair = false;
+    while (cursor + 4 <= function_size)
+    {
+        u32 instruction = 0;
+        memcpy(&instruction, code + cursor, sizeof(instruction));
+        u32 next_cursor = cursor + 4;
+        if ((instruction & UINT32_C(0xff8003ff)) == UINT32_C(0xd10003ff))
+        {
+            u32 amount = (instruction >> 10) & 0xfff;
+            if (instruction & (1u << 22))
+            {
+                amount <<= 12;
+            }
+            if (!amount || stack_size > UINT32_MAX - amount ||
+                !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, amount))
+            {
+                return false;
+            }
+            stack_size += amount;
+            cursor = next_cursor;
+            continue;
+        }
+        u32 pair_form = instruction & UINT32_C(0xffc00000);
+        if (pair_form == UINT32_C(0xa9800000) || pair_form == UINT32_C(0xa9000000))
+        {
+            if (((instruction >> 5) & 31) != 31)
+            {
+                return false;
+            }
+            s32 signed_immediate = (s32)((instruction >> 15) & 0x7f);
+            if (signed_immediate & 0x40)
+            {
+                signed_immediate -= 0x80;
+            }
+            signed_immediate *= 8;
+            if (pair_form == UINT32_C(0xa9800000))
+            {
+                if (signed_immediate >= 0 || (u32)-signed_immediate > UINT32_MAX - stack_size ||
+                    !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0,
+                                                       (u32)-signed_immediate))
+                {
+                    return false;
+                }
+                stack_size += (u32)-signed_immediate;
+                signed_immediate = 0;
+            }
+            if (signed_immediate < 0 || (u32)signed_immediate > stack_size || (u32)signed_immediate + 16 > stack_size)
+            {
+                return false;
+            }
+            u8 first = (u8)(instruction & 31);
+            u8 second = (u8)((instruction >> 10) & 31);
+            if ((first == 29 && second == 30) || (first == 30 && second == 29))
+            {
+                frame_pair = true;
+            }
+            else
+            {
+                u8 low = BUSTER_MIN(first, second);
+                u32 pair_bit = low == 19 && BUSTER_MAX(first, second) == 20   ? 1u
+                               : low == 21 && BUSTER_MAX(first, second) == 22 ? 2u
+                               : low == 23 && BUSTER_MAX(first, second) == 24 ? 4u
+                               : low == 25 && BUSTER_MAX(first, second) == 26 ? 8u
+                               : low == 27 && BUSTER_MAX(first, second) == 28 ? 16u
+                                                                             : 0;
+                if (!pair_bit || (seen_pairs & pair_bit))
+                {
+                    return false;
+                }
+                seen_pairs |= pair_bit;
+            }
+            bool valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, first,
+                                                           (u32)signed_immediate);
+            valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, second,
+                                                      (u32)signed_immediate + 8) && valid;
+            if (!valid)
+            {
+                return false;
+            }
+            cursor = next_cursor;
+            continue;
+        }
+        if ((instruction & UINT32_C(0xff8003ff)) == UINT32_C(0x910003fd))
+        {
+            u32 frame_offset = ((instruction >> 10) & 0xfff) << ((instruction & (1u << 22)) ? 12 : 0);
+            if (!frame_pair || seen_pairs != expected_pairs || frame_offset > stack_size ||
+                !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, 29, frame_offset))
+            {
+                return false;
+            }
+            descriptor->prolog_size = next_cursor;
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice bytes, Target target)
 {
     ObjectFile result = {
@@ -3814,6 +4011,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
     u32* section_kinds = arena_allocate(arena, u32, mach_section_count);
     u64* section_bases = arena_allocate(arena, u64, mach_section_count);
     u64* section_addresses = arena_allocate(arena, u64, mach_section_count);
+    bool* compact_sections = arena_allocate(arena, bool, mach_section_count);
+    bool* eh_frame_sections = arena_allocate(arena, bool, mach_section_count);
+    memset(compact_sections, 0, (u64)mach_section_count * sizeof(*compact_sections));
+    memset(eh_frame_sections, 0, (u64)mach_section_count * sizeof(*eh_frame_sections));
     u64 section_sizes[OBJECT_SECTION_COUNT] = {0};
     u32 section_alignments[OBJECT_SECTION_COUNT];
     for (u32 alignment_kind = 0; alignment_kind < OBJECT_SECTION_COUNT; alignment_kind += 1)
@@ -3821,6 +4022,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         section_alignments[alignment_kind] = 1;
     }
     u32 relocation_capacity = 0;
+    u32 compact_entry_count = 0;
+    bool has_compact = false;
     u32 output_section_index = 0;
     command = MACH_HEADER_SIZE;
     for (u32 command_index = 0; command_index < command_count; command_index += 1)
@@ -3868,18 +4071,28 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     name.length += 1;
                 }
                 bool is_thread_local = section_type == 0x11 || section_type == 0x12 || string_starts_with_sequence(name, S8("__thread"));
+                bool compact_unwind = string_equal(name, S8("__compact_unwind"));
+                bool eh_frame = string_equal(name, S8("__eh_frame"));
+                if (compact_unwind && (section_size % 32 || section_size / 32 > UINT32_MAX - compact_entry_count))
+                {
+                    return result;
+                }
+                has_compact |= compact_unwind;
+                compact_entry_count += compact_unwind ? (u32)(section_size / 32) : 0;
                 // The __DWARF sections must keep their debug identity so that
                 // their contents and relocations do not land in read-only data.
                 ObjectSectionKind debug_kind = object_debug_section_kind_from_name(name);
-                ObjectSectionKind output_kind = debug_kind != OBJECT_SECTION_COUNT ? debug_kind
+                ObjectSectionKind output_kind = eh_frame                         ? OBJECT_SECTION_UNWIND
+                                                : debug_kind != OBJECT_SECTION_COUNT ? debug_kind
                                                 : is_thread_local ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                                 : (flags & 0x80000000) || string_equal(name, S8("__text")) ? OBJECT_SECTION_TEXT
                                                 : zero_fill || string_starts_with_sequence(name, S8("__bss")) ? OBJECT_SECTION_ZERO
                                                 : string_starts_with_sequence(name, S8("__data")) ? OBJECT_SECTION_DATA
                                                                                                      : OBJECT_SECTION_READ_ONLY_DATA;
                 u32 alignment = 1u << alignment_power;
+                u64 output_size = compact_unwind ? 0 : section_size;
                 u64 base = align_forward(section_sizes[output_kind], alignment);
-                if (base < section_sizes[output_kind] || section_size > UINT64_MAX - base)
+                if (base < section_sizes[output_kind] || output_size > UINT64_MAX - base)
                 {
                     return result;
                 }
@@ -3887,13 +4100,24 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 section_kinds[output_section_index] = (u32)output_kind;
                 section_bases[output_section_index] = base;
                 section_addresses[output_section_index] = address;
-                section_sizes[output_kind] = base + section_size;
+                compact_sections[output_section_index] = compact_unwind;
+                eh_frame_sections[output_section_index] = eh_frame;
+                section_sizes[output_kind] = base + output_size;
                 section_alignments[output_kind] = BUSTER_MAX(section_alignments[output_kind], alignment);
                 relocation_capacity += relocation_count;
                 output_section_index += 1;
             }
         }
         command += size;
+    }
+    if (has_compact)
+    {
+        if (compact_entry_count > UINT32_MAX - relocation_capacity)
+        {
+            return result;
+        }
+        section_sizes[OBJECT_SECTION_UNWIND] = 0;
+        relocation_capacity += compact_entry_count;
     }
     result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
     result.section_count = OBJECT_SECTION_COUNT;
@@ -3922,13 +4146,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         object_read_u32(bytes, section + 48, &offset);
         object_read_u32(bytes, section + 64, &flags);
         u32 section_type = flags & 0xff;
-        if (section_type != 1 && section_type != 0x12 && size)
+        if (section_type != 1 && section_type != 0x12 && size && !compact_sections[section_index] && !(has_compact && eh_frame_sections[section_index]))
         {
             ObjectSectionKind kind = (ObjectSectionKind)section_kinds[section_index];
             memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + offset, size);
         }
     }
-    result.symbols = arena_allocate(arena, ObjectSymbol, symbol_count + mach_section_count);
+    result.symbols = arena_allocate(arena, ObjectSymbol, symbol_count + mach_section_count + compact_entry_count);
     u32* symbol_map = arena_allocate(arena, u32, symbol_count);
     for (u32 source_index = 0; source_index < symbol_count; source_index += 1)
     {
@@ -3998,6 +4222,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         object_read_u32(bytes, section + 48, &raw_offset);
         object_read_u32(bytes, section + 56, &relocation_offset);
         object_read_u32(bytes, section + 60, &relocation_count);
+        if (compact_sections[section_index] || (has_compact && eh_frame_sections[section_index]))
+        {
+            continue;
+        }
         for (u32 relocation_index = 0; relocation_index < relocation_count; relocation_index += 1)
         {
             u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
@@ -4013,6 +4241,46 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             if (source_offset < 0 || (u64)source_offset > section_size)
             {
                 return result;
+            }
+            if (target.cpu_arch == CPU_ARCH_AARCH64 && section_kinds[section_index] == OBJECT_SECTION_UNWIND && relocation_type == 1 && length == 2)
+            {
+                u32 next_source_offset = 0;
+                u32 next_information = 0;
+                if (relocation_index + 1 >= relocation_count || !external ||
+                    !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
+                    !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
+                    (next_information >> 28) != 0 || ((next_information >> 25) & 0x3) != 2 || !(next_information & (1u << 27)))
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    return result;
+                }
+                u32 subtractor_source_symbol = source_symbol;
+                u32 target_source_symbol = next_information & 0x00ffffff;
+                if (subtractor_source_symbol >= symbol_count || target_source_symbol >= symbol_count ||
+                    symbol_map[subtractor_source_symbol] == UINT32_MAX || symbol_map[target_source_symbol] == UINT32_MAX)
+                {
+                    return result;
+                }
+                ObjectSymbol* subtractor = &result.symbols[symbol_map[subtractor_source_symbol]];
+                if (subtractor->section != OBJECT_SECTION_UNWIND || subtractor->value != section_bases[section_index] + (u32)source_offset)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    return result;
+                }
+                u32 stored = 0;
+                if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                {
+                    return result;
+                }
+                result.relocations[result.relocation_count++] = (ObjectRelocation){
+                    .addend = (s32)stored,
+                    .offset = section_bases[section_index] + (u32)source_offset,
+                    .section = OBJECT_SECTION_UNWIND,
+                    .symbol = symbol_map[target_source_symbol],
+                    .kind = OBJECT_RELOCATION_AARCH64_PREL32,
+                };
+                relocation_index += 1;
+                continue;
             }
             u32 destination_symbol = UINT32_MAX;
             if (external)
@@ -4124,6 +4392,166 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 .section = section_kinds[section_index],
                 .symbol = destination_symbol,
                 .kind = output_kind,
+            };
+        }
+    }
+    if (has_compact)
+    {
+        CodegenFunctionDescriptor* functions = arena_allocate(arena, CodegenFunctionDescriptor, compact_entry_count);
+        u32* function_symbols = arena_allocate(arena, u32, compact_entry_count);
+        u32 function_count = 0;
+        for (u32 section_index = 0; section_index < mach_section_count; section_index += 1)
+        {
+            if (!compact_sections[section_index])
+            {
+                continue;
+            }
+            u64 section = mach_sections[section_index];
+            u64 section_size = 0;
+            u32 raw_offset = 0;
+            u32 relocation_offset = 0;
+            u32 relocation_count = 0;
+            object_read_u64(bytes, section + 40, &section_size);
+            object_read_u32(bytes, section + 48, &raw_offset);
+            object_read_u32(bytes, section + 56, &relocation_offset);
+            object_read_u32(bytes, section + 60, &relocation_count);
+            u32 entry_count = (u32)(section_size / 32);
+            if (relocation_count != entry_count)
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                return result;
+            }
+            for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
+            {
+                u32 entry_offset = entry_index * 32;
+                u64 entry = (u64)raw_offset + entry_offset;
+                u32 function_size = 0;
+                u32 encoding = 0;
+                u64 personality = 0;
+                u64 lsda = 0;
+                if (!object_read_u32(bytes, entry + 8, &function_size) || !object_read_u32(bytes, entry + 12, &encoding) ||
+                    !object_read_u64(bytes, entry + 16, &personality) || !object_read_u64(bytes, entry + 24, &lsda) || personality || lsda)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    return result;
+                }
+                u32 matching_relocation = UINT32_MAX;
+                u32 information = 0;
+                for (u32 relocation_index = 0; relocation_index < relocation_count; relocation_index += 1)
+                {
+                    u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
+                    u32 source_offset = 0;
+                    u32 candidate_information = 0;
+                    object_read_u32(bytes, relocation, &source_offset);
+                    object_read_u32(bytes, relocation + 4, &candidate_information);
+                    if (source_offset == entry_offset)
+                    {
+                        if (matching_relocation != UINT32_MAX)
+                        {
+                            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                            return result;
+                        }
+                        matching_relocation = relocation_index;
+                        information = candidate_information;
+                    }
+                }
+                if (matching_relocation == UINT32_MAX || (information >> 28) != 0 || ((information >> 25) & 0x3) != 3 || (information & (1u << 24)))
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    return result;
+                }
+                u32 source_symbol = information & 0x00ffffff;
+                bool external = (information & (1u << 27)) != 0;
+                u64 stored = 0;
+                object_read_u64(bytes, entry, &stored);
+                u64 function_offset = 0;
+                if (external)
+                {
+                    if (source_symbol >= symbol_count || symbol_map[source_symbol] == UINT32_MAX)
+                    {
+                        return result;
+                    }
+                    ObjectSymbol* symbol = &result.symbols[symbol_map[source_symbol]];
+                    if (symbol->section != OBJECT_SECTION_TEXT || stored > UINT64_MAX - symbol->value)
+                    {
+                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                        return result;
+                    }
+                    function_offset = symbol->value + stored;
+                }
+                else
+                {
+                    if (!source_symbol || source_symbol > mach_section_count)
+                    {
+                        return result;
+                    }
+                    u32 referenced_section = source_symbol - 1;
+                    if (section_kinds[referenced_section] != OBJECT_SECTION_TEXT || stored < section_addresses[referenced_section])
+                    {
+                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                        return result;
+                    }
+                    u64 local_offset = stored - section_addresses[referenced_section];
+                    if (local_offset > UINT64_MAX - section_bases[referenced_section])
+                    {
+                        return result;
+                    }
+                    function_offset = section_bases[referenced_section] + local_offset;
+                }
+                if (function_offset > UINT32_MAX || function_offset > result.sections[OBJECT_SECTION_TEXT].data.length ||
+                    function_size > result.sections[OBJECT_SECTION_TEXT].data.length - function_offset ||
+                    !object_mach_compact_decode(arena, result.sections[OBJECT_SECTION_TEXT].data, (u32)function_offset, function_size, encoding, target,
+                                                &functions[function_count]))
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    return result;
+                }
+                u32 function_symbol = UINT32_MAX;
+                for (u32 symbol_index = 0; symbol_index < result.symbol_count; symbol_index += 1)
+                {
+                    ObjectSymbol* symbol = result.symbols + symbol_index;
+                    if (symbol->section == OBJECT_SECTION_TEXT && symbol->value == function_offset)
+                    {
+                        function_symbol = symbol_index;
+                        symbol->kind = OBJECT_SYMBOL_FUNCTION;
+                        break;
+                    }
+                }
+                if (function_symbol == UINT32_MAX)
+                {
+                    function_symbol = result.symbol_count++;
+                    result.symbols[function_symbol] = (ObjectSymbol){
+                        .name = string_format(arena, S8(".Lmach_unwind.{u32}"), function_count),
+                        .value = function_offset,
+                        .size = function_size,
+                        .section = OBJECT_SECTION_TEXT,
+                        .kind = OBJECT_SYMBOL_FUNCTION,
+                    };
+                }
+                function_symbols[function_count++] = function_symbol;
+            }
+        }
+        DwarfCfiResult cfi = dwarf_cfi_build(arena, (DwarfCfiInput){
+                                                        .functions = functions,
+                                                        .target = target,
+                                                        .function_count = function_count,
+                                                    });
+        if (!cfi.valid || cfi.relocation_count != function_count)
+        {
+            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+            return result;
+        }
+        result.sections[OBJECT_SECTION_UNWIND].data = cfi.bytes;
+        result.sections[OBJECT_SECTION_UNWIND].virtual_size = cfi.bytes.length;
+        result.sections[OBJECT_SECTION_UNWIND].alignment = object_section_default_alignment(OBJECT_SECTION_UNWIND);
+        for (u32 relocation_index = 0; relocation_index < cfi.relocation_count; relocation_index += 1)
+        {
+            DwarfCfiRelocation relocation = cfi.relocations[relocation_index];
+            result.relocations[result.relocation_count++] = (ObjectRelocation){
+                .offset = relocation.offset,
+                .section = OBJECT_SECTION_UNWIND,
+                .symbol = function_symbols[relocation.function],
+                .kind = target.cpu_arch == CPU_ARCH_X86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_PREL32,
             };
         }
     }
@@ -4699,7 +5127,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
     };
     object_metadata_sections_initialize(&result);
     DwarfCfiResult cfi = {0};
-    if (object_format_for_target(target) == OBJECT_FORMAT_ELF64 && module->function_count)
+    if (object_format_for_target(target) != OBJECT_FORMAT_COFF && module->function_count)
     {
         cfi = dwarf_cfi_build(arena, (DwarfCfiInput){
                                          .functions = module->functions,
@@ -5026,7 +5454,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     };
     object_metadata_sections_initialize(&result);
     DwarfCfiResult cfi = {0};
-    if (object_format_for_target(target) == OBJECT_FORMAT_ELF64 && module->function_count)
+    if (object_format_for_target(target) != OBJECT_FORMAT_COFF && module->function_count)
     {
         cfi = dwarf_cfi_build(arena, (DwarfCfiInput){
                                          .functions = module->functions,
@@ -5847,6 +6275,23 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         MACH_SYMBOL_SIZE = 16,
     };
     u32 section_count = object->section_count;
+    u32 prel32_count = 0;
+    for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+    {
+        prel32_count += object->relocations[relocation].kind == OBJECT_RELOCATION_AARCH64_PREL32;
+    }
+    if (prel32_count > UINT32_MAX - object->symbol_count || object->symbol_count + prel32_count > 0x00ffffff)
+    {
+        result.error = OBJECT_ERROR_CAPACITY;
+        return result;
+    }
+    u32 symbol_count = object->symbol_count + prel32_count;
+    u32* prel32_place_symbols = arena_allocate(arena, u32, object->relocation_count);
+    u32 next_place_symbol = object->symbol_count;
+    for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+    {
+        prel32_place_symbols[relocation] = object->relocations[relocation].kind == OBJECT_RELOCATION_AARCH64_PREL32 ? next_place_symbol++ : UINT32_MAX;
+    }
     u32 segment_size = MACH_SEGMENT_COMMAND_SIZE + section_count * MACH_SECTION_SIZE;
     u32 commands_size = segment_size + MACH_SYMTAB_COMMAND_SIZE;
     object_buffer_zero(&buffer, MACH_HEADER_SIZE + commands_size);
@@ -5892,6 +6337,17 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
             {
                 object_write_u32_at(&buffer, section_offsets[section] + source->offset, (u32)addend);
             }
+            if (source->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+            {
+                u64 offset = buffer.count;
+                object_buffer_zero(&buffer, 2 * MACH_RELOCATION_SIZE);
+                object_write_u32_at(&buffer, offset, (u32)source->offset);
+                object_write_u32_at(&buffer, offset + 4, prel32_place_symbols[relocation] | (2u << 25) | (1u << 27) | (1u << 28));
+                object_write_u32_at(&buffer, offset + MACH_RELOCATION_SIZE, (u32)source->offset);
+                object_write_u32_at(&buffer, offset + MACH_RELOCATION_SIZE + 4, source->symbol | (2u << 25) | (1u << 27));
+                relocation_counts[section] += 2;
+                continue;
+            }
             u32 type = object_mach_relocation_type(object->target.cpu_arch, source->kind);
             if (type == UINT32_MAX)
             {
@@ -5903,6 +6359,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
             object_write_u32_at(&buffer, offset, (u32)source->offset);
             bool pc_relative = source->kind != OBJECT_RELOCATION_ABSOLUTE64 && source->kind != OBJECT_RELOCATION_ABSOLUTE32 &&
                                source->kind != OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12;
+            if (source->section == OBJECT_SECTION_UNWIND && source->kind == OBJECT_RELOCATION_X86_64_PC32)
+            {
+                type = 1;
+            }
             u32 word = (source->symbol & 0x00ffffff) | (pc_relative ? 1u << 24 : 0) | ((source->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 3u : 2u) << 25) |
                        (1u << 27) | (type << 28);
             object_write_u32_at(&buffer, offset + 4, word);
@@ -5911,16 +6371,23 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     }
     object_buffer_align(&buffer, 8);
     u32 symbol_offset = (u32)buffer.count;
-    object_buffer_zero(&buffer, (u64)object->symbol_count * MACH_SYMBOL_SIZE);
+    object_buffer_zero(&buffer, (u64)symbol_count * MACH_SYMBOL_SIZE);
     u32 string_offset = (u32)buffer.count;
     u8 zero = 0;
     object_buffer_write(&buffer, &zero, 1);
-    u32* symbol_name_offsets = arena_allocate(arena, u32, object->symbol_count);
+    u32* symbol_name_offsets = arena_allocate(arena, u32, symbol_count);
     for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
     {
         symbol_name_offsets[symbol] = (u32)(buffer.count - string_offset);
         object_buffer_write(&buffer, "_", 1);
         object_buffer_write(&buffer, object->symbols[symbol].name.pointer, object->symbols[symbol].name.length);
+        object_buffer_write(&buffer, &zero, 1);
+    }
+    for (u32 symbol = object->symbol_count; symbol < symbol_count; symbol += 1)
+    {
+        symbol_name_offsets[symbol] = (u32)(buffer.count - string_offset);
+        String8 name = string_format(arena, S8("L_buster_eh_place_{u32}"), symbol - object->symbol_count);
+        object_buffer_write(&buffer, name.pointer, name.length);
         object_buffer_write(&buffer, &zero, 1);
     }
     for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
@@ -5931,6 +6398,20 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         buffer.bytes[offset + 4] = source->section == OBJECT_SECTION_UNDEFINED ? 0x01 : (u8)(0x0e | (source->global ? 1 : 0));
         buffer.bytes[offset + 5] = source->section == OBJECT_SECTION_UNDEFINED ? 0 : (u8)(source->section + 1);
         object_write_u64_at(&buffer, offset + 8, source->value + (source->section == OBJECT_SECTION_UNDEFINED ? 0 : section_addresses[source->section]));
+    }
+    for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+    {
+        u32 symbol = prel32_place_symbols[relocation];
+        if (symbol == UINT32_MAX)
+        {
+            continue;
+        }
+        ObjectRelocation* source = object->relocations + relocation;
+        u64 offset = symbol_offset + (u64)symbol * MACH_SYMBOL_SIZE;
+        object_write_u32_at(&buffer, offset, symbol_name_offsets[symbol]);
+        buffer.bytes[offset + 4] = 0x0e;
+        buffer.bytes[offset + 5] = (u8)(source->section + 1);
+        object_write_u64_at(&buffer, offset + 8, section_addresses[source->section] + source->offset);
     }
     object_write_u32_at(&buffer, 0, 0xfeedfacf);
     object_write_u32_at(&buffer, 4, object->target.cpu_arch == CPU_ARCH_X86_64 ? 0x01000007 : 0x0100000c);
@@ -5961,6 +6442,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                                : source->kind == OBJECT_SECTION_ZERO              ? S8("__bss")
                                : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ? S8("__thread_data")
                                : source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? S8("__thread_bss")
+                               : source->kind == OBJECT_SECTION_UNWIND            ? S8("__eh_frame")
                                : source->kind == OBJECT_SECTION_DEBUG_INFO        ? S8("__debug_info")
                                : source->kind == OBJECT_SECTION_DEBUG_ABBREV     ? S8("__debug_abbrev")
                                : source->kind == OBJECT_SECTION_DEBUG_LINE       ? S8("__debug_line")
@@ -5994,6 +6476,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                             : source->kind == OBJECT_SECTION_ZERO              ? 0x1
                             : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ? 0x11
                             : source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? 0x12
+                            : source->kind == OBJECT_SECTION_UNWIND            ? 0x6800000b
                             : object_section_kind_is_debug(source->kind)       ? 0x02000000
                                                                                : 0);
     }
@@ -6001,7 +6484,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     object_write_u32_at(&buffer, symtab_command, 0x2);
     object_write_u32_at(&buffer, symtab_command + 4, MACH_SYMTAB_COMMAND_SIZE);
     object_write_u32_at(&buffer, symtab_command + 8, symbol_offset);
-    object_write_u32_at(&buffer, symtab_command + 12, object->symbol_count);
+    object_write_u32_at(&buffer, symtab_command + 12, symbol_count);
     object_write_u32_at(&buffer, symtab_command + 16, string_offset);
     object_write_u32_at(&buffer, symtab_command + 20, (u32)(buffer.count - string_offset));
     result.bytes = (ByteSlice){

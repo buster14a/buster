@@ -48,6 +48,8 @@ BUSTER_F_DECL bool object_section_kind_is_zero_fill(ObjectSectionKind kind);
 BUSTER_F_DECL String8 object_section_name_for_kind(ObjectSectionKind kind);
 BUSTER_F_DECL u32 object_section_default_alignment(ObjectSectionKind kind);
 BUSTER_TEST_F_DECL AnalysisEntity* object_entity_find(AnalysisResult* analysis, AnalysisEntityId entity);
+BUSTER_TEST_F_DECL bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offset, u32 function_size, u32 encoding, Target target,
+                                                  CodegenFunctionDescriptor* descriptor);
 
 typedef enum ObjectSymbolKind
 {
