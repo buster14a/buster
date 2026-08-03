@@ -50,6 +50,26 @@ BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
     }
 
+#if defined(_WIN32)
+    // A parent pipe end must be made non-inheritable before process creation;
+    // failure is observable so spawn can close every created handle and stop.
+    {
+        SECURITY_ATTRIBUTES attributes = {sizeof(attributes), 0, TRUE};
+        HANDLE read_pipe = 0;
+        HANDLE write_pipe = 0;
+        BUSTER_TEST(arguments, CreatePipe(&read_pipe, &write_pipe, &attributes, 0) != 0);
+        if (read_pipe && write_pipe)
+        {
+            DWORD flags = HANDLE_FLAG_INHERIT;
+            BUSTER_TEST(arguments, os_windows_pipe_disable_inheritance((OsFileDescriptor*)read_pipe));
+            BUSTER_TEST(arguments, GetHandleInformation(read_pipe, &flags) != 0 && !(flags & HANDLE_FLAG_INHERIT));
+            CloseHandle(read_pipe);
+            CloseHandle(write_pipe);
+        }
+        BUSTER_TEST(arguments, !os_windows_pipe_disable_inheritance((OsFileDescriptor*)INVALID_HANDLE_VALUE));
+    }
+#endif
+
 #if BUSTER_LINUX || BUSTER_MACOS
     // Regression: draining captured stdout/stderr sequentially deadlocked when
     // the child filled one pipe while the parent blocked on the other. The

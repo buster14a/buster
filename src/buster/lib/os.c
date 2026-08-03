@@ -1078,6 +1078,13 @@ u64 string8_code_point_count(String8 s, u8 code_point)
     return count;
 }
 
+#if defined(_WIN32)
+BUSTER_TEST_F_DECL bool os_windows_pipe_disable_inheritance(OsFileDescriptor* pipe)
+{
+    return SetHandleInformation((HANDLE)pipe, HANDLE_FLAG_INHERIT, 0) != 0;
+}
+#endif
+
 ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environment_keys, SliceString8 environment_values, ProcessSpawnOptions options)
 {
     TemporalArena temp = scratch_begin(0, 0);
@@ -1102,8 +1109,11 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
                 // end for stdout/stderr; only the parent's end may be made
                 // non-inheritable.
                 u32 parent_side = stream == STANDARD_STREAM_INPUT ? 1 : 0;
-                // TODO: handle error for this
-                SetHandleInformation(result.pipes[stream][parent_side], HANDLE_FLAG_INHERIT, 0);
+                if (!os_windows_pipe_disable_inheritance(result.pipes[stream][parent_side]))
+                {
+                    string_print(S8("Error configuring a process pipe: \"{EOs}\"\n"), os_get_last_error());
+                    pipe_result = false;
+                }
             }
             else
             {
