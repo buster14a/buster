@@ -7195,6 +7195,7 @@ BUSTER_TEST_F_DECL ParserFileTestCase parser_file_test_cases[] = {
         .expected_diagnostic_count = BUSTER_ARRAY_LENGTH(missing_compile_time_marker_diagnostics),
     },
 };
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(parser_file_test_cases) == PARSER_FILE_TEST_CASE_COUNT);
 
 BUSTER_GLOBAL_LOCAL int parser_bench_u64_compare(const void* a, const void* b)
 {
