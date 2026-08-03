@@ -578,6 +578,202 @@ void os_make_directory(String8 path)
 #endif
 }
 
+bool os_file_delete(String8 path)
+{
+#if defined(__linux__) || defined(__APPLE__)
+    BUSTER_CHECK(!path.pointer[path.length]);
+    return unlink((const char*)path.pointer) == 0 || errno == ENOENT;
+#elif defined(_WIN32)
+    TemporalArena temp = scratch_begin(0, 0);
+    String16 path_w = string16_from_string8(temp.arena, path, true);
+    bool result = DeleteFileW(path_w.pointer);
+    if (!result)
+    {
+        DWORD error = GetLastError();
+        result = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    scratch_end(temp);
+    return result;
+#else
+    BUSTER_UNUSED(path);
+    return false;
+#endif
+}
+
+#if defined(_WIN32)
+BUSTER_GLOBAL_LOCAL String16 os_string16_from_wide(char16* pointer)
+{
+    u64 length = 0;
+    while (pointer[length])
+    {
+        length += 1;
+    }
+    return (String16){.pointer = pointer, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL bool os_windows_entry_delete(String8 path, DWORD attributes)
+{
+    TemporalArena temp = scratch_begin(0, 0);
+    String16 path_w = string16_from_string8(temp.arena, path, true);
+    // Read-only files refuse DeleteFileW until the attribute is cleared.
+    if (attributes & FILE_ATTRIBUTE_READONLY)
+    {
+        SetFileAttributesW(path_w.pointer, attributes & ~(DWORD)FILE_ATTRIBUTE_READONLY);
+    }
+    // A directory reparse point is unlinked with RemoveDirectoryW, which
+    // removes the link itself rather than its target.
+    bool result = attributes & FILE_ATTRIBUTE_DIRECTORY ? RemoveDirectoryW(path_w.pointer) != 0 : DeleteFileW(path_w.pointer) != 0;
+    if (!result)
+    {
+        DWORD error = GetLastError();
+        result = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    scratch_end(temp);
+    return result;
+}
+#endif
+
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+typedef struct OsDirectoryWalkEntry OsDirectoryWalkEntry;
+struct OsDirectoryWalkEntry
+{
+    OsDirectoryWalkEntry* next;
+    String8 path;
+    bool descend;
+    u8 reserved[3];
+    u32 attributes;
+};
+
+// Each level is read in full and its handle closed before anything is removed:
+// deleting entries while readdir/FindNextFileW is still walking the same
+// directory is unspecified, and holding one handle per level would exhaust
+// descriptors on a deep tree. Symbolic links are unlinked as links and never
+// descended into, so the walk cannot escape the tree it was handed. `arena`
+// carries one level's paths; recursion nests its own region above them.
+BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 path)
+{
+    bool result = true;
+    TemporalArena level = arena_begin_temporal(arena);
+    OsDirectoryWalkEntry* first = 0;
+    OsDirectoryWalkEntry* last = 0;
+
+#if defined(__linux__) || defined(__APPLE__)
+    DIR* directory = opendir((const char*)path.pointer);
+    if (!directory)
+    {
+        scratch_end(level);
+        return errno == ENOENT;
+    }
+    for (struct dirent* directory_entry = readdir(directory); directory_entry; directory_entry = readdir(directory))
+    {
+        String8 name = string_from_pointer((const char8*)directory_entry->d_name);
+        if (string_equal(name, S8(".")) || string_equal(name, S8("..")))
+        {
+            continue;
+        }
+        OsDirectoryWalkEntry* entry = arena_allocate(arena, OsDirectoryWalkEntry, 1);
+        entry->next = 0;
+        entry->path = string_format_z(arena, S8("{S8}/{S8}"), path, name);
+        entry->attributes = 0;
+        entry->descend = directory_entry->d_type == DT_DIR;
+        if (directory_entry->d_type == DT_UNKNOWN)
+        {
+            // Filesystems that leave d_type unset force an explicit stat, and
+            // lstat keeps a symlink a symlink instead of resolving its target.
+            struct stat entry_stats;
+            entry->descend = lstat((const char*)entry->path.pointer, &entry_stats) == 0 && S_ISDIR(entry_stats.st_mode);
+        }
+        if (last)
+        {
+            last->next = entry;
+        }
+        else
+        {
+            first = entry;
+        }
+        last = entry;
+    }
+    closedir(directory);
+#elif defined(_WIN32)
+    String16 pattern = string16_from_string8(arena, string_format_z(arena, S8("{S8}\\*"), path), true);
+    WIN32_FIND_DATAW find_data;
+    HANDLE find = FindFirstFileW(pattern.pointer, &find_data);
+    if (find == INVALID_HANDLE_VALUE)
+    {
+        DWORD error = GetLastError();
+        scratch_end(level);
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    do
+    {
+        String8 name = string8_from_string16(arena, os_string16_from_wide(find_data.cFileName), false);
+        if (string_equal(name, S8(".")) || string_equal(name, S8("..")))
+        {
+            continue;
+        }
+        OsDirectoryWalkEntry* entry = arena_allocate(arena, OsDirectoryWalkEntry, 1);
+        entry->next = 0;
+        entry->path = string_format_z(arena, S8("{S8}\\{S8}"), path, name);
+        entry->attributes = find_data.dwFileAttributes;
+        bool is_link = (find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        entry->descend = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 && !is_link;
+        if (last)
+        {
+            last->next = entry;
+        }
+        else
+        {
+            first = entry;
+        }
+        last = entry;
+    } while (FindNextFileW(find, &find_data));
+    FindClose(find);
+#endif
+
+    for (OsDirectoryWalkEntry* entry = first; entry; entry = entry->next)
+    {
+        if (entry->descend)
+        {
+            result = os_directory_delete_walk(arena, entry->path) && result;
+        }
+        else
+        {
+#if defined(_WIN32)
+            result = os_windows_entry_delete(entry->path, entry->attributes) && result;
+#else
+            result = os_file_delete(entry->path) && result;
+#endif
+        }
+    }
+
+#if defined(__linux__) || defined(__APPLE__)
+    result = (rmdir((const char*)path.pointer) == 0 || errno == ENOENT) && result;
+#elif defined(_WIN32)
+    result = os_windows_entry_delete(path, FILE_ATTRIBUTE_DIRECTORY) && result;
+#endif
+    scratch_end(level);
+    return result;
+}
+#endif
+
+bool os_directory_delete(String8 path)
+{
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+    if (!path.length)
+    {
+        return false;
+    }
+    BUSTER_CHECK(!path.pointer[path.length]);
+    TemporalArena temp = scratch_begin(0, 0);
+    bool result = os_directory_delete_walk(temp.arena, path);
+    scratch_end(temp);
+    return result;
+#else
+    BUSTER_UNUSED(path);
+    return false;
+#endif
+}
+
 OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions)
 {
     OsFileDescriptor* result = 0;

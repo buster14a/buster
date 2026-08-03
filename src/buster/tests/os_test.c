@@ -188,6 +188,67 @@ BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
     }
 #endif
 
+    // os_directory_delete removes a populated tree, and reports success for a
+    // path that is already absent so callers can clean up unconditionally.
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+
+        String8 root = buster_test_temporary_path(arena, S8("buster-delete-tree"), S8(""));
+        os_directory_delete(root);
+        os_make_directory(root);
+        String8 nested = string_format_z(arena, S8("{S8}/nested"), root);
+        os_make_directory(nested);
+        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/top.txt"), root), BUSTER_SLICE_TO_BYTE_SLICE(S8("top"))));
+        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/deep.txt"), nested), BUSTER_SLICE_TO_BYTE_SLICE(S8("deep"))));
+
+        // BUSTER_TEST reuses the stringified expression as a format string, so
+        // compound literals stay out of the assertion itself.
+        OpenFlags read_flags = {.read = 1};
+        OpenPermissions read_permissions = {.read = 1};
+        BUSTER_TEST(arguments, os_directory_delete(root));
+        OsFileDescriptor* deleted = os_file_open(root, read_flags, read_permissions);
+        BUSTER_TEST(arguments, deleted == 0);
+        // Idempotent: a second delete of the same path still reports success.
+        BUSTER_TEST(arguments, os_directory_delete(root));
+        // An empty path is rejected rather than treated as the current directory.
+        String8 empty_path = {0};
+        BUSTER_TEST(arguments, !os_directory_delete(empty_path));
+
+        arena->position = position;
+    }
+
+#if defined(__linux__) || defined(__APPLE__)
+    // A symbolic link inside the tree is unlinked, never followed: deleting the
+    // tree must not reach through it and delete the target outside.
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+
+        String8 outside = buster_test_temporary_path(arena, S8("buster-delete-outside"), S8(".txt"));
+        String8 root = buster_test_temporary_path(arena, S8("buster-delete-link"), S8(""));
+        os_directory_delete(root);
+        os_file_delete(outside);
+        BUSTER_TEST(arguments, file_write(outside, BUSTER_SLICE_TO_BYTE_SLICE(S8("keep me"))));
+        os_make_directory(root);
+        String8 link = string_format_z(arena, S8("{S8}/link.txt"), root);
+        BUSTER_TEST(arguments, symlink((const char*)outside.pointer, (const char*)link.pointer) == 0);
+
+        OpenFlags link_read_flags = {.read = 1};
+        OpenPermissions link_read_permissions = {.read = 1};
+        BUSTER_TEST(arguments, os_directory_delete(root));
+        OsFileDescriptor* survivor = os_file_open(outside, link_read_flags, link_read_permissions);
+        BUSTER_TEST(arguments, survivor != 0);
+        if (survivor)
+        {
+            os_file_close(survivor);
+        }
+        os_file_delete(outside);
+
+        arena->position = position;
+    }
+#endif
+
 #if defined(_WIN32)
     // Regression: the tick-to-nanosecond conversion overflowed u64 for
     // intervals over ~30 minutes at a 10 MHz QueryPerformanceCounter rate.

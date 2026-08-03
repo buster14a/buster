@@ -18,6 +18,7 @@ BUSTER_V_DECL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions;
 
 #elif defined(__APPLE__) || defined(__linux__)
 #include <errno.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <poll.h>

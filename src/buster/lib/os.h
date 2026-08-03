@@ -135,6 +135,11 @@ BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnR
 BUSTER_F_DECL String8 os_get_environment_variable(String8 variable);
 
 BUSTER_F_DECL void os_make_directory(String8 path);
+BUSTER_F_DECL bool os_file_delete(String8 path);
+// Deletes `path` and everything under it. Symbolic links are removed as links
+// rather than followed, so the walk cannot escape the tree it was given.
+// Returns whether the tree is gone; a missing `path` counts as success.
+BUSTER_F_DECL bool os_directory_delete(String8 path);
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_F_DECL u64 os_file_get_size(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options);

@@ -194,7 +194,7 @@ BUSTER_GLOBAL_LOCAL void ide_window_update_font_for_dpi(IdeWindow* window)
 }
 
 #if BUSTER_FUZZ_AVAILABLE
-BUSTER_EXPORT s32 buster_fuzz_test_input(const u8* pointer, size_t size)
+s32 buster_fuzz_test_input(const u8* pointer, size_t size)
 {
     if (size > BUSTER_KB(4))
     {
@@ -1089,6 +1089,30 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     return result;
 }
 
+#if BUSTER_FUZZ_AVAILABLE
+BUSTER_GLOBAL_LOCAL String8 ide_fuzz_output_corpus = {0};
+
+BUSTER_GLOBAL_LOCAL String8 ide_fuzz_scratch_root(void)
+{
+#if BUSTER_WINDOWS
+    // The repo's own build tree is the one scratch location every platform
+    // agrees on; Windows has no fixed /tmp.
+    return S8("build/");
+#else
+    return S8("/tmp/");
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL void ide_fuzz_output_corpus_release(void)
+{
+    if (ide_fuzz_output_corpus.length)
+    {
+        os_directory_delete(ide_fuzz_output_corpus);
+        ide_fuzz_output_corpus = (String8){0};
+    }
+}
+#endif
+
 ProcessResult entry_point(void)
 {
 #if BUSTER_FUZZ_AVAILABLE
@@ -1123,21 +1147,24 @@ ProcessResult entry_point(void)
         // the bounded session would otherwise leave hundreds of untracked
         // files in the working tree on every `test_all` run. Give it a
         // throwaway output corpus and pass the checked-in seeds read-only.
-#if BUSTER_WINDOWS
-        String8 output_corpus = string_format_z(program_state->arena, S8("build/buster-fuzz-corpus-{u64}"), os_get_current_process_id());
-#else
-        String8 output_corpus = string_format_z(program_state->arena, S8("/tmp/buster-fuzz-corpus-{u64}"), os_get_current_process_id());
-#endif
-        os_make_directory(output_corpus);
-        // Same reasoning for crash artifacts, which default to `./`: the log
-        // already carries the reproducer as Base64 plus the artifact path, so
-        // nothing is lost by keeping the file out of the working tree.
-        String8 artifact_prefix = string_format_z(program_state->arena, S8("-artifact_prefix={S8}/"), output_corpus);
+        ide_fuzz_output_corpus = string_format_z(program_state->arena, S8("{S8}buster-fuzz-corpus-{u64}"), ide_fuzz_scratch_root(),
+                                                 os_get_current_process_id());
+        os_make_directory(ide_fuzz_output_corpus);
+        // FuzzerDriver ends a timed session with exit(0) and never returns, so
+        // the corpus has to be released from an exit handler rather than after
+        // the call below.
+        atexit(&ide_fuzz_output_corpus_release);
+        // Crash artifacts default to `./`, which would drop them in the repo
+        // root. This is a filename prefix rather than a directory, so a clean
+        // run creates nothing and a crash leaves one plainly named file behind
+        // instead of being swept up with the corpus.
+        String8 artifact_prefix = string_format_z(program_state->arena, S8("-artifact_prefix={S8}buster-fuzz-{u64}-"), ide_fuzz_scratch_root(),
+                                                  os_get_current_process_id());
         String8 fuzz_arguments[] = {
             S8("-max_len=4096"),
             S8("-max_total_time=2"),
             artifact_prefix,
-            output_corpus,
+            ide_fuzz_output_corpus,
             S8("tests/fuzz"),
         };
         ProcessResult fuzz_result = buster_fuzz_run((SliceString8)BUSTER_ARRAY_TO_SLICE(fuzz_arguments));
