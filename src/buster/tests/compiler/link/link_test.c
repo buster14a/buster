@@ -204,6 +204,79 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
     u8 sha256_result[32] = {0};
     link_sha256(arguments->arena, (u8 const*)"abc", 3, sha256_result);
     BUSTER_TEST(arguments, memcmp(sha256_result, sha256_abc, sizeof(sha256_abc)) == 0);
+    {
+        ObjectSectionKind symbol_sections[] = {
+            OBJECT_SECTION_TEXT,
+            OBJECT_SECTION_READ_ONLY_DATA,
+            OBJECT_SECTION_DATA,
+            OBJECT_SECTION_ZERO,
+            OBJECT_SECTION_THREAD_LOCAL_DATA,
+            OBJECT_SECTION_THREAD_LOCAL_ZERO,
+        };
+        u32 expected_output_sections[] = {0, 1, 2, 3, 4, 4};
+        u64 expected_section_offsets[] = {0x40, 0x10, 0x20, 0x30, 0x50, 0x90};
+        u8 codeview_bytes[BUSTER_ARRAY_LENGTH(symbol_sections) * 8] = {0};
+        ObjectSection sections[OBJECT_SECTION_COUNT] = {0};
+        sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(codeview_bytes);
+        ObjectSymbol symbols[BUSTER_ARRAY_LENGTH(symbol_sections)] = {0};
+        ObjectRelocation relocations[BUSTER_ARRAY_LENGTH(symbol_sections) * 2] = {0};
+        u32 object_output_sections[OBJECT_SECTION_COUNT];
+        u64 object_section_offsets[OBJECT_SECTION_COUNT] = {0};
+        memset(object_output_sections, 0xff, sizeof(object_output_sections));
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(symbol_sections); index += 1)
+        {
+            ObjectSectionKind section = symbol_sections[index];
+            symbols[index] = (ObjectSymbol){
+                .value = 0x100 + (u64)index * 0x10,
+                .section = section,
+                .kind = OBJECT_SYMBOL_DATA,
+            };
+            relocations[index * 2] = (ObjectRelocation){
+                .addend = (s64)index - 2,
+                .offset = (u64)index * 8,
+                .section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
+                .symbol = index,
+                .kind = OBJECT_RELOCATION_COFF_SECREL32,
+            };
+            relocations[index * 2 + 1] = (ObjectRelocation){
+                .offset = (u64)index * 8 + 4,
+                .section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
+                .symbol = index,
+                .kind = OBJECT_RELOCATION_COFF_SECTION16,
+            };
+            object_output_sections[section] = expected_output_sections[index];
+            object_section_offsets[section] = expected_section_offsets[index];
+        }
+        ObjectDebugModule debug_module = {.symbols_size = sizeof(codeview_bytes)};
+        ObjectFile object = {
+            .sections = sections,
+            .symbols = symbols,
+            .relocations = relocations,
+            .section_count = OBJECT_SECTION_COUNT,
+            .symbol_count = BUSTER_ARRAY_LENGTH(symbols),
+            .relocation_count = BUSTER_ARRAY_LENGTH(relocations),
+        };
+        ByteSlice resolved = link_pe_resolved_codeview(arguments->arena, &object, &debug_module, object_output_sections,
+                                                       object_section_offsets, 5);
+        BUSTER_TEST(arguments, resolved.length == sizeof(codeview_bytes));
+        if (resolved.length == sizeof(codeview_bytes))
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(symbol_sections); index += 1)
+            {
+                u32 section_offset = 0;
+                u16 section_number = 0;
+                memcpy(&section_offset, resolved.pointer + (u64)index * 8, sizeof(section_offset));
+                memcpy(&section_number, resolved.pointer + (u64)index * 8 + 4, sizeof(section_number));
+                s64 addend = (s64)index - 2;
+                u32 expected_section_offset = (u32)((s64)symbols[index].value + (s64)expected_section_offsets[index] + addend);
+                BUSTER_TEST(arguments, section_offset == expected_section_offset);
+                BUSTER_TEST(arguments, section_number == expected_output_sections[index] + 1);
+            }
+        }
+        object_output_sections[OBJECT_SECTION_DATA] = UINT32_MAX;
+        BUSTER_TEST(arguments,
+                    link_pe_resolved_codeview(arguments->arena, &object, &debug_module, object_output_sections, object_section_offsets, 5).length == 0);
+    }
     Target target = target_native;
 #if BUSTER_CPU_ARCH_X86_64
     u8 answer_text[] = {

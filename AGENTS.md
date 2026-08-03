@@ -432,10 +432,13 @@ has hard design constraints:
   remains a DBI module stream, symbol subsections become that module's symbol
   region, the remaining subsections its C13 region, and checksum entries are
   remapped from object-local string tables onto the PDB `/names` stream. TPI
-  records are merged into the shared type stream. Readers need more than the
-  streams they will read — an empty globals or publics stream still needs its
-  GSI hash header, and the DBI needs an edit-and-continue name table, or module
-  iteration fails. Windows links with debug enabled derive a sibling `.pdb`,
+  records are merged into the shared type stream. Function and global symbol
+  locations use their actual final PE section number and section-relative
+  offset across text, read-only data, writable data, BSS, and TLS. Readers need
+  more than the streams they will read — an empty globals or publics stream
+  still needs its GSI hash header, and the DBI needs an edit-and-continue name
+  table, or module iteration fails. Windows links with debug enabled derive a
+  sibling `.pdb`,
   emit a read-only PE `.debug` section containing a matching RSDS record, and
   derive the GUID deterministically from the pre-debug PE image and canonical
   debug-module data. Validate changes with `llvm-pdbutil dump --all`, which is

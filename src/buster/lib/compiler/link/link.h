@@ -79,3 +79,6 @@ struct NativeExecutableLinkResult
 
 BUSTER_F_DECL LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options);
 BUSTER_F_DECL NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options);
+BUSTER_TEST_F_DECL ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
+                                                       u32 const* object_output_sections, u64 const* object_section_offsets,
+                                                       u32 output_section_count);

@@ -1637,11 +1637,13 @@ BUSTER_GLOBAL_LOCAL String8 link_pe_pdb_path(Arena* arena, String8 executable_pa
     return string_format_z(arena, S8("{S8}.pdb"), string_slice(executable_path, 0, dot));
 }
 
-BUSTER_GLOBAL_LOCAL ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
-                                                        u64 text_offset)
+BUSTER_TEST_F_DECL ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
+                                                       u32 const* object_output_sections, u64 const* object_section_offsets,
+                                                       u32 output_section_count)
 {
     ByteSlice result = {0};
-    if (!arena || !object || !debug_module || debug_module->symbols_size > UINT32_MAX ||
+    if (!arena || !object || !debug_module || !object_output_sections || !object_section_offsets || !output_section_count ||
+        debug_module->symbols_size > UINT32_MAX ||
         debug_module->symbols_offset > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length ||
         debug_module->symbols_size > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length - debug_module->symbols_offset)
     {
@@ -1659,21 +1661,29 @@ BUSTER_GLOBAL_LOCAL ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile
         }
         u64 offset = relocation->offset - debug_module->symbols_offset;
         ObjectSymbol* symbol = object->symbols + relocation->symbol;
+        if (symbol->section >= OBJECT_SECTION_COUNT || object_output_sections[symbol->section] >= output_section_count ||
+            object_output_sections[symbol->section] >= UINT16_MAX)
+        {
+            return (ByteSlice){0};
+        }
         if (relocation->kind == OBJECT_RELOCATION_COFF_SECREL32)
         {
-            if (offset + 4 > debug_module->symbols_size || symbol->section >= OBJECT_SECTION_COUNT)
+            if (offset + 4 > debug_module->symbols_size || symbol->value > INT64_MAX || object_section_offsets[symbol->section] > INT64_MAX)
             {
                 return (ByteSlice){0};
             }
-            s64 signed_value = (s64)symbol->value + relocation->addend;
-            if (symbol->section == OBJECT_SECTION_TEXT)
+            s64 signed_value = (s64)symbol->value;
+            if ((relocation->addend > 0 && signed_value > INT64_MAX - relocation->addend) ||
+                (relocation->addend < 0 && signed_value < INT64_MIN - relocation->addend))
             {
-                if (signed_value > INT64_MAX - (s64)text_offset)
-                {
-                    return (ByteSlice){0};
-                }
-                signed_value += (s64)text_offset;
+                return (ByteSlice){0};
             }
+            signed_value += relocation->addend;
+            if (signed_value > INT64_MAX - (s64)object_section_offsets[symbol->section])
+            {
+                return (ByteSlice){0};
+            }
+            signed_value += (s64)object_section_offsets[symbol->section];
             if (signed_value < 0 || signed_value > UINT32_MAX)
             {
                 return (ByteSlice){0};
@@ -1686,7 +1696,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile
             {
                 return (ByteSlice){0};
             }
-            u16 section = symbol->section == OBJECT_SECTION_TEXT ? 1 : 1;
+            u16 section = (u16)(object_output_sections[symbol->section] + 1);
             memcpy(bytes + offset, &section, sizeof(section));
         }
     }
@@ -1863,7 +1873,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     u64* object_section_offsets = arena_allocate(arena, u64, OBJECT_SECTION_COUNT);
     memset(section_rvas, 0, sizeof(*section_rvas) * PE_SECTION_COUNT);
     memset(section_raw_offsets, 0, sizeof(*section_raw_offsets) * PE_SECTION_COUNT);
-    memset(object_output_sections, 0, sizeof(*object_output_sections) * OBJECT_SECTION_COUNT);
+    memset(object_output_sections, 0xff, sizeof(*object_output_sections) * OBJECT_SECTION_COUNT);
     memset(object_section_offsets, 0, sizeof(*object_section_offsets) * OBJECT_SECTION_COUNT);
     section_rvas[0] = PE_SECTION_ALIGNMENT;
     section_raw_offsets[0] = (u32)header_size;
@@ -2429,7 +2439,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         for (u32 module_index = 0; module_index < object->debug_module_count; module_index += 1)
         {
             ObjectDebugModule* source = object->debug_modules + module_index;
-            ByteSlice symbols = link_pe_resolved_codeview(arena, object, source, object_section_offsets[OBJECT_SECTION_TEXT]);
+            ByteSlice symbols =
+                link_pe_resolved_codeview(arena, object, source, object_output_sections, object_section_offsets, pe_section_count);
             if (!symbols.pointer || source->types_offset > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length ||
                 source->types_size > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length - source->types_offset)
             {
