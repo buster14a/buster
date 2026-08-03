@@ -22,7 +22,9 @@ struct BatchTestResult
         bool success_ = (boolean);                                                                                                                             \
         if (BUSTER_UNLIKELY(!(success_)))                                                                                                                      \
         {                                                                                                                                                      \
-            buster_test_error(__LINE__, BUSTER_FUNCTION, S8(__FILE__), log);                                                                                   \
+            /* The stringified expression is data, not a format string. It can */                                                                              \
+            /* legitimately contain formatting syntax such as S8("{S8}"). */                                                                                 \
+            buster_test_error(__LINE__, BUSTER_FUNCTION, S8(__FILE__), S8("{S8}"), log);                                                                      \
         }                                                                                                                                                      \
         result.succeeded_test_count += (success_);                                                                                                             \
         result.test_count += 1;                                                                                                                                \

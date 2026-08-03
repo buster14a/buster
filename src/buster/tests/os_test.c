@@ -1,7 +1,6 @@
 #include <buster/tests/os_test.h>
 #include <buster/lib/time.h>
 
-
 BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -240,8 +239,6 @@ BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/top.txt"), root), BUSTER_SLICE_TO_BYTE_SLICE(S8("top"))));
         BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/deep.txt"), nested), BUSTER_SLICE_TO_BYTE_SLICE(S8("deep"))));
 
-        // BUSTER_TEST reuses the stringified expression as a format string, so
-        // compound literals stay out of the assertion itself.
         OpenFlags read_flags = {.read = 1};
         OpenPermissions read_permissions = {.read = 1};
         BUSTER_TEST(arguments, os_directory_delete(root));
@@ -254,15 +251,40 @@ BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !os_directory_delete(empty_path));
 
         String8 deep = buster_test_temporary_path(arena, S8("buster-delete-deep"), S8(""));
+#if BUSTER_WINDOWS
+        // The worklist test must really create all 256 levels. An ordinary
+        // relative Win32 path stops at MAX_PATH and used to turn this test into
+        // a shallow no-op, so use the extended-length absolute path form.
+        String8 deep_absolute = os_path_absolute(arena, deep, true);
+        BUSTER_TEST(arguments, deep_absolute.length != 0);
+        deep_absolute = string_duplicate_arena(arena, deep_absolute, true);
+        for (u64 i = 0; i < deep_absolute.length; i += 1)
+        {
+            if (deep_absolute.pointer[i] == '/')
+            {
+                deep_absolute.pointer[i] = '\\';
+            }
+        }
+        deep = string_format_z(arena, S8("\\\\?\\{S8}"), deep_absolute);
+#endif
+        String8 deep_root = deep;
         os_directory_delete(deep);
         os_make_directory(deep);
         for (u32 depth = 0; depth < 256; depth += 1)
         {
+#if BUSTER_WINDOWS
+            deep = string_format_z(arena, S8("{S8}\\d"), deep);
+#else
             deep = string_format_z(arena, S8("{S8}/d"), deep);
+#endif
             os_make_directory(deep);
         }
-        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/leaf.txt"), deep), BUSTER_SLICE_TO_BYTE_SLICE(S8("leaf"))));
-        String8 deep_root = buster_test_temporary_path(arena, S8("buster-delete-deep"), S8(""));
+#if BUSTER_WINDOWS
+        String8 deep_leaf = string_format_z(arena, S8("{S8}\\leaf.txt"), deep);
+#else
+        String8 deep_leaf = string_format_z(arena, S8("{S8}/leaf.txt"), deep);
+#endif
+        BUSTER_TEST(arguments, file_write(deep_leaf, BUSTER_SLICE_TO_BYTE_SLICE(S8("leaf"))));
         BUSTER_TEST(arguments, os_directory_delete(deep_root));
 
         arena->position = position;

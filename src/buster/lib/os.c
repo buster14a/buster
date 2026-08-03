@@ -624,10 +624,11 @@ BUSTER_GLOBAL_LOCAL String16 os_string16_from_wide(char16* pointer)
     return (String16){.pointer = pointer, .length = length};
 }
 
-BUSTER_GLOBAL_LOCAL bool os_windows_entry_delete(String8 path, DWORD attributes)
+BUSTER_GLOBAL_LOCAL bool os_windows_entry_delete(Arena* arena, String8 path, DWORD attributes)
 {
-    TemporalArena temp = scratch_begin(0, 0);
-    String16 path_w = string16_from_string8(temp.arena, path, true);
+    // Keep conversion storage in the walker's arena. A nested scratch scope
+    // can select that same arena and rewind away the pending worklist tasks.
+    String16 path_w = string16_from_string8(arena, path, true);
     // Read-only files refuse DeleteFileW until the attribute is cleared.
     if (attributes & FILE_ATTRIBUTE_READONLY)
     {
@@ -641,7 +642,6 @@ BUSTER_GLOBAL_LOCAL bool os_windows_entry_delete(String8 path, DWORD attributes)
         DWORD error = GetLastError();
         result = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
     }
-    scratch_end(temp);
     return result;
 }
 #endif
@@ -752,7 +752,7 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
 #elif defined(_WIN32)
         if (task->kind == OS_DIRECTORY_DELETE_POST || task->kind == OS_DIRECTORY_DELETE_ENTRY)
         {
-            result = os_windows_entry_delete(task->path, task->attributes) && result;
+            result = os_windows_entry_delete(arena, task->path, task->attributes) && result;
             continue;
         }
 
@@ -766,7 +766,7 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
         }
         if (task_attributes & FILE_ATTRIBUTE_REPARSE_POINT)
         {
-            result = os_windows_entry_delete(task->path, task_attributes) && result;
+            result = os_windows_entry_delete(arena, task->path, task_attributes) && result;
             continue;
         }
         if (!(task_attributes & FILE_ATTRIBUTE_DIRECTORY))
