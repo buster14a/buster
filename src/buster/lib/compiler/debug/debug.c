@@ -400,17 +400,14 @@ BUSTER_TEST_F_DECL DebugVariableId debug_variable_add(Arena* arena, DebugModel* 
                                                        String8 name, DebugTypeId type, DebugSourceLocation declaration, DebugVariableKind kind,
                                                        IrSymbolId symbol, IrLocalId local, u32 start, u32 end)
 {
+    // Rejects a scope that does not belong to this model without scanning it:
+    // debug info is built for every function by default, so an O(scope_count)
+    // check here would be quadratic across a translation unit.
     DebugScopeId scope_id = DEBUG_SCOPE_INVALID;
-    if (scope && model->scopes)
+    if (scope && model->scopes && scope >= model->scopes && scope < model->scopes + model->scope_count &&
+        (u64)((u8*)scope - (u8*)model->scopes) % sizeof(*model->scopes) == 0)
     {
-        for (u32 scope_index = 0; scope_index < model->scope_count; scope_index += 1)
-        {
-            if (scope == model->scopes + scope_index)
-            {
-                scope_id = scope_index;
-                break;
-            }
-        }
+        scope_id = (DebugScopeId)(scope - model->scopes);
     }
     if (!name.length || model->variable_count == UINT32_MAX || scope_id == DEBUG_SCOPE_INVALID)
     {

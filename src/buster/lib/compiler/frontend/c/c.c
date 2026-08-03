@@ -12474,15 +12474,6 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntege
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL IrTypeId c_ir_pointer_type(CIntegerIrBuilder* builder, IrTypeId element)
-{
-    if (!builder->pointer_types || element.value >= builder->pointer_types->capacity)
-    {
-        return IR_TYPE_ID_INVALID;
-    }
-    return builder->pointer_types->by_element[element.value];
-}
-
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* builder, u64 magnitude, bool is_negative, CToken token, IrTypeId type);
 
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_binary_value(CIntegerIrBuilder* builder, IrValueId left, IrValueId right, IrTypeId type, IrBinaryOperation operation,
@@ -13251,11 +13242,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* buil
     {
         return IR_VALUE_ID_INVALID;
     }
-    IrTypeId pointer_type = c_ir_pointer_type(builder, element_type);
-    if (pointer_type.value == IR_ID_UNDERLYING_INVALID)
-    {
-        pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, element_type);
-    }
+    IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, element_type);
     IrValueId result = c_ir_add_result(builder, pointer_type);
     builder->function->values[result.value].points_to_read_only = builder->function->values[place.value].is_read_only;
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ADDRESS_OF, pointer_type, source);
@@ -14603,6 +14590,13 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* bui
 
 BUSTER_GLOBAL_LOCAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
 
+// An empty String8 legitimately carries a null pointer, which buster_hash_64
+// must not be handed.
+BUSTER_GLOBAL_LOCAL u64 c_ir_function_name_hash(String8 name)
+{
+    return buster_hash_64(name.pointer ? (u8*)name.pointer : (u8*)"", name.length);
+}
+
 BUSTER_GLOBAL_LOCAL CIrFunctionNameResolution* c_ir_function_name_resolution(CIntegerIrBuilder* builder, String8 name)
 {
     CIrFunctionNameIndex* index = builder->function_names;
@@ -14610,7 +14604,7 @@ BUSTER_GLOBAL_LOCAL CIrFunctionNameResolution* c_ir_function_name_resolution(CIn
     {
         return 0;
     }
-    u32 bucket = (u32)(buster_hash_64((u8*)name.pointer, name.length) % index->bucket_count);
+    u32 bucket = (u32)(c_ir_function_name_hash(name) % index->bucket_count);
     for (u32 group_index = index->buckets[bucket]; group_index != UINT32_MAX; group_index = index->groups[group_index].next_in_bucket)
     {
         CIrFunctionNameResolution* group = index->groups + group_index;
@@ -14647,7 +14641,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_build_function_name_index(Arena* arena, CParseResu
         {
             continue;
         }
-        u32 bucket = (u32)(buster_hash_64((u8*)declaration.name.pointer, declaration.name.length) % index->bucket_count);
+        u32 bucket = (u32)(c_ir_function_name_hash(declaration.name) % index->bucket_count);
         u32 group_index = index->buckets[bucket];
         while (group_index != UINT32_MAX && !string_equal(index->groups[group_index].name, declaration.name))
         {

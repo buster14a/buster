@@ -872,6 +872,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 }
 
 #if BUSTER_FUZZ_AVAILABLE
+// The release below can run from an atexit handler, which fires after
+// buster_entry_point has destroyed the program arena. The path therefore lives
+// in static storage rather than in that arena, whose pages are unmapped by then.
+BUSTER_GLOBAL_LOCAL char8 ide_fuzz_output_corpus_storage[512];
 BUSTER_GLOBAL_LOCAL String8 ide_fuzz_output_corpus = {0};
 
 BUSTER_GLOBAL_LOCAL String8 ide_fuzz_scratch_root(void)
@@ -885,9 +889,24 @@ BUSTER_GLOBAL_LOCAL String8 ide_fuzz_scratch_root(void)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL void ide_fuzz_output_corpus_set(String8 path)
+{
+    if (!path.length || path.length >= BUSTER_ARRAY_LENGTH(ide_fuzz_output_corpus_storage))
+    {
+        return;
+    }
+    memcpy(ide_fuzz_output_corpus_storage, path.pointer, path.length);
+    ide_fuzz_output_corpus_storage[path.length] = 0;
+    ide_fuzz_output_corpus = string_from_pointer_length(ide_fuzz_output_corpus_storage, path.length);
+}
+
 BUSTER_GLOBAL_LOCAL void ide_fuzz_output_corpus_release(void)
 {
-    if (ide_fuzz_output_corpus.length)
+    // os_directory_delete needs a scratch arena. When FuzzerDriver returns
+    // rather than exiting, buster_entry_point releases the thread context
+    // before atexit handlers run and there is nothing left to delete with; the
+    // explicit release after buster_fuzz_run covers that path instead.
+    if (ide_fuzz_output_corpus.length && thread_context_selected())
     {
         os_directory_delete(ide_fuzz_output_corpus);
         ide_fuzz_output_corpus = (String8){0};
@@ -929,12 +948,13 @@ ProcessResult entry_point(void)
         // the bounded session would otherwise leave hundreds of untracked
         // files in the working tree on every `test_all` run. Give it a
         // throwaway output corpus and pass the checked-in seeds read-only.
-        ide_fuzz_output_corpus = string_format_z(program_state->arena, S8("{S8}buster-fuzz-corpus-{u64}"), ide_fuzz_scratch_root(),
-                                                 os_get_current_process_id());
+        ide_fuzz_output_corpus_set(string_format_z(program_state->arena, S8("{S8}buster-fuzz-corpus-{u64}"), ide_fuzz_scratch_root(),
+                                                   os_get_current_process_id()));
         os_make_directory(ide_fuzz_output_corpus);
         // FuzzerDriver ends a timed session with exit(0) and never returns, so
-        // the corpus has to be released from an exit handler rather than after
-        // the call below.
+        // the corpus needs an exit handler. It does return on flag and corpus
+        // errors, and the runtime is torn down before atexit handlers run in
+        // that case, so the explicit release below is the one that fires there.
         atexit(&ide_fuzz_output_corpus_release);
         // Crash artifacts default to `./`, which would drop them in the repo
         // root. This is a filename prefix rather than a directory, so a clean
@@ -950,6 +970,7 @@ ProcessResult entry_point(void)
             S8("tests/fuzz"),
         };
         ProcessResult fuzz_result = buster_fuzz_run((SliceString8)BUSTER_ARRAY_TO_SLICE(fuzz_arguments));
+        ide_fuzz_output_corpus_release();
         if (result == PROCESS_RESULT_SUCCESS)
         {
             result = fuzz_result;

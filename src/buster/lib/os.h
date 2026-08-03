@@ -202,13 +202,20 @@ struct ThreadContext
 BUSTER_V_DECL ProgramState* program_state;
 
 BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_va(u32 line, String8 function, String8 file, String8 context, ...);
+BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 function, String8 file, String8 context);
 
 #define os_fail_message(message)                                                                                                                               \
     (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_va((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message))
 #define os_fail_message_format(message, ...)                                                                                                                   \
     (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_va((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message, __VA_ARGS__))
+// Reports without allocating. Use for invariants that can fail while the thread
+// context is unselected, where the formatted reporter would need the very
+// scratch arena whose absence is being reported.
+#define os_fail_message_raw(message)                                                                                                                           \
+    (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_raw((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message))
 #define os_fail() os_fail_message(S8("internal error"))
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
+#define BUSTER_CHECK_RAW(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message_raw(S8("assertion failed")), 0) : 0))
 #define BUSTER_TODO_MESSAGE(message, ...)                                                                                                                      \
     do                                                                                                                                                         \
     {                                                                                                                                                          \

@@ -5450,8 +5450,11 @@ BUSTER_GLOBAL_LOCAL void analysis_body_statement(AnalysisBodyContext* context, A
     {
         // `return;` carries no expression to type-check, so a non-void return
         // type has to be rejected here or IR lowering emits a value-less
-        // return from a value-returning function and fails validation.
-        if (!statement->return_statement.expression.count && analysis_type_from_id(context->result, return_type)->kind != ANALYSIS_TYPE_VOID &&
+        // return from a value-returning function and fails validation. An
+        // unresolvable return type is already diagnosed elsewhere; adding a
+        // mismatch for it here would only duplicate that.
+        AnalysisType* declared_return_type = analysis_type_from_id(context->result, return_type);
+        if (!statement->return_statement.expression.count && declared_return_type && declared_return_type->kind != ANALYSIS_TYPE_VOID &&
             !analysis_type_id_equal(return_type, context->result->types.builtin.poison))
         {
             analysis_mismatch_diagnostic_push(context, statement->range, return_type, context->result->types.builtin.void_type);

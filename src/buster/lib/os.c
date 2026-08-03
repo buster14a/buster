@@ -232,6 +232,41 @@ BUSTER_NORETURN BUSTER_COLD void os_fail_va(u32 line, String8 function, String8 
     os_exit(1);
 }
 
+BUSTER_COLD BUSTER_GLOBAL_LOCAL void os_fail_raw_write(OsFileDescriptor* stream, String8 string)
+{
+    if (string.length)
+    {
+        os_file_write(stream, BUSTER_SLICE_TO_BYTE_SLICE(string));
+    }
+}
+
+// The formatted reporter above needs a scratch arena, so it cannot describe a
+// failure that is itself about the thread context being unavailable: the report
+// would re-enter the failing check and recurse until the stack is gone. This
+// variant writes only string literals and caller-owned storage.
+BUSTER_NORETURN BUSTER_COLD void os_fail_raw(u32 line, String8 function, String8 file, String8 context)
+{
+    OsFileDescriptor* stream = os_get_standard_stream(STANDARD_STREAM_ERROR);
+    char8 line_digits[10];
+    u64 line_length = 0;
+    do
+    {
+        line_digits[BUSTER_ARRAY_LENGTH(line_digits) - 1 - line_length] = (char8)('0' + line % 10);
+        line_length += 1;
+        line /= 10;
+    } while (line && line_length < BUSTER_ARRAY_LENGTH(line_digits));
+
+    os_fail_raw_write(stream, context);
+    os_fail_raw_write(stream, S8(" at "));
+    os_fail_raw_write(stream, file);
+    os_fail_raw_write(stream, S8(":"));
+    os_fail_raw_write(stream, string_from_pointer_length(line_digits + BUSTER_ARRAY_LENGTH(line_digits) - line_length, line_length));
+    os_fail_raw_write(stream, S8(" in "));
+    os_fail_raw_write(stream, function);
+    os_fail_raw_write(stream, S8("\n"));
+    os_exit(1);
+}
+
 BUSTER_NORETURN BUSTER_COLD void os_exit(u32 code)
 {
 #if BUSTER_LINK_LIBC
@@ -814,9 +849,13 @@ bool os_directory_delete(String8 path)
         return false;
     }
     BUSTER_CHECK(!path.pointer[path.length]);
-    TemporalArena temp = scratch_begin(0, 0);
-    bool result = os_directory_delete_walk(temp.arena, path);
-    scratch_end(temp);
+    // The walk holds its pending worklist in this arena for the whole
+    // traversal. A scratch arena would be reachable from any nested
+    // scratch_begin(0, 0) inside the walk, whose scratch_end would rewind the
+    // tasks still queued above it, so own the storage outright instead.
+    Arena* arena = arena_create((ArenaCreation){0});
+    bool result = os_directory_delete_walk(arena, path);
+    arena_destroy(arena, 1);
     return result;
 #else
     BUSTER_UNUSED(path);
@@ -1881,8 +1920,9 @@ void thread_context_release(ThreadContext* thread_context)
     {
         thread_context_select(0);
         // The context owns the scratch arenas that contain it. TLS must stop
-        // referring to that storage before any arena is unmapped.
-        BUSTER_CHECK(thread_context_selected() == 0);
+        // referring to that storage before any arena is unmapped. Reported
+        // without scratch: there is deliberately no selected context here.
+        BUSTER_CHECK_RAW(thread_context_selected() == 0);
     }
     Arena* arenas[BUSTER_ARRAY_LENGTH(thread_context->arenas)];
     memcpy(arenas, thread_context->arenas, sizeof(arenas));
@@ -1911,7 +1951,9 @@ Arena* thread_context_get_scratch(Arena** conflicts, u64 count)
     ThreadContext* thread_context = thread_context_selected();
     // Releasing the selected context deliberately leaves TLS empty. Callers
     // must select another context before using any scratch-backed operation.
-    BUSTER_CHECK(thread_context != 0);
+    // The raw reporter is required: the formatted one allocates from the
+    // scratch arena this call is failing to produce.
+    BUSTER_CHECK_RAW(thread_context != 0);
     Arena** arena_pointer = thread_context->arenas;
 
     Arena* result = 0;
