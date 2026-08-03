@@ -813,6 +813,7 @@ BUSTER_F_DECL void analysis_build_jobs(Arena* result_arena, AnalysisResult* resu
 BUSTER_F_DECL AnalysisScheduleResult analysis_execute_jobs(Arena* result_arena, AnalysisResult* result, u32 worker_count, AnalysisJobCallback* callback,
                                                            void* user_data);
 BUSTER_F_DECL AnalysisProgram analysis_program_load(Arena* result_arena, Arena* expression_arena, AnalysisProgramOptions options);
+BUSTER_F_DECL AnalysisProgram analysis_program_load_memory(Arena* result_arena, Arena* expression_arena, String8 source);
 BUSTER_F_DECL void analysis_program_unmap_sources(AnalysisProgram* program);
 BUSTER_F_DECL AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena, AnalysisProgram* program, u32 worker_count,
                                                                           AnalysisProgramJobCallback* callback, void* user_data);

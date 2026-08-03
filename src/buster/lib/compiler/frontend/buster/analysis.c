@@ -1145,6 +1145,61 @@ BUSTER_GLOBAL_LOCAL String8 analysis_root_module_name(Arena* arena, AnalysisProg
     return string_duplicate_arena(arena, string_slice(options.root_path, start, end), false);
 }
 
+BUSTER_GLOBAL_LOCAL void analysis_program_finish(Arena* result_arena, AnalysisProgram* program, TargetDataLayout data_layout)
+{
+    analysis_resolve_program_interfaces(result_arena, program->module_results, program->module_count);
+    if (!target_data_layout_is_valid(data_layout))
+    {
+        data_layout = target_data_layout(target_native);
+    }
+    AnalysisLayoutOptions layout = {
+        .data_layout = data_layout,
+        .pointer_size = data_layout.pointer.size,
+        .pointer_alignment = data_layout.pointer.alignment,
+    };
+    for (u32 index = 0; index < program->module_count; index += 1)
+    {
+        AnalysisResult* analysis = program->module_results[index];
+        if (!analysis)
+        {
+            continue;
+        }
+        analysis_analyze_bodies(result_arena, analysis);
+    }
+    bool pending = true;
+    while (pending)
+    {
+        pending = false;
+        for (u32 index = 0; index < program->module_count; index += 1)
+        {
+            AnalysisResult* analysis = program->module_results[index];
+            if (!analysis)
+            {
+                continue;
+            }
+            for (AnalysisInstantiation* instantiation = analysis->first_instantiation; instantiation; instantiation = instantiation->next)
+            {
+                pending |= analysis->module.entities[instantiation->generic_entity.index.value].ast.code->has_body && !instantiation->analyzed;
+            }
+            if (pending)
+            {
+                analysis_analyze_bodies(result_arena, analysis);
+            }
+        }
+    }
+    for (u32 index = 0; index < program->module_count; index += 1)
+    {
+        AnalysisResult* analysis = program->module_results[index];
+        if (!analysis)
+        {
+            continue;
+        }
+        analysis_compute_layouts(analysis, layout);
+        analysis_build_jobs(result_arena, analysis);
+        program->analysis_diagnostic_count += analysis->diagnostic_count;
+    }
+}
+
 AnalysisProgram analysis_program_load(Arena* result_arena, Arena* expression_arena, AnalysisProgramOptions options)
 {
     BUSTER_CHECK(result_arena);
@@ -1251,7 +1306,6 @@ AnalysisProgram analysis_program_load(Arena* result_arena, Arena* expression_are
     }
     BUSTER_CHECK(program.root);
 
-    analysis_resolve_program_interfaces(result_arena, program.module_results, discovery_count);
     TargetDataLayout data_layout = options.data_layout;
     if (!target_data_layout_is_valid(data_layout))
     {
@@ -1266,52 +1320,39 @@ AnalysisProgram analysis_program_load(Arena* result_arena, Arena* expression_are
             data_layout.pointer.alignment = options.pointer_alignment;
         }
     }
-    AnalysisLayoutOptions layout = {
-        .data_layout = data_layout,
-        .pointer_size = data_layout.pointer.size,
-        .pointer_alignment = data_layout.pointer.alignment,
+    analysis_program_finish(result_arena, &program, data_layout);
+    return program;
+}
+
+AnalysisProgram analysis_program_load_memory(Arena* result_arena, Arena* expression_arena, String8 source)
+{
+    BUSTER_CHECK(result_arena);
+    BUSTER_CHECK(expression_arena);
+    BUSTER_CHECK(result_arena != expression_arena);
+
+    AnalysisProgram program = {
+        .module_count = 1,
     };
-    for (u32 index = 0; index < discovery_count; index += 1)
-    {
-        AnalysisResult* analysis = program.module_results[index];
-        if (!analysis)
-        {
-            continue;
-        }
-        analysis_analyze_bodies(result_arena, analysis);
-    }
-    bool pending = true;
-    while (pending)
-    {
-        pending = false;
-        for (u32 index = 0; index < discovery_count; index += 1)
-        {
-            AnalysisResult* analysis = program.module_results[index];
-            if (!analysis)
-            {
-                continue;
-            }
-            for (AnalysisInstantiation* instantiation = analysis->first_instantiation; instantiation; instantiation = instantiation->next)
-            {
-                pending |= analysis->module.entities[instantiation->generic_entity.index.value].ast.code->has_body && !instantiation->analyzed;
-            }
-            if (pending)
-            {
-                analysis_analyze_bodies(result_arena, analysis);
-            }
-        }
-    }
-    for (u32 index = 0; index < discovery_count; index += 1)
-    {
-        AnalysisResult* analysis = program.module_results[index];
-        if (!analysis)
-        {
-            continue;
-        }
-        analysis_compute_layouts(analysis, layout);
-        analysis_build_jobs(result_arena, analysis);
-        program.analysis_diagnostic_count += analysis->diagnostic_count;
-    }
+    String8 parser_source = source.pointer ? source : S8("");
+    TokenizerResult tokenizer = tokenize(result_arena, parser_source.pointer, parser_source.length);
+    ParserResult parser = parser_parse(result_arena, expression_arena, parser_source, tokenizer);
+    program.parser_diagnostic_count = tokenizer.error_count + parser.diagnostic_count;
+    program.modules = arena_allocate(result_arena, AnalysisProgramModule, 1);
+    program.modules[0].name = string_duplicate_arena(result_arena, S8("fuzz"), false);
+    program.modules[0].path = string_duplicate_arena(result_arena, S8("fuzz.bbb"), true);
+    program.modules[0].source = source;
+    program.modules[0].source_map = (FileMapRead){0};
+    program.modules[0].parser = parser;
+    program.module_results = arena_allocate(result_arena, AnalysisResult*, 1);
+    AnalysisSourceInput input = {
+        .path = program.modules[0].path,
+        .parser = program.parser_diagnostic_count ? 0 : &program.modules[0].parser,
+    };
+    program.modules[0].analysis = arena_allocate(result_arena, AnalysisResult, 1);
+    *program.modules[0].analysis = analysis_index_module(result_arena, (AnalysisModuleId){.value = 0}, program.modules[0].name, &input, 1);
+    program.module_results[0] = program.modules[0].analysis;
+    program.root = program.modules;
+    analysis_program_finish(result_arena, &program, target_data_layout(target_native));
     return program;
 }
 
@@ -3020,7 +3061,7 @@ void analysis_resolve_module_interfaces(Arena* result_arena, AnalysisResult* res
             analysis_body_capacity_measure(scratch.arena, entity->ast.code, &ignored_local_count, &body_expression_node_count);
         }
     }
-    u32 builtin_count = 13;
+    u32 builtin_count = 14;
     result->types.capacity = builtin_count + result->module.type_count + ast_type_count + body_expression_node_count;
     for (u32 import_index = 0; import_index < result->module.import_count; import_index += 1)
     {

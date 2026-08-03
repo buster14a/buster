@@ -2528,6 +2528,18 @@ BUSTER_GLOBAL_LOCAL bool c_include_resolve(Arena* arena, CPreprocessOptions opti
     {
         *origin_out = (CIncludeSearchOrigin){0};
     }
+    if (options.disable_external_includes)
+    {
+        if (c_include_builtin(name, path_out, source_out))
+        {
+            if (origin_out)
+            {
+                *origin_out = (CIncludeSearchOrigin){.kind = C_INCLUDE_SEARCH_BUILTIN};
+            }
+            return true;
+        }
+        return false;
+    }
     if (c_path_is_absolute(name))
     {
         return c_include_read(arena, S8("."), name, path_out, source_out, map_out);
@@ -2585,6 +2597,18 @@ BUSTER_GLOBAL_LOCAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions
     if (origin_out)
     {
         *origin_out = (CIncludeSearchOrigin){0};
+    }
+    if (options.disable_external_includes)
+    {
+        if (c_include_builtin(name, path_out, source_out))
+        {
+            if (origin_out)
+            {
+                *origin_out = (CIncludeSearchOrigin){.kind = C_INCLUDE_SEARCH_BUILTIN};
+            }
+            return true;
+        }
+        return false;
     }
     u32 include_start = 0;
     u32 system_start = 0;

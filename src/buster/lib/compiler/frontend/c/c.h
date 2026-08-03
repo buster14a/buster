@@ -140,6 +140,8 @@ struct CPreprocessOptions
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;
+    bool disable_external_includes;
+    u8 reserved[3];
 };
 
 typedef struct CPreprocessResult CPreprocessResult;

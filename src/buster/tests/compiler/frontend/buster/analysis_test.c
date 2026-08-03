@@ -1083,6 +1083,52 @@ BUSTER_TEST_F_DECL UnitTestResult analysis_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, loaded_schedule.execution_count != 0);
     }
     analysis_program_unmap_sources(&loaded);
+
+    FileMapRead memory_source_map = file_map_read(arguments->arena, S8("tests/fuzz/valid_buster.bbb"), (FileReadOptions){0});
+    String8 memory_source = BYTE_SLICE_TO_STRING(8, memory_source_map.bytes);
+    BUSTER_TEST(arguments, memory_source.pointer != 0);
+    if (memory_source.pointer)
+    {
+        AnalysisProgram memory_loaded = analysis_program_load_memory(arguments->arena, fixture_expression_arena, memory_source);
+        BUSTER_TEST(arguments, !memory_loaded.load_failed);
+        BUSTER_TEST(arguments, memory_loaded.module_count == 1);
+        BUSTER_TEST(arguments, memory_loaded.root != 0);
+        BUSTER_TEST(arguments, memory_loaded.parser_diagnostic_count == 0);
+        BUSTER_TEST(arguments, memory_loaded.analysis_diagnostic_count == 0);
+        if (memory_loaded.root)
+        {
+            BUSTER_STRING_TEST(arguments, memory_loaded.root->name, S8("fuzz"));
+            BUSTER_STRING_TEST(arguments, memory_loaded.root->path, S8("fuzz.bbb"));
+            BUSTER_TEST(arguments, memory_loaded.root->source.pointer == memory_source.pointer);
+            BUSTER_TEST(arguments, memory_loaded.root->source.length == memory_source.length);
+            BUSTER_TEST(arguments, memory_loaded.root->source_map.bytes.pointer == 0);
+            BUSTER_TEST(arguments, memory_loaded.root->source_map.mapped_pointer == 0);
+        }
+        IrProgram memory_ir = ir_generate_program(arguments->arena, &memory_loaded);
+        BUSTER_TEST(arguments, memory_ir.module_count == 1);
+        if (memory_loaded.root && memory_ir.module_count == 1)
+        {
+            BUSTER_TEST(arguments, ir_validate_module(memory_loaded.root->analysis, &memory_ir.modules[0]).error == IR_VALIDATION_NONE);
+        }
+    }
+    file_map_unmap(memory_source_map);
+
+    AnalysisProgram missing_memory = analysis_program_load_memory(arguments->arena, fixture_expression_arena,
+                                                                  S8("import missing = \"not_available\";\n"
+                                                                     "code main : fn () s32\n"
+                                                                     "{\n"
+                                                                     "    return 0;\n"
+                                                                     "}\n"));
+    BUSTER_TEST(arguments, missing_memory.module_count == 1);
+    BUSTER_TEST(arguments, missing_memory.parser_diagnostic_count == 0);
+    BUSTER_TEST(arguments, missing_memory.analysis_diagnostic_count == 1);
+    BUSTER_TEST(arguments, missing_memory.root && analysis_test_has_diagnostic(missing_memory.root->analysis, ANALYSIS_DIAGNOSTIC_MISSING_IMPORTED_MODULE));
+    IrProgram missing_memory_ir = ir_generate_program(arguments->arena, &missing_memory);
+    BUSTER_TEST(arguments, missing_memory_ir.module_count == 1);
+    if (missing_memory.root && missing_memory_ir.module_count == 1)
+    {
+        BUSTER_TEST(arguments, ir_validate_module(missing_memory.root->analysis, &missing_memory_ir.modules[0]).error == IR_VALIDATION_NONE);
+    }
     BUSTER_CHECK(arena_destroy(fixture_expression_arena, 1));
 
     arena_set_position(temporary.arena, temporary.position);

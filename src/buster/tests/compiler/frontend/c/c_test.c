@@ -546,6 +546,45 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, builtin_headers.diagnostic_count == 0);
     CParseResult builtin_headers_parse = c_parse(arguments->arena, builtin_headers);
     BUSTER_TEST(arguments, builtin_headers_parse.diagnostic_count == 0);
+
+    FileMapRead hermetic_c_source_map = file_map_read(arguments->arena, S8("tests/fuzz/valid_c.c"), (FileReadOptions){0});
+    String8 hermetic_c_source = BYTE_SLICE_TO_STRING(8, hermetic_c_source_map.bytes);
+    BUSTER_TEST(arguments, hermetic_c_source.pointer != 0);
+    CPreprocessResult hermetic_builtin_headers = c_preprocess(arguments->arena, hermetic_c_source,
+                                                              (CPreprocessOptions){
+                                                                  .source_path = S8("fuzz.c"),
+                                                                  .target = target_native,
+                                                                  .data_layout = target_data_layout(target_native),
+                                                                  .disable_external_includes = true,
+                                                              });
+    BUSTER_TEST(arguments, hermetic_builtin_headers.diagnostic_count == 0);
+    CParserResult hermetic_syntax = c_parse_ast(arguments->arena, hermetic_builtin_headers);
+    BUSTER_TEST(arguments, hermetic_syntax.diagnostic_count == 0);
+    CIRLowerResult hermetic_ir = c_analyze(arguments->arena, S8("fuzz.c"), hermetic_builtin_headers, hermetic_syntax, target_native);
+    BUSTER_TEST(arguments, hermetic_ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, hermetic_ir.program != 0);
+    if (hermetic_ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(hermetic_ir.program, &hermetic_ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    file_map_unmap(hermetic_c_source_map);
+    CPreprocessResult hermetic_blocked_headers = c_preprocess(arguments->arena,
+                                                              S8("#include <stddef.h>\n"
+                                                                 "#include \"basic_c_include.h\"\n"
+                                                                 "#include <basic_c_include.h>\n"
+                                                                 "#include \"/definitely/missing/buster-header.h\"\n"
+                                                                 "size_t value;\n"),
+                                                              (CPreprocessOptions){
+                                                                  .source_path = S8("fuzz.c"),
+                                                                  .target = target_native,
+                                                                  .data_layout = target_data_layout(target_native),
+                                                                  .disable_external_includes = true,
+                                                              });
+    BUSTER_TEST(arguments, hermetic_blocked_headers.diagnostic_count == 3);
+    for (u64 diagnostic_index = 0; diagnostic_index < hermetic_blocked_headers.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, hermetic_blocked_headers.diagnostics[diagnostic_index].kind == C_DIAGNOSTIC_INCLUDE_NOT_FOUND);
+    }
     String8 feature_include_paths[] = {
         S8("tests"),
         S8("tests/include_first"),

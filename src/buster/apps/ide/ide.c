@@ -196,8 +196,75 @@ BUSTER_GLOBAL_LOCAL void ide_window_update_font_for_dpi(IdeWindow* window)
 #if BUSTER_FUZZ_AVAILABLE
 BUSTER_EXPORT s32 buster_fuzz_test_input(const u8* pointer, size_t size)
 {
-    BUSTER_UNUSED(pointer);
-    BUSTER_UNUSED(size);
+    if (size > BUSTER_KB(4))
+    {
+        return 0;
+    }
+    if (!pointer && size)
+    {
+        return 0;
+    }
+
+    Arena* result_arena = arena_create((ArenaCreation){
+        .reserved_size = BUSTER_MB(64),
+    });
+    Arena* expression_arena = arena_create((ArenaCreation){
+        .reserved_size = BUSTER_MB(64),
+    });
+    if (!result_arena || !expression_arena)
+    {
+        if (result_arena)
+        {
+            arena_destroy(result_arena, 1);
+        }
+        if (expression_arena)
+        {
+            arena_destroy(expression_arena, 1);
+        }
+        return 0;
+    }
+
+    String8 source = {
+        .pointer = pointer ? (char8*)pointer : S8("").pointer,
+        .length = size,
+    };
+    AnalysisProgram buster_analysis = analysis_program_load_memory(result_arena, expression_arena, source);
+    IrProgram buster_ir = ir_generate_program(result_arena, &buster_analysis);
+    for (u32 module_index = 0; module_index < buster_analysis.module_count; module_index += 1)
+    {
+        AnalysisResult* module_analysis = buster_analysis.module_results[module_index];
+        if (module_analysis)
+        {
+            IrValidationResult validation = ir_validate_module(module_analysis, &buster_ir.modules[module_index]);
+            BUSTER_CHECK(validation.error == IR_VALIDATION_NONE);
+        }
+    }
+    analysis_program_unmap_sources(&buster_analysis);
+    arena_reset_to_start(result_arena);
+    arena_reset_to_start(expression_arena);
+
+    CPreprocessResult preprocess = c_preprocess(result_arena, source,
+                                                (CPreprocessOptions){
+                                                    .source_path = S8("fuzz.c"),
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                    .expansion_limit = BUSTER_KB(4),
+                                                    .include_depth_limit = 8,
+                                                    .disable_external_includes = true,
+                                                });
+    CParserResult syntax = c_parse_ast(result_arena, preprocess);
+    CIRLowerResult c_ir = c_analyze(result_arena, S8("fuzz.c"), preprocess, syntax, target_native);
+    if (c_ir.program)
+    {
+        for (u32 module_index = 0; module_index < c_ir.program->module_count; module_index += 1)
+        {
+            IrValidationResult validation = ir_validate_canonical_module(c_ir.program, &c_ir.program->modules[module_index]);
+            BUSTER_CHECK(validation.error == IR_VALIDATION_NONE);
+        }
+    }
+
+    arena_destroy(expression_arena, 1);
+    arena_destroy(result_arena, 1);
     return 0;
 }
 #endif
@@ -1054,6 +1121,7 @@ ProcessResult entry_point(void)
         String8 fuzz_arguments[] = {
             S8("-max_len=4096"),
             S8("-max_total_time=2"),
+            S8("tests/fuzz"),
         };
         ProcessResult fuzz_result = buster_fuzz_run((SliceString8)BUSTER_ARRAY_TO_SLICE(fuzz_arguments));
         if (result == PROCESS_RESULT_SUCCESS)
