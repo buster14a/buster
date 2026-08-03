@@ -7269,6 +7269,37 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             u64 value = (u64)(uintptr_t)target + (u64)relocation->addend;
             memcpy(patch, &value, sizeof(value));
         }
+        else if (relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB)
+        {
+            u64 value = section_offsets[symbol->section] + symbol->value;
+            if (relocation->addend < 0)
+            {
+                u64 magnitude = (u64)(-(relocation->addend + 1)) + 1;
+                if (magnitude > value)
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                value -= magnitude;
+            }
+            else
+            {
+                u64 addend = (u64)relocation->addend;
+                if (addend > UINT32_MAX || value > UINT32_MAX - addend)
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                value += addend;
+            }
+            if (value > UINT32_MAX)
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            u32 image_relative = (u32)value;
+            memcpy(patch, &image_relative, sizeof(image_relative));
+        }
         else
         {
             result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;

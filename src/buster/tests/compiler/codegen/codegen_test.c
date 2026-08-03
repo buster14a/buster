@@ -1428,17 +1428,13 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
         }
     }
     BUSTER_TEST(arguments, found_exported_string_symbol);
-    ObjectFormat object_formats[] = {
-        OBJECT_FORMAT_ELF64,
-        OBJECT_FORMAT_COFF,
-        OBJECT_FORMAT_MACH_O64,
-    };
-    for (u32 object_format_index = 0; object_format_index < BUSTER_ARRAY_LENGTH(object_formats); object_format_index += 1)
-    {
-        ObjectArtifact artifact = object_write(arguments->arena, &generated_object, object_formats[object_format_index]);
-        BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
-        BUSTER_TEST(arguments, artifact.bytes.length > generated_module.code.length);
-    }
+    // Unwind sections and their relocations are native-format metadata. Keep
+    // the object target paired with its writer instead of cross-serializing it.
+    ObjectFormat artifact_format = object_format_for_target(target);
+    ObjectArtifact artifact = object_write(arguments->arena, &generated_object, artifact_format);
+    BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, artifact.format == artifact_format);
+    BUSTER_TEST(arguments, artifact.bytes.length > generated_module.code.length);
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
     ObjectExecutable generated_object_executable = object_link_executable(&generated_object);
     BUSTER_TEST(arguments, generated_object_executable.error == OBJECT_ERROR_NONE);
@@ -1457,9 +1453,11 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
     windows_target.os = OPERATING_SYSTEM_WINDOWS;
     CodegenModule windows_abi_module = codegen_generate_module(arguments->arena, &analysis, &module, windows_target, (CodegenModuleOptions){0});
     BUSTER_TEST(arguments, windows_abi_module.error == CODEGEN_ERROR_NONE);
-    CodegenModule aapcs64_abi_module = codegen_generate_module(arguments->arena, &analysis, &module, aarch64_target, (CodegenModuleOptions){0});
+    Target aapcs64_target = aarch64_target;
+    aapcs64_target.os = OPERATING_SYSTEM_LINUX;
+    CodegenModule aapcs64_abi_module = codegen_generate_module(arguments->arena, &analysis, &module, aapcs64_target, (CodegenModuleOptions){0});
     BUSTER_TEST(arguments, aapcs64_abi_module.error == CODEGEN_ERROR_NONE);
-    ObjectFile aapcs64_object = object_from_codegen_module(arguments->arena, &analysis, &aapcs64_abi_module, aarch64_target);
+    ObjectFile aapcs64_object = object_from_codegen_module(arguments->arena, &analysis, &aapcs64_abi_module, aapcs64_target);
     BUSTER_TEST(arguments, aapcs64_object.error == OBJECT_ERROR_NONE);
     bool found_aarch64_call_relocation = false;
     bool found_aarch64_absolute_relocation = false;

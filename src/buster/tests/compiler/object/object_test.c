@@ -515,6 +515,14 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
         BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
     }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+    ObjectExecutable windows_unwind_executable = object_link_executable(&windows_unwind_object);
+    BUSTER_TEST(arguments, windows_unwind_executable.error == OBJECT_ERROR_NONE);
+    if (windows_unwind_executable.address)
+    {
+        object_release_executable(windows_unwind_executable);
+    }
+#endif
 
     u8 windows_arm64_code[64] = {0};
     u32 windows_arm64_epilog = 48;
