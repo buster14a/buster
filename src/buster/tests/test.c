@@ -8,6 +8,7 @@
 #include <buster/lib/compiler/frontend/buster/parser.h>
 #include <buster/lib/compiler/frontend/buster/analysis.h>
 #include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/interpreter.h>
 #include <buster/lib/compiler/dwarf/dwarf.h>
@@ -32,6 +33,7 @@
 #include <buster/tests/compiler/frontend/buster/parser_test.h>
 #include <buster/tests/compiler/frontend/buster/analysis_test.h>
 #include <buster/tests/compiler/frontend/c/c_test.h>
+#include <buster/tests/compiler/assembly/assembly_test.h>
 #include <buster/tests/compiler/ir/ir_test.h>
 #include <buster/tests/compiler/ir/interpreter_test.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
@@ -57,6 +59,7 @@
 #include <buster/tests/compiler/frontend/buster/parser_test.c>
 #include <buster/tests/compiler/frontend/buster/analysis_test.c>
 #include <buster/tests/compiler/frontend/c/c_test.c>
+#include <buster/tests/compiler/assembly/assembly_test.c>
 #include <buster/tests/compiler/ir/ir_test.c>
 #include <buster/tests/compiler/ir/interpreter_test.c>
 #include <buster/tests/compiler/codegen/codegen_test.c>
@@ -172,6 +175,7 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &parser_result_tests,
     &parser_file_tests,
     &c_frontend_tests,
+    &assembly_tests,
     &analysis_tests,
     &ir_tests,
     &ir_interpreter_tests,

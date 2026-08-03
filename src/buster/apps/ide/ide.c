@@ -12,6 +12,7 @@
 #include <buster/lib/compiler/frontend/buster/parser.h>
 #include <buster/lib/compiler/frontend/buster/analysis.h>
 #include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/interpreter.h>
 #include <buster/lib/compiler/debug/debug.h>
@@ -48,6 +49,7 @@
 #include <buster/lib/compiler/frontend/buster/parser.c>
 #include <buster/lib/compiler/frontend/buster/analysis.c>
 #include <buster/lib/compiler/frontend/c/c.c>
+#include <buster/lib/compiler/assembly/assembly.c>
 #include <buster/lib/compiler/ir/ir.c>
 #include <buster/lib/compiler/ir/interpreter.c>
 #include <buster/lib/compiler/debug/debug.c>

@@ -800,6 +800,7 @@ buster_register_module(file "${BUSTER_SOURCE_DIR}/file${COMMON_EXTENSION}")
 buster_register_module(compiler_parser "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/parser${COMMON_EXTENSION}")
 buster_register_module(compiler_analysis "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/analysis${COMMON_EXTENSION}")
 buster_register_module(compiler_c_frontend "${BUSTER_SOURCE_DIR}/compiler/frontend/c/c${COMMON_EXTENSION}")
+buster_register_module(compiler_assembly "${BUSTER_SOURCE_DIR}/compiler/assembly/assembly${COMMON_EXTENSION}")
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
 buster_register_module(compiler_ir_interpreter "${BUSTER_SOURCE_DIR}/compiler/ir/interpreter${COMMON_EXTENSION}")
 buster_register_module(compiler_debug "${BUSTER_SOURCE_DIR}/compiler/debug/debug${COMMON_EXTENSION}")
@@ -852,6 +853,8 @@ set(BUSTER_TEST_FILES
     src/buster/tests/compiler/frontend/buster/analysis_test.h
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/frontend/c/c_test.h
+    src/buster/tests/compiler/assembly/assembly_test.c
+    src/buster/tests/compiler/assembly/assembly_test.h
     src/buster/tests/compiler/ir/ir_test.c
     src/buster/tests/compiler/ir/ir_test.h
     src/buster/tests/compiler/ir/interpreter_test.c
@@ -1651,6 +1654,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_parser
     compiler_analysis
     compiler_c_frontend
+    compiler_assembly
     compiler_ir
     compiler_ir_interpreter
     compiler_debug
