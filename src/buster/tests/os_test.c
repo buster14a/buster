@@ -50,6 +50,11 @@ BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
     }
 
+#if defined(__APPLE__)
+    BUSTER_TEST(arguments, !os_apple_process_is_traced(0));
+    BUSTER_TEST(arguments, os_apple_process_is_traced(P_TRACED));
+#endif
+
 #if defined(_WIN32)
     // A parent pipe end must be made non-inheritable before process creation;
     // failure is observable so spawn can close every created handle and stop.

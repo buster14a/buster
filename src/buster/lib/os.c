@@ -156,6 +156,13 @@ BUSTER_GLOBAL_LOCAL void os_entity_release(OsEntity* entity)
     os_entity_unlock();
 }
 
+#if defined(__APPLE__)
+BUSTER_TEST_F_DECL bool os_apple_process_is_traced(u32 process_flags)
+{
+    return (process_flags & P_TRACED) != 0;
+}
+#endif
+
 BUSTER_COLD bool is_debugger_present(void)
 {
     if (BUSTER_UNLIKELY(!program_state->is_debugger_present_called))
@@ -190,6 +197,12 @@ BUSTER_COLD bool is_debugger_present(void)
         }
         program_state->_is_debugger_present = traced;
 #elif defined(__APPLE__)
+        int query[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+        struct kinfo_proc process_info = {0};
+        size_t process_info_size = sizeof(process_info);
+        bool traced = sysctl(query, 4, &process_info, &process_info_size, 0, 0) == 0 &&
+                      process_info_size >= sizeof(process_info) && os_apple_process_is_traced((u32)process_info.kp_proc.p_flag);
+        program_state->_is_debugger_present = traced;
 #elif defined(_WIN32)
         BOOL os_result = IsDebuggerPresent();
         program_state->_is_debugger_present = os_result != 0;
