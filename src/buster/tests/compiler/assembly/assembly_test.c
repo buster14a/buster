@@ -178,6 +178,86 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_absolute_memory.relocation_count == 1 && x86_absolute_memory.relocations[0].offset == 3 &&
                                x86_absolute_memory.relocations[0].addend == 8 &&
                                x86_absolute_memory.relocations[0].kind == ASSEMBLY_RELOCATION_X86_32);
+    u8 expected_x86_sse2[] = {
+        0x0f, 0x28, 0xc1,
+        0x47, 0x0f, 0x10, 0x44, 0x4c, 0x20,
+        0x66, 0x45, 0x0f, 0x29, 0x7d, 0x00,
+        0x66, 0x0f, 0x10, 0x15, 0x00, 0x00, 0x00, 0x00,
+        0x66, 0x0f, 0x6f, 0xdc,
+        0xf3, 0x44, 0x0f, 0x7f, 0x48, 0x01,
+        0x45, 0x0f, 0x57, 0xd3,
+        0x66, 0x44, 0x0f, 0x57, 0x65, 0x00,
+        0x66, 0x0f, 0xef, 0xca,
+        0x0f, 0x58, 0xdc,
+        0x66, 0x0f, 0x58, 0xee,
+        0xf3, 0x41, 0x0f, 0x58, 0xf8,
+        0xf2, 0x45, 0x0f, 0x58, 0xca,
+        0x45, 0x0f, 0x5c, 0xdc,
+        0x66, 0x45, 0x0f, 0x5c, 0xee,
+        0x44, 0x0f, 0x59, 0xf8,
+        0x66, 0x0f, 0x59, 0xca,
+        0x0f, 0x5e, 0xdc,
+        0x66, 0x0f, 0x5e, 0xee,
+    };
+    String8 x86_intel_sse2_source =
+        S8("movaps xmm0, xmm1\n"
+           "movups xmm8, [r12 + r9*2 + 32]\n"
+           "movapd [r13], xmm15\n"
+           "movupd xmm2, [rip + external]\n"
+           "movdqa xmm3, xmm4\n"
+           "movdqu [rax + 1], xmm9\n"
+           "xorps xmm10, xmm11\n"
+           "xorpd xmm12, [rbp]\n"
+           "pxor xmm1, xmm2\n"
+           "addps xmm3, xmm4\n"
+           "addpd xmm5, xmm6\n"
+           "addss xmm7, xmm8\n"
+           "addsd xmm9, xmm10\n"
+           "subps xmm11, xmm12\n"
+           "subpd xmm13, xmm14\n"
+           "mulps xmm15, xmm0\n"
+           "mulpd xmm1, xmm2\n"
+           "divps xmm3, xmm4\n"
+           "divpd xmm5, xmm6\n");
+    AssemblyEncodeResult x86_intel_sse2 = assembly_encode(
+        arguments->arena, x86_intel_sse2_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_sse2.diagnostic_count == 0 && x86_intel_sse2.bytes.length == sizeof(expected_x86_sse2) &&
+                               memcmp(x86_intel_sse2.bytes.pointer, expected_x86_sse2, sizeof(expected_x86_sse2)) == 0);
+    BUSTER_TEST(arguments, x86_intel_sse2.relocation_count == 1 && x86_intel_sse2.relocations[0].offset == 19 &&
+                               x86_intel_sse2.relocations[0].addend == -4 &&
+                               x86_intel_sse2.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+    String8 x86_att_sse2_source =
+        S8("movaps %xmm1, %xmm0\n"
+           "movups 32(%r12,%r9,2), %xmm8\n"
+           "movapd %xmm15, (%r13)\n"
+           "movupd external(%rip), %xmm2\n"
+           "movdqa %xmm4, %xmm3\n"
+           "movdqu %xmm9, 1(%rax)\n"
+           "xorps %xmm11, %xmm10\n"
+           "xorpd (%rbp), %xmm12\n"
+           "pxor %xmm2, %xmm1\n"
+           "addps %xmm4, %xmm3\n"
+           "addpd %xmm6, %xmm5\n"
+           "addss %xmm8, %xmm7\n"
+           "addsd %xmm10, %xmm9\n"
+           "subps %xmm12, %xmm11\n"
+           "subpd %xmm14, %xmm13\n"
+           "mulps %xmm0, %xmm15\n"
+           "mulpd %xmm2, %xmm1\n"
+           "divps %xmm4, %xmm3\n"
+           "divpd %xmm6, %xmm5\n");
+    AssemblyEncodeResult x86_att_sse2 = assembly_encode(
+        arguments->arena, x86_att_sse2_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_sse2.diagnostic_count == 0 && x86_att_sse2.bytes.length == sizeof(expected_x86_sse2) &&
+                               memcmp(x86_att_sse2.bytes.pointer, expected_x86_sse2, sizeof(expected_x86_sse2)) == 0);
+    Target x86_without_sse2 = x86_target;
+    x86_without_sse2.cpu_features_explicit = true;
+    x86_without_sse2.cpu_features = 0;
+    AssemblyEncodeResult unsupported_sse2 = assembly_encode(
+        arguments->arena, S8("pxor xmm0, xmm0\n"),
+        (AssemblyEncodeOptions){.target = x86_without_sse2, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_sse2.diagnostic_count == 1 &&
+                               unsupported_sse2.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     AssemblyEncodeResult invalid_x86_forms =
         assembly_encode(arguments->arena, S8("mov rax, eax\nadd rax, 0x80000000\nnopq\n"),
                         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -190,6 +270,10 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
         assembly_encode(arguments->arena, S8("mov rax, [rsp*2]\nmov rax, [rip + rbx]\ninc [rax]\nmov rax, [rbx + 0x80000000]\n"),
                         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, invalid_x86_memory.diagnostic_count == 4);
+    AssemblyEncodeResult invalid_x86_sse2 =
+        assembly_encode(arguments->arena, S8("mov rax, xmm0\naddps xmm0, rax\nmovaps [rax], [rbx]\naddps [rax], xmm0\n"),
+                        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_x86_sse2.diagnostic_count == 4);
 
     Target aarch64_target = {
         .cpu_arch = CPU_ARCH_AARCH64,
