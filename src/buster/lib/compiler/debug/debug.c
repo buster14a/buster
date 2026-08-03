@@ -400,7 +400,19 @@ BUSTER_TEST_F_DECL DebugVariableId debug_variable_add(Arena* arena, DebugModel* 
                                                        String8 name, DebugTypeId type, DebugSourceLocation declaration, DebugVariableKind kind,
                                                        IrSymbolId symbol, IrLocalId local, u32 start, u32 end)
 {
-    if (!name.length || model->variable_count == UINT32_MAX)
+    DebugScopeId scope_id = DEBUG_SCOPE_INVALID;
+    if (scope && model->scopes)
+    {
+        for (u32 scope_index = 0; scope_index < model->scope_count; scope_index += 1)
+        {
+            if (scope == model->scopes + scope_index)
+            {
+                scope_id = scope_index;
+                break;
+            }
+        }
+    }
+    if (!name.length || model->variable_count == UINT32_MAX || scope_id == DEBUG_SCOPE_INVALID)
     {
         return DEBUG_ID_INVALID;
     }
@@ -412,7 +424,7 @@ BUSTER_TEST_F_DECL DebugVariableId debug_variable_add(Arena* arena, DebugModel* 
         .declaration = declaration,
         .symbol = symbol,
         .local = local,
-        .scope = (DebugScopeId)(scope - model->scopes),
+        .scope = scope_id,
         .kind = kind,
     };
     debug_variable_add_location(arena, input, variable, symbol, local, start, end);
