@@ -14,8 +14,9 @@ BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
     ThreadContext* temporary_context = thread_context_allocate();
     thread_context_select(temporary_context);
     thread_context_release(temporary_context);
-    BUSTER_TEST(arguments, thread_context_selected() == 0);
+    bool released_context_was_cleared = thread_context_selected() == 0;
     thread_context_select(main_context);
+    BUSTER_TEST(arguments, released_context_was_cleared);
 
     // flag_set_ex/flag_get_ex pack one flag per bit across u64 words.
     {
