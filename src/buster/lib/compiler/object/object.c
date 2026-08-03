@@ -1487,7 +1487,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
     }
     if (opcode == 0x98)
     {
-        object_assembly_append_string(buffer, width == 64 ? S8("\tcdqe\n") : width == 16 ? S8("\tcwde\n") : S8("\tcwde\n"));
+        object_assembly_append_string(buffer, width == 64 ? S8("\tcdqe\n") : width == 16 ? S8("\tcbw\n") : S8("\tcwde\n"));
         return prefix.length + 1;
     }
     if (opcode == 0x99)

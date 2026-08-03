@@ -100,6 +100,20 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
         .symbol_count = BUSTER_ARRAY_LENGTH(symbols),
         .relocation_count = 1,
     };
+    u8 x86_accumulator_extend[] = {0x66, 0x98, 0x98, 0x48, 0x98};
+    ObjectSection accumulator_extend_section = {
+        .name = S8(".text"),
+        .data = BUSTER_ARRAY_TO_SLICE(x86_accumulator_extend),
+        .kind = OBJECT_SECTION_TEXT,
+        .alignment = 1,
+    };
+    ObjectFile accumulator_extend_object = {
+        .sections = &accumulator_extend_section,
+        .target = object.target,
+        .section_count = 1,
+    };
+    String8 accumulator_extend_assembly = object_print_assembly(arguments->arena, &accumulator_extend_object);
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(accumulator_extend_assembly), S8("\tcbw\n\tcwde\n\tcdqe\n")));
     ObjectFormat formats[] = {
         OBJECT_FORMAT_ELF64,
         OBJECT_FORMAT_COFF,
