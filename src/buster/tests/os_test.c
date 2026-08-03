@@ -215,6 +215,18 @@ BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 empty_path = {0};
         BUSTER_TEST(arguments, !os_directory_delete(empty_path));
 
+        String8 deep = buster_test_temporary_path(arena, S8("buster-delete-deep"), S8(""));
+        os_directory_delete(deep);
+        os_make_directory(deep);
+        for (u32 depth = 0; depth < 256; depth += 1)
+        {
+            deep = string_format_z(arena, S8("{S8}/d"), deep);
+            os_make_directory(deep);
+        }
+        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/leaf.txt"), deep), BUSTER_SLICE_TO_BYTE_SLICE(S8("leaf"))));
+        String8 deep_root = buster_test_temporary_path(arena, S8("buster-delete-deep"), S8(""));
+        BUSTER_TEST(arguments, os_directory_delete(deep_root));
+
         arena->position = position;
     }
 
@@ -244,6 +256,25 @@ BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
             os_file_close(survivor);
         }
         os_file_delete(outside);
+
+        String8 outside_directory = buster_test_temporary_path(arena, S8("buster-delete-outside-directory"), S8(""));
+        String8 directory_root = buster_test_temporary_path(arena, S8("buster-delete-directory-link"), S8(""));
+        os_directory_delete(outside_directory);
+        os_directory_delete(directory_root);
+        os_make_directory(outside_directory);
+        os_make_directory(directory_root);
+        String8 outside_file = string_format_z(arena, S8("{S8}/survivor.txt"), outside_directory);
+        BUSTER_TEST(arguments, file_write(outside_file, BUSTER_SLICE_TO_BYTE_SLICE(S8("keep me too"))));
+        String8 directory_link = string_format_z(arena, S8("{S8}/linked-directory"), directory_root);
+        BUSTER_TEST(arguments, symlink((const char*)outside_directory.pointer, (const char*)directory_link.pointer) == 0);
+        BUSTER_TEST(arguments, os_directory_delete(directory_root));
+        OsFileDescriptor* directory_survivor = os_file_open(outside_file, link_read_flags, link_read_permissions);
+        BUSTER_TEST(arguments, directory_survivor != 0);
+        if (directory_survivor)
+        {
+            os_file_close(directory_survivor);
+        }
+        os_directory_delete(outside_directory);
 
         arena->position = position;
     }
