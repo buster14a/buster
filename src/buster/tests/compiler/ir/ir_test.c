@@ -9,6 +9,8 @@ struct IrFixtureTest
 BUSTER_GLOBAL_LOCAL IrFixtureTest ir_fixture_tests[] = {
     {S8_INITIALIZER("tests/basic_vector.bbb")},
     {S8_INITIALIZER("tests/basic_vector_error.bbb")},
+    {S8_INITIALIZER("tests/basic_code_non_function_type_error.bbb")},
+    {S8_INITIALIZER("tests/basic_return_without_value_error.bbb")},
     {S8_INITIALIZER("tests/basic_variadic.bbb")},
     {S8_INITIALIZER("tests/basic_variadic_error.bbb")},
     {S8_INITIALIZER("tests/array_slices.bbb")},

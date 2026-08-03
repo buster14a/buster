@@ -1,0 +1,11 @@
+type Callback = fn (value: s32) s32
+
+code aliased : Callback
+{
+    return 0;
+}
+
+code not_a_function : s32
+{
+    return 0;
+}

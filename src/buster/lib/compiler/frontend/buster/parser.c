@@ -7022,6 +7022,15 @@ BUSTER_TEST_F_DECL ParserFileTestCase parser_file_test_cases[] = {
         .expected_code_count = 1,
     },
     {
+        .path = S8_INITIALIZER("tests/basic_code_non_function_type_error.bbb"),
+        .expected_code_count = 2,
+        .expected_type_declaration_count = 1,
+    },
+    {
+        .path = S8_INITIALIZER("tests/basic_return_without_value_error.bbb"),
+        .expected_code_count = 1,
+    },
+    {
         .path = S8_INITIALIZER("tests/basic_variadic.bbb"),
         .expected_expression = S8_INITIALIZER(
             "(- (+ (+ (+ (call first_two 1 small 100) (@cast (call take_float floating))) (@cast (call take_pair pair))) (@cast (call take_large large))) 81)"),

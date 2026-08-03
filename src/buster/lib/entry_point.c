@@ -9,12 +9,24 @@ BUSTER_V_IMPL OsState os_state;
 #if BUSTER_LINK_LIBC
 #if BUSTER_FUZZ_AVAILABLE
 extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const u8* pointer, size_t size));
+#if !BUSTER_SANITIZE
+BUSTER_GLOBAL_LOCAL void restore_default_signal_handlers(void);
+#endif
 ProcessResult buster_fuzz_run(SliceString8 fuzz_arguments)
 {
     if (fuzz_arguments.length > (u64)INT32_MAX - 1)
     {
         return PROCESS_RESULT_FAILED;
     }
+
+#if !BUSTER_SANITIZE
+    // libFuzzer's SetSigaction() refuses to replace an already-installed
+    // handler, so our crash reporter would otherwise silently disable
+    // libFuzzer's own crash reporting: no crash-<sha1> artifact, no reproducer
+    // command, no minimization. A fuzz session with no saved input is not
+    // actionable, so hand the fatal signals back before entering the driver.
+    restore_default_signal_handlers();
+#endif
 
     u64 argument_count = fuzz_arguments.length + 1;
     char** arguments = arena_allocate(program_state->arena, char*, argument_count + 1);
@@ -172,6 +184,23 @@ BUSTER_GLOBAL_LOCAL void install_signal_handlers(void)
 #else
 #endif
 }
+
+#if BUSTER_FUZZ_AVAILABLE
+BUSTER_GLOBAL_LOCAL void restore_default_signal_handlers(void)
+{
+#if defined(__linux__)
+    struct sigaction default_action = {0};
+    default_action.sa_handler = SIG_DFL;
+    sigaction(SIGILL, &default_action, NULL);
+    sigaction(SIGTRAP, &default_action, NULL);
+    sigaction(SIGABRT, &default_action, NULL);
+    sigaction(SIGFPE, &default_action, NULL);
+    sigaction(SIGBUS, &default_action, NULL);
+    sigaction(SIGSEGV, &default_action, NULL);
+    sigaction(SIGQUIT, &default_action, NULL);
+#endif
+}
+#endif
 #endif
 
 BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOsList envp)

@@ -750,6 +750,12 @@ BUSTER_GLOBAL_LOCAL void string_append_formatted_integer(Arena* arena, StringFor
 
 BUSTER_GLOBAL_LOCAL void arena_append_string(Arena* arena, String8 string)
 {
+    // An empty String8 legitimately carries a null pointer, and memcpy is
+    // declared nonnull even for a zero count.
+    if (!string.length)
+    {
+        return;
+    }
     char8* destination = arena_allocate(arena, char8, string.length);
     memcpy(destination, string.pointer, sizeof(char8) * string.length);
 }

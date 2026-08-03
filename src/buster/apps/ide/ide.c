@@ -1118,9 +1118,26 @@ ProcessResult entry_point(void)
 #if BUSTER_FUZZ_AVAILABLE
     if (ide_state.test)
     {
+        // libFuzzer writes every newly discovered unit into the *first*
+        // positional directory, so `tests/fuzz` must not be that directory:
+        // the bounded session would otherwise leave hundreds of untracked
+        // files in the working tree on every `test_all` run. Give it a
+        // throwaway output corpus and pass the checked-in seeds read-only.
+#if BUSTER_WINDOWS
+        String8 output_corpus = string_format_z(program_state->arena, S8("build/buster-fuzz-corpus-{u64}"), os_get_current_process_id());
+#else
+        String8 output_corpus = string_format_z(program_state->arena, S8("/tmp/buster-fuzz-corpus-{u64}"), os_get_current_process_id());
+#endif
+        os_make_directory(output_corpus);
+        // Same reasoning for crash artifacts, which default to `./`: the log
+        // already carries the reproducer as Base64 plus the artifact path, so
+        // nothing is lost by keeping the file out of the working tree.
+        String8 artifact_prefix = string_format_z(program_state->arena, S8("-artifact_prefix={S8}/"), output_corpus);
         String8 fuzz_arguments[] = {
             S8("-max_len=4096"),
             S8("-max_total_time=2"),
+            artifact_prefix,
+            output_corpus,
             S8("tests/fuzz"),
         };
         ProcessResult fuzz_result = buster_fuzz_run((SliceString8)BUSTER_ARRAY_TO_SLICE(fuzz_arguments));

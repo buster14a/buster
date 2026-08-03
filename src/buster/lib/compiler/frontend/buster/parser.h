@@ -721,7 +721,7 @@ struct ParserFileTestCase
     bool expected_code_count_is_set;
 };
 
-#define PARSER_FILE_TEST_CASE_COUNT 59
+#define PARSER_FILE_TEST_CASE_COUNT 61
 
 typedef struct ParserDiagnostic ParserDiagnostic;
 struct ParserDiagnostic

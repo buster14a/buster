@@ -131,7 +131,10 @@ enabled.
 - To add a language test: drop a `.bbb` file in `tests/` **and** append it to
   the hardcoded `parser_file_test_cases` list in
   `src/buster/lib/compiler/frontend/buster/parser.c` (covered by
-  `parser_file_tests()`). Valid fixtures must also be appended to
+  `parser_file_tests()`) **and** bump `PARSER_FILE_TEST_CASE_COUNT` in
+  `parser.h` to match — the header declares the list with that fixed size, so
+  forgetting it only fails the unity/Release build, not Debug. Valid fixtures
+  must also be appended to
   `analysis_fixture_tests` in `analysis.c` with their exact semantic diagnostic
   count and to `ir_fixture_tests` in `ir.c`; this keeps the complete frontend
   pipeline covered. Invalid-syntax fixtures live in `tests/errors/` and use the

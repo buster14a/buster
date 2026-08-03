@@ -1539,9 +1539,15 @@ BUSTER_GLOBAL_LOCAL void analysis_body_capacity_measure(Arena* scratch_arena, As
 {
     AnalysisAstStatementLink* top = 0;
     analysis_ast_statement_link_push(scratch_arena, &top, code->body.first_statement);
-    for (AstTypeArgument* argument = code->type->function.first_argument; argument; argument = argument->next)
+    // A code entity declared with a non-function type (`code main : s33 {}`) is
+    // diagnosed later; until then its AstType union holds no argument list, so
+    // reading `function.first_argument` would walk whatever aliases it.
+    if (code->type && code->type->id == AST_TYPE_FUNCTION)
     {
-        *local_count += 1;
+        for (AstTypeArgument* argument = code->type->function.first_argument; argument; argument = argument->next)
+        {
+            *local_count += 1;
+        }
     }
     while (top)
     {
@@ -2970,6 +2976,20 @@ BUSTER_GLOBAL_LOCAL void analysis_validate_module_declarations(Arena* result_are
         if (entity->kind == ANALYSIS_ENTITY_CODE)
         {
             AstType* function = entity->ast.code->type;
+            if (!function || function->id != AST_TYPE_FUNCTION)
+            {
+                // A body binds its parameters by the names in the syntactic
+                // argument list, so a declared type that is not spelled
+                // `fn (...)` — a named alias, or a non-function type entirely —
+                // leaves IR lowering with fewer argument locals than the
+                // semantic function type declares.
+                if (entity->ast.code->has_body)
+                {
+                    analysis_entity_diagnostic_push(result_arena, result, entity, entity->ast.code->range, ANALYSIS_DIAGNOSTIC_EXPECTED_FUNCTION_TYPE,
+                                                    entity->name, S8("code declaration with a body requires a `fn` type"));
+                }
+                continue;
+            }
             for (AstTypeArgument* argument = function->function.first_argument; argument; argument = argument->next)
             {
                 for (AstTypeArgument* previous = function->function.first_argument; previous && previous != argument; previous = previous->next)
@@ -3209,6 +3229,8 @@ BUSTER_GLOBAL_LOCAL String8 analysis_diagnostic_message(AnalysisDiagnosticKind k
         return S8("duplicate switch case");
     case ANALYSIS_DIAGNOSTIC_NONEXHAUSTIVE_SWITCH:
         return S8("switch does not cover every enum member");
+    case ANALYSIS_DIAGNOSTIC_EXPECTED_FUNCTION_TYPE:
+        return S8("code declaration with a body requires a `fn` type");
     case ANALYSIS_DIAGNOSTIC_DUPLICATE_DECLARATION:
         return S8("duplicate declaration");
     case ANALYSIS_DIAGNOSTIC_DUPLICATE_IMPORT_NAMESPACE:
@@ -3460,11 +3482,14 @@ bool analysis_entity_is_generic(Arena* scratch_arena, AnalysisResult* result, An
     {
         return false;
     }
-    for (AstTypeArgument* argument = entity->ast.code->type->function.first_argument; argument; argument = argument->next)
+    if (entity->ast.code->type && entity->ast.code->type->id == AST_TYPE_FUNCTION)
     {
-        if (argument->is_compile_time)
+        for (AstTypeArgument* argument = entity->ast.code->type->function.first_argument; argument; argument = argument->next)
         {
-            return true;
+            if (argument->is_compile_time)
+            {
+                return true;
+            }
         }
     }
     AnalysisTypeId type = result->module.semantics[entity->id.index.value].type;
@@ -4467,6 +4492,15 @@ BUSTER_GLOBAL_LOCAL AnalysisInstantiation* analysis_generic_call_resolve(Analysi
     {
         return 0;
     }
+    // Instantiation pairs the semantic argument list with the syntactic one to
+    // recover parameter names and their `compile_time` markers. A code entity
+    // whose declared type is a named alias (`code f : Callback`) resolves to a
+    // function semantically while carrying no syntactic argument list, so there
+    // is nothing to pair against.
+    if (!entity->ast.code->type || entity->ast.code->type->id != AST_TYPE_FUNCTION)
+    {
+        return 0;
+    }
 
     u32 source_argument_count = generic_function->as.function.argument_count;
     if (call->call.argument_count != source_argument_count)
@@ -5414,6 +5448,14 @@ BUSTER_GLOBAL_LOCAL void analysis_body_statement(AnalysisBodyContext* context, A
     {
     case AST_STATEMENT_RETURN:
     {
+        // `return;` carries no expression to type-check, so a non-void return
+        // type has to be rejected here or IR lowering emits a value-less
+        // return from a value-returning function and fails validation.
+        if (!statement->return_statement.expression.count && analysis_type_from_id(context->result, return_type)->kind != ANALYSIS_TYPE_VOID &&
+            !analysis_type_id_equal(return_type, context->result->types.builtin.poison))
+        {
+            analysis_mismatch_diagnostic_push(context, statement->range, return_type, context->result->types.builtin.void_type);
+        }
         analysis_expression(context, bindings, statement->return_statement.expression, return_type);
         analysis_body_task_continue(context, top, task, bindings);
     }
@@ -6457,6 +6499,14 @@ BUSTER_GLOBAL_LOCAL void analysis_analyze_code_body(Arena* result_arena, Arena* 
     AnalysisTypeId function_type = instantiation ? instantiation->function_type : result->module.semantics[entity->id.index.value].type;
     AnalysisType* function = analysis_type_from_id(result, function_type);
     if (function->kind != ANALYSIS_TYPE_FUNCTION)
+    {
+        body->analyzed = true;
+        return;
+    }
+    // Argument locals come from the syntactic argument list, which only exists
+    // when the declared type is spelled `fn (...)`; a named alias resolving to
+    // a function type binds no parameter names.
+    if (!entity->ast.code->type || entity->ast.code->type->id != AST_TYPE_FUNCTION)
     {
         body->analyzed = true;
         return;
