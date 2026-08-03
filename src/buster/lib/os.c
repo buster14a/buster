@@ -1876,9 +1876,13 @@ void thread_context_release(ThreadContext* thread_context)
     {
         return;
     }
-    if (thread_context_selected() == thread_context)
+    ThreadContext* selected = thread_context_selected();
+    if (selected == thread_context)
     {
         thread_context_select(0);
+        // The context owns the scratch arenas that contain it. TLS must stop
+        // referring to that storage before any arena is unmapped.
+        BUSTER_CHECK(thread_context_selected() == 0);
     }
     Arena* arenas[BUSTER_ARRAY_LENGTH(thread_context->arenas)];
     memcpy(arenas, thread_context->arenas, sizeof(arenas));
@@ -1905,6 +1909,9 @@ void thread_context_select(ThreadContext* context)
 Arena* thread_context_get_scratch(Arena** conflicts, u64 count)
 {
     ThreadContext* thread_context = thread_context_selected();
+    // Releasing the selected context deliberately leaves TLS empty. Callers
+    // must select another context before using any scratch-backed operation.
+    BUSTER_CHECK(thread_context != 0);
     Arena** arena_pointer = thread_context->arenas;
 
     Arena* result = 0;

@@ -9,14 +9,17 @@ BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
 
     // Releasing the selected context must clear TLS before its arenas go
-    // away. Restore the process's main context for the remainder of the suite.
+    // away. No scratch-backed operation is valid while TLS is empty, so
+    // restore the process's main context immediately after observing it.
     ThreadContext* main_context = thread_context_selected();
+    BUSTER_TEST(arguments, main_context != 0);
     ThreadContext* temporary_context = thread_context_allocate();
     thread_context_select(temporary_context);
     thread_context_release(temporary_context);
     bool released_context_was_cleared = thread_context_selected() == 0;
     thread_context_select(main_context);
     BUSTER_TEST(arguments, released_context_was_cleared);
+    BUSTER_TEST(arguments, thread_context_selected() == main_context);
 
     // flag_set_ex/flag_get_ex pack one flag per bit across u64 words.
     {
