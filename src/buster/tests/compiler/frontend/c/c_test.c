@@ -2687,7 +2687,7 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     {
         scratch_fragments[scratch_fragment_count++] = string_format(scratch_lifetime_arena,
                                                                     S8("struct Padding{u32}"
-                                                                       " { int value; };"),
+                                                                       " {{ int value; }};"),
                                                                     index);
     }
     scratch_fragments[scratch_fragment_count++] = S8("struct ScratchItem { int value; };"

@@ -417,151 +417,328 @@ BUSTER_GLOBAL_LOCAL void string_reverse(String8 s)
     }
 }
 
-BUSTER_GLOBAL_LOCAL String8 string_format_u64_hexadecimal(String8 buffer, u64 value, bool upper)
+typedef struct StringFormatU128Parts StringFormatU128Parts;
+struct StringFormatU128Parts
 {
-    String8 result = {0};
+    u64 low;
+    u64 high;
+};
 
-    if (value == 0)
+typedef enum StringFormatIntegerKind
+{
+    STRING_FORMAT_INTEGER_KIND_DECIMAL,
+    STRING_FORMAT_INTEGER_KIND_BINARY,
+    STRING_FORMAT_INTEGER_KIND_OCTAL,
+    STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_LOWER,
+    STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER,
+    STRING_FORMAT_INTEGER_KIND_COUNT,
+} StringFormatIntegerKind;
+
+BUSTER_GLOBAL_LOCAL void arena_append_string(Arena* arena, String8 string);
+BUSTER_GLOBAL_LOCAL void string_append_repeated_code_unit(Arena* arena, char8 code_unit, u64 code_unit_count);
+
+#define BUSTER_FORMAT_INTEGER_MAX_WIDTH ((u64)128)
+#define BUSTER_FORMAT_INTEGER_BUFFER_LENGTH (BUSTER_FORMAT_INTEGER_MAX_WIDTH * 2 + 2)
+
+BUSTER_GLOBAL_LOCAL bool string_format_u128_parts_is_zero(StringFormatU128Parts value)
+{
+    return (value.low == 0) & (value.high == 0);
+}
+
+BUSTER_GLOBAL_LOCAL u64 string_format_u128_parts_divide(StringFormatU128Parts* value, u64 divisor)
+{
+    BUSTER_CHECK(divisor >= 2 && divisor <= 16);
+
+    StringFormatU128Parts quotient = {0};
+    u64 remainder = 0;
+
+    // Long division from the most significant bit keeps the implementation
+    // independent of a compiler-provided 128-bit integer type.
+    for (u64 bit_index = 128; bit_index != 0; bit_index -= 1)
     {
-        buffer.pointer[0] = '0';
-        result = (String8){.pointer = buffer.pointer, .length = 1};
+        u64 shift = bit_index - 1;
+        u64 bit = shift >= 64 ? (value->high >> (shift - 64)) & 1u : (value->low >> shift) & 1u;
+        remainder = remainder * 2 + bit;
+
+        if (remainder >= divisor)
+        {
+            remainder -= divisor;
+            if (shift >= 64)
+            {
+                quotient.high |= (u64)1 << (shift - 64);
+            }
+            else
+            {
+                quotient.low |= (u64)1 << shift;
+            }
+        }
     }
-    else
+
+    *value = quotient;
+    return remainder;
+}
+
+BUSTER_GLOBAL_LOCAL StringFormatU128Parts string_format_u128_parts_from_u128(u128 value)
+{
+#if defined(__clang__)
+    return (StringFormatU128Parts){
+        .low = (u64)value,
+        .high = (u64)(value >> 64),
+    };
+#else
+    return (StringFormatU128Parts){
+        .low = value.v[0],
+        .high = value.v[1],
+    };
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL StringFormatU128Parts string_format_u128_parts_from_s128(s128 value)
+{
+#if defined(__clang__)
+    return string_format_u128_parts_from_u128((u128)value);
+#else
+    return (StringFormatU128Parts){
+        .low = value.v[0],
+        .high = value.v[1],
+    };
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL StringFormatU128Parts string_format_u128_parts_negate(StringFormatU128Parts value)
+{
+    u64 low = value.low;
+    return (StringFormatU128Parts){
+        .low = 0 - low,
+        .high = ~value.high + (low == 0),
+    };
+}
+
+BUSTER_GLOBAL_LOCAL StringFormatU128Parts string_format_u128_parts_mask(StringFormatU128Parts value, u64 bit_width)
+{
+    BUSTER_CHECK(bit_width != 0 && bit_width <= 128);
+
+    if (bit_width < 64)
     {
-        u64 v = value;
-        u64 i = 0;
+        value.low &= ((u64)1 << bit_width) - 1;
+        value.high = 0;
+    }
+    else if (bit_width == 64)
+    {
+        value.high = 0;
+    }
+    else if (bit_width < 128)
+    {
+        value.high &= ((u64)1 << (bit_width - 64)) - 1;
+    }
+
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL String8 string_format_u128_parts_radix(String8 buffer, StringFormatU128Parts value, u64 radix, bool upper)
+{
+    BUSTER_CHECK(radix == 2 || radix == 8 || radix == 10 || radix == 16);
+
+    u64 length = 0;
+    do
+    {
+        u64 digit = string_format_u128_parts_divide(&value, radix);
         char8 alpha_start = upper ? 'A' : 'a';
+        char8 character = (char8)(digit > 9 ? digit - 10 + alpha_start : digit + '0');
+        BUSTER_CHECK(length < buffer.length);
+        buffer.pointer[length] = character;
+        length += 1;
+    } while (!string_format_u128_parts_is_zero(value));
 
-        while (v != 0)
-        {
-            u64 digit = v % 16;
-            char8 ch = (char8)(digit > 9 ? (digit - 10 + alpha_start) : (digit + '0'));
-            BUSTER_CHECK(i < buffer.length);
-            buffer.pointer[i] = ch;
-            i += 1;
-            v = v / 16;
-        }
-
-        u64 length = i;
-
-        result = (String8){.pointer = buffer.pointer, .length = length};
-        string_reverse(result);
-    }
-
+    String8 result = (String8){.pointer = buffer.pointer, .length = length};
+    string_reverse(result);
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL String8 string_format_i64_decimal(String8 buffer, u64 value, bool treat_as_signed)
+BUSTER_GLOBAL_LOCAL u64 string_format_integer_max_width(u64 bit_width, StringFormatIntegerKind kind)
 {
-    String8 result = {0};
-
-    if (value == 0)
+    switch (kind)
     {
-        buffer.pointer[0] = '0';
-        result = (String8){buffer.pointer, 1};
-    }
-    else
-    {
-        u64 i = treat_as_signed;
-
-        buffer.pointer[0] = '-';
-        u64 v = value;
-
-        while (v != 0)
+        break;
+    case STRING_FORMAT_INTEGER_KIND_DECIMAL:
+        switch (bit_width)
         {
-            u64 digit = v % 10;
-            char8 ch = (char8)(digit + '0');
-            BUSTER_CHECK(i < buffer.length);
-            buffer.pointer[i] = ch;
-            i += 1;
-            v = v / 10;
+            break;
+        case 8:
+            return 3;
+        case 16:
+            return 5;
+        case 32:
+            return 10;
+        case 64:
+            return 20;
+        case 128:
+            return 39;
+        default:
+            BUSTER_UNREACHABLE();
         }
-
-        u64 length = i;
-
-        result = (String8){buffer.pointer + treat_as_signed, length - treat_as_signed};
-        string_reverse(result);
-        result.pointer -= treat_as_signed;
-        result.length += treat_as_signed;
+        break;
+    case STRING_FORMAT_INTEGER_KIND_BINARY:
+        return bit_width;
+    case STRING_FORMAT_INTEGER_KIND_OCTAL:
+        return (bit_width + 2) / 3;
+    case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_LOWER:
+    case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER:
+        return (bit_width + 3) / 4;
+    case STRING_FORMAT_INTEGER_KIND_COUNT:
+        BUSTER_UNREACHABLE();
     }
 
-    return result;
+    BUSTER_UNREACHABLE();
 }
 
-BUSTER_GLOBAL_LOCAL u64 string_format_s64_decimal_magnitude(s64 value)
+BUSTER_GLOBAL_LOCAL u64 string_format_integer_radix(StringFormatIntegerKind kind)
 {
-    u64 result = (u64)value;
-    if (value < 0)
+    switch (kind)
     {
-        result = 0 - result;
+        break;
+    case STRING_FORMAT_INTEGER_KIND_DECIMAL:
+        return 10;
+    case STRING_FORMAT_INTEGER_KIND_BINARY:
+        return 2;
+    case STRING_FORMAT_INTEGER_KIND_OCTAL:
+        return 8;
+    case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_LOWER:
+    case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER:
+        return 16;
+    case STRING_FORMAT_INTEGER_KIND_COUNT:
+        BUSTER_UNREACHABLE();
     }
-    return result;
+
+    BUSTER_UNREACHABLE();
 }
 
-BUSTER_GLOBAL_LOCAL String8 string_format_u64_octal(String8 buffer, u64 value)
+BUSTER_GLOBAL_LOCAL char8 string_format_integer_prefix_character(StringFormatIntegerKind kind)
 {
-    String8 result = {0};
-
-    if (value == 0)
+    switch (kind)
     {
-        buffer.pointer[0] = '0';
-        result = (String8){.pointer = buffer.pointer, .length = 1};
-    }
-    else
-    {
-        u64 i = 0;
-        u64 v = value;
-
-        while (v != 0)
-        {
-            u64 digit = v % 8;
-            char8 ch = (char8)(digit + '0');
-            BUSTER_CHECK(i < buffer.length);
-            buffer.pointer[i] = ch;
-            i += 1;
-            v = v / 8;
-        }
-
-        u64 length = i;
-
-        result = (String8){.pointer = buffer.pointer, .length = length};
-        string_reverse(result);
+        break;
+    case STRING_FORMAT_INTEGER_KIND_DECIMAL:
+        return 'd';
+    case STRING_FORMAT_INTEGER_KIND_BINARY:
+        return 'b';
+    case STRING_FORMAT_INTEGER_KIND_OCTAL:
+        return 'o';
+    case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_LOWER:
+    case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER:
+        return 'x';
+    case STRING_FORMAT_INTEGER_KIND_COUNT:
+        BUSTER_UNREACHABLE();
     }
 
-    return result;
+    BUSTER_UNREACHABLE();
 }
 
-BUSTER_GLOBAL_LOCAL String8 string_format_u64_binary(String8 buffer, u64 value)
+BUSTER_GLOBAL_LOCAL u64 string_format_integer_digit_group_size(StringFormatIntegerKind kind)
 {
-    String8 result = {0};
-
-    if (value == 0)
+    switch (kind)
     {
-        buffer.pointer[0] = '0';
-        result = (String8){.pointer = buffer.pointer, .length = 1};
-    }
-    else
-    {
-        u64 i = 0;
-        u64 v = value;
-
-        while (v != 0)
-        {
-            u64 digit = v % 2;
-            char8 ch = (char8)(digit + '0');
-            BUSTER_CHECK(i < buffer.length);
-            buffer.pointer[i] = ch;
-            i += 1;
-            v = v / 2;
-        }
-
-        u64 length = i;
-
-        result = (String8){.pointer = buffer.pointer, .length = length};
-        string_reverse(result);
+        break;
+    case STRING_FORMAT_INTEGER_KIND_DECIMAL:
+    case STRING_FORMAT_INTEGER_KIND_OCTAL:
+        return 3;
+    case STRING_FORMAT_INTEGER_KIND_BINARY:
+        return 8;
+    case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_LOWER:
+    case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER:
+        return 2;
+    case STRING_FORMAT_INTEGER_KIND_COUNT:
+        BUSTER_UNREACHABLE();
     }
 
-    return result;
+    BUSTER_UNREACHABLE();
+}
+
+BUSTER_GLOBAL_LOCAL void string_append_integer_digits(Arena* arena, String8 digits, StringFormatIntegerKind kind, bool digit_group)
+{
+    u64 group_size = string_format_integer_digit_group_size(kind);
+    bool separator_characters = digit_group && digits.length > group_size;
+
+    if (!separator_characters)
+    {
+        arena_append_string(arena, digits);
+        return;
+    }
+
+    char8 separator = kind == STRING_FORMAT_INTEGER_KIND_DECIMAL ? '.' : '_';
+    u64 remainder = digits.length % group_size;
+    if (remainder)
+    {
+        arena_append_string(arena, (String8){.pointer = digits.pointer, .length = remainder});
+        *arena_allocate(arena, char8, 1) = separator;
+    }
+
+    for (u64 source_index = remainder; source_index < digits.length - group_size; source_index += group_size)
+    {
+        arena_append_string(arena, (String8){.pointer = digits.pointer + source_index, .length = group_size});
+        *arena_allocate(arena, char8, 1) = separator;
+    }
+
+    arena_append_string(arena, (String8){.pointer = digits.pointer + digits.length - group_size, .length = group_size});
+}
+
+typedef struct StringFormatIntegerOptions StringFormatIntegerOptions;
+struct StringFormatIntegerOptions
+{
+    StringFormatIntegerKind kind;
+    bool prefix;
+    bool digit_group;
+    bool width_natural_extension;
+    u64 width;
+    char8 width_character;
+};
+
+BUSTER_GLOBAL_LOCAL void string_append_formatted_integer(Arena* arena, StringFormatU128Parts value, u64 bit_width, bool signed_value, bool negative,
+                                                         StringFormatIntegerOptions options)
+{
+    StringFormatU128Parts format_value = value;
+    bool decimal_negative = signed_value && negative && options.kind == STRING_FORMAT_INTEGER_KIND_DECIMAL;
+    if (options.kind != STRING_FORMAT_INTEGER_KIND_DECIMAL)
+    {
+        format_value = string_format_u128_parts_mask(format_value, bit_width);
+    }
+    else if (decimal_negative)
+    {
+        format_value = string_format_u128_parts_negate(format_value);
+    }
+
+    char8 integer_format_buffer[BUSTER_FORMAT_INTEGER_BUFFER_LENGTH];
+    String8 number_buffer = BUSTER_ARRAY_TO_SLICE(integer_format_buffer);
+    String8 digit_buffer = decimal_negative ? (String8){.pointer = number_buffer.pointer + 1, .length = number_buffer.length - 1} : number_buffer;
+    String8 digits = string_format_u128_parts_radix(digit_buffer, format_value, string_format_integer_radix(options.kind),
+                                                    options.kind == STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER);
+    String8 sign = {0};
+    if (decimal_negative)
+    {
+        integer_format_buffer[0] = '-';
+        sign = (String8){.pointer = integer_format_buffer, .length = 1};
+    }
+
+    u64 number_length = sign.length + digits.length;
+    u64 maximum_width = string_format_integer_max_width(bit_width, options.kind);
+    u64 width = options.width ? (options.width_natural_extension ? maximum_width : options.width) : 0;
+    u64 width_character_count = width > number_length ? width - number_length : 0;
+
+    if (options.prefix)
+    {
+        char8 prefix[] = {'0', string_format_integer_prefix_character(options.kind)};
+        arena_append_string(arena, (String8)BUSTER_ARRAY_TO_SLICE(prefix));
+    }
+
+    if (sign.length)
+    {
+        arena_append_string(arena, sign);
+    }
+    if (width_character_count)
+    {
+        string_append_repeated_code_unit(arena, options.width_character, width_character_count);
+    }
+    string_append_integer_digits(arena, digits, options.kind, options.digit_group);
 }
 
 BUSTER_GLOBAL_LOCAL void arena_append_string(Arena* arena, String8 string)
@@ -705,695 +882,478 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 
     while (format_index < format.length)
     {
-        bool escaped_left_brace = format_index + 1 < format.length && format.pointer[format_index] == '{' && format.pointer[format_index + 1] == '{';
-        bool escaped_right_brace = format_index + 1 < format.length && format.pointer[format_index] == '}' && format.pointer[format_index + 1] == '}';
-
-        if (escaped_left_brace || escaped_right_brace)
+        char8 format_character = format.pointer[format_index];
+        if (format_character == '{' && format_index + 1 < format.length && format.pointer[format_index + 1] == '{')
         {
-            *arena_allocate(arena, char8, 1) = format.pointer[format_index];
+            *arena_allocate(arena, char8, 1) = '{';
             format_index += 2;
         }
-        else if (format.pointer[format_index] != '{')
+        else if (format_character == '}')
         {
-            *arena_allocate(arena, char8, 1) = format.pointer[format_index];
+            if (format_index + 1 < format.length && format.pointer[format_index + 1] == '}')
+            {
+                *arena_allocate(arena, char8, 1) = '}';
+                format_index += 2;
+            }
+            else
+            {
+                *arena_allocate(arena, char8, 1) = '}';
+                format_index += 1;
+            }
+        }
+        else if (format_character != '{')
+        {
+            *arena_allocate(arena, char8, 1) = format_character;
             format_index += 1;
         }
         else
         {
-            // '{' is found
-            String8 iteration_left_format_string = string_slice(format, format_index, format.length);
-            String8 iteration_left_format_string_plus_one = string_slice(iteration_left_format_string, 1, iteration_left_format_string.length);
-            u64 left_brace_index = string_first_code_unit(iteration_left_format_string_plus_one, '{');
-            u64 right_brace_index = string_first_code_unit(iteration_left_format_string, '}');
-
-            bool has_right_brace = right_brace_index != BUSTER_STRING_NO_MATCH;
-            bool nested_left_brace_before_right_brace = left_brace_index != BUSTER_STRING_NO_MATCH && right_brace_index > left_brace_index;
-
-            if (has_right_brace && !nested_left_brace_before_right_brace)
+            u64 right_brace_index = format_index + 1;
+            while (right_brace_index < format.length && format.pointer[right_brace_index] != '}')
             {
-                String8 whole_format_string = string_slice(iteration_left_format_string, 0, right_brace_index + 1);
-                format_index += whole_format_string.length;
-
-                typedef enum FormatTypeId
+                if (format.pointer[right_brace_index] == '{')
                 {
-                    FORMAT_TYPE_STRING_SLICE,
-                    FORMAT_TYPE_STRING_OS_LIST,
-                    FORMAT_TYPE_STRING8,
-                    FORMAT_TYPE_STRING16,
-                    FORMAT_TYPE_CHAR_OS,
-                    FORMAT_TYPE_CHAR8,
-                    FORMAT_TYPE_UNSIGNED_INTEGER_8,
-                    FORMAT_TYPE_UNSIGNED_INTEGER_16,
-                    FORMAT_TYPE_UNSIGNED_INTEGER_32,
-                    FORMAT_TYPE_UNSIGNED_INTEGER_64,
-                    FORMAT_TYPE_UNSIGNED_INTEGER_128,
-                    FORMAT_TYPE_SIGNED_INTEGER_8,
-                    FORMAT_TYPE_SIGNED_INTEGER_16,
-                    FORMAT_TYPE_SIGNED_INTEGER_32,
-                    FORMAT_TYPE_SIGNED_INTEGER_64,
-                    FORMAT_TYPE_SIGNED_INTEGER_128,
-                    FORMAT_TYPE_OS_ERROR,
-                    FORMAT_TYPE_COUNT,
-                } FormatTypeId;
+                    os_fail();
+                }
+                right_brace_index += 1;
+            }
 
-                String8 possible_format_strings[] = {
-                    [FORMAT_TYPE_STRING_SLICE] = S8("[]S8"),
-                    [FORMAT_TYPE_STRING_OS_LIST] = S8("SOsL"),
-                    [FORMAT_TYPE_STRING8] = S8("S8"),
-                    [FORMAT_TYPE_STRING16] = S8("S16"),
-                    [FORMAT_TYPE_CHAR_OS] = S8("CharOs"),
-                    [FORMAT_TYPE_CHAR8] = S8("char8"),
-                    [FORMAT_TYPE_UNSIGNED_INTEGER_8] = S8("u8"),
-                    [FORMAT_TYPE_UNSIGNED_INTEGER_16] = S8("u16"),
-                    [FORMAT_TYPE_UNSIGNED_INTEGER_32] = S8("u32"),
-                    [FORMAT_TYPE_UNSIGNED_INTEGER_64] = S8("u64"),
-                    [FORMAT_TYPE_UNSIGNED_INTEGER_128] = S8("u128"),
-                    [FORMAT_TYPE_SIGNED_INTEGER_8] = S8("s8"),
-                    [FORMAT_TYPE_SIGNED_INTEGER_16] = S8("s16"),
-                    [FORMAT_TYPE_SIGNED_INTEGER_32] = S8("s32"),
-                    [FORMAT_TYPE_SIGNED_INTEGER_64] = S8("s64"),
-                    [FORMAT_TYPE_SIGNED_INTEGER_128] = S8("s128"),
-                    [FORMAT_TYPE_OS_ERROR] = S8("EOs"),
-                };
+            if (right_brace_index >= format.length)
+            {
+                os_fail();
+            }
 
-                BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(possible_format_strings) == FORMAT_TYPE_COUNT);
+            String8 format_body = string_slice(format, format_index + 1, right_brace_index);
 
-                u64 first_format = string_first_code_unit(whole_format_string, ':');
-                bool there_is_format_modifiers = first_format != BUSTER_STRING_NO_MATCH;
-                u64 this_format_string_length = there_is_format_modifiers ? first_format : whole_format_string.length - 1; // Avoid final right brace
-                String8 this_format_string = string_slice(whole_format_string,
-                                                          1, // Avoid starting left brace
-                                                          this_format_string_length);
+            typedef enum FormatTypeId
+            {
+                FORMAT_TYPE_STRING_SLICE,
+                FORMAT_TYPE_STRING_OS_LIST,
+                FORMAT_TYPE_STRING8,
+                FORMAT_TYPE_STRING16,
+                FORMAT_TYPE_CHAR_OS,
+                FORMAT_TYPE_CHAR8,
+                FORMAT_TYPE_UNSIGNED_INTEGER_8,
+                FORMAT_TYPE_UNSIGNED_INTEGER_16,
+                FORMAT_TYPE_UNSIGNED_INTEGER_32,
+                FORMAT_TYPE_UNSIGNED_INTEGER_64,
+                FORMAT_TYPE_UNSIGNED_INTEGER_128,
+                FORMAT_TYPE_SIGNED_INTEGER_8,
+                FORMAT_TYPE_SIGNED_INTEGER_16,
+                FORMAT_TYPE_SIGNED_INTEGER_32,
+                FORMAT_TYPE_SIGNED_INTEGER_64,
+                FORMAT_TYPE_SIGNED_INTEGER_128,
+                FORMAT_TYPE_OS_ERROR,
+                FORMAT_TYPE_COUNT,
+            } FormatTypeId;
 
-                u64 format_string_i;
-                for (format_string_i = 0; format_string_i < BUSTER_ARRAY_LENGTH(possible_format_strings); format_string_i += 1)
+            String8 possible_format_strings[] = {
+                [FORMAT_TYPE_STRING_SLICE] = S8("[]S8"),
+                [FORMAT_TYPE_STRING_OS_LIST] = S8("SOsL"),
+                [FORMAT_TYPE_STRING8] = S8("S8"),
+                [FORMAT_TYPE_STRING16] = S8("S16"),
+                [FORMAT_TYPE_CHAR_OS] = S8("CharOs"),
+                [FORMAT_TYPE_CHAR8] = S8("char8"),
+                [FORMAT_TYPE_UNSIGNED_INTEGER_8] = S8("u8"),
+                [FORMAT_TYPE_UNSIGNED_INTEGER_16] = S8("u16"),
+                [FORMAT_TYPE_UNSIGNED_INTEGER_32] = S8("u32"),
+                [FORMAT_TYPE_UNSIGNED_INTEGER_64] = S8("u64"),
+                [FORMAT_TYPE_UNSIGNED_INTEGER_128] = S8("u128"),
+                [FORMAT_TYPE_SIGNED_INTEGER_8] = S8("s8"),
+                [FORMAT_TYPE_SIGNED_INTEGER_16] = S8("s16"),
+                [FORMAT_TYPE_SIGNED_INTEGER_32] = S8("s32"),
+                [FORMAT_TYPE_SIGNED_INTEGER_64] = S8("s64"),
+                [FORMAT_TYPE_SIGNED_INTEGER_128] = S8("s128"),
+                [FORMAT_TYPE_OS_ERROR] = S8("EOs"),
+            };
+            BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(possible_format_strings) == FORMAT_TYPE_COUNT);
+
+            u64 colon_index = BUSTER_STRING_NO_MATCH;
+            for (u64 body_index = 0; body_index < format_body.length; body_index += 1)
+            {
+                if (format_body.pointer[body_index] == ':')
                 {
-                    String8 possible_format_string = possible_format_strings[format_string_i];
-                    if (string_equal(this_format_string, possible_format_string))
-                    {
-                        break;
-                    }
+                    colon_index = body_index;
+                    break;
+                }
+            }
+
+            bool has_modifiers = colon_index != BUSTER_STRING_NO_MATCH;
+            u64 type_name_length = has_modifiers ? colon_index : format_body.length;
+            String8 type_name = string_slice(format_body, 0, type_name_length);
+            u64 format_string_i = 0;
+            while (format_string_i < BUSTER_ARRAY_LENGTH(possible_format_strings) &&
+                   !string_equal(type_name, possible_format_strings[format_string_i]))
+            {
+                format_string_i += 1;
+            }
+
+            if (format_string_i >= BUSTER_ARRAY_LENGTH(possible_format_strings))
+            {
+                os_fail();
+            }
+
+            FormatTypeId format_type_id = (FormatTypeId)format_string_i;
+            bool integer_type = (format_type_id >= FORMAT_TYPE_UNSIGNED_INTEGER_8 && format_type_id <= FORMAT_TYPE_SIGNED_INTEGER_128);
+            bool prefix = false;
+            bool prefix_set = false;
+            bool digit_group = false;
+            u64 width = 0;
+            char8 width_character = '0';
+            bool width_natural_extension = false;
+            StringFormatIntegerKind integer_format_kind = STRING_FORMAT_INTEGER_KIND_DECIMAL;
+            bool integer_format_set = false;
+
+            if (has_modifiers)
+            {
+                u64 modifier_index = colon_index + 1;
+                if (modifier_index >= format_body.length)
+                {
+                    os_fail();
                 }
 
-                typedef enum IntegerFormatKind
+                while (modifier_index < format_body.length)
                 {
-                    INTEGER_FORMAT_KIND_DECIMAL,
-                    INTEGER_FORMAT_KIND_BINARY,
-                    INTEGER_FORMAT_KIND_OCTAL,
-                    INTEGER_FORMAT_KIND_HEXADECIMAL_LOWER,
-                    INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER,
-                    INTEGER_FORMAT_KIND_COUNT,
-                } IntegerFormatKind;
-
-                typedef enum IntegerFormatSpecifier
-                {
-                    INTEGER_FORMAT_SPECIFIER_D,
-                    INTEGER_FORMAT_SPECIFIER_X_UPPER,
-                    INTEGER_FORMAT_SPECIFIER_X_LOWER,
-                    INTEGER_FORMAT_SPECIFIER_O,
-                    INTEGER_FORMAT_SPECIFIER_B,
-                    INTEGER_FORMAT_SPECIFIER_WIDTH,
-                    INTEGER_FORMAT_SPECIFIER_NO_PREFIX,
-                    INTEGER_FORMAT_SPECIFIER_DIGIT_GROUP,
-                    INTEGER_FORMAT_SPECIFIER_COUNT,
-                } IntegerFormatSpecifier;
-
-                FormatTypeId format_type_id = (FormatTypeId)format_string_i;
-                bool prefix = false;
-                bool prefix_set = false;
-                bool digit_group = false;
-                u64 width = 0;
-                char8 width_character = '0';
-                bool width_natural_extension = false;
-#define BUSTER_FORMAT_INTEGER_MAX_WIDTH (u64)(64)
-
-                IntegerFormatKind integer_format_kind = INTEGER_FORMAT_KIND_DECIMAL;
-                bool integer_format_set = false;
-
-                if (there_is_format_modifiers)
-                {
-                    String8 possible_format_specifier_strings[] = {
-                        [INTEGER_FORMAT_SPECIFIER_D] = S8("d"),
-                        [INTEGER_FORMAT_SPECIFIER_X_UPPER] = S8("X"),
-                        [INTEGER_FORMAT_SPECIFIER_X_LOWER] = S8("x"),
-                        [INTEGER_FORMAT_SPECIFIER_O] = S8("o"),
-                        [INTEGER_FORMAT_SPECIFIER_B] = S8("b"),
-                        [INTEGER_FORMAT_SPECIFIER_WIDTH] = S8("width"),
-                        [INTEGER_FORMAT_SPECIFIER_NO_PREFIX] = S8("no_prefix"),
-                        [INTEGER_FORMAT_SPECIFIER_DIGIT_GROUP] = S8("digit_group"),
-                    };
-                    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(possible_format_specifier_strings) == (u64)INTEGER_FORMAT_SPECIFIER_COUNT);
-
-                    String8 whole_format_specifiers_string = string_slice(whole_format_string, first_format + 1, whole_format_string.length - 1);
-                    BUSTER_CHECK(whole_format_specifiers_string.length <= whole_format_string.length);
-                    u64 format_specifier_string_i = 0;
-
-                    while (format_specifier_string_i < whole_format_specifiers_string.length &&
-                           whole_format_specifiers_string.pointer[format_specifier_string_i] != '}')
+                    u64 name_start = modifier_index;
+                    while (modifier_index < format_body.length && format_body.pointer[modifier_index] != ',' &&
+                           format_body.pointer[modifier_index] != '=')
                     {
-                        String8 iteration_left_format_specifiers_string = BUSTER_SLICE_START(whole_format_specifiers_string, format_specifier_string_i);
-                        BUSTER_CHECK(iteration_left_format_specifiers_string.length <= whole_format_specifiers_string.length);
-                        u64 equal_index = string_first_code_unit(iteration_left_format_specifiers_string, '=');
-                        u64 comma_index = string_first_code_unit(iteration_left_format_specifiers_string, ',');
-                        u64 format_specifier_name_end = BUSTER_MIN(equal_index, comma_index);
-                        bool string_left = format_specifier_name_end == BUSTER_STRING_NO_MATCH;
-                        format_specifier_name_end = string_left ? iteration_left_format_specifiers_string.length : format_specifier_name_end;
-                        char8 next_character = string_left ? 0 : (equal_index < comma_index ? '=' : ',');
+                        modifier_index += 1;
+                    }
 
-                        String8 format_name = string_slice(iteration_left_format_specifiers_string, 0, format_specifier_name_end);
-                        format_specifier_string_i += format_name.length + !string_left;
-                        String8 left_format_specifiers_string = BUSTER_SLICE_START(iteration_left_format_specifiers_string, format_name.length + !string_left);
-                        BUSTER_CHECK(left_format_specifiers_string.length <= iteration_left_format_specifiers_string.length);
+                    String8 format_name = string_slice(format_body, name_start, modifier_index);
+                    bool has_equal = modifier_index < format_body.length && format_body.pointer[modifier_index] == '=';
 
-                        IntegerFormatSpecifier format_i;
-                        for (format_i = 0; format_i < INTEGER_FORMAT_SPECIFIER_COUNT; format_i += 1)
+                    if (string_equal(format_name, S8("width")))
+                    {
+                        if (!has_equal)
                         {
-                            String8 candidate_format_specifier = possible_format_specifier_strings[(u64)format_i];
-                            if (string_equal(format_name, candidate_format_specifier))
+                            os_fail();
+                        }
+
+                        modifier_index += 1;
+                        if (modifier_index >= format_body.length || format_body.pointer[modifier_index] != '[')
+                        {
+                            os_fail();
+                        }
+                        modifier_index += 1;
+
+                        if (modifier_index >= format_body.length || (format_body.pointer[modifier_index] != '0' && format_body.pointer[modifier_index] != ' '))
+                        {
+                            os_fail();
+                        }
+                        width_character = format_body.pointer[modifier_index];
+                        modifier_index += 1;
+
+                        if (modifier_index >= format_body.length || format_body.pointer[modifier_index] != ',')
+                        {
+                            os_fail();
+                        }
+                        modifier_index += 1;
+
+                        u64 width_start = modifier_index;
+                        while (modifier_index < format_body.length && format_body.pointer[modifier_index] != ']')
+                        {
+                            modifier_index += 1;
+                        }
+                        if (modifier_index >= format_body.length)
+                        {
+                            os_fail();
+                        }
+
+                        String8 width_string = string_slice(format_body, width_start, modifier_index);
+                        if (width_string.length == 1 && width_string.pointer[0] == 'x')
+                        {
+                            width_natural_extension = true;
+                            width = BUSTER_FORMAT_INTEGER_MAX_WIDTH;
+                        }
+                        else
+                        {
+                            IntegerParsingU64 width_parsing = string_parse_u64_decimal(width_string.pointer);
+                            if (width_string.length == 0 || width_parsing.length != width_string.length || width_parsing.value == 0)
                             {
-                                break;
+                                os_fail();
+                            }
+                            width = width_parsing.value;
+                        }
+
+                        modifier_index += 1;
+                        if (modifier_index < format_body.length)
+                        {
+                            if (format_body.pointer[modifier_index] != ',')
+                            {
+                                os_fail();
+                            }
+                            modifier_index += 1;
+                            if (modifier_index >= format_body.length)
+                            {
+                                os_fail();
                             }
                         }
+                    }
+                    else
+                    {
+                        if (has_equal || format_name.length == 0)
+                        {
+                            os_fail();
+                        }
 
-                        IntegerFormatSpecifier format_specifier = (IntegerFormatSpecifier)format_i;
-                        switch (format_specifier)
+                        if (string_equal(format_name, S8("d")))
                         {
-                            break;
-                        case INTEGER_FORMAT_SPECIFIER_D:
-                        {
-                            integer_format_kind = INTEGER_FORMAT_KIND_DECIMAL;
+                            integer_format_kind = STRING_FORMAT_INTEGER_KIND_DECIMAL;
                             integer_format_set = true;
                         }
-                        break;
-                        case INTEGER_FORMAT_SPECIFIER_X_UPPER:
+                        else if (string_equal(format_name, S8("X")))
                         {
-                            integer_format_kind = INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER;
+                            integer_format_kind = STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER;
                             integer_format_set = true;
                         }
-                        break;
-                        case INTEGER_FORMAT_SPECIFIER_X_LOWER:
+                        else if (string_equal(format_name, S8("x")))
                         {
-                            integer_format_kind = INTEGER_FORMAT_KIND_HEXADECIMAL_LOWER;
+                            integer_format_kind = STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_LOWER;
                             integer_format_set = true;
                         }
-                        break;
-                        case INTEGER_FORMAT_SPECIFIER_O:
+                        else if (string_equal(format_name, S8("o")))
                         {
-                            integer_format_kind = INTEGER_FORMAT_KIND_OCTAL;
+                            integer_format_kind = STRING_FORMAT_INTEGER_KIND_OCTAL;
                             integer_format_set = true;
                         }
-                        break;
-                        case INTEGER_FORMAT_SPECIFIER_B:
+                        else if (string_equal(format_name, S8("b")))
                         {
-                            integer_format_kind = INTEGER_FORMAT_KIND_BINARY;
+                            integer_format_kind = STRING_FORMAT_INTEGER_KIND_BINARY;
                             integer_format_set = true;
                         }
-                        break;
-                        case INTEGER_FORMAT_SPECIFIER_WIDTH:
-                        {
-                            if (next_character == '=')
-                            {
-                                if (left_format_specifiers_string.length >= 3 && left_format_specifiers_string.pointer[0] == '[')
-                                {
-                                    width_character = left_format_specifiers_string.pointer[1];
-
-                                    if (left_format_specifiers_string.pointer[2] == ',')
-                                    {
-                                        u64 right_bracket_index = string_first_code_unit(left_format_specifiers_string, ']');
-
-                                        if (right_bracket_index != BUSTER_STRING_NO_MATCH)
-                                        {
-                                            u64 width_start = 3;
-                                            String8 width_count_string = string_slice(left_format_specifiers_string, width_start, right_bracket_index);
-                                            u64 character_to_advance_count = right_bracket_index + 1;
-
-                                            bool success = false;
-
-                                            if (width_count_string.length == 1 && width_count_string.pointer[0] == 'x')
-                                            {
-                                                width_natural_extension = true;
-                                                success = true;
-                                                width = BUSTER_FORMAT_INTEGER_MAX_WIDTH;
-                                            }
-                                            else
-                                            {
-                                                IntegerParsingU64 width_count_parsing = string_parse_u64_decimal(width_count_string.pointer);
-
-                                                if (width_count_parsing.length == width_count_string.length && width_count_parsing.value != 0)
-                                                {
-                                                    width = width_count_parsing.value;
-
-                                                    bool more_characters = right_bracket_index + 1 < left_format_specifiers_string.length;
-                                                    if (more_characters)
-                                                    {
-                                                        char8 next_ch = left_format_specifiers_string.pointer[character_to_advance_count];
-                                                        if (next_ch == ',')
-                                                        {
-                                                            character_to_advance_count += 1;
-                                                            success = true;
-                                                        }
-                                                        else
-                                                        {
-                                                            os_fail();
-                                                        }
-                                                    }
-                                                    else
-                                                    {
-                                                        success = true;
-                                                    }
-
-                                                    if (!success)
-                                                    {
-                                                        os_fail();
-                                                    }
-                                                }
-                                            }
-
-                                            if (success)
-                                            {
-                                                format_specifier_string_i += character_to_advance_count;
-                                            }
-                                            else
-                                            {
-                                                os_fail();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        break;
-                        case INTEGER_FORMAT_SPECIFIER_NO_PREFIX:
+                        else if (string_equal(format_name, S8("no_prefix")))
                         {
                             prefix = false;
                             prefix_set = true;
                         }
-                        break;
-                        case INTEGER_FORMAT_SPECIFIER_DIGIT_GROUP:
+                        else if (string_equal(format_name, S8("digit_group")))
                         {
                             digit_group = true;
                         }
-                        break;
-                        case INTEGER_FORMAT_SPECIFIER_COUNT:
+                        else
                         {
+                            os_fail();
                         }
+
+                        if (modifier_index < format_body.length)
+                        {
+                            if (format_body.pointer[modifier_index] != ',')
+                            {
+                                os_fail();
+                            }
+                            modifier_index += 1;
+                            if (modifier_index >= format_body.length)
+                            {
+                                os_fail();
+                            }
                         }
-                    }
-
-                    if (!prefix_set && integer_format_set)
-                    {
-                        prefix = true;
-                    }
-
-                    if (!prefix_set && width && width_character == ' ')
-                    {
-                        prefix = false;
                     }
                 }
 
-                if (width > BUSTER_FORMAT_INTEGER_MAX_WIDTH)
+                if (!integer_type)
                 {
-                    width = BUSTER_FORMAT_INTEGER_MAX_WIDTH;
+                    os_fail();
                 }
+
+                if (!prefix_set && integer_format_set)
+                {
+                    prefix = true;
+                }
+                if (!prefix_set && width && width_character == ' ')
+                {
+                    prefix = false;
+                }
+            }
+
+            if (width > BUSTER_FORMAT_INTEGER_MAX_WIDTH)
+            {
+                width = BUSTER_FORMAT_INTEGER_MAX_WIDTH;
+            }
+
+            format_index = right_brace_index + 1;
+
+            switch (format_type_id)
+            {
+                break;
+            case FORMAT_TYPE_STRING_SLICE:
+            {
+                SliceString8 strings = va_arg(variable_arguments, SliceString8);
+                for (u64 string_index = 0; string_index < strings.length; string_index += 1)
+                {
+                    if (string_index != 0)
+                    {
+                        *arena_allocate(arena, char8, 1) = ' ';
+                    }
+                    arena_append_string(arena, strings.pointer[string_index]);
+                }
+            }
+            break;
+            case FORMAT_TYPE_STRING_OS_LIST:
+            {
+                StringOsList string_os_list = va_arg(variable_arguments, StringOsList);
+                TemporalArena list_scratch = scratch_begin(&arena, 1);
+#if defined(_WIN32)
+                SliceString8 strings = slice_string_from_windows_string_list(list_scratch.arena, string_os_list);
+#else
+                SliceString8 strings = slice_string_from_posix_string_list(list_scratch.arena, string_os_list);
+#endif
+                for (u64 string_index = 0; string_index < strings.length; string_index += 1)
+                {
+                    if (string_index != 0)
+                    {
+                        *arena_allocate(arena, char8, 1) = ' ';
+                    }
+                    arena_append_string(arena, strings.pointer[string_index]);
+                }
+                scratch_end(list_scratch);
+            }
+            break;
+            case FORMAT_TYPE_STRING8:
+            {
+                String8 string = va_arg(variable_arguments, String8);
+                arena_append_string(arena, string);
+            }
+            break;
+            case FORMAT_TYPE_STRING16:
+            {
+                String16 string16 = va_arg(variable_arguments, String16);
+                string8_from_string16(arena, string16, false);
+            }
+            break;
+            case FORMAT_TYPE_CHAR_OS:
+            {
+#if defined(_WIN32)
+                u32 code_point = (u32)(u16)va_arg(variable_arguments, int);
+                Utf8Result encoding = utf8_from_code_point(code_point);
+                arena_append_string(arena, (String8){.pointer = encoding.buffer, .length = encoding.count});
+#else
+                char8 character = (char8)va_arg(variable_arguments, int);
+                *arena_allocate(arena, char8, 1) = character;
+#endif
+            }
+            break;
+            case FORMAT_TYPE_CHAR8:
+            {
+                char8 character = (char8)va_arg(variable_arguments, int);
+                *arena_allocate(arena, char8, 1) = character;
+            }
+            break;
+            case FORMAT_TYPE_UNSIGNED_INTEGER_8:
+            case FORMAT_TYPE_UNSIGNED_INTEGER_16:
+            case FORMAT_TYPE_UNSIGNED_INTEGER_32:
+            case FORMAT_TYPE_UNSIGNED_INTEGER_64:
+            case FORMAT_TYPE_UNSIGNED_INTEGER_128:
+            case FORMAT_TYPE_SIGNED_INTEGER_8:
+            case FORMAT_TYPE_SIGNED_INTEGER_16:
+            case FORMAT_TYPE_SIGNED_INTEGER_32:
+            case FORMAT_TYPE_SIGNED_INTEGER_64:
+            case FORMAT_TYPE_SIGNED_INTEGER_128:
+            {
+                StringFormatU128Parts value = {0};
+                u64 bit_width = 0;
+                bool signed_value = false;
+                bool negative = false;
 
                 switch (format_type_id)
                 {
                     break;
-                case FORMAT_TYPE_STRING_SLICE:
-                {
-                    SliceString8 strings = va_arg(variable_arguments, SliceString8);
-                    if (strings.length)
-                    {
-                        for (u64 i = 0; i < strings.length; i += 1)
-                        {
-                            String8 string = strings.pointer[i];
-                            arena_append_string(arena, string);
-                            *arena_allocate(arena, char8, 1) = ' ';
-                        }
-
-                        arena->position -= 1;
-                    }
-                }
-                break;
-                case FORMAT_TYPE_STRING_OS_LIST:
-                {
-                    BUSTER_TODO();
-                    // StringOsList string_os_list = va_arg(variable_arguments, StringOsList);
-                    // StringOsListIterator it = string_os_list_iterator_initialize(string_os_list);
-                    //
-                    // StringOs string_os;
-                    //
-                    // it = string_os_list_iterator_initialize(string_os_list);
-                    // while ((string_os = string_os_list_iterator_next(&it)).pointer)
-                    // {
-                    //     string8_duplicate_from_string_os(arena, string_os, false);
-                    //     *arena_allocate(arena, char8, 1) = ' ';
-                    // }
-                    //
-                    // // Remove trailing space
-                    // arena->position -= 1;
-                }
-                // break; case FORMAT_TYPE_STRING_OS:
-                // {
-                //     BUSTER_TODO();
-                //     // StringOs string = va_arg(variable_arguments, StringOs);
-                //     // string8_duplicate_from_string_os(arena, string, false);
-                // }
-                break;
-                case FORMAT_TYPE_STRING8:
-                {
-                    String8 string = va_arg(variable_arguments, String8);
-                    arena_append_string(arena, string);
-                }
-                break;
-                case FORMAT_TYPE_STRING16:
-                {
-                    String16 string16 = va_arg(variable_arguments, String16);
-                    BUSTER_UNUSED(string16);
-                    BUSTER_TODO();
-                    // string_append_slice_different<Char, char16>(arena, string16);
-                }
-                break;
-                case FORMAT_TYPE_CHAR_OS:
-                {
-                    CharOs os_char = (CharOs)va_arg(variable_arguments, int);
-                    *arena_allocate(arena, char8, 1) = (char8)os_char;
-                }
-                break;
-                case FORMAT_TYPE_CHAR8:
-                {
-                    char8 ch = (char8)va_arg(variable_arguments, int);
-                    *arena_allocate(arena, char8, 1) = ch;
-                }
-                break;
                 case FORMAT_TYPE_UNSIGNED_INTEGER_8:
+                    value.low = (u8)va_arg(variable_arguments, int);
+                    bit_width = 8;
+                    break;
                 case FORMAT_TYPE_UNSIGNED_INTEGER_16:
+                    value.low = (u16)va_arg(variable_arguments, int);
+                    bit_width = 16;
+                    break;
                 case FORMAT_TYPE_UNSIGNED_INTEGER_32:
+                    value.low = va_arg(variable_arguments, u32);
+                    bit_width = 32;
+                    break;
                 case FORMAT_TYPE_UNSIGNED_INTEGER_64:
+                    value.low = va_arg(variable_arguments, u64);
+                    bit_width = 64;
+                    break;
+                case FORMAT_TYPE_UNSIGNED_INTEGER_128:
                 {
-                    prefix = prefix && integer_format_kind != INTEGER_FORMAT_KIND_COUNT;
-
-                    char8 prefix_second_character;
-                    switch (integer_format_kind)
-                    {
-                        break;
-                    case INTEGER_FORMAT_KIND_DECIMAL:
-                        prefix_second_character = 'd';
-                        break;
-                    case INTEGER_FORMAT_KIND_BINARY:
-                        prefix_second_character = 'b';
-                        break;
-                    case INTEGER_FORMAT_KIND_OCTAL:
-                        prefix_second_character = 'o';
-                        break;
-                    case INTEGER_FORMAT_KIND_HEXADECIMAL_LOWER:
-                    case INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER:
-                        prefix_second_character = 'x';
-                        break;
-                    case INTEGER_FORMAT_KIND_COUNT:
-                        BUSTER_UNREACHABLE();
-                    }
-
-                    char8 prefix_buffer[] = {
-                        '0',
-                        prefix_second_character,
-                    };
-
-                    if (integer_format_kind == INTEGER_FORMAT_KIND_COUNT)
-                    {
-                        integer_format_kind = INTEGER_FORMAT_KIND_DECIMAL;
-                    }
-
-                    u64 value;
-                    u64 value_size;
-                    switch (format_type_id)
-                    {
-                        break;
-                    case FORMAT_TYPE_UNSIGNED_INTEGER_8:
-                    {
-                        value = (u8)va_arg(variable_arguments, u32);
-                        value_size = sizeof(u8);
-                    }
-                    break;
-                    case FORMAT_TYPE_UNSIGNED_INTEGER_16:
-                    {
-                        value = (u16)va_arg(variable_arguments, u32);
-                        value_size = sizeof(u16);
-                    }
-                    break;
-                    case FORMAT_TYPE_UNSIGNED_INTEGER_32:
-                    {
-                        value = va_arg(variable_arguments, u32);
-                        value_size = sizeof(u32);
-                    }
-                    break;
-                    case FORMAT_TYPE_UNSIGNED_INTEGER_64:
-                    {
-                        value = va_arg(variable_arguments, u64);
-                        value_size = sizeof(u64);
-                    }
-                    break;
-                    default:
-                        BUSTER_UNREACHABLE();
-                    }
-
-                    // let prefix_character_count = (u64)prefix << 1;
-                    char8 integer_format_buffer[(sizeof(u64) * 8) + BUSTER_FORMAT_INTEGER_MAX_WIDTH + 2];
-                    String8 number_string_buffer = BUSTER_ARRAY_TO_SLICE(integer_format_buffer);
-
-                    String8 format_result;
-
-                    switch (integer_format_kind)
-                    {
-                        break;
-                    case INTEGER_FORMAT_KIND_DECIMAL:
-                        format_result = string_format_i64_decimal(number_string_buffer, value, false);
-                        break;
-                    case INTEGER_FORMAT_KIND_BINARY:
-                        format_result = string_format_u64_binary(number_string_buffer, value);
-                        break;
-                    case INTEGER_FORMAT_KIND_OCTAL:
-                        format_result = string_format_u64_octal(number_string_buffer, value);
-                        break;
-                    case INTEGER_FORMAT_KIND_HEXADECIMAL_LOWER:
-                    case INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER:
-                        format_result =
-                            string_format_u64_hexadecimal(number_string_buffer, value, integer_format_kind == INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER);
-                        break;
-                    case INTEGER_FORMAT_KIND_COUNT:
-                        BUSTER_UNREACHABLE();
-                    }
-
-                    number_string_buffer.length = format_result.length;
-
-                    u64 integer_max_width = 0;
-
-                    u64 digit_group_character_count;
-
-                    switch (integer_format_kind)
-                    {
-                        break;
-                    case INTEGER_FORMAT_KIND_DECIMAL:
-                    {
-                        switch (format_type_id)
-                        {
-                            break;
-                        case FORMAT_TYPE_UNSIGNED_INTEGER_8:
-                            integer_max_width = 3;
-                            break;
-                        case FORMAT_TYPE_UNSIGNED_INTEGER_16:
-                            integer_max_width = 5;
-                            break;
-                        case FORMAT_TYPE_UNSIGNED_INTEGER_32:
-                            integer_max_width = 10;
-                            break;
-                        case FORMAT_TYPE_UNSIGNED_INTEGER_64:
-                            integer_max_width = 20;
-                            break;
-                        default:
-                            BUSTER_UNREACHABLE();
-                        }
-                        digit_group_character_count = 3;
-                    }
-                    break;
-                    case INTEGER_FORMAT_KIND_BINARY:
-                    {
-                        integer_max_width = value_size * 8;
-                        digit_group_character_count = 8;
-                    }
-                    break;
-                    case INTEGER_FORMAT_KIND_OCTAL:
-                    {
-                        switch (format_type_id)
-                        {
-                            break;
-                        case FORMAT_TYPE_UNSIGNED_INTEGER_8:
-                            integer_max_width = 3;
-                            break;
-                        case FORMAT_TYPE_UNSIGNED_INTEGER_16:
-                            integer_max_width = 6;
-                            break;
-                        case FORMAT_TYPE_UNSIGNED_INTEGER_32:
-                            integer_max_width = 11;
-                            break;
-                        case FORMAT_TYPE_UNSIGNED_INTEGER_64:
-                            integer_max_width = 22;
-                            break;
-                        default:
-                            BUSTER_UNREACHABLE();
-                        }
-                        digit_group_character_count = 3;
-                    }
-                    break;
-                    case INTEGER_FORMAT_KIND_HEXADECIMAL_LOWER:
-                    case INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER:
-                    {
-                        integer_max_width = value_size * 2;
-                        digit_group_character_count = 2;
-                    }
-                    break;
-                    case INTEGER_FORMAT_KIND_COUNT:
-                        BUSTER_UNREACHABLE();
-                    }
-
-                    width = width ? (width_natural_extension ? integer_max_width : width) : 0;
-
-                    u64 width_character_count = width ? (width > number_string_buffer.length ? (width - number_string_buffer.length) : 0) : 0;
-                    bool separator_characters = digit_group && digit_group_character_count && number_string_buffer.length > digit_group_character_count;
-                    u64 separator_character_count = separator_characters ? (number_string_buffer.length / digit_group_character_count) +
-                                                                               (number_string_buffer.length % digit_group_character_count != 0) - 1
-                                                                         : 0;
-
-                    // TODO: allocate only once?
-                    // u64 character_to_write_count = prefix_character_count + width_character_count + number_string_buffer.length + separator_character_count;
-                    {
-                        if (prefix)
-                        {
-                            arena_append_string(arena, (String8)BUSTER_ARRAY_TO_SLICE(prefix_buffer));
-                        }
-
-                        if (width_character_count)
-                        {
-                            string_append_repeated_code_unit(arena, width_character, width_character_count);
-                        }
-
-                        if (separator_character_count)
-                        {
-                            char8 separator_character = integer_format_kind == INTEGER_FORMAT_KIND_DECIMAL ? '.' : '_';
-                            u64 remainder = number_string_buffer.length % digit_group_character_count;
-                            if (remainder)
-                            {
-                                arena_append_string(arena, (String8){.pointer = number_string_buffer.pointer, .length = remainder});
-                                *arena_allocate(arena, char8, 1) = separator_character;
-                            }
-
-                            u64 source_i;
-                            for (source_i = remainder; source_i < number_string_buffer.length - digit_group_character_count;
-                                 source_i += digit_group_character_count)
-                            {
-                                arena_append_string(arena,
-                                                    (String8){.pointer = number_string_buffer.pointer + source_i, .length = digit_group_character_count});
-                                *arena_allocate(arena, char8, 1) = separator_character;
-                            }
-
-                            arena_append_string(arena,
-                                                (String8){.pointer = number_string_buffer.pointer + number_string_buffer.length - digit_group_character_count,
-                                                          .length = digit_group_character_count});
-                        }
-                        else
-                        {
-                            arena_append_string(arena, number_string_buffer);
-                        }
-                    }
+                    u128 argument = va_arg(variable_arguments, u128);
+                    value = string_format_u128_parts_from_u128(argument);
+                    bit_width = 128;
                 }
                 break;
                 case FORMAT_TYPE_SIGNED_INTEGER_8:
-                case FORMAT_TYPE_SIGNED_INTEGER_16:
-                case FORMAT_TYPE_SIGNED_INTEGER_32:
-                case FORMAT_TYPE_SIGNED_INTEGER_64:
                 {
-                    if (integer_format_kind == INTEGER_FORMAT_KIND_COUNT)
-                    {
-                        integer_format_kind = INTEGER_FORMAT_KIND_DECIMAL;
-                    }
-
-                    s64 value;
-                    switch (format_type_id)
-                    {
-                        break;
-                    case FORMAT_TYPE_SIGNED_INTEGER_8:
-                        value = (s8)va_arg(variable_arguments, int);
-                        break;
-                    case FORMAT_TYPE_SIGNED_INTEGER_16:
-                        value = (s16)va_arg(variable_arguments, int);
-                        break;
-                    case FORMAT_TYPE_SIGNED_INTEGER_32:
-                        value = va_arg(variable_arguments, s32);
-                        break;
-                    case FORMAT_TYPE_SIGNED_INTEGER_64:
-                        value = va_arg(variable_arguments, s64);
-                        break;
-                    default:
-                        BUSTER_UNREACHABLE();
-                    }
-
-                    char8 integer_format_buffer[sizeof(u64) * 8 + 1]; // 1 for the sign (needed?)
-                    String8 string_buffer = BUSTER_ARRAY_TO_SLICE(integer_format_buffer);
-                    String8 format_result;
-
-                    switch (integer_format_kind)
-                    {
-                        break;
-                    case INTEGER_FORMAT_KIND_DECIMAL:
-                        format_result = string_format_i64_decimal(string_buffer, string_format_s64_decimal_magnitude(value), value < 0);
-                        break;
-                    case INTEGER_FORMAT_KIND_BINARY:
-                        format_result = string_format_u64_binary(string_buffer, (u64)value);
-                        break;
-                    case INTEGER_FORMAT_KIND_OCTAL:
-                        format_result = string_format_u64_octal(string_buffer, (u64)value);
-                        break;
-                    case INTEGER_FORMAT_KIND_HEXADECIMAL_LOWER:
-                    case INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER:
-                        format_result = string_format_u64_hexadecimal(string_buffer, (u64)value, integer_format_kind == INTEGER_FORMAT_KIND_HEXADECIMAL_UPPER);
-                        break;
-                    case INTEGER_FORMAT_KIND_COUNT:
-                        BUSTER_UNREACHABLE();
-                    }
-
-                    arena_append_string(arena, format_result);
+                    s8 argument = (s8)va_arg(variable_arguments, int);
+                    signed_value = true;
+                    negative = argument < 0;
+                    value.low = (u64)(s64)argument;
+                    value.high = negative ? UINT64_MAX : 0;
+                    bit_width = 8;
                 }
                 break;
-                case FORMAT_TYPE_UNSIGNED_INTEGER_128:
+                case FORMAT_TYPE_SIGNED_INTEGER_16:
                 {
-                    // Not implemented; silently skipping would leave the
-                    // argument unconsumed and corrupt every later va_arg.
-                    BUSTER_TODO();
+                    s16 argument = (s16)va_arg(variable_arguments, int);
+                    signed_value = true;
+                    negative = argument < 0;
+                    value.low = (u64)(s64)argument;
+                    value.high = negative ? UINT64_MAX : 0;
+                    bit_width = 16;
+                }
+                break;
+                case FORMAT_TYPE_SIGNED_INTEGER_32:
+                {
+                    s32 argument = va_arg(variable_arguments, s32);
+                    signed_value = true;
+                    negative = argument < 0;
+                    value.low = (u64)(s64)argument;
+                    value.high = negative ? UINT64_MAX : 0;
+                    bit_width = 32;
+                }
+                break;
+                case FORMAT_TYPE_SIGNED_INTEGER_64:
+                {
+                    s64 argument = va_arg(variable_arguments, s64);
+                    signed_value = true;
+                    negative = argument < 0;
+                    value.low = (u64)argument;
+                    value.high = negative ? UINT64_MAX : 0;
+                    bit_width = 64;
                 }
                 break;
                 case FORMAT_TYPE_SIGNED_INTEGER_128:
                 {
-                    BUSTER_TODO();
+                    s128 argument = va_arg(variable_arguments, s128);
+                    value = string_format_u128_parts_from_s128(argument);
+                    signed_value = true;
+                    negative = (value.high >> 63) != 0;
+                    bit_width = 128;
                 }
                 break;
-                case FORMAT_TYPE_OS_ERROR:
-                {
-                    OsError os_error = va_arg(variable_arguments, OsError);
-                    string8_from_os_error(arena, os_error, false);
+                default:
+                    BUSTER_UNREACHABLE();
                 }
-                break;
-                case FORMAT_TYPE_COUNT:
-                {
-                    // Unrecognized specifier: echo the original "{...}" text back verbatim.
-                    // whole_format_string already includes both braces, so no extra ones are added here.
-                    char8* pointer = arena_allocate(arena, char8, whole_format_string.length);
-                    memcpy(pointer, whole_format_string.pointer, sizeof(char8) * whole_format_string.length);
-                }
-                }
+
+                string_append_formatted_integer(arena, value, bit_width, signed_value, negative,
+                                                (StringFormatIntegerOptions){
+                                                    .kind = integer_format_kind,
+                                                    .prefix = prefix,
+                                                    .digit_group = digit_group,
+                                                    .width_natural_extension = width_natural_extension,
+                                                    .width = width,
+                                                    .width_character = width_character,
+                                                });
             }
-            else
+            break;
+            case FORMAT_TYPE_OS_ERROR:
             {
-                BUSTER_TODO();
+                OsError os_error = va_arg(variable_arguments, OsError);
+                string8_from_os_error(arena, os_error, false);
+            }
+            break;
+            case FORMAT_TYPE_COUNT:
+                BUSTER_UNREACHABLE();
             }
         }
     }

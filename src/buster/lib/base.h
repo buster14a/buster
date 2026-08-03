@@ -403,6 +403,12 @@ typedef int32_t s32;
 typedef int64_t s64;
 #if defined(__clang__)
 typedef signed __int128 s128;
+#else
+typedef struct s128 s128;
+struct s128
+{
+    u64 v[2];
+};
 #endif
 
 typedef unsigned int uint;

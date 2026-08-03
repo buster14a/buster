@@ -22,6 +22,24 @@
     } while (0)
 #endif
 
+BUSTER_GLOBAL_LOCAL u128 string_test_u128(u64 low, u64 high)
+{
+#if defined(__clang__)
+    return ((u128)high << 64) | (u128)low;
+#else
+    return (u128){.v = {low, high}};
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL s128 string_test_s128(u64 low, u64 high)
+{
+#if defined(__clang__)
+    return (s128)string_test_u128(low, high);
+#else
+    return (s128){.v = {low, high}};
+#endif
+}
+
 #define BUSTER_UNICODE_ROUND_TRIP_TEST(args, arena_value, utf8_value, utf16_value)                                                                             \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
@@ -51,6 +69,30 @@ BUSTER_TEST_F_DECL UnitTestResult string_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
+
+    // The formatter deliberately terminates the process for malformed input.
+    // A child-mode hook lets the parent test that behavior without terminating
+    // the main test process.
+    String8 failure_mode = os_get_environment_variable(S8("BUSTER_STRING_FORMAT_FAILURE"));
+    if (failure_mode.length)
+    {
+        if (string_equal(failure_mode, S8("string_format_fail_brace")))
+        {
+            string_format(arena, S8("{"));
+            os_exit(0);
+        }
+        if (string_equal(failure_mode, S8("string_format_fail_type")))
+        {
+            string_format(arena, S8("{unknown}"));
+            os_exit(0);
+        }
+        if (string_equal(failure_mode, S8("string_format_fail_modifier")))
+        {
+            string_format(arena, S8("{u8:not_a_modifier}"), (u8)1);
+            os_exit(0);
+        }
+    }
+
     // string8_format
     {
         {
@@ -64,6 +106,107 @@ BUSTER_TEST_F_DECL UnitTestResult string_tests(UnitTestArguments* arguments)
         {
             String8 formatted = string_format(arena, S8("{s64}"), (s64)INT64_MIN);
             BUSTER_STRING_TEST(arguments, formatted, S8("-9223372036854775808"));
+        }
+        {
+            char16 utf16_bmp[] = {0x00E9};
+            char8 expected_utf8[] = {(char8)0xC3, (char8)0xA9};
+            String8 formatted = string_format(arena, S8("{S16}"), (String16){.pointer = utf16_bmp, .length = 1});
+            BUSTER_STRING_TEST(arguments, formatted, string_from_pointer_length(expected_utf8, 2));
+        }
+        {
+            char16 utf16_pair[] = {0xD83D, 0xDE00};
+            char8 expected_utf8[] = {(char8)0xF0, (char8)0x9F, (char8)0x98, (char8)0x80};
+            String8 formatted = string_format(arena, S8("{S16}"), (String16){.pointer = utf16_pair, .length = 2});
+            BUSTER_STRING_TEST(arguments, formatted, string_from_pointer_length(expected_utf8, 4));
+        }
+        {
+            char16 utf16_invalid[] = {0xD83D, 0xDE00, 0xD83D, 0x0041, 0xDE00};
+            char8 expected_utf8[] = {
+                (char8)0xF0, (char8)0x9F, (char8)0x98, (char8)0x80,
+                (char8)0xEF, (char8)0xBF, (char8)0xBD,
+                'A',
+                (char8)0xEF, (char8)0xBF, (char8)0xBD,
+            };
+            String8 formatted = string_format(arena, S8("{S16}"), (String16){.pointer = utf16_invalid, .length = 5});
+            BUSTER_STRING_TEST(arguments, formatted, string_from_pointer_length(expected_utf8, 11));
+        }
+        {
+#if defined(_WIN32)
+            WindowsChar os_list_raw[] = {'o', 'n', 'e', ' ', '"', 't', 'w', 'o', ' ', 'w', 'o', 'r', 'd', 's', '"', 0};
+            StringOsList os_list = os_list_raw;
+            String8 formatted = string_format(arena, S8("{SOsL}|{CharOs}"), os_list, (CharOs)0x20AC);
+            char8 expected_utf8[] = {'o', 'n', 'e', ' ', 't', 'w', 'o', ' ', 'w', 'o', 'r', 'd', 's', '|',
+                                     (char8)0xE2, (char8)0x82, (char8)0xAC};
+            BUSTER_STRING_TEST(arguments, formatted, string_from_pointer_length(expected_utf8, 17));
+#else
+            PosixChar first[] = "one";
+            PosixChar second[] = "two words";
+            PosixChar* os_list_raw[] = {first, second, 0};
+            StringOsList os_list = os_list_raw;
+            String8 formatted = string_format(arena, S8("{SOsL}|{CharOs}"), os_list, (CharOs)'@');
+            BUSTER_STRING_TEST(arguments, formatted, S8("one two words|@"));
+#endif
+        }
+        {
+            u128 zero = string_test_u128(0, 0);
+            u128 maximum = string_test_u128(UINT64_MAX, UINT64_MAX);
+            u128 mixed = string_test_u128(0xFEDCBA9876543210ull, 0x0123456789ABCDEFull);
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128}"), zero), S8("0"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128}"), maximum), S8("340282366920938463463374607431768211455"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128:d}"), mixed), S8("0d1512366075204170947332355369683137040"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128:x}"), mixed), S8("0x123456789abcdeffedcba9876543210"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128:X}"), mixed), S8("0x123456789ABCDEFFEDCBA9876543210"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128:o,no_prefix}"), mixed), S8("11064254742325715737773345651416625031020"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128:b,no_prefix}"), mixed),
+                               S8("1001000110100010101100111100010011010101111001101111011111111111011011100101110101001100001110110010101000011001000010000"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128:x,digit_group,no_prefix}"), mixed),
+                               S8("1_23_45_67_89_ab_cd_ef_fe_dc_ba_98_76_54_32_10"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128:x,width=[0,x]}"), mixed), S8("0x0123456789abcdeffedcba9876543210"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128:x,width=[0,32],digit_group}"), zero),
+                               S8("0x00000000000000000000000000000000"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{u128}{u32}"), maximum, (u32)7),
+                               S8("3402823669209384634633746074317682114557"));
+        }
+        {
+            s128 minimum = string_test_s128(0, (u64)1 << 63);
+            s128 negative_one = string_test_s128(UINT64_MAX, UINT64_MAX);
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{s128}"), minimum), S8("-170141183460469231731687303715884105728"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{s128:x,no_prefix}"), minimum), S8("80000000000000000000000000000000"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{s128:X,no_prefix}"), negative_one), S8("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{s128:digit_group}"), minimum),
+                               S8("-170.141.183.460.469.231.731.687.303.715.884.105.728"));
+        }
+        {
+#if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
+            String8 failure_modes[] = {
+                S8("string_format_fail_brace"),
+                S8("string_format_fail_type"),
+                S8("string_format_fail_modifier"),
+            };
+            String8 executable = program_state->input.arguments.pointer[0];
+            for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(failure_modes); mode_index += 1)
+            {
+                String8 child_arguments[] = {
+                    executable,
+                    S8("test"),
+                };
+                String8 environment_keys[] = {S8("BUSTER_STRING_FORMAT_FAILURE")};
+                String8 environment_values[] = {failure_modes[mode_index]};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                             (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
+                                                             (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
+                                                             (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
+                    String8 error = (String8){.pointer = (char8*)wait_result.streams[STANDARD_STREAM_ERROR].pointer,
+                                             .length = wait_result.streams[STANDARD_STREAM_ERROR].length};
+                    BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_FAILED);
+                    BUSTER_TEST(arguments, string_first_sequence(error, S8("TODO")) == BUSTER_STRING_NO_MATCH);
+                }
+            }
+#endif
         }
         {
             char8 utf8_bytes[] = {'J', 'o', 's', (char8)0xC3, (char8)0xA9, '/', (char8)0xF0, (char8)0x9F, (char8)0x98, (char8)0x80, 0};
