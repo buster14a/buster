@@ -94,6 +94,11 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     Target invalid_avx512bw = valid_avx512;
     invalid_avx512bw.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX512BW;
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_avx512bw));
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("avx2")) == TARGET_CPU_FEATURE_X86_AVX2);
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_AARCH64, S8("neon")) == TARGET_CPU_FEATURE_AARCH64_NEON);
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_AARCH64, S8("avx2")) == TARGET_CPU_FEATURE_NONE);
+    BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_AVX512F), S8("avx512f"));
+    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, valid_avx512), S8("avx,avx2,avx512f,sse2"));
     TargetDataLayout linux_x86_layout = target_data_layout((Target){
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,

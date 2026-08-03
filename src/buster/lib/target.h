@@ -233,6 +233,7 @@ struct TargetDataLayout
 
 typedef enum TargetCpuFeature
 {
+    TARGET_CPU_FEATURE_NONE = 0,
     TARGET_CPU_FEATURE_X86_SSE2 = 1u << 0,
     TARGET_CPU_FEATURE_X86_AVX = 1u << 1,
     TARGET_CPU_FEATURE_X86_AVX2 = 1u << 2,
@@ -300,6 +301,9 @@ BUSTER_F_DECL TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuMod
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_effective(Target target);
 BUSTER_F_DECL bool target_cpu_features_are_valid(Target target);
 BUSTER_F_DECL bool target_cpu_feature_has(Target target, TargetCpuFeature feature);
+BUSTER_F_DECL TargetCpuFeature target_cpu_feature_from_string(CpuArch arch, String8 name);
+BUSTER_F_DECL String8 target_cpu_feature_to_string(TargetCpuFeature feature);
+BUSTER_F_DECL String8 target_cpu_features_to_string(Arena* arena, Target target);
 BUSTER_F_DECL TargetDataLayout target_data_layout(Target target);
 BUSTER_F_DECL bool target_data_layout_is_valid(TargetDataLayout layout);
 BUSTER_F_DECL u32 target_vector_register_size(Target target);

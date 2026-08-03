@@ -96,10 +96,13 @@ accepts `--config <name>`, `--optimize`, `--target/-t <ninja target>`, and
 Ninja (`build`) or CMake (`generate`).
 
 The Clang-like `ide cc` driver accepts `-march=<model>` and
-`-mcpu=<model>` (or their separated forms). CPU names use the canonical
+`-mcpu=<model>` (or their separated forms), ordered target-feature overrides
+through `-mattr=+feature,-feature`, and x86 assembly dialect selection through
+`-masm=att|intel`. CPU and feature options also accept separated values. CPU names use the canonical
 spellings printed by `cpu_model_to_string_os`, such as `baseline`, `native`,
 `haswell`, `znver5`, and `apple-m4`; incompatible target/model pairs are
-diagnosed. `-v` reports the selected CPU and maximum native vector width.
+diagnosed. `-v` reports the selected CPU, the sorted effective feature set,
+and maximum native vector width.
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),

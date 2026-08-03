@@ -96,6 +96,71 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_cpu_model(Arena* arena, CompilerDri
     return true;
 }
 
+typedef struct CompilerDriverFeatureOverride CompilerDriverFeatureOverride;
+struct CompilerDriverFeatureOverride
+{
+    String8 name;
+    bool enable;
+};
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_parse_feature_overrides(Arena* arena, CompilerDriverInvocation* invocation, String8 value,
+                                                                  CompilerDriverFeatureOverride* overrides, u64 override_capacity, u64* override_count)
+{
+    u64 start = 0;
+    while (start < value.length)
+    {
+        u64 end = start;
+        while (end < value.length && value.pointer[end] != ',')
+        {
+            end += 1;
+        }
+        String8 item = string_slice(value, start, end);
+        if (item.length < 2 || (item.pointer[0] != '+' && item.pointer[0] != '-'))
+        {
+            compiler_driver_argument_error(arena, invocation, S8("invalid target feature override: {S8}"), item);
+            return false;
+        }
+        if (*override_count >= override_capacity)
+        {
+            compiler_driver_argument_error(arena, invocation, S8("too many target feature overrides: {S8}"), value);
+            return false;
+        }
+        overrides[*override_count] = (CompilerDriverFeatureOverride){
+            .name = string_slice(item, 1, item.length),
+            .enable = item.pointer[0] == '+',
+        };
+        *override_count += 1;
+        if (end == value.length)
+        {
+            return true;
+        }
+        start = end + 1;
+        if (start == value.length)
+        {
+            compiler_driver_argument_error(arena, invocation, S8("invalid target feature override: {S8}"), value);
+            return false;
+        }
+    }
+    compiler_driver_argument_error(arena, invocation, S8("invalid target feature override: {S8}"), value);
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_set_assembly_syntax(Arena* arena, CompilerDriverInvocation* invocation, String8 value)
+{
+    if (string_equal(value, S8("att")))
+    {
+        invocation->assembly_syntax = ASSEMBLY_SYNTAX_ATT;
+        return true;
+    }
+    if (string_equal(value, S8("intel")))
+    {
+        invocation->assembly_syntax = ASSEMBLY_SYNTAX_INTEL;
+        return true;
+    }
+    compiler_driver_argument_error(arena, invocation, S8("unsupported assembly syntax: {S8}"), value);
+    return false;
+}
+
 CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments)
 {
     CompilerDriverInvocation invocation = {
@@ -120,6 +185,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     invocation.framework_paths = arena_allocate(arena, String8, arguments.length);
     invocation.frameworks = arena_allocate(arena, String8, arguments.length);
     invocation.linker_arguments = arena_allocate(arena, String8, arguments.length);
+    u64 feature_override_capacity = 0;
+    for (u64 argument_index = 0; argument_index < arguments.length; argument_index += 1)
+    {
+        feature_override_capacity += arguments.pointer[argument_index].length / 2 + 1;
+    }
+    CompilerDriverFeatureOverride* feature_overrides = arena_allocate(arena, CompilerDriverFeatureOverride, feature_override_capacity);
+    u64 feature_override_count = 0;
     bool options_ended = false;
     bool action_seen = false;
     for (u64 argument_index = 0; argument_index < arguments.length; argument_index += 1)
@@ -203,7 +275,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             string_equal(argument, S8("-D")) || string_equal(argument, S8("-U")) || string_equal(argument, S8("-L")) || string_equal(argument, S8("-l")) ||
             string_equal(argument, S8("-F")) || string_equal(argument, S8("-framework")) || string_equal(argument, S8("-x")) ||
             string_equal(argument, S8("-target")) || string_equal(argument, S8("--target")) || string_equal(argument, S8("-march")) ||
-            string_equal(argument, S8("-mcpu")) || string_equal(argument, S8("-isysroot")) || string_equal(argument, S8("--sysroot")) ||
+            string_equal(argument, S8("-mcpu")) || string_equal(argument, S8("-mattr")) || string_equal(argument, S8("-masm")) ||
+            string_equal(argument, S8("-isysroot")) || string_equal(argument, S8("--sysroot")) ||
             string_equal(argument, S8("-Xlinker")) || string_equal(argument, S8("-fmodule-root")) || string_equal(argument, S8("--module-root")))
         {
             if (argument_index + 1 >= arguments.length)
@@ -285,6 +358,21 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                     return invocation;
                 }
             }
+            else if (string_equal(argument, S8("-mattr")))
+            {
+                if (!compiler_driver_parse_feature_overrides(arena, &invocation, value, feature_overrides, feature_override_capacity,
+                                                             &feature_override_count))
+                {
+                    return invocation;
+                }
+            }
+            else if (string_equal(argument, S8("-masm")))
+            {
+                if (!compiler_driver_set_assembly_syntax(arena, &invocation, value))
+                {
+                    return invocation;
+                }
+            }
             else if (string_equal(argument, S8("-isysroot")) || string_equal(argument, S8("--sysroot")))
             {
                 invocation.sysroot = value;
@@ -325,6 +413,24 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (value.length)
         {
             if (!compiler_driver_set_cpu_model(arena, &invocation, value))
+            {
+                return invocation;
+            }
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-mattr=")))
+        {
+            value = string_slice(argument, S8("-mattr=").length, argument.length);
+            if (!compiler_driver_parse_feature_overrides(arena, &invocation, value, feature_overrides, feature_override_capacity, &feature_override_count))
+            {
+                return invocation;
+            }
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-masm=")))
+        {
+            value = string_slice(argument, S8("-masm=").length, argument.length);
+            if (!compiler_driver_set_assembly_syntax(arena, &invocation, value))
             {
                 return invocation;
             }
@@ -403,10 +509,47 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), argument);
         return invocation;
     }
+    if (feature_override_count)
+    {
+        invocation.target.cpu_features = target_cpu_features_effective(invocation.target);
+        invocation.target.cpu_features_explicit = true;
+        for (u64 override_index = 0; override_index < feature_override_count; override_index += 1)
+        {
+            CompilerDriverFeatureOverride override = feature_overrides[override_index];
+            TargetCpuFeature feature = target_cpu_feature_from_string(invocation.target.cpu_arch, override.name);
+            if (feature == TARGET_CPU_FEATURE_NONE)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported target feature: {S8}"), override.name);
+                return invocation;
+            }
+            if (override.enable)
+            {
+                invocation.target.cpu_features |= (TargetCpuFeatures)feature;
+            }
+            else
+            {
+                invocation.target.cpu_features &= ~(TargetCpuFeatures)feature;
+            }
+        }
+    }
     if (!target_cpu_features_are_valid(invocation.target))
     {
-        compiler_driver_argument_error(arena, &invocation, S8("CPU model is incompatible with target: {S8}"),
-                                       cpu_model_to_string_os(invocation.target.cpu_model));
+        if (feature_override_count)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("invalid target feature combination: {S8}"),
+                                           target_cpu_features_to_string(arena, invocation.target));
+        }
+        else
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("CPU model is incompatible with target: {S8}"),
+                                           cpu_model_to_string_os(invocation.target.cpu_model));
+        }
+        return invocation;
+    }
+    if (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.assembly_syntax != ASSEMBLY_SYNTAX_DEFAULT)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("assembly syntax is incompatible with target: {S8}"),
+                                       invocation.assembly_syntax == ASSEMBLY_SYNTAX_ATT ? S8("att") : S8("intel"));
         return invocation;
     }
     if (!invocation.no_standard_includes)

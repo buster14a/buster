@@ -1,5 +1,6 @@
 #pragma once
 
+#include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/link/link.h>
 
 typedef enum CompilerDriverError
@@ -79,6 +80,7 @@ struct CompilerDriverInvocation
     CompilerDriverAction action;
     CompilerDriverCDialect c_dialect;
     CompilerDriverError error;
+    AssemblySyntax assembly_syntax;
     bool verbose;
     bool no_standard_includes;
     bool debug_info;

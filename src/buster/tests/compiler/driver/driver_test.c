@@ -200,6 +200,58 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     BUSTER_TEST(arguments, x86_cpu_invocation.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, x86_cpu_invocation.target.cpu_model == CPU_MODEL_AMD_ZEN_5);
     BUSTER_TEST(arguments, target_vector_register_size(x86_cpu_invocation.target) == 64);
+    String8 feature_command_line[] = {
+        S8("-c"),
+        S8("-mattr=+avx512f,+avx512vl,-avx2,+avx512bw"),
+        S8("--target=x86_64-linux"),
+        S8("-march=haswell"),
+        S8("-masm"),
+        S8("att"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation feature_invocation =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(feature_command_line));
+    BUSTER_TEST(arguments, feature_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, feature_invocation.assembly_syntax == ASSEMBLY_SYNTAX_ATT);
+    BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX));
+    BUSTER_TEST(arguments, !target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX2));
+    BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX512F));
+    BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX512VL));
+    BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX512BW));
+    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, feature_invocation.target),
+                       S8("avx,avx512bw,avx512f,avx512vl,sse2"));
+    String8 ordered_feature_command_line[] = {
+        S8("--target=x86_64-linux"), S8("-march=haswell"), S8("-mattr=+avx512f"), S8("-mattr=-avx512f"), S8("source.c"),
+    };
+    CompilerDriverInvocation ordered_features =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ordered_feature_command_line));
+    BUSTER_TEST(arguments, ordered_features.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, !target_cpu_feature_has(ordered_features.target, TARGET_CPU_FEATURE_X86_AVX512F));
+    String8 invalid_feature_command_line[] = {S8("--target=x86_64-linux"), S8("-mattr=+future-isa"), S8("source.c")};
+    CompilerDriverInvocation invalid_feature =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_feature_command_line));
+    BUSTER_TEST(arguments, invalid_feature.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, invalid_feature.diagnostic, S8("unsupported target feature: future-isa"));
+    String8 invalid_feature_syntax_command_line[] = {S8("--target=x86_64-linux"), S8("-mattr=avx"), S8("source.c")};
+    CompilerDriverInvocation invalid_feature_syntax =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_feature_syntax_command_line));
+    BUSTER_TEST(arguments, invalid_feature_syntax.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, invalid_feature_syntax.diagnostic, S8("invalid target feature override: avx"));
+    String8 invalid_feature_combination_command_line[] = {S8("--target=x86_64-linux"), S8("-mattr=+avx2"), S8("source.c")};
+    CompilerDriverInvocation invalid_feature_combination =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_feature_combination_command_line));
+    BUSTER_TEST(arguments, invalid_feature_combination.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, invalid_feature_combination.diagnostic, S8("invalid target feature combination: avx2,sse2"));
+    String8 aarch64_feature_command_line[] = {S8("--target=aarch64-linux"), S8("-mattr"), S8("-neon"), S8("source.c")};
+    CompilerDriverInvocation aarch64_features =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(aarch64_feature_command_line));
+    BUSTER_TEST(arguments, aarch64_features.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, aarch64_features.target), S8("none"));
+    String8 incompatible_assembly_syntax_command_line[] = {S8("--target=aarch64-linux"), S8("-masm=intel"), S8("source.c")};
+    CompilerDriverInvocation incompatible_assembly_syntax =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(incompatible_assembly_syntax_command_line));
+    BUSTER_TEST(arguments, incompatible_assembly_syntax.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, incompatible_assembly_syntax.diagnostic, S8("assembly syntax is incompatible with target: intel"));
     String8 no_debug_command_line[] = {S8("-g0"), S8("-c"), S8("source.c")};
     CompilerDriverInvocation no_debug_invocation =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(no_debug_command_line));

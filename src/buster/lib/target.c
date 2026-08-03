@@ -511,6 +511,79 @@ bool target_cpu_feature_has(Target target, TargetCpuFeature feature)
     return (target_cpu_features_effective(target) & (TargetCpuFeatures)feature) != 0;
 }
 
+typedef struct TargetCpuFeatureName TargetCpuFeatureName;
+struct TargetCpuFeatureName
+{
+    String8 name;
+    TargetCpuFeature feature;
+    CpuArch arch;
+};
+
+// Kept in bytewise name order so verbose output is stable without sorting or
+// allocating one node per feature.
+BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
+    {.name = S8_INITIALIZER("apx"), .feature = TARGET_CPU_FEATURE_X86_APX, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("avx"), .feature = TARGET_CPU_FEATURE_X86_AVX, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("avx10-512"), .feature = TARGET_CPU_FEATURE_X86_AVX10_512, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("avx10.1"), .feature = TARGET_CPU_FEATURE_X86_AVX10_1, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("avx10.2"), .feature = TARGET_CPU_FEATURE_X86_AVX10_2, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("avx2"), .feature = TARGET_CPU_FEATURE_X86_AVX2, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("avx512bw"), .feature = TARGET_CPU_FEATURE_X86_AVX512BW, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("avx512f"), .feature = TARGET_CPU_FEATURE_X86_AVX512F, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("avx512vl"), .feature = TARGET_CPU_FEATURE_X86_AVX512VL, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("neon"), .feature = TARGET_CPU_FEATURE_AARCH64_NEON, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("sse2"), .feature = TARGET_CPU_FEATURE_X86_SSE2, .arch = CPU_ARCH_X86_64},
+};
+
+TargetCpuFeature target_cpu_feature_from_string(CpuArch arch, String8 name)
+{
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(target_cpu_feature_names); index += 1)
+    {
+        TargetCpuFeatureName entry = target_cpu_feature_names[index];
+        if (entry.arch == arch && string_equal(entry.name, name))
+        {
+            return entry.feature;
+        }
+    }
+    return TARGET_CPU_FEATURE_NONE;
+}
+
+String8 target_cpu_feature_to_string(TargetCpuFeature feature)
+{
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(target_cpu_feature_names); index += 1)
+    {
+        if (target_cpu_feature_names[index].feature == feature)
+        {
+            return target_cpu_feature_names[index].name;
+        }
+    }
+    return S8("");
+}
+
+String8 target_cpu_features_to_string(Arena* arena, Target target)
+{
+    TargetCpuFeatures features = target_cpu_features_effective(target);
+    String8 parts[BUSTER_ARRAY_LENGTH(target_cpu_feature_names) * 2] = {0};
+    u32 part_count = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(target_cpu_feature_names); index += 1)
+    {
+        TargetCpuFeatureName entry = target_cpu_feature_names[index];
+        if (entry.arch == target.cpu_arch && (features & (TargetCpuFeatures)entry.feature))
+        {
+            if (part_count)
+            {
+                parts[part_count++] = S8(",");
+            }
+            parts[part_count++] = entry.name;
+        }
+    }
+    if (!part_count)
+    {
+        return S8("none");
+    }
+    return string_join_arena(arena, (SliceString8){.pointer = parts, .length = part_count}, false);
+}
+
 u32 target_vector_register_size(Target target)
 {
     if (target.cpu_arch == CPU_ARCH_AARCH64)

@@ -863,6 +863,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     {
         string_print(S8("{S8}"), compile.output);
     }
+    if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose)
+    {
+        string_print(S8("TARGET cpu={S8} features={S8}\n"), cpu_model_to_string_os(invocation.target.cpu_model),
+                     target_cpu_features_to_string(arena, invocation.target));
+    }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose && compile.codegen_statistics.function_count)
     {
         string_print(S8("CODEGEN cpu={S8} vector_bits={u32} functions={u32} instructions={u64} values={u64} stack_value_bytes={u64} stack_frame_bytes={u64} "
