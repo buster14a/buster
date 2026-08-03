@@ -30,6 +30,9 @@ typedef enum AssemblyOpcode
     ASSEMBLY_OPCODE_X86_CBW,
     ASSEMBLY_OPCODE_X86_CWDE,
     ASSEMBLY_OPCODE_X86_CDQE,
+    ASSEMBLY_OPCODE_X86_JCC,
+    ASSEMBLY_OPCODE_X86_SETCC,
+    ASSEMBLY_OPCODE_X86_CMOVCC,
     ASSEMBLY_OPCODE_X86_MOVAPS,
     ASSEMBLY_OPCODE_X86_MOVUPS,
     ASSEMBLY_OPCODE_X86_MOVAPD,
@@ -123,7 +126,8 @@ struct AssemblyInstruction
     AssemblyOpcode opcode;
     u8 operand_count;
     u8 width;
-    u8 reserved[2];
+    u8 condition;
+    u8 reserved;
 };
 
 typedef struct AssemblyBuilder AssemblyBuilder;
@@ -684,7 +688,35 @@ struct AssemblyInstructionInfo
     AssemblyOpcode opcode;
     u8 operand_count;
     u8 suffix_width;
+    u8 condition;
 };
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_condition_parse(String8 name, u8* result)
+{
+    static const struct
+    {
+        String8 name;
+        u8 condition;
+    } conditions[] = {
+        {S8_INITIALIZER("o"), 0},   {S8_INITIALIZER("no"), 1},  {S8_INITIALIZER("b"), 2},   {S8_INITIALIZER("c"), 2},
+        {S8_INITIALIZER("nae"), 2}, {S8_INITIALIZER("ae"), 3},  {S8_INITIALIZER("nb"), 3},  {S8_INITIALIZER("nc"), 3},
+        {S8_INITIALIZER("e"), 4},   {S8_INITIALIZER("z"), 4},   {S8_INITIALIZER("ne"), 5},  {S8_INITIALIZER("nz"), 5},
+        {S8_INITIALIZER("be"), 6},  {S8_INITIALIZER("na"), 6},  {S8_INITIALIZER("a"), 7},   {S8_INITIALIZER("nbe"), 7},
+        {S8_INITIALIZER("s"), 8},   {S8_INITIALIZER("ns"), 9},  {S8_INITIALIZER("p"), 10},  {S8_INITIALIZER("pe"), 10},
+        {S8_INITIALIZER("np"), 11}, {S8_INITIALIZER("po"), 11}, {S8_INITIALIZER("l"), 12},  {S8_INITIALIZER("nge"), 12},
+        {S8_INITIALIZER("ge"), 13}, {S8_INITIALIZER("nl"), 13}, {S8_INITIALIZER("le"), 14}, {S8_INITIALIZER("ng"), 14},
+        {S8_INITIALIZER("g"), 15},  {S8_INITIALIZER("nle"), 15},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(conditions); index += 1)
+    {
+        if (assembly_word_equal(name, conditions[index].name))
+        {
+            *result = conditions[index].condition;
+            return true;
+        }
+    }
+    return false;
+}
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic, AssemblyInstructionInfo* result)
 {
@@ -728,6 +760,27 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic,
             return true;
         }
     }
+    static const struct
+    {
+        String8 prefix;
+        AssemblyOpcode opcode;
+        u8 operand_count;
+    } condition_families[] = {
+        {S8_INITIALIZER("cmov"), ASSEMBLY_OPCODE_X86_CMOVCC, 2},
+        {S8_INITIALIZER("set"), ASSEMBLY_OPCODE_X86_SETCC, 1},
+        {S8_INITIALIZER("j"), ASSEMBLY_OPCODE_X86_JCC, 1},
+    };
+    for (u32 family_index = 0; family_index < BUSTER_ARRAY_LENGTH(condition_families); family_index += 1)
+    {
+        String8 prefix = condition_families[family_index].prefix;
+        if (mnemonic.length > prefix.length && assembly_word_equal(string_slice(mnemonic, 0, prefix.length), prefix) &&
+            assembly_x86_condition_parse(string_slice(mnemonic, prefix.length, mnemonic.length), &result->condition))
+        {
+            result->opcode = condition_families[family_index].opcode;
+            result->operand_count = condition_families[family_index].operand_count;
+            return true;
+        }
+    }
     return false;
 }
 
@@ -747,6 +800,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
             if (width && assembly_x86_instruction_lookup_exact(base, result))
             {
                 if (!result->operand_count && result->opcode != ASSEMBLY_OPCODE_X86_RET)
+                {
+                    return false;
+                }
+                if (result->opcode == ASSEMBLY_OPCODE_X86_JCC || result->opcode == ASSEMBLY_OPCODE_X86_SETCC)
                 {
                     return false;
                 }
@@ -878,6 +935,66 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     {
         instruction->size = 2;
         return instruction->operand_count == 0;
+    }
+    if (opcode == ASSEMBLY_OPCODE_X86_JCC)
+    {
+        instruction->size = 6;
+        return first->kind == ASSEMBLY_OPERAND_EXPRESSION;
+    }
+    if (opcode == ASSEMBLY_OPCODE_X86_SETCC)
+    {
+        if (first->kind == ASSEMBLY_OPERAND_REGISTER)
+        {
+            if (first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.width != 8)
+            {
+                return false;
+            }
+            instruction->width = 8;
+            instruction->size = (assembly_x86_rex_needed(8, (AssemblyRegister){0}, first->reg) ? 1 : 0) + 3;
+            return true;
+        }
+        if (first->kind == ASSEMBLY_OPERAND_MEMORY && (!first->memory.width || first->memory.width == 8))
+        {
+            u32 address_size = 0;
+            if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
+            {
+                return false;
+            }
+            first->memory.width = 8;
+            instruction->width = 8;
+            instruction->size = (assembly_x86_memory_rex_needed(8, (AssemblyRegister){0}, first->memory) ? 1 : 0) + 2 + address_size;
+            return true;
+        }
+        return false;
+    }
+    if (opcode == ASSEMBLY_OPCODE_X86_CMOVCC)
+    {
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.width == 8 ||
+            (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
+            (second->kind == ASSEMBLY_OPERAND_REGISTER &&
+             (second->reg.class != ASSEMBLY_REGISTER_GPR || second->reg.width != first->reg.width)))
+        {
+            return false;
+        }
+        instruction->width = first->reg.width;
+        if (second->kind == ASSEMBLY_OPERAND_MEMORY)
+        {
+            if (second->memory.width && second->memory.width != instruction->width)
+            {
+                return false;
+            }
+            second->memory.width = instruction->width;
+        }
+        u32 address_size = 1;
+        bool rex = second->kind == ASSEMBLY_OPERAND_REGISTER
+                       ? assembly_x86_rex_needed(instruction->width, first->reg, second->reg)
+                       : assembly_x86_memory_rex_needed(instruction->width, first->reg, second->memory);
+        if (second->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(second->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->size = (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) + 2 + address_size;
+        return true;
     }
     if (assembly_x86_opcode_is_sse2(opcode))
     {
@@ -1154,6 +1271,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         .column = column,
         .opcode = info.opcode,
         .operand_count = info.operand_count,
+        .condition = info.condition,
     };
     u8 parsed_operand_count = 0;
     u64 operand_start = 0;
@@ -1188,7 +1306,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         {
             break;
         }
-        bool branch = info.opcode == ASSEMBLY_OPCODE_X86_CALL || info.opcode == ASSEMBLY_OPCODE_X86_JMP;
+        bool branch = info.opcode == ASSEMBLY_OPCODE_X86_CALL || info.opcode == ASSEMBLY_OPCODE_X86_JMP || info.opcode == ASSEMBLY_OPCODE_X86_JCC;
         bool indirect = syntax == ASSEMBLY_SYNTAX_ATT && branch && text.length && text.pointer[0] == '*';
         if (indirect)
         {
@@ -1652,6 +1770,77 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 assembly_emit_byte(builder, 0x48);
             }
             assembly_emit_byte(builder, 0x98);
+            continue;
+        }
+        if (instruction->opcode == ASSEMBLY_OPCODE_X86_JCC)
+        {
+            assembly_emit_byte(builder, 0x0f);
+            assembly_emit_byte(builder, (u8)(0x80 + instruction->condition));
+            AssemblyExpression expression = instruction->operands[0].expression;
+            s64 target = 0;
+            u32 displacement = 0;
+            if (assembly_expression_target(builder, expression, &target))
+            {
+                s64 next = (s64)instruction->offset + 6;
+                if (target < next + INT32_MIN || target > next + INT32_MAX)
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                        S8("x86 conditional branch target is out of range"));
+                }
+                else
+                {
+                    displacement = (u32)(s32)(target - next);
+                }
+            }
+            else if (!assembly_relocation_append(builder, instruction->offset + 2, expression, ASSEMBLY_RELOCATION_X86_PC32, -4))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                    S8("x86 conditional branch relocation addend is out of range"));
+            }
+            assembly_emit_u32(builder, displacement);
+            continue;
+        }
+        if (instruction->opcode == ASSEMBLY_OPCODE_X86_SETCC)
+        {
+            AssemblyOperand operand = instruction->operands[0];
+            if (operand.kind == ASSEMBLY_OPERAND_MEMORY)
+            {
+                assembly_x86_emit_memory_prefix(builder, 8, (AssemblyRegister){0}, operand.memory);
+            }
+            else
+            {
+                assembly_x86_emit_prefix(builder, 8, (AssemblyRegister){0}, operand.reg);
+            }
+            assembly_emit_byte(builder, 0x0f);
+            assembly_emit_byte(builder, (u8)(0x90 + instruction->condition));
+            if (!assembly_x86_emit_rm(builder, instruction, 0, operand))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                    S8("x86 memory displacement is out of range"));
+                return;
+            }
+            continue;
+        }
+        if (instruction->opcode == ASSEMBLY_OPCODE_X86_CMOVCC)
+        {
+            AssemblyRegister destination = instruction->operands[0].reg;
+            AssemblyOperand source = instruction->operands[1];
+            if (source.kind == ASSEMBLY_OPERAND_MEMORY)
+            {
+                assembly_x86_emit_memory_prefix(builder, instruction->width, destination, source.memory);
+            }
+            else
+            {
+                assembly_x86_emit_prefix(builder, instruction->width, destination, source.reg);
+            }
+            assembly_emit_byte(builder, 0x0f);
+            assembly_emit_byte(builder, (u8)(0x40 + instruction->condition));
+            if (!assembly_x86_emit_rm(builder, instruction, destination.index, source))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                    S8("x86 memory displacement is out of range"));
+                return;
+            }
             continue;
         }
         if (assembly_x86_opcode_is_sse2(instruction->opcode))

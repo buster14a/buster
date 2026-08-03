@@ -258,6 +258,48 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
         (AssemblyEncodeOptions){.target = x86_without_sse2, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, unsupported_sse2.diagnostic_count == 1 &&
                                unsupported_sse2.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    u8 expected_x86_conditions[] = {
+        0x0f, 0x84, 0x00, 0x00, 0x00, 0x00,
+        0x0f, 0x85, 0x00, 0x00, 0x00, 0x00,
+        0x0f, 0x95, 0xc0,
+        0x41, 0x0f, 0x92, 0xc1,
+        0x41, 0x0f, 0x9f, 0x45, 0x08,
+        0x48, 0x0f, 0x44, 0xc3,
+        0x47, 0x0f, 0x42, 0x14, 0x8c,
+        0x66, 0x45, 0x0f, 0x49, 0xdc,
+    };
+    String8 x86_intel_condition_source =
+        S8("je external\n"
+           "jnz external2\n"
+           "setne al\n"
+           "setb r9b\n"
+           "setg byte ptr [r13 + 8]\n"
+           "cmove rax, rbx\n"
+           "cmovb r10d, [r12 + r9*4]\n"
+           "cmovns r11w, r12w\n");
+    AssemblyEncodeResult x86_intel_conditions = assembly_encode(
+        arguments->arena, x86_intel_condition_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_conditions.diagnostic_count == 0 &&
+                               x86_intel_conditions.bytes.length == sizeof(expected_x86_conditions) &&
+                               memcmp(x86_intel_conditions.bytes.pointer, expected_x86_conditions, sizeof(expected_x86_conditions)) == 0);
+    BUSTER_TEST(arguments, x86_intel_conditions.relocation_count == 2 && x86_intel_conditions.relocations[0].offset == 2 &&
+                               x86_intel_conditions.relocations[1].offset == 8 && x86_intel_conditions.relocations[0].addend == -4 &&
+                               x86_intel_conditions.relocations[1].addend == -4 &&
+                               x86_intel_conditions.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                               x86_intel_conditions.relocations[1].kind == ASSEMBLY_RELOCATION_X86_PC32);
+    String8 x86_att_condition_source =
+        S8("je external\n"
+           "jnz external2\n"
+           "setne %al\n"
+           "setb %r9b\n"
+           "setg 8(%r13)\n"
+           "cmoveq %rbx, %rax\n"
+           "cmovbl (%r12,%r9,4), %r10d\n"
+           "cmovnsw %r12w, %r11w\n");
+    AssemblyEncodeResult x86_att_conditions = assembly_encode(
+        arguments->arena, x86_att_condition_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_conditions.diagnostic_count == 0 && x86_att_conditions.bytes.length == sizeof(expected_x86_conditions) &&
+                               memcmp(x86_att_conditions.bytes.pointer, expected_x86_conditions, sizeof(expected_x86_conditions)) == 0);
     AssemblyEncodeResult invalid_x86_forms =
         assembly_encode(arguments->arena, S8("mov rax, eax\nadd rax, 0x80000000\nnopq\n"),
                         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -274,6 +316,10 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
         assembly_encode(arguments->arena, S8("mov rax, xmm0\naddps xmm0, rax\nmovaps [rax], [rbx]\naddps [rax], xmm0\n"),
                         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, invalid_x86_sse2.diagnostic_count == 4);
+    AssemblyEncodeResult invalid_x86_conditions =
+        assembly_encode(arguments->arena, S8("seteb %al\nsete %rax\ncmove %al, %bl\ncmoveq (%rax), (%rbx)\nje %rax\n"),
+                        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, invalid_x86_conditions.diagnostic_count == 5);
 
     Target aarch64_target = {
         .cpu_arch = CPU_ARCH_AARCH64,
