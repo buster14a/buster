@@ -4,6 +4,7 @@
 #include <buster/lib/os.h>
 #include <buster/lib/entry_point.h>
 #include <buster/lib/file.h>
+#include <buster/lib/hash.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/string.h>
 #include <buster/lib/target.h>
@@ -16,6 +17,7 @@
 #include <buster/lib/os.c>
 #include <buster/lib/arena.c>
 #include <buster/lib/file.c>
+#include <buster/lib/hash.c>
 #include <buster/lib/integer.c>
 #include <buster/lib/entry_point.c>
 #include <buster/lib/target.c>
@@ -29,6 +31,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
     BUILD_COMMAND_NINJA_LOG_SUMMARY,
     BUILD_COMMAND_TIME_TRACE_SUMMARY,
+    BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_TEST_SELF_HOST,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
@@ -1256,6 +1259,17 @@ struct JsonParser
     u64 index;
 };
 
+typedef struct AssemblyImportOptions AssemblyImportOptions;
+struct AssemblyImportOptions
+{
+    String8 xed_datafiles;
+    String8 aarch64_json;
+    String8 output_directory;
+    u32 xed_datafiles_set : 1;
+    u32 aarch64_json_set : 1;
+    u32 output_directory_set : 1;
+};
+
 typedef struct CompileCommandEntry CompileCommandEntry;
 struct CompileCommandEntry
 {
@@ -1784,6 +1798,245 @@ BUSTER_GLOBAL_LOCAL void json_skip_value(Arena* arena, JsonParser* parser, bool*
             parser->index += 1;
         }
     }
+}
+
+// The assembly metadata importer consumes llvm-tblgen's large JSON dump. Its
+// nesting depends on upstream data, so keep this scanner iterative instead of
+// extending json_skip_value's recursive implementation.
+BUSTER_GLOBAL_LOCAL String8 json_raw_string(JsonParser* parser, bool* valid)
+{
+    String8 result = {0};
+    json_skip_whitespace(parser);
+    if (parser->index >= parser->text.length || parser->text.pointer[parser->index] != '"')
+    {
+        *valid = false;
+        return result;
+    }
+
+    u64 start = parser->index++;
+    bool escaped = false;
+    while (parser->index < parser->text.length)
+    {
+        char8 c = parser->text.pointer[parser->index++];
+        if (escaped)
+        {
+            escaped = false;
+        }
+        else if (c == '\\')
+        {
+            escaped = true;
+        }
+        else if (c == '"')
+        {
+            return string_slice(parser->text, start, parser->index);
+        }
+    }
+
+    *valid = false;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 json_raw_value(JsonParser* parser, bool* valid)
+{
+    String8 result = {0};
+    json_skip_whitespace(parser);
+    if (parser->index >= parser->text.length)
+    {
+        *valid = false;
+        return result;
+    }
+
+    u64 start = parser->index;
+    char8 first = parser->text.pointer[parser->index];
+    if (first == '"')
+    {
+        return json_raw_string(parser, valid);
+    }
+    if (first == '{' || first == '[')
+    {
+        char8 stack[256];
+        u64 depth = 0;
+        bool in_string = false;
+        bool escaped = false;
+        while (parser->index < parser->text.length)
+        {
+            char8 c = parser->text.pointer[parser->index++];
+            if (in_string)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (c == '\\')
+                {
+                    escaped = true;
+                }
+                else if (c == '"')
+                {
+                    in_string = false;
+                }
+                continue;
+            }
+            if (c == '"')
+            {
+                in_string = true;
+            }
+            else if (c == '{' || c == '[')
+            {
+                if (depth == BUSTER_ARRAY_LENGTH(stack))
+                {
+                    *valid = false;
+                    break;
+                }
+                stack[depth++] = c;
+            }
+            else if (c == '}' || c == ']')
+            {
+                char8 expected = c == '}' ? '{' : '[';
+                if (!depth || stack[depth - 1] != expected)
+                {
+                    *valid = false;
+                    break;
+                }
+                depth -= 1;
+                if (!depth)
+                {
+                    result = string_slice(parser->text, start, parser->index);
+                    break;
+                }
+            }
+        }
+        if (!result.pointer)
+        {
+            *valid = false;
+        }
+        return result;
+    }
+
+    while (parser->index < parser->text.length)
+    {
+        char8 c = parser->text.pointer[parser->index];
+        if (c == ',' || c == ']' || c == '}' || character_is_space(c))
+        {
+            break;
+        }
+        parser->index += 1;
+    }
+    if (parser->index == start)
+    {
+        *valid = false;
+    }
+    else
+    {
+        result = string_slice(parser->text, start, parser->index);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool json_raw_object_next(JsonParser* parser, String8* key, String8* value, bool* valid)
+{
+    json_skip_whitespace(parser);
+    if (json_consume(parser, '}'))
+    {
+        return false;
+    }
+    *key = json_raw_string(parser, valid);
+    if (!*valid || !json_consume(parser, ':'))
+    {
+        *valid = false;
+        return false;
+    }
+    *value = json_raw_value(parser, valid);
+    if (!*valid)
+    {
+        return false;
+    }
+    json_skip_whitespace(parser);
+    if (json_consume(parser, ','))
+    {
+        return true;
+    }
+    if (parser->index < parser->text.length && parser->text.pointer[parser->index] == '}')
+    {
+        return true;
+    }
+    *valid = false;
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL String8 json_raw_key_text(String8 raw)
+{
+    return raw.length >= 2 ? string_slice(raw, 1, raw.length - 1) : (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL bool json_raw_object_find(String8 object, String8 wanted, String8* value)
+{
+    JsonParser parser = {.text = object};
+    bool valid = json_consume(&parser, '{');
+    while (valid)
+    {
+        String8 key = {0};
+        String8 candidate = {0};
+        if (!json_raw_object_next(&parser, &key, &candidate, &valid))
+        {
+            break;
+        }
+        if (string_equal(json_raw_key_text(key), wanted))
+        {
+            *value = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL void arena_append_string8(Arena* arena, String8 string)
+{
+    if (string.length)
+    {
+        memcpy(arena_allocate(arena, char8, string.length), string.pointer, string.length);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void arena_append_json_string(Arena* arena, String8 string)
+{
+    arena_append_char8(arena, '"');
+    for (u64 i = 0; i < string.length; i += 1)
+    {
+        char8 c = string.pointer[i];
+        switch (c)
+        {
+            break;
+        case '"':
+            arena_append_string8(arena, S8("\\\""));
+            break;
+        case '\\':
+            arena_append_string8(arena, S8("\\\\"));
+            break;
+        case '\n':
+            arena_append_string8(arena, S8("\\n"));
+            break;
+        case '\r':
+            arena_append_string8(arena, S8("\\r"));
+            break;
+        case '\t':
+            arena_append_string8(arena, S8("\\t"));
+            break;
+        default:
+            if ((u8)c < 0x20)
+            {
+                static char8 const hexadecimal[] = "0123456789abcdef";
+                arena_append_string8(arena, S8("\\u00"));
+                arena_append_char8(arena, hexadecimal[((u8)c >> 4) & 0xf]);
+                arena_append_char8(arena, hexadecimal[(u8)c & 0xf]);
+            }
+            else
+            {
+                arena_append_char8(arena, c);
+            }
+        }
+    }
+    arena_append_char8(arena, '"');
 }
 
 BUSTER_GLOBAL_LOCAL CompileCommandEntry json_parse_compile_command_entry(Arena* arena, JsonParser* parser, bool* valid)
@@ -3353,6 +3606,785 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
     }
 }
 
+// --- import_assembly_metadata -------------------------------------------
+// Explicit developer workflow. Normal builds consume only the checked-in
+// reduced metadata and never need an XED checkout or llvm-tblgen.
+
+typedef struct AssemblyImportPathNode AssemblyImportPathNode;
+struct AssemblyImportPathNode
+{
+    String8 full;
+    String8 relative;
+    AssemblyImportPathNode* next;
+};
+
+typedef struct AssemblyImportPathList AssemblyImportPathList;
+struct AssemblyImportPathList
+{
+    AssemblyImportPathNode* first;
+    AssemblyImportPathNode* last;
+    u64 count;
+};
+
+typedef struct XedImportRecord XedImportRecord;
+struct XedImportRecord
+{
+    String8 source;
+    String8 iclass;
+    String8 iform;
+    String8 isa_set;
+    String8 category;
+    String8 extension;
+    String8 attributes;
+    String8 pattern;
+    String8 operands;
+    XedImportRecord* next;
+};
+
+typedef struct XedImportRecordList XedImportRecordList;
+struct XedImportRecordList
+{
+    XedImportRecord* first;
+    XedImportRecord* last;
+    u64 count;
+};
+
+BUSTER_GLOBAL_LOCAL String8 assembly_import_trim(String8 string)
+{
+    u64 start = 0;
+    u64 end = string.length;
+    while (start < end && character_is_space(string.pointer[start]))
+    {
+        start += 1;
+    }
+    while (end > start && character_is_space(string.pointer[end - 1]))
+    {
+        end -= 1;
+    }
+    return string_slice(string, start, end);
+}
+
+BUSTER_GLOBAL_LOCAL void assembly_import_path_list_push(Arena* arena, AssemblyImportPathList* list, String8 full, String8 relative)
+{
+    AssemblyImportPathNode* node = arena_allocate(arena, AssemblyImportPathNode, 1);
+    *node = (AssemblyImportPathNode){
+        .full = string_duplicate_arena(arena, full, true),
+        .relative = string_duplicate_arena(arena, relative, true),
+    };
+    if (list->last)
+    {
+        list->last->next = node;
+    }
+    else
+    {
+        list->first = node;
+    }
+    list->last = node;
+    list->count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_collect_xed_paths(Arena* arena, String8 root, AssemblyImportPathList* files)
+{
+    AssemblyImportPathNode* pending = arena_allocate(arena, AssemblyImportPathNode, 1);
+    *pending = (AssemblyImportPathNode){.full = string_duplicate_arena(arena, root, true), .relative = S8("")};
+    bool result = true;
+
+    while (pending && result)
+    {
+        AssemblyImportPathNode* directory_node = pending;
+        pending = pending->next;
+        String8 directory = directory_node->full;
+#if BUSTER_WINDOWS
+        TemporalArena temp = scratch_begin(&arena, 1);
+        String8 pattern = path_join(temp.arena, directory, S8("*"));
+        String16 pattern_w = string16_from_string8(temp.arena, pattern, true);
+        WIN32_FIND_DATAW find_data;
+        HANDLE find = FindFirstFileW(pattern_w.pointer, &find_data);
+        if (find == INVALID_HANDLE_VALUE)
+        {
+            result = false;
+        }
+        else
+        {
+            do
+            {
+                String8 name = string8_from_string16(temp.arena,
+                                                     (String16){.pointer = find_data.cFileName, .length = string16_length(find_data.cFileName)}, true);
+                if (string_equal(name, S8(".")) || string_equal(name, S8("..")))
+                {
+                    continue;
+                }
+                String8 full = path_join(arena, directory, name);
+                String8 relative = directory_node->relative.length ? path_join(arena, directory_node->relative, name) : string_duplicate_arena(arena, name, true);
+                if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                {
+                    if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                    {
+                        AssemblyImportPathNode* node = arena_allocate(arena, AssemblyImportPathNode, 1);
+                        *node = (AssemblyImportPathNode){.full = full, .relative = relative, .next = pending};
+                        pending = node;
+                    }
+                }
+                else if (string_ends_with_sequence_insensitive(name, S8(".txt")))
+                {
+                    assembly_import_path_list_push(arena, files, full, relative);
+                }
+            } while (FindNextFileW(find, &find_data));
+            FindClose(find);
+        }
+        scratch_end(temp);
+#else
+        DIR* directory_handle = opendir((const char*)directory.pointer);
+        if (!directory_handle)
+        {
+            result = false;
+        }
+        else
+        {
+            struct dirent* entry = 0;
+            while ((entry = readdir(directory_handle)) != 0)
+            {
+                String8 name = string_from_pointer((char8*)entry->d_name);
+                if (string_equal(name, S8(".")) || string_equal(name, S8("..")))
+                {
+                    continue;
+                }
+                String8 full = path_join(arena, directory, name);
+                String8 relative = directory_node->relative.length ? path_join(arena, directory_node->relative, name) : string_duplicate_arena(arena, name, true);
+                struct stat status;
+                if (lstat((const char*)full.pointer, &status) != 0)
+                {
+                    result = false;
+                    break;
+                }
+                if (S_ISDIR(status.st_mode) && !S_ISLNK(status.st_mode))
+                {
+                    AssemblyImportPathNode* node = arena_allocate(arena, AssemblyImportPathNode, 1);
+                    *node = (AssemblyImportPathNode){.full = full, .relative = relative, .next = pending};
+                    pending = node;
+                }
+                else if (S_ISREG(status.st_mode) && string_ends_with_sequence_insensitive(name, S8(".txt")))
+                {
+                    assembly_import_path_list_push(arena, files, full, relative);
+                }
+            }
+            closedir(directory_handle);
+        }
+#endif
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int assembly_import_path_compare(const void* left_pointer, const void* right_pointer)
+{
+    AssemblyImportPathNode const* left = *(AssemblyImportPathNode* const*)left_pointer;
+    AssemblyImportPathNode const* right = *(AssemblyImportPathNode* const*)right_pointer;
+    u64 count = BUSTER_MIN(left->relative.length, right->relative.length);
+    int result = count ? memcmp(left->relative.pointer, right->relative.pointer, count) : 0;
+    if (!result)
+    {
+        result = (left->relative.length > right->relative.length) - (left->relative.length < right->relative.length);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void xed_import_record_push(Arena* arena, XedImportRecordList* list, XedImportRecord record)
+{
+    XedImportRecord* node = arena_allocate(arena, XedImportRecord, 1);
+    *node = record;
+    if (list->last)
+    {
+        list->last->next = node;
+    }
+    else
+    {
+        list->first = node;
+    }
+    list->last = node;
+    list->count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL void xed_import_record_field(XedImportRecord* record, String8 key, String8 value)
+{
+    if (string_equal(key, S8("ICLASS")))
+    {
+        record->iclass = value;
+    }
+    else if (string_equal(key, S8("IFORM")))
+    {
+        record->iform = value;
+    }
+    else if (string_equal(key, S8("ISA_SET")))
+    {
+        record->isa_set = value;
+    }
+    else if (string_equal(key, S8("CATEGORY")))
+    {
+        record->category = value;
+    }
+    else if (string_equal(key, S8("EXTENSION")))
+    {
+        record->extension = value;
+    }
+    else if (string_equal(key, S8("ATTRIBUTES")))
+    {
+        record->attributes = value;
+    }
+    else if (string_equal(key, S8("PATTERN")))
+    {
+        record->pattern = value;
+    }
+    else if (string_equal(key, S8("OPERANDS")))
+    {
+        record->operands = value;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void xed_import_parse_file(Arena* arena, XedImportRecordList* records, String8 source, String8 text)
+{
+    XedImportRecord record = {.source = source};
+    bool in_record = false;
+    while (text.length)
+    {
+        u64 newline = string_first_code_unit(text, '\n');
+        u64 line_end = newline == BUSTER_STRING_NO_MATCH ? text.length : newline;
+        String8 line = assembly_import_trim(string_slice(text, 0, line_end));
+        text = newline == BUSTER_STRING_NO_MATCH ? (String8){0} : string_slice(text, line_end + 1, text.length);
+        if (string_equal(line, S8("{")))
+        {
+            record = (XedImportRecord){.source = source};
+            in_record = true;
+            continue;
+        }
+        if (string_equal(line, S8("}")))
+        {
+            if (in_record && record.iclass.length && record.pattern.length && record.operands.length)
+            {
+                xed_import_record_push(arena, records, record);
+            }
+            in_record = false;
+            continue;
+        }
+        if (!in_record || !line.length || line.pointer[0] == '#')
+        {
+            continue;
+        }
+        u64 colon = string_first_code_unit(line, ':');
+        if (colon != BUSTER_STRING_NO_MATCH)
+        {
+            String8 key = assembly_import_trim(string_slice(line, 0, colon));
+            String8 value = assembly_import_trim(string_slice(line, colon + 1, line.length));
+            xed_import_record_field(&record, key, value);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void xed_import_emit_field(Arena* output, String8 key, String8 value, bool* first)
+{
+    if (!value.length)
+    {
+        return;
+    }
+    if (!*first)
+    {
+        arena_append_char8(output, ',');
+    }
+    *first = false;
+    arena_append_json_string(output, key);
+    arena_append_char8(output, ':');
+    arena_append_json_string(output, value);
+}
+
+BUSTER_GLOBAL_LOCAL void xed_import_emit(Arena* output, XedImportRecordList records)
+{
+    for (XedImportRecord* record = records.first; record; record = record->next)
+    {
+        bool first = true;
+        arena_append_char8(output, '{');
+        xed_import_emit_field(output, S8("source"), record->source, &first);
+        xed_import_emit_field(output, S8("iclass"), record->iclass, &first);
+        xed_import_emit_field(output, S8("iform"), record->iform, &first);
+        xed_import_emit_field(output, S8("isa_set"), record->isa_set, &first);
+        xed_import_emit_field(output, S8("category"), record->category, &first);
+        xed_import_emit_field(output, S8("extension"), record->extension, &first);
+        xed_import_emit_field(output, S8("attributes"), record->attributes, &first);
+        xed_import_emit_field(output, S8("pattern"), record->pattern, &first);
+        xed_import_emit_field(output, S8("operands"), record->operands, &first);
+        arena_append_string8(output, S8("}\n"));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool json_raw_array_next(JsonParser* parser, String8* value, bool* valid)
+{
+    json_skip_whitespace(parser);
+    if (json_consume(parser, ']'))
+    {
+        return false;
+    }
+    *value = json_raw_value(parser, valid);
+    if (!*valid)
+    {
+        return false;
+    }
+    json_skip_whitespace(parser);
+    if (json_consume(parser, ','))
+    {
+        return true;
+    }
+    if (parser->index < parser->text.length && parser->text.pointer[parser->index] == ']')
+    {
+        return true;
+    }
+    *valid = false;
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL int assembly_import_string_compare(const void* left_pointer, const void* right_pointer)
+{
+    String8 const* left = (String8 const*)left_pointer;
+    String8 const* right = (String8 const*)right_pointer;
+    u64 count = BUSTER_MIN(left->length, right->length);
+    int result = count ? memcmp(left->pointer, right->pointer, count) : 0;
+    if (!result)
+    {
+        result = (left->length > right->length) - (left->length < right->length);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_string_find(SliceString8 strings, String8 wanted)
+{
+    u64 low = 0;
+    u64 high = strings.length;
+    while (low < high)
+    {
+        u64 middle = low + (high - low) / 2;
+        String8 candidate = strings.pointer[middle];
+        int comparison = assembly_import_string_compare(&candidate, &wanted);
+        if (comparison < 0)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < strings.length && string_equal(strings.pointer[low], wanted);
+}
+
+BUSTER_GLOBAL_LOCAL SliceString8 aarch64_import_instruction_names(Arena* arena, String8 json, bool* valid)
+{
+    SliceString8 result = {0};
+    String8 instances = {0};
+    String8 names_array = {0};
+    if (!json_raw_object_find(json, S8("!instanceof"), &instances) || !json_raw_object_find(instances, S8("AArch64Inst"), &names_array))
+    {
+        *valid = false;
+        return result;
+    }
+
+    JsonParser parser = {.text = names_array};
+    *valid = json_consume(&parser, '[');
+    String8List names = {0};
+    while (*valid)
+    {
+        String8 raw = {0};
+        if (!json_raw_array_next(&parser, &raw, valid))
+        {
+            break;
+        }
+        String8 name = json_raw_key_text(raw);
+        if (string_first_code_unit(name, '\\') != BUSTER_STRING_NO_MATCH)
+        {
+            *valid = false;
+            break;
+        }
+        string8_list_push(arena, &names, name);
+    }
+    if (*valid)
+    {
+        result = string8_list_to_slice(arena, names);
+        qsort(result.pointer, result.length, sizeof(result.pointer[0]), assembly_import_string_compare);
+    }
+    return result;
+}
+
+typedef struct Aarch64ImportFields Aarch64ImportFields;
+struct Aarch64ImportFields
+{
+    String8 pseudo;
+    String8 inst;
+    String8 assembly;
+    String8 output_operands;
+    String8 input_operands;
+    String8 predicates;
+};
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_fields(String8 object, Aarch64ImportFields* fields)
+{
+    JsonParser parser = {.text = object};
+    bool valid = json_consume(&parser, '{');
+    while (valid)
+    {
+        String8 raw_key = {0};
+        String8 value = {0};
+        if (!json_raw_object_next(&parser, &raw_key, &value, &valid))
+        {
+            break;
+        }
+        String8 key = json_raw_key_text(raw_key);
+        if (string_equal(key, S8("isPseudo")))
+        {
+            fields->pseudo = value;
+        }
+        else if (string_equal(key, S8("Inst")))
+        {
+            fields->inst = value;
+        }
+        else if (string_equal(key, S8("AsmString")))
+        {
+            fields->assembly = value;
+        }
+        else if (string_equal(key, S8("OutOperandList")))
+        {
+            json_raw_object_find(value, S8("printable"), &fields->output_operands);
+        }
+        else if (string_equal(key, S8("InOperandList")))
+        {
+            json_raw_object_find(value, S8("printable"), &fields->input_operands);
+        }
+        else if (string_equal(key, S8("Predicates")))
+        {
+            fields->predicates = value;
+        }
+    }
+    return valid && fields->pseudo.length && fields->inst.length && fields->assembly.length && fields->output_operands.length && fields->input_operands.length &&
+           fields->predicates.length;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_emit_predicates(Arena* output, String8 predicates)
+{
+    JsonParser parser = {.text = predicates};
+    bool valid = json_consume(&parser, '[');
+    bool first = true;
+    arena_append_char8(output, '[');
+    while (valid)
+    {
+        String8 predicate = {0};
+        if (!json_raw_array_next(&parser, &predicate, &valid))
+        {
+            break;
+        }
+        String8 definition = {0};
+        if (json_raw_object_find(predicate, S8("def"), &definition))
+        {
+            if (!first)
+            {
+                arena_append_char8(output, ',');
+            }
+            first = false;
+            arena_append_string8(output, definition);
+        }
+    }
+    arena_append_char8(output, ']');
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_emit(Arena* arena, Arena* output, String8 json, u64* imported_count)
+{
+    bool valid = true;
+    SliceString8 instruction_names = aarch64_import_instruction_names(arena, json, &valid);
+    if (!valid || !instruction_names.length)
+    {
+        return false;
+    }
+
+    JsonParser parser = {.text = json};
+    valid = json_consume(&parser, '{');
+    u64 count = 0;
+    while (valid)
+    {
+        String8 raw_name = {0};
+        String8 object = {0};
+        if (!json_raw_object_next(&parser, &raw_name, &object, &valid))
+        {
+            break;
+        }
+        String8 name = json_raw_key_text(raw_name);
+        if (!assembly_import_string_find(instruction_names, name))
+        {
+            continue;
+        }
+
+        Aarch64ImportFields fields = {0};
+        if (!aarch64_import_fields(object, &fields))
+        {
+            valid = false;
+            break;
+        }
+        if (!string_equal(fields.pseudo, S8("0")))
+        {
+            continue;
+        }
+
+        arena_append_string8(output, S8("{\"name\":"));
+        arena_append_string8(output, raw_name);
+        arena_append_string8(output, S8(",\"inst\":"));
+        arena_append_string8(output, fields.inst);
+        arena_append_string8(output, S8(",\"asm\":"));
+        arena_append_string8(output, fields.assembly);
+        arena_append_string8(output, S8(",\"out\":"));
+        arena_append_string8(output, fields.output_operands);
+        arena_append_string8(output, S8(",\"in\":"));
+        arena_append_string8(output, fields.input_operands);
+        arena_append_string8(output, S8(",\"predicates\":"));
+        if (!aarch64_import_emit_predicates(output, fields.predicates))
+        {
+            valid = false;
+            break;
+        }
+        arena_append_string8(output, S8("}\n"));
+        count += 1;
+    }
+    *imported_count = count;
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL String8 assembly_import_arena_contents(Arena* arena)
+{
+    return (String8){.pointer = (char8*)arena_buffer_start(arena), .length = arena_buffer_size(arena)};
+}
+
+BUSTER_GLOBAL_LOCAL String8 assembly_import_checksum(Arena* arena, String8 bytes)
+{
+    u64 checksum = buster_hash_64(bytes.pointer ? (u8*)bytes.pointer : (u8*)"", bytes.length);
+    return string_format(arena, S8("{u64:x,width=[0,16],no_prefix}"), checksum);
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_write(Arena* arena, String8 directory, String8 name, String8 content)
+{
+    String8 path = path_join(arena, directory, name);
+    if (!file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(content)))
+    {
+        string_print(S8("error: failed to write {S8}\n"), path);
+        return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
+    Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
+    if (!arena || !output)
+    {
+        if (arena)
+        {
+            arena_destroy(arena, 1);
+        }
+        if (output)
+        {
+            arena_destroy(output, 1);
+        }
+        return false;
+    }
+
+    XedImportRecordList xed = {0};
+    xed_import_parse_file(arena, &xed, S8("fixture.xed.txt"),
+                          S8("{\nICLASS: ADD\nIFORM: ADD_GPRv_GPRv\nISA_SET: BASE\nPATTERN: 0x01 MODRM()\nOPERANDS: REG0=GPRv:r REG1=GPRv:r\n}\n"
+                             "{\nICLASS: INCOMPLETE\nPATTERN: 0x02\n}\n"));
+    xed_import_emit(output, xed);
+    String8 expected_xed =
+        S8("{\"source\":\"fixture.xed.txt\",\"iclass\":\"ADD\",\"iform\":\"ADD_GPRv_GPRv\",\"isa_set\":\"BASE\","
+           "\"pattern\":\"0x01 MODRM()\",\"operands\":\"REG0=GPRv:r REG1=GPRv:r\"}\n");
+    bool result = xed.count == 1 && string_equal(assembly_import_arena_contents(output), expected_xed);
+
+    arena_reset_to_start(output);
+    String8 aarch64_json =
+        S8("{\"!instanceof\":{\"AArch64Inst\":[\"Pseudo\",\"Real\"]},"
+           "\"Pseudo\":{\"isPseudo\":1,\"Inst\":[0],\"AsmString\":\"pseudo\",\"OutOperandList\":{\"printable\":\"(outs)\"},"
+           "\"InOperandList\":{\"printable\":\"(ins)\"},\"Predicates\":[]},"
+           "\"Real\":{\"isPseudo\":0,\"Inst\":[1,0],\"AsmString\":\"real\\t$Rd\","
+           "\"OutOperandList\":{\"printable\":\"(outs GPR:$Rd)\"},\"InOperandList\":{\"printable\":\"(ins)\"},"
+           "\"Predicates\":[{\"def\":\"HasFeature\"}]}}");
+    u64 aarch64_count = 0;
+    String8 expected_aarch64 =
+        S8("{\"name\":\"Real\",\"inst\":[1,0],\"asm\":\"real\\t$Rd\",\"out\":\"(outs GPR:$Rd)\",\"in\":\"(ins)\","
+           "\"predicates\":[\"HasFeature\"]}\n");
+    result = result && aarch64_import_emit(arena, output, aarch64_json, &aarch64_count) && aarch64_count == 1 &&
+             string_equal(assembly_import_arena_contents(output), expected_aarch64);
+
+    arena_destroy(output, 1);
+    arena_destroy(arena, 1);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* data)
+{
+    AssemblyImportOptions options = *(AssemblyImportOptions*)data;
+    if (!assembly_import_self_test())
+    {
+        string_print(S8("error: assembly metadata importer self-test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    AssemblyImportPathList paths = {0};
+    if (!assembly_import_collect_xed_paths(arena, options.xed_datafiles, &paths) || !paths.count)
+    {
+        string_print(S8("error: failed to enumerate XED data files under {S8}\n"), options.xed_datafiles);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    AssemblyImportPathNode** sorted_paths = arena_allocate(arena, AssemblyImportPathNode*, paths.count);
+    u64 path_index = 0;
+    for (AssemblyImportPathNode* node = paths.first; node; node = node->next)
+    {
+        sorted_paths[path_index++] = node;
+    }
+    qsort(sorted_paths, paths.count, sizeof(sorted_paths[0]), assembly_import_path_compare);
+
+    Arena* xed_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+    Arena* aarch64_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+    Arena* xed_checksum_input = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+    if (!xed_output || !aarch64_output || !xed_checksum_input)
+    {
+        string_print(S8("error: failed to reserve assembly importer arenas\n"));
+        if (xed_output)
+        {
+            arena_destroy(xed_output, 1);
+        }
+        if (aarch64_output)
+        {
+            arena_destroy(aarch64_output, 1);
+        }
+        if (xed_checksum_input)
+        {
+            arena_destroy(xed_checksum_input, 1);
+        }
+        return PROCESS_RESULT_FAILED;
+    }
+
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
+    XedImportRecordList xed_records = {0};
+    for (u64 i = 0; i < paths.count; i += 1)
+    {
+        AssemblyImportPathNode* path = sorted_paths[i];
+        ByteSlice bytes = file_read(arena, path->full, (FileReadOptions){0});
+        if (!bytes.pointer && bytes.length == 0)
+        {
+            string_print(S8("error: failed to read XED data file {S8}\n"), path->full);
+            result = PROCESS_RESULT_FAILED;
+            break;
+        }
+        String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+        arena_append_string8(xed_checksum_input, path->relative);
+        arena_append_char8(xed_checksum_input, 0);
+        arena_append_string8(xed_checksum_input, text);
+        arena_append_char8(xed_checksum_input, 0);
+        if (string_contains(text, S8("ICLASS:")))
+        {
+            xed_import_parse_file(arena, &xed_records, path->relative, text);
+        }
+    }
+    if (result == PROCESS_RESULT_SUCCESS && !xed_records.count)
+    {
+        string_print(S8("error: no XED encoding forms were imported\n"));
+        result = PROCESS_RESULT_FAILED;
+    }
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        xed_import_emit(xed_output, xed_records);
+    }
+
+    FileMapRead aarch64_map = {0};
+    u64 aarch64_count = 0;
+    String8 aarch64_json = {0};
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        aarch64_map = file_map_read(arena, options.aarch64_json, (FileReadOptions){0});
+        if (!aarch64_map.bytes.pointer)
+        {
+            string_print(S8("error: failed to read llvm-tblgen JSON {S8}\n"), options.aarch64_json);
+            result = PROCESS_RESULT_FAILED;
+        }
+        else
+        {
+            aarch64_json = BYTE_SLICE_TO_STRING(8, aarch64_map.bytes);
+            if (!aarch64_import_emit(arena, aarch64_output, aarch64_json, &aarch64_count))
+            {
+                string_print(S8("error: malformed or incomplete AArch64 llvm-tblgen JSON in {S8}\n"), options.aarch64_json);
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+    }
+
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        make_directory_recursive(arena, options.output_directory);
+        String8 xed_content = assembly_import_arena_contents(xed_output);
+        String8 aarch64_content = assembly_import_arena_contents(aarch64_output);
+        String8 xed_input_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(xed_checksum_input));
+        String8 aarch64_input_checksum = assembly_import_checksum(arena, aarch64_json);
+        String8 xed_output_checksum = assembly_import_checksum(arena, xed_content);
+        String8 aarch64_output_checksum = assembly_import_checksum(arena, aarch64_content);
+        String8 manifest = string_format(
+            arena,
+            S8("{{\n"
+               "  \"schema_version\": 1,\n"
+               "  \"checksum_algorithm\": \"xxh64\",\n"
+               "  \"xed\": {{\n"
+               "    \"source_url\": \"https://github.com/intelxed/xed\",\n"
+               "    \"release\": \"v2026.07.15\",\n"
+               "    \"commit\": \"519c843c86547e2003f5a404a53358a7dcfb82f3\",\n"
+               "    \"license\": \"Apache-2.0\",\n"
+               "    \"input_checksum\": \"{S8}\",\n"
+               "    \"output_checksum\": \"{S8}\",\n"
+               "    \"form_count\": {u64}\n"
+               "  },\n"
+               "  \"llvm\": {{\n"
+               "    \"source_url\": \"https://github.com/llvm/llvm-project\",\n"
+               "    \"release\": \"llvmorg-22.1.8\",\n"
+               "    \"commit\": \"ca7933e47d3a3451d81e72ac174dcb5aa28b59d1\",\n"
+               "    \"license\": \"Apache-2.0 WITH LLVM-exception\",\n"
+               "    \"input_checksum\": \"{S8}\",\n"
+               "    \"output_checksum\": \"{S8}\",\n"
+               "    \"instruction_count\": {u64}\n"
+               "  }\n"
+               "}\n"),
+            xed_input_checksum, xed_output_checksum, xed_records.count, aarch64_input_checksum, aarch64_output_checksum, aarch64_count);
+
+        if (!assembly_import_write(arena, options.output_directory, S8("x86_64-xed.jsonl"), xed_content) ||
+            !assembly_import_write(arena, options.output_directory, S8("aarch64-llvm.jsonl"), aarch64_content) ||
+            !assembly_import_write(arena, options.output_directory, S8("manifest.json"), manifest))
+        {
+            result = PROCESS_RESULT_FAILED;
+        }
+        else
+        {
+            string_print(S8("Imported {u64} XED forms and {u64} AArch64 instructions into {S8}.\n"), xed_records.count, aarch64_count,
+                         options.output_directory);
+        }
+    }
+
+    if (aarch64_map.mapped_pointer)
+    {
+        file_map_unmap(aarch64_map);
+    }
+    arena_destroy(xed_checksum_input, 1);
+    arena_destroy(aarch64_output, 1);
+    arena_destroy(xed_output, 1);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void assembly_import_action_add(Arena* arena, AssemblyImportOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    AssemblyImportOptions* options_copy = arena_allocate(arena, AssemblyImportOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = assembly_import_action, .callback_data = options_copy};
+}
+
 ProcessResult process_arguments(void)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
@@ -3372,6 +4404,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
         [BUILD_COMMAND_TIME_TRACE_SUMMARY] = S8_INITIALIZER("time_trace_summary"),
+        [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_TEST_SELF_HOST] = S8_INITIALIZER("test_self_host"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
@@ -3428,6 +4461,7 @@ ProcessResult process_arguments(void)
     CmakeProfileSummaryOptions cmake_profile_summary_options = {.limit = 25};
     NinjaLogSummaryOptions ninja_log_summary_options = {.limit = 25};
     TimeTraceSummaryOptions time_trace_summary_options = {.limit = 25};
+    AssemblyImportOptions assembly_import_options = {.output_directory = S8("src/buster/lib/compiler/assembly/generated")};
     String8List time_trace_summary_paths = {0};
     String8List generate_cmake_arguments = {0};
     String8List build_targets = {0};
@@ -3509,6 +4543,30 @@ ProcessResult process_arguments(void)
             else if (command == BUILD_COMMAND_TIME_TRACE_SUMMARY && !string_starts_with_sequence(argument, S8("--")))
             {
                 string8_list_push(arena, &time_trace_summary_paths, argument);
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
+            {
+                if (!assembly_import_options.xed_datafiles_set)
+                {
+                    assembly_import_options.xed_datafiles = argument;
+                    assembly_import_options.xed_datafiles_set = true;
+                }
+                else if (!assembly_import_options.aarch64_json_set)
+                {
+                    assembly_import_options.aarch64_json = argument;
+                    assembly_import_options.aarch64_json_set = true;
+                }
+                else if (!assembly_import_options.output_directory_set)
+                {
+                    assembly_import_options.output_directory = argument;
+                    assembly_import_options.output_directory_set = true;
+                }
+                else
+                {
+                    result = PROCESS_RESULT_FAILED;
+                    break;
+                }
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_GENERATE)
@@ -4038,6 +5096,19 @@ ProcessResult process_arguments(void)
         {
             time_trace_summary_options.paths = string8_list_to_slice(arena, time_trace_summary_paths);
             time_trace_summary_action_add(arena, time_trace_summary_options);
+        }
+        break;
+        case BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA:
+        {
+            if (!assembly_import_options.xed_datafiles_set || !assembly_import_options.aarch64_json_set)
+            {
+                string_print(S8("error: import_assembly_metadata requires <xed-datafiles-directory> <aarch64-tblgen-json> [output-directory]\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+            else
+            {
+                assembly_import_action_add(arena, assembly_import_options);
+            }
         }
         break;
         case BUILD_COMMAND_TEST_SELF_HOST:
