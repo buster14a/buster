@@ -4,6 +4,8 @@
 
 typedef u16 WmUnit;
 
+// WmOffset deliberately uses signed coordinate members while size and
+// rectangle extent members remain unsigned.
 typedef union WmOffset WmOffset;
 union WmOffset
 {
@@ -13,7 +15,7 @@ union WmOffset
     };
     struct
     {
-        WmUnit x, y;
+        s16 x, y;
     };
     WmUnit values[2];
 };
@@ -81,6 +83,7 @@ typedef enum WmEventKind
     WM_EVENT_BUTTON_PRESS,
     WM_EVENT_BUTTON_RELEASE,
     WM_EVENT_TEXT_INPUT,
+    WM_EVENT_FILE_DROP,
     WM_EVENT_COUNT,
 } WmEventKind;
 
@@ -270,6 +273,7 @@ struct WmEvent
     u8 modifiers;
     WmOffset position;
     String8 text;
+    SliceString8 paths;
     u8 reserved[4];
 };
 

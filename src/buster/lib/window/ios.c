@@ -57,8 +57,8 @@ BUSTER_GLOBAL_LOCAL WmOffset buster_ios_touch_position(id self, id touches)
         point = ((BusterCGPoint (*)(id, SEL, id))objc_msgSend)(touch, buster_sel("locationInView:"), self);
     }
     return (WmOffset){
-        .x = (WmUnit)((f32)point.x * buster_ios_scale),
-        .y = (WmUnit)((f32)point.y * buster_ios_scale),
+        .x = (s16)((f32)point.x * buster_ios_scale),
+        .y = (s16)((f32)point.y * buster_ios_scale),
     };
 }
 

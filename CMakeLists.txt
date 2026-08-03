@@ -774,7 +774,7 @@ function(buster_apply_module_options name)
     endif()
 
     if ("WINDOW" IN_LIST modules AND WIN32)
-        target_link_libraries(${name} PRIVATE dwmapi)
+        target_link_libraries(${name} PRIVATE dwmapi shell32)
 
         if (C_COMPILER_TCC)
             target_link_libraries(${name} PRIVATE user32)
@@ -838,6 +838,8 @@ set(BUSTER_TEST_FILES
     src/buster/tests/os_test.h
     src/buster/tests/file_test.c
     src/buster/tests/file_test.h
+    src/buster/tests/window_test.c
+    src/buster/tests/window_test.h
     src/buster/tests/target_test.c
     src/buster/tests/target_test.h
     src/buster/tests/x86_64_test.c

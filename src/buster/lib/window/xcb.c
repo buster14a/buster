@@ -1824,7 +1824,7 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                                                      .window = window,
                                                      .key = key,
                                                      .modifiers = modifiers,
-                                                     .position = (WmOffset){.x = (WmUnit)button_event->event_x, .y = (WmUnit)button_event->event_y},
+                                                     .position = (WmOffset){.x = (s16)button_event->event_x, .y = (s16)button_event->event_y},
                                                  });
                     }
 
@@ -1905,7 +1905,7 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                     wm_event_push(windowing, (WmEvent){
                                                  .kind = WM_EVENT_MOUSE_MOVE,
                                                  .window = wm_x11_window_from_xcb(windowing, motion_notify_event->event),
-                                                 .position = (WmOffset){.x = (WmUnit)motion_notify_event->event_x, .y = (WmUnit)motion_notify_event->event_y},
+                                                 .position = (WmOffset){.x = (s16)motion_notify_event->event_x, .y = (s16)motion_notify_event->event_y},
                                              });
                     // xcb_motion_notify_event_t(3)                                                               XCB Events xcb_motion_notify_event_t(3)
                     //

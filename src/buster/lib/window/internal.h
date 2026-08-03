@@ -89,8 +89,6 @@ struct WmHandle
     Arena* window_arena;
     Arena* event_arena;
     WmEventList event_list;
-
-    bool resizing;
 };
 
 struct WmWindowHandle
@@ -107,6 +105,8 @@ struct WmWindowHandle
     bool xim_create_ic_pending;
 #elif defined(_WIN32)
     HWND handle;
+    char16 pending_high_surrogate;
+    u8 held_mouse_buttons;
 #elif defined(__APPLE__)
 #if BUSTER_IOS
     id view;
@@ -119,7 +119,6 @@ struct WmWindowHandle
 #else
     WmOffset size;
 #endif
-    bool custom_border;
 };
 
 #if defined(BUSTER_WINDOW_IMPLEMENTATION)

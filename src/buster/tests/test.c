@@ -26,6 +26,7 @@
 #include <buster/tests/string_test.h>
 #include <buster/tests/os_test.h>
 #include <buster/tests/file_test.h>
+#include <buster/tests/window_test.h>
 #include <buster/tests/target_test.h>
 #include <buster/tests/compiler/frontend/buster/parser_test.h>
 #include <buster/tests/compiler/frontend/buster/analysis_test.h>
@@ -49,6 +50,7 @@
 #include <buster/tests/string_test.c>
 #include <buster/tests/os_test.c>
 #include <buster/tests/file_test.c>
+#include <buster/tests/window_test.c>
 #include <buster/tests/target_test.c>
 #include <buster/tests/compiler/frontend/buster/parser_test.c>
 #include <buster/tests/compiler/frontend/buster/analysis_test.c>
@@ -160,6 +162,7 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &string_tests,
     &os_tests,
     &file_tests,
+    &window_tests,
     &target_tests,
     &parser_tokenizer_tests,
     &parser_expression_tests,

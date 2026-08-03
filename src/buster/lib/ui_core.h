@@ -23,6 +23,7 @@ typedef enum UI_EventKind
     UI_EventKind_Text,
     UI_EventKind_MouseMove,
     UI_EventKind_Scroll,
+    UI_EventKind_FileDrop,
     UI_EventKind_COUNT,
 } UI_EventKind;
 
@@ -34,6 +35,7 @@ struct UI_Event
     WmKey key;
     u8 modifiers;
     String8 string;
+    SliceString8 paths;
     float2 pos;
     float2 delta;
 };

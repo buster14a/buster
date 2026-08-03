@@ -155,6 +155,18 @@ UI_EventNode* ui_event_list_push(Arena* arena, UI_EventList* list, UI_Event* eve
     {
         node->v.string = string_duplicate_arena(arena, node->v.string, false);
     }
+    if (node->v.paths.length != 0)
+    {
+        SliceString8 paths = {
+            .pointer = arena_allocate(arena, String8, node->v.paths.length),
+            .length = node->v.paths.length,
+        };
+        for (u64 i = 0; i < paths.length; i += 1)
+        {
+            paths.pointer[i] = string_duplicate_arena(arena, node->v.paths.pointer[i], false);
+        }
+        node->v.paths = paths;
+    }
 
     if (!list->last)
     {
@@ -725,6 +737,12 @@ UI_EventList ui_event_list_from_wm_events(Arena* arena, WmWindowHandle* window, 
         {
             ui_event.kind = UI_EventKind_Text;
             ui_event.string = event->text;
+        }
+        break;
+        case WM_EVENT_FILE_DROP:
+        {
+            ui_event.kind = UI_EventKind_FileDrop;
+            ui_event.paths = event->paths;
         }
         break;
         case WM_EVENT_MOUSE_MOVE:

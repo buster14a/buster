@@ -42,8 +42,8 @@ BUSTER_GLOBAL_LOCAL int32_t buster_android_on_input_event(struct android_app* ap
 
     int32_t action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
     WmOffset position = {
-        .x = (WmUnit)AMotionEvent_getX(event, 0),
-        .y = (WmUnit)AMotionEvent_getY(event, 0),
+        .x = (s16)AMotionEvent_getX(event, 0),
+        .y = (s16)AMotionEvent_getY(event, 0),
     };
 
     switch (action)
