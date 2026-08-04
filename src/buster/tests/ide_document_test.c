@@ -24,6 +24,9 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
 
     Arena* test_arena = arguments->arena;
     String8 root = buster_test_temporary_path(test_arena, S8("buster-ide-document-model"), S8(""));
+#if defined(_WIN32)
+    root = os_path_absolute(test_arena, root, true);
+#endif
     String8 subdirectory = string_format_z(test_arena, S8("{S8}/sub"), root);
     String8 a_path = string_format_z(test_arena, S8("{S8}/a.bbb"), root);
     String8 b_path = string_format_z(test_arena, S8("{S8}/sub/b.bbb"), root);
