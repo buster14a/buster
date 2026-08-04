@@ -283,14 +283,12 @@ BUSTER_GLOBAL_LOCAL const char* metal_rect_vertex_shader_source(void)
 #endif
 }
 
+#if BUSTER_USE_SLANG_SHADERS
 BUSTER_GLOBAL_LOCAL const char* metal_rect_fragment_shader_source(void)
 {
-#if BUSTER_USE_SLANG_SHADERS
     return BUSTER_SHADER_RECT_METAL_FRAGMENT_SOURCE;
-#else
-    return metal_rect_inline_shader_source();
-#endif
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL const char* metal_blur_shader_source(void)
 {
