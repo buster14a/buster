@@ -598,8 +598,6 @@ struct AnalysisJob
     u32 dependency_count;
 };
 
-typedef void AnalysisJobCallback(AnalysisJob* job, u32 worker_index, void* user_data);
-
 typedef struct AnalysisScheduleResult AnalysisScheduleResult;
 struct AnalysisScheduleResult
 {
@@ -666,8 +664,6 @@ struct AnalysisProgramJob
     AnalysisModuleId module;
     AnalysisJobId job;
 };
-
-typedef void AnalysisProgramJobCallback(AnalysisResult* module, AnalysisJob* job, u32 worker_index, void* user_data);
 
 typedef struct AnalysisProgramScheduleResult AnalysisProgramScheduleResult;
 struct AnalysisProgramScheduleResult
@@ -799,9 +795,7 @@ BUSTER_F_DECL AnalysisType* analysis_type_from_id(AnalysisResult* result, Analys
 BUSTER_F_DECL bool analysis_entity_is_generic(Arena* scratch_arena, AnalysisResult* result, AnalysisEntity* entity);
 // Resolves lexical bindings and annotates every node in each flattened body
 // expression. Interfaces must have been resolved first.
-typedef void AnalysisBodyConsumer(Arena* result_arena, Arena* scratch_arena, AnalysisResult* result, u32 entity_index, void* user_data);
 BUSTER_F_DECL void analysis_analyze_bodies(Arena* result_arena, AnalysisResult* result);
-BUSTER_F_DECL void analysis_analyze_bodies_with_consumer(Arena* result_arena, AnalysisResult* result, AnalysisBodyConsumer* consumer, void* user_data);
 BUSTER_F_DECL void analysis_compute_layouts(AnalysisResult* result, AnalysisLayoutOptions options);
 BUSTER_F_DECL AnalysisAbiValue analysis_abi_value_classify(Arena* scratch_arena, AnalysisResult* result, AnalysisTypeId type, AnalysisAbiConvention convention,
                                                            bool is_result);
@@ -811,10 +805,8 @@ BUSTER_F_DECL AnalysisFunctionAbi analysis_classify_function_abi(Arena* result_a
 BUSTER_F_DECL AnalysisFunctionAbi analysis_classify_call_abi(Arena* result_arena, AnalysisResult* result, AnalysisTypeId function_type,
                                                              AnalysisTypeId* argument_types, u32 argument_count, Target target);
 BUSTER_F_DECL void analysis_build_jobs(Arena* result_arena, AnalysisResult* result);
-BUSTER_F_DECL AnalysisScheduleResult analysis_execute_jobs(Arena* result_arena, AnalysisResult* result, u32 worker_count, AnalysisJobCallback* callback,
-                                                           void* user_data);
+BUSTER_F_DECL AnalysisScheduleResult analysis_schedule_jobs(Arena* result_arena, AnalysisResult* result);
 BUSTER_F_DECL AnalysisProgram analysis_program_load(Arena* result_arena, Arena* expression_arena, AnalysisProgramOptions options);
 BUSTER_F_DECL AnalysisProgram analysis_program_load_memory(Arena* result_arena, Arena* expression_arena, String8 source);
 BUSTER_F_DECL void analysis_program_unmap_sources(AnalysisProgram* program);
-BUSTER_F_DECL AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena, AnalysisProgram* program, u32 worker_count,
-                                                                          AnalysisProgramJobCallback* callback, void* user_data);
+BUSTER_F_DECL AnalysisProgramScheduleResult analysis_schedule_program_jobs(Arena* result_arena, AnalysisProgram* program);

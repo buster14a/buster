@@ -271,6 +271,10 @@ enabled.
   stack, queue, or worklist rather than the C call stack. Never use recursive
   calls when the depth depends on source input, runtime data, or another
   unbounded structure.
+- **Compiler control flow must not use callbacks or function-pointer dispatch.**
+  Use direct calls, loops, switches, and explicit work structures. Function
+  pointer values may model the program being compiled, but the compiler itself
+  must not execute through them.
 - **Warnings are errors** under a very large warning set (see
   `GNU_FAMILY_WARNINGS` in `CMakeLists.txt`), and code must stay clean under
   clang, gcc, tcc, zig cc, and MSVC. Avoid compiler-specific extensions

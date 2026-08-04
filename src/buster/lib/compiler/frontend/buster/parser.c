@@ -7197,19 +7197,35 @@ BUSTER_TEST_F_DECL ParserFileTestCase parser_file_test_cases[] = {
 };
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(parser_file_test_cases) == PARSER_FILE_TEST_CASE_COUNT);
 
-BUSTER_GLOBAL_LOCAL int parser_bench_u64_compare(const void* a, const void* b)
+BUSTER_GLOBAL_LOCAL void parser_bench_sort_u64(u64* values, u64 count)
 {
-    u64 left = *(const u64*)a;
-    u64 right = *(const u64*)b;
-    return (left > right) - (left < right);
+    for (u64 index = 1; index < count; index += 1)
+    {
+        u64 value = values[index];
+        u64 insert = index;
+        while (insert && values[insert - 1] > value)
+        {
+            values[insert] = values[insert - 1];
+            insert -= 1;
+        }
+        values[insert] = value;
+    }
 }
 
 #if BUSTER_INSTRUMENT
-BUSTER_GLOBAL_LOCAL int parser_bench_file_result_compare_desc(const void* a, const void* b)
+BUSTER_GLOBAL_LOCAL void parser_bench_sort_file_results(ParserBenchFileResult* files, u64 count)
 {
-    const ParserBenchFileResult* left = (const ParserBenchFileResult*)a;
-    const ParserBenchFileResult* right = (const ParserBenchFileResult*)b;
-    return (left->median_ns < right->median_ns) - (left->median_ns > right->median_ns);
+    for (u64 index = 1; index < count; index += 1)
+    {
+        ParserBenchFileResult value = files[index];
+        u64 insert = index;
+        while (insert && files[insert - 1].median_ns < value.median_ns)
+        {
+            files[insert] = files[insert - 1];
+            insert -= 1;
+        }
+        files[insert] = value;
+    }
 }
 #endif
 
@@ -7296,13 +7312,13 @@ ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
         scratch_end(scratch);
     }
 
-    qsort(durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+    parser_bench_sort_u64(durations_ns, iterations);
     result.min_ns = iterations ? durations_ns[0] : 0;
     result.median_ns = iterations ? durations_ns[iterations / 2] : 0;
 
 #if BUSTER_INSTRUMENT
-    qsort(tokenize_durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
-    qsort(parse_durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+    parser_bench_sort_u64(tokenize_durations_ns, iterations);
+    parser_bench_sort_u64(parse_durations_ns, iterations);
     result.tokenize_min_ns = iterations ? tokenize_durations_ns[0] : 0;
     result.tokenize_median_ns = iterations ? tokenize_durations_ns[iterations / 2] : 0;
     result.parse_min_ns = iterations ? parse_durations_ns[0] : 0;
@@ -7316,7 +7332,7 @@ ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
         {
             per_file_ns[iteration] = file_durations_ns[iteration * result.file_count + file_i];
         }
-        qsort(per_file_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+        parser_bench_sort_u64(per_file_ns, iterations);
 
         result.files[file_i] = (ParserBenchFileResult){
             .path = parser_file_test_cases[file_i].path,
@@ -7324,7 +7340,7 @@ ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations)
             .median_ns = iterations ? per_file_ns[iterations / 2] : 0,
         };
     }
-    qsort(result.files, result.file_count, sizeof(ParserBenchFileResult), parser_bench_file_result_compare_desc);
+    parser_bench_sort_file_results(result.files, result.file_count);
 #endif
 
     bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
@@ -7398,13 +7414,13 @@ ParserBenchResult parser_parse_bench_mmap(Arena* arena, u64 iterations)
         scratch_end(scratch);
     }
 
-    qsort(durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+    parser_bench_sort_u64(durations_ns, iterations);
     result.min_ns = iterations ? durations_ns[0] : 0;
     result.median_ns = iterations ? durations_ns[iterations / 2] : 0;
 
 #if BUSTER_INSTRUMENT
-    qsort(tokenize_durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
-    qsort(parse_durations_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+    parser_bench_sort_u64(tokenize_durations_ns, iterations);
+    parser_bench_sort_u64(parse_durations_ns, iterations);
     result.tokenize_min_ns = iterations ? tokenize_durations_ns[0] : 0;
     result.tokenize_median_ns = iterations ? tokenize_durations_ns[iterations / 2] : 0;
     result.parse_min_ns = iterations ? parse_durations_ns[0] : 0;
@@ -7418,14 +7434,14 @@ ParserBenchResult parser_parse_bench_mmap(Arena* arena, u64 iterations)
         {
             per_file_ns[iteration] = file_durations_ns[iteration * result.file_count + file_i];
         }
-        qsort(per_file_ns, iterations, sizeof(u64), parser_bench_u64_compare);
+        parser_bench_sort_u64(per_file_ns, iterations);
         result.files[file_i] = (ParserBenchFileResult){
             .path = parser_file_test_cases[file_i].path,
             .min_ns = iterations ? per_file_ns[0] : 0,
             .median_ns = iterations ? per_file_ns[iterations / 2] : 0,
         };
     }
-    qsort(result.files, result.file_count, sizeof(ParserBenchFileResult), parser_bench_file_result_compare_desc);
+    parser_bench_sort_file_results(result.files, result.file_count);
 #endif
 
     parser_bench_unmap_files(mapped_files, result.file_count);

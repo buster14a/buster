@@ -32211,10 +32211,10 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             }
         }
     }
-    // Function symbols must exist before global initializers are lowered.  A
-    // callback table is allowed to name a definition that appears later in
-    // the translation unit, and an external callback has no definition in
-    // this module at all.
+    // Function symbols must exist before global initializers are lowered. A
+    // function-pointer table may name a definition that appears later in the
+    // translation unit, while an external function has no definition in this
+    // module at all.
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
     {
         CEntity* entity = parse.entities + entity_index;

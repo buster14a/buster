@@ -483,7 +483,7 @@ BUSTER_TEST_F_DECL UnitTestResult analysis_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, resolved.jobs[15].kind == ANALYSIS_JOB_BODY);
     BUSTER_TEST(arguments, resolved.jobs[15].dependency_count == 1);
     BUSTER_TEST(arguments, resolved.jobs[15].dependency_kinds[0] == ANALYSIS_DEPENDENCY_INTERFACE);
-    AnalysisScheduleResult schedule = analysis_execute_jobs(arguments->arena, &resolved, 4, 0, 0);
+    AnalysisScheduleResult schedule = analysis_schedule_jobs(arguments->arena, &resolved);
     BUSTER_TEST(arguments, !schedule.has_cycle);
     BUSTER_TEST(arguments, schedule.execution_count == resolved.job_count);
     BUSTER_TEST(arguments, schedule.wave_count == 2);
@@ -764,7 +764,7 @@ BUSTER_TEST_F_DECL UnitTestResult analysis_tests(UnitTestArguments* arguments)
         .module_results = scheduled_modules,
         .module_count = BUSTER_ARRAY_LENGTH(scheduled_modules),
     };
-    AnalysisProgramScheduleResult program_schedule = analysis_execute_program_jobs(arguments->arena, &scheduled_program, 4, 0, 0);
+    AnalysisProgramScheduleResult program_schedule = analysis_schedule_program_jobs(arguments->arena, &scheduled_program);
     BUSTER_TEST(arguments, !program_schedule.has_cycle);
     BUSTER_TEST(arguments, program_schedule.execution_count == namespace_math.job_count + namespace_app.job_count + namespace_app_two.job_count);
     BUSTER_TEST(arguments, program_schedule.wave_count >= 2);
@@ -778,7 +778,7 @@ BUSTER_TEST_F_DECL UnitTestResult analysis_tests(UnitTestArguments* arguments)
         .module_results = absent_body_modules,
         .module_count = BUSTER_ARRAY_LENGTH(absent_body_modules),
     };
-    AnalysisProgramScheduleResult absent_body_schedule = analysis_execute_program_jobs(arguments->arena, &absent_body_program, 4, 0, 0);
+    AnalysisProgramScheduleResult absent_body_schedule = analysis_schedule_program_jobs(arguments->arena, &absent_body_program);
     BUSTER_TEST(arguments, !absent_body_schedule.has_cycle);
     BUSTER_TEST(arguments, absent_body_schedule.execution_count == namespace_math.job_count);
     namespace_math.module.bodies = namespace_math_bodies;
@@ -1039,7 +1039,7 @@ BUSTER_TEST_F_DECL UnitTestResult analysis_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, ordinary_body_job_count == 1);
             BUSTER_TEST(arguments, specialized_body_job_count == 3);
-            AnalysisScheduleResult generic_schedule = analysis_execute_jobs(arguments->arena, &fixture_result, 2, 0, 0);
+            AnalysisScheduleResult generic_schedule = analysis_schedule_jobs(arguments->arena, &fixture_result);
             BUSTER_TEST(arguments, !generic_schedule.has_cycle);
             BUSTER_TEST(arguments, generic_schedule.execution_count == fixture_result.job_count);
         }
@@ -1095,7 +1095,7 @@ BUSTER_TEST_F_DECL UnitTestResult analysis_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, analysis_interface_cache_store(arguments->arena, &cache, loaded.root->name, hashed));
         BUSTER_TEST(arguments, !analysis_interface_cache_store(arguments->arena, &cache, loaded.root->name, hashed));
         BUSTER_TEST(arguments, cache.count == 1);
-        AnalysisProgramScheduleResult loaded_schedule = analysis_execute_program_jobs(arguments->arena, &loaded, 4, 0, 0);
+        AnalysisProgramScheduleResult loaded_schedule = analysis_schedule_program_jobs(arguments->arena, &loaded);
         BUSTER_TEST(arguments, !loaded_schedule.has_cycle);
         BUSTER_TEST(arguments, loaded_schedule.execution_count != 0);
     }

@@ -6563,7 +6563,7 @@ BUSTER_GLOBAL_LOCAL void analysis_analyze_code_body(Arena* result_arena, Arena* 
     }
 }
 
-void analysis_analyze_bodies_with_consumer(Arena* result_arena, AnalysisResult* result, AnalysisBodyConsumer* consumer, void* user_data)
+void analysis_analyze_bodies(Arena* result_arena, AnalysisResult* result)
 {
     BUSTER_CHECK(result->types.types != 0);
     Arena* conflicts[] = {result_arena};
@@ -6584,10 +6584,6 @@ void analysis_analyze_bodies_with_consumer(Arena* result_arena, AnalysisResult* 
         if (!body->analyzed)
         {
             analysis_analyze_code_body(result_arena, scratch.arena, result, entity, body, 0);
-            if (consumer)
-            {
-                consumer(result_arena, scratch.arena, result, entity_index, user_data);
-            }
         }
     }
     for (AnalysisInstantiation* instantiation = result->first_instantiation; instantiation; instantiation = instantiation->next)
@@ -6599,11 +6595,6 @@ void analysis_analyze_bodies_with_consumer(Arena* result_arena, AnalysisResult* 
         }
     }
     scratch_end(scratch);
-}
-
-void analysis_analyze_bodies(Arena* result_arena, AnalysisResult* result)
-{
-    analysis_analyze_bodies_with_consumer(result_arena, result, 0, 0);
 }
 
 BUSTER_GLOBAL_LOCAL u64 analysis_layout_align(u64 value, u32 alignment)
@@ -7682,28 +7673,7 @@ void analysis_build_jobs(Arena* result_arena, AnalysisResult* result)
     scratch_end(scratch);
 }
 
-typedef struct AnalysisScheduleWorker AnalysisScheduleWorker;
-struct AnalysisScheduleWorker
-{
-    AnalysisResult* result;
-    AnalysisJobId* ready;
-    AnalysisJobCallback* callback;
-    void* user_data;
-    u32 ready_count;
-    u32 worker_index;
-    u32 worker_count;
-};
-
-BUSTER_GLOBAL_LOCAL void analysis_schedule_worker(void* raw_worker)
-{
-    AnalysisScheduleWorker* worker = (AnalysisScheduleWorker*)raw_worker;
-    for (u32 index = worker->worker_index; index < worker->ready_count; index += worker->worker_count)
-    {
-        worker->callback(worker->result->jobs + worker->ready[index].value, worker->worker_index, worker->user_data);
-    }
-}
-
-AnalysisScheduleResult analysis_execute_jobs(Arena* result_arena, AnalysisResult* result, u32 worker_count, AnalysisJobCallback* callback, void* user_data)
+AnalysisScheduleResult analysis_schedule_jobs(Arena* result_arena, AnalysisResult* result)
 {
     AnalysisScheduleResult schedule = {0};
     schedule.execution_order = arena_allocate(result_arena, AnalysisJobId, result->job_count);
@@ -7787,50 +7757,10 @@ AnalysisScheduleResult analysis_execute_jobs(Arena* result_arena, AnalysisResult
             ready[tail++] = result->jobs[job_index].id;
         }
     }
-    worker_count = BUSTER_MAX(worker_count, 1);
     while (head < tail)
     {
         u32 batch_start = head;
         u32 batch_end = tail;
-        u32 ready_count = batch_end - batch_start;
-        u32 active_workers = BUSTER_MIN(worker_count, ready_count);
-        if (callback && active_workers > 1)
-        {
-            AnalysisScheduleWorker* workers = arena_allocate(result_arena, AnalysisScheduleWorker, active_workers);
-            OsThreadHandle** handles = arena_allocate(result_arena, OsThreadHandle*, active_workers);
-            for (u32 worker_index = 0; worker_index < active_workers; worker_index += 1)
-            {
-                workers[worker_index] = (AnalysisScheduleWorker){
-                    .result = result,
-                    .ready = ready + batch_start,
-                    .callback = callback,
-                    .user_data = user_data,
-                    .ready_count = ready_count,
-                    .worker_index = worker_index,
-                    .worker_count = active_workers,
-                };
-                handles[worker_index] = os_thread_create((ThreadCreateOptions){
-                    .callback = analysis_schedule_worker,
-                    .argument = workers + worker_index,
-                });
-            }
-            for (u32 worker_index = 0; worker_index < active_workers; worker_index += 1)
-            {
-                BUSTER_CHECK(os_thread_join(handles[worker_index]));
-            }
-        }
-        else if (callback)
-        {
-            AnalysisScheduleWorker worker = {
-                .result = result,
-                .ready = ready + batch_start,
-                .callback = callback,
-                .user_data = user_data,
-                .ready_count = ready_count,
-                .worker_count = 1,
-            };
-            analysis_schedule_worker(&worker);
-        }
         head = batch_end;
         for (u32 index = batch_start; index < batch_end; index += 1)
         {
@@ -7857,18 +7787,6 @@ AnalysisScheduleResult analysis_execute_jobs(Arena* result_arena, AnalysisResult
     return schedule;
 }
 
-typedef struct AnalysisProgramScheduleWorker AnalysisProgramScheduleWorker;
-struct AnalysisProgramScheduleWorker
-{
-    AnalysisProgram* program;
-    AnalysisProgramJob* ready;
-    AnalysisProgramJobCallback* callback;
-    void* user_data;
-    u32 ready_count;
-    u32 worker_index;
-    u32 worker_count;
-};
-
 BUSTER_GLOBAL_LOCAL AnalysisInstantiation* analysis_instantiation_from_id(AnalysisResult* result, AnalysisInstantiationId id)
 {
     for (AnalysisInstantiation* instantiation = result->first_instantiation; instantiation; instantiation = instantiation->next)
@@ -7893,27 +7811,6 @@ BUSTER_GLOBAL_LOCAL AnalysisBody* analysis_program_job_body(AnalysisResult* modu
         return instantiation ? &instantiation->body : 0;
     }
     return module->module.bodies ? module->module.bodies + job->entity.index.value : 0;
-}
-
-BUSTER_GLOBAL_LOCAL void analysis_program_schedule_worker(void* raw_worker)
-{
-    AnalysisProgramScheduleWorker* worker = (AnalysisProgramScheduleWorker*)raw_worker;
-    for (u32 index = worker->worker_index; index < worker->ready_count; index += worker->worker_count)
-    {
-        AnalysisProgramJob ready = worker->ready[index];
-        AnalysisResult* module = 0;
-        for (u32 module_index = 0; module_index < worker->program->module_count; module_index += 1)
-        {
-            AnalysisResult* candidate = worker->program->module_results[module_index];
-            if (candidate && candidate->module.id.value == ready.module.value)
-            {
-                module = candidate;
-                break;
-            }
-        }
-        BUSTER_CHECK(module && ready.job.value < module->job_count);
-        worker->callback(module, module->jobs + ready.job.value, worker->worker_index, worker->user_data);
-    }
 }
 
 BUSTER_GLOBAL_LOCAL u32 analysis_program_module_index(AnalysisProgram* program, AnalysisModuleId id)
@@ -7976,8 +7873,7 @@ BUSTER_GLOBAL_LOCAL bool analysis_program_schedule_add_edge(AnalysisProgramDepen
     return true;
 }
 
-AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena, AnalysisProgram* program, u32 worker_count,
-                                                            AnalysisProgramJobCallback* callback, void* user_data)
+AnalysisProgramScheduleResult analysis_schedule_program_jobs(Arena* result_arena, AnalysisProgram* program)
 {
     AnalysisProgramScheduleResult schedule = {0};
     u32* offsets = arena_allocate(result_arena, u32, program->module_count + 1);
@@ -8161,51 +8057,10 @@ AnalysisProgramScheduleResult analysis_execute_program_jobs(Arena* result_arena,
             }
         }
     }
-    worker_count = BUSTER_MAX(worker_count, 1);
     while (head < tail)
     {
         u32 batch_start = head;
         u32 batch_end = tail;
-        u32 ready_count = batch_end - batch_start;
-        u32 active_workers = BUSTER_MIN(worker_count, ready_count);
-        if (callback && active_workers > 1)
-        {
-            AnalysisProgramScheduleWorker* workers = arena_allocate(result_arena, AnalysisProgramScheduleWorker, active_workers);
-            OsThreadHandle** handles = arena_allocate(result_arena, OsThreadHandle*, active_workers);
-            for (u32 worker_index = 0; worker_index < active_workers; worker_index += 1)
-            {
-                workers[worker_index] = (AnalysisProgramScheduleWorker){
-                    .program = program,
-                    .ready = ready + batch_start,
-                    .callback = callback,
-                    .user_data = user_data,
-                    .ready_count = ready_count,
-                    .worker_index = worker_index,
-                    .worker_count = active_workers,
-                };
-                handles[worker_index] = os_thread_create((ThreadCreateOptions){
-                    .callback = analysis_program_schedule_worker,
-                    .argument = workers + worker_index,
-                });
-            }
-            for (u32 worker_index = 0; worker_index < active_workers; worker_index += 1)
-            {
-                BUSTER_CHECK(os_thread_join(handles[worker_index]));
-            }
-        }
-        else if (callback)
-        {
-            AnalysisProgramScheduleWorker worker = {
-                .program = program,
-                .ready = ready + batch_start,
-                .callback = callback,
-                .user_data = user_data,
-                .ready_count = ready_count,
-                .worker_count = 1,
-            };
-            analysis_program_schedule_worker(&worker);
-        }
-
         head = batch_end;
         for (u32 ready_index = batch_start; ready_index < batch_end; ready_index += 1)
         {
