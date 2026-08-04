@@ -258,6 +258,92 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
         (AssemblyEncodeOptions){.target = x86_without_sse2, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, unsupported_sse2.diagnostic_count == 1 &&
                                unsupported_sse2.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    u8 expected_x86_mmx[] = {
+        0x0f, 0x6f, 0xc1,
+        0x41, 0x0f, 0x7f, 0x7c, 0x24, 0x08,
+        0x0f, 0xfc, 0xd3,
+        0x0f, 0xfd, 0xe5,
+        0x0f, 0xfe, 0xf7,
+        0x0f, 0xd4, 0x45, 0x00,
+        0x0f, 0xf8, 0xca,
+        0x0f, 0xf9, 0xdc,
+        0x0f, 0xfa, 0xee,
+        0x0f, 0xfb, 0xf8,
+        0x0f, 0xdb, 0xca,
+        0x0f, 0xeb, 0xdc,
+        0x0f, 0xef, 0xee,
+        0x0f, 0x74, 0xf8,
+        0x0f, 0x75, 0xca,
+        0x0f, 0x76, 0xdc,
+        0x0f, 0x64, 0xee,
+        0x0f, 0x65, 0xf8,
+        0x0f, 0x66, 0xca,
+        0x0f, 0xd5, 0xdc,
+        0x0f, 0x77,
+    };
+    String8 x86_intel_mmx_source =
+        S8("movq mm0, mm1\n"
+           "movq [r12 + 8], mm7\n"
+           "paddb mm2, mm3\n"
+           "paddw mm4, mm5\n"
+           "paddd mm6, mm7\n"
+           "paddq mm0, [rbp]\n"
+           "psubb mm1, mm2\n"
+           "psubw mm3, mm4\n"
+           "psubd mm5, mm6\n"
+           "psubq mm7, mm0\n"
+           "pand mm1, mm2\n"
+           "por mm3, mm4\n"
+           "pxor mm5, mm6\n"
+           "pcmpeqb mm7, mm0\n"
+           "pcmpeqw mm1, mm2\n"
+           "pcmpeqd mm3, mm4\n"
+           "pcmpgtb mm5, mm6\n"
+           "pcmpgtw mm7, mm0\n"
+           "pcmpgtd mm1, mm2\n"
+           "pmullw mm3, mm4\n"
+           "emms\n");
+    AssemblyEncodeResult x86_intel_mmx = assembly_encode(
+        arguments->arena, x86_intel_mmx_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_mmx.diagnostic_count == 0 && x86_intel_mmx.bytes.length == sizeof(expected_x86_mmx) &&
+                               memcmp(x86_intel_mmx.bytes.pointer, expected_x86_mmx, sizeof(expected_x86_mmx)) == 0);
+    String8 x86_att_mmx_source =
+        S8("movq %mm1, %mm0\n"
+           "movq %mm7, 8(%r12)\n"
+           "paddb %mm3, %mm2\n"
+           "paddw %mm5, %mm4\n"
+           "paddd %mm7, %mm6\n"
+           "paddq (%rbp), %mm0\n"
+           "psubb %mm2, %mm1\n"
+           "psubw %mm4, %mm3\n"
+           "psubd %mm6, %mm5\n"
+           "psubq %mm0, %mm7\n"
+           "pand %mm2, %mm1\n"
+           "por %mm4, %mm3\n"
+           "pxor %mm6, %mm5\n"
+           "pcmpeqb %mm0, %mm7\n"
+           "pcmpeqw %mm2, %mm1\n"
+           "pcmpeqd %mm4, %mm3\n"
+           "pcmpgtb %mm6, %mm5\n"
+           "pcmpgtw %mm0, %mm7\n"
+           "pcmpgtd %mm2, %mm1\n"
+           "pmullw %mm4, %mm3\n"
+           "emms\n");
+    AssemblyEncodeResult x86_att_mmx = assembly_encode(
+        arguments->arena, x86_att_mmx_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_mmx.diagnostic_count == 0 && x86_att_mmx.bytes.length == sizeof(expected_x86_mmx) &&
+                               memcmp(x86_att_mmx.bytes.pointer, expected_x86_mmx, sizeof(expected_x86_mmx)) == 0);
+    AssemblyEncodeResult x86_xmm_packed = assembly_encode(
+        arguments->arena, S8("paddd xmm0, xmm1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_x86_xmm_packed[] = {0x66, 0x0f, 0xfe, 0xc1};
+    BUSTER_TEST(arguments, x86_xmm_packed.diagnostic_count == 0 && x86_xmm_packed.bytes.length == sizeof(expected_x86_xmm_packed) &&
+                               memcmp(x86_xmm_packed.bytes.pointer, expected_x86_xmm_packed, sizeof(expected_x86_xmm_packed)) == 0);
+    AssemblyEncodeResult unsupported_xmm_packed = assembly_encode(
+        arguments->arena, S8("paddd xmm0, xmm1\n"),
+        (AssemblyEncodeOptions){.target = x86_without_sse2, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_xmm_packed.diagnostic_count == 1 &&
+                               unsupported_xmm_packed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     u8 expected_x86_conditions[] = {
         0x0f, 0x84, 0x00, 0x00, 0x00, 0x00,
         0x0f, 0x85, 0x00, 0x00, 0x00, 0x00,

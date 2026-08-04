@@ -91,6 +91,26 @@ typedef enum AssemblyOpcode
     ASSEMBLY_OPCODE_X86_VPCMPGTQ,
     ASSEMBLY_OPCODE_X86_VPMULLW,
     ASSEMBLY_OPCODE_X86_VPMULLD,
+    ASSEMBLY_OPCODE_X86_EMMS,
+    ASSEMBLY_OPCODE_X86_MOVQ_MMX,
+    ASSEMBLY_OPCODE_X86_PADDB_MMX,
+    ASSEMBLY_OPCODE_X86_PADDW_MMX,
+    ASSEMBLY_OPCODE_X86_PADDD_MMX,
+    ASSEMBLY_OPCODE_X86_PADDQ_MMX,
+    ASSEMBLY_OPCODE_X86_PSUBB_MMX,
+    ASSEMBLY_OPCODE_X86_PSUBW_MMX,
+    ASSEMBLY_OPCODE_X86_PSUBD_MMX,
+    ASSEMBLY_OPCODE_X86_PSUBQ_MMX,
+    ASSEMBLY_OPCODE_X86_PAND_MMX,
+    ASSEMBLY_OPCODE_X86_POR_MMX,
+    ASSEMBLY_OPCODE_X86_PXOR_MMX,
+    ASSEMBLY_OPCODE_X86_PCMPEQB_MMX,
+    ASSEMBLY_OPCODE_X86_PCMPEQW_MMX,
+    ASSEMBLY_OPCODE_X86_PCMPEQD_MMX,
+    ASSEMBLY_OPCODE_X86_PCMPGTB_MMX,
+    ASSEMBLY_OPCODE_X86_PCMPGTW_MMX,
+    ASSEMBLY_OPCODE_X86_PCMPGTD_MMX,
+    ASSEMBLY_OPCODE_X86_PMULLW_MMX,
     ASSEMBLY_OPCODE_AARCH64_NOP,
     ASSEMBLY_OPCODE_AARCH64_RET,
     ASSEMBLY_OPCODE_AARCH64_B,
@@ -122,6 +142,7 @@ typedef enum AssemblyRegisterClass
     ASSEMBLY_REGISTER_GPR,
     ASSEMBLY_REGISTER_XMM,
     ASSEMBLY_REGISTER_YMM,
+    ASSEMBLY_REGISTER_MMX,
     ASSEMBLY_REGISTER_CLASS_COUNT,
 } AssemblyRegisterClass;
 
@@ -489,6 +510,18 @@ BUSTER_GLOBAL_LOCAL bool assembly_register_parse(String8 text, AssemblySyntax sy
             return true;
         }
     }
+    static String8 const names_mmx[] = {
+        S8_INITIALIZER("mm0"), S8_INITIALIZER("mm1"), S8_INITIALIZER("mm2"), S8_INITIALIZER("mm3"),
+        S8_INITIALIZER("mm4"), S8_INITIALIZER("mm5"), S8_INITIALIZER("mm6"), S8_INITIALIZER("mm7"),
+    };
+    for (u32 register_index = 0; register_index < BUSTER_ARRAY_LENGTH(names_mmx); register_index += 1)
+    {
+        if (assembly_word_equal(text, names_mmx[register_index]))
+        {
+            *result = (AssemblyRegister){.index = (u8)register_index, .width = 64, .class = ASSEMBLY_REGISTER_MMX};
+            return true;
+        }
+    }
     return false;
 }
 
@@ -802,7 +835,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic,
         {S8_INITIALIZER("movapd"), ASSEMBLY_OPCODE_X86_MOVAPD, 2}, {S8_INITIALIZER("movupd"), ASSEMBLY_OPCODE_X86_MOVUPD, 2},
         {S8_INITIALIZER("movdqa"), ASSEMBLY_OPCODE_X86_MOVDQA, 2}, {S8_INITIALIZER("movdqu"), ASSEMBLY_OPCODE_X86_MOVDQU, 2},
         {S8_INITIALIZER("xorps"), ASSEMBLY_OPCODE_X86_XORPS, 2},   {S8_INITIALIZER("xorpd"), ASSEMBLY_OPCODE_X86_XORPD, 2},
-        {S8_INITIALIZER("pxor"), ASSEMBLY_OPCODE_X86_PXOR, 2},     {S8_INITIALIZER("addps"), ASSEMBLY_OPCODE_X86_ADDPS, 2},
+        {S8_INITIALIZER("pxor"), ASSEMBLY_OPCODE_X86_PXOR_MMX, 2}, {S8_INITIALIZER("addps"), ASSEMBLY_OPCODE_X86_ADDPS, 2},
         {S8_INITIALIZER("addpd"), ASSEMBLY_OPCODE_X86_ADDPD, 2},   {S8_INITIALIZER("addss"), ASSEMBLY_OPCODE_X86_ADDSS, 2},
         {S8_INITIALIZER("addsd"), ASSEMBLY_OPCODE_X86_ADDSD, 2},   {S8_INITIALIZER("subps"), ASSEMBLY_OPCODE_X86_SUBPS, 2},
         {S8_INITIALIZER("subpd"), ASSEMBLY_OPCODE_X86_SUBPD, 2},   {S8_INITIALIZER("mulps"), ASSEMBLY_OPCODE_X86_MULPS, 2},
@@ -828,6 +861,19 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic,
         {S8_INITIALIZER("vpcmpgtw"), ASSEMBLY_OPCODE_X86_VPCMPGTW, 3}, {S8_INITIALIZER("vpcmpgtd"), ASSEMBLY_OPCODE_X86_VPCMPGTD, 3},
         {S8_INITIALIZER("vpcmpgtq"), ASSEMBLY_OPCODE_X86_VPCMPGTQ, 3}, {S8_INITIALIZER("vpmullw"), ASSEMBLY_OPCODE_X86_VPMULLW, 3},
         {S8_INITIALIZER("vpmulld"), ASSEMBLY_OPCODE_X86_VPMULLD, 3},
+        {S8_INITIALIZER("emms"), ASSEMBLY_OPCODE_X86_EMMS, 0},
+        {S8_INITIALIZER("paddb"), ASSEMBLY_OPCODE_X86_PADDB_MMX, 2}, {S8_INITIALIZER("paddw"), ASSEMBLY_OPCODE_X86_PADDW_MMX, 2},
+        {S8_INITIALIZER("paddd"), ASSEMBLY_OPCODE_X86_PADDD_MMX, 2}, {S8_INITIALIZER("paddq"), ASSEMBLY_OPCODE_X86_PADDQ_MMX, 2},
+        {S8_INITIALIZER("psubb"), ASSEMBLY_OPCODE_X86_PSUBB_MMX, 2}, {S8_INITIALIZER("psubw"), ASSEMBLY_OPCODE_X86_PSUBW_MMX, 2},
+        {S8_INITIALIZER("psubd"), ASSEMBLY_OPCODE_X86_PSUBD_MMX, 2}, {S8_INITIALIZER("psubq"), ASSEMBLY_OPCODE_X86_PSUBQ_MMX, 2},
+        {S8_INITIALIZER("pand"), ASSEMBLY_OPCODE_X86_PAND_MMX, 2},   {S8_INITIALIZER("por"), ASSEMBLY_OPCODE_X86_POR_MMX, 2},
+        {S8_INITIALIZER("pcmpeqb"), ASSEMBLY_OPCODE_X86_PCMPEQB_MMX, 2},
+        {S8_INITIALIZER("pcmpeqw"), ASSEMBLY_OPCODE_X86_PCMPEQW_MMX, 2},
+        {S8_INITIALIZER("pcmpeqd"), ASSEMBLY_OPCODE_X86_PCMPEQD_MMX, 2},
+        {S8_INITIALIZER("pcmpgtb"), ASSEMBLY_OPCODE_X86_PCMPGTB_MMX, 2},
+        {S8_INITIALIZER("pcmpgtw"), ASSEMBLY_OPCODE_X86_PCMPGTW_MMX, 2},
+        {S8_INITIALIZER("pcmpgtd"), ASSEMBLY_OPCODE_X86_PCMPGTD_MMX, 2},
+        {S8_INITIALIZER("pmullw"), ASSEMBLY_OPCODE_X86_PMULLW_MMX, 2},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(instructions); index += 1)
     {
@@ -865,6 +911,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
 {
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
+        if (syntax == ASSEMBLY_SYNTAX_INTEL && assembly_word_equal(mnemonic, S8("movq")))
+        {
+            *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_X86_MOVQ_MMX, .operand_count = 2};
+            return true;
+        }
         if (assembly_x86_instruction_lookup_exact(mnemonic, result))
         {
             return true;
@@ -944,6 +995,11 @@ BUSTER_GLOBAL_LOCAL u8 assembly_x86_avx_map(AssemblyOpcode opcode)
                    opcode == ASSEMBLY_OPCODE_X86_VPMULLD
                ? 2
                : 1;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_legacy_packed(AssemblyOpcode opcode)
+{
+    return opcode >= ASSEMBLY_OPCODE_X86_MOVQ_MMX && opcode <= ASSEMBLY_OPCODE_X86_PMULLW_MMX;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_rex_needed(u8 width, AssemblyRegister first, AssemblyRegister second)
@@ -1043,6 +1099,53 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     {
         instruction->size = 2;
         return instruction->operand_count == 0;
+    }
+    if (opcode == ASSEMBLY_OPCODE_X86_EMMS)
+    {
+        instruction->size = 2;
+        return instruction->operand_count == 0;
+    }
+    if (assembly_x86_opcode_is_legacy_packed(opcode))
+    {
+        bool move = opcode == ASSEMBLY_OPCODE_X86_MOVQ_MMX;
+        if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
+            (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
+            (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY) ||
+            (!move && first->kind != ASSEMBLY_OPERAND_REGISTER))
+        {
+            return false;
+        }
+        AssemblyRegister packed_reg = first->kind == ASSEMBLY_OPERAND_REGISTER ? first->reg : second->reg;
+        if ((packed_reg.class != ASSEMBLY_REGISTER_MMX && packed_reg.class != ASSEMBLY_REGISTER_XMM) ||
+            (move && packed_reg.class != ASSEMBLY_REGISTER_MMX) ||
+            (first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class != packed_reg.class) ||
+            (second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.class != packed_reg.class))
+        {
+            return false;
+        }
+        AssemblyOperand* memory = first->kind == ASSEMBLY_OPERAND_MEMORY ? first : second->kind == ASSEMBLY_OPERAND_MEMORY ? second : 0;
+        if (memory)
+        {
+            if (memory->memory.width && memory->memory.width != packed_reg.width)
+            {
+                return false;
+            }
+            memory->memory.width = packed_reg.width;
+        }
+        bool load = !move || first->kind == ASSEMBLY_OPERAND_REGISTER;
+        AssemblyRegister reg = load ? packed_reg : second->reg;
+        AssemblyOperand* rm = load ? second : first;
+        u32 address_size = 1;
+        bool rex = rm->kind == ASSEMBLY_OPERAND_REGISTER
+                       ? assembly_x86_rex_needed(0, reg, rm->reg)
+                       : assembly_x86_memory_rex_needed(0, reg, rm->memory);
+        if (rm->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(rm->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->width = packed_reg.width;
+        instruction->size = (packed_reg.class == ASSEMBLY_REGISTER_XMM ? 1 : 0) + (rex ? 1 : 0) + 2 + address_size;
+        return true;
     }
     if (opcode == ASSEMBLY_OPCODE_X86_JCC)
     {
@@ -1474,21 +1577,21 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
             text.pointer += 1;
             text.length -= 1;
         }
-        if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_memory_parse(builder, text, syntax, &operand->memory))
-        {
-            if (branch && syntax == ASSEMBLY_SYNTAX_ATT && !indirect)
-            {
-                break;
-            }
-            operand->kind = ASSEMBLY_OPERAND_MEMORY;
-        }
-        else if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_register_parse(text, syntax, &operand->reg))
+        if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_register_parse(text, syntax, &operand->reg))
         {
             if (syntax == ASSEMBLY_SYNTAX_ATT && branch && !indirect)
             {
                 break;
             }
             operand->kind = ASSEMBLY_OPERAND_REGISTER;
+        }
+        else if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_memory_parse(builder, text, syntax, &operand->memory))
+        {
+            if (branch && syntax == ASSEMBLY_SYNTAX_ATT && !indirect)
+            {
+                break;
+            }
+            operand->kind = ASSEMBLY_OPERAND_MEMORY;
         }
         else
         {
@@ -1540,6 +1643,14 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         instruction.operands[2] = instruction.operands[0];
         instruction.operands[0] = destination;
     }
+    if (target.cpu_arch == CPU_ARCH_X86_64 && instruction.opcode == ASSEMBLY_OPCODE_X86_MOV &&
+        ((instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER &&
+          instruction.operands[0].reg.class == ASSEMBLY_REGISTER_MMX) ||
+         (instruction.operands[1].kind == ASSEMBLY_OPERAND_REGISTER &&
+          instruction.operands[1].reg.class == ASSEMBLY_REGISTER_MMX)))
+    {
+        instruction.opcode = ASSEMBLY_OPCODE_X86_MOVQ_MMX;
+    }
     if (info.suffix_width)
     {
         instruction.width = info.suffix_width;
@@ -1576,6 +1687,22 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         {
             assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
                                 S8("256-bit packed integer instruction requires the avx2 target feature"));
+            return;
+        }
+    }
+    if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_opcode_is_legacy_packed(info.opcode) &&
+        !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_SSE2))
+    {
+        bool requires_sse2 = false;
+        for (u32 operand_index = 0; operand_index < instruction.operand_count; operand_index += 1)
+        {
+            requires_sse2 = requires_sse2 || (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_REGISTER &&
+                                               instruction.operands[operand_index].reg.class == ASSEMBLY_REGISTER_XMM);
+        }
+        if (requires_sse2)
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                S8("XMM packed integer instruction requires the sse2 target feature"));
             return;
         }
     }
@@ -1975,6 +2102,61 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 assembly_emit_byte(builder, 0x48);
             }
             assembly_emit_byte(builder, 0x98);
+            continue;
+        }
+        if (instruction->opcode == ASSEMBLY_OPCODE_X86_EMMS)
+        {
+            assembly_emit_byte(builder, 0x0f);
+            assembly_emit_byte(builder, 0x77);
+            continue;
+        }
+        if (assembly_x86_opcode_is_legacy_packed(instruction->opcode))
+        {
+            AssemblyOperand first = instruction->operands[0];
+            AssemblyOperand second = instruction->operands[1];
+            bool move = instruction->opcode == ASSEMBLY_OPCODE_X86_MOVQ_MMX;
+            bool load = !move || first.kind == ASSEMBLY_OPERAND_REGISTER;
+            AssemblyRegister reg = load ? first.reg : second.reg;
+            AssemblyOperand rm = load ? second : first;
+            if (reg.class == ASSEMBLY_REGISTER_XMM)
+            {
+                assembly_emit_byte(builder, 0x66);
+            }
+            if (rm.kind == ASSEMBLY_OPERAND_MEMORY)
+            {
+                assembly_x86_emit_memory_prefix(builder, 0, reg, rm.memory);
+            }
+            else
+            {
+                assembly_x86_emit_prefix(builder, 0, reg, rm.reg);
+            }
+            assembly_emit_byte(builder, 0x0f);
+            u8 packed_opcode = instruction->opcode == ASSEMBLY_OPCODE_X86_MOVQ_MMX ? (load ? 0x6f : 0x7f)
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PADDB_MMX ? 0xfc
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PADDW_MMX ? 0xfd
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PADDD_MMX ? 0xfe
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PADDQ_MMX ? 0xd4
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PSUBB_MMX ? 0xf8
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PSUBW_MMX ? 0xf9
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PSUBD_MMX ? 0xfa
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PSUBQ_MMX ? 0xfb
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PAND_MMX ? 0xdb
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_POR_MMX ? 0xeb
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PXOR_MMX ? 0xef
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPEQB_MMX ? 0x74
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPEQW_MMX ? 0x75
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPEQD_MMX ? 0x76
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPGTB_MMX ? 0x64
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPGTW_MMX ? 0x65
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPGTD_MMX ? 0x66
+                                                                                        : 0xd5;
+            assembly_emit_byte(builder, packed_opcode);
+            if (!assembly_x86_emit_rm(builder, instruction, reg.index, rm))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                    S8("x86 memory displacement is out of range"));
+                return;
+            }
             continue;
         }
         if (instruction->opcode == ASSEMBLY_OPCODE_X86_JCC)
