@@ -124,8 +124,6 @@ BUSTER_TEST_F_DECL bool rendering_vulkan_queue_family_enumeration_needs_retry(u3
 BUSTER_TEST_F_DECL RenderingVulkanQueueFamilySelection rendering_vulkan_select_queue_families(RenderingVulkanQueueFamilyCandidateSlice candidates);
 BUSTER_TEST_F_DECL bool rendering_vulkan_device_candidate_is_eligible(RenderingVulkanDeviceCandidate candidate);
 BUSTER_TEST_F_DECL u64 rendering_vulkan_device_score(RenderingVulkanDeviceCandidate candidate);
-BUSTER_TEST_F_DECL bool rendering_vulkan_device_is_better(RenderingVulkanDeviceCandidate* candidate, RenderingVulkanDeviceCandidate* current,
-                                                          u64 candidate_score, u64 current_score);
 BUSTER_TEST_F_DECL RenderingVulkanDeviceSelection rendering_vulkan_select_device(RenderingVulkanDeviceCandidateSlice candidates);
 
 #define BUSTER_GPU_VALIDATION_ENABLED (!BUSTER_OPTIMIZE || BUSTER_SANITIZE)

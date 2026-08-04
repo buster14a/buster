@@ -111,41 +111,55 @@ BUSTER_TEST_F_DECL u64 rendering_vulkan_device_score(RenderingVulkanDeviceCandid
     return score;
 }
 
-BUSTER_TEST_F_DECL bool rendering_vulkan_device_is_better(RenderingVulkanDeviceCandidate* candidate, RenderingVulkanDeviceCandidate* current,
-                                                          u64 candidate_score, u64 current_score)
+BUSTER_GLOBAL_LOCAL int rendering_vulkan_device_name_compare(String8 left, String8 right)
+{
+    u64 common_length = left.length < right.length ? left.length : right.length;
+    for (u64 i = 0; i < common_length; i += 1)
+    {
+        u8 left_code_unit = (u8)left.pointer[i];
+        u8 right_code_unit = (u8)right.pointer[i];
+        if (left_code_unit < right_code_unit)
+        {
+            return -1;
+        }
+        if (left_code_unit > right_code_unit)
+        {
+            return 1;
+        }
+    }
+    if (left.length < right.length)
+    {
+        return -1;
+    }
+    if (left.length > right.length)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool rendering_vulkan_device_is_better(RenderingVulkanDeviceCandidate candidate, RenderingVulkanDeviceCandidate current,
+                                                           u64 candidate_score, u64 current_score)
 {
     if (candidate_score != current_score)
     {
         return candidate_score > current_score;
     }
 
-    u64 common_name_length = candidate->name.length < current->name.length ? candidate->name.length : current->name.length;
-    for (u64 name_index = 0; name_index < common_name_length; name_index += 1)
+    int name_comparison = rendering_vulkan_device_name_compare(candidate.name, current.name);
+    if (name_comparison != 0)
     {
-        u8 candidate_code_unit = (u8)candidate->name.pointer[name_index];
-        u8 current_code_unit = (u8)current->name.pointer[name_index];
-        if (candidate_code_unit < current_code_unit)
-        {
-            return true;
-        }
-        if (candidate_code_unit > current_code_unit)
-        {
-            return false;
-        }
+        return name_comparison < 0;
     }
-    if (candidate->name.length != current->name.length)
+    if (candidate.vendor_id != current.vendor_id)
     {
-        return candidate->name.length < current->name.length;
+        return candidate.vendor_id < current.vendor_id;
     }
-    if (candidate->vendor_id != current->vendor_id)
+    if (candidate.device_id != current.device_id)
     {
-        return candidate->vendor_id < current->vendor_id;
+        return candidate.device_id < current.device_id;
     }
-    if (candidate->device_id != current->device_id)
-    {
-        return candidate->device_id < current->device_id;
-    }
-    return candidate->enumeration_index < current->enumeration_index;
+    return candidate.enumeration_index < current.enumeration_index;
 }
 
 BUSTER_TEST_F_DECL RenderingVulkanDeviceSelection rendering_vulkan_select_device(RenderingVulkanDeviceCandidateSlice candidates)
@@ -165,23 +179,11 @@ BUSTER_TEST_F_DECL RenderingVulkanDeviceSelection rendering_vulkan_select_device
         }
 
         u64 score = rendering_vulkan_device_score(candidate);
-        if (!result.found)
+        if (!result.found || rendering_vulkan_device_is_better(candidate, candidates.pointer[result.candidate_index], score, result.score))
         {
             result.candidate_index = i;
             result.score = score;
             result.found = true;
-        }
-        else
-        {
-            RenderingVulkanDeviceCandidate current = candidates.pointer[result.candidate_index];
-            bool candidate_is_better = false;
-            candidate_is_better = rendering_vulkan_device_is_better(&candidate, &current, score, result.score);
-            if (candidate_is_better)
-            {
-                result.candidate_index = i;
-                result.score = score;
-                result.found = true;
-            }
         }
     }
     return result;
