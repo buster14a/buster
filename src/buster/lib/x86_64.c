@@ -64,6 +64,10 @@ TargetCpuFeatures cpu_detect_features_x86_64(void)
     TargetCpuFeatures result = TARGET_CPU_FEATURE_X86_SSE2;
     CpuId maximum = cpuid(0, 0);
     CpuId basic = cpuid(1, 0);
+    if (basic.ecx & 1u)
+    {
+        result |= TARGET_CPU_FEATURE_X86_SSE3;
+    }
     bool has_osxsave = (basic.ecx & (1u << 27)) != 0;
     bool has_avx_hardware = (basic.ecx & (1u << 28)) != 0;
     u64 xcr0 = has_osxsave ? xgetbv(0) : 0;

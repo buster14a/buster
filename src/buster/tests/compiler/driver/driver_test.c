@@ -219,7 +219,7 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX512VL));
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX512BW));
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, feature_invocation.target),
-                       S8("avx,avx512bw,avx512f,avx512vl,sse2"));
+                       S8("avx,avx512bw,avx512f,avx512vl,sse2,sse3"));
     String8 ordered_feature_command_line[] = {
         S8("--target=x86_64-linux"), S8("-march=haswell"), S8("-mattr=+avx512f"), S8("-mattr=-avx512f"), S8("source.c"),
     };

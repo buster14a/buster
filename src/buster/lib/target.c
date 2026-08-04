@@ -383,6 +383,10 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
         return 0;
     }
     TargetCpuFeatures result = TARGET_CPU_FEATURE_X86_SSE2;
+    if (model >= CPU_MODEL_AMD_K8_SSE3 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS)
+    {
+        result |= TARGET_CPU_FEATURE_X86_SSE3;
+    }
     switch (model)
     {
     case CPU_MODEL_AMD_ZEN_1:
@@ -461,12 +465,17 @@ bool target_cpu_features_are_valid(Target target)
     }
     TargetCpuFeatures known = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX2 | TARGET_CPU_FEATURE_X86_AVX512F |
                               TARGET_CPU_FEATURE_X86_AVX512VL | TARGET_CPU_FEATURE_X86_AVX10_1 | TARGET_CPU_FEATURE_X86_AVX10_2 |
-                              TARGET_CPU_FEATURE_X86_AVX10_512 | TARGET_CPU_FEATURE_X86_APX | TARGET_CPU_FEATURE_X86_AVX512BW;
+                              TARGET_CPU_FEATURE_X86_AVX10_512 | TARGET_CPU_FEATURE_X86_APX | TARGET_CPU_FEATURE_X86_AVX512BW |
+                              TARGET_CPU_FEATURE_X86_SSE3;
     if ((features & ~known) || !(features & TARGET_CPU_FEATURE_X86_SSE2))
     {
         return false;
     }
     if ((features & TARGET_CPU_FEATURE_X86_AVX2) && !(features & TARGET_CPU_FEATURE_X86_AVX))
+    {
+        return false;
+    }
+    if ((features & TARGET_CPU_FEATURE_X86_SSE3) && !(features & TARGET_CPU_FEATURE_X86_SSE2))
     {
         return false;
     }
@@ -533,6 +542,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("avx512vl"), .feature = TARGET_CPU_FEATURE_X86_AVX512VL, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("neon"), .feature = TARGET_CPU_FEATURE_AARCH64_NEON, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("sse2"), .feature = TARGET_CPU_FEATURE_X86_SSE2, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("sse3"), .feature = TARGET_CPU_FEATURE_X86_SSE3, .arch = CPU_ARCH_X86_64},
 };
 
 TargetCpuFeature target_cpu_feature_from_string(CpuArch arch, String8 name)

@@ -245,6 +245,7 @@ typedef enum TargetCpuFeature
     TARGET_CPU_FEATURE_X86_APX = 1u << 8,
     TARGET_CPU_FEATURE_X86_AVX512BW = 1u << 9,
     TARGET_CPU_FEATURE_AARCH64_NEON = 1u << 10,
+    TARGET_CPU_FEATURE_X86_SSE3 = 1u << 11,
 } TargetCpuFeature;
 
 typedef enum TargetStringComponents

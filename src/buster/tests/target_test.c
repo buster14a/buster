@@ -76,6 +76,8 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !cpu_model_supports_arch(CPU_MODEL_AMD_ZEN_5, CPU_ARCH_AARCH64));
     BUSTER_TEST(arguments, cpu_model_supports_arch(CPU_MODEL_A64_APPLE_M4, CPU_ARCH_AARCH64));
     BUSTER_TEST(arguments, (target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_5) & TARGET_CPU_FEATURE_X86_AVX512BW) != 0);
+    BUSTER_TEST(arguments, (target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_K8_SSE3) & TARGET_CPU_FEATURE_X86_SSE3) != 0);
+    BUSTER_TEST(arguments, (target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_K8) & TARGET_CPU_FEATURE_X86_SSE3) == 0);
     BUSTER_TEST(arguments,
                 (target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_KNL) & (TARGET_CPU_FEATURE_X86_AVX512BW | TARGET_CPU_FEATURE_X86_AVX512VL)) == 0);
     Target valid_avx512 = {
@@ -88,6 +90,9 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     Target invalid_avx2 = valid_avx512;
     invalid_avx2.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX2;
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_avx2));
+    Target invalid_sse3 = valid_avx512;
+    invalid_sse3.cpu_features = TARGET_CPU_FEATURE_X86_SSE3;
+    BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_sse3));
     Target invalid_avx512vl = valid_avx512;
     invalid_avx512vl.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX512VL;
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_avx512vl));
@@ -95,6 +100,7 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     invalid_avx512bw.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX512BW;
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_avx512bw));
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("avx2")) == TARGET_CPU_FEATURE_X86_AVX2);
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("sse3")) == TARGET_CPU_FEATURE_X86_SSE3);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_AARCH64, S8("neon")) == TARGET_CPU_FEATURE_AARCH64_NEON);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_AARCH64, S8("avx2")) == TARGET_CPU_FEATURE_NONE);
     BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_AVX512F), S8("avx512f"));

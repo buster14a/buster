@@ -545,6 +545,130 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                x86_x87_relocation.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
                                string_equal(x86_x87_relocation.symbols[x86_x87_relocation.relocations[0].symbol].name,
                                             S8("external_x87")));
+    Target x86_sse3_target = x86_target;
+    x86_sse3_target.cpu_features_explicit = true;
+    x86_sse3_target.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_SSE3;
+    u8 expected_x86_x87_compare_integer[] = {
+        0xd8, 0xd3, 0xd8, 0xdc, 0xd8, 0x10, 0x41, 0xdc, 0x19,
+        0xde, 0xd9, 0xdd, 0xe5, 0xdd, 0xee, 0xda, 0xe9,
+        0xdb, 0xf1, 0xdf, 0xf2, 0xdb, 0xeb, 0xdf, 0xec,
+        0xda, 0xc1, 0xda, 0xca, 0xda, 0xd3, 0xda, 0xdc,
+        0xdb, 0xc5, 0xdb, 0xce, 0xdb, 0xd7, 0xdb, 0xd9,
+        0xde, 0x00, 0xda, 0x01, 0xde, 0x0a, 0xda, 0x0b,
+        0xde, 0x24, 0x24, 0xda, 0x65, 0x00, 0xde, 0x2e, 0xda, 0x2f,
+        0x41, 0xde, 0x30, 0x41, 0xda, 0x31, 0x41, 0xde, 0x3a, 0x41, 0xda, 0x3b,
+        0x41, 0xdf, 0x0c, 0x24, 0x41, 0xdb, 0x4d, 0x00, 0x41, 0xdd, 0x0e,
+    };
+    String8 x86_intel_x87_compare_integer_source =
+        S8("fcom st(3)\n"
+           "fcomp st(4)\n"
+           "fcom dword ptr [rax]\n"
+           "fcomp qword ptr [r9]\n"
+           "fcompp\n"
+           "fucom st(5)\n"
+           "fucomp st(6)\n"
+           "fucompp\n"
+           "fcomi st(0), st(1)\n"
+           "fcomip st(0), st(2)\n"
+           "fucomi st(0), st(3)\n"
+           "fucomip st(0), st(4)\n"
+           "fcmovb st(0), st(1)\n"
+           "fcmove st(0), st(2)\n"
+           "fcmovbe st(0), st(3)\n"
+           "fcmovu st(0), st(4)\n"
+           "fcmovnb st(0), st(5)\n"
+           "fcmovne st(0), st(6)\n"
+           "fcmovnbe st(0), st(7)\n"
+           "fcmovnu st(0), st(1)\n"
+           "fiadd word ptr [rax]\n"
+           "fiadd dword ptr [rcx]\n"
+           "fimul word ptr [rdx]\n"
+           "fimul dword ptr [rbx]\n"
+           "fisub word ptr [rsp]\n"
+           "fisub dword ptr [rbp]\n"
+           "fisubr word ptr [rsi]\n"
+           "fisubr dword ptr [rdi]\n"
+           "fidiv word ptr [r8]\n"
+           "fidiv dword ptr [r9]\n"
+           "fidivr word ptr [r10]\n"
+           "fidivr dword ptr [r11]\n"
+           "fisttp word ptr [r12]\n"
+           "fisttp dword ptr [r13]\n"
+           "fisttp qword ptr [r14]\n");
+    AssemblyEncodeResult x86_intel_x87_compare_integer = assembly_encode(
+        arguments->arena, x86_intel_x87_compare_integer_source,
+        (AssemblyEncodeOptions){.target = x86_sse3_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_x87_compare_integer.diagnostic_count == 0 &&
+                               x86_intel_x87_compare_integer.bytes.length == sizeof(expected_x86_x87_compare_integer) &&
+                               memcmp(x86_intel_x87_compare_integer.bytes.pointer, expected_x86_x87_compare_integer,
+                                      sizeof(expected_x86_x87_compare_integer)) == 0);
+    String8 x86_att_x87_compare_integer_source =
+        S8("fcom %st(3)\n"
+           "fcomp %st(4)\n"
+           "fcoms (%rax)\n"
+           "fcompl (%r9)\n"
+           "fcompp\n"
+           "fucom %st(5)\n"
+           "fucomp %st(6)\n"
+           "fucompp\n"
+           "fcomi %st(1), %st\n"
+           "fcomip %st(2), %st\n"
+           "fucomi %st(3), %st\n"
+           "fucomip %st(4), %st\n"
+           "fcmovb %st(1), %st\n"
+           "fcmove %st(2), %st\n"
+           "fcmovbe %st(3), %st\n"
+           "fcmovu %st(4), %st\n"
+           "fcmovnb %st(5), %st\n"
+           "fcmovne %st(6), %st\n"
+           "fcmovnbe %st(7), %st\n"
+           "fcmovnu %st(1), %st\n"
+           "fiadds (%rax)\n"
+           "fiaddl (%rcx)\n"
+           "fimuls (%rdx)\n"
+           "fimull (%rbx)\n"
+           "fisubs (%rsp)\n"
+           "fisubl (%rbp)\n"
+           "fisubrs (%rsi)\n"
+           "fisubrl (%rdi)\n"
+           "fidivs (%r8)\n"
+           "fidivl (%r9)\n"
+           "fidivrs (%r10)\n"
+           "fidivrl (%r11)\n"
+           "fisttps (%r12)\n"
+           "fisttpl (%r13)\n"
+           "fisttpq (%r14)\n");
+    AssemblyEncodeResult x86_att_x87_compare_integer = assembly_encode(
+        arguments->arena, x86_att_x87_compare_integer_source,
+        (AssemblyEncodeOptions){.target = x86_sse3_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_x87_compare_integer.diagnostic_count == 0 &&
+                               x86_att_x87_compare_integer.bytes.length == sizeof(expected_x86_x87_compare_integer) &&
+                               memcmp(x86_att_x87_compare_integer.bytes.pointer, expected_x86_x87_compare_integer,
+                                      sizeof(expected_x86_x87_compare_integer)) == 0);
+    AssemblyEncodeResult unsupported_x86_fisttp = assembly_encode(
+        arguments->arena, S8("fisttp word ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_x86_fisttp.diagnostic_count == 1 &&
+                               unsupported_x86_fisttp.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    AssemblyEncodeResult invalid_x86_x87_compare_integer = assembly_encode(
+        arguments->arena,
+        S8("fcom [rax]\n"
+           "fcomp tbyte ptr [rax]\n"
+           "fucom qword ptr [rax]\n"
+           "fcomi st(1), st(0)\n"
+           "fcomi st(0), rax\n"
+           "fcmovb st(1), st(0)\n"
+           "fiadd qword ptr [rax]\n"
+           "fiadd st(0)\n"
+           "fisttp tbyte ptr [rax]\n"
+           "fisttp st(0)\n"),
+        (AssemblyEncodeOptions){.target = x86_sse3_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_x86_x87_compare_integer.diagnostic_count == 10);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_x87_compare_integer.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments,
+                    invalid_x86_x87_compare_integer.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
     AssemblyEncodeResult invalid_x86_x87 = assembly_encode(
         arguments->arena,
         S8("fld [rax]\n"
