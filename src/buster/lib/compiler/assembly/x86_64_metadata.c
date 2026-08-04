@@ -1158,7 +1158,7 @@ bool buster_x86_metadata_validate_patch(BusterX86MetadataValidationPatch patch, 
 {
     if (patch.kind >= BUSTER_X86_METADATA_PATCH_COUNT)
     {
-        return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_ENUM, patch.index, patch.kind);
+        return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_ENUM, patch.index, (u32)patch.kind);
     }
     if (patch.kind == BUSTER_X86_METADATA_PATCH_INDEX_CAPACITY)
     {
