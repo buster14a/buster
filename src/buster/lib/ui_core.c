@@ -7,8 +7,26 @@
 
 BUSTER_V_IMPL UI_State* ui_state;
 
-BUSTER_GLOBAL_LOCAL void ui_process_focus_navigation(void);
 BUSTER_GLOBAL_LOCAL void ui_prune_focus_keys(void);
+BUSTER_GLOBAL_LOCAL bool ui_box_is_current(UI_Box* box);
+BUSTER_GLOBAL_LOCAL void ui_prune_active_keys(void);
+BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void);
+BUSTER_GLOBAL_LOCAL UI_MouseButtonKind ui_mouse_button_kind_from_key(WmKey key, bool* is_mouse);
+BUSTER_GLOBAL_LOCAL bool ui_box_contains_point(UI_Box* box, float2 point);
+BUSTER_GLOBAL_LOCAL bool ui_box_draws_content(UI_Box* box);
+
+typedef enum UI_FocusDirection
+{
+    UI_FocusDirection_LinearForward,
+    UI_FocusDirection_LinearBackward,
+    UI_FocusDirection_Left,
+    UI_FocusDirection_Right,
+    UI_FocusDirection_Up,
+    UI_FocusDirection_Down,
+} UI_FocusDirection;
+
+BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI_BoxFlags axis_flag, UI_FocusDirection direction,
+                                                           u64 build_index, UI_Box* root);
 
 BUSTER_GLOBAL_LOCAL F32Interval2 ui_rect_make(f32 x0, f32 y0, f32 x1, f32 y1)
 {
@@ -37,6 +55,208 @@ BUSTER_GLOBAL_LOCAL F32Interval2 ui_rect_intersect(F32Interval2 a, F32Interval2 
 BUSTER_GLOBAL_LOCAL bool ui_rect_has_area(F32Interval2 rect)
 {
     return rect.x1 > rect.x0 && rect.y1 > rect.y0;
+}
+
+BUSTER_GLOBAL_LOCAL F32Interval2 ui_box_text_clip_rect(UI_Box* box)
+{
+    F32Interval2 result = box ? box->clip_rect : (F32Interval2){0};
+    if (box && (box->flags & UI_BoxFlag_Clip))
+    {
+        result = ui_rect_intersect(result, box->rect);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_box_focusable(UI_Box* box, bool active);
+
+BUSTER_GLOBAL_LOCAL u64 ui_utf8_sequence_length(String8 string, u64 position)
+{
+    if (!string.pointer || position >= string.length)
+    {
+        return 0;
+    }
+
+    u8 first = (u8)string.pointer[position];
+    u64 result = 0;
+    if (first <= 0x7fu)
+    {
+        result = 1;
+    }
+    else if (first >= 0xc2u && first <= 0xdfu)
+    {
+        result = 2;
+    }
+    else if (first >= 0xe0u && first <= 0xefu)
+    {
+        result = 3;
+    }
+    else if (first >= 0xf0u && first <= 0xf4u)
+    {
+        result = 4;
+    }
+    else
+    {
+        return 0;
+    }
+
+    if (result > string.length - position)
+    {
+        return 0;
+    }
+    for (u64 index = 1; index < result; index += 1)
+    {
+        u8 continuation = (u8)string.pointer[position + index];
+        if (continuation < 0x80u || continuation > 0xbfu)
+        {
+            return 0;
+        }
+    }
+
+    u8 second = result > 1 ? (u8)string.pointer[position + 1] : 0;
+    if ((first == 0xe0u && second < 0xa0u) || (first == 0xedu && second > 0x9fu) || (first == 0xf0u && second < 0x90u) ||
+        (first == 0xf4u && second > 0x8fu))
+    {
+        return 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 ui_utf8_codepoint_at(String8 string, u64 position)
+{
+    u64 length = ui_utf8_sequence_length(string, position);
+    if (length == 0)
+    {
+        return 0xfffdu;
+    }
+    u8 first = (u8)string.pointer[position];
+    u32 result = first;
+    if (length >= 2)
+    {
+        result = (result & 0x1fu) << 6 | ((u8)string.pointer[position + 1] & 0x3fu);
+    }
+    if (length >= 3)
+    {
+        result = (result & 0x0fu) << 6 | ((u8)string.pointer[position + 2] & 0x3fu);
+    }
+    if (length == 4)
+    {
+        result = (result & 0x07u) << 6 | ((u8)string.pointer[position + 3] & 0x3fu);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ui_utf8_codepoint_count(String8 string)
+{
+    u64 result = 0;
+    u64 position = 0;
+    while (position < string.length)
+    {
+        u64 sequence_length = ui_utf8_sequence_length(string, position);
+        position += sequence_length ? sequence_length : 1;
+        result += 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ui_utf8_byte_offset_for_columns(String8 string, u64 columns)
+{
+    u64 result = 0;
+    u64 column = 0;
+    while (result < string.length && column < columns)
+    {
+        u64 sequence_length = ui_utf8_sequence_length(string, result);
+        result += sequence_length ? sequence_length : 1;
+        column += 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ui_utf8_columns_for_byte_offset(String8 string, u64 byte_offset)
+{
+    u64 result = 0;
+    u64 position = 0;
+    byte_offset = BUSTER_MIN(byte_offset, string.length);
+    while (position < byte_offset)
+    {
+        u64 sequence_length = ui_utf8_sequence_length(string, position);
+        sequence_length = sequence_length ? sequence_length : 1;
+        if (sequence_length > byte_offset - position)
+        {
+            break;
+        }
+        position += sequence_length;
+        result += 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 ui_utf8_sanitize(Arena* arena, String8 string)
+{
+    if (string.length == 0)
+    {
+        return string;
+    }
+    if (!string.pointer)
+    {
+        return (String8){0};
+    }
+
+    bool valid = true;
+    u64 extra_length = 0;
+    u64 position = 0;
+    while (position < string.length)
+    {
+        u64 sequence_length = ui_utf8_sequence_length(string, position);
+        if (sequence_length == 0)
+        {
+            valid = false;
+            if (extra_length > (u64)-1 - 2)
+            {
+                return (String8){0};
+            }
+            extra_length += 2;
+            position += 1;
+        }
+        else
+        {
+            position += sequence_length;
+        }
+    }
+    if (valid)
+    {
+        if (!arena || string.length == 0)
+        {
+            return string;
+        }
+        return string_duplicate_arena(arena, string, false);
+    }
+    if (!arena || extra_length > (u64)-1 - string.length)
+    {
+        return (String8){0};
+    }
+
+    u64 output_length = string.length + extra_length;
+    char8* output = arena_allocate(arena, char8, output_length);
+    u64 source_position = 0;
+    u64 output_position = 0;
+    while (source_position < string.length)
+    {
+        u64 sequence_length = ui_utf8_sequence_length(string, source_position);
+        if (sequence_length == 0)
+        {
+            output[output_position++] = (char8)0xef;
+            output[output_position++] = (char8)0xbf;
+            output[output_position++] = (char8)0xbd;
+            source_position += 1;
+        }
+        else
+        {
+            memcpy(output + output_position, string.pointer + source_position, sequence_length);
+            output_position += sequence_length;
+            source_position += sequence_length;
+        }
+    }
+    return (String8){.pointer = output, .length = output_length};
 }
 
 BUSTER_GLOBAL_LOCAL void ui_stack_reset(UI_State* state)
@@ -155,6 +375,94 @@ Arena* ui_build_arena(void)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool ui_arena_try_advance(Arena* arena, u64* position, u64 size, u64 alignment)
+{
+    if (!arena || !position || !BUSTER_IS_POWER_OF_TWO(alignment) || *position > arena->reserved_size)
+    {
+        return false;
+    }
+
+    u64 alignment_mask = alignment - 1;
+    if (*position > (u64)-1 - alignment_mask)
+    {
+        return false;
+    }
+
+    u64 aligned_position = (*position + alignment_mask) & ~alignment_mask;
+    if (aligned_position > arena->reserved_size || size > arena->reserved_size - aligned_position)
+    {
+        return false;
+    }
+
+    *position = aligned_position + size;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_string8_source_is_valid(String8 string)
+{
+    return string.length == 0 || string.pointer != 0;
+}
+
+BUSTER_GLOBAL_LOCAL String8 ui_copy_string8_checked(Arena* arena, String8 source)
+{
+    String8 result = {0};
+    if (!arena || !ui_string8_source_is_valid(source) || source.length == 0)
+    {
+        return result;
+    }
+
+    u64 position = arena->position;
+    if (!ui_arena_try_advance(arena, &position, source.length, BUSTER_ALIGN_OF(char8)))
+    {
+        return result;
+    }
+
+    result.pointer = arena_allocate(arena, char8, source.length);
+    result.length = source.length;
+    memcpy(result.pointer, source.pointer, source.length);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL SliceString8 ui_copy_string8_slice_checked(Arena* arena, SliceString8 sources)
+{
+    SliceString8 result = {0};
+    if (!arena || !sources.pointer || sources.length == 0 || sources.length > (u64)-1 / sizeof(*sources.pointer))
+    {
+        return result;
+    }
+
+    u64 position = arena->position;
+    u64 descriptor_bytes = sources.length * sizeof(*sources.pointer);
+    if (!ui_arena_try_advance(arena, &position, descriptor_bytes, BUSTER_ALIGN_OF(String8)))
+    {
+        return result;
+    }
+
+    u64 aggregate_length = 0;
+    for (u64 index = 0; index < sources.length; index += 1)
+    {
+        String8 source = sources.pointer[index];
+        if (!ui_string8_source_is_valid(source) || source.length > (u64)-1 - aggregate_length ||
+            !ui_arena_try_advance(arena, &position, source.length, BUSTER_ALIGN_OF(char8)))
+        {
+            return result;
+        }
+        aggregate_length += source.length;
+    }
+
+    result.pointer = arena_allocate(arena, String8, sources.length);
+    result.length = sources.length;
+    for (u64 index = 0; index < sources.length; index += 1)
+    {
+        result.pointer[index] = ui_copy_string8_checked(arena, sources.pointer[index]);
+        if (sources.pointer[index].length != 0 && result.pointer[index].pointer == 0)
+        {
+            BUSTER_CHECK(false);
+        }
+    }
+    return result;
+}
+
 UI_Box* ui_root_from_state(UI_State* state)
 {
     return state ? state->root : 0;
@@ -167,19 +475,11 @@ UI_EventNode* ui_event_list_push(Arena* arena, UI_EventList* list, UI_Event* eve
     node->v = *event;
     if (node->v.string.length != 0)
     {
-        node->v.string = string_duplicate_arena(arena, node->v.string, false);
+        node->v.string = ui_copy_string8_checked(arena, node->v.string);
     }
     if (node->v.paths.length != 0)
     {
-        SliceString8 paths = {
-            .pointer = arena_allocate(arena, String8, node->v.paths.length),
-            .length = node->v.paths.length,
-        };
-        for (u64 i = 0; i < paths.length; i += 1)
-        {
-            paths.pointer[i] = string_duplicate_arena(arena, node->v.paths.pointer[i], false);
-        }
-        node->v.paths = paths;
+        node->v.paths = ui_copy_string8_slice_checked(arena, node->v.paths);
     }
 
     if (!list->last)
@@ -268,10 +568,18 @@ UI_Key ui_key_make(u64 value)
 BUSTER_GLOBAL_LOCAL String8 ui_hash_part_from_key_string(String8 string)
 {
     String8 result = string;
-    u64 index = string_first_sequence(string, S8("###"));
-    if (index < string.length)
+    u64 triple_index = string_first_sequence(string, S8("###"));
+    if (triple_index < string.length)
     {
-        result = string_slice(string, index, string.length);
+        result = string_slice(string, triple_index + 3, string.length);
+    }
+    else
+    {
+        u64 double_index = string_first_sequence(string, S8("##"));
+        if (double_index < string.length)
+        {
+            result = string_slice(string, double_index + 2, string.length);
+        }
     }
     return result;
 }
@@ -297,6 +605,21 @@ UI_Key ui_key_from_string(UI_Key seed, String8 string)
         for (u64 i = 0; i < hash_part.length; i += 1)
         {
             hash = ((hash << 5) + hash) + (u8)hash_part.pointer[i];
+        }
+        result.value = hash;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UI_Key ui_key_from_literal_string(UI_Key seed, String8 string)
+{
+    UI_Key result = ui_key_zero();
+    if (string.pointer && string.length != 0)
+    {
+        u64 hash = seed.value ? seed.value : 5381;
+        for (u64 index = 0; index < string.length; index += 1)
+        {
+            hash = ((hash << 5) + hash) + (u8)string.pointer[index];
         }
         result.value = hash;
     }
@@ -367,7 +690,7 @@ UI_BoxFlagInfo ui_box_flag_info(u32 bit_index)
         UI_BOX_FLAG_INFO(43, DrawFadeBottom, Appearance, false);
         UI_BOX_FLAG_INFO(44, DrawFadeLeft, Appearance, false);
         UI_BOX_FLAG_INFO(45, DrawFadeRight, Appearance, false);
-        UI_BOX_FLAG_INFO(46, Clip, Appearance, false);
+        UI_BOX_FLAG_INFO(46, Clip, Appearance, true);
         UI_BOX_FLAG_INFO(47, AnimatePosX, Appearance, false);
         UI_BOX_FLAG_INFO(48, AnimatePosY, Appearance, false);
         UI_BOX_FLAG_INFO(49, DisableTextTrunc, Appearance, false);
@@ -667,6 +990,10 @@ UI_Box* ui_build_box_from_key(UI_BoxFlags flags, UI_Key key)
 
     UI_BoxFlags stack_flags = ui_top_flags();
     box->flags = flags | stack_flags;
+    if (parent && (parent->flags & UI_BoxFlag_Disabled))
+    {
+        box->flags |= UI_BoxFlag_Disabled;
+    }
     box->fixed_position = float2_make(ui_top_fixed_x(), ui_top_fixed_y());
     box->fixed_size = float2_make(ui_top_fixed_width(), ui_top_fixed_height());
     box->min_size = float2_make(ui_top_min_width(), ui_top_min_height());
@@ -692,6 +1019,10 @@ UI_Box* ui_build_box_from_key(UI_BoxFlags flags, UI_Key key)
     if (box->flags & UI_BoxFlag_RoundChildrenByParent)
     {
         box->renderer_dependency_flags |= UI_BoxRendererDependency_CornerRadii;
+    }
+    if (box->flags & UI_BoxFlag_Clip)
+    {
+        box->renderer_dependency_flags |= UI_BoxRendererDependency_TextScissor;
     }
     if (box->renderer_dependency_flags)
     {
@@ -723,14 +1054,12 @@ UI_Box* ui_build_box_from_string(UI_BoxFlags flags, String8 string)
 {
     UI_BoxFlags effective_flags = flags | ui_top_flags();
     String8 key_string = string;
-    if (effective_flags & UI_BoxFlag_DisableIDString)
-    {
-        key_string = ui_display_part_from_key_string(string);
-    }
-    UI_Key key = ui_key_from_string(ui_key_zero(), key_string);
+    UI_Key key = (effective_flags & UI_BoxFlag_DisableIDString) ? ui_key_from_literal_string(ui_key_zero(), key_string)
+                                                                : ui_key_from_string(ui_key_zero(), key_string);
     UI_Box* box = ui_build_box_from_key(flags, key);
-    box->raw_string = string;
-    box->display_string = ui_display_part_from_key_string(string);
+    box->raw_string = string.length != 0 ? string_duplicate_arena(ui_build_arena(), string, false) : string;
+    box->display_string = (effective_flags & UI_BoxFlag_DisableIDString) ? ui_utf8_sanitize(ui_build_arena(), string)
+                                                                         : ui_utf8_sanitize(ui_build_arena(), ui_display_part_from_key_string(string));
     box->string = box->display_string;
     return box;
 }
@@ -765,9 +1094,19 @@ void ui_box_set_display_string(UI_Box* box, String8 string)
 {
     if (box)
     {
-        box->display_string = string;
-        box->string = string;
+        String8 display_string = ui_utf8_sanitize(ui_build_arena(), string);
+        box->display_string = display_string;
+        box->string = display_string;
         box->flags |= UI_BoxFlag_HasDisplayString;
+    }
+}
+
+void ui_box_set_fastpath_codepoint(UI_Box* box, u32 codepoint)
+{
+    if (box)
+    {
+        bool valid = codepoint <= 0x10ffffu && !(codepoint >= 0xd800u && codepoint <= 0xdfffu);
+        box->fastpath_codepoint = valid ? codepoint : 0;
     }
 }
 
@@ -775,15 +1114,46 @@ void ui_box_set_fuzzy_match_ranges(UI_Box* box, UI_FuzzyMatchRange* ranges, u64 
 {
     if (box)
     {
-        box->fuzzy_match_ranges = ranges;
-        box->fuzzy_match_range_count = count;
-        if (count != 0)
+        if (!ranges || count == 0)
         {
+            box->fuzzy_match_ranges = 0;
+            box->fuzzy_match_range_count = 0;
+            box->flags &= ~UI_BoxFlag_HasFuzzyMatchRanges;
+            return;
+        }
+
+        bool ranges_are_valid = count <= (u64)-1 / sizeof(*ranges);
+        for (u64 index = 0; ranges_are_valid && index < count; index += 1)
+        {
+            ranges_are_valid = ranges[index].one_past_last >= ranges[index].first;
+        }
+
+        Arena* arena = ui_build_arena();
+        u64 byte_count = ranges_are_valid ? count * sizeof(*ranges) : 0;
+        u64 position = arena ? arena->position : 0;
+        bool enough_arena = ranges_are_valid && ui_arena_try_advance(arena, &position, byte_count, BUSTER_ALIGN_OF(UI_FuzzyMatchRange));
+        if (enough_arena)
+        {
+            UI_FuzzyMatchRange* copied_ranges = arena_allocate(arena, UI_FuzzyMatchRange, count);
+            memcpy(copied_ranges, ranges, byte_count);
+            box->fuzzy_match_ranges = copied_ranges;
+            box->fuzzy_match_range_count = count;
             box->flags |= UI_BoxFlag_HasFuzzyMatchRanges;
+        }
+        else if (!box->fuzzy_match_ranges || box->fuzzy_match_range_count == 0)
+        {
+            box->fuzzy_match_ranges = 0;
+            box->fuzzy_match_range_count = 0;
+            box->flags &= ~UI_BoxFlag_HasFuzzyMatchRanges;
         }
         else
         {
-            box->flags &= ~UI_BoxFlag_HasFuzzyMatchRanges;
+            // A failed replacement leaves the previous complete copy intact.
+            // No arena position or box range metadata is changed on failure.
+            if (box->fuzzy_match_range_count != 0)
+            {
+                box->flags |= UI_BoxFlag_HasFuzzyMatchRanges;
+            }
         }
     }
 }
@@ -807,6 +1177,11 @@ bool ui_box_is_visible(UI_Box* box)
 bool ui_box_is_focused(UI_Box* box)
 {
     return box && (box->state_flags & (UI_BoxState_FocusHot | UI_BoxState_FocusActive | UI_BoxState_FocusEdit));
+}
+
+bool ui_box_has_tooltip(UI_Box* box)
+{
+    return box && box->tooltip_visible;
 }
 
 void ui_box_scroll_by(UI_Box* box, float2 delta)
@@ -879,12 +1254,6 @@ BUSTER_GLOBAL_LOCAL void ui_prune_untouched_boxes(void)
             }
         }
     }
-}
-
-BUSTER_GLOBAL_LOCAL bool ui_wm_key_is_mouse(WmKey key)
-{
-    bool result = (key >= WM_KEY_MOUSE_LEFT && key <= WM_KEY_MOUSE_FORWARD);
-    return result;
 }
 
 UI_EventList ui_event_list_from_wm_events(Arena* arena, WmWindowHandle* window, WmEventList event_queue)
@@ -984,7 +1353,14 @@ void ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time,
     ui_state->build_index += 1;
     arena_reset_to_start(ui_build_arena());
     ui_stack_reset(ui_state);
+    ui_state->previous_root = ui_state->root;
     ui_state->root = 0;
+    if (ui_state->focus_changed_pending && ui_state->focus_changed_delivery_build_index < ui_state->build_index)
+    {
+        ui_state->focus_changed_pending = 0;
+        ui_state->focus_changed_key = ui_key_zero();
+        ui_state->focus_changed_delivery_build_index = 0;
+    }
     ui_state->previous_mouse = ui_state->mouse;
     ui_state->next_build_order = 0;
     ui_state->next_draw_order = 0;
@@ -995,30 +1371,11 @@ void ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time,
     ui_state->events = events;
     ui_state->frame_time = frame_time;
     ui_state->is_animating = 0;
-
-    for (UI_EventNode* event = events.first; event; event = event->next)
-    {
-        switch (event->v.kind)
-        {
-        case UI_EventKind_MouseMove:
-        case UI_EventKind_Scroll:
-        {
-            ui_state->mouse = event->v.pos;
-        }
-        break;
-        case UI_EventKind_Press:
-        case UI_EventKind_Release:
-        {
-            if (ui_wm_key_is_mouse(event->v.key))
-            {
-                ui_state->mouse = event->v.pos;
-            }
-        }
-        break;
-        default:
-            break;
-        }
-    }
+    // Keep the previous completed pointer position while the router walks
+    // events chronologically.  The final pointer position is published only
+    // after ownership has been assigned, so an earlier event cannot observe a
+    // later move.
+    ui_state->mouse = ui_state->previous_mouse;
 
     bool has_active = false;
     for (u64 i = 0; i < (u64)UI_MouseButtonKind_COUNT; i += 1)
@@ -1035,10 +1392,23 @@ void ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time,
         if (!ui_key_match(ui_state->active_box_key[i], ui_key_zero()))
         {
             UI_Box* active_box = ui_box_from_key(ui_state->active_box_key[i]);
-            if (!active_box || (active_box->flags & UI_BoxFlag_Disabled))
+            if (!active_box || (active_box->flags & UI_BoxFlag_Disabled) || !(active_box->flags & UI_BoxFlag_MouseClickable))
             {
                 ui_state->active_box_key[i] = ui_key_zero();
             }
+        }
+    }
+
+    ui_route_event_owners();
+
+    for (UI_EventNode* event = ui_state->events.first; event; event = event->next)
+    {
+        bool is_mouse = false;
+        ui_mouse_button_kind_from_key(event->v.key, &is_mouse);
+        if (event->v.kind == UI_EventKind_MouseMove || event->v.kind == UI_EventKind_Scroll ||
+            (is_mouse && (event->v.kind == UI_EventKind_Press || event->v.kind == UI_EventKind_Release)))
+        {
+            ui_state->mouse = event->v.pos;
         }
     }
 
@@ -1077,7 +1447,7 @@ BUSTER_GLOBAL_LOCAL f32 ui_text_size_for_axis(UI_Box* box, Axis2 axis)
     f32 padding = box->pref_size[axis].value + box->text_padding * 2.0f;
     if (axis == AXIS2_X)
     {
-        result = (f32)box->string.length * box->font_size * 0.60f + padding;
+        result = (f32)ui_utf8_codepoint_count(box->string) * box->font_size * 0.60f + padding;
     }
     else
     {
@@ -1163,34 +1533,53 @@ BUSTER_GLOBAL_LOCAL void ui_layout_enforce_constraints(UI_Box* root, Axis2 axis)
         if (!(box->flags & (UI_BoxFlag_AllowOverflowX << axis)))
         {
             f32 allowed_size = float2_element(box->fixed_size, axis);
-            f32 total_size = 0.0f;
-            f32 total_weighted_size = 0.0f;
-            for (UI_Box* child = box->first; child; child = child->next)
+            if (axis != box->child_layout_axis)
             {
-                if (!(child->flags & (UI_BoxFlag_FloatingX << axis)))
-                {
-                    if (axis == box->child_layout_axis)
-                    {
-                        total_size += float2_element(child->fixed_size, axis);
-                    }
-                    else
-                    {
-                        total_size = BUSTER_MAX(total_size, float2_element(child->fixed_size, axis));
-                    }
-                    total_weighted_size += float2_element(child->fixed_size, axis) * (1.0f - child->pref_size[axis].strictness);
-                }
-            }
-
-            f32 violation = total_size - allowed_size;
-            if (violation > 0 && total_weighted_size > 0)
-            {
+                // Cross-axis children overlap in the layout axis, so each
+                // flexible child must fit the parent's constraint on its own.
+                // Sharing one violation budget across siblings leaves every
+                // child wider than the available cross-axis extent.
                 for (UI_Box* child = box->first; child; child = child->next)
                 {
                     if (!(child->flags & (UI_BoxFlag_FloatingX << axis)))
                     {
-                        f32 fixup_budget = float2_element(child->fixed_size, axis) * (1.0f - child->pref_size[axis].strictness);
-                        f32 fixup_pct = BUSTER_CLAMP(0.0f, violation / total_weighted_size, 1.0f);
-                        float2_element(child->fixed_size, axis) -= fixup_budget * fixup_pct;
+                        f32 child_size = float2_element(child->fixed_size, axis);
+                        f32 strictness = BUSTER_CLAMP(0.0f, child->pref_size[axis].strictness, 1.0f);
+                        f32 flexible_budget = child_size * (1.0f - strictness);
+                        f32 violation = child_size - allowed_size;
+                        if (violation > 0.0f && flexible_budget > 0.0f)
+                        {
+                            float2_element(child->fixed_size, axis) = child_size - BUSTER_MIN(violation, flexible_budget);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                f32 total_size = 0.0f;
+                f32 total_weighted_size = 0.0f;
+                for (UI_Box* child = box->first; child; child = child->next)
+                {
+                    if (!(child->flags & (UI_BoxFlag_FloatingX << axis)))
+                    {
+                        total_size += float2_element(child->fixed_size, axis);
+                        f32 strictness = BUSTER_CLAMP(0.0f, child->pref_size[axis].strictness, 1.0f);
+                        total_weighted_size += float2_element(child->fixed_size, axis) * (1.0f - strictness);
+                    }
+                }
+
+                f32 violation = total_size - allowed_size;
+                if (violation > 0.0f && total_weighted_size > 0.0f)
+                {
+                    for (UI_Box* child = box->first; child; child = child->next)
+                    {
+                        if (!(child->flags & (UI_BoxFlag_FloatingX << axis)))
+                        {
+                            f32 strictness = BUSTER_CLAMP(0.0f, child->pref_size[axis].strictness, 1.0f);
+                            f32 fixup_budget = float2_element(child->fixed_size, axis) * (1.0f - strictness);
+                            f32 fixup_pct = BUSTER_CLAMP(0.0f, violation / total_weighted_size, 1.0f);
+                            float2_element(child->fixed_size, axis) -= fixup_budget * fixup_pct;
+                        }
                     }
                 }
             }
@@ -1241,7 +1630,8 @@ BUSTER_GLOBAL_LOCAL void ui_layout_position(UI_Box* root, Axis2 axis)
             f32 desired_p0 = floor_f32(float2_element(box->rect.p0, axis) + child_pos - view_offset);
             if ((child->flags & (UI_BoxFlag_AnimatePosX << axis)) && child->has_previous_rect)
             {
-                f32 animation_t = ui_state->frame_time > 0.0 ? BUSTER_CLAMP(0.0f, (f32)(ui_state->frame_time * 12.0), 1.0f) : 1.0f;
+                // ui_build_begin receives milliseconds from the window loop.
+                f32 animation_t = ui_state->frame_time > 0.0 ? BUSTER_CLAMP(0.0f, (f32)(ui_state->frame_time * 0.001 * 12.0), 1.0f) : 1.0f;
                 desired_p0 = floor_f32(old_p0 + (desired_p0 - old_p0) * animation_t);
                 ui_state->is_animating = ui_state->is_animating || desired_p0 != floor_f32(float2_element(box->rect.p0, axis) + child_pos - view_offset);
             }
@@ -1293,6 +1683,100 @@ BUSTER_GLOBAL_LOCAL void ui_layout_root(UI_Box* root, Axis2 axis)
     }
 }
 
+BUSTER_GLOBAL_LOCAL String8 ui_tooltip_make_text(Arena* arena, String8 source, u64 max_columns, u64 max_lines, u64* line_count_out,
+                                                  u64* max_line_columns_out, bool* truncated_out)
+{
+    String8 result = {0};
+    *line_count_out = 0;
+    *max_line_columns_out = 0;
+    *truncated_out = false;
+    if (!arena || source.length == 0 || !ui_string8_source_is_valid(source) || max_columns == 0 || max_lines == 0 ||
+        max_lines > (u64)-1 / max_columns)
+    {
+        return result;
+    }
+
+    u64 full_columns = ui_utf8_codepoint_count(source);
+    u64 column_capacity = max_lines * max_columns;
+    bool truncated = full_columns > column_capacity;
+    if (truncated && max_columns < 3)
+    {
+        return result;
+    }
+
+    u64 source_columns = truncated ? column_capacity - 3 : full_columns;
+    u64 output_capacity = source.length;
+    if (output_capacity > (u64)-1 - source.length || output_capacity + source.length > (u64)-1 - max_lines ||
+        output_capacity + source.length + max_lines > (u64)-1 - 4)
+    {
+        return result;
+    }
+    output_capacity += source.length + max_lines + 4;
+
+    u64 position = arena->position;
+    if (!ui_arena_try_advance(arena, &position, output_capacity, BUSTER_ALIGN_OF(char8)))
+    {
+        return result;
+    }
+
+    char8* output = arena_allocate(arena, char8, output_capacity);
+    u64 output_length = 0;
+    u64 source_position = 0;
+    u64 copied_columns = 0;
+    u64 line_count = 1;
+    u64 line_columns = 0;
+    u64 max_line_columns = 0;
+    while (source_position < source.length && copied_columns < source_columns)
+    {
+        u64 sequence_length = ui_utf8_sequence_length(source, source_position);
+        sequence_length = sequence_length ? sequence_length : 1;
+        if (line_columns == max_columns)
+        {
+            output[output_length++] = '\n';
+            line_count += 1;
+            line_columns = 0;
+        }
+
+        u32 codepoint = ui_utf8_codepoint_at(source, source_position);
+        if (codepoint == '\n')
+        {
+            output[output_length++] = ' ';
+        }
+        else
+        {
+            memcpy(output + output_length, source.pointer + source_position, sequence_length);
+            output_length += sequence_length;
+        }
+        source_position += sequence_length;
+        copied_columns += 1;
+        line_columns += 1;
+        max_line_columns = BUSTER_MAX(max_line_columns, line_columns);
+    }
+
+    truncated = truncated || source_position < source.length;
+    if (truncated)
+    {
+        if (line_columns + 3 > max_columns)
+        {
+            output[output_length++] = '\n';
+            line_count += 1;
+            line_columns = 0;
+        }
+        output[output_length++] = '.';
+        output[output_length++] = '.';
+        output[output_length++] = '.';
+        line_columns += 3;
+        max_line_columns = BUSTER_MAX(max_line_columns, line_columns);
+    }
+
+    result.pointer = output;
+    result.length = output_length;
+    *line_count_out = line_count;
+    *max_line_columns_out = max_line_columns;
+    *truncated_out = truncated;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void ui_layout_compute_clips(UI_Box* root)
 {
     for (UI_Box* box = root; box; box = ui_box_rec_df_pre(box, root).next)
@@ -1303,7 +1787,7 @@ BUSTER_GLOBAL_LOCAL void ui_layout_compute_clips(UI_Box* root)
             clip = ui_rect_intersect(clip, box->parent->rect);
         }
         box->clip_rect = clip;
-        box->visible = ui_rect_has_area(box->rect) && ui_rect_has_area(clip);
+        box->visible = ui_rect_has_area(ui_rect_intersect(box->rect, clip));
         box->state_flags &= UI_BoxState_RendererDependency | UI_BoxState_Scrollable;
         if (box->visible)
         {
@@ -1321,11 +1805,11 @@ BUSTER_GLOBAL_LOCAL void ui_layout_compute_clips(UI_Box* root)
         {
             box->state_flags |= UI_BoxState_Active;
         }
-        if (ui_key_match(box->key, ui_state->focus_hot_key))
+        if (ui_key_match(box->key, ui_state->focus_hot_key) && !(box->flags & UI_BoxFlag_FocusHotDisabled))
         {
             box->state_flags |= UI_BoxState_FocusHot;
         }
-        if (ui_key_match(box->key, ui_state->focus_active_key))
+        if (ui_key_match(box->key, ui_state->focus_active_key) && !(box->flags & UI_BoxFlag_FocusActiveDisabled))
         {
             box->state_flags |= UI_BoxState_FocusActive;
         }
@@ -1334,19 +1818,29 @@ BUSTER_GLOBAL_LOCAL void ui_layout_compute_clips(UI_Box* root)
             box->state_flags |= UI_BoxState_FocusEdit;
         }
 
-        f32 available_width = BUSTER_MAX(0.0f, box->rect.x1 - box->rect.x0 - box->text_padding * 2.0f);
-        if (box->flags & UI_BoxFlag_Clip)
-        {
-            available_width = BUSTER_MAX(0.0f, BUSTER_MIN(available_width, box->clip_rect.x1 - box->rect.x0 - box->text_padding));
-        }
+        F32Interval2 text_clip = ui_box_text_clip_rect(box);
+        f32 text_left = BUSTER_MAX(box->rect.x0 + box->text_padding, text_clip.x0);
+        f32 text_right = BUSTER_MIN(box->rect.x1 - box->text_padding, text_clip.x1 - box->text_padding);
+        f32 available_width = BUSTER_MAX(0.0f, text_right - text_left);
         f32 character_width = BUSTER_MAX(0.001f, box->font_size * 0.60f);
-        u64 visible_length = box->string.length;
+        u64 full_columns = ui_utf8_codepoint_count(box->string);
+        u64 available_columns = available_width >= character_width ? (u64)(available_width / character_width) : 0;
+        u64 visible_columns = full_columns;
         if (!(box->flags & UI_BoxFlag_DisableTextTrunc))
         {
-            visible_length = BUSTER_MIN(box->string.length, (u64)(available_width / character_width));
+            if (full_columns > available_columns)
+            {
+                visible_columns = available_columns > 3 ? available_columns - 3 : 0;
+            }
         }
-        box->text_visible_length = visible_length;
-        box->text_truncated = visible_length < box->string.length;
+        box->text_visible_columns = visible_columns;
+        box->text_visible_length = ui_utf8_byte_offset_for_columns(box->string, visible_columns);
+        box->text_truncated = visible_columns < full_columns;
+        box->tooltip_visible = false;
+        box->tooltip_rect = (F32Interval2){0};
+        box->tooltip_string = (String8){0};
+        box->tooltip_line_count = 0;
+        box->tooltip_text_truncated = false;
         if (box->text_truncated)
         {
             box->state_flags |= UI_BoxState_TextTruncated;
@@ -1364,6 +1858,102 @@ BUSTER_GLOBAL_LOCAL void ui_layout_compute_clips(UI_Box* root)
             box->state_flags |= UI_BoxState_Fade;
         }
     }
+
+    // Tooltip hover follows the completed draw order.  First find the actual
+    // topmost visible draw target at the pointer; a later non-truncated overlay
+    // must occlude an eligible truncated label just as it occludes its pixels.
+    UI_Box* topmost_draw_target = 0;
+    for (UI_Box* box = root; box; box = ui_box_rec_df_pre(box, root).next)
+    {
+        if (ui_box_draws_content(box) && ui_box_contains_point(box, ui_state->mouse) &&
+            (!topmost_draw_target || box->draw_order >= topmost_draw_target->draw_order))
+        {
+            topmost_draw_target = box;
+        }
+    }
+
+    // Only the topmost eligible box owns the full-text tooltip for this frame.
+    UI_Box* tooltip_target = 0;
+    for (UI_Box* box = root; box; box = ui_box_rec_df_pre(box, root).next)
+    {
+        if (box->text_truncated && !(box->flags & UI_BoxFlag_DisableTruncatedHover) && box->visible && box->string.length != 0 &&
+            ui_box_contains_point(box, ui_state->mouse) && (!tooltip_target || box->draw_order >= tooltip_target->draw_order))
+        {
+            tooltip_target = box;
+        }
+    }
+    if (tooltip_target && tooltip_target == topmost_draw_target)
+    {
+        UI_Box* box = tooltip_target;
+        f32 root_width = BUSTER_MAX(0.0f, root->rect.x1 - root->rect.x0);
+        f32 root_height = BUSTER_MAX(0.0f, root->rect.y1 - root->rect.y0);
+        f32 character_width = BUSTER_MAX(0.001f, box->font_size * 0.60f);
+        f32 tooltip_line_height = BUSTER_MAX(1.0f, box->font_size * 1.35f);
+        f32 tooltip_content_width = BUSTER_MAX(0.0f, root_width - box->text_padding * 2.0f);
+        f32 tooltip_content_height = BUSTER_MAX(0.0f, root_height - box->text_padding * 2.0f);
+        u64 tooltip_columns = tooltip_content_width >= character_width ? (u64)(tooltip_content_width / character_width) : 0;
+        u64 tooltip_lines = tooltip_content_height >= tooltip_line_height ? (u64)(tooltip_content_height / tooltip_line_height) : 0;
+        u64 tooltip_text_line_count = 0;
+        u64 tooltip_max_line_columns = 0;
+        bool tooltip_text_truncated = false;
+        String8 tooltip_string = ui_tooltip_make_text(ui_build_arena(), box->string, tooltip_columns, tooltip_lines, &tooltip_text_line_count,
+                                                       &tooltip_max_line_columns, &tooltip_text_truncated);
+        f32 tooltip_width = (f32)tooltip_max_line_columns * character_width + box->text_padding * 2.0f;
+        f32 tooltip_height = (f32)tooltip_text_line_count * tooltip_line_height + box->text_padding * 2.0f;
+        f32 tooltip_x = box->rect.x0;
+        f32 tooltip_y = box->rect.y1 + 4.0f;
+        if (tooltip_string.length != 0 && tooltip_width <= root_width && tooltip_height <= root_height)
+        {
+            if (tooltip_x + tooltip_width > root->rect.x1)
+            {
+                tooltip_x = root->rect.x1 - tooltip_width;
+            }
+            if (tooltip_y + tooltip_height > root->rect.y1)
+            {
+                tooltip_y = box->rect.y0 - tooltip_height - 4.0f;
+            }
+            f32 max_tooltip_x = BUSTER_MAX(root->rect.x0, root->rect.x1 - tooltip_width);
+            f32 max_tooltip_y = BUSTER_MAX(root->rect.y0, root->rect.y1 - tooltip_height);
+            tooltip_x = BUSTER_CLAMP(root->rect.x0, tooltip_x, max_tooltip_x);
+            tooltip_y = BUSTER_CLAMP(root->rect.y0, tooltip_y, max_tooltip_y);
+            box->tooltip_rect = ui_rect_make(tooltip_x, tooltip_y, tooltip_x + tooltip_width, tooltip_y + tooltip_height);
+            box->tooltip_string = tooltip_string;
+            box->tooltip_line_count = tooltip_text_line_count;
+            box->tooltip_text_truncated = tooltip_text_truncated;
+            box->tooltip_visible = true;
+            box->state_flags |= UI_BoxState_Tooltip;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_box_draws_content(UI_Box* box)
+{
+    if (!box || !box->visible || !ui_rect_has_area(box->rect))
+    {
+        return false;
+    }
+
+    UI_BoxFlags direct_draw_flags = UI_BoxFlag_DrawBackgroundBlur | UI_BoxFlag_DrawDropShadow | UI_BoxFlag_DrawBackground | UI_BoxFlag_DrawBorder |
+                                    UI_BoxFlag_DrawSideTop | UI_BoxFlag_DrawSideBottom | UI_BoxFlag_DrawSideLeft | UI_BoxFlag_DrawSideRight |
+                                    UI_BoxFlag_DrawOverlay | UI_BoxFlag_DrawFadeTop | UI_BoxFlag_DrawFadeBottom | UI_BoxFlag_DrawFadeLeft |
+                                    UI_BoxFlag_DrawFadeRight | UI_BoxFlag_Debug;
+    if (box->flags & direct_draw_flags)
+    {
+        return true;
+    }
+    if ((box->flags & UI_BoxFlag_DrawText) && box->string.length != 0)
+    {
+        return true;
+    }
+    if ((box->flags & UI_BoxFlag_HasFuzzyMatchRanges) && box->fuzzy_match_ranges && box->fuzzy_match_range_count != 0)
+    {
+        return true;
+    }
+    if (!(box->flags & UI_BoxFlag_DisableFocusBorder) && (box->state_flags & UI_BoxState_FocusActive))
+    {
+        return true;
+    }
+    return false;
 }
 
 void ui_build_end(void)
@@ -1374,8 +1964,12 @@ void ui_build_end(void)
     }
 
     ui_prune_untouched_boxes();
+    // A release may have been routed to a previous capture, while this build
+    // can omit, disable, or remove clickability from that owner.  Prune before
+    // layout derives UI_BoxState_Active so the completed box cannot publish a
+    // stale active state and a replacement cannot inherit the capture.
+    ui_prune_active_keys();
     ui_prune_focus_keys();
-    ui_process_focus_navigation();
 
     if (ui_state->root)
     {
@@ -1412,10 +2006,20 @@ void ui_build_end(void)
                     }
                 }
 
-                box->first->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
-                box->first->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
-                box->last->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
-                box->last->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
+                if (box->child_layout_axis == AXIS2_X)
+                {
+                    box->first->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
+                    box->first->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
+                    box->last->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
+                    box->last->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
+                }
+                else
+                {
+                    box->first->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
+                    box->first->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
+                    box->last->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
+                    box->last->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
+                }
             }
         }
     }
@@ -1433,6 +2037,7 @@ void ui_build_end(void)
             ui_state->is_animating = ui_state->is_animating || (box->hot_t > 0.01f && box->hot_t < 0.99f) || (box->active_t > 0.01f && box->active_t < 0.99f);
         }
     }
+
 }
 
 BUSTER_GLOBAL_LOCAL UI_MouseButtonKind ui_mouse_button_kind_from_key(WmKey key, bool* is_mouse)
@@ -1460,56 +2065,330 @@ BUSTER_GLOBAL_LOCAL UI_MouseButtonKind ui_mouse_button_kind_from_key(WmKey key, 
 
 BUSTER_GLOBAL_LOCAL bool ui_box_contains_point(UI_Box* box, float2 point)
 {
-    if (!box || !ui_rect_contains(box->rect, point))
+    if (!box || !box->visible)
     {
         return false;
     }
-    if (box->clip_rect.x1 > box->clip_rect.x0 && box->clip_rect.y1 > box->clip_rect.y0 && !ui_rect_contains(box->clip_rect, point))
-    {
-        return false;
-    }
-    if ((box->flags & UI_BoxFlag_DisableTruncatedHover) && box->text_truncated)
-    {
-        return false;
-    }
-    return true;
+    F32Interval2 effective_rect = ui_rect_intersect(box->rect, box->clip_rect);
+    return ui_rect_has_area(effective_rect) && ui_rect_contains(effective_rect, point);
 }
 
-BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_box_at_point(float2 point, UI_BoxFlags required_flags, bool allow_disabled)
+BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_box_at_point_for_build(float2 point, UI_BoxFlags required_flags, bool allow_disabled, u64 build_index)
 {
     UI_Box* result = 0;
+    UI_Box* disabled_blocker = 0;
     u64 result_order = 0;
+    u64 blocker_order = 0;
     for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
     {
         for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
         {
-            if (box->last_touched_build_index != ui_state->build_index || !(box->flags & required_flags) || !ui_box_contains_point(box, point))
+            if (box->last_touched_build_index != build_index || !ui_box_contains_point(box, point))
             {
                 continue;
             }
-            if (!allow_disabled && (box->flags & UI_BoxFlag_Disabled))
+            if (!allow_disabled && (box->flags & UI_BoxFlag_Disabled) && (!disabled_blocker || box->build_order >= blocker_order))
             {
-                continue;
+                disabled_blocker = box;
+                blocker_order = box->build_order;
             }
-            if (!result || box->build_order >= result_order)
+            if ((box->flags & required_flags) && (allow_disabled || !(box->flags & UI_BoxFlag_Disabled)) && (!result || box->build_order >= result_order))
             {
                 result = box;
                 result_order = box->build_order;
             }
         }
     }
+    if (disabled_blocker && (!result || blocker_order >= result_order))
+    {
+        result = disabled_blocker;
+    }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_focus_box_at_point_for_build(float2 point, u64 build_index)
+{
+    UI_Box* result = 0;
+    UI_Box* disabled_blocker = 0;
+    u64 result_order = 0;
+    u64 blocker_order = 0;
+    UI_BoxFlags focus_flags = UI_BoxFlag_FocusHot | UI_BoxFlag_FocusActive | UI_BoxFlag_KeyboardClickable | UI_BoxFlag_ClickToFocus |
+                              UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY | UI_BoxFlag_DefaultFocusEdit;
+    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+    {
+        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+        {
+            if (box->last_touched_build_index != build_index || !ui_box_contains_point(box, point))
+            {
+                continue;
+            }
+            if ((box->flags & UI_BoxFlag_Disabled) && (!disabled_blocker || box->build_order >= blocker_order))
+            {
+                disabled_blocker = box;
+                blocker_order = box->build_order;
+            }
+            if ((box->flags & focus_flags) && ui_box_focusable(box, false) && (!result || box->build_order >= result_order))
+            {
+                result = box;
+                result_order = box->build_order;
+            }
+        }
+    }
+    if (disabled_blocker && (!result || blocker_order >= result_order))
+    {
+        result = disabled_blocker;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_event_belongs_to_box(UI_Event* event, UI_Box* box, UI_BoxFlags required_flags)
+{
+    BUSTER_UNUSED(required_flags);
+    if (!event || !box)
+    {
+        return false;
+    }
+    if (event->owner_assigned)
+    {
+        return event->owner_key != 0 && event->owner_key == box->key.value;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL SliceString8 ui_copy_drop_paths(SliceString8 paths)
+{
+    return ui_copy_string8_slice_checked(ui_build_arena(), paths);
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_event_updates_pointer(UI_Event* event)
+{
+    if (!event)
+    {
+        return false;
+    }
+    bool is_mouse = false;
+    ui_mouse_button_kind_from_key(event->key, &is_mouse);
+    return event->kind == UI_EventKind_MouseMove || event->kind == UI_EventKind_Scroll ||
+           (is_mouse && (event->kind == UI_EventKind_Press || event->kind == UI_EventKind_Release));
+}
+
+BUSTER_GLOBAL_LOCAL void ui_route_pointer_targets_at(float2 point, u64 build_index, UI_Key* hot, UI_Key* focus_hot)
+{
+    UI_Box* hot_target = ui_topmost_box_at_point_for_build(point, UI_BoxFlag_MouseClickable, false, build_index);
+    UI_Box* focus_target = ui_topmost_focus_box_at_point_for_build(point, build_index);
+    if (hot)
+    {
+        *hot = hot_target && !(hot_target->flags & UI_BoxFlag_Disabled) ? hot_target->key : ui_key_zero();
+    }
+    if (focus_hot)
+    {
+        *focus_hot = focus_target && !(focus_target->flags & UI_BoxFlag_Disabled) ? focus_target->key : ui_key_zero();
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_focus_navigation_event(UI_Event* event, UI_BoxFlags* axis_flag, UI_FocusDirection* direction)
+{
+    if (!event || event->kind != UI_EventKind_Press || !axis_flag || !direction)
+    {
+        return false;
+    }
+    *axis_flag = 0;
+    *direction = UI_FocusDirection_LinearForward;
+    if (event->key == WM_KEY_TAB)
+    {
+        *axis_flag = UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY;
+        *direction = (event->modifiers & (1u << WM_MODIFIER_SHIFT)) ? UI_FocusDirection_LinearBackward : UI_FocusDirection_LinearForward;
+    }
+    else if (event->key == WM_KEY_LEFT)
+    {
+        *axis_flag = UI_BoxFlag_DefaultFocusNavX;
+        *direction = UI_FocusDirection_Left;
+    }
+    else if (event->key == WM_KEY_RIGHT)
+    {
+        *axis_flag = UI_BoxFlag_DefaultFocusNavX;
+        *direction = UI_FocusDirection_Right;
+    }
+    else if (event->key == WM_KEY_UP)
+    {
+        *axis_flag = UI_BoxFlag_DefaultFocusNavY;
+        *direction = UI_FocusDirection_Up;
+    }
+    else if (event->key == WM_KEY_DOWN)
+    {
+        *axis_flag = UI_BoxFlag_DefaultFocusNavY;
+        *direction = UI_FocusDirection_Down;
+    }
+    return *axis_flag != 0;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
+{
+    u64 previous_build_index = ui_state->build_index ? ui_state->build_index - 1 : 0;
+    ui_state->pointer_targets_assigned = previous_build_index != 0;
+
+    UI_Key provisional_hot = ui_state->hot_box_key;
+    UI_Key provisional_focus_hot = ui_state->focus_hot_key;
+    UI_Key provisional_focus_active = ui_state->focus_active_key;
+    UI_Key provisional_focus_edit = ui_state->focus_edit_key;
+    UI_Key provisional_active[UI_MouseButtonKind_COUNT] = {0};
+    for (u64 i = 0; i < (u64)UI_MouseButtonKind_COUNT; i += 1)
+    {
+        provisional_active[i] = ui_state->active_box_key[i];
+    }
+
+    if (ui_state->pointer_targets_assigned)
+    {
+        ui_route_pointer_targets_at(ui_state->previous_mouse, previous_build_index, &provisional_hot, &provisional_focus_hot);
+    }
+
+    // Ownership and capture/focus transitions are computed in this one
+    // chronological pass. Signals later walk the same event list in box
+    // order, but only report the transitions recorded on their owned events;
+    // they must not replay or reorder these global state changes.
+    for (UI_EventNode* node = ui_state->events.first; node; node = node->next)
+    {
+        UI_Event* event = &node->v;
+        event->owner_key = 0;
+        event->owner_assigned = 0;
+        event->route_flags = UI_EventRouteFlag_None;
+
+        bool is_mouse = false;
+        UI_MouseButtonKind button = ui_mouse_button_kind_from_key(event->key, &is_mouse);
+        UI_Box* target = 0;
+        if (ui_state->pointer_targets_assigned && ui_event_updates_pointer(event))
+        {
+            ui_route_pointer_targets_at(event->pos, previous_build_index, &provisional_hot, &provisional_focus_hot);
+        }
+        if (is_mouse && event->kind == UI_EventKind_Release)
+        {
+            event->owner_assigned = 1;
+            if (!ui_key_match(provisional_active[button], ui_key_zero()))
+            {
+                event->owner_key = provisional_active[button].value;
+            }
+            provisional_active[button] = ui_key_zero();
+        }
+        else if (event->kind == UI_EventKind_Text)
+        {
+            if (!ui_key_match(provisional_focus_edit, ui_key_zero()))
+            {
+                event->owner_key = provisional_focus_edit.value;
+            }
+            else if (!ui_key_match(provisional_focus_hot, ui_key_zero()))
+            {
+                event->owner_key = provisional_focus_hot.value;
+            }
+            event->owner_assigned = 1;
+        }
+        else if (event->kind == UI_EventKind_Press && !is_mouse)
+        {
+            UI_BoxFlags axis_flag = 0;
+            UI_FocusDirection direction = UI_FocusDirection_LinearForward;
+            event->owner_assigned = 1;
+            bool edit_owns_horizontal_arrow = !ui_key_match(provisional_focus_edit, ui_key_zero()) &&
+                                               (event->key == WM_KEY_LEFT || event->key == WM_KEY_RIGHT);
+            if (ui_focus_navigation_event(event, &axis_flag, &direction) && !edit_owns_horizontal_arrow)
+            {
+                UI_Box* candidate = ui_focus_navigation_candidate(provisional_focus_active, axis_flag, direction, previous_build_index, ui_state->previous_root);
+                if (candidate)
+                {
+                    UI_Key next_focus_edit = (candidate->flags & UI_BoxFlag_DefaultFocusEdit) ? candidate->key : ui_key_zero();
+                    bool focus_changed = !ui_key_match(provisional_focus_active, candidate->key) || !ui_key_match(provisional_focus_edit, next_focus_edit);
+                    provisional_focus_hot = candidate->key;
+                    provisional_focus_active = candidate->key;
+                    provisional_focus_edit = next_focus_edit;
+                    if (focus_changed)
+                    {
+                        ui_state->focus_changed = 1;
+                        ui_state->focus_changed_key = candidate->key;
+                        ui_state->focus_changed_delivery_build_index = ui_state->build_index + 1;
+                        ui_state->focus_changed_pending = 1;
+                    }
+                    // Navigation is resolved against the previous tree here;
+                    // removing it prevents build-order signals from replaying
+                    // the transition after the new tree is built.
+                    ui_eat_event(event);
+                }
+            }
+            else if (!ui_key_match(provisional_focus_active, ui_key_zero()))
+            {
+                event->owner_key = provisional_focus_active.value;
+            }
+        }
+        else if (event->kind == UI_EventKind_Scroll)
+        {
+            event->owner_assigned = 1;
+            if (ui_state->pointer_targets_assigned)
+            {
+                target = ui_topmost_box_at_point_for_build(event->pos, UI_BoxFlag_Scroll, false, previous_build_index);
+            }
+        }
+        else if (event->kind == UI_EventKind_FileDrop)
+        {
+            event->owner_assigned = 1;
+            if (ui_state->pointer_targets_assigned)
+            {
+                target = ui_topmost_box_at_point_for_build(event->pos, UI_BoxFlag_DropSite, false, previous_build_index);
+            }
+        }
+        else if (is_mouse && event->kind == UI_EventKind_Press)
+        {
+            event->owner_assigned = 1;
+            if (ui_state->pointer_targets_assigned)
+            {
+                target = ui_topmost_box_at_point_for_build(event->pos, UI_BoxFlag_MouseClickable, false, previous_build_index);
+            }
+            provisional_active[button] = ui_key_zero();
+            if (target && !(target->flags & UI_BoxFlag_Disabled) && (target->flags & UI_BoxFlag_MouseClickable))
+            {
+                provisional_active[button] = target->key;
+                if ((target->flags & (UI_BoxFlag_ClickToFocus | UI_BoxFlag_FocusActive | UI_BoxFlag_DefaultFocusEdit)) && ui_box_focusable(target, true))
+                {
+                    UI_Key next_focus_edit = (target->flags & UI_BoxFlag_DefaultFocusEdit) ? target->key : ui_key_zero();
+                    bool focus_changed = !ui_key_match(provisional_focus_active, target->key) || !ui_key_match(provisional_focus_edit, next_focus_edit);
+                    provisional_focus_hot = target->key;
+                    provisional_focus_active = target->key;
+                    provisional_focus_edit = next_focus_edit;
+                    if (focus_changed)
+                    {
+                        event->route_flags |= UI_EventRouteFlag_FocusChanged;
+                        ui_state->focus_changed = 1;
+                    }
+                }
+            }
+        }
+
+        if (target)
+        {
+            event->owner_key = target->key.value;
+            event->owner_assigned = 1;
+        }
+    }
+
+    ui_state->hot_box_key = provisional_hot;
+    ui_state->focus_hot_key = provisional_focus_hot;
+    ui_state->focus_active_key = provisional_focus_active;
+    ui_state->focus_edit_key = provisional_focus_edit;
+    for (u64 i = 0; i < (u64)UI_MouseButtonKind_COUNT; i += 1)
+    {
+        ui_state->active_box_key[i] = provisional_active[i];
+    }
 }
 
 BUSTER_GLOBAL_LOCAL bool ui_box_focusable(UI_Box* box, bool active)
 {
-    if (!box || (box->flags & UI_BoxFlag_FocusNavSkip))
+    if (!box || ui_key_match(box->key, ui_key_zero()) || (box->flags & UI_BoxFlag_FocusNavSkip) || (box->flags & UI_BoxFlag_Disabled))
     {
         return false;
     }
-    if (box->flags & UI_BoxFlag_Disabled)
+    if (!active && (box->flags & UI_BoxFlag_FocusHotDisabled))
     {
-        return (active && (box->flags & UI_BoxFlag_FocusActiveDisabled)) || (!active && (box->flags & UI_BoxFlag_FocusHotDisabled));
+        return false;
+    }
+    if (active && (box->flags & UI_BoxFlag_FocusActiveDisabled))
+    {
+        return false;
     }
     return active ? !!(box->flags & (UI_BoxFlag_FocusActive | UI_BoxFlag_KeyboardClickable | UI_BoxFlag_ClickToFocus | UI_BoxFlag_DefaultFocusNavX |
                                      UI_BoxFlag_DefaultFocusNavY | UI_BoxFlag_DefaultFocusEdit))
@@ -1517,27 +2396,32 @@ BUSTER_GLOBAL_LOCAL bool ui_box_focusable(UI_Box* box, bool active)
                                      UI_BoxFlag_DefaultFocusNavY | UI_BoxFlag_DefaultFocusEdit));
 }
 
-BUSTER_GLOBAL_LOCAL void ui_set_focus(UI_Box* box, bool edit)
-{
-    UI_Key key = box ? box->key : ui_key_zero();
-    UI_Key edit_key = edit ? key : ui_key_zero();
-    if (!ui_key_match(ui_state->focus_active_key, key) || !ui_key_match(ui_state->focus_edit_key, edit_key))
-    {
-        ui_state->focus_changed = 1;
-    }
-    ui_state->focus_hot_key = key;
-    ui_state->focus_active_key = key;
-    ui_state->focus_edit_key = edit_key;
-}
-
 BUSTER_GLOBAL_LOCAL bool ui_box_is_current(UI_Box* box)
 {
     return box && box->last_touched_build_index == ui_state->build_index;
 }
 
+BUSTER_GLOBAL_LOCAL void ui_prune_active_keys(void)
+{
+    for (u64 i = 0; i < (u64)UI_MouseButtonKind_COUNT; i += 1)
+    {
+        UI_Key active_key = ui_state->active_box_key[i];
+        if (!ui_key_match(active_key, ui_key_zero()))
+        {
+            UI_Box* active_box = ui_box_from_key(active_key);
+            if (!ui_box_is_current(active_box) || (active_box->flags & UI_BoxFlag_Disabled) || !(active_box->flags & UI_BoxFlag_MouseClickable))
+            {
+                ui_state->active_box_key[i] = ui_key_zero();
+            }
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void ui_signal_add_focus_state(UI_Signal* signal, UI_Box* box)
 {
-    if (ui_key_match(ui_state->focus_active_key, box->key) || ui_key_match(ui_state->focus_edit_key, box->key))
+    if (!ui_key_match(box->key, ui_key_zero()) && !(box->flags & UI_BoxFlag_Disabled) &&
+        ((ui_key_match(ui_state->focus_active_key, box->key) && !(box->flags & UI_BoxFlag_FocusActiveDisabled)) ||
+         (ui_key_match(ui_state->focus_edit_key, box->key) && !(box->flags & UI_BoxFlag_FocusActiveDisabled))))
     {
         signal->f |= UI_SignalFlag_Focused;
         signal->focused = 1;
@@ -1552,6 +2436,17 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         return sig;
     }
 
+    bool disabled = !!(box->flags & UI_BoxFlag_Disabled);
+    if (!disabled && ui_state->focus_changed_pending && ui_state->focus_changed_delivery_build_index == ui_state->build_index &&
+        ui_key_match(ui_state->focus_changed_key, box->key) && ui_key_match(ui_state->focus_active_key, box->key) && ui_box_focusable(box, true))
+    {
+        sig.f |= UI_SignalFlag_FocusChanged;
+        sig.focus_changed = 1;
+        ui_state->focus_changed_pending = 0;
+        ui_state->focus_changed_key = ui_key_zero();
+        ui_state->focus_changed_delivery_build_index = 0;
+    }
+
     bool mouse_over = ui_box_contains_point(box, ui_state->mouse);
     if (mouse_over)
     {
@@ -1559,24 +2454,14 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         sig.mouse_over = 1;
     }
 
-    bool disabled = !!(box->flags & UI_BoxFlag_Disabled);
-    if (mouse_over && ui_box_focusable(box, false))
+    bool pointer_focus_target = ui_state->pointer_targets_assigned && ui_key_match(ui_state->focus_hot_key, box->key);
+    if (mouse_over && pointer_focus_target && ui_box_focusable(box, false))
     {
-        ui_state->focus_hot_key = box->key;
         sig.f |= UI_SignalFlag_Hovering;
         sig.hovering = 1;
     }
-    if ((box->flags & UI_BoxFlag_MouseClickable) && mouse_over && !disabled)
-    {
-        UI_Box* pointer_target = ui_topmost_box_at_point(ui_state->mouse, UI_BoxFlag_MouseClickable, false);
-        if (!pointer_target || ui_key_match(pointer_target->key, box->key))
-        {
-            ui_state->hot_box_key = box->key;
-        }
-    }
-
     ui_signal_add_focus_state(&sig, box);
-    if (disabled && !(box->flags & (UI_BoxFlag_FocusHotDisabled | UI_BoxFlag_FocusActiveDisabled)))
+    if (disabled)
     {
         return sig;
     }
@@ -1588,67 +2473,61 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         bool is_mouse = false;
         UI_MouseButtonKind button = ui_mouse_button_kind_from_key(event->key, &is_mouse);
         bool event_in_bounds = ui_box_contains_point(box, event->pos);
-        if (event->kind == UI_EventKind_Scroll && (box->flags & UI_BoxFlag_Scroll) && event_in_bounds && !disabled)
+        bool event_owned = event->owner_assigned && event->owner_key == box->key.value;
+        if (event->kind == UI_EventKind_Text && (box->flags & UI_BoxFlag_DrawTextFastpathCodepoint) && box->fastpath_codepoint != 0 && !disabled &&
+            (ui_key_match(ui_state->focus_hot_key, box->key) || event_owned) && ui_box_focusable(box, false) && ui_utf8_codepoint_count(event->string) == 1 &&
+            ui_utf8_codepoint_at(event->string, 0) == box->fastpath_codepoint && (!event->owner_assigned || event_owned))
         {
-            UI_Box* scroll_target = ui_topmost_box_at_point(event->pos, UI_BoxFlag_Scroll, false);
-            if (!scroll_target || ui_key_match(scroll_target->key, box->key))
-            {
-                float2 delta = float2_make(float2_element(event->delta, AXIS2_X) * 32.0f, float2_element(event->delta, AXIS2_Y) * 32.0f);
-                if (!(box->flags & UI_BoxFlag_ViewScrollX))
-                {
-                    float2_element(delta, AXIS2_X) = 0.0f;
-                }
-                if (!(box->flags & UI_BoxFlag_ViewScrollY))
-                {
-                    float2_element(delta, AXIS2_Y) = 0.0f;
-                }
-                ui_box_scroll_by(box, delta);
-                sig.f |= UI_SignalFlag_Scrolled;
-                sig.scrolled = 1;
-                sig.scroll_delta = delta;
-                ui_eat_event(event);
-            }
+            sig.f |= UI_SignalFlag_KeyboardPressed;
+            sig.clicked_left = 1;
+            sig.key = event->key;
+            sig.modifiers = event->modifiers;
+            ui_eat_event(event);
         }
-        else if (event->kind == UI_EventKind_FileDrop && (box->flags & UI_BoxFlag_DropSite) && event_in_bounds && !disabled)
+        else if (event->kind == UI_EventKind_Scroll && (box->flags & UI_BoxFlag_Scroll) && event_in_bounds && !disabled &&
+            ui_event_belongs_to_box(event, box, UI_BoxFlag_Scroll))
         {
-            UI_Box* drop_target = ui_topmost_box_at_point(event->pos, UI_BoxFlag_DropSite, false);
-            if (!drop_target || ui_key_match(drop_target->key, box->key))
+            float2 delta = float2_make(float2_element(event->delta, AXIS2_X) * 32.0f, float2_element(event->delta, AXIS2_Y) * 32.0f);
+            if (!(box->flags & UI_BoxFlag_ViewScrollX))
             {
-                sig.f |= UI_SignalFlag_Dropped;
-                sig.dropped = 1;
-                ui_eat_event(event);
+                float2_element(delta, AXIS2_X) = 0.0f;
             }
+            if (!(box->flags & UI_BoxFlag_ViewScrollY))
+            {
+                float2_element(delta, AXIS2_Y) = 0.0f;
+            }
+            ui_box_scroll_by(box, delta);
+            sig.f |= UI_SignalFlag_Scrolled;
+            sig.scrolled = 1;
+            sig.scroll_delta = delta;
+            ui_eat_event(event);
         }
-        else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Press && event_in_bounds && !disabled)
+        else if (event->kind == UI_EventKind_FileDrop && (box->flags & UI_BoxFlag_DropSite) && event_in_bounds && !disabled &&
+                 ui_event_belongs_to_box(event, box, UI_BoxFlag_DropSite))
         {
-            UI_Box* pointer_target = ui_topmost_box_at_point(event->pos, UI_BoxFlag_MouseClickable, false);
-            if (!pointer_target || ui_key_match(pointer_target->key, box->key))
+            sig.f |= UI_SignalFlag_Dropped;
+            sig.dropped = 1;
+            sig.drop_paths = ui_copy_drop_paths(event->paths);
+            ui_eat_event(event);
+        }
+        else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Press && event_in_bounds && !disabled &&
+                 ui_event_belongs_to_box(event, box, UI_BoxFlag_MouseClickable))
+        {
+            if (button == UI_MouseButtonKind_Left)
             {
-                ui_state->hot_box_key = box->key;
-                ui_state->active_box_key[button] = box->key;
-                if (button == UI_MouseButtonKind_Left)
-                {
-                    sig.f |= UI_SignalFlag_LeftPressed;
-                    sig.pressed_left = 1;
-                }
-                if (box->flags & (UI_BoxFlag_ClickToFocus | UI_BoxFlag_FocusActive | UI_BoxFlag_DefaultFocusEdit))
-                {
-                    UI_Key old_focus_active_key = ui_state->focus_active_key;
-                    UI_Key old_focus_edit_key = ui_state->focus_edit_key;
-                    ui_set_focus(box, !!(box->flags & UI_BoxFlag_DefaultFocusEdit));
-                    if (!ui_key_match(old_focus_active_key, ui_state->focus_active_key) || !ui_key_match(old_focus_edit_key, ui_state->focus_edit_key))
-                    {
-                        sig.f |= UI_SignalFlag_FocusChanged;
-                        sig.focus_changed = 1;
-                    }
-                }
-                ui_eat_event(event);
+                sig.f |= UI_SignalFlag_LeftPressed;
+                sig.pressed_left = 1;
             }
+            if (event->route_flags & UI_EventRouteFlag_FocusChanged)
+            {
+                sig.f |= UI_SignalFlag_FocusChanged;
+                sig.focus_changed = 1;
+            }
+            ui_eat_event(event);
         }
         else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Release &&
-                 ui_key_match(ui_state->active_box_key[button], box->key) && !disabled)
+                 !disabled && ui_event_belongs_to_box(event, box, UI_BoxFlag_MouseClickable))
         {
-            ui_state->active_box_key[button] = ui_key_zero();
             if (button == UI_MouseButtonKind_Left)
             {
                 sig.f |= UI_SignalFlag_LeftReleased;
@@ -1663,7 +2542,8 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         }
         else if ((box->flags & UI_BoxFlag_KeyboardClickable) && event->kind == UI_EventKind_Press &&
                  (event->key == WM_KEY_RETURN || event->key == WM_KEY_SPACE) &&
-                 ui_key_match(ui_state->focus_active_key, box->key) && !disabled)
+                 !disabled && ui_box_focusable(box, true) &&
+                 (event->owner_assigned ? event->owner_key == box->key.value : ui_key_match(ui_state->focus_active_key, box->key)))
         {
             sig.f |= UI_SignalFlag_KeyboardPressed;
             sig.clicked_left = 1;
@@ -1673,12 +2553,14 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         }
     }
 
-    if (!disabled && ui_key_match(ui_state->active_box_key[UI_MouseButtonKind_Left], box->key))
+    if (!disabled && (box->flags & UI_BoxFlag_MouseClickable) && ui_key_match(ui_state->active_box_key[UI_MouseButtonKind_Left], box->key))
     {
         sig.f |= UI_SignalFlag_Dragging;
         sig.dragging = 1;
     }
-    if (ui_key_match(ui_state->focus_active_key, box->key) || ui_key_match(ui_state->focus_edit_key, box->key))
+    if (!ui_key_match(box->key, ui_key_zero()) && !(box->flags & UI_BoxFlag_Disabled) &&
+        ((ui_key_match(ui_state->focus_active_key, box->key) && !(box->flags & UI_BoxFlag_FocusActiveDisabled)) ||
+         (ui_key_match(ui_state->focus_edit_key, box->key) && !(box->flags & UI_BoxFlag_FocusActiveDisabled))))
     {
         sig.f |= UI_SignalFlag_Focused;
         sig.focused = 1;
@@ -1686,19 +2568,54 @@ UI_Signal ui_signal_from_box(UI_Box* box)
     return sig;
 }
 
-BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI_BoxFlags axis_flag, bool backwards)
+BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_scope_from_box(UI_Box* box, UI_Box* root)
+{
+    UI_Box* result = box ? box->parent : root;
+    for (UI_Box* parent = box ? box->parent : root; parent; parent = parent->parent)
+    {
+        if (parent != root && (parent->flags & (UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY)))
+        {
+            result = parent;
+            break;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_box_in_focus_scope(UI_Box* box, UI_Box* scope)
+{
+    if (!box || !scope || box == scope)
+    {
+        return false;
+    }
+    for (UI_Box* parent = box->parent; parent; parent = parent->parent)
+    {
+        if (parent == scope)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI_BoxFlags axis_flag, UI_FocusDirection direction, u64 build_index, UI_Box* root)
 {
     UI_Box* first = 0;
     UI_Box* last = 0;
-    UI_Box* after = 0;
-    UI_Box* before = 0;
-    u64 current_order = 0;
-    bool current_found = false;
+    UI_Box* current = ui_box_from_key(current_key);
+    bool current_found = current && current->last_touched_build_index == build_index;
+    if (!current_found)
+    {
+        current = 0;
+    }
+    UI_Box* scope = ui_focus_scope_from_box(current, root);
+    UI_Box* directional = 0;
+    f32 directional_score = 0.0f;
     for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
     {
         for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
         {
-            if (!ui_box_is_current(box) || !(box->flags & axis_flag) || !ui_box_focusable(box, true))
+            if (box->last_touched_build_index != build_index || !ui_box_in_focus_scope(box, scope) || !(box->flags & axis_flag) || !ui_box_focusable(box, true))
             {
                 continue;
             }
@@ -1710,92 +2627,117 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
             {
                 last = box;
             }
-            if (ui_key_match(box->key, current_key))
+            if (current_found && ui_key_match(box->key, current_key) && direction >= UI_FocusDirection_Left)
             {
-                current_found = true;
-                current_order = box->build_order;
+                continue;
+            }
+            if (current_found && direction >= UI_FocusDirection_Left)
+            {
+                f32 current_x = (current->rect.x0 + current->rect.x1) * 0.5f;
+                f32 current_y = (current->rect.y0 + current->rect.y1) * 0.5f;
+                f32 candidate_x = (box->rect.x0 + box->rect.x1) * 0.5f;
+                f32 candidate_y = (box->rect.y0 + box->rect.y1) * 0.5f;
+                f32 primary_delta = 0.0f;
+                f32 cross_delta = 0.0f;
+                bool in_direction = false;
+                if (direction == UI_FocusDirection_Left || direction == UI_FocusDirection_Right)
+                {
+                    primary_delta = candidate_x - current_x;
+                    cross_delta = fabs_f32(candidate_y - current_y);
+                    in_direction = direction == UI_FocusDirection_Left ? primary_delta < 0.0f : primary_delta > 0.0f;
+                }
+                else
+                {
+                    primary_delta = candidate_y - current_y;
+                    cross_delta = fabs_f32(candidate_x - current_x);
+                    in_direction = direction == UI_FocusDirection_Up ? primary_delta < 0.0f : primary_delta > 0.0f;
+                }
+                if (in_direction)
+                {
+                    f32 score = fabs_f32(primary_delta) * 1024.0f + cross_delta;
+                    if (!directional || score < directional_score || (score == directional_score && box->build_order < directional->build_order))
+                    {
+                        directional = box;
+                        directional_score = score;
+                    }
+                }
             }
         }
     }
-    if (current_found)
+    if (direction >= UI_FocusDirection_Left)
     {
+        if (directional)
+        {
+            return directional;
+        }
+        // Directional navigation wraps within the current parent scope.
         for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
         {
             for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
             {
-                if (!ui_box_is_current(box) || !(box->flags & axis_flag) || !ui_box_focusable(box, true))
+                if (box->last_touched_build_index != build_index || !ui_box_in_focus_scope(box, scope) || !(box->flags & axis_flag) || !ui_box_focusable(box, true) || ui_key_match(box->key, current_key))
                 {
                     continue;
                 }
-                if (box->build_order > current_order && (!after || box->build_order < after->build_order))
+                bool better = false;
+                if (!directional)
                 {
-                    after = box;
+                    better = true;
                 }
-                if (box->build_order < current_order && (!before || box->build_order > before->build_order))
+                else if (direction == UI_FocusDirection_Left || direction == UI_FocusDirection_Right)
+                {
+                    f32 value = (box->rect.x0 + box->rect.x1) * 0.5f;
+                    f32 old_value = (directional->rect.x0 + directional->rect.x1) * 0.5f;
+                    better = direction == UI_FocusDirection_Left ? value > old_value : value < old_value;
+                }
+                else if (directional)
+                {
+                    f32 value = (box->rect.y0 + box->rect.y1) * 0.5f;
+                    f32 old_value = (directional->rect.y0 + directional->rect.y1) * 0.5f;
+                    better = direction == UI_FocusDirection_Up ? value > old_value : value < old_value;
+                }
+                if (better)
+                {
+                    directional = box;
+                }
+            }
+        }
+        return directional;
+    }
+
+    if (!current_found)
+    {
+        return direction == UI_FocusDirection_LinearBackward ? last : first;
+    }
+    if (direction == UI_FocusDirection_LinearBackward)
+    {
+        UI_Box* before = 0;
+        for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+        {
+            for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+            {
+                if (box->last_touched_build_index == build_index && ui_box_in_focus_scope(box, scope) && (box->flags & axis_flag) && ui_box_focusable(box, true) && box->build_order < current->build_order &&
+                    (!before || box->build_order > before->build_order))
                 {
                     before = box;
                 }
             }
         }
+        return before ? before : last;
     }
-    UI_Box* result = 0;
-    if (!current_found)
+    UI_Box* after = 0;
+    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
     {
-        result = backwards ? last : first;
-    }
-    else
-    {
-        result = backwards ? (before ? before : last) : (after ? after : first);
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL void ui_process_focus_navigation(void)
-{
-    UI_EventIterator iterator = ui_event_iterator_initialize(ui_state);
-    UI_Event* event;
-    while ((event = ui_next_event(&iterator)))
-    {
-        if (event->kind != UI_EventKind_Press)
+        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
         {
-            continue;
-        }
-        UI_BoxFlags axis_flag = 0;
-        bool backwards = false;
-        if (event->key == WM_KEY_TAB)
-        {
-            axis_flag = UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY;
-            backwards = !!(event->modifiers & (1u << WM_MODIFIER_SHIFT));
-        }
-        else if (event->key == WM_KEY_LEFT)
-        {
-            axis_flag = UI_BoxFlag_DefaultFocusNavX;
-            backwards = true;
-        }
-        else if (event->key == WM_KEY_RIGHT)
-        {
-            axis_flag = UI_BoxFlag_DefaultFocusNavX;
-        }
-        else if (event->key == WM_KEY_UP)
-        {
-            axis_flag = UI_BoxFlag_DefaultFocusNavY;
-            backwards = true;
-        }
-        else if (event->key == WM_KEY_DOWN)
-        {
-            axis_flag = UI_BoxFlag_DefaultFocusNavY;
-        }
-        if (axis_flag)
-        {
-            UI_Box* candidate = ui_focus_navigation_candidate(ui_state->focus_active_key, axis_flag, backwards);
-            if (candidate)
+            if (box->last_touched_build_index == build_index && ui_box_in_focus_scope(box, scope) && (box->flags & axis_flag) && ui_box_focusable(box, true) && box->build_order > current->build_order &&
+                (!after || box->build_order < after->build_order))
             {
-                bool edit = !!(candidate->flags & UI_BoxFlag_DefaultFocusEdit);
-                ui_set_focus(candidate, edit);
-                ui_eat_event(event);
+                after = box;
             }
         }
     }
+    return after ? after : first;
 }
 
 BUSTER_GLOBAL_LOCAL void ui_prune_focus_keys(void)
@@ -1804,7 +2746,7 @@ BUSTER_GLOBAL_LOCAL void ui_prune_focus_keys(void)
     if (!ui_key_match(ui_state->focus_hot_key, zero))
     {
         UI_Box* box = ui_box_from_key(ui_state->focus_hot_key);
-        if (!box || !ui_box_is_current(box))
+        if (!box || !ui_box_is_current(box) || !ui_box_focusable(box, false))
         {
             ui_state->focus_hot_key = zero;
         }
@@ -1812,7 +2754,7 @@ BUSTER_GLOBAL_LOCAL void ui_prune_focus_keys(void)
     if (!ui_key_match(ui_state->focus_active_key, zero))
     {
         UI_Box* box = ui_box_from_key(ui_state->focus_active_key);
-        if (!box || !ui_box_is_current(box))
+        if (!box || !ui_box_is_current(box) || !ui_box_focusable(box, true))
         {
             ui_state->focus_active_key = zero;
         }
@@ -1820,9 +2762,19 @@ BUSTER_GLOBAL_LOCAL void ui_prune_focus_keys(void)
     if (!ui_key_match(ui_state->focus_edit_key, zero))
     {
         UI_Box* box = ui_box_from_key(ui_state->focus_edit_key);
-        if (!box || !ui_box_is_current(box))
+        if (!box || !ui_box_is_current(box) || !ui_box_focusable(box, true))
         {
             ui_state->focus_edit_key = zero;
+        }
+    }
+    if (ui_state->focus_changed_pending)
+    {
+        UI_Box* box = ui_box_from_key(ui_state->focus_changed_key);
+        if (!box || !ui_box_is_current(box) || !ui_box_focusable(box, true))
+        {
+            ui_state->focus_changed_pending = 0;
+            ui_state->focus_changed_key = zero;
+            ui_state->focus_changed_delivery_build_index = 0;
         }
     }
 }
@@ -1831,7 +2783,12 @@ BUSTER_GLOBAL_LOCAL float2 ui_box_text_position(UI_Box* box)
 {
     float2 rect_dim = ui_rect_dim(box->rect);
     float2 result = float2_make(box->rect.x0 + box->text_padding, box->rect.y0 + BUSTER_MAX(0.0f, (float2_element(rect_dim, AXIS2_Y) - box->font_size) * 0.5f));
-    f32 estimated_width = (f32)(box->text_visible_length ? box->text_visible_length : box->string.length) * box->font_size * 0.60f;
+    u64 columns = (box->flags & UI_BoxFlag_DisableTextTrunc) ? ui_utf8_codepoint_count(box->string) : box->text_visible_columns;
+    if (box->text_truncated && !(box->flags & UI_BoxFlag_DisableTextTrunc))
+    {
+        columns += 3;
+    }
+    f32 estimated_width = (f32)columns * box->font_size * 0.60f;
     if (box->text_align == UI_TextAlign_Center)
     {
         float2_element(result, AXIS2_X) = floor_f32((box->rect.x0 + box->rect.x1) * 0.5f - estimated_width * 0.5f);
@@ -1846,8 +2803,200 @@ BUSTER_GLOBAL_LOCAL float2 ui_box_text_position(UI_Box* box)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void ui_draw_command_count_add(u64* count, u64 increment)
+{
+    BUSTER_CHECK(count != 0 && *count <= (u64)-1 - increment);
+    if (count && *count <= (u64)-1 - increment)
+    {
+        *count += increment;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u64 ui_draw_box_command_upper_bound(UI_Box* box)
+{
+    u64 result = 0;
+    if (!box || !box->visible || !ui_rect_has_area(box->rect))
+    {
+        return result;
+    }
+
+    if (box->flags & UI_BoxFlag_DrawBackgroundBlur)
+    {
+        ui_draw_command_count_add(&result, 1);
+    }
+    if (box->flags & UI_BoxFlag_DrawDropShadow)
+    {
+        ui_draw_command_count_add(&result, 1);
+    }
+    if (box->flags & UI_BoxFlag_DrawBackground)
+    {
+        ui_draw_command_count_add(&result, 1);
+        if (box->flags & UI_BoxFlag_DrawHotEffects)
+        {
+            ui_draw_command_count_add(&result, 1);
+        }
+        if (box->flags & UI_BoxFlag_DrawActiveEffects)
+        {
+            ui_draw_command_count_add(&result, 2);
+        }
+    }
+    if ((box->flags & UI_BoxFlag_DrawText) && box->string.length != 0)
+    {
+        ui_draw_command_count_add(&result, 1);
+        if (box->text_truncated && !(box->flags & UI_BoxFlag_DisableTextTrunc))
+        {
+            ui_draw_command_count_add(&result, 1);
+        }
+        if (box->fastpath_codepoint != 0)
+        {
+            ui_draw_command_count_add(&result, 1);
+        }
+    }
+    if ((box->flags & UI_BoxFlag_HasFuzzyMatchRanges) && box->fuzzy_match_ranges)
+    {
+        ui_draw_command_count_add(&result, box->fuzzy_match_range_count);
+    }
+    if (box->flags & UI_BoxFlag_DrawBorder)
+    {
+        ui_draw_command_count_add(&result, 4);
+    }
+    if (box->flags & UI_BoxFlag_DrawSideTop)
+    {
+        ui_draw_command_count_add(&result, 1);
+    }
+    if (box->flags & UI_BoxFlag_DrawSideBottom)
+    {
+        ui_draw_command_count_add(&result, 1);
+    }
+    if (box->flags & UI_BoxFlag_DrawSideLeft)
+    {
+        ui_draw_command_count_add(&result, 1);
+    }
+    if (box->flags & UI_BoxFlag_DrawSideRight)
+    {
+        ui_draw_command_count_add(&result, 1);
+    }
+    if (box->flags & UI_BoxFlag_DrawOverlay)
+    {
+        ui_draw_command_count_add(&result, 1);
+        if (!(box->flags & UI_BoxFlag_DisableFocusOverlay) && (box->state_flags & (UI_BoxState_FocusActive | UI_BoxState_FocusEdit)))
+        {
+            ui_draw_command_count_add(&result, 1);
+        }
+    }
+    if (!(box->flags & UI_BoxFlag_DisableFocusBorder) && (box->state_flags & UI_BoxState_FocusActive))
+    {
+        ui_draw_command_count_add(&result, 4);
+    }
+    if (box->flags & UI_BoxFlag_DrawFadeTop)
+    {
+        ui_draw_command_count_add(&result, 1);
+    }
+    if (box->flags & UI_BoxFlag_DrawFadeBottom)
+    {
+        ui_draw_command_count_add(&result, 1);
+    }
+    if (box->flags & UI_BoxFlag_DrawFadeLeft)
+    {
+        ui_draw_command_count_add(&result, 1);
+    }
+    if (box->flags & UI_BoxFlag_DrawFadeRight)
+    {
+        ui_draw_command_count_add(&result, 1);
+    }
+    if (box->flags & UI_BoxFlag_Debug)
+    {
+        ui_draw_command_count_add(&result, 4);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ui_draw_command_upper_bound(UI_Box* root)
+{
+    u64 result = 0;
+    for (UI_Box* box = root; box; box = ui_box_rec_df_pre(box, root).next)
+    {
+        if (box == root)
+        {
+            ui_draw_command_count_add(&result, 5);
+        }
+        else
+        {
+            ui_draw_command_count_add(&result, ui_draw_box_command_upper_bound(box));
+        }
+        if (box->tooltip_visible && box->tooltip_string.length != 0 && ui_rect_has_area(box->tooltip_rect))
+        {
+            ui_draw_command_count_add(&result, 5);
+            ui_draw_command_count_add(&result, box->tooltip_line_count);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_draw_command_push(UI_DrawCommand command)
+{
+    BUSTER_CHECK(ui_state != 0 && ui_state->draw_commands != 0);
+    if (!ui_state || !ui_state->draw_commands)
+    {
+        return;
+    }
+    if (ui_state->draw_command_count >= ui_state->draw_command_capacity)
+    {
+        ui_state->draw_commands_complete = false;
+        BUSTER_CHECK(false);
+        return;
+    }
+    ui_state->draw_commands[ui_state->draw_command_count++] = command;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_draw_command_push_rect(F32Interval2 rect, float4* colors)
+{
+    UI_DrawCommand command;
+    memset(&command, 0, sizeof(command));
+    command.kind = UI_DrawCommandKind_Rect;
+    command.box = ui_state ? ui_state->draw_command_box : 0;
+    command.rect = rect;
+    command.clip_rect = (ui_state && ui_state->draw_command_box) ? ui_state->draw_command_box->clip_rect : (F32Interval2){0};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(command.colors); index += 1)
+    {
+        command.colors[index] = colors[index];
+    }
+    if (ui_state && ui_state->draw_command_box)
+    {
+        UI_Box* box = ui_state->draw_command_box;
+        command.corner_radii = float4_make(box->corner_radii[CORNER_00], box->corner_radii[CORNER_01], box->corner_radii[CORNER_10], box->corner_radii[CORNER_11]);
+    }
+    ui_draw_command_push(command);
+}
+
+BUSTER_GLOBAL_LOCAL void ui_draw_command_push_text(String8 text, float2 position, float4 color, F32Interval2 clip_rect)
+{
+    if (!ui_state || !ui_state->draw_command_box || text.length == 0)
+    {
+        return;
+    }
+    UI_Box* box = ui_state->draw_command_box;
+    f32 width = (f32)ui_utf8_codepoint_count(text) * box->font_size * 0.60f;
+    UI_DrawCommand command;
+    memset(&command, 0, sizeof(command));
+    command.kind = UI_DrawCommandKind_Text;
+    command.box = box;
+    command.rect = ui_rect_make(float2_element(position, AXIS2_X), float2_element(position, AXIS2_Y), float2_element(position, AXIS2_X) + width,
+                                float2_element(position, AXIS2_Y) + box->font_size);
+    command.clip_rect = clip_rect;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(command.colors); index += 1)
+    {
+        command.colors[index] = color;
+    }
+    command.corner_radii = float4_make(box->corner_radii[CORNER_00], box->corner_radii[CORNER_01], box->corner_radii[CORNER_10], box->corner_radii[CORNER_11]);
+    command.text = text;
+    ui_draw_command_push(command);
+}
+
 BUSTER_GLOBAL_LOCAL void ui_draw_rect(F32Interval2 rect, float4 color)
 {
+    float4 colors[] = {color, color, color, color};
+    ui_draw_command_push_rect(rect, colors);
     if (ui_state->rendering_window && ui_rect_has_area(rect))
     {
         rendering_window_render_rect(ui_state->rendering_window, (RectDraw){
@@ -1867,6 +3016,8 @@ BUSTER_GLOBAL_LOCAL void ui_draw_border(F32Interval2 rect, float4 color, f32 thi
 
 BUSTER_GLOBAL_LOCAL void ui_draw_gradient_rect(F32Interval2 rect, float4 top_left, float4 top_right, float4 bottom_left, float4 bottom_right)
 {
+    float4 colors[] = {top_left, top_right, bottom_left, bottom_right};
+    ui_draw_command_push_rect(rect, colors);
     if (ui_state->rendering_window && ui_rect_has_area(rect))
     {
         rendering_window_render_rect(ui_state->rendering_window, (RectDraw){
@@ -1909,6 +3060,62 @@ BUSTER_GLOBAL_LOCAL void ui_draw_box_fades(UI_Box* box, F32Interval2 rect)
     }
 }
 
+BUSTER_GLOBAL_LOCAL String8 ui_text_clip_to_rect(UI_Box* box, String8 text, float2* position, F32Interval2 clip)
+{
+    if (!box)
+    {
+        return text;
+    }
+    if (!ui_rect_has_area(clip) || float2_element(*position, AXIS2_Y) < clip.y0 || float2_element(*position, AXIS2_Y) + box->font_size > clip.y1)
+    {
+        return (String8){0};
+    }
+    f32 character_width = BUSTER_MAX(0.001f, box->font_size * 0.60f);
+    if (float2_element(*position, AXIS2_X) < clip.x0)
+    {
+        u64 skip_columns = (u64)((clip.x0 - float2_element(*position, AXIS2_X)) / character_width);
+        while (skip_columns < ui_utf8_codepoint_count(text) && float2_element(*position, AXIS2_X) + (f32)skip_columns * character_width < clip.x0)
+        {
+            skip_columns += 1;
+        }
+        u64 skip_bytes = ui_utf8_byte_offset_for_columns(text, skip_columns);
+        float2_element(*position, AXIS2_X) += (f32)ui_utf8_columns_for_byte_offset(text, skip_bytes) * character_width;
+        text = string_slice(text, skip_bytes, text.length);
+    }
+    if (float2_element(*position, AXIS2_X) >= clip.x1)
+    {
+        return (String8){0};
+    }
+    u64 visible_columns = (u64)((clip.x1 - float2_element(*position, AXIS2_X)) / character_width);
+    u64 visible_bytes = ui_utf8_byte_offset_for_columns(text, visible_columns);
+    text.length = BUSTER_MIN(text.length, visible_bytes);
+    return text;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_draw_text_clipped(UI_Box* box, String8 text, float4 color, float2* position, F32Interval2 clip_rect)
+{
+    if (!box || text.length == 0)
+    {
+        return;
+    }
+    text = ui_text_clip_to_rect(box, text, position, clip_rect);
+    if (text.length == 0)
+    {
+        return;
+    }
+    ui_draw_command_push_text(text, *position, color, clip_rect);
+    if (ui_state->rendering && ui_state->rendering_window)
+    {
+        rendering_window_render_text(ui_state->rendering, ui_state->rendering_window, text, color, RENDER_FONT_TYPE_MONOSPACE,
+                                     float2_element(*position, AXIS2_X), float2_element(*position, AXIS2_Y));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ui_draw_text_unclipped(UI_Box* box, String8 text, float4 color, float2 position, F32Interval2 clip_rect)
+{
+    ui_draw_text_clipped(box, text, color, &position, clip_rect);
+}
+
 BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
 {
     if (!box || !box->visible || !ui_rect_has_area(box->rect))
@@ -1920,6 +3127,19 @@ BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
     if (!ui_rect_has_area(rect))
     {
         return;
+    }
+
+    UI_Box* previous_draw_box = ui_state->draw_command_box;
+    ui_state->draw_command_box = box;
+
+    if (box->flags & UI_BoxFlag_DrawBackgroundBlur)
+    {
+        // The renderer has no blur operation yet. Keep the UI-side ordering
+        // and provide a deterministic translucent fallback until it exposes
+        // one; the dependency remains recorded on the box.
+        float4 blur_fallback = box->background_color;
+        float4_element(blur_fallback, 3) *= 0.35f;
+        ui_draw_rect(rect, blur_fallback);
     }
 
     if (box->flags & UI_BoxFlag_DrawDropShadow)
@@ -1962,33 +3182,43 @@ BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
     {
         u64 text_length = box->flags & UI_BoxFlag_DisableTextTrunc ? box->string.length : box->text_visible_length;
         String8 text = string_slice(box->string, 0, BUSTER_MIN(text_length, box->string.length));
-        if ((box->flags & UI_BoxFlag_DrawTextFastpathCodepoint) && text.length > 1)
-        {
-            u64 codepoint_length = 1;
-            while (codepoint_length < text.length && (((u8)text.pointer[codepoint_length]) & 0xc0u) == 0x80u)
-            {
-                codepoint_length += 1;
-            }
-            text.length = codepoint_length;
-        }
         float2 p = ui_box_text_position(box);
+        F32Interval2 text_clip = ui_box_text_clip_rect(box);
         float4 color = box->text_color;
         if (box->flags & UI_BoxFlag_DrawTextWeak)
         {
             float4_element(color, 3) *= 0.55f;
         }
-        if (ui_state->rendering && ui_state->rendering_window && text.length != 0)
+        if (box->fastpath_codepoint != 0 && text.length != 0)
         {
-            rendering_window_render_text(ui_state->rendering, ui_state->rendering_window, text, color, RENDER_FONT_TYPE_MONOSPACE,
-                                         float2_element(p, AXIS2_X), float2_element(p, AXIS2_Y));
-        }
-        if (box->text_truncated && !(box->flags & UI_BoxFlag_DisableTextTrunc) && text.length != 0)
-        {
-            f32 ellipsis_x = float2_element(p, AXIS2_X) + (f32)text.length * box->font_size * 0.60f;
-            if (ellipsis_x + box->font_size * 1.8f < rect.x1)
+            u64 position = 0;
+            u64 column = 0;
+            while (position < text.length)
             {
-                rendering_window_render_text(ui_state->rendering, ui_state->rendering_window, S8("..."), color, RENDER_FONT_TYPE_MONOSPACE,
-                                             ellipsis_x, float2_element(p, AXIS2_Y));
+                u64 sequence_length = ui_utf8_sequence_length(text, position);
+                sequence_length = sequence_length ? sequence_length : 1;
+                if (ui_utf8_codepoint_at(text, position) == box->fastpath_codepoint)
+                {
+                    f32 x0 = float2_element(p, AXIS2_X) + (f32)column * box->font_size * 0.60f;
+                    F32Interval2 underline = ui_box_draw_rect(box, ui_rect_make(x0, rect.y1 - 2.0f, x0 + box->font_size * 0.60f, rect.y1));
+                    ui_draw_rect(underline, float4_make(0.35f, 0.65f, 1.0f, 0.65f));
+                    break;
+                }
+                position += sequence_length;
+                column += 1;
+            }
+        }
+        text = ui_text_clip_to_rect(box, text, &p, text_clip);
+        ui_draw_text_clipped(box, text, color, &p, text_clip);
+        if (box->text_truncated && !(box->flags & UI_BoxFlag_DisableTextTrunc))
+        {
+            f32 ellipsis_x = float2_element(p, AXIS2_X) + (f32)ui_utf8_codepoint_count(text) * box->font_size * 0.60f;
+            f32 ellipsis_width = box->font_size * 1.80f;
+            f32 ellipsis_right = BUSTER_MIN(box->rect.x1 - box->text_padding, text_clip.x1 - box->text_padding);
+            if (ellipsis_x + ellipsis_width <= ellipsis_right + 0.001f)
+            {
+                float2 ellipsis_position = float2_make(ellipsis_x, float2_element(p, AXIS2_Y));
+                ui_draw_text_clipped(box, S8("..."), color, &ellipsis_position, text_clip);
             }
         }
     }
@@ -1998,13 +3228,17 @@ BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
         for (u64 range_index = 0; range_index < box->fuzzy_match_range_count; range_index += 1)
         {
             UI_FuzzyMatchRange range = box->fuzzy_match_ranges[range_index];
-            u64 first = BUSTER_MIN(range.first, box->text_visible_length);
-            u64 last = BUSTER_MIN(range.one_past_last, box->text_visible_length);
+            u64 first_byte = BUSTER_MIN(range.first, box->text_visible_length);
+            u64 last_byte = BUSTER_MIN(range.one_past_last, box->text_visible_length);
+            u64 first = ui_utf8_columns_for_byte_offset(box->string, first_byte);
+            u64 last = ui_utf8_columns_for_byte_offset(box->string, last_byte);
             if (last > first)
             {
-                f32 x0 = box->rect.x0 + box->text_padding + (f32)first * box->font_size * 0.60f;
-                f32 x1 = box->rect.x0 + box->text_padding + (f32)last * box->font_size * 0.60f;
-                ui_draw_rect(ui_rect_make(x0, rect.y1 - 2.0f, x1, rect.y1), box->border_color);
+                float2 text_position = ui_box_text_position(box);
+                f32 x0 = float2_element(text_position, AXIS2_X) + (f32)first * box->font_size * 0.60f;
+                f32 x1 = float2_element(text_position, AXIS2_X) + (f32)last * box->font_size * 0.60f;
+                F32Interval2 highlight = ui_box_draw_rect(box, ui_rect_make(x0, rect.y1 - 2.0f, x1, rect.y1));
+                ui_draw_rect(highlight, box->border_color);
             }
         }
     }
@@ -2048,31 +3282,103 @@ BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
     {
         ui_draw_border(rect, float4_make(1.0f, 0.0f, 1.0f, 0.65f), 1.0f);
     }
+    ui_state->draw_command_box = previous_draw_box;
 }
 
-BUSTER_GLOBAL_LOCAL void ui_draw_tree(UI_Box* root, bool bucket)
+BUSTER_GLOBAL_LOCAL void ui_draw_tree(UI_Box* root)
 {
     for (UI_Box* box = root; box; box = ui_box_rec_df_pre(box, root).next)
     {
-        if (box != root && !!(box->flags & UI_BoxFlag_DrawBucket) == bucket)
+        if (box != root)
         {
             ui_draw_box(box);
         }
     }
 }
 
-void ui_draw(void)
+BUSTER_GLOBAL_LOCAL void ui_draw_tooltip_text(UI_Box* box)
 {
-    UI_Box* root = ui_state->root;
-    if (!root || !ui_state->rendering_window || !ui_state->rendering)
+    if (!box || box->tooltip_string.length == 0)
     {
         return;
     }
+
+    f32 line_height = BUSTER_MAX(1.0f, box->font_size * 1.35f);
+    f32 x = box->tooltip_rect.x0 + box->text_padding;
+    f32 y = box->tooltip_rect.y0 + box->text_padding;
+    u64 line_start = 0;
+    for (u64 position = 0; position <= box->tooltip_string.length; position += 1)
+    {
+        if (position == box->tooltip_string.length || box->tooltip_string.pointer[position] == '\n')
+        {
+            String8 line = string_slice(box->tooltip_string, line_start, position);
+            float2 line_position = float2_make(x, y);
+            ui_draw_text_unclipped(box, line, box->text_color, line_position, box->tooltip_rect);
+            y += line_height;
+            line_start = position + 1;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ui_draw_tooltips(UI_Box* root)
+{
+    for (UI_Box* box = root; box; box = ui_box_rec_df_pre(box, root).next)
+    {
+        if (!box->tooltip_visible || box->string.length == 0 || !ui_rect_has_area(box->tooltip_rect))
+        {
+            continue;
+        }
+        UI_Box* previous_draw_box = ui_state->draw_command_box;
+        ui_state->draw_command_box = box;
+        ui_draw_rect(box->tooltip_rect, float4_make(0.08f, 0.08f, 0.095f, 0.98f));
+        ui_draw_border(box->tooltip_rect, float4_make(0.35f, 0.38f, 0.46f, 1.0f), 1.0f);
+        ui_draw_tooltip_text(box);
+        ui_state->draw_command_box = previous_draw_box;
+    }
+}
+
+void ui_draw(void)
+{
+    UI_Box* root = ui_state->root;
+    ui_state->draw_commands = 0;
+    ui_state->draw_command_count = 0;
+    ui_state->draw_command_capacity = 0;
+    ui_state->draw_commands_complete = false;
+    ui_state->draw_command_box = 0;
+    if (!root)
+    {
+        ui_state->draw_commands_complete = true;
+        return;
+    }
+
+    ui_state->draw_command_capacity = ui_draw_command_upper_bound(root);
+    if (ui_state->draw_command_capacity > (u64)-1 / sizeof(UI_DrawCommand))
+    {
+        BUSTER_CHECK(false);
+        return;
+    }
+    u64 position = ui_build_arena()->position;
+    bool capacity_fits = ui_arena_try_advance(ui_build_arena(), &position, ui_state->draw_command_capacity * sizeof(UI_DrawCommand),
+                                              BUSTER_ALIGN_OF(UI_DrawCommand));
+    BUSTER_CHECK(capacity_fits);
+    if (!capacity_fits)
+    {
+        ui_state->draw_command_capacity = 0;
+        return;
+    }
+    ui_state->draw_commands = arena_allocate(ui_build_arena(), UI_DrawCommand, ui_state->draw_command_capacity);
+    ui_state->draw_command_box = root;
 
     //- rjf: draw UI background & simple window border
     ui_draw_rect(root->rect, float4_make(0.08f, 0.08f, 0.095f, 1.0f));
     ui_draw_border(root->rect, float4_make(0.18f, 0.18f, 0.22f, 1.0f), 1.0f);
 
-    ui_draw_tree(root, false);
-    ui_draw_tree(root, true);
+    // Keep tree order for all boxes. The renderer has no bucket submission
+    // operation, and a global second pass would paint bucket parents over
+    // their normal children. The dependency bit and draw_pass remain visible
+    // to a future renderer command boundary.
+    ui_draw_tree(root);
+    ui_draw_tooltips(root);
+    ui_state->draw_command_box = 0;
+    ui_state->draw_commands_complete = true;
 }

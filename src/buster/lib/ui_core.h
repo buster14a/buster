@@ -38,6 +38,24 @@ struct UI_Event
     SliceString8 paths;
     float2 pos;
     float2 delta;
+    // Filled by the UI event router. Pointer/scroll/drop ownership comes from
+    // the previous completed tree; a zero key with owner_assigned set means
+    // the event is quarantined because no completed hit tree exists. Active
+    // capture and focus transitions are applied in event-list order before
+    // box signals report their owned events.
+    u64 owner_key;
+    u8 owner_assigned;
+    // Set by the chronological router for transitions that signals must
+    // report without replaying global state in box/build order.
+    u8 route_flags;
+    u8 reserved_owner[6];
+};
+
+typedef u8 UI_EventRouteFlags;
+enum
+{
+    UI_EventRouteFlag_None = 0,
+    UI_EventRouteFlag_FocusChanged = (1u << 0),
 };
 
 struct UI_EventNode
@@ -113,6 +131,8 @@ typedef u64 UI_BoxFlags;
 #define UI_BoxFlag_ViewClampY (UI_BoxFlags)(1ull << 8)
 #define UI_BoxFlag_FocusHot (UI_BoxFlags)(1ull << 9)
 #define UI_BoxFlag_FocusActive (UI_BoxFlags)(1ull << 10)
+// These suppress the corresponding focus mode even when the matching focus
+// flag is present. They are independent of UI_BoxFlag_Disabled.
 #define UI_BoxFlag_FocusHotDisabled (UI_BoxFlags)(1ull << 11)
 #define UI_BoxFlag_FocusActiveDisabled (UI_BoxFlags)(1ull << 12)
 #define UI_BoxFlag_DefaultFocusNavX (UI_BoxFlags)(1ull << 13)
@@ -179,7 +199,12 @@ typedef u64 UI_BoxFlags;
 #define UI_BoxFlag_DisableFocusEffects (UI_BoxFlag_DisableFocusBorder | UI_BoxFlag_DisableFocusOverlay)
 
 #define UI_BOX_FLAG_COUNT (57)
-#define UI_BoxFlag_All (UI_BoxFlags)((1ull << UI_BOX_FLAG_COUNT) - 1ull)
+#define UI_BoxFlag_AllContiguous (UI_BoxFlags)((1ull << UI_BOX_FLAG_COUNT) - 1ull)
+#define UI_BoxFlag_All (UI_BoxFlags)(UI_BoxFlag_AllContiguous | UI_BoxFlag_Debug)
+
+BUSTER_CT_CHECK((UI_BoxFlag_All & UI_BoxFlag_AllContiguous) == UI_BoxFlag_AllContiguous);
+BUSTER_CT_CHECK((UI_BoxFlag_All & UI_BoxFlag_Debug) == UI_BoxFlag_Debug);
+BUSTER_CT_CHECK((UI_BoxFlag_All & ((UI_BoxFlags)0x3full << 57)) == 0);
 
 typedef enum UI_BoxFlagSupportKind
 {
@@ -206,6 +231,7 @@ enum
     UI_BoxRendererDependency_BackgroundBlur = (1u << 0),
     UI_BoxRendererDependency_BucketSubmission = (1u << 1),
     UI_BoxRendererDependency_CornerRadii = (1u << 2),
+    UI_BoxRendererDependency_TextScissor = (1u << 3),
 };
 
 typedef u32 UI_BoxStateFlags;
@@ -224,6 +250,7 @@ enum
     UI_BoxState_TextFastpath = (1u << 10),
     UI_BoxState_Overlay = (1u << 11),
     UI_BoxState_Fade = (1u << 12),
+    UI_BoxState_Tooltip = (1u << 13),
 };
 
 typedef struct UI_FuzzyMatchRange UI_FuzzyMatchRange;
@@ -337,6 +364,7 @@ struct UI_Box
     float4 border_color;
     f32 font_size;
     f32 text_padding;
+    u32 fastpath_codepoint;
     f32 corner_radii[(u64)CORNER_COUNT];
 
     // per-build artifacts
@@ -347,15 +375,25 @@ struct UI_Box
     u64 draw_order;
     u32 draw_pass;
     u32 reserved_draw_order;
+    // UTF-8 byte offset of the visible text prefix. text_visible_columns is
+    // the corresponding display-column count after reserving an ellipsis.
     u64 text_visible_length;
+    u64 text_visible_columns;
+    F32Interval2 tooltip_rect;
+    // Tooltip text is wrapped/truncated into the current build arena and is
+    // valid through the current UI draw, just like display_string.
+    String8 tooltip_string;
+    u64 tooltip_line_count;
     UI_BoxRendererDependencyFlags renderer_dependency_flags;
     UI_BoxStateFlags state_flags;
     UI_FuzzyMatchRange* fuzzy_match_ranges;
     u64 fuzzy_match_range_count;
     bool visible;
     bool text_truncated;
+    bool tooltip_visible;
+    bool tooltip_text_truncated;
     bool has_previous_rect;
-    u8 reserved_artifacts;
+    u8 reserved_artifacts[2];
 
     // persistent interaction/animation data
     u64 first_touched_build_index;
@@ -381,6 +419,31 @@ struct UI_BoxHashSlot
 {
     UI_Box* first;
     UI_Box* last;
+};
+
+typedef enum UI_DrawCommandKind
+{
+    UI_DrawCommandKind_Rect,
+    UI_DrawCommandKind_Text,
+    UI_DrawCommandKind_COUNT,
+} UI_DrawCommandKind;
+
+// UI-owned audit/draw commands produced by ui_draw. They are not a second
+// renderer command stream: box pointers refer to persistent UI boxes, text
+// pointers borrow the completed build arena, and remain valid until that arena
+// is reused by a later build. The state capacity is a pre-counted upper bound
+// and every emitted command must fit; command loss is an invariant failure,
+// never a valid result.
+typedef struct UI_DrawCommand UI_DrawCommand;
+struct UI_DrawCommand
+{
+    UI_DrawCommandKind kind;
+    UI_Box* box;
+    F32Interval2 rect;
+    F32Interval2 clip_rect;
+    float4 colors[4];
+    float4 corner_radii;
+    String8 text;
 };
 
 typedef u32 UI_SignalFlags;
@@ -422,6 +485,9 @@ struct UI_Signal
     u32 focus_changed : 1;
     u32 focused : 1;
     u32 reserved : 22;
+    // File-drop paths are valid for the duration of the current build and
+    // are copied into the build arena by ui_signal_from_box.
+    SliceString8 drop_paths;
 };
 
 #define ui_pressed(s) !!((s).f & UI_SignalFlag_Pressed)
@@ -529,22 +595,46 @@ struct UI_State
     f64 frame_time;
 
     UI_Box* root;
+    // The completed tree from the preceding build.  The event router uses
+    // this tree for keyboard navigation and pointer ownership before the new
+    // tree has been constructed.
+    UI_Box* previous_root;
     UI_Box* first_free_box;
     u64 box_table_size;
     UI_BoxHashSlot* box_table;
+    UI_DrawCommand* draw_commands;
+    u64 draw_command_count;
+    u64 draw_command_capacity;
+    bool draw_commands_complete;
+    u8 reserved_draw_commands[7];
+    UI_Box* draw_command_box;
+    // Pointer/scroll/drop ownership is routed from the previous completed
+    // tree. It is false on the first build, so current partial build order
+    // cannot claim an event.
+    bool pointer_targets_assigned;
+    u8 reserved_pointer_targets[7];
 
     UI_Key hot_box_key;
     UI_Key active_box_key[(u64)UI_MouseButtonKind_COUNT];
     UI_Key focus_hot_key;
     UI_Key focus_active_key;
     UI_Key focus_edit_key;
+    // Keyboard navigation is resolved by the pre-build event router against
+    // the previous completed tree.  A changed target is published to that
+    // target's signal in the following build, and is discarded after that
+    // delivery window.
+    UI_Key focus_changed_key;
+    u64 focus_changed_delivery_build_index;
     float2 mouse;
+    // Pointer position from the preceding completed frame; event routing
+    // advances from this position in event-list order.
     float2 previous_mouse;
     u64 next_build_order;
     u64 next_draw_order;
     u64 is_animating : 1;
     u64 focus_changed : 1;
-    u64 reserved : 62;
+    u64 focus_changed_pending : 1;
+    u64 reserved : 61;
 
     UI_StateStacks stacks;
     UI_StateStackNulls stack_nulls;
@@ -639,7 +729,7 @@ BUSTER_F_DECL UI_State* ui_state_get(void);
 BUSTER_F_DECL Arena* ui_build_arena(void);
 BUSTER_F_DECL UI_Box* ui_root_from_state(UI_State* state);
 BUSTER_F_DECL UI_EventList ui_event_list_from_wm_events(Arena* arena, WmWindowHandle* window, WmEventList event_queue);
-BUSTER_F_DECL void ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, UI_EventList events);
+BUSTER_F_DECL void ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time_milliseconds, UI_EventList events);
 BUSTER_F_DECL void ui_build_end(void);
 BUSTER_F_DECL void ui_draw(void);
 
@@ -668,10 +758,14 @@ BUSTER_F_DECL UI_Box* ui_build_box_from_key(UI_BoxFlags flags, UI_Key key);
 BUSTER_F_DECL UI_Box* ui_build_box_from_string(UI_BoxFlags flags, String8 string);
 BUSTER_F_DECL UI_Box* ui_build_box_from_stringf(UI_BoxFlags flags, String8 format, ...);
 BUSTER_F_DECL void ui_box_set_display_string(UI_Box* box, String8 string);
+BUSTER_F_DECL void ui_box_set_fastpath_codepoint(UI_Box* box, u32 codepoint);
+// Fuzzy-match ranges are UTF-8 byte ranges in the displayed string. The
+// ranges are copied into the current build arena and may be frame-borrowed.
 BUSTER_F_DECL void ui_box_set_fuzzy_match_ranges(UI_Box* box, UI_FuzzyMatchRange* ranges, u64 count);
 BUSTER_F_DECL void ui_box_set_corner_radii(UI_Box* box, f32 radius);
 BUSTER_F_DECL bool ui_box_is_visible(UI_Box* box);
 BUSTER_F_DECL bool ui_box_is_focused(UI_Box* box);
+BUSTER_F_DECL bool ui_box_has_tooltip(UI_Box* box);
 BUSTER_F_DECL void ui_box_scroll_by(UI_Box* box, float2 delta);
 BUSTER_F_DECL float2 ui_box_scroll_offset(UI_Box* box);
 BUSTER_F_DECL UI_BoxRec ui_box_rec_df(UI_Box* box, UI_Box* root, u64 sibling_offset, u64 child_offset);

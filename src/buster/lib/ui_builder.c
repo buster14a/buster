@@ -1,12 +1,41 @@
 #include <buster/lib/ui_builder.h>
 #include <buster/lib/string.h>
 
+BUSTER_GLOBAL_LOCAL String8 ui_widget_display_part(String8 label)
+{
+    u64 index = string_first_sequence(label, S8("##"));
+    if (index < label.length)
+    {
+        label.length = index;
+    }
+    return label;
+}
+
+BUSTER_GLOBAL_LOCAL String8 ui_widget_identity_part(String8 label)
+{
+    u64 triple_index = string_first_sequence(label, S8("###"));
+    if (triple_index < label.length)
+    {
+        return string_slice(label, triple_index + 3, label.length);
+    }
+    u64 double_index = string_first_sequence(label, S8("##"));
+    if (double_index < label.length)
+    {
+        return string_slice(label, double_index + 2, label.length);
+    }
+    return label;
+}
+
 BUSTER_GLOBAL_LOCAL String8 ui_widget_id(Arena* arena, String8 role, String8 label)
 {
     UI_Box* parent = ui_top_parent();
     u64 parent_key = parent ? parent->key.value : 0;
-    u64 sequence = ui_state_get() ? ui_state_get()->next_build_order : 0;
-    return string_format(arena, S8("{S8}###{S8}:{u64:x}:{u64}"), label, role, parent_key, sequence);
+    String8 display = ui_widget_display_part(label);
+    String8 identity = ui_widget_identity_part(label);
+    // A repeated visible label in one parent/role has no stable identity. Its
+    // caller must provide a ##id or ###id suffix; the UI core deliberately
+    // resolves the resulting duplicate without falling back to build order.
+    return string_format(arena, S8("{S8}###{S8}:{u64:x}:{S8}"), display, role, parent_key, identity);
 }
 
 BUSTER_GLOBAL_LOCAL UI_BoxFlags ui_interactive_widget_flags(void)
@@ -79,7 +108,7 @@ UI_WidgetResult ui_checkbox(String8 string, bool checked)
                         UI_BoxFlag_DrawActiveEffects | ui_interactive_widget_flags();
     UI_Box* box = ui_widget_box(S8("checkbox"), string, flags);
     Arena* arena = ui_build_arena();
-    String8 display = string_format(arena, S8("[{char8}] {S8}"), checked ? 'x' : ' ', string);
+    String8 display = string_format(arena, S8("[{char8}] {S8}"), checked ? 'x' : ' ', ui_widget_display_part(string));
     ui_box_set_display_string(box, display);
     UI_Signal signal = ui_signal_from_box(box);
     UI_WidgetResult result = ui_widget_result(box, signal);
@@ -96,7 +125,7 @@ UI_WidgetResult ui_radio(String8 string, bool selected)
                         UI_BoxFlag_DrawActiveEffects | ui_interactive_widget_flags();
     UI_Box* box = ui_widget_box(S8("radio"), string, flags);
     Arena* arena = ui_build_arena();
-    String8 display = string_format(arena, S8("({char8}) {S8}"), selected ? '*' : ' ', string);
+    String8 display = string_format(arena, S8("({char8}) {S8}"), selected ? '*' : ' ', ui_widget_display_part(string));
     ui_box_set_display_string(box, display);
     UI_Signal signal = ui_signal_from_box(box);
     UI_WidgetResult result = ui_widget_result(box, signal);
@@ -137,7 +166,10 @@ UI_WidgetResult ui_slider(String8 string, f32 value, f32 minimum, f32 maximum)
     UI_Event* event;
     while ((event = ui_next_event(&iterator)))
     {
-        if (event->kind == UI_EventKind_Press && ui_key_match(ui_state_get()->focus_active_key, box->key) &&
+        bool event_owned = event->owner_assigned && event->owner_key == box->key.value;
+        if (event->kind == UI_EventKind_Press && !(box->flags & (UI_BoxFlag_Disabled | UI_BoxFlag_FocusActiveDisabled)) &&
+            ((!ui_key_match(ui_state_get()->focus_active_key, ui_key_zero()) && ui_key_match(ui_state_get()->focus_active_key, box->key)) || event_owned) &&
+            (!event->owner_assigned || event_owned) &&
             (event->key == WM_KEY_LEFT || event->key == WM_KEY_RIGHT))
         {
             f32 step = span * 0.05f;
@@ -175,19 +207,24 @@ BUSTER_GLOBAL_LOCAL void ui_text_delete_range(String8* value, u64 first, u64 one
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool ui_text_insert(String8* value, u64 capacity, u64 position, String8 insertion)
+BUSTER_GLOBAL_LOCAL bool ui_text_replace_range(String8* value, u64 capacity, u64 first, u64 one_past_last, String8 replacement)
 {
-    if (!value || !value->pointer || position > value->length || value->length > capacity || insertion.length > capacity - value->length)
+    if (!value || !value->pointer || (replacement.length != 0 && !replacement.pointer) || value->length > capacity || first > one_past_last || one_past_last > value->length)
     {
         return false;
     }
-    if (insertion.length == 0)
+    u64 removed_length = one_past_last - first;
+    u64 retained_length = value->length - removed_length;
+    if (replacement.length > capacity || retained_length > capacity - replacement.length)
     {
-        return true;
+        return false;
     }
-    memmove(value->pointer + position + insertion.length, value->pointer + position, value->length - position);
-    memcpy(value->pointer + position, insertion.pointer, insertion.length);
-    value->length += insertion.length;
+    memmove(value->pointer + first + replacement.length, value->pointer + one_past_last, value->length - one_past_last);
+    if (replacement.length != 0)
+    {
+        memcpy(value->pointer + first, replacement.pointer, replacement.length);
+    }
+    value->length = retained_length + replacement.length;
     return true;
 }
 
@@ -216,8 +253,9 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
     state->mark = BUSTER_MIN(state->mark, value->length);
     ui_box_set_display_string(box, *value);
     UI_Signal signal = ui_signal_from_box(box);
-    bool active = ui_key_match(ui_state_get()->focus_edit_key, box->key);
-    if (ui_focus_changed(signal) && active)
+    bool active = !(box->flags & (UI_BoxFlag_Disabled | UI_BoxFlag_FocusActiveDisabled)) && !ui_key_match(ui_state_get()->focus_edit_key, ui_key_zero()) &&
+                  ui_key_match(ui_state_get()->focus_edit_key, box->key);
+    if (ui_focus_changed(signal))
     {
         state->cursor = value->length;
         state->mark = state->cursor;
@@ -227,22 +265,27 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
     iterator.list = ui_state_get()->events;
     iterator.current = iterator.list.first;
     UI_Event* event;
-    while (active && (event = ui_next_event(&iterator)))
+    while ((event = ui_next_event(&iterator)))
     {
+        if (event->owner_assigned && event->owner_key != box->key.value)
+        {
+            continue;
+        }
+        bool event_owned = event->owner_assigned && event->owner_key == box->key.value;
+        if ((!active && !event_owned) || (box->flags & UI_BoxFlag_Disabled))
+        {
+            continue;
+        }
         if (event->kind == UI_EventKind_Text)
         {
             u64 first = BUSTER_MIN(state->cursor, state->mark);
             u64 last = BUSTER_MAX(state->cursor, state->mark);
-            if (first != last)
+            if (ui_text_replace_range(value, capacity, first, last, event->string))
             {
-                ui_text_delete_range(value, first, last);
-                state->cursor = first;
-            }
-            if (ui_text_insert(value, capacity, state->cursor, event->string))
-            {
-                state->cursor += event->string.length;
+                state->cursor = first + event->string.length;
                 state->mark = state->cursor;
-                result.changed = true;
+                state->selecting = false;
+                result.changed = (last != first) || event->string.length != 0;
             }
             ui_eat_event(event);
         }
@@ -312,6 +355,9 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
             {
                 state->mark = 0;
                 state->cursor = value->length;
+                state->selecting = true;
+                ui_eat_event(event);
+                continue;
             }
             else
             {
@@ -381,7 +427,7 @@ UI_Signal ui_tree_row(String8 string, u32 depth, bool selected, bool expanded)
     ui_set_next_text_padding(4.0f + (f32)depth * 16.0f);
     UI_Signal result = ui_list_row(string, selected);
     Arena* arena = ui_build_arena();
-    ui_box_set_display_string(result.box, string_format(arena, S8("{char8} {S8}"), expanded ? '-' : '+', string));
+    ui_box_set_display_string(result.box, string_format(arena, S8("{char8} {S8}"), expanded ? '-' : '+', ui_widget_display_part(string)));
     return result;
 }
 
