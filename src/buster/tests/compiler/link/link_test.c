@@ -1,5 +1,8 @@
 #include <buster/tests/compiler/link/link_test.h>
 
+#include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/file.h>
+
 BUSTER_GLOBAL_LOCAL String8 link_test_temporary_executable_path(Arena* arena, String8 name, String8 suffix)
 {
 #if BUSTER_ANDROID || BUSTER_IOS
@@ -150,7 +153,7 @@ BUSTER_GLOBAL_LOCAL bool link_test_mach_section_find(ByteSlice image, String8 se
     return false;
 }
 
-#if BUSTER_LINUX || BUSTER_CPU_ARCH_X86_64
+#if BUSTER_LINUX || BUSTER_WINDOWS || BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name, u32* virtual_address, u32* raw_offset)
 {
     if (image.length < 0x40 || image.pointer[0] != 'M' || image.pointer[1] != 'Z')
@@ -354,6 +357,373 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, Strin
     return false;
 }
 #endif
+
+BUSTER_GLOBAL_LOCAL void link_test_runtime_stack_walk_skip(UnitTestArguments* arguments, String8 reason)
+{
+    arguments->show(arguments, S8("SKIP runtime stack walk: {S8}\n"), reason);
+}
+
+#if !BUSTER_SANITIZE && !BUSTER_ANDROID && !BUSTER_IOS && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
+{
+#if BUSTER_WINDOWS
+    return S8("typedef unsigned long long RuntimeU64;"
+              "extern unsigned short RtlCaptureStackBackTrace(unsigned long skip, unsigned long count, void** buffer, unsigned long* hash);"
+              "extern void* GetStdHandle(int standard_handle);"
+              "extern int WriteFile(void* handle, void* buffer, unsigned long byte_count, unsigned long* written, void* overlapped);"
+              "int stack_walk_normal(void** buffer, int size)"
+              "{"
+              "    RuntimeU64 a0 = 1; RuntimeU64 a1 = 2; RuntimeU64 a2 = 3; RuntimeU64 a3 = 4;"
+              "    RuntimeU64 a4 = 5; RuntimeU64 a5 = 6; RuntimeU64 a6 = 7; RuntimeU64 a7 = 8;"
+              "    RuntimeU64 a8 = 9; RuntimeU64 a9 = 10; RuntimeU64 a10 = 11; RuntimeU64 a11 = 12;"
+              "    RuntimeU64 a12 = 13; RuntimeU64 a13 = 14; RuntimeU64 a14 = 15; RuntimeU64 a15 = 16;"
+              "    RuntimeU64 pressure = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15;"
+              "    if (pressure == 0) { a0 = pressure; }"
+              "    return (int)RtlCaptureStackBackTrace(0, (unsigned long)size, buffer, 0);"
+              "}"
+              "int stack_walk_large(void** buffer, int size)"
+              "{"
+              "    unsigned char padding[40000];"
+              "    RuntimeU64 a0 = 17; RuntimeU64 a1 = 18; RuntimeU64 a2 = 19; RuntimeU64 a3 = 20;"
+              "    RuntimeU64 a4 = 21; RuntimeU64 a5 = 22; RuntimeU64 a6 = 23; RuntimeU64 a7 = 24;"
+              "    RuntimeU64 pressure = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7;"
+              "    padding[0] = (unsigned char)pressure; padding[39999] = (unsigned char)(pressure >> 8);"
+              "    return (int)RtlCaptureStackBackTrace(0, (unsigned long)size, buffer, 0);"
+              "}"
+              "typedef struct RuntimeReport RuntimeReport;"
+              "struct RuntimeReport"
+              "{"
+              "    void* normal_entry; void* large_entry; void* main_entry;"
+              "    RuntimeU64 normal_count; RuntimeU64 large_count;"
+              "    void* normal_frames[64]; void* large_frames[64];"
+              "};"
+              "int main(void)"
+              "{"
+              "    RuntimeReport report;"
+              "    report.normal_entry = (void*)stack_walk_normal; report.large_entry = (void*)stack_walk_large; report.main_entry = (void*)main;"
+              "    int normal_count = stack_walk_normal(report.normal_frames, 64);"
+              "    int large_count = stack_walk_large(report.large_frames, 64);"
+              "    report.normal_count = normal_count > 0 ? (RuntimeU64)normal_count : 0;"
+              "    report.large_count = large_count > 0 ? (RuntimeU64)large_count : 0;"
+              "    unsigned long written = 0;"
+              "    WriteFile(GetStdHandle(-11), &report, sizeof(report), &written, 0);"
+              "    return normal_count > 0 && large_count > 0 ? 0 : 1;"
+              "}");
+#elif BUSTER_LINUX || BUSTER_MACOS
+    return S8("typedef unsigned long long RuntimeU64;"
+              "extern int backtrace(void** buffer, int size);"
+              "extern long write(int file_descriptor, void* buffer, unsigned long byte_count);"
+              "int stack_walk_normal(void** buffer, int size)"
+              "{"
+              "    RuntimeU64 a0 = 1; RuntimeU64 a1 = 2; RuntimeU64 a2 = 3; RuntimeU64 a3 = 4;"
+              "    RuntimeU64 a4 = 5; RuntimeU64 a5 = 6; RuntimeU64 a6 = 7; RuntimeU64 a7 = 8;"
+              "    RuntimeU64 a8 = 9; RuntimeU64 a9 = 10; RuntimeU64 a10 = 11; RuntimeU64 a11 = 12;"
+              "    RuntimeU64 a12 = 13; RuntimeU64 a13 = 14; RuntimeU64 a14 = 15; RuntimeU64 a15 = 16;"
+              "    RuntimeU64 pressure = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15;"
+              "    if (pressure == 0) { a0 = pressure; }"
+              "    return backtrace(buffer, size);"
+              "}"
+              "int stack_walk_large(void** buffer, int size)"
+              "{"
+              "    unsigned char padding[40000];"
+              "    RuntimeU64 a0 = 17; RuntimeU64 a1 = 18; RuntimeU64 a2 = 19; RuntimeU64 a3 = 20;"
+              "    RuntimeU64 a4 = 21; RuntimeU64 a5 = 22; RuntimeU64 a6 = 23; RuntimeU64 a7 = 24;"
+              "    RuntimeU64 pressure = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7;"
+              "    padding[0] = (unsigned char)pressure; padding[39999] = (unsigned char)(pressure >> 8);"
+              "    return backtrace(buffer, size);"
+              "}"
+              "typedef struct RuntimeReport RuntimeReport;"
+              "struct RuntimeReport"
+              "{"
+              "    void* normal_entry; void* large_entry; void* main_entry;"
+              "    RuntimeU64 normal_count; RuntimeU64 large_count;"
+              "    void* normal_frames[64]; void* large_frames[64];"
+              "};"
+              "int main(void)"
+              "{"
+              "    RuntimeReport report;"
+              "    report.normal_entry = (void*)stack_walk_normal; report.large_entry = (void*)stack_walk_large; report.main_entry = (void*)main;"
+              "    int normal_count = stack_walk_normal(report.normal_frames, 64);"
+              "    int large_count = stack_walk_large(report.large_frames, 64);"
+              "    report.normal_count = normal_count > 0 ? (RuntimeU64)normal_count : 0;"
+              "    report.large_count = large_count > 0 ? (RuntimeU64)large_count : 0;"
+              "    write(1, &report, sizeof(report));"
+              "    return normal_count > 0 && large_count > 0 ? 0 : 1;"
+              "}");
+#else
+    return (String8){0};
+#endif
+}
+
+typedef struct LinkTestRuntimeReport LinkTestRuntimeReport;
+struct LinkTestRuntimeReport
+{
+    u64 normal_entry;
+    u64 large_entry;
+    u64 main_entry;
+    u64 normal_count;
+    u64 large_count;
+    u64 normal_frames[64];
+    u64 large_frames[64];
+};
+
+BUSTER_GLOBAL_LOCAL bool link_test_runtime_symbol_find(ObjectFile* object, String8 name, u64* value, u64* size)
+{
+    if (!object || !object->symbols)
+    {
+        return false;
+    }
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+    {
+        ObjectSymbol* symbol = &object->symbols[symbol_index];
+        if (symbol->kind == OBJECT_SYMBOL_FUNCTION && symbol->section == OBJECT_SECTION_TEXT && string_equal(symbol->name, name))
+        {
+            if (value)
+            {
+                *value = symbol->value;
+            }
+            if (size)
+            {
+                *size = symbol->size;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+#if BUSTER_LINUX
+BUSTER_GLOBAL_LOCAL bool link_test_runtime_has_eh_frame_header(ByteSlice image)
+{
+    u32 section_index = 0;
+    u64 section_header = 0;
+    if (!link_test_elf_section_find(image, S8(".eh_frame_hdr"), &section_index, &section_header))
+    {
+        return false;
+    }
+    u64 program_header_offset = link_read_u64(image.pointer, 32);
+    u16 program_header_size = 0;
+    u16 program_header_count = 0;
+    memcpy(&program_header_size, image.pointer + 54, sizeof(program_header_size));
+    memcpy(&program_header_count, image.pointer + 56, sizeof(program_header_count));
+    if (program_header_size < 56 || program_header_offset > image.length ||
+        (u64)program_header_count > (image.length - program_header_offset) / program_header_size)
+    {
+        return false;
+    }
+    bool found_program_header = false;
+    for (u32 index = 0; index < program_header_count; index += 1)
+    {
+        u64 program_header = program_header_offset + (u64)index * program_header_size;
+        if (link_read_u32(image.pointer, program_header) == 0x6474e550 && link_read_u64(image.pointer, program_header + 32) != 0)
+        {
+            found_program_header = true;
+        }
+    }
+    return found_program_header;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL bool link_test_runtime_frame_contains(u64 const* frames, u64 count, u64 begin, u64 size)
+{
+    if (!frames || !size)
+    {
+        return false;
+    }
+    for (u64 index = 0; index < count; index += 1)
+    {
+        u64 address = frames[index];
+        if (address >= begin && address - begin < size)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTestArguments* arguments, String8 source_path, String8 output_path,
+                                                                          bool debug_info)
+{
+    UnitTestResult result = {0};
+    String8 command_line[8] = {0};
+    u32 command_count = 0;
+    command_line[command_count++] = debug_info ? S8("-g") : S8("-g0");
+#if BUSTER_WINDOWS
+    command_line[command_count++] = S8("-l");
+    command_line[command_count++] = S8("ntdll");
+#endif
+    command_line[command_count++] = S8("-o");
+    command_line[command_count++] = output_path;
+    command_line[command_count++] = source_path;
+    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8){command_line, command_count});
+    CompilerDriverResult compiled = compiler_driver_execute_invocation(arguments->arena, invocation);
+    if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+    {
+        arguments->show(arguments, S8("runtime stack-walk child compilation failed: {S8}\n"), compiled.diagnostic);
+    }
+    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+    if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+    {
+        return result;
+    }
+    BUSTER_TEST(arguments, compiled.has_object);
+    BUSTER_TEST(arguments, compiled.native_link.error == LINK_ERROR_NONE);
+    BUSTER_TEST(arguments, compiled.native_link.executable.length != 0);
+    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count >= 3);
+    BUSTER_TEST(arguments, compiled.codegen_statistics.stack_value_bytes != 0);
+    BUSTER_TEST(arguments, compiled.codegen_statistics.maximum_stack_frame_bytes > 4096);
+    if (!compiled.has_object || compiled.native_link.error != LINK_ERROR_NONE || !compiled.native_link.executable.length)
+    {
+        return result;
+    }
+
+    ObjectSectionKind debug_kinds[] = {
+        OBJECT_SECTION_DEBUG_INFO,
+        OBJECT_SECTION_DEBUG_ABBREV,
+        OBJECT_SECTION_DEBUG_LINE,
+        OBJECT_SECTION_DEBUG_STR,
+        OBJECT_SECTION_DEBUG_LOC,
+        OBJECT_SECTION_DEBUG_RANGES,
+        OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
+        OBJECT_SECTION_DEBUG_CODEVIEW_TYPES,
+    };
+    bool has_debug = false;
+    for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(debug_kinds); kind_index += 1)
+    {
+        has_debug |= compiled.object.sections[debug_kinds[kind_index]].data.length != 0;
+    }
+    BUSTER_TEST(arguments, has_debug == debug_info);
+
+    ByteSlice image = compiled.native_link.executable;
+    bool has_unwind = false;
+#if BUSTER_LINUX
+    u32 unwind_section_index = 0;
+    u64 unwind_section_header = 0;
+    bool unwind_found = link_test_elf_section_find(image, S8(".eh_frame"), &unwind_section_index, &unwind_section_header);
+    bool unwind_header_found = link_test_elf_section_find(image, S8(".eh_frame_hdr"), 0, 0);
+    has_unwind = unwind_found && unwind_header_found && link_test_runtime_has_eh_frame_header(image);
+#elif BUSTER_MACOS
+    has_unwind = link_test_mach_section_find(image, S8("__TEXT"), S8("__eh_frame"), 0);
+#elif BUSTER_WINDOWS
+    bool pdata_found = link_test_pe_section_find(image, S8(".pdata"), 0, 0);
+    bool xdata_found = link_test_pe_section_find(image, S8(".xdata"), 0, 0);
+    has_unwind = pdata_found && xdata_found;
+#endif
+    BUSTER_TEST(arguments, has_unwind);
+
+    u64 normal_value = 0;
+    u64 normal_size = 0;
+    u64 large_value = 0;
+    u64 large_size = 0;
+    u64 main_value = 0;
+    u64 main_size = 0;
+    bool normal_symbol_found = link_test_runtime_symbol_find(&compiled.object, S8("stack_walk_normal"), &normal_value, &normal_size);
+    bool large_symbol_found = link_test_runtime_symbol_find(&compiled.object, S8("stack_walk_large"), &large_value, &large_size);
+    bool main_symbol_found = link_test_runtime_symbol_find(&compiled.object, S8("main"), &main_value, &main_size);
+    BUSTER_TEST(arguments, normal_symbol_found && normal_size != 0);
+    BUSTER_TEST(arguments, large_symbol_found && large_size != 0);
+    BUSTER_TEST(arguments, main_symbol_found && main_size != 0);
+    if (!normal_symbol_found || !normal_size || !large_symbol_found || !large_size || !main_symbol_found || !main_size)
+    {
+        return result;
+    }
+
+    String8 run_arguments[] = {output_path};
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                (ProcessSpawnOptions){
+                                                    .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
+                                                    .use_process_environment = true,
+                                                });
+    BUSTER_TEST(arguments, spawn.handle != 0);
+    if (!spawn.handle)
+    {
+        return result;
+    }
+    ProcessWaitResult wait = os_process_wait_sync(arguments->arena, spawn);
+    BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
+    ByteSlice output = wait.streams[STANDARD_STREAM_OUTPUT];
+    BUSTER_TEST(arguments, output.length == sizeof(LinkTestRuntimeReport));
+    if (wait.result != PROCESS_RESULT_SUCCESS || output.length != sizeof(LinkTestRuntimeReport))
+    {
+        return result;
+    }
+    LinkTestRuntimeReport report = {0};
+    memcpy(&report, output.pointer, sizeof(report));
+    BUSTER_TEST(arguments, report.normal_entry != 0 && report.large_entry != 0 && report.main_entry != 0);
+    BUSTER_TEST(arguments, report.normal_count != 0 && report.normal_count <= BUSTER_ARRAY_LENGTH(report.normal_frames));
+    BUSTER_TEST(arguments, report.large_count != 0 && report.large_count <= BUSTER_ARRAY_LENGTH(report.large_frames));
+    if (!report.normal_entry || !report.large_entry || !report.main_entry || !report.normal_count || !report.large_count ||
+        report.normal_count > BUSTER_ARRAY_LENGTH(report.normal_frames) || report.large_count > BUSTER_ARRAY_LENGTH(report.large_frames))
+    {
+        return result;
+    }
+
+    bool base_ranges_valid = report.normal_entry >= normal_value && report.large_entry >= large_value && report.main_entry >= main_value;
+    u64 normal_base = report.normal_entry - normal_value;
+    u64 large_base = report.large_entry - large_value;
+    u64 main_base = report.main_entry - main_value;
+    base_ranges_valid &= normal_base == large_base && normal_base == main_base;
+    BUSTER_TEST(arguments, base_ranges_valid);
+    if (!base_ranges_valid)
+    {
+        return result;
+    }
+    u64 normal_begin = normal_base + normal_value;
+    u64 large_begin = normal_base + large_value;
+    u64 main_begin = normal_base + main_value;
+    bool normal_contains_normal = link_test_runtime_frame_contains(report.normal_frames, report.normal_count, normal_begin, normal_size);
+    bool normal_contains_main = link_test_runtime_frame_contains(report.normal_frames, report.normal_count, main_begin, main_size);
+    bool large_contains_large = link_test_runtime_frame_contains(report.large_frames, report.large_count, large_begin, large_size);
+    bool large_contains_main = link_test_runtime_frame_contains(report.large_frames, report.large_count, main_begin, main_size);
+    BUSTER_TEST(arguments, normal_contains_normal && normal_contains_main);
+    BUSTER_TEST(arguments, large_contains_large && large_contains_main);
+    return result;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_SANITIZE
+    link_test_runtime_stack_walk_skip(arguments, S8("sanitizer builds do not execute generated native child code"));
+#elif BUSTER_ANDROID
+    link_test_runtime_stack_walk_skip(arguments, S8("Android runtime execution is device-managed and has no host child-executable gate"));
+#elif BUSTER_IOS
+    link_test_runtime_stack_walk_skip(arguments, S8("iOS runtime execution is simulator-managed and has no host child-executable gate"));
+#elif BUSTER_LINUX && !(BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    link_test_runtime_stack_walk_skip(arguments, S8("Linux runtime stack walking is only enabled for native x86-64 and AArch64"));
+#elif BUSTER_MACOS && !(BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    link_test_runtime_stack_walk_skip(arguments, S8("macOS runtime stack walking is only enabled for native x86-64 and AArch64"));
+#elif BUSTER_WINDOWS && !(BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    link_test_runtime_stack_walk_skip(arguments, S8("Windows runtime stack walking is only enabled for native x64 and AArch64"));
+#elif !BUSTER_SANITIZE && !BUSTER_ANDROID && !BUSTER_IOS && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 source = link_test_runtime_stack_walk_source();
+    String8 source_path = link_test_temporary_executable_path(arguments->arena, S8("buster-runtime-stack-walk"), S8(".c"));
+#if BUSTER_WINDOWS
+    String8 output_suffix = S8(".exe");
+#else
+    String8 output_suffix = S8("");
+#endif
+    BUSTER_TEST(arguments, source.length != 0 && source_path.length != 0);
+    if (source.length && source_path.length && file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)))
+    {
+        String8 debug_output = link_test_temporary_executable_path(arguments->arena, S8("buster-runtime-stack-walk-debug"), output_suffix);
+        String8 no_debug_output = link_test_temporary_executable_path(arguments->arena, S8("buster-runtime-stack-walk-g0"), output_suffix);
+        UnitTestResult debug_result = link_test_runtime_stack_walk_variant(arguments, source_path, debug_output, true);
+        UnitTestResult no_debug_result = link_test_runtime_stack_walk_variant(arguments, source_path, no_debug_output, false);
+        result.succeeded_test_count = debug_result.succeeded_test_count + no_debug_result.succeeded_test_count;
+        result.test_count = debug_result.test_count + no_debug_result.test_count;
+    }
+    else
+    {
+        link_test_runtime_stack_walk_skip(arguments, S8("could not create the native runtime source artifact"));
+        BUSTER_TEST(arguments, false);
+    }
+#else
+    link_test_runtime_stack_walk_skip(arguments, S8("native runtime stack walking is not implemented for this target operating system"));
+#endif
+    return result;
+}
 
 BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
 {
@@ -1585,5 +1955,8 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
 #else
     BUSTER_UNUSED(target);
 #endif
+    UnitTestResult runtime_stack_walk = link_test_runtime_stack_walk(arguments);
+    result.succeeded_test_count += runtime_stack_walk.succeeded_test_count;
+    result.test_count += runtime_stack_walk.test_count;
     return result;
 }
