@@ -1,5 +1,194 @@
 #include <buster/lib/rendering/internal.h>
 
+BUSTER_TEST_F_DECL bool rendering_vulkan_window_requires_device_initialization(bool device_initialized)
+{
+    return !device_initialized;
+}
+
+BUSTER_TEST_F_DECL bool rendering_vulkan_existing_surface_is_compatible(RenderingVulkanSurfaceCompatibility compatibility)
+{
+    return compatibility.queue_setup && compatibility.present_queue && compatibility.capabilities && compatibility.format && compatibility.present_modes &&
+           compatibility.usage && compatibility.image_count && compatibility.composite_alpha;
+}
+
+BUSTER_TEST_F_DECL bool rendering_vulkan_surface_format_sentinel_is_compatible(u32 available_color_space, u32 selected_color_space)
+{
+    return available_color_space == selected_color_space;
+}
+
+BUSTER_TEST_F_DECL bool rendering_vulkan_enumeration_needs_retry(bool incomplete, u32 capacity, u32 reported_count)
+{
+    return incomplete || reported_count > capacity;
+}
+
+BUSTER_TEST_F_DECL bool rendering_vulkan_queue_family_enumeration_needs_retry(u32 capacity, u32 reported_count, u32 available_count)
+{
+    return reported_count > capacity || available_count > capacity || available_count > reported_count;
+}
+
+BUSTER_TEST_F_DECL RenderingVulkanQueueFamilySelection rendering_vulkan_select_queue_families(RenderingVulkanQueueFamilyCandidateSlice candidates)
+{
+    RenderingVulkanQueueFamilySelection result = {
+        .graphics_family_index = 0,
+        .present_family_index = 0,
+        .eligible = false,
+    };
+
+    for (u32 i = 0; i < candidates.length; i += 1)
+    {
+        RenderingVulkanQueueFamilyCandidate candidate = candidates.pointer[i];
+        if (candidate.queue_count && candidate.graphics && candidate.present)
+        {
+            result.graphics_family_index = i;
+            result.present_family_index = i;
+            result.eligible = true;
+            return result;
+        }
+    }
+
+    u32 graphics_family_index = 0;
+    u32 present_family_index = 0;
+    bool has_graphics = false;
+    bool has_present = false;
+    for (u32 i = 0; i < candidates.length; i += 1)
+    {
+        RenderingVulkanQueueFamilyCandidate candidate = candidates.pointer[i];
+        if (candidate.queue_count && candidate.graphics && !has_graphics)
+        {
+            graphics_family_index = i;
+            has_graphics = true;
+        }
+        if (candidate.queue_count && candidate.present && !has_present)
+        {
+            present_family_index = i;
+            has_present = true;
+        }
+    }
+
+    if (has_graphics && has_present)
+    {
+        result.graphics_family_index = graphics_family_index;
+        result.present_family_index = present_family_index;
+        result.eligible = true;
+    }
+    return result;
+}
+
+BUSTER_TEST_F_DECL bool rendering_vulkan_device_candidate_is_eligible(RenderingVulkanDeviceCandidate candidate)
+{
+    return !candidate.excluded && candidate.has_required_extension && candidate.has_required_features && candidate.has_surface_support &&
+           candidate.queues.eligible;
+}
+
+BUSTER_TEST_F_DECL u64 rendering_vulkan_device_score(RenderingVulkanDeviceCandidate candidate)
+{
+    u64 score = 0;
+    switch (candidate.device_type)
+    {
+    case RENDERING_VULKAN_DEVICE_TYPE_DISCRETE:
+        score = 1000000;
+        break;
+    case RENDERING_VULKAN_DEVICE_TYPE_INTEGRATED:
+        score = 500000;
+        break;
+    case RENDERING_VULKAN_DEVICE_TYPE_VIRTUAL:
+        score = 250000;
+        break;
+    case RENDERING_VULKAN_DEVICE_TYPE_CPU:
+        score = 100000;
+        break;
+    case RENDERING_VULKAN_DEVICE_TYPE_OTHER:
+        score = 0;
+        break;
+    case RENDERING_VULKAN_DEVICE_TYPE_COUNT:
+        BUSTER_UNREACHABLE();
+    }
+
+    if (candidate.queues.graphics_family_index == candidate.queues.present_family_index)
+    {
+        score += 10000;
+    }
+    return score;
+}
+
+BUSTER_GLOBAL_LOCAL int rendering_vulkan_device_name_compare(String8 left, String8 right)
+{
+    u64 common_length = left.length < right.length ? left.length : right.length;
+    for (u64 i = 0; i < common_length; i += 1)
+    {
+        u8 left_code_unit = (u8)left.pointer[i];
+        u8 right_code_unit = (u8)right.pointer[i];
+        if (left_code_unit < right_code_unit)
+        {
+            return -1;
+        }
+        if (left_code_unit > right_code_unit)
+        {
+            return 1;
+        }
+    }
+    if (left.length < right.length)
+    {
+        return -1;
+    }
+    if (left.length > right.length)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool rendering_vulkan_device_is_better(RenderingVulkanDeviceCandidate candidate, RenderingVulkanDeviceCandidate current,
+                                                           u64 candidate_score, u64 current_score)
+{
+    if (candidate_score != current_score)
+    {
+        return candidate_score > current_score;
+    }
+
+    int name_comparison = rendering_vulkan_device_name_compare(candidate.name, current.name);
+    if (name_comparison != 0)
+    {
+        return name_comparison < 0;
+    }
+    if (candidate.vendor_id != current.vendor_id)
+    {
+        return candidate.vendor_id < current.vendor_id;
+    }
+    if (candidate.device_id != current.device_id)
+    {
+        return candidate.device_id < current.device_id;
+    }
+    return candidate.enumeration_index < current.enumeration_index;
+}
+
+BUSTER_TEST_F_DECL RenderingVulkanDeviceSelection rendering_vulkan_select_device(RenderingVulkanDeviceCandidateSlice candidates)
+{
+    RenderingVulkanDeviceSelection result = {
+        .candidate_index = 0,
+        .score = 0,
+        .found = false,
+    };
+
+    for (u32 i = 0; i < candidates.length; i += 1)
+    {
+        RenderingVulkanDeviceCandidate candidate = candidates.pointer[i];
+        if (!rendering_vulkan_device_candidate_is_eligible(candidate))
+        {
+            continue;
+        }
+
+        u64 score = rendering_vulkan_device_score(candidate);
+        if (!result.found || rendering_vulkan_device_is_better(candidate, candidates.pointer[result.candidate_index], score, result.score))
+        {
+            result.candidate_index = i;
+            result.score = score;
+            result.found = true;
+        }
+    }
+    return result;
+}
+
 #if BUSTER_USE_VULKAN
 #include <buster/lib/rendering/vulkan.c>
 #elif defined(_WIN32) && BUSTER_USE_D3D12
