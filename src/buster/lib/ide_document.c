@@ -167,6 +167,9 @@ BUSTER_GLOBAL_LOCAL IdePathKind ide_path_kind(String8 path)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL bool ide_path_separator(char8 byte);
+BUSTER_GLOBAL_LOCAL String8 ide_path_parent(Arena* arena, String8 path);
+
 String8 ide_document_path_canonical(Arena* arena, String8 path)
 {
     if (!arena || !path.length || !path.pointer)
@@ -176,7 +179,39 @@ String8 ide_document_path_canonical(Arena* arena, String8 path)
 
     String8 path_z = ide_string_copy(arena, path);
     String8 result = os_path_absolute(arena, path_z, true);
-#if defined(_WIN32)
+#if defined(__linux__) || defined(__APPLE__)
+    if (!result.length)
+    {
+        String8 parent = ide_path_parent(arena, path_z);
+        u64 basename_start = 0;
+        if (parent.length)
+        {
+            basename_start = parent.length;
+            while (basename_start < path_z.length && ide_path_separator(path_z.pointer[basename_start]))
+            {
+                basename_start += 1;
+            }
+        }
+        else
+        {
+            parent = ide_string_copy(arena, S8("."));
+        }
+
+        if (basename_start < path_z.length)
+        {
+            String8 basename = string_slice(path_z, basename_start, path_z.length);
+            if (!string_equal(basename, S8(".")) && !string_equal(basename, S8("..")))
+            {
+                String8 canonical_parent = os_path_absolute(arena, parent, true);
+                if (canonical_parent.length)
+                {
+                    bool parent_separator = ide_path_separator(canonical_parent.pointer[canonical_parent.length - 1]);
+                    result = string_format_z(arena, parent_separator ? S8("{S8}{S8}") : S8("{S8}/{S8}"), canonical_parent, basename);
+                }
+            }
+        }
+    }
+#elif defined(_WIN32)
     for (u64 index = 0; index < result.length; index += 1)
     {
         if (result.pointer[index] == '\\')
@@ -203,8 +238,6 @@ String8 ide_document_path_identity(Arena* arena, String8 canonical_path)
     }
     return result;
 }
-
-BUSTER_GLOBAL_LOCAL bool ide_path_separator(char8 byte);
 
 bool ide_document_path_is_within(String8 root, String8 path)
 {
@@ -920,8 +953,8 @@ BUSTER_GLOBAL_LOCAL u64 ide_diagnostic_identity(String8 path, ParserSourceRange 
         range.length,
         range.line,
         range.column,
-        severity,
-        source,
+        (u64)(u32)severity,
+        (u64)(u32)source,
     };
     return buster_hash_64((u8*)values, sizeof(values));
 }

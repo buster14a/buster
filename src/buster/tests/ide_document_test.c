@@ -192,8 +192,11 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
         BUSTER_TEST(arguments, ide_document_model_import_at(&model, 0) == import_before_save_conflict);
         edited = ide_document_model_find(&model, a_path);
         BUSTER_TEST(arguments, edited && edited->dirty && edited->revision == revision_before_save_conflict);
-        BUSTER_STRING_TEST(arguments, edited->source, save_edit_source);
-        BUSTER_STRING_TEST(arguments, edited->saved_source, save_source);
+        if (edited)
+        {
+            BUSTER_STRING_TEST(arguments, edited->source, save_edit_source);
+            BUSTER_STRING_TEST(arguments, edited->saved_source, save_source);
+        }
         BUSTER_TEST(arguments, edited && edited->external_modified == external_modified_before_save_conflict &&
                                   edited->external_hash == external_hash_before_save_conflict);
         ByteSlice conflict_disk_bytes = file_read(test_arena, a_path, (FileReadOptions){0});
@@ -202,8 +205,11 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
         BUSTER_TEST(arguments, ide_document_model_save(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
         edited = ide_document_model_find(&model, a_path);
         BUSTER_TEST(arguments, edited && !edited->dirty && edited->revision > saved_revision);
-        BUSTER_STRING_TEST(arguments, edited->source, save_edit_source);
-        BUSTER_STRING_TEST(arguments, edited->saved_source, save_edit_source);
+        if (edited)
+        {
+            BUSTER_STRING_TEST(arguments, edited->source, save_edit_source);
+            BUSTER_STRING_TEST(arguments, edited->saved_source, save_edit_source);
+        }
         BUSTER_TEST(arguments, edited && edited->saved_hash == buster_hash_64((u8*)save_edit_source.pointer, save_edit_source.length));
 
         String8 failed_save_source = S8("code failed save : fn () s32 { return 6; }\n");
@@ -216,8 +222,11 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
         BUSTER_TEST(arguments, ide_document_model_find(&model, a_path) == pointer_before_replace_failure);
         edited = ide_document_model_find(&model, a_path);
         BUSTER_TEST(arguments, edited && edited->dirty);
-        BUSTER_STRING_TEST(arguments, edited->source, failed_save_source);
-        BUSTER_STRING_TEST(arguments, edited->saved_source, save_edit_source);
+        if (edited)
+        {
+            BUSTER_STRING_TEST(arguments, edited->source, failed_save_source);
+            BUSTER_STRING_TEST(arguments, edited->saved_source, save_edit_source);
+        }
         ByteSlice failed_save_disk_bytes = file_read(test_arena, a_path, (FileReadOptions){0});
         BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, failed_save_disk_bytes), save_edit_source);
         BUSTER_TEST(arguments, ide_document_model_save(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
@@ -280,30 +289,65 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
         BUSTER_TEST(arguments, ide_document_model_find(&model, a_path) == pointer_before_failed_rebuild);
         BUSTER_TEST(arguments, ide_document_model_import_at(&model, 0) == import_before_failed_rebuild);
         edited = ide_document_model_find(&model, a_path);
-        BUSTER_STRING_TEST(arguments, edited->source, source_before_failed_rebuild);
+        if (edited)
+        {
+            BUSTER_STRING_TEST(arguments, edited->source, source_before_failed_rebuild);
+        }
         BUSTER_TEST(arguments, model.workspace.import_count == imports_before_failed_rebuild);
         model.max_diagnostics = IDE_DOCUMENT_DEFAULT_MAX_DIAGNOSTICS;
         BUSTER_TEST(arguments, ide_document_model_set_text(&model, b_path, b_source) == IDE_DOCUMENT_ERROR_NONE);
         edited = ide_document_model_find(&model, a_path);
 
-        String8 failed_source = string_duplicate_arena(test_arena, edited->source, true);
+        String8 failed_source = edited ? string_duplicate_arena(test_arena, edited->source, true) : (String8){0};
+#if defined(__linux__) || defined(__APPLE__)
+        String8 root_alias = string_format_z(test_arena, S8("{S8}-alias"), root);
+        String8 alias_a_path = string_format_z(test_arena, S8("{S8}/a.bbb"), root_alias);
+        BUSTER_TEST(arguments, os_file_delete(root_alias));
+        bool root_alias_created = symlink((const char*)root.pointer, (const char*)root_alias.pointer) == 0;
+        BUSTER_TEST(arguments, root_alias_created);
+#endif
         BUSTER_TEST(arguments, os_file_delete(a_path));
         BUSTER_TEST(arguments, ide_document_model_poll_external(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
         edited = ide_document_model_find(&model, a_path);
         BUSTER_TEST(arguments, edited && !edited->external_exists && edited->external_modified);
         BUSTER_TEST(arguments, ide_document_model_reload(&model, a_path, IDE_DOCUMENT_RELOAD_DISCARD_DIRTY) == IDE_DOCUMENT_ERROR_PATH_NOT_FOUND);
         edited = ide_document_model_find(&model, a_path);
-        BUSTER_STRING_TEST(arguments, edited->source, failed_source);
+        if (edited)
+        {
+            BUSTER_STRING_TEST(arguments, edited->source, failed_source);
+        }
         BUSTER_TEST(arguments, edited && !edited->external_exists);
+#if defined(__linux__) || defined(__APPLE__)
+        if (root_alias_created)
+        {
+            BUSTER_TEST(arguments, ide_document_model_poll_external(&model, alias_a_path) == IDE_DOCUMENT_ERROR_NONE);
+            edited = ide_document_model_find(&model, alias_a_path);
+            BUSTER_TEST(arguments, edited && !edited->external_exists && edited->external_modified);
+            BUSTER_TEST(arguments, ide_document_model_reload(&model, alias_a_path, IDE_DOCUMENT_RELOAD_DISCARD_DIRTY) ==
+                                      IDE_DOCUMENT_ERROR_PATH_NOT_FOUND);
+            edited = ide_document_model_find(&model, alias_a_path);
+            if (edited)
+            {
+                BUSTER_STRING_TEST(arguments, edited->source, failed_source);
+            }
+            BUSTER_TEST(arguments, edited && !edited->external_exists);
+        }
+#endif
         BUSTER_TEST(arguments, ide_document_model_close(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
         BUSTER_TEST(arguments, ide_document_model_refresh_workspace(&model) == IDE_DOCUMENT_ERROR_NONE);
         edited = ide_document_model_find(&model, a_path);
         BUSTER_TEST(arguments, edited && !edited->is_open && edited->dirty);
-        BUSTER_STRING_TEST(arguments, edited->source, failed_source);
+        if (edited)
+        {
+            BUSTER_STRING_TEST(arguments, edited->source, failed_source);
+        }
         BUSTER_TEST(arguments, ide_document_model_open(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
         edited = ide_document_model_find(&model, a_path);
         BUSTER_TEST(arguments, edited && edited->is_open && edited->dirty);
-        BUSTER_STRING_TEST(arguments, edited->source, failed_source);
+        if (edited)
+        {
+            BUSTER_STRING_TEST(arguments, edited->source, failed_source);
+        }
         String8 recreated_source = S8("code recreated : fn () s32 { return 8; }\n");
         BUSTER_TEST(arguments, file_write(a_path, BUSTER_SLICE_TO_BYTE_SLICE(recreated_source)));
         BUSTER_TEST(arguments, ide_document_model_poll_external(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
@@ -312,8 +356,17 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
         BUSTER_TEST(arguments, edited && edited->external_hash == buster_hash_64((u8*)recreated_source.pointer, recreated_source.length));
         BUSTER_TEST(arguments, ide_document_model_reload(&model, a_path, IDE_DOCUMENT_RELOAD_DISCARD_DIRTY) == IDE_DOCUMENT_ERROR_NONE);
         edited = ide_document_model_find(&model, a_path);
-        BUSTER_STRING_TEST(arguments, edited->source, recreated_source);
+        if (edited)
+        {
+            BUSTER_STRING_TEST(arguments, edited->source, recreated_source);
+        }
         BUSTER_TEST(arguments, edited && !edited->dirty && !edited->external_modified);
+#if defined(__linux__) || defined(__APPLE__)
+        if (root_alias_created)
+        {
+            BUSTER_TEST(arguments, os_file_delete(root_alias));
+        }
+#endif
 
         IdeDocumentDiagnosticInput diagnostics[] = {
             {
@@ -342,15 +395,30 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
                                   IDE_DOCUMENT_ERROR_NONE);
         IdeDocument* diagnostic_document = ide_document_model_find(&model, a_path);
         BUSTER_TEST(arguments, diagnostic_document && diagnostic_document->diagnostic_count == 2);
+        u64 first_diagnostic_identity = 0;
+        u64 second_diagnostic_identity = 0;
         if (diagnostic_document && diagnostic_document->diagnostic_count == 2)
         {
             BUSTER_STRING_TEST(arguments, diagnostic_document->diagnostics[0].message, S8("first"));
             BUSTER_STRING_TEST(arguments, diagnostic_document->diagnostics[1].message, S8("second"));
+            first_diagnostic_identity = diagnostic_document->diagnostics[0].identity;
+            second_diagnostic_identity = diagnostic_document->diagnostics[1].identity;
+        }
+        BUSTER_TEST(arguments, first_diagnostic_identity != 0 && second_diagnostic_identity != 0);
+        BUSTER_TEST(arguments, ide_document_model_replace_diagnostics(&model, diagnostics, BUSTER_ARRAY_LENGTH(diagnostics)) ==
+                                  IDE_DOCUMENT_ERROR_NONE);
+        diagnostic_document = ide_document_model_find(&model, a_path);
+        BUSTER_TEST(arguments, diagnostic_document && diagnostic_document->diagnostic_count == 2);
+        if (diagnostic_document && diagnostic_document->diagnostic_count == 2)
+        {
+            BUSTER_TEST(arguments, diagnostic_document->diagnostics[0].identity == first_diagnostic_identity &&
+                                      diagnostic_document->diagnostics[1].identity == second_diagnostic_identity);
         }
         BUSTER_TEST(arguments, ide_document_model_replace_diagnostics(&model, diagnostics + 1, 1) == IDE_DOCUMENT_ERROR_NONE);
         diagnostic_document = ide_document_model_find(&model, a_path);
         BUSTER_TEST(arguments, diagnostic_document && diagnostic_document->diagnostic_count == 1);
-        BUSTER_TEST(arguments, ide_document_model_find(&model, z_path)->diagnostic_count == 0);
+        IdeDocument* z_document = ide_document_model_find(&model, z_path);
+        BUSTER_TEST(arguments, z_document && z_document->diagnostic_count == 0);
 
         IdeDocumentViewState view = {
             .cursor_offset = 3,
@@ -413,7 +481,7 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
 
         IdeDocumentCompileMetadata compile = {
             .status = IDE_DOCUMENT_COMPILE_SUCCEEDED,
-            .compiled_revision = diagnostic_document->revision,
+            .compiled_revision = diagnostic_document ? diagnostic_document->revision : 0,
             .artifact_hash = 123,
             .artifact_path = S8("build/a.o"),
             .command_line = S8("ide compile a.bbb"),
@@ -433,16 +501,23 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
                                                                          .show_dirty_only = true,
                                                                      }) == IDE_DOCUMENT_ERROR_NONE);
         diagnostic_document = ide_document_model_find(&model, a_path);
-        BUSTER_STRING_TEST(arguments, diagnostic_document->compile.artifact_path, S8("build/a.o"));
-        BUSTER_STRING_TEST(arguments, diagnostic_document->search.query, S8("return"));
+        BUSTER_TEST(arguments, diagnostic_document != 0);
+        if (diagnostic_document)
+        {
+            BUSTER_STRING_TEST(arguments, diagnostic_document->compile.artifact_path, S8("build/a.o"));
+            BUSTER_STRING_TEST(arguments, diagnostic_document->search.query, S8("return"));
+        }
         BUSTER_STRING_TEST(arguments, model.workspace.filter.query, S8("bbb"));
         BUSTER_TEST(arguments, model.workspace.filter.show_dirty_only);
 
-        String8 reload_source = diagnostic_document->source;
+        String8 reload_source = diagnostic_document ? diagnostic_document->source : (String8){0};
         BUSTER_TEST(arguments, ide_document_model_refresh_workspace(&model) == IDE_DOCUMENT_ERROR_NONE);
         diagnostic_document = ide_document_model_find(&model, a_path);
-        BUSTER_STRING_TEST(arguments, diagnostic_document->source, reload_source);
-        BUSTER_TEST(arguments, diagnostic_document->is_open);
+        if (diagnostic_document)
+        {
+            BUSTER_STRING_TEST(arguments, diagnostic_document->source, reload_source);
+            BUSTER_TEST(arguments, diagnostic_document->is_open);
+        }
 
 #if defined(__linux__) || defined(__APPLE__)
         String8 sibling_prefix_file = string_format_z(test_arena, S8("{S8}\\outside.bbb"), root);
