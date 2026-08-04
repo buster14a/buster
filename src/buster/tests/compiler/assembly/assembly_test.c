@@ -1562,6 +1562,312 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
                         (AssemblyEncodeOptions){.target = x86_avx_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, invalid_x86_avx.diagnostic_count == 4);
 
+    u8 expected_x86_lea[] = {
+        0x66, 0x8d, 0x44, 0x8b, 0x10,
+        0x43, 0x8d, 0x44, 0xc8, 0xe0,
+        0x4e, 0x8d, 0x7c, 0x64, 0x7f,
+        0x44, 0x8d, 0x45, 0x00,
+        0x4d, 0x8d, 0x8c, 0x24, 0x78, 0x56, 0x34, 0x12,
+    };
+    String8 x86_intel_lea_source =
+        S8("lea ax, [rbx + rcx*4 + 16]\n"
+           "lea eax, [r8 + r9*8 - 32]\n"
+           "lea r15, [rsp + r12*2 + 127]\n"
+           "lea r8d, [rbp]\n"
+           "lea r9, [r12 + 0x12345678]\n");
+    AssemblyEncodeResult x86_intel_lea = assembly_encode(
+        arguments->arena, x86_intel_lea_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_lea.diagnostic_count == 0 && x86_intel_lea.bytes.length == sizeof(expected_x86_lea) &&
+                               memcmp(x86_intel_lea.bytes.pointer, expected_x86_lea, sizeof(expected_x86_lea)) == 0);
+    String8 x86_att_lea_source =
+        S8("leaw 16(%rbx,%rcx,4), %ax\n"
+           "leal -32(%r8,%r9,8), %eax\n"
+           "leaq 127(%rsp,%r12,2), %r15\n"
+           "leal (%rbp), %r8d\n"
+           "leaq 0x12345678(%r12), %r9\n");
+    AssemblyEncodeResult x86_att_lea =
+        assembly_encode(arguments->arena, x86_att_lea_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_lea.diagnostic_count == 0 && x86_att_lea.bytes.length == sizeof(expected_x86_lea) &&
+                               memcmp(x86_att_lea.bytes.pointer, expected_x86_lea, sizeof(expected_x86_lea)) == 0);
+    u8 expected_x86_lea_rip[] = {0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00};
+    AssemblyEncodeResult x86_lea_rip = assembly_encode(
+        arguments->arena, S8("lea rax, [rip + external]\n"), (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_lea_rip.diagnostic_count == 0 && x86_lea_rip.bytes.length == sizeof(expected_x86_lea_rip) &&
+                               memcmp(x86_lea_rip.bytes.pointer, expected_x86_lea_rip, sizeof(expected_x86_lea_rip)) == 0 &&
+                               x86_lea_rip.relocation_count == 1 && x86_lea_rip.relocations[0].offset == 3 &&
+                               x86_lea_rip.relocations[0].addend == -4 && x86_lea_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+    u8 expected_x86_lea_absolute[] = {0x4d, 0x8d, 0x8c, 0x24, 0x00, 0x00, 0x00, 0x00};
+    AssemblyEncodeResult x86_lea_absolute = assembly_encode(
+        arguments->arena, S8("lea r9, [r12 + external + 8]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_lea_absolute.diagnostic_count == 0 && x86_lea_absolute.bytes.length == sizeof(expected_x86_lea_absolute) &&
+                               memcmp(x86_lea_absolute.bytes.pointer, expected_x86_lea_absolute, sizeof(expected_x86_lea_absolute)) == 0 &&
+                               x86_lea_absolute.relocation_count == 1 && x86_lea_absolute.relocations[0].offset == 4 &&
+                               x86_lea_absolute.relocations[0].addend == 8 && x86_lea_absolute.relocations[0].kind == ASSEMBLY_RELOCATION_X86_32);
+
+    u8 expected_x86_scalar_extend[] = {
+        0x66, 0x0f, 0xb6, 0xc0,
+        0x0f, 0xb6, 0xc4,
+        0x44, 0x0f, 0xb6, 0xc4,
+        0x66, 0x40, 0x0f, 0xb6, 0xc4,
+        0x4f, 0x0f, 0xb7, 0x4c, 0x94, 0x08,
+        0x66, 0x0f, 0xbe, 0xc7,
+        0x48, 0x0f, 0xbe, 0x06,
+        0x4d, 0x63, 0x41, 0x10,
+        0x48, 0x63, 0xc0,
+    };
+    String8 x86_intel_scalar_extend_source =
+        S8("movzx ax, al\n"
+           "movzx eax, ah\n"
+           "movzx r8d, spl\n"
+           "movzx ax, spl\n"
+           "movzx r9, word ptr [r12 + r10*4 + 8]\n"
+           "movsx ax, bh\n"
+           "movsx rax, byte ptr [rsi]\n"
+           "movsxd r8, dword ptr [r9 + 16]\n"
+           "movsxd rax, eax\n");
+    AssemblyEncodeResult x86_intel_scalar_extend = assembly_encode(
+        arguments->arena, x86_intel_scalar_extend_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_scalar_extend.diagnostic_count == 0 &&
+                               x86_intel_scalar_extend.bytes.length == sizeof(expected_x86_scalar_extend) &&
+                               memcmp(x86_intel_scalar_extend.bytes.pointer, expected_x86_scalar_extend,
+                                      sizeof(expected_x86_scalar_extend)) == 0);
+    u8 expected_x86_att_scalar_extend[] = {
+        0x66, 0x0f, 0xb6, 0xc0,
+        0x0f, 0xb6, 0xc4,
+        0x48, 0x0f, 0xb6, 0xc4,
+        0x66, 0x40, 0x0f, 0xb6, 0xc4,
+        0x47, 0x0f, 0xb7, 0x4c, 0x94, 0x08,
+        0x66, 0x0f, 0xbe, 0xc7,
+        0x44, 0x0f, 0xbe, 0x06,
+        0x4c, 0x0f, 0xbe, 0x0e,
+        0x45, 0x0f, 0xbf, 0xda,
+        0x4d, 0x0f, 0xbf, 0xec,
+        0x4d, 0x63, 0xfe,
+    };
+    String8 x86_att_scalar_extend_source =
+        S8("movzbw %al, %ax\n"
+           "movzbl %ah, %eax\n"
+           "movzbq %spl, %rax\n"
+           "movzbw %spl, %ax\n"
+           "movzwl 8(%r12,%r10,4), %r9d\n"
+           "movsbw %bh, %ax\n"
+           "movsbl (%rsi), %r8d\n"
+           "movsbq (%rsi), %r9\n"
+           "movswl %r10w, %r11d\n"
+           "movswq %r12w, %r13\n"
+           "movslq %r14d, %r15\n");
+    AssemblyEncodeResult x86_att_scalar_extend = assembly_encode(
+        arguments->arena, x86_att_scalar_extend_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_scalar_extend.diagnostic_count == 0 &&
+                               x86_att_scalar_extend.bytes.length == sizeof(expected_x86_att_scalar_extend) &&
+                               memcmp(x86_att_scalar_extend.bytes.pointer, expected_x86_att_scalar_extend,
+                                      sizeof(expected_x86_att_scalar_extend)) == 0);
+    u8 expected_x86_scalar_extend_rip[] = {0x48, 0x0f, 0xbe, 0x05, 0x00, 0x00, 0x00, 0x00};
+    AssemblyEncodeResult x86_scalar_extend_rip = assembly_encode(
+        arguments->arena, S8("movsx rax, byte ptr [rip + external]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_scalar_extend_rip.diagnostic_count == 0 &&
+                               x86_scalar_extend_rip.bytes.length == sizeof(expected_x86_scalar_extend_rip) &&
+                               memcmp(x86_scalar_extend_rip.bytes.pointer, expected_x86_scalar_extend_rip,
+                                      sizeof(expected_x86_scalar_extend_rip)) == 0 &&
+                               x86_scalar_extend_rip.relocation_count == 1 && x86_scalar_extend_rip.relocations[0].offset == 4 &&
+                               x86_scalar_extend_rip.relocations[0].addend == -4 &&
+                               x86_scalar_extend_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+    u8 expected_x86_scalar_extend_memory_widths[] = {
+        0x0f, 0xb6, 0x06,
+        0x4c, 0x0f, 0xb6, 0x06,
+        0x0f, 0xbf, 0x06,
+        0x4c, 0x0f, 0xbf, 0x0e,
+        0x48, 0x63, 0x06,
+    };
+    AssemblyEncodeResult x86_intel_scalar_extend_memory_widths = assembly_encode(
+        arguments->arena,
+        S8("movzx eax, byte ptr [rsi]\n"
+           "movzx r8, byte ptr [rsi]\n"
+           "movsx eax, word ptr [rsi]\n"
+           "movsx r9, word ptr [rsi]\n"
+           "movsxd rax, dword ptr [rsi]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_scalar_extend_memory_widths.diagnostic_count == 0 &&
+                               x86_intel_scalar_extend_memory_widths.bytes.length == sizeof(expected_x86_scalar_extend_memory_widths) &&
+                               memcmp(x86_intel_scalar_extend_memory_widths.bytes.pointer, expected_x86_scalar_extend_memory_widths,
+                                      sizeof(expected_x86_scalar_extend_memory_widths)) == 0);
+    AssemblyEncodeResult x86_att_scalar_extend_memory_widths = assembly_encode(
+        arguments->arena,
+        S8("movzbl (%rsi), %eax\n"
+           "movzbq (%rsi), %r8\n"
+           "movswl (%rsi), %eax\n"
+           "movswq (%rsi), %r9\n"
+           "movslq (%rsi), %rax\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_scalar_extend_memory_widths.diagnostic_count == 0 &&
+                               x86_att_scalar_extend_memory_widths.bytes.length == sizeof(expected_x86_scalar_extend_memory_widths) &&
+                               memcmp(x86_att_scalar_extend_memory_widths.bytes.pointer, expected_x86_scalar_extend_memory_widths,
+                                      sizeof(expected_x86_scalar_extend_memory_widths)) == 0);
+    u8 expected_x86_high_byte_extend[] = {
+        0x0f, 0xb6, 0xc4,
+        0x0f, 0xb6, 0xcd,
+        0x0f, 0xbe, 0xd6,
+        0x0f, 0xb6, 0xdf,
+    };
+    AssemblyEncodeResult x86_high_byte_extend = assembly_encode(
+        arguments->arena,
+        S8("movzx eax, ah\nmovzx ecx, ch\nmovsx edx, dh\nmovzx ebx, bh\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_high_byte_extend.diagnostic_count == 0 &&
+                               x86_high_byte_extend.bytes.length == sizeof(expected_x86_high_byte_extend) &&
+                               memcmp(x86_high_byte_extend.bytes.pointer, expected_x86_high_byte_extend,
+                                      sizeof(expected_x86_high_byte_extend)) == 0);
+
+    u8 expected_x86_rotate[] = {
+        0xd0, 0xc0,
+        0x66, 0xd3, 0xc8,
+        0xc1, 0xd0, 0x7f,
+        0x49, 0xc1, 0xd8, 0xff,
+        0x43, 0xd0, 0x44, 0x51, 0x08,
+        0x66, 0xd3, 0x0d, 0x00, 0x00, 0x00, 0x00,
+        0xc1, 0x54, 0x24, 0x10, 0x07,
+        0x49, 0xd3, 0x1c, 0x24,
+        0xd0, 0xc4,
+        0x41, 0xc0, 0xcf, 0xff,
+    };
+    String8 x86_intel_rotate_source =
+        S8("rol al, 1\n"
+           "ror ax, cl\n"
+           "rcl eax, 0x7f\n"
+           "rcr r8, 0xff\n"
+           "rol byte ptr [r9 + r10*2 + 8], 1\n"
+           "ror word ptr [rip + rotate_external], cl\n"
+           "rcl dword ptr [rsp + 16], 7\n"
+           "rcr qword ptr [r12], cl\n"
+           "rol ah, 1\n"
+           "ror r15b, -1\n");
+    AssemblyEncodeResult x86_intel_rotate = assembly_encode(
+        arguments->arena, x86_intel_rotate_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_rotate.diagnostic_count == 0 && x86_intel_rotate.bytes.length == sizeof(expected_x86_rotate) &&
+                               memcmp(x86_intel_rotate.bytes.pointer, expected_x86_rotate, sizeof(expected_x86_rotate)) == 0 &&
+                               x86_intel_rotate.relocation_count == 1 && x86_intel_rotate.relocations[0].offset == 20 &&
+                               x86_intel_rotate.relocations[0].addend == -4 &&
+                               x86_intel_rotate.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+    String8 x86_att_rotate_source =
+        S8("rolb $1, %al\n"
+           "rorw %cl, %ax\n"
+           "rcll $0x7f, %eax\n"
+           "rcrq $-1, %r8\n"
+           "rolb $1, 8(%r9,%r10,2)\n"
+           "rorw %cl, rotate_external(%rip)\n"
+           "rcll $7, 16(%rsp)\n"
+           "rcrq %cl, (%r12)\n"
+           "rolb $1, %ah\n"
+           "rorb $-1, %r15b\n");
+    AssemblyEncodeResult x86_att_rotate = assembly_encode(
+        arguments->arena, x86_att_rotate_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_rotate.diagnostic_count == 0 && x86_att_rotate.bytes.length == sizeof(expected_x86_rotate) &&
+                               memcmp(x86_att_rotate.bytes.pointer, expected_x86_rotate, sizeof(expected_x86_rotate)) == 0 &&
+                               x86_att_rotate.relocation_count == 1 && x86_att_rotate.relocations[0].offset == 20 &&
+                               x86_att_rotate.relocations[0].addend == -4 &&
+                               x86_att_rotate.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    u8 expected_x86_double_shift[] = {
+        0x66, 0x0f, 0xa5, 0xd8,
+        0x44, 0x0f, 0xa4, 0xc0, 0x07,
+        0x4d, 0x0f, 0xa4, 0xd1, 0xff,
+        0x66, 0x47, 0x0f, 0xad, 0x74, 0xac, 0x08,
+        0x0f, 0xac, 0x6c, 0x24, 0x10, 0x01,
+        0x45, 0x0f, 0xad, 0xda,
+    };
+    String8 x86_intel_double_shift_source =
+        S8("shld ax, bx, cl\n"
+           "shld eax, r8d, 7\n"
+           "shld r9, r10, 255\n"
+           "shrd word ptr [r12 + r13*4 + 8], r14w, cl\n"
+           "shrd dword ptr [rsp + 16], ebp, 1\n"
+           "shrd r10d, r11d, cl\n");
+    AssemblyEncodeResult x86_intel_double_shift = assembly_encode(
+        arguments->arena, x86_intel_double_shift_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_double_shift.diagnostic_count == 0 &&
+                               x86_intel_double_shift.bytes.length == sizeof(expected_x86_double_shift) &&
+                               memcmp(x86_intel_double_shift.bytes.pointer, expected_x86_double_shift,
+                                      sizeof(expected_x86_double_shift)) == 0);
+    String8 x86_att_double_shift_source =
+        S8("shldw %cl, %bx, %ax\n"
+           "shldl $7, %r8d, %eax\n"
+           "shldq $255, %r10, %r9\n"
+           "shrdw %cl, %r14w, 8(%r12,%r13,4)\n"
+           "shrdl $1, %ebp, 16(%rsp)\n"
+           "shrdl %cl, %r11d, %r10d\n");
+    AssemblyEncodeResult x86_att_double_shift = assembly_encode(
+        arguments->arena, x86_att_double_shift_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_double_shift.diagnostic_count == 0 &&
+                               x86_att_double_shift.bytes.length == sizeof(expected_x86_double_shift) &&
+                               memcmp(x86_att_double_shift.bytes.pointer, expected_x86_double_shift,
+                                      sizeof(expected_x86_double_shift)) == 0);
+    u8 expected_x86_double_shift_rip[] = {0x4c, 0x0f, 0xa4, 0x05, 0x00, 0x00, 0x00, 0x00, 0x80};
+    AssemblyEncodeResult x86_double_shift_rip = assembly_encode(
+        arguments->arena, S8("shld qword ptr [rip + shift_external], r8, 0x80\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_double_shift_rip.diagnostic_count == 0 &&
+                               x86_double_shift_rip.bytes.length == sizeof(expected_x86_double_shift_rip) &&
+                               memcmp(x86_double_shift_rip.bytes.pointer, expected_x86_double_shift_rip,
+                                      sizeof(expected_x86_double_shift_rip)) == 0 &&
+                               x86_double_shift_rip.relocation_count == 1 && x86_double_shift_rip.relocations[0].offset == 4 &&
+                               x86_double_shift_rip.relocations[0].addend == -5 &&
+                               x86_double_shift_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+    u8 expected_x86_double_shift_rip_shrd[] = {0x4c, 0x0f, 0xac, 0x05, 0x00, 0x00, 0x00, 0x00, 0x80};
+    AssemblyEncodeResult x86_double_shift_rip_shrd = assembly_encode(
+        arguments->arena, S8("shrd qword ptr [rip + shift_external], r8, 0x80\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_double_shift_rip_shrd.diagnostic_count == 0 &&
+                               x86_double_shift_rip_shrd.bytes.length == sizeof(expected_x86_double_shift_rip_shrd) &&
+                               memcmp(x86_double_shift_rip_shrd.bytes.pointer, expected_x86_double_shift_rip_shrd,
+                                      sizeof(expected_x86_double_shift_rip_shrd)) == 0 &&
+                               x86_double_shift_rip_shrd.relocation_count == 1 &&
+                               x86_double_shift_rip_shrd.relocations[0].offset == 4 &&
+                               x86_double_shift_rip_shrd.relocations[0].addend == -5 &&
+                               x86_double_shift_rip_shrd.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult invalid_x86_scalar_integer_family = assembly_encode(
+        arguments->arena,
+        S8("lea r8b, [rax]\n"
+           "lea eax, rbx\n"
+           "movzx al, byte ptr [rax]\n"
+           "movzx eax, [rax]\n"
+           "movsx eax, dword ptr [rax]\n"
+           "movsxd eax, dword ptr [rax]\n"
+           "movzx r8d, ah\n"
+           "movzx r9d, ch\n"
+           "movsx r10d, dh\n"
+           "movsx rax, bh\n"
+           "movzx ax, ax\n"
+           "movsx ax, word ptr [rax]\n"
+           "movsx al, byte ptr [rax]\n"
+           "movzx eax, dword ptr [rax]\n"
+           "movsx eax, ebx\n"
+           "movsxd rax, ax\n"
+           "movsxd r8d, eax\n"
+           "rol eax, edx\n"
+           "ror [rax], 1\n"
+           "rcl eax, external\n"
+           "shld eax, ebx, dl\n"
+           "shrd eax, [rbx], cl\n"
+           "shld eax, ebx, 256\n"
+           "shrd eax, ebx, -129\n"
+           "lock lea rax, [rbx]\n"
+           "lock movzx eax, byte ptr [rbx]\n"
+           "lock rol eax, 1\n"
+           "lock shld eax, ebx, cl\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_x86_scalar_integer_family.diagnostic_count == 28);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_scalar_integer_family.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_x86_scalar_integer_family.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
     Target aarch64_target = {
         .cpu_arch = CPU_ARCH_AARCH64,
         .os = OPERATING_SYSTEM_LINUX,
