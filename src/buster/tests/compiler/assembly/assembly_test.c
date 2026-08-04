@@ -1338,6 +1338,204 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
         (AssemblyEncodeOptions){.target = x86_avx_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, unsupported_avx2.diagnostic_count == 1 &&
                                unsupported_avx2.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+
+    Target x86_bit_atomic_target = x86_target;
+    x86_bit_atomic_target.cpu_model = CPU_MODEL_BASELINE;
+    x86_bit_atomic_target.cpu_features_explicit = true;
+    x86_bit_atomic_target.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_POPCNT |
+                                         TARGET_CPU_FEATURE_X86_LZCNT | TARGET_CPU_FEATURE_X86_BMI1 | TARGET_CPU_FEATURE_X86_CX16;
+    u8 expected_x86_bit_atomic[] = {
+        0x66, 0x0f, 0xbc, 0xc1,
+        0x0f, 0xbd, 0xc2,
+        0x4f, 0x0f, 0xbc, 0x44, 0x8c, 0x10,
+        0x0f, 0xc8,
+        0x49, 0x0f, 0xc8,
+        0x66, 0x0f, 0xa3, 0xc8,
+        0x41, 0x0f, 0xbb, 0x54, 0x24, 0x08,
+        0x4d, 0x0f, 0xb3, 0xc8,
+        0x48, 0x0f, 0xba, 0x2d, 0x00, 0x00, 0x00, 0x00, 0x3f,
+        0x86, 0xc3,
+        0x66, 0x41, 0x90,
+        0x93,
+        0x4d, 0x87, 0xc1,
+        0x4f, 0x87, 0x44, 0x4c, 0x20,
+        0x45, 0x0f, 0xc0, 0x4d, 0x00,
+        0x66, 0x45, 0x0f, 0xc1, 0xda,
+        0x0f, 0xb1, 0xc8,
+        0x4c, 0x0f, 0xb1, 0x05, 0x00, 0x00, 0x00, 0x00,
+        0x41, 0x0f, 0xc7, 0x4d, 0x00,
+        0x49, 0x0f, 0xc7, 0x0e,
+        0xf3, 0x4d, 0x0f, 0xb8, 0x04, 0x24,
+        0xf3, 0x0f, 0xbd, 0xca,
+        0xf3, 0x48, 0x0f, 0xbc, 0xc3,
+    };
+    String8 x86_intel_bit_atomic_source =
+        S8("bsf ax, cx\n"
+           "bsr eax, edx\n"
+           "bsf r8, qword ptr [r12 + r9*4 + 16]\n"
+           "bswap eax\n"
+           "bswap r8\n"
+           "bt ax, cx\n"
+           "btc dword ptr [r12 + 8], edx\n"
+           "btr r8, r9\n"
+           "bts qword ptr [rip + external], 63\n"
+           "xchg al, bl\n"
+           "xchg ax, r8w\n"
+           "xchg eax, ebx\n"
+           "xchg r8, r9\n"
+           "xchg qword ptr [r12 + r9*2 + 32], r8\n"
+           "xadd byte ptr [r13], r9b\n"
+           "xadd r10w, r11w\n"
+           "cmpxchg eax, ecx\n"
+           "cmpxchg qword ptr [rip + external2], r8\n"
+           "cmpxchg8b qword ptr [r13]\n"
+           "cmpxchg16b xmmword ptr [r14]\n"
+           "popcnt r8, qword ptr [r12]\n"
+           "lzcnt ecx, edx\n"
+           "tzcnt rax, rbx\n");
+    AssemblyEncodeResult x86_intel_bit_atomic = assembly_encode(
+        arguments->arena, x86_intel_bit_atomic_source,
+        (AssemblyEncodeOptions){.target = x86_bit_atomic_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_bit_atomic.diagnostic_count == 0 &&
+                               x86_intel_bit_atomic.bytes.length == sizeof(expected_x86_bit_atomic) &&
+                               memcmp(x86_intel_bit_atomic.bytes.pointer, expected_x86_bit_atomic,
+                                      sizeof(expected_x86_bit_atomic)) == 0);
+    BUSTER_TEST(arguments, x86_intel_bit_atomic.relocation_count == 2 && x86_intel_bit_atomic.relocations[0].offset == 36 &&
+                               x86_intel_bit_atomic.relocations[1].offset == 72 && x86_intel_bit_atomic.relocations[0].addend == -4 &&
+                               x86_intel_bit_atomic.relocations[1].addend == -4 &&
+                               x86_intel_bit_atomic.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                               x86_intel_bit_atomic.relocations[1].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                               string_equal(x86_intel_bit_atomic.symbols[x86_intel_bit_atomic.relocations[0].symbol].name,
+                                            S8("external")) &&
+                               string_equal(x86_intel_bit_atomic.symbols[x86_intel_bit_atomic.relocations[1].symbol].name,
+                                            S8("external2")));
+    String8 x86_att_bit_atomic_source =
+        S8("bsfw %cx, %ax\n"
+           "bsrl %edx, %eax\n"
+           "bsfq 16(%r12,%r9,4), %r8\n"
+           "bswapl %eax\n"
+           "bswapq %r8\n"
+           "btw %cx, %ax\n"
+           "btcl %edx, 8(%r12)\n"
+           "btrq %r9, %r8\n"
+           "btsq $63, external(%rip)\n"
+           "xchgb %bl, %al\n"
+           "xchgw %r8w, %ax\n"
+           "xchgl %ebx, %eax\n"
+           "xchgq %r9, %r8\n"
+           "xchgq %r8, 32(%r12,%r9,2)\n"
+           "xaddb %r9b, (%r13)\n"
+           "xaddw %r11w, %r10w\n"
+           "cmpxchgl %ecx, %eax\n"
+           "cmpxchgq %r8, external2(%rip)\n"
+           "cmpxchg8b (%r13)\n"
+           "cmpxchg16b (%r14)\n"
+           "popcntq (%r12), %r8\n"
+           "lzcntl %edx, %ecx\n"
+           "tzcntq %rbx, %rax\n");
+    AssemblyEncodeResult x86_att_bit_atomic = assembly_encode(
+        arguments->arena, x86_att_bit_atomic_source,
+        (AssemblyEncodeOptions){.target = x86_bit_atomic_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_bit_atomic.diagnostic_count == 0 && x86_att_bit_atomic.bytes.length == sizeof(expected_x86_bit_atomic) &&
+                               memcmp(x86_att_bit_atomic.bytes.pointer, expected_x86_bit_atomic,
+                                      sizeof(expected_x86_bit_atomic)) == 0);
+    BUSTER_TEST(arguments, x86_att_bit_atomic.relocation_count == 2 && x86_att_bit_atomic.relocations[0].offset == 36 &&
+                               x86_att_bit_atomic.relocations[1].offset == 72);
+
+    u8 expected_x86_locked_bit_atomic[] = {
+        0xf0, 0x01, 0x08,
+        0xf0, 0x0f, 0xbb, 0x08,
+        0xf0, 0x0f, 0xba, 0x30, 0x03,
+        0xf0, 0x48, 0x0f, 0xba, 0x2d, 0x00, 0x00, 0x00, 0x00, 0x07,
+        0xf0, 0x41, 0x87, 0x08,
+        0xf0, 0x41, 0x0f, 0xc1, 0x08,
+        0xf0, 0x41, 0x0f, 0xb1, 0x08,
+        0xf0, 0x41, 0x0f, 0xc7, 0x08,
+    };
+    String8 x86_intel_locked_bit_atomic_source =
+        S8("lock add dword ptr [rax], ecx\n"
+           "lock btc dword ptr [rax], ecx\n"
+           "lock btr dword ptr [rax], 3\n"
+           "lock bts qword ptr [rip + lock_external], 7\n"
+           "lock xchg dword ptr [r8], ecx\n"
+           "lock xadd dword ptr [r8], ecx\n"
+           "lock cmpxchg dword ptr [r8], ecx\n"
+           "lock cmpxchg8b qword ptr [r8]\n");
+    AssemblyEncodeResult x86_intel_locked_bit_atomic = assembly_encode(
+        arguments->arena, x86_intel_locked_bit_atomic_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_locked_bit_atomic.diagnostic_count == 0 &&
+                               x86_intel_locked_bit_atomic.bytes.length == sizeof(expected_x86_locked_bit_atomic) &&
+                               memcmp(x86_intel_locked_bit_atomic.bytes.pointer, expected_x86_locked_bit_atomic,
+                                      sizeof(expected_x86_locked_bit_atomic)) == 0);
+    BUSTER_TEST(arguments, x86_intel_locked_bit_atomic.relocation_count == 1 &&
+                               x86_intel_locked_bit_atomic.relocations[0].offset == 17 &&
+                               x86_intel_locked_bit_atomic.relocations[0].addend == -4);
+    AssemblyEncodeResult x86_att_locked_bit_atomic = assembly_encode(
+        arguments->arena,
+        S8("lock addl %ecx, (%rax)\n"
+           "lock btcl %ecx, (%rax)\n"
+           "lock btrl $3, (%rax)\n"
+           "lock btsq $7, lock_external(%rip)\n"
+           "lock xchgl %ecx, (%r8)\n"
+           "lock xaddl %ecx, (%r8)\n"
+           "lock cmpxchgl %ecx, (%r8)\n"
+           "lock cmpxchg8b (%r8)\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_locked_bit_atomic.diagnostic_count == 0 &&
+                               x86_att_locked_bit_atomic.bytes.length == sizeof(expected_x86_locked_bit_atomic) &&
+                               memcmp(x86_att_locked_bit_atomic.bytes.pointer, expected_x86_locked_bit_atomic,
+                                      sizeof(expected_x86_locked_bit_atomic)) == 0);
+
+    u8 expected_x86_high_byte_atomic[] = {
+        0x86, 0xe0,
+        0x0f, 0xc0, 0xc4,
+        0x0f, 0xb0, 0xc4,
+    };
+    AssemblyEncodeResult x86_high_byte_atomic = assembly_encode(
+        arguments->arena, S8("xchg ah, al\nxadd ah, al\ncmpxchg ah, al\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_high_byte_atomic.diagnostic_count == 0 &&
+                               x86_high_byte_atomic.bytes.length == sizeof(expected_x86_high_byte_atomic) &&
+                               memcmp(x86_high_byte_atomic.bytes.pointer, expected_x86_high_byte_atomic,
+                                      sizeof(expected_x86_high_byte_atomic)) == 0);
+    AssemblyEncodeResult invalid_x86_high_byte_atomic = assembly_encode(
+        arguments->arena,
+        S8("xchg ah, r8b\n"
+           "xadd ah, r8b\n"
+           "cmpxchg ah, r8b\n"
+           "mov byte ptr [r8], ah\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_x86_high_byte_atomic.diagnostic_count == 4);
+
+    AssemblyEncodeResult unsupported_x86_bit_atomic = assembly_encode(
+        arguments->arena,
+        S8("popcnt eax, ebx\n"
+           "lzcnt eax, ebx\n"
+           "tzcnt eax, ebx\n"
+           "cmpxchg16b xmmword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_x86_bit_atomic.diagnostic_count == 4);
+    for (u32 diagnostic_index = 0; diagnostic_index < unsupported_x86_bit_atomic.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, unsupported_x86_bit_atomic.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    AssemblyEncodeResult invalid_x86_bit_atomic = assembly_encode(
+        arguments->arena,
+        S8("bsf al, bl\n"
+           "bswap ax\n"
+           "bt qword ptr [rax], 256\n"
+           "xadd dword ptr [rax], dword ptr [rbx]\n"
+           "cmpxchg8b rax\n"
+           "lock bt dword ptr [rax], ecx\n"
+           "lock xadd eax, ecx\n"
+           "lock mov dword ptr [rax], ecx\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_x86_bit_atomic.diagnostic_count == 8);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_bit_atomic.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_x86_bit_atomic.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
     AssemblyEncodeResult invalid_x86_forms =
         assembly_encode(arguments->arena, S8("mov rax, eax\nadd rax, 0x80000000\nnopq\n"),
                         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
