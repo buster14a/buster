@@ -69,12 +69,14 @@ VertexOut rect_vertex(uint vertex_id, RectVertex v, float width, float height)
 #endif
 
     float2 uv0 = v.uv0;
-    float2 uv1 = uv0 + v.uv_extent;
-    float2 texture_center = (uv1 + uv0) * 0.5;
+    // Geometry is in framebuffer pixels and may be DPI-scaled independently
+    // of the atlas rectangle.  Derive UVs from normalized quad coordinates;
+    // never use the pixel half-size here.
+    float2 uv = uv0 + (quad_vertices[quad_vertex_id] * 0.5 + float2(0.5, 0.5)) * v.uv_extent;
 
     output.texture_index = v.texture_index;
     output.color = v.colors[quad_vertex_id];
-    output.uv = quad_vertices[quad_vertex_id] * half_size + texture_center;
+    output.uv = uv;
     output.pixel_position = pixel_position;
     output.center = center;
     output.half_size = half_size;

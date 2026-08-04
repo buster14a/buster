@@ -56,6 +56,7 @@ enum
     BUSTER_MTL_PIXEL_FORMAT_RGBA8_UNORM = 70,
     BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM = 80,
     BUSTER_MTL_LOAD_ACTION_CLEAR = 2,
+    BUSTER_MTL_LOAD_ACTION_LOAD = 1,
     BUSTER_MTL_STORE_ACTION_STORE = 1,
     BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE = 3,
     BUSTER_MTL_INDEX_TYPE_UINT32 = 1,
@@ -67,7 +68,9 @@ enum
     BUSTER_MTL_SAMPLER_MIN_MAG_FILTER_LINEAR = 1,
     BUSTER_MTL_SAMPLER_MIP_FILTER_NOT_MIPMAPPED = 0,
     BUSTER_MTL_SAMPLER_ADDRESS_MODE_REPEAT = 2,
+    BUSTER_MTL_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE = 1,
     BUSTER_MTL_TEXTURE_USAGE_SHADER_READ = 1,
+    BUSTER_MTL_TEXTURE_USAGE_RENDER_TARGET = 4,
     BUSTER_MTL_STORAGE_MODE_SHARED = 0,
 };
 
@@ -123,7 +126,11 @@ typedef struct WindowFrame WindowFrame;
 struct WindowFrame
 {
     id command_buffer;
-    RenderingCommandStream commands;
+    RenderingCommandStream* commands;
+    id blur_source;
+    id blur_horizontal;
+    u32 blur_width;
+    u32 blur_height;
     FramePipelineInstantiation pipeline_instantiations[(u64)BUSTER_PIPELINE_COUNT];
 };
 
@@ -142,7 +149,9 @@ struct RenderingHandle
     id command_queue;
     id library;
     id rect_pipeline;
+    id blur_pipeline;
     id sampler_state;
+    id blur_sampler_state;
     u32 texture_count;
     u32 reserved;
     FontTextureAtlas fonts[RENDER_FONT_TYPE_COUNT];
@@ -162,12 +171,17 @@ struct RenderingWindowHandle
     RenderingScale scale;
     TextureIndex rect_textures[RECT_TEXTURE_SLOT_COUNT];
     WindowFrame frames[BUSTER_METAL_FRAME_COUNT];
+    bool last_frame_error;
+    u8 reserved[3];
 };
 
 BUSTER_GLOBAL_LOCAL RenderingHandle rendering_handle = {0};
 BUSTER_GLOBAL_LOCAL u32 metal_drawable_size_log_count = 0;
 BUSTER_GLOBAL_LOCAL u32 metal_frame_begin_log_count = 0;
 BUSTER_GLOBAL_LOCAL u32 metal_frame_end_log_count = 0;
+
+BUSTER_GLOBAL_LOCAL void metal_blur_frame_destroy(WindowFrame* frame);
+BUSTER_GLOBAL_LOCAL bool metal_blur_resources_ensure(RenderingHandle* rendering, RenderingWindowHandle* window, WindowFrame* frame);
 
 #if defined(__x86_64__)
 #define metal_msg_send_stret objc_msgSend_stret
@@ -242,8 +256,7 @@ BUSTER_GLOBAL_LOCAL const char* metal_rect_inline_shader_source(void)
            "float2 p1 = p0 + extent; float2 center = (p1 + p0) * 0.5; float2 half_size = (p1 - p0) * 0.5; float2 position = quad_vertices[quad_vertex_id] * "
            "half_size + center;\n"
            "    output.position = float4(2.0 * position.x / constants.width - 1.0, 1.0 - 2.0 * position.y / constants.height, 0.0, 1.0);\n"
-           "    float2 uv0 = v.uv0; float2 uv1 = uv0 + v.uv_extent; float2 texture_center = (uv1 + uv0) * 0.5; output.uv = quad_vertices[quad_vertex_id] * "
-           "half_size + texture_center;\n"
+           "    float2 uv0 = v.uv0; output.uv = uv0 + (quad_vertices[quad_vertex_id] * 0.5 + float2(0.5, 0.5)) * v.uv_extent;\n"
            "    output.texture_index = v.texture_index; output.color = v.colors[quad_vertex_id]; output.pixel_position = position; output.center = center; "
            "output.half_size = half_size; output.corner_radius = v.corner_radius; output.softness = v.softness; return output; }\n"
            "float rounded_rect_sdf(float2 position, float2 center, float2 half_size, float radius) { float2 r2 = float2(radius, radius); float2 d2_no_r2 = "
@@ -277,6 +290,25 @@ BUSTER_GLOBAL_LOCAL const char* metal_rect_fragment_shader_source(void)
 #else
     return metal_rect_inline_shader_source();
 #endif
+}
+
+BUSTER_GLOBAL_LOCAL const char* metal_blur_shader_source(void)
+{
+    return "#include <metal_stdlib>\n"
+           "using namespace metal;\n"
+           "struct BlurConstants { float2 texel_step; uint radius; uint vertical; };\n"
+           "struct BlurVertexOut { float4 position [[position]]; float2 uv; };\n"
+           "constant float2 blur_triangle[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };\n"
+           "vertex BlurVertexOut blur_vs(uint vertex_id [[vertex_id]]) { BlurVertexOut output; float2 position = blur_triangle[vertex_id]; "
+           "output.position = float4(position, 0.0, 1.0); output.uv = float2(position.x * 0.5 + 0.5, 0.5 - position.y * 0.5); return output; }\n"
+           "fragment float4 blur_fs_metal(BlurVertexOut input [[stage_in]], texture2d<float> blur_source [[texture(0)]], "
+           "sampler blur_sampler [[sampler(0)]], constant BlurConstants& blur_constants [[buffer(0)]]) { "
+           "float4 sum = float4(0.0); uint count = 0; uint limit = min(blur_constants.radius, 32u); "
+           "for (uint sample_index = 0; sample_index <= 64; sample_index += 1) { if (sample_index > limit * 2) break; "
+           "int offset = (int)sample_index - (int)limit; float2 delta = blur_constants.texel_step * (float)offset; "
+           "float2 sample_uv = input.uv + (blur_constants.vertical != 0 ? float2(0.0, delta.y) : float2(delta.x, 0.0)); "
+           "sum += blur_source.sample(blur_sampler, sample_uv); count += 1; } "
+           "return count != 0 ? sum / (float)count : float4(0.0); }\n";
 }
 
 BUSTER_GLOBAL_LOCAL void metal_log_error(String8 prefix, id error)
@@ -379,6 +411,50 @@ BUSTER_GLOBAL_LOCAL bool metal_create_rect_pipeline(RenderingHandle* rendering)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool metal_create_blur_pipeline(RenderingHandle* rendering)
+{
+    id source = metal_nsstring_from_cstring(metal_blur_shader_source());
+    id error = 0;
+    id library = ((id (*)(id, SEL, id, id, id*))objc_msgSend)(rendering->device, metal_sel("newLibraryWithSource:options:error:"), source, 0, &error);
+    metal_release(source);
+    if (!library)
+    {
+        metal_log_error(S8("Metal blur shader compilation failed"), error);
+        return false;
+    }
+
+    id vertex_name = metal_nsstring_from_cstring("blur_vs");
+    id fragment_name = metal_nsstring_from_cstring("blur_fs_metal");
+    id vertex_function = ((id (*)(id, SEL, id))objc_msgSend)(library, metal_sel("newFunctionWithName:"), vertex_name);
+    id fragment_function = ((id (*)(id, SEL, id))objc_msgSend)(library, metal_sel("newFunctionWithName:"), fragment_name);
+    metal_release(vertex_name);
+    metal_release(fragment_name);
+    bool result = false;
+    if (vertex_function && fragment_function)
+    {
+        id descriptor = metal_msg_id(metal_msg_id((id)objc_getClass("MTLRenderPipelineDescriptor"), "alloc"), "init");
+        metal_msg_void_id(descriptor, "setVertexFunction:", vertex_function);
+        metal_msg_void_id(descriptor, "setFragmentFunction:", fragment_function);
+        id color_attachments = metal_msg_id(descriptor, "colorAttachments");
+        id color_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(color_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
+        metal_msg_void_ulong(color_attachment, "setPixelFormat:", BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM);
+        metal_msg_void_bool(color_attachment, "setBlendingEnabled:", false);
+        id pipeline_error = 0;
+        rendering->blur_pipeline =
+            ((id (*)(id, SEL, id, id*))objc_msgSend)(rendering->device, metal_sel("newRenderPipelineStateWithDescriptor:error:"), descriptor, &pipeline_error);
+        if (!rendering->blur_pipeline)
+        {
+            metal_log_error(S8("Metal blur pipeline creation failed"), pipeline_error);
+        }
+        result = rendering->blur_pipeline != 0;
+        metal_release(descriptor);
+    }
+    metal_release(vertex_function);
+    metal_release(fragment_function);
+    metal_release(library);
+    return result;
+}
+
 RenderingHandle* rendering_initialize(Arena* arena)
 {
     BUSTER_UNUSED(arena);
@@ -408,6 +484,15 @@ RenderingHandle* rendering_initialize(Arena* arena)
         rendering_handle.sampler_state =
             ((id (*)(id, SEL, id))objc_msgSend)(rendering_handle.device, metal_sel("newSamplerStateWithDescriptor:"), sampler_descriptor);
         metal_release(sampler_descriptor);
+        id blur_sampler_descriptor = metal_msg_id(metal_msg_id((id)objc_getClass("MTLSamplerDescriptor"), "alloc"), "init");
+        metal_msg_void_ulong(blur_sampler_descriptor, "setMinFilter:", BUSTER_MTL_SAMPLER_MIN_MAG_FILTER_LINEAR);
+        metal_msg_void_ulong(blur_sampler_descriptor, "setMagFilter:", BUSTER_MTL_SAMPLER_MIN_MAG_FILTER_LINEAR);
+        metal_msg_void_ulong(blur_sampler_descriptor, "setMipFilter:", BUSTER_MTL_SAMPLER_MIP_FILTER_NOT_MIPMAPPED);
+        metal_msg_void_ulong(blur_sampler_descriptor, "setSAddressMode:", BUSTER_MTL_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        metal_msg_void_ulong(blur_sampler_descriptor, "setTAddressMode:", BUSTER_MTL_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        rendering_handle.blur_sampler_state =
+            ((id (*)(id, SEL, id))objc_msgSend)(rendering_handle.device, metal_sel("newSamplerStateWithDescriptor:"), blur_sampler_descriptor);
+        metal_release(blur_sampler_descriptor);
         string_print(S8("Metal device objects: command_queue={u64:x}, sampler_state={u64:x}\n"), (u64)rendering_handle.command_queue,
                      (u64)rendering_handle.sampler_state);
 
@@ -419,7 +504,9 @@ RenderingHandle* rendering_initialize(Arena* arena)
         {
             string_print(S8("Metal sampler state creation failed\n"));
         }
-        if (rendering_handle.command_queue && rendering_handle.sampler_state && metal_create_rect_pipeline(&rendering_handle))
+        bool rect_pipeline_created = rendering_handle.command_queue && rendering_handle.sampler_state && metal_create_rect_pipeline(&rendering_handle);
+        bool blur_pipeline_created = rendering_handle.command_queue && rendering_handle.blur_sampler_state && metal_create_blur_pipeline(&rendering_handle);
+        if (rect_pipeline_created && blur_pipeline_created)
         {
             result = &rendering_handle;
         }
@@ -476,6 +563,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     result->frame_index = 0;
     result->frame_count = BUSTER_METAL_FRAME_COUNT;
     result->scale = (RenderingScale){.x = 1.0f, .y = 1.0f};
+    result->last_frame_error = false;
 
 #if BUSTER_IOS
     // On iOS the window handle already exposes a CAMetalLayer (the UIView's
@@ -487,7 +575,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     ((void (*)(id, SEL))objc_msgSend)(result->layer, metal_sel("retain"));
     metal_msg_void_id(result->layer, "setDevice:", rendering->device);
     metal_msg_void_ulong(result->layer, "setPixelFormat:", BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM);
-    metal_msg_void_bool(result->layer, "setFramebufferOnly:", true);
+    metal_msg_void_bool(result->layer, "setFramebufferOnly:", false);
     string_print(S8("Metal render window initialization: platform=ios, layer={u64:x}, frame_count={u32}\n"), (u64)result->layer, result->frame_count);
 #else
     BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_APPKIT);
@@ -500,7 +588,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     ((void (*)(id, SEL))objc_msgSend)(result->layer, metal_sel("retain"));
     metal_msg_void_id(result->layer, "setDevice:", rendering->device);
     metal_msg_void_ulong(result->layer, "setPixelFormat:", BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM);
-    metal_msg_void_bool(result->layer, "setFramebufferOnly:", true);
+    metal_msg_void_bool(result->layer, "setFramebufferOnly:", false);
     // Headless CI runners have no WindowServer session actively cycling
     // drawables, so nextDrawable's default ~1s internal wait (looking for a
     // free one) turns every frame in `ide test`'s 3-frame smoke test into a
@@ -517,6 +605,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     for (u64 frame_index = 0; frame_index < result->frame_count; frame_index += 1)
     {
         WindowFrame* frame = &result->frames[frame_index];
+        frame->commands = arena_allocate(arena, RenderingCommandStream, 1);
         for (BusterPipeline pipeline_index = 0; pipeline_index < BUSTER_PIPELINE_COUNT; pipeline_index += 1)
         {
             FramePipelineInstantiation* pipeline = &frame->pipeline_instantiations[pipeline_index];
@@ -525,9 +614,9 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
             pipeline->vertex_buffer.gpu.type = BUFFER_TYPE_VERTEX;
             pipeline->index_buffer.gpu.type = BUFFER_TYPE_INDEX;
         }
-        rendering_command_stream_bind_buffers(&frame->commands, frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].vertex_buffer.cpu,
+        rendering_command_stream_bind_buffers(frame->commands, frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].vertex_buffer.cpu,
                                               frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].index_buffer.cpu);
-        rendering_command_stream_begin(&frame->commands, (RenderingWindowSize){.width = result->width, .height = result->height}, result->scale);
+        rendering_command_stream_begin(frame->commands, (RenderingWindowSize){.width = result->width, .height = result->height}, result->scale);
         string_print(S8("Metal frame resources {u32}: command_buffer={u64:x}\n"), (u32)frame_index, (u64)frame->command_buffer);
     }
     string_print(S8("Metal render window initialization succeeded: ns_window={u64:x}, layer={u64:x}, frame_count={u32}\n"), (u64)result->ns_window,
@@ -545,6 +634,7 @@ void rendering_window_queue_rect_texture_update(RenderingHandle* rendering, Rend
     BUSTER_CHECK(slot < RECT_TEXTURE_SLOT_COUNT);
     BUSTER_CHECK(texture_index.value < rendering->texture_count);
     window->rect_textures[(u32)slot] = texture_index;
+    rendering_command_stream_set_texture_binding(rendering_window_command_stream(window), (u32)slot, texture_index);
 }
 
 void rendering_window_rect_texture_update_end(RenderingHandle* rendering, RenderingWindowHandle* window)
@@ -628,7 +718,7 @@ BUSTER_GLOBAL_LOCAL WindowFrame* rendering_window_frame(RenderingWindowHandle* w
 
 RenderingCommandStream* rendering_window_command_stream(RenderingWindowHandle* window)
 {
-    return window ? &rendering_window_frame(window)->commands : 0;
+    return window ? rendering_window_frame(window)->commands : 0;
 }
 
 void rendering_window_set_content_scale_internal(RenderingWindowHandle* window, RenderingScale scale)
@@ -637,17 +727,33 @@ void rendering_window_set_content_scale_internal(RenderingWindowHandle* window, 
     {
         return;
     }
-    window->scale = scale.x > 0.0f && scale.y > 0.0f ? scale : (RenderingScale){.x = 1.0f, .y = 1.0f};
+    window->scale = rendering_scale_is_valid(scale) ? scale : (RenderingScale){.x = 1.0f, .y = 1.0f};
     for (u32 frame_index = 0; frame_index < window->frame_count && frame_index < BUSTER_ARRAY_LENGTH(window->frames); frame_index += 1)
     {
-        rendering_command_stream_set_scale(&window->frames[frame_index].commands, window->scale);
+        rendering_command_stream_set_scale(window->frames[frame_index].commands, window->scale);
     }
 }
 
 void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
     BUSTER_UNUSED(rendering);
+    u32 previous_width = window->width;
+    u32 previous_height = window->height;
     metal_window_update_drawable_size(window);
+    if (previous_width != window->width || previous_height != window->height)
+    {
+        for (u32 frame_index = 0; frame_index < window->frame_count && frame_index < BUSTER_ARRAY_LENGTH(window->frames); frame_index += 1)
+        {
+            WindowFrame* resize_frame = &window->frames[frame_index];
+            if (resize_frame->command_buffer)
+            {
+                metal_msg_void(resize_frame->command_buffer, "waitUntilCompleted");
+                metal_release(resize_frame->command_buffer);
+                resize_frame->command_buffer = 0;
+            }
+            metal_blur_frame_destroy(resize_frame);
+        }
+    }
     WindowFrame* frame = rendering_window_frame(window);
     if (metal_frame_begin_log_count < 3)
     {
@@ -661,7 +767,6 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         metal_release(frame->command_buffer);
         frame->command_buffer = 0;
     }
-
     for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(frame->pipeline_instantiations); i += 1)
     {
         FramePipelineInstantiation* pipeline_instantiation = &frame->pipeline_instantiations[i];
@@ -669,7 +774,11 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         pipeline_instantiation->vertex_buffer.count = 0;
         arena_reset_to_start(pipeline_instantiation->index_buffer.cpu);
     }
-    rendering_command_stream_begin(&frame->commands, (RenderingWindowSize){.width = window->width, .height = window->height}, window->scale);
+    rendering_command_stream_begin(frame->commands, (RenderingWindowSize){.width = window->width, .height = window->height}, window->scale);
+    for (u32 slot = 0; slot < RECT_TEXTURE_SLOT_COUNT; slot += 1)
+    {
+        rendering_command_stream_set_texture_binding(frame->commands, slot, window->rect_textures[slot]);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void metal_buffer_destroy(MetalBuffer* buffer)
@@ -709,8 +818,200 @@ BUSTER_GLOBAL_LOCAL void metal_buffer_ensure_capacity(RenderingHandle* rendering
     }
 }
 
+BUSTER_GLOBAL_LOCAL void metal_blur_frame_destroy(WindowFrame* frame)
+{
+    metal_release(frame->blur_source);
+    metal_release(frame->blur_horizontal);
+    frame->blur_source = 0;
+    frame->blur_horizontal = 0;
+    frame->blur_width = 0;
+    frame->blur_height = 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool metal_blur_resources_ensure(RenderingHandle* rendering, RenderingWindowHandle* window, WindowFrame* frame)
+{
+    RenderingBlurDimensions dimensions = rendering_blur_dimensions_make((RenderingWindowSize){.width = window->width, .height = window->height});
+    if (!dimensions.valid)
+    {
+        return false;
+    }
+    u32 half_width = dimensions.half_width;
+    u32 half_height = dimensions.half_height;
+    if (frame->blur_source && frame->blur_horizontal && frame->blur_width == half_width && frame->blur_height == half_height)
+    {
+        return true;
+    }
+
+    id texture_descriptor_class = (id)objc_getClass("MTLTextureDescriptor");
+    metal_blur_frame_destroy(frame);
+    id source_descriptor = ((id (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger, bool))objc_msgSend)(
+        texture_descriptor_class, metal_sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM,
+        (BusterNSUInteger)half_width, (BusterNSUInteger)half_height, false);
+    metal_msg_void_ulong(source_descriptor, "setUsage:", BUSTER_MTL_TEXTURE_USAGE_SHADER_READ | BUSTER_MTL_TEXTURE_USAGE_RENDER_TARGET);
+    metal_msg_void_ulong(source_descriptor, "setStorageMode:", BUSTER_MTL_STORAGE_MODE_SHARED);
+    frame->blur_source = ((id (*)(id, SEL, id))objc_msgSend)(rendering->device, metal_sel("newTextureWithDescriptor:"), source_descriptor);
+    metal_release(source_descriptor);
+
+    id horizontal_descriptor = ((id (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger, bool))objc_msgSend)(
+        texture_descriptor_class, metal_sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM,
+        (BusterNSUInteger)half_width, (BusterNSUInteger)half_height, false);
+    metal_msg_void_ulong(horizontal_descriptor, "setUsage:", BUSTER_MTL_TEXTURE_USAGE_SHADER_READ | BUSTER_MTL_TEXTURE_USAGE_RENDER_TARGET);
+    metal_msg_void_ulong(horizontal_descriptor, "setStorageMode:", BUSTER_MTL_STORAGE_MODE_SHARED);
+    frame->blur_horizontal = ((id (*)(id, SEL, id))objc_msgSend)(rendering->device, metal_sel("newTextureWithDescriptor:"), horizontal_descriptor);
+    metal_release(horizontal_descriptor);
+    if (!frame->blur_source || !frame->blur_horizontal)
+    {
+        metal_blur_frame_destroy(frame);
+        return false;
+    }
+    frame->blur_width = half_width;
+    frame->blur_height = half_height;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool metal_record_background_blur(RenderingHandle* rendering, RenderingWindowHandle* window, WindowFrame* frame, id command_buffer,
+                                                       id drawable_texture, id* encoder, RenderingCommand command)
+{
+    RenderingBlurPlan plan = rendering_blur_plan_make((RenderingWindowSize){.width = window->width, .height = window->height}, command.blur_rect,
+                                                       command.blur_radius);
+    if (!plan.valid || !plan.radius)
+    {
+        return true;
+    }
+    if (!encoder || !*encoder || !command_buffer || !drawable_texture || command.target != RENDERING_TARGET_BACKBUFFER ||
+        !metal_blur_resources_ensure(rendering, window, frame) || !frame->blur_source || !frame->blur_horizontal)
+    {
+        return false;
+    }
+
+    metal_msg_void(*encoder, "endEncoding");
+    *encoder = 0;
+    id downsample_pass = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
+    id downsample_attachments = metal_msg_id(downsample_pass, "colorAttachments");
+    if (!downsample_pass || !downsample_attachments)
+    {
+        return false;
+    }
+    id downsample_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(downsample_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
+    if (!downsample_attachment)
+    {
+        return false;
+    }
+    metal_msg_void_id(downsample_attachment, "setTexture:", frame->blur_source);
+    metal_msg_void_ulong(downsample_attachment, "setLoadAction:", BUSTER_MTL_LOAD_ACTION_CLEAR);
+    metal_msg_void_ulong(downsample_attachment, "setStoreAction:", BUSTER_MTL_STORE_ACTION_STORE);
+    BusterMTLClearColor downsample_clear_color = {0.0, 0.0, 0.0, 0.0};
+    ((void (*)(id, SEL, BusterMTLClearColor))objc_msgSend)(downsample_attachment, metal_sel("setClearColor:"), downsample_clear_color);
+    id downsample_encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), downsample_pass);
+    if (!downsample_encoder)
+    {
+        return false;
+    }
+    BusterMTLViewport downsample_viewport = {0, 0, (double)plan.half_width, (double)plan.half_height, 0, 1};
+    BusterMTLScissorRect downsample_scissor = {0, 0, plan.half_width, plan.half_height};
+    ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(downsample_encoder, metal_sel("setViewport:"), downsample_viewport);
+    ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(downsample_encoder, metal_sel("setScissorRect:"), downsample_scissor);
+    metal_msg_void_id(downsample_encoder, "setRenderPipelineState:", rendering->blur_pipeline);
+    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("setFragmentTexture:atIndex:"), drawable_texture, 0);
+    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->blur_sampler_state, 0);
+    BlurConstants downsample_constants = {
+        .texel_step = float2_make(1.0f / (f32)plan.source_width, 1.0f / (f32)plan.source_height),
+        .radius = 0,
+        .vertical = 0,
+    };
+    ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("setFragmentBytes:length:atIndex:"),
+                                                                                         &downsample_constants, sizeof(downsample_constants), 0);
+    ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"),
+                                                                                              BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE, 0, 3);
+    metal_msg_void(downsample_encoder, "endEncoding");
+
+    id horizontal_pass = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
+    id horizontal_attachments = metal_msg_id(horizontal_pass, "colorAttachments");
+    if (!horizontal_pass || !horizontal_attachments)
+    {
+        return false;
+    }
+    id horizontal_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(horizontal_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
+    if (!horizontal_attachment)
+    {
+        return false;
+    }
+    metal_msg_void_id(horizontal_attachment, "setTexture:", frame->blur_horizontal);
+    metal_msg_void_ulong(horizontal_attachment, "setLoadAction:", BUSTER_MTL_LOAD_ACTION_CLEAR);
+    metal_msg_void_ulong(horizontal_attachment, "setStoreAction:", BUSTER_MTL_STORE_ACTION_STORE);
+    BusterMTLClearColor clear_color = {0.0, 0.0, 0.0, 0.0};
+    ((void (*)(id, SEL, BusterMTLClearColor))objc_msgSend)(horizontal_attachment, metal_sel("setClearColor:"), clear_color);
+    id horizontal_encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), horizontal_pass);
+    if (!horizontal_encoder)
+    {
+        return false;
+    }
+    BusterMTLViewport horizontal_viewport = {0, 0, (double)plan.half_width, (double)plan.half_height, 0, 1};
+    BusterMTLScissorRect horizontal_scissor = {0, 0, plan.half_width, plan.half_height};
+    ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(horizontal_encoder, metal_sel("setViewport:"), horizontal_viewport);
+    ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(horizontal_encoder, metal_sel("setScissorRect:"), horizontal_scissor);
+    metal_msg_void_id(horizontal_encoder, "setRenderPipelineState:", rendering->blur_pipeline);
+    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("setFragmentTexture:atIndex:"), frame->blur_source, 0);
+    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->blur_sampler_state, 0);
+    BlurConstants horizontal_constants = {
+        .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
+        .radius = plan.radius,
+        .vertical = 0,
+    };
+    ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("setFragmentBytes:length:atIndex:"),
+                                                                                         &horizontal_constants, sizeof(horizontal_constants), 0);
+    ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"),
+                                                                                              BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE, 0, 3);
+    metal_msg_void(horizontal_encoder, "endEncoding");
+
+    id target_pass = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
+    id target_attachments = metal_msg_id(target_pass, "colorAttachments");
+    if (!target_pass || !target_attachments)
+    {
+        return false;
+    }
+    id target_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(target_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
+    if (!target_attachment)
+    {
+        return false;
+    }
+    metal_msg_void_id(target_attachment, "setTexture:", drawable_texture);
+    metal_msg_void_ulong(target_attachment, "setLoadAction:", BUSTER_MTL_LOAD_ACTION_LOAD);
+    metal_msg_void_ulong(target_attachment, "setStoreAction:", BUSTER_MTL_STORE_ACTION_STORE);
+    *encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), target_pass);
+    if (!*encoder)
+    {
+        return false;
+    }
+    BusterMTLViewport target_viewport = {0, 0, (double)window->width, (double)window->height, 0, 1};
+    BusterMTLScissorRect blur_scissor = {
+        .x = (BusterNSUInteger)command.blur_rect.x0,
+        .y = (BusterNSUInteger)command.blur_rect.y0,
+        .width = (BusterNSUInteger)(command.blur_rect.x1 - command.blur_rect.x0),
+        .height = (BusterNSUInteger)(command.blur_rect.y1 - command.blur_rect.y0),
+    };
+    ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(*encoder, metal_sel("setViewport:"), target_viewport);
+    ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(*encoder, metal_sel("setScissorRect:"), blur_scissor);
+    metal_msg_void_id(*encoder, "setRenderPipelineState:", rendering->blur_pipeline);
+    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("setFragmentTexture:atIndex:"), frame->blur_horizontal, 0);
+    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->blur_sampler_state, 0);
+    BlurConstants vertical_constants = {
+        .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
+        .radius = plan.radius,
+        .vertical = 1,
+    };
+    ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("setFragmentBytes:length:atIndex:"),
+                                                                                         &vertical_constants, sizeof(vertical_constants), 0);
+    ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"),
+                                                                                              BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE, 0, 3);
+    return true;
+}
+
 void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
+    WindowFrame* frame = rendering_window_frame(window);
+    rendering_backend_trace_begin(frame->commands, RENDERING_BACKEND_METAL);
+    rendering_backend_trace_preflight(frame->commands);
     bool log_frame_end = metal_frame_end_log_count < 3;
     u32 log_index = metal_frame_end_log_count;
     if (log_frame_end)
@@ -725,6 +1026,9 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
         {
             string_print(S8("Metal frame end {u32}: skipped zero-sized drawable\n"), log_index);
         }
+        frame->commands->frame_active = false;
+        rendering_backend_trace_finish(frame->commands, false, false, !rendering_command_stream_is_valid(frame->commands));
+        rendering_frame_error_commit(&window->last_frame_error, !rendering_command_stream_is_valid(frame->commands));
         return;
     }
 
@@ -735,10 +1039,12 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
         {
             string_print(S8("Metal frame end {u32}: nextDrawable returned null\n"), log_index);
         }
+        frame->commands->frame_active = false;
+        rendering_backend_trace_finish(frame->commands, false, false, !rendering_command_stream_is_valid(frame->commands));
+        rendering_frame_error_commit(&window->last_frame_error, !rendering_command_stream_is_valid(frame->commands));
         return;
     }
 
-    WindowFrame* frame = rendering_window_frame(window);
     id command_buffer = metal_msg_id(rendering->command_queue, "commandBuffer");
     id render_pass_descriptor = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
     id color_attachments = metal_msg_id(render_pass_descriptor, "colorAttachments");
@@ -760,28 +1066,18 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
     {
         string_print(S8("Metal frame end {u32}: encoder={u64:x}, rect_pipeline={u64:x}\n"), log_index, (u64)encoder, (u64)rendering->rect_pipeline);
     }
-    metal_msg_void_id(encoder, "setRenderPipelineState:", rendering->rect_pipeline);
     BusterMTLViewport viewport = {0, 0, (double)window->width, (double)window->height, 0, 1};
     ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(encoder, metal_sel("setViewport:"), viewport);
     BusterMTLScissorRect scissor = {0, 0, window->width, window->height};
     ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(encoder, metal_sel("setScissorRect:"), scissor);
     ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->sampler_state, 0);
-    for (u32 slot = 0; slot < RECT_TEXTURE_SLOT_COUNT; slot += 1)
-    {
-        TextureIndex texture_index = window->rect_textures[slot];
-        if (texture_index.value < rendering->texture_count)
-        {
-            ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(encoder, metal_sel("setFragmentTexture:atIndex:"),
-                                                                    rendering->textures[texture_index.value].resource, (BusterNSUInteger)slot);
-        }
-    }
 
     for (BusterPipeline pipeline_index = 0; pipeline_index < BUSTER_PIPELINE_COUNT; pipeline_index += 1)
     {
         FramePipelineInstantiation* pipeline_instantiation = &frame->pipeline_instantiations[pipeline_index];
         u64 vertex_size = arena_buffer_size(pipeline_instantiation->vertex_buffer.cpu);
         u64 index_size = arena_buffer_size(pipeline_instantiation->index_buffer.cpu);
-        if (vertex_size && index_size)
+        if (rendering_command_stream_is_valid(frame->commands) && vertex_size && index_size)
         {
             metal_buffer_ensure_capacity(rendering, &pipeline_instantiation->vertex_buffer.gpu, vertex_size);
             metal_buffer_ensure_capacity(rendering, &pipeline_instantiation->index_buffer.gpu, index_size);
@@ -794,43 +1090,133 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
             memcpy(vertex_destination, arena_buffer_start(pipeline_instantiation->vertex_buffer.cpu), vertex_size);
             memcpy(index_destination, arena_buffer_start(pipeline_instantiation->index_buffer.cpu), index_size);
 
+        }
+    }
+
+    BusterPipeline bound_pipeline = BUSTER_PIPELINE_COUNT;
+    for (u32 command_index = 0; rendering_command_stream_is_valid(frame->commands) && command_index < frame->commands->command_count; command_index += 1)
+    {
+        RenderingCommand command = frame->commands->commands[command_index];
+        if (command.kind == RENDERING_COMMAND_BACKGROUND_BLUR)
+        {
+            if (!metal_record_background_blur(rendering, window, frame, command_buffer, drawable_texture, &encoder, command))
+            {
+                rendering_command_stream_mark_failure(frame->commands);
+                break;
+            }
+            bound_pipeline = BUSTER_PIPELINE_COUNT;
+            continue;
+        }
+        if (command.kind != RENDERING_COMMAND_RECT || !rendering_command_stream_command_ends_batch(frame->commands, command_index))
+        {
+            if (command.kind != RENDERING_COMMAND_RECT)
+            {
+                bound_pipeline = BUSTER_PIPELINE_COUNT;
+            }
+            continue;
+        }
+        if (command.batch_index >= frame->commands->batch_count)
+        {
+            continue;
+        }
+        RenderingBatch batch = frame->commands->batches[command.batch_index];
+        if (batch.target != RENDERING_TARGET_BACKBUFFER || rendering_clip_rect_is_empty(batch.clip) || batch.pipeline >= BUSTER_PIPELINE_COUNT)
+        {
+            continue;
+        }
+        FramePipelineInstantiation* pipeline_instantiation = &frame->pipeline_instantiations[batch.pipeline];
+        if (!pipeline_instantiation->vertex_buffer.gpu.resource || !pipeline_instantiation->index_buffer.gpu.resource)
+        {
+            continue;
+        }
+        if (bound_pipeline != batch.pipeline)
+        {
+            metal_msg_void_id(encoder, "setRenderPipelineState:", rendering->rect_pipeline);
+            ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->sampler_state, 0);
             ((void (*)(id, SEL, id, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(encoder, metal_sel("setVertexBuffer:offset:atIndex:"),
                                                                                       pipeline_instantiation->vertex_buffer.gpu.resource, 0, 0);
             f32 constants[] = {(f32)window->width, (f32)window->height};
             ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(encoder, metal_sel("setVertexBytes:length:atIndex:"), constants,
                                                                                                (BusterNSUInteger)sizeof(constants), 1);
-            for (u32 batch_index = 0; batch_index < frame->commands.batch_count; batch_index += 1)
+            bound_pipeline = batch.pipeline;
+        }
+        for (u32 slot = 0; slot < RECT_TEXTURE_SLOT_COUNT; slot += 1)
+        {
+            TextureIndex texture_index = batch.resources.textures[slot];
+            if (texture_index.value < rendering->texture_count)
             {
-                RenderingBatch batch = frame->commands.batches[batch_index];
-                if (batch.pipeline != pipeline_index || rendering_clip_rect_is_empty(batch.clip))
-                {
-                    continue;
-                }
-                BusterMTLScissorRect batch_scissor = {
-                    .x = (BusterNSUInteger)batch.clip.x0,
-                    .y = (BusterNSUInteger)batch.clip.y0,
-                    .width = (BusterNSUInteger)(batch.clip.x1 - batch.clip.x0),
-                    .height = (BusterNSUInteger)(batch.clip.y1 - batch.clip.y0),
-                };
-                ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(encoder, metal_sel("setScissorRect:"), batch_scissor);
-                ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger, id, BusterNSUInteger))objc_msgSend)(
-                    encoder, metal_sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"), BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE,
-                    (BusterNSUInteger)batch.index_count, BUSTER_MTL_INDEX_TYPE_UINT32, pipeline_instantiation->index_buffer.gpu.resource,
-                    (BusterNSUInteger)batch.first_index * sizeof(u32));
+                ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(encoder, metal_sel("setFragmentTexture:atIndex:"),
+                                                                        rendering->textures[texture_index.value].resource, (BusterNSUInteger)slot);
             }
         }
+        BusterMTLScissorRect batch_scissor = {
+            .x = (BusterNSUInteger)batch.clip.x0,
+            .y = (BusterNSUInteger)batch.clip.y0,
+            .width = (BusterNSUInteger)(batch.clip.x1 - batch.clip.x0),
+            .height = (BusterNSUInteger)(batch.clip.y1 - batch.clip.y0),
+        };
+        ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(encoder, metal_sel("setScissorRect:"), batch_scissor);
+        ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger, id, BusterNSUInteger))objc_msgSend)(
+            encoder, metal_sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"), BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE,
+            (BusterNSUInteger)batch.index_count, BUSTER_MTL_INDEX_TYPE_UINT32, pipeline_instantiation->index_buffer.gpu.resource,
+            (BusterNSUInteger)batch.first_index * sizeof(u32));
     }
 
+    bool error_frame = !rendering_command_stream_is_valid(frame->commands);
     metal_msg_void(encoder, "endEncoding");
+    if (error_frame)
+    {
+        id error_pass_descriptor = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
+        id error_attachments = metal_msg_id(error_pass_descriptor, "colorAttachments");
+        id error_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(error_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
+        metal_msg_void_id(error_attachment, "setTexture:", drawable_texture);
+        metal_msg_void_ulong(error_attachment, "setLoadAction:", BUSTER_MTL_LOAD_ACTION_CLEAR);
+        metal_msg_void_ulong(error_attachment, "setStoreAction:", BUSTER_MTL_STORE_ACTION_STORE);
+        ((void (*)(id, SEL, BusterMTLClearColor))objc_msgSend)(error_attachment, metal_sel("setClearColor:"), clear_color);
+        id error_encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), error_pass_descriptor);
+        if (error_encoder)
+        {
+            metal_msg_void(error_encoder, "endEncoding");
+        }
+    }
     metal_msg_void_id(command_buffer, "presentDrawable:", drawable);
+    bool submitted = command_buffer != 0;
+    bool presented = submitted && drawable != 0;
     metal_msg_void(command_buffer, "commit");
+    rendering_backend_trace_finish(frame->commands, submitted, presented, error_frame);
     ((void (*)(id, SEL))objc_msgSend)(command_buffer, metal_sel("retain"));
     frame->command_buffer = command_buffer;
+    rendering_frame_error_commit(&window->last_frame_error, error_frame);
+    frame->commands->frame_active = false;
     window->frame_index = (window->frame_index + 1) % window->frame_count;
     if (log_frame_end)
     {
         string_print(S8("Metal frame end {u32}: present+commit complete, next_frame_index={u32}\n"), log_index, window->frame_index);
     }
+}
+
+bool rendering_window_has_rendering_error_internal(RenderingWindowHandle* window)
+{
+    return !window || rendering_frame_error_query(&window->last_frame_error);
+}
+
+void rendering_backend_trace_command(RenderingCommandStream* stream, u32 command_index, RenderingCommand command)
+{
+    if (stream)
+    {
+        rendering_backend_trace_record_command(stream, command_index);
+        rendering_backend_trace_validate_common(stream, command_index, command);
+    }
+}
+
+BUSTER_TEST_F_DECL RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity)
+{
+    RenderingBackendReplayResult result = rendering_backend_replay_policy(stream, RENDERING_BACKEND_METAL, events, capacity);
+    rendering_backend_trace_begin(stream, RENDERING_BACKEND_METAL);
+    rendering_backend_trace_preflight(stream);
+    rendering_backend_trace_finish(stream, false, false, !rendering_command_stream_is_valid(stream));
+    rendering_backend_trace_copy_result(&result, stream);
+    return result;
 }
 
 void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHandle* window)
@@ -869,6 +1255,7 @@ void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHa
             metal_buffer_destroy(&pipeline->vertex_buffer.gpu);
             metal_buffer_destroy(&pipeline->index_buffer.gpu);
         }
+        metal_blur_frame_destroy(frame);
     }
     if (window->content_view)
     {
@@ -893,7 +1280,9 @@ void rendering_deinitialize(RenderingHandle* rendering)
         rendering->textures[i].resource = 0;
     }
     metal_release(rendering->sampler_state);
+    metal_release(rendering->blur_sampler_state);
     metal_release(rendering->rect_pipeline);
+    metal_release(rendering->blur_pipeline);
     metal_release(rendering->library);
     metal_release(rendering->command_queue);
     metal_release(rendering->device);

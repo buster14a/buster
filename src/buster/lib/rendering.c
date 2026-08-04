@@ -199,9 +199,15 @@ BUSTER_TEST_F_DECL RenderingVulkanDeviceSelection rendering_vulkan_select_device
 #include <buster/lib/rendering/null.c>
 #endif
 
-BUSTER_GLOBAL_LOCAL bool rendering_scale_is_valid(RenderingScale scale)
+bool rendering_scale_is_valid(RenderingScale scale)
 {
-    return scale.x > 0.0f && scale.y > 0.0f;
+    f32 maximum_finite_f32 = 3.402823466e+38f;
+    return scale.x > 0.0f && scale.y > 0.0f && scale.x == scale.x && scale.y == scale.y && scale.x <= maximum_finite_f32 && scale.y <= maximum_finite_f32;
+}
+
+BUSTER_TEST_F_DECL bool rendering_vulkan_device_functions_loaded_for_test(bool core_loaded, bool clear_attachments_loaded, bool blit_image_loaded)
+{
+    return core_loaded && clear_attachments_loaded && blit_image_loaded;
 }
 
 BUSTER_GLOBAL_LOCAL s32 rendering_clip_coordinate(f64 value, bool round_up)
@@ -248,6 +254,10 @@ bool rendering_clip_rect_is_empty(RenderingClipRect rect)
 
 RenderingClipRect rendering_clip_rect_intersect(RenderingClipRect a, RenderingClipRect b)
 {
+    if (rendering_clip_rect_is_empty(a) || rendering_clip_rect_is_empty(b))
+    {
+        return (RenderingClipRect){0};
+    }
     RenderingClipRect result = {
         .x0 = a.x0 > b.x0 ? a.x0 : b.x0,
         .y0 = a.y0 > b.y0 ? a.y0 : b.y0,
@@ -269,7 +279,7 @@ RenderingClipRect rendering_clip_rect_from_f32(F32Interval2 rect, RenderingScale
     f64 x1 = (f64)rect.x1 * (f64)scale.x;
     f64 y0 = (f64)rect.y0 * (f64)scale.y;
     f64 y1 = (f64)rect.y1 * (f64)scale.y;
-    if (x0 != x0 || x1 != x1 || y0 != y0 || y1 != y1)
+    if (x0 != x0 || x1 != x1 || y0 != y0 || y1 != y1 || rect.x1 <= rect.x0 || rect.y1 <= rect.y0)
     {
         return result;
     }
@@ -297,6 +307,190 @@ BUSTER_GLOBAL_LOCAL void rendering_command_stream_mark_overflow(RenderingCommand
     {
         stream->overflowed = true;
     }
+}
+
+void rendering_command_stream_mark_failure(RenderingCommandStream* stream)
+{
+    if (stream)
+    {
+        stream->render_failed = true;
+    }
+}
+
+bool rendering_command_stream_is_valid(RenderingCommandStream* stream)
+{
+    return stream && !stream->overflowed && !stream->render_failed;
+}
+
+void rendering_backend_trace_begin(RenderingCommandStream* stream, RenderingBackendKind backend)
+{
+    if (!stream)
+    {
+        return;
+    }
+    stream->backend_trace = (RenderingBackendExecutionTrace){
+        .backend = backend,
+        .valid = true,
+        .consumed_order_preserved = true,
+        .resources_snapshot = true,
+        .target_boundaries = true,
+        .descriptor_snapshots = backend == RENDERING_BACKEND_VULKAN || backend == RENDERING_BACKEND_D3D12,
+    };
+}
+
+void rendering_backend_trace_record_command(RenderingCommandStream* stream, u32 command_index)
+{
+    if (!stream)
+    {
+        return;
+    }
+    RenderingBackendExecutionTrace* trace = &stream->backend_trace;
+    if (command_index != trace->consumed_command_count)
+    {
+        trace->consumed_order_preserved = false;
+    }
+    trace->consumed_command_count += 1;
+    trace->backend_executed = true;
+}
+
+bool rendering_backend_trace_preflight(RenderingCommandStream* stream)
+{
+    if (!stream || !rendering_command_stream_is_valid(stream))
+    {
+        if (stream)
+        {
+            stream->backend_trace.valid = false;
+        }
+        return false;
+    }
+    for (u32 command_index = 0; command_index < stream->command_count; command_index += 1)
+    {
+        rendering_backend_trace_command(stream, command_index, stream->commands[command_index]);
+        if (!rendering_command_stream_is_valid(stream))
+        {
+            break;
+        }
+    }
+    return rendering_command_stream_is_valid(stream) && stream->backend_trace.valid;
+}
+
+bool rendering_backend_trace_validate_common(RenderingCommandStream* stream, u32 command_index, RenderingCommand command)
+{
+    bool valid = stream && command_index < stream->command_count;
+    if (valid)
+    {
+        switch (command.kind)
+        {
+        case RENDERING_COMMAND_RECT:
+            valid = command.pipeline < BUSTER_PIPELINE_COUNT && command.target == RENDERING_TARGET_BACKBUFFER;
+            if (valid && rendering_command_stream_command_ends_batch(stream, command_index))
+            {
+                valid = command.batch_index < stream->batch_count;
+                if (valid)
+                {
+                    RenderingBatch batch = stream->batches[command.batch_index];
+                    valid = batch.pipeline < BUSTER_PIPELINE_COUNT && batch.target == RENDERING_TARGET_BACKBUFFER &&
+                            memcmp(&batch.resources, &command.resources, sizeof(batch.resources)) == 0 && rendering_clip_rect_equal(batch.clip, command.clip);
+                }
+            }
+            break;
+        case RENDERING_COMMAND_RESOURCE:
+            valid = command.resource_slot < RENDERING_RESOURCE_SLOT_COUNT && command.target == RENDERING_TARGET_BACKBUFFER;
+            break;
+        case RENDERING_COMMAND_TARGET:
+            valid = command.target == RENDERING_TARGET_BACKBUFFER;
+            break;
+        case RENDERING_COMMAND_BACKGROUND_BLUR:
+        {
+            RenderingBlurPlan plan = rendering_blur_plan_make(stream->target_size, command.blur_rect, command.blur_radius);
+            // A clipped-out blur is a successful no-op, just like a rect under
+            // an empty scissor.  Non-empty malformed plans remain failures.
+            valid = command.target == RENDERING_TARGET_BACKBUFFER && (plan.valid || rendering_clip_rect_is_empty(command.blur_rect));
+            if (valid && plan.valid && plan.radius)
+            {
+                stream->backend_trace.blur_occurrence += 1;
+                stream->backend_trace.blur_pass_count += 3;
+                stream->backend_trace.blur_capture_pass_count += 1;
+                stream->backend_trace.blur_horizontal_pass_count += 1;
+                stream->backend_trace.blur_vertical_pass_count += 1;
+                stream->backend_trace.state_restore_count += 1;
+            }
+            break;
+        }
+        case RENDERING_COMMAND_CLIP_PUSH:
+        case RENDERING_COMMAND_CLIP_POP:
+        case RENDERING_COMMAND_FLUSH:
+            break;
+        case RENDERING_COMMAND_KIND_COUNT:
+            valid = false;
+            break;
+        }
+    }
+    if (!valid && stream)
+    {
+        stream->backend_trace.valid = false;
+        rendering_command_stream_mark_failure(stream);
+    }
+    return valid;
+}
+
+void rendering_backend_trace_copy_result(RenderingBackendReplayResult* result, RenderingCommandStream* stream)
+{
+    if (!result || !stream)
+    {
+        return;
+    }
+    RenderingBackendExecutionTrace trace = stream->backend_trace;
+    result->backend = trace.backend;
+    result->valid = result->valid && trace.valid;
+    result->blur_pass_count = trace.blur_pass_count;
+    result->blur_capture_pass_count = trace.blur_capture_pass_count;
+    result->blur_horizontal_pass_count = trace.blur_horizontal_pass_count;
+    result->blur_vertical_pass_count = trace.blur_vertical_pass_count;
+    result->descriptor_snapshot_count = trace.descriptor_snapshot_count;
+    result->state_restore_count = trace.state_restore_count;
+    result->consumed_command_count = trace.consumed_command_count;
+    result->resources_snapshot = result->resources_snapshot && trace.resources_snapshot;
+    result->target_boundaries = result->target_boundaries && trace.target_boundaries;
+    result->state_restored = result->state_restored && trace.state_restored;
+    result->backend_executed = trace.backend_executed;
+    result->consumed_order_preserved = trace.consumed_order_preserved;
+    result->failure_propagated = trace.failure_propagated;
+    result->submitted = trace.submitted;
+    result->presented = trace.presented;
+    result->descriptor_snapshots = trace.descriptor_snapshots;
+    result->error_frame = trace.error_frame;
+}
+
+void rendering_backend_trace_finish(RenderingCommandStream* stream, bool submitted, bool presented, bool error_frame)
+{
+    if (!stream)
+    {
+        return;
+    }
+    RenderingBackendExecutionTrace* trace = &stream->backend_trace;
+    // An invalid stream is never replayed. GPU backends submit one complete
+    // magenta clear as the deterministic error frame; null records failure
+    // without pretending that a submission or presentation happened.
+    trace->valid = trace->valid && rendering_command_stream_is_valid(stream);
+    trace->state_restored = trace->valid && trace->state_restore_count == trace->blur_occurrence;
+    trace->submitted = submitted;
+    trace->presented = presented;
+    trace->error_frame = error_frame || !trace->valid;
+    trace->failure_propagated = !trace->valid;
+}
+
+void rendering_frame_error_commit(bool* last_frame_error, bool frame_error)
+{
+    if (last_frame_error)
+    {
+        *last_frame_error = frame_error;
+    }
+}
+
+bool rendering_frame_error_query(bool* last_frame_error)
+{
+    return last_frame_error && *last_frame_error;
 }
 
 BUSTER_GLOBAL_LOCAL void rendering_command_stream_ensure_clip_root(RenderingCommandStream* stream)
@@ -334,10 +528,23 @@ void rendering_command_stream_begin(RenderingCommandStream* stream, RenderingWin
     stream->command_count = 0;
     stream->batch_count = 0;
     stream->clip_depth = 1;
+    stream->clip_overflow_depth = 0;
     stream->vertex_count = 0;
     stream->index_count = 0;
+    stream->target = RENDERING_TARGET_BACKBUFFER;
     stream->force_new_batch = true;
     stream->overflowed = false;
+    stream->render_failed = false;
+    stream->backend_trace = (RenderingBackendExecutionTrace){0};
+    stream->frame_active = true;
+    if (!stream->resources_initialized)
+    {
+        for (u32 slot = 0; slot < RENDERING_RESOURCE_SLOT_COUNT; slot += 1)
+        {
+            stream->resources.textures[slot] = (TextureIndex){.value = UINT32_MAX};
+        }
+        stream->resources_initialized = true;
+    }
     stream->clip_stack[0] = rendering_clip_rect_target(target_size);
     if (stream->vertex_cpu)
     {
@@ -357,6 +564,7 @@ void rendering_command_stream_set_scale(RenderingCommandStream* stream, Renderin
     }
     stream->scale = rendering_scale_is_valid(scale) ? scale : (RenderingScale){.x = 1.0f, .y = 1.0f};
     stream->clip_depth = 1;
+    stream->clip_overflow_depth = 0;
     stream->clip_stack[0] = rendering_clip_rect_target(stream->target_size);
     stream->force_new_batch = true;
 }
@@ -370,7 +578,12 @@ void rendering_command_stream_push_clip(RenderingCommandStream* stream, F32Inter
     rendering_command_stream_ensure_clip_root(stream);
     if (stream->clip_depth >= RENDERING_MAX_CLIP_DEPTH)
     {
+        if (stream->clip_overflow_depth != UINT32_MAX)
+        {
+            stream->clip_overflow_depth += 1;
+        }
         rendering_command_stream_mark_overflow(stream);
+        rendering_command_stream_record_clip(stream, RENDERING_COMMAND_CLIP_PUSH, stream->clip_stack[stream->clip_depth - 1]);
         return;
     }
     RenderingClipRect requested = rendering_clip_rect_from_f32(rect, stream->scale, stream->target_size);
@@ -388,6 +601,12 @@ void rendering_command_stream_pop_clip(RenderingCommandStream* stream)
         return;
     }
     rendering_command_stream_ensure_clip_root(stream);
+    if (stream->clip_overflow_depth)
+    {
+        stream->clip_overflow_depth -= 1;
+        rendering_command_stream_record_clip(stream, RENDERING_COMMAND_CLIP_POP, stream->clip_stack[stream->clip_depth - 1]);
+        return;
+    }
     if (stream->clip_depth > 1)
     {
         stream->clip_depth -= 1;
@@ -407,6 +626,7 @@ void rendering_command_stream_reset_clip(RenderingCommandStream* stream)
         return;
     }
     stream->clip_depth = 1;
+    stream->clip_overflow_depth = 0;
     stream->clip_stack[0] = rendering_clip_rect_target(stream->target_size);
     rendering_command_stream_record_flush(stream);
 }
@@ -441,9 +661,52 @@ BUSTER_GLOBAL_LOCAL bool rendering_command_stream_push_batch(RenderingCommandStr
         .index_count = command.index_count,
         .texture = command.texture,
         .clip = command.clip,
+        .resources = command.resources,
+        .target = command.target,
     };
     stream->batch_count += 1;
     return true;
+}
+
+BUSTER_TEST_F_DECL bool rendering_command_stream_rect_allocation_fits(RenderingCommandStream* stream, BusterPipeline pipeline, TextureIndex texture,
+                                                                       u32 first_index, u32 index_count, u64 vertex_bytes, u32 vertex_count)
+{
+    if (!stream || !rendering_command_stream_is_valid(stream) || pipeline >= BUSTER_PIPELINE_COUNT || stream->command_count >= RENDERING_MAX_DRAW_COUNT ||
+        stream->vertex_count > RENDERING_MAX_VERTEX_COUNT || vertex_count > RENDERING_MAX_VERTEX_COUNT - stream->vertex_count || !stream->vertex_cpu ||
+        !stream->index_cpu || !rendering_arena_allocation_fits(stream->vertex_cpu, vertex_bytes, 16) ||
+        stream->index_count > RENDERING_MAX_INDEX_COUNT || index_count > RENDERING_MAX_INDEX_COUNT - stream->index_count ||
+        first_index > RENDERING_MAX_INDEX_COUNT || index_count > RENDERING_MAX_INDEX_COUNT - first_index ||
+        !rendering_arena_allocation_fits(stream->index_cpu, (u64)index_count * sizeof(u32), BUSTER_ALIGN_OF(u32)))
+    {
+        return false;
+    }
+
+    rendering_command_stream_ensure_clip_root(stream);
+    RenderingCommand command = {
+        .kind = RENDERING_COMMAND_RECT,
+        .pipeline = pipeline,
+        .first_index = first_index,
+        .index_count = index_count,
+        .texture = texture,
+        .clip = stream->clip_stack[stream->clip_depth - 1],
+        .resources = stream->resources,
+        .target = stream->target,
+    };
+    if (index_count == 0 || rendering_clip_rect_is_empty(command.clip))
+    {
+        return true;
+    }
+
+    bool compatible = !stream->force_new_batch && stream->batch_count != 0;
+    if (compatible)
+    {
+        RenderingBatch* previous = &stream->batches[stream->batch_count - 1];
+        compatible = previous->pipeline == command.pipeline && previous->texture.value == command.texture.value &&
+                     rendering_clip_rect_equal(previous->clip, command.clip) && previous->target == command.target &&
+                     memcmp(&previous->resources, &command.resources, sizeof(command.resources)) == 0 && previous->index_count <= UINT32_MAX - previous->first_index &&
+                     previous->first_index + previous->index_count == command.first_index && index_count <= UINT32_MAX - previous->index_count;
+    }
+    return compatible || stream->batch_count < RENDERING_MAX_BATCH_COUNT;
 }
 
 void rendering_command_stream_record_rect(RenderingCommandStream* stream, BusterPipeline pipeline, TextureIndex texture, u32 first_index,
@@ -451,6 +714,20 @@ void rendering_command_stream_record_rect(RenderingCommandStream* stream, Buster
 {
     if (!stream)
     {
+        return;
+    }
+
+    if (pipeline >= BUSTER_PIPELINE_COUNT)
+    {
+        rendering_command_stream_mark_overflow(stream);
+        stream->force_new_batch = true;
+        return;
+    }
+
+    if (first_index > RENDERING_MAX_INDEX_COUNT || index_count > RENDERING_MAX_INDEX_COUNT - first_index)
+    {
+        rendering_command_stream_mark_overflow(stream);
+        stream->force_new_batch = true;
         return;
     }
 
@@ -463,14 +740,13 @@ void rendering_command_stream_record_rect(RenderingCommandStream* stream, Buster
         .index_count = index_count,
         .texture = texture,
         .clip = clip,
+        .resources = stream->resources,
+        .target = stream->target,
+        .batch_index = UINT32_MAX,
     };
-    if (!rendering_command_stream_push_command(stream, command))
-    {
-        return;
-    }
-
     if (index_count == 0 || rendering_clip_rect_is_empty(clip))
     {
+        rendering_command_stream_push_command(stream, command);
         stream->force_new_batch = true;
         return;
     }
@@ -480,17 +756,36 @@ void rendering_command_stream_record_rect(RenderingCommandStream* stream, Buster
     {
         RenderingBatch* previous = &stream->batches[stream->batch_count - 1];
         compatible = previous->pipeline == command.pipeline && previous->texture.value == command.texture.value &&
-                     rendering_clip_rect_equal(previous->clip, command.clip) && previous->first_index + previous->index_count == command.first_index;
+                     rendering_clip_rect_equal(previous->clip, command.clip) && previous->target == command.target &&
+                     memcmp(&previous->resources, &command.resources, sizeof(command.resources)) == 0 && previous->index_count <= UINT32_MAX - previous->first_index &&
+                     previous->first_index + previous->index_count == command.first_index && index_count <= UINT32_MAX - previous->index_count;
     }
+    if (!compatible && stream->batch_count >= RENDERING_MAX_BATCH_COUNT)
+    {
+        rendering_command_stream_mark_overflow(stream);
+        stream->force_new_batch = true;
+        return;
+    }
+    if (!rendering_command_stream_push_command(stream, command))
+    {
+        return;
+    }
+    bool batched = false;
     if (compatible)
     {
         stream->batches[stream->batch_count - 1].index_count += index_count;
+        stream->commands[stream->command_count - 1].batch_index = stream->batch_count - 1;
+        batched = true;
     }
     else
     {
-        rendering_command_stream_push_batch(stream, command);
+        if (rendering_command_stream_push_batch(stream, command))
+        {
+            stream->commands[stream->command_count - 1].batch_index = stream->batch_count - 1;
+            batched = true;
+        }
     }
-    stream->force_new_batch = false;
+    stream->force_new_batch = !batched;
 }
 
 void rendering_command_stream_record_clip(RenderingCommandStream* stream, RenderingCommandKind kind, RenderingClipRect clip)
@@ -511,6 +806,395 @@ void rendering_command_stream_record_flush(RenderingCommandStream* stream)
     }
     rendering_command_stream_push_command(stream, (RenderingCommand){.kind = RENDERING_COMMAND_FLUSH, .pipeline = BUSTER_PIPELINE_RECT});
     stream->force_new_batch = true;
+}
+
+bool rendering_command_stream_set_texture_binding(RenderingCommandStream* stream, u32 slot, TextureIndex texture)
+{
+    if (!stream || slot >= RENDERING_RESOURCE_SLOT_COUNT)
+    {
+        if (stream)
+        {
+            rendering_command_stream_mark_overflow(stream);
+        }
+        return false;
+    }
+
+    stream->resources.textures[slot] = texture;
+    stream->resources_initialized = true;
+    if (stream->frame_active)
+    {
+        RenderingCommand command = {
+            .kind = RENDERING_COMMAND_RESOURCE,
+            .pipeline = BUSTER_PIPELINE_RECT,
+            .texture = texture,
+            .resources = stream->resources,
+            .target = stream->target,
+            .resource_slot = slot,
+            .batch_index = UINT32_MAX,
+        };
+        if (!rendering_command_stream_push_command(stream, command))
+        {
+            return false;
+        }
+        stream->force_new_batch = true;
+    }
+    return true;
+}
+
+bool rendering_command_stream_record_target(RenderingCommandStream* stream, u32 target)
+{
+    if (!stream || target != RENDERING_TARGET_BACKBUFFER)
+    {
+        if (stream)
+        {
+            rendering_command_stream_mark_overflow(stream);
+        }
+        return false;
+    }
+    stream->target = target;
+    if (!rendering_command_stream_push_command(stream, (RenderingCommand){
+                                                         .kind = RENDERING_COMMAND_TARGET,
+                                                         .pipeline = BUSTER_PIPELINE_RECT,
+                                                         .target = target,
+                                                         .resources = stream->resources,
+                                                         .batch_index = UINT32_MAX,
+                                                     }))
+    {
+        return false;
+    }
+    stream->force_new_batch = true;
+    return true;
+}
+
+bool rendering_command_stream_record_background_blur(RenderingCommandStream* stream, F32Interval2 rect, u32 radius)
+{
+    if (!stream)
+    {
+        return false;
+    }
+    rendering_command_stream_ensure_clip_root(stream);
+    RenderingClipRect requested = rendering_clip_rect_from_f32(rect, stream->scale, stream->target_size);
+    RenderingClipRect blur_rect = rendering_clip_rect_intersect(stream->clip_stack[stream->clip_depth - 1], requested);
+    if (rendering_clip_rect_is_empty(blur_rect))
+    {
+        return true;
+    }
+    if (radius > RENDERING_MAX_BLUR_RADIUS)
+    {
+        radius = RENDERING_MAX_BLUR_RADIUS;
+    }
+    RenderingCommand command = {
+        .kind = RENDERING_COMMAND_BACKGROUND_BLUR,
+        .pipeline = BUSTER_PIPELINE_RECT,
+        .clip = stream->clip_stack[stream->clip_depth - 1],
+        .blur_rect = blur_rect,
+        .blur_radius = radius,
+        .resources = stream->resources,
+        .target = stream->target,
+        .batch_index = UINT32_MAX,
+    };
+    if (!rendering_command_stream_push_command(stream, command))
+    {
+        return false;
+    }
+    stream->force_new_batch = true;
+    return true;
+}
+
+RenderingBlurDimensions rendering_blur_dimensions_make(RenderingWindowSize target_size)
+{
+    RenderingBlurDimensions result = {
+        .source_width = target_size.width,
+        .source_height = target_size.height,
+        .half_width = target_size.width / 2 + target_size.width % 2,
+        .half_height = target_size.height / 2 + target_size.height % 2,
+        .valid = false,
+    };
+    if (!result.source_width || !result.source_height || result.source_width > (u32)INT32_MAX || result.source_height > (u32)INT32_MAX || !result.half_width ||
+        !result.half_height || result.half_width > UINT32_MAX / result.half_height)
+    {
+        return result;
+    }
+    result.valid = true;
+    return result;
+}
+
+RenderingBlurDescriptorBindings rendering_blur_descriptor_bindings(u32 occurrence)
+{
+    RenderingBlurDescriptorBindings result = {0};
+    if (occurrence >= RENDERING_MAX_DRAW_COUNT || RENDERING_MAX_BLUR_PASS_SET_COUNT < 2)
+    {
+        return result;
+    }
+    result.horizontal = occurrence * 3;
+    result.vertical = result.horizontal + 1;
+    result.downsample = result.horizontal + 2;
+    result.valid = true;
+    result.stable = true;
+    return result;
+}
+
+RenderingDescriptorRange rendering_descriptor_range_make(u32 descriptor_base, u32 window_slot, u32 window_count, u32 window_length)
+{
+    RenderingDescriptorRange result = {0};
+    if (window_slot >= window_count || window_length > UINT32_MAX - descriptor_base ||
+        window_slot > (UINT32_MAX - descriptor_base) / window_length)
+    {
+        return result;
+    }
+    result.base = descriptor_base + window_slot * window_length;
+    result.length = window_length;
+    result.valid = true;
+    return result;
+}
+
+bool rendering_arena_allocation_fits(Arena* arena, u64 size, u64 alignment)
+{
+    if (!arena || !BUSTER_IS_POWER_OF_TWO(alignment) || arena->position < arena_minimum_position || arena->position > arena->reserved_size ||
+        arena->granularity == 0 || !BUSTER_IS_POWER_OF_TWO(arena->granularity))
+    {
+        return false;
+    }
+
+    u64 alignment_mask = alignment - 1;
+    if (arena->position > UINT64_MAX - alignment_mask)
+    {
+        return false;
+    }
+    u64 aligned_offset = (arena->position + alignment_mask) & ~alignment_mask;
+    if (aligned_offset > arena->reserved_size || size > arena->reserved_size - aligned_offset || size > UINT64_MAX - aligned_offset)
+    {
+        return false;
+    }
+    u64 aligned_size_after = aligned_offset + size;
+    u64 granularity_mask = arena->granularity - 1;
+    if (aligned_size_after > UINT64_MAX - granularity_mask)
+    {
+        return false;
+    }
+    u64 target_committed_size = (aligned_size_after + granularity_mask) & ~granularity_mask;
+    return target_committed_size <= arena->reserved_size;
+}
+
+RenderingBlurPlan rendering_blur_plan_make(RenderingWindowSize target_size, RenderingClipRect rect, u32 radius)
+{
+    RenderingBlurDimensions dimensions = rendering_blur_dimensions_make(target_size);
+    RenderingBlurPlan result = {
+        .rect = rect,
+        .source_width = dimensions.source_width,
+        .source_height = dimensions.source_height,
+        .half_width = dimensions.half_width,
+        .half_height = dimensions.half_height,
+        .radius = radius > RENDERING_MAX_BLUR_RADIUS ? RENDERING_MAX_BLUR_RADIUS : radius,
+        .pass_count = 0,
+        .captures_current_target = false,
+        .valid = false,
+    };
+    if (rendering_clip_rect_is_empty(rect) || !dimensions.valid)
+    {
+        return result;
+    }
+    result.captures_current_target = true;
+    result.pass_count = result.radius ? 2 : 0;
+    result.valid = true;
+    return result;
+}
+
+bool rendering_command_stream_command_ends_batch(RenderingCommandStream* stream, u32 command_index)
+{
+    if (!stream || command_index >= stream->command_count || stream->commands[command_index].kind != RENDERING_COMMAND_RECT)
+    {
+        return false;
+    }
+    u32 batch_index = stream->commands[command_index].batch_index;
+    if (batch_index == UINT32_MAX || batch_index >= stream->batch_count)
+    {
+        return false;
+    }
+    if (command_index + 1 < stream->command_count)
+    {
+        RenderingCommand next = stream->commands[command_index + 1];
+        if (next.kind == RENDERING_COMMAND_RECT && next.batch_index == batch_index)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+u32 rendering_command_stream_replay(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity)
+{
+    if (!rendering_command_stream_is_valid(stream))
+    {
+        return 0;
+    }
+    u32 event_count = 0;
+    for (u32 command_index = 0; command_index < stream->command_count; command_index += 1)
+    {
+        RenderingCommand command = stream->commands[command_index];
+        RenderingReplayEvent event = {
+            .kind = RENDERING_REPLAY_EVENT_KIND_COUNT,
+            .pipeline = command.pipeline,
+            .command_index = command_index,
+            .batch_index = command.batch_index,
+            .texture = command.texture,
+            .clip = command.clip,
+            .blur_rect = command.blur_rect,
+            .resources = command.resources,
+            .target = command.target,
+            .radius = command.blur_radius,
+        };
+        bool emit = true;
+        switch (command.kind)
+        {
+        case RENDERING_COMMAND_RECT:
+            if (rendering_command_stream_command_ends_batch(stream, command_index))
+            {
+                event.kind = RENDERING_REPLAY_DRAW;
+                if (command.batch_index < stream->batch_count)
+                {
+                    RenderingBatch batch = stream->batches[command.batch_index];
+                    event.pipeline = batch.pipeline;
+                    event.batch_index = command.batch_index;
+                    event.texture = batch.texture;
+                    event.clip = batch.clip;
+                    event.resources = batch.resources;
+                    event.target = batch.target;
+                }
+            }
+            else
+            {
+                emit = false;
+            }
+            break;
+        case RENDERING_COMMAND_CLIP_PUSH:
+            event.kind = RENDERING_REPLAY_CLIP_PUSH;
+            break;
+        case RENDERING_COMMAND_CLIP_POP:
+            event.kind = RENDERING_REPLAY_CLIP_POP;
+            break;
+        case RENDERING_COMMAND_FLUSH:
+            event.kind = RENDERING_REPLAY_FLUSH;
+            break;
+        case RENDERING_COMMAND_RESOURCE:
+            event.kind = RENDERING_REPLAY_RESOURCE;
+            break;
+        case RENDERING_COMMAND_TARGET:
+            event.kind = RENDERING_REPLAY_TARGET;
+            break;
+        case RENDERING_COMMAND_BACKGROUND_BLUR:
+            event.kind = RENDERING_REPLAY_BACKGROUND_BLUR;
+            break;
+        case RENDERING_COMMAND_KIND_COUNT:
+            emit = false;
+            break;
+        }
+        if (emit)
+        {
+            if (event_count < capacity && events)
+            {
+                events[event_count] = event;
+            }
+            event_count += 1;
+        }
+    }
+    return event_count;
+}
+
+RenderingBackendReplayResult rendering_backend_replay_policy(RenderingCommandStream* stream, RenderingBackendKind backend, RenderingReplayEvent* events,
+                                                              u32 capacity)
+{
+    RenderingBackendReplayResult result = {
+        .backend = backend,
+        .valid = false,
+        .order_preserved = false,
+        .resources_snapshot = false,
+        .target_boundaries = false,
+        .state_restored = false,
+    };
+    switch (backend)
+    {
+    case RENDERING_BACKEND_NULL:
+    case RENDERING_BACKEND_VULKAN:
+    case RENDERING_BACKEND_METAL:
+    case RENDERING_BACKEND_D3D12:
+        break;
+    case RENDERING_BACKEND_KIND_COUNT:
+        return result;
+    }
+    if (!rendering_command_stream_is_valid(stream) || !events)
+    {
+        return result;
+    }
+    u32 event_count = rendering_command_stream_replay(stream, events, capacity);
+    if (event_count > capacity)
+    {
+        return result;
+    }
+    result.valid = true;
+    result.event_count = event_count;
+    result.order_preserved = true;
+    result.resources_snapshot = true;
+    result.target_boundaries = true;
+    result.state_restored = true;
+    bool saw_blur = false;
+    bool blur_followed_by_draw = false;
+    u32 previous_command_index = 0;
+    for (u32 event_index = 0; event_index < event_count; event_index += 1)
+    {
+        RenderingReplayEvent event = events[event_index];
+        if (event_index && event.command_index <= previous_command_index)
+        {
+            result.order_preserved = false;
+        }
+        previous_command_index = event.command_index;
+        switch (event.kind)
+        {
+        case RENDERING_REPLAY_DRAW:
+            result.draw_count += 1;
+            if (event.batch_index >= stream->batch_count ||
+                memcmp(&event.resources, &stream->batches[event.batch_index].resources, sizeof(event.resources)) != 0 ||
+                event.target != stream->batches[event.batch_index].target)
+            {
+                result.resources_snapshot = false;
+            }
+            if (saw_blur)
+            {
+                blur_followed_by_draw = true;
+                saw_blur = false;
+            }
+            break;
+        case RENDERING_REPLAY_BACKGROUND_BLUR:
+            result.blur_pass_count += 3;
+            saw_blur = true;
+            break;
+        case RENDERING_REPLAY_TARGET:
+            if (event.target != RENDERING_TARGET_BACKBUFFER)
+            {
+                result.target_boundaries = false;
+            }
+            break;
+        case RENDERING_REPLAY_CLIP_PUSH:
+        case RENDERING_REPLAY_CLIP_POP:
+        case RENDERING_REPLAY_FLUSH:
+        case RENDERING_REPLAY_RESOURCE:
+            break;
+        case RENDERING_REPLAY_EVENT_KIND_COUNT:
+            result.valid = false;
+            break;
+        }
+    }
+    if (saw_blur)
+    {
+        blur_followed_by_draw = true;
+    }
+    result.state_restored = !result.blur_pass_count || blur_followed_by_draw;
+    return result;
+}
+
+bool rendering_window_has_rendering_error(RenderingWindowHandle* window)
+{
+    return rendering_window_has_rendering_error_internal(window);
 }
 
 void rendering_window_set_content_scale(RenderingWindowHandle* window, RenderingScale scale)
@@ -547,6 +1231,18 @@ void rendering_window_flush(RenderingWindowHandle* window)
     }
 }
 
+bool rendering_window_set_render_target(RenderingWindowHandle* window, u32 target)
+{
+    RenderingCommandStream* stream = window ? rendering_window_command_stream(window) : 0;
+    return rendering_command_stream_record_target(stream, target);
+}
+
+bool rendering_window_render_background_blur(RenderingWindowHandle* window, F32Interval2 rect, u32 radius)
+{
+    RenderingCommandStream* stream = window ? rendering_window_command_stream(window) : 0;
+    return rendering_command_stream_record_background_blur(stream, rect, radius);
+}
+
 #if BUSTER_USE_VULKAN || (defined(_WIN32) && BUSTER_USE_D3D12) || defined(__APPLE__)
 RenderingWindowSize rendering_window_get_size(RenderingWindowHandle* window)
 {
@@ -568,6 +1264,11 @@ TextureIndex white_texture_create(Arena* arena, RenderingHandle* rendering)
 {
     u32 white_texture_width = 1024;
     u32 white_texture_height = white_texture_width;
+    u64 white_texture_count = (u64)white_texture_width * white_texture_height;
+    if (!rendering_arena_allocation_fits(arena, white_texture_count * sizeof(u32), BUSTER_ALIGN_OF(u32)))
+    {
+        return (TextureIndex){.value = UINT32_MAX};
+    }
     u32* white_texture_buffer = arena_allocate(arena, u32, white_texture_width * white_texture_height);
     memset(white_texture_buffer, 0xff, white_texture_width * white_texture_height * sizeof(u32));
 
@@ -596,10 +1297,56 @@ FontTextureAtlas rendering_font_create(Arena* arena, RenderingHandle* rendering,
 
 #endif
 
+BUSTER_TEST_F_DECL bool rendering_command_stream_add_vertices(RenderingCommandStream* stream, ByteSlice vertex_memory, u32 vertex_count)
+{
+    if (!stream || stream->vertex_count > RENDERING_MAX_VERTEX_COUNT || vertex_count > RENDERING_MAX_VERTEX_COUNT - stream->vertex_count || !stream->vertex_cpu ||
+        (vertex_memory.length && !vertex_memory.pointer) || !rendering_arena_allocation_fits(stream->vertex_cpu, vertex_memory.length, 16))
+    {
+        if (stream)
+        {
+            rendering_command_stream_mark_overflow(stream);
+        }
+        return false;
+    }
+    if (vertex_memory.length)
+    {
+        u8* allocation = (u8*)arena_allocate_bytes(stream->vertex_cpu, vertex_memory.length, 16);
+        memcpy(allocation, vertex_memory.pointer, vertex_memory.length);
+    }
+    stream->vertex_count += vertex_count;
+    return true;
+}
+
+BUSTER_TEST_F_DECL bool rendering_command_stream_add_indices(RenderingCommandStream* stream, Sliceu32 indices)
+{
+    if (!stream || stream->index_count > RENDERING_MAX_INDEX_COUNT || indices.length > RENDERING_MAX_INDEX_COUNT - stream->index_count || !stream->index_cpu ||
+        (indices.length && !indices.pointer) || indices.length > UINT64_MAX / sizeof(*indices.pointer))
+    {
+        if (stream)
+        {
+            rendering_command_stream_mark_overflow(stream);
+        }
+        return false;
+    }
+    u64 byte_count = indices.length * sizeof(*indices.pointer);
+    if (!rendering_arena_allocation_fits(stream->index_cpu, byte_count, BUSTER_ALIGN_OF(u32)))
+    {
+        rendering_command_stream_mark_overflow(stream);
+        return false;
+    }
+    if (byte_count)
+    {
+        u32* allocation = (u32*)arena_allocate_bytes(stream->index_cpu, byte_count, BUSTER_ALIGN_OF(u32));
+        memcpy(allocation, indices.pointer, byte_count);
+    }
+    stream->index_count += (u32)indices.length;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL u32 rendering_window_pipeline_add_vertices(RenderingWindowHandle* window, BusterPipeline pipeline_index, ByteSlice vertex_memory,
                                                                u32 vertex_count)
 {
-    RenderingCommandStream* stream = rendering_window_command_stream(window);
+        RenderingCommandStream* stream = rendering_window_command_stream(window);
     if (!stream || pipeline_index >= BUSTER_PIPELINE_COUNT || stream->vertex_count > RENDERING_MAX_VERTEX_COUNT ||
         vertex_count > RENDERING_MAX_VERTEX_COUNT - stream->vertex_count || !stream->vertex_cpu)
     {
@@ -609,10 +1356,11 @@ BUSTER_GLOBAL_LOCAL u32 rendering_window_pipeline_add_vertices(RenderingWindowHa
         }
         return UINT32_MAX;
     }
-    u8* allocation = (u8*)arena_allocate_bytes(stream->vertex_cpu, vertex_memory.length, 16);
-    memcpy(allocation, vertex_memory.pointer, vertex_memory.length);
     u32 vertex_offset = stream->vertex_count;
-    stream->vertex_count += vertex_count;
+    if (!rendering_command_stream_add_vertices(stream, vertex_memory, vertex_count))
+    {
+        return UINT32_MAX;
+    }
     return vertex_offset;
 }
 
@@ -630,9 +1378,10 @@ BUSTER_GLOBAL_LOCAL u32 rendering_window_pipeline_add_indices(RenderingWindowHan
         return UINT32_MAX;
     }
     u32 first_index = stream->index_count;
-    u32* allocation = arena_allocate(stream->index_cpu, u32, indices.length);
-    memcpy(allocation, indices.pointer, indices.length * sizeof(*indices.pointer));
-    stream->index_count += (u32)indices.length;
+    if (!rendering_command_stream_add_indices(stream, indices))
+    {
+        return UINT32_MAX;
+    }
     return first_index;
 }
 
@@ -724,19 +1473,61 @@ void rendering_window_render_rect(RenderingWindowHandle* window, RectDraw draw)
         },
     };
 
+    u32 first_index = stream->index_count;
+    if (!rendering_command_stream_rect_allocation_fits(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = draw.texture_index}, first_index, 6,
+                                                        sizeof(vertices), BUSTER_ARRAY_LENGTH(vertices)))
+    {
+        rendering_command_stream_mark_overflow(stream);
+        return;
+    }
+    u64 vertex_position = stream->vertex_cpu->position;
+    u64 index_position = stream->index_cpu->position;
+    u32 vertex_count = stream->vertex_count;
+    u32 index_count = stream->index_count;
+    u32 command_count = stream->command_count;
+    u32 batch_count = stream->batch_count;
+    bool force_new_batch = stream->force_new_batch;
+    u32 previous_batch_index_count = batch_count ? stream->batches[batch_count - 1].index_count : 0;
     u32 vertex_offset =
         rendering_window_pipeline_add_vertices(window, BUSTER_PIPELINE_RECT, BUSTER_ARRAY_TO_BYTE_SLICE(vertices), BUSTER_ARRAY_LENGTH(vertices));
     if (vertex_offset == UINT32_MAX)
     {
+        arena_set_position(stream->vertex_cpu, vertex_position);
+        arena_set_position(stream->index_cpu, index_position);
+        stream->vertex_count = vertex_count;
+        stream->index_count = index_count;
+        stream->force_new_batch = force_new_batch;
         return;
     }
     u32 indices[] = {
         vertex_offset + 0, vertex_offset + 1, vertex_offset + 2, vertex_offset + 1, vertex_offset + 3, vertex_offset + 2,
     };
-    u32 first_index = rendering_window_pipeline_add_indices(window, BUSTER_PIPELINE_RECT, (Sliceu32)BUSTER_ARRAY_TO_SLICE(indices));
-    if (first_index != UINT32_MAX)
+    u32 recorded_first_index = rendering_window_pipeline_add_indices(window, BUSTER_PIPELINE_RECT, (Sliceu32)BUSTER_ARRAY_TO_SLICE(indices));
+    if (recorded_first_index != UINT32_MAX)
     {
-        rendering_command_stream_record_rect(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = draw.texture_index}, first_index, BUSTER_ARRAY_LENGTH(indices));
+        rendering_command_stream_record_rect(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = draw.texture_index}, recorded_first_index,
+                                             BUSTER_ARRAY_LENGTH(indices));
+        if (stream->command_count == command_count || stream->overflowed)
+        {
+            arena_set_position(stream->vertex_cpu, vertex_position);
+            arena_set_position(stream->index_cpu, index_position);
+            stream->vertex_count = vertex_count;
+            stream->index_count = index_count;
+            stream->command_count = command_count;
+            stream->batch_count = batch_count;
+            if (batch_count)
+            {
+                stream->batches[batch_count - 1].index_count = previous_batch_index_count;
+            }
+            stream->force_new_batch = force_new_batch;
+            rendering_command_stream_mark_overflow(stream);
+        }
+    }
+    else
+    {
+        arena_set_position(stream->vertex_cpu, vertex_position);
+        stream->vertex_count = vertex_count;
+        stream->force_new_batch = force_new_batch;
     }
 }
 
@@ -776,10 +1567,30 @@ void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHan
             {.p0 = p0, .uv0 = uv0, .extent = extent, .uv_extent = uv_extent, .texture_index = texture_index, .colors = {color, color, color, color}, .softness = 1.0},
             {.p0 = p0, .uv0 = uv0, .extent = extent, .uv_extent = uv_extent, .texture_index = texture_index, .colors = {color, color, color, color}, .softness = 1.0},
         };
+        u32 text_first_index = stream->index_count;
+        if (!rendering_command_stream_rect_allocation_fits(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = texture_index}, text_first_index, 6,
+                                                            sizeof(vertices), BUSTER_ARRAY_LENGTH(vertices)))
+        {
+            rendering_command_stream_mark_overflow(stream);
+            return;
+        }
+        u64 text_vertex_position = stream->vertex_cpu->position;
+        u64 text_index_position = stream->index_cpu->position;
+        u32 text_vertex_count = stream->vertex_count;
+        u32 text_index_count = stream->index_count;
+        u32 text_command_count = stream->command_count;
+        u32 text_batch_count = stream->batch_count;
+        bool text_force_new_batch = stream->force_new_batch;
+        u32 text_previous_batch_index_count = text_batch_count ? stream->batches[text_batch_count - 1].index_count : 0;
         u32 vertex_offset =
             rendering_window_pipeline_add_vertices(window, BUSTER_PIPELINE_RECT, BUSTER_ARRAY_TO_BYTE_SLICE(vertices), BUSTER_ARRAY_LENGTH(vertices));
         if (vertex_offset == UINT32_MAX)
         {
+            arena_set_position(stream->vertex_cpu, text_vertex_position);
+            arena_set_position(stream->index_cpu, text_index_position);
+            stream->vertex_count = text_vertex_count;
+            stream->index_count = text_index_count;
+            stream->force_new_batch = text_force_new_batch;
             return;
         }
         u32 indices[] = {vertex_offset + 0, vertex_offset + 1, vertex_offset + 2, vertex_offset + 1, vertex_offset + 3, vertex_offset + 2};
@@ -788,6 +1599,31 @@ void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHan
         {
             rendering_command_stream_record_rect(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = texture_index}, first_index,
                                                  BUSTER_ARRAY_LENGTH(indices));
+            if (stream->command_count == text_command_count || stream->overflowed)
+            {
+                arena_set_position(stream->vertex_cpu, text_vertex_position);
+                arena_set_position(stream->index_cpu, text_index_position);
+                stream->vertex_count = text_vertex_count;
+                stream->index_count = text_index_count;
+                stream->command_count = text_command_count;
+                stream->batch_count = text_batch_count;
+                if (text_batch_count)
+                {
+                    stream->batches[text_batch_count - 1].index_count = text_previous_batch_index_count;
+                }
+                stream->force_new_batch = text_force_new_batch;
+                rendering_command_stream_mark_overflow(stream);
+                return;
+            }
+        }
+        else
+        {
+            arena_set_position(stream->vertex_cpu, text_vertex_position);
+            arena_set_position(stream->index_cpu, text_index_position);
+            stream->vertex_count = text_vertex_count;
+            stream->index_count = text_index_count;
+            stream->force_new_batch = text_force_new_batch;
+            return;
         }
 
         s32 kerning = 0;
@@ -799,15 +1635,44 @@ void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHan
     }
 }
 
+RenderingUvCoordinate rendering_rect_uv_for_quad(RectVertex vertex, u32 quad_vertex_index)
+{
+    RenderingUvCoordinate result = {0};
+    static const f32 quad_coordinates[4][2] = {
+        {-1.0f, -1.0f},
+        {1.0f, -1.0f},
+        {-1.0f, 1.0f},
+        {1.0f, 1.0f},
+    };
+    if (quad_vertex_index >= BUSTER_ARRAY_LENGTH(quad_coordinates))
+    {
+        return result;
+    }
+    f32 u = quad_coordinates[quad_vertex_index][0] * 0.5f + 0.5f;
+    f32 v = quad_coordinates[quad_vertex_index][1] * 0.5f + 0.5f;
+    result.x = float2_element(vertex.uv0, 0) + float2_element(vertex.uv_extent, 0) * u;
+    result.y = float2_element(vertex.uv0, 1) + float2_element(vertex.uv_extent, 1) * v;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool rendering_blur_validate(Arena* scratch, u8* pixels, u32 width, u32 height, u32 stride, u32 channels, u32 radius)
 {
-    BUSTER_UNUSED(radius);
-    if (!width || !height || !pixels || !scratch || stride < (u64)width * channels)
+    if (!width || !height || !pixels || !scratch || !channels)
+    {
+        return false;
+    }
+    u64 row_bytes = (u64)width * channels;
+    if ((u64)stride < row_bytes)
     {
         return false;
     }
     u64 pixel_count = (u64)width * height;
-    return pixel_count <= RENDERING_MAX_BLUR_PIXELS && pixel_count <= UINT32_MAX / channels;
+    if (pixel_count > RENDERING_MAX_BLUR_PIXELS || pixel_count > UINT64_MAX / channels)
+    {
+        return false;
+    }
+    u64 byte_count = pixel_count * channels;
+    return radius == 0 || rendering_arena_allocation_fits(scratch, byte_count, 16);
 }
 
 BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 width, u32 height, u32 stride, u32 channels, u32 radius)
@@ -909,6 +1774,11 @@ TextureIndex rendering_texture_create_blurred(Arena* arena, RenderingHandle* ren
         return rendering_texture_create(rendering, source);
     }
     u64 byte_count = (u64)source.width * source.height * channels;
+    if (!rendering_arena_allocation_fits(arena, byte_count, 16))
+    {
+        return (TextureIndex){.value = UINT32_MAX};
+    }
+    u64 arena_position = arena->position;
     u8* copy = (u8*)arena_allocate_bytes(arena, byte_count, 16);
     memcpy(copy, source.pointer, byte_count);
     Arena* conflicts[] = {arena};
@@ -918,6 +1788,7 @@ TextureIndex rendering_texture_create_blurred(Arena* arena, RenderingHandle* ren
     scratch_end(scratch);
     if (!success)
     {
+        arena_set_position(arena, arena_position);
         return (TextureIndex){.value = UINT32_MAX};
     }
     source.pointer = copy;

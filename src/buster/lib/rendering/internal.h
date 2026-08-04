@@ -11,6 +11,7 @@
 #include <buster/lib/font_provider.h>
 #include <buster/lib/window.h>
 #include <buster/lib/shaders/rect_shared.h>
+#include <buster/lib/shaders/blur_shared.h>
 #include <buster/lib/shaders/paths.h>
 
 #ifndef BUSTER_USE_SLANG_SHADERS
@@ -30,6 +31,13 @@
 #endif
 
 typedef struct RectVertex RectVertex;
+typedef struct BlurConstants BlurConstants;
+typedef struct RenderingUvCoordinate RenderingUvCoordinate;
+struct RenderingUvCoordinate
+{
+    f32 x;
+    f32 y;
+};
 
 typedef enum BusterPipeline
 {
@@ -44,6 +52,16 @@ typedef enum BusterPipeline
 #define RENDERING_MAX_INDEX_COUNT (RENDERING_MAX_DRAW_COUNT * 6)
 #define RENDERING_MAX_BLUR_RADIUS (32)
 #define RENDERING_MAX_BLUR_PIXELS (4 * 1024 * 1024)
+#define RENDERING_MAX_BLUR_PASS_SET_COUNT (RENDERING_MAX_DRAW_COUNT * 3)
+#define RENDERING_MAX_WINDOW_COUNT (8)
+#define RENDERING_TARGET_BACKBUFFER (0)
+#define RENDERING_RESOURCE_SLOT_COUNT RECT_TEXTURE_SLOT_COUNT
+
+typedef struct RenderingResourceBindings RenderingResourceBindings;
+struct RenderingResourceBindings
+{
+    TextureIndex textures[RENDERING_RESOURCE_SLOT_COUNT];
+};
 
 typedef enum RenderingCommandKind
 {
@@ -51,8 +69,20 @@ typedef enum RenderingCommandKind
     RENDERING_COMMAND_CLIP_PUSH,
     RENDERING_COMMAND_CLIP_POP,
     RENDERING_COMMAND_FLUSH,
+    RENDERING_COMMAND_RESOURCE,
+    RENDERING_COMMAND_TARGET,
+    RENDERING_COMMAND_BACKGROUND_BLUR,
     RENDERING_COMMAND_KIND_COUNT,
 } RenderingCommandKind;
+
+typedef enum RenderingBackendKind
+{
+    RENDERING_BACKEND_NULL,
+    RENDERING_BACKEND_VULKAN,
+    RENDERING_BACKEND_METAL,
+    RENDERING_BACKEND_D3D12,
+    RENDERING_BACKEND_KIND_COUNT,
+} RenderingBackendKind;
 
 typedef struct RenderingCommand RenderingCommand;
 struct RenderingCommand
@@ -63,6 +93,12 @@ struct RenderingCommand
     u32 index_count;
     TextureIndex texture;
     RenderingClipRect clip;
+    RenderingResourceBindings resources;
+    RenderingClipRect blur_rect;
+    u32 batch_index;
+    u32 resource_slot;
+    u32 target;
+    u32 blur_radius;
 };
 
 typedef struct RenderingBatch RenderingBatch;
@@ -73,6 +109,34 @@ struct RenderingBatch
     u32 index_count;
     TextureIndex texture;
     RenderingClipRect clip;
+    RenderingResourceBindings resources;
+    u32 target;
+    u8 reserved[4];
+};
+
+typedef struct RenderingBackendExecutionTrace RenderingBackendExecutionTrace;
+struct RenderingBackendExecutionTrace
+{
+    RenderingBackendKind backend;
+    u32 blur_occurrence;
+    u32 blur_pass_count;
+    u32 blur_capture_pass_count;
+    u32 blur_horizontal_pass_count;
+    u32 blur_vertical_pass_count;
+    u32 descriptor_snapshot_count;
+    u32 state_restore_count;
+    u32 consumed_command_count;
+    bool valid;
+    bool backend_executed;
+    bool consumed_order_preserved;
+    bool resources_snapshot;
+    bool target_boundaries;
+    bool descriptor_snapshots;
+    bool state_restored;
+    bool submitted;
+    bool presented;
+    bool error_frame;
+    bool failure_propagated;
 };
 
 typedef struct RenderingCommandStream RenderingCommandStream;
@@ -83,16 +147,123 @@ struct RenderingCommandStream
     RenderingCommand commands[RENDERING_MAX_DRAW_COUNT];
     RenderingBatch batches[RENDERING_MAX_BATCH_COUNT];
     RenderingClipRect clip_stack[RENDERING_MAX_CLIP_DEPTH];
+    RenderingResourceBindings resources;
     RenderingScale scale;
     RenderingWindowSize target_size;
     u32 command_count;
     u32 batch_count;
     u32 clip_depth;
+    u32 clip_overflow_depth;
     u32 vertex_count;
     u32 index_count;
+    u32 target;
+    bool frame_active;
+    bool resources_initialized;
     bool force_new_batch;
     bool overflowed;
+    bool render_failed;
+    RenderingBackendExecutionTrace backend_trace;
+};
+
+typedef enum RenderingReplayEventKind
+{
+    RENDERING_REPLAY_DRAW,
+    RENDERING_REPLAY_CLIP_PUSH,
+    RENDERING_REPLAY_CLIP_POP,
+    RENDERING_REPLAY_FLUSH,
+    RENDERING_REPLAY_RESOURCE,
+    RENDERING_REPLAY_TARGET,
+    RENDERING_REPLAY_BACKGROUND_BLUR,
+    RENDERING_REPLAY_EVENT_KIND_COUNT,
+} RenderingReplayEventKind;
+
+typedef struct RenderingReplayEvent RenderingReplayEvent;
+struct RenderingReplayEvent
+{
+    RenderingReplayEventKind kind;
+    BusterPipeline pipeline;
+    u32 command_index;
+    u32 batch_index;
+    TextureIndex texture;
+    RenderingClipRect clip;
+    RenderingClipRect blur_rect;
+    RenderingResourceBindings resources;
+    u32 target;
+    u32 radius;
+};
+
+typedef struct RenderingBackendReplayResult RenderingBackendReplayResult;
+struct RenderingBackendReplayResult
+{
+    RenderingBackendKind backend;
+    u32 event_count;
+    u32 draw_count;
+    u32 blur_pass_count;
+    u32 blur_capture_pass_count;
+    u32 blur_horizontal_pass_count;
+    u32 blur_vertical_pass_count;
+    u32 descriptor_snapshot_count;
+    u32 state_restore_count;
+    u32 consumed_command_count;
+    bool valid;
+    bool order_preserved;
+    bool resources_snapshot;
+    bool target_boundaries;
+    bool state_restored;
+    bool backend_executed;
+    bool consumed_order_preserved;
+    bool failure_propagated;
+    bool submitted;
+    bool presented;
+    bool descriptor_snapshots;
+    bool error_frame;
     u8 reserved[2];
+};
+
+typedef struct RenderingBlurPlan RenderingBlurPlan;
+struct RenderingBlurPlan
+{
+    RenderingClipRect rect;
+    u32 source_width;
+    u32 source_height;
+    u32 half_width;
+    u32 half_height;
+    u32 radius;
+    u32 pass_count;
+    bool captures_current_target;
+    bool valid;
+    u8 reserved[2];
+};
+
+typedef struct RenderingBlurDimensions RenderingBlurDimensions;
+struct RenderingBlurDimensions
+{
+    u32 source_width;
+    u32 source_height;
+    u32 half_width;
+    u32 half_height;
+    bool valid;
+    u8 reserved[3];
+};
+
+typedef struct RenderingBlurDescriptorBindings RenderingBlurDescriptorBindings;
+struct RenderingBlurDescriptorBindings
+{
+    u32 horizontal;
+    u32 vertical;
+    u32 downsample;
+    bool valid;
+    bool stable;
+    u8 reserved[2];
+};
+
+typedef struct RenderingDescriptorRange RenderingDescriptorRange;
+struct RenderingDescriptorRange
+{
+    u32 base;
+    u32 length;
+    bool valid;
+    u8 reserved[3];
 };
 
 BUSTER_F_DECL RenderingCommandStream* rendering_window_command_stream(RenderingWindowHandle* window);
@@ -107,6 +278,39 @@ BUSTER_F_DECL void rendering_command_stream_record_rect(RenderingCommandStream* 
                                                          u32 index_count);
 BUSTER_F_DECL void rendering_command_stream_record_clip(RenderingCommandStream* stream, RenderingCommandKind kind, RenderingClipRect clip);
 BUSTER_F_DECL void rendering_command_stream_record_flush(RenderingCommandStream* stream);
+BUSTER_F_DECL bool rendering_command_stream_set_texture_binding(RenderingCommandStream* stream, u32 slot, TextureIndex texture);
+BUSTER_F_DECL bool rendering_command_stream_record_target(RenderingCommandStream* stream, u32 target);
+BUSTER_F_DECL bool rendering_command_stream_record_background_blur(RenderingCommandStream* stream, F32Interval2 rect, u32 radius);
+BUSTER_F_DECL bool rendering_command_stream_command_ends_batch(RenderingCommandStream* stream, u32 command_index);
+BUSTER_F_DECL void rendering_command_stream_mark_failure(RenderingCommandStream* stream);
+BUSTER_F_DECL bool rendering_command_stream_is_valid(RenderingCommandStream* stream);
+BUSTER_F_DECL void rendering_backend_trace_begin(RenderingCommandStream* stream, RenderingBackendKind backend);
+BUSTER_F_DECL void rendering_backend_trace_record_command(RenderingCommandStream* stream, u32 command_index);
+BUSTER_F_DECL void rendering_backend_trace_command(RenderingCommandStream* stream, u32 command_index, RenderingCommand command);
+BUSTER_F_DECL bool rendering_backend_trace_preflight(RenderingCommandStream* stream);
+BUSTER_F_DECL void rendering_backend_trace_finish(RenderingCommandStream* stream, bool submitted, bool presented, bool error_frame);
+BUSTER_F_DECL bool rendering_backend_trace_validate_common(RenderingCommandStream* stream, u32 command_index, RenderingCommand command);
+BUSTER_F_DECL void rendering_backend_trace_copy_result(RenderingBackendReplayResult* result, RenderingCommandStream* stream);
+BUSTER_F_DECL void rendering_frame_error_commit(bool* last_frame_error, bool frame_error);
+BUSTER_F_DECL bool rendering_frame_error_query(bool* last_frame_error);
+BUSTER_F_DECL bool rendering_window_has_rendering_error_internal(RenderingWindowHandle* window);
+BUSTER_TEST_F_DECL RenderingBlurDimensions rendering_blur_dimensions_make(RenderingWindowSize target_size);
+BUSTER_TEST_F_DECL RenderingBlurDescriptorBindings rendering_blur_descriptor_bindings(u32 occurrence);
+BUSTER_TEST_F_DECL RenderingDescriptorRange rendering_descriptor_range_make(u32 descriptor_base, u32 window_slot, u32 window_count, u32 window_length);
+BUSTER_TEST_F_DECL bool rendering_arena_allocation_fits(Arena* arena, u64 size, u64 alignment);
+BUSTER_TEST_F_DECL RenderingBlurPlan rendering_blur_plan_make(RenderingWindowSize target_size, RenderingClipRect rect, u32 radius);
+BUSTER_TEST_F_DECL u32 rendering_command_stream_replay(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity);
+BUSTER_TEST_F_DECL RenderingBackendReplayResult rendering_backend_replay_policy(RenderingCommandStream* stream, RenderingBackendKind backend,
+                                                                                  RenderingReplayEvent* events, u32 capacity);
+BUSTER_TEST_F_DECL RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity);
+BUSTER_TEST_F_DECL bool rendering_command_stream_add_vertices(RenderingCommandStream* stream, ByteSlice vertex_memory, u32 vertex_count);
+BUSTER_TEST_F_DECL bool rendering_command_stream_add_indices(RenderingCommandStream* stream, Sliceu32 indices);
+BUSTER_TEST_F_DECL bool rendering_command_stream_rect_allocation_fits(RenderingCommandStream* stream, BusterPipeline pipeline, TextureIndex texture,
+                                                                       u32 first_index, u32 index_count, u64 vertex_bytes, u32 vertex_count);
+BUSTER_TEST_F_DECL bool rendering_vulkan_device_functions_loaded_for_test(bool core_loaded, bool clear_attachments_loaded, bool blit_image_loaded);
+BUSTER_TEST_F_DECL bool rendering_window_set_size_for_test(RenderingWindowHandle* window, RenderingWindowSize size);
+BUSTER_TEST_F_DECL RenderingUvCoordinate rendering_rect_uv_for_quad(RectVertex vertex, u32 quad_vertex_index);
+BUSTER_F_DECL bool rendering_scale_is_valid(RenderingScale scale);
 
 typedef enum RenderingVulkanDeviceType
 {

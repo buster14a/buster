@@ -86,6 +86,7 @@ BUSTER_F_DECL TextureIndex rendering_texture_create(RenderingHandle* rendering, 
 BUSTER_F_DECL FontTextureAtlas rendering_font_create(Arena* arena, RenderingHandle* rendering, FontTextureAtlasCreate create);
 BUSTER_F_DECL void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHandle* window);
 BUSTER_F_DECL void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandle* window);
+BUSTER_F_DECL bool rendering_window_has_rendering_error(RenderingWindowHandle* window);
 BUSTER_F_DECL RenderingClipRect rendering_clip_rect_from_f32(F32Interval2 rect, RenderingScale scale, RenderingWindowSize target_size);
 BUSTER_F_DECL RenderingClipRect rendering_clip_rect_intersect(RenderingClipRect a, RenderingClipRect b);
 BUSTER_F_DECL bool rendering_clip_rect_is_empty(RenderingClipRect rect);
@@ -94,9 +95,11 @@ BUSTER_F_DECL void rendering_window_clip_push(RenderingWindowHandle* window, F32
 BUSTER_F_DECL void rendering_window_clip_pop(RenderingWindowHandle* window);
 BUSTER_F_DECL void rendering_window_clip_reset(RenderingWindowHandle* window);
 BUSTER_F_DECL void rendering_window_flush(RenderingWindowHandle* window);
+BUSTER_F_DECL bool rendering_window_set_render_target(RenderingWindowHandle* window, u32 target);
 BUSTER_F_DECL void rendering_window_render_rect(RenderingWindowHandle* window, RectDraw draw);
 BUSTER_F_DECL void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHandle* window, String8 string, float4 color,
                                                 RenderFontType font_type, f32 x_offset, f32 y_offset);
+BUSTER_F_DECL bool rendering_window_render_background_blur(RenderingWindowHandle* window, F32Interval2 rect, u32 radius);
 BUSTER_F_DECL bool rendering_blur_rgba8(Arena* scratch, u8* pixels, u32 width, u32 height, u32 stride, u32 radius);
 BUSTER_F_DECL TextureIndex rendering_texture_create_blurred(Arena* arena, RenderingHandle* rendering, TextureMemory source, u32 radius);
 BUSTER_F_DECL void rendering_deinitialize(RenderingHandle* rendering);

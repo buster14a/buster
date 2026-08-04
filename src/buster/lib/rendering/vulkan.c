@@ -7,6 +7,7 @@
 #define BUSTER_VULKAN_FUNCTION_LOAD_GENERIC(context, load_function, function) function = (__typeof__(function))load_function(context, #function)
 #define BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(instance, function) BUSTER_VULKAN_FUNCTION_LOAD_GENERIC(instance, vkGetInstanceProcAddr, function)
 #define BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(device, function) BUSTER_VULKAN_FUNCTION_LOAD_GENERIC(device, vkGetDeviceProcAddr, function)
+#define VULKAN_BLUR_PIPELINE_INDEX BUSTER_PIPELINE_COUNT
 
 #ifndef VK_NO_PROTOTYPES
 #define VK_NO_PROTOTYPES
@@ -235,6 +236,8 @@ BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkBindImageMemory);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCreateImageView);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCmdPipelineBarrier2);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCmdBlitImage2);
+BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCmdDraw);
+BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCmdClearAttachments);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkGetDeviceQueue);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkCreateCommandPool);
 BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(vkAllocateCommandBuffers);
@@ -673,10 +676,13 @@ struct WindowFrame
     VkFence render_fence;
     VkBuffer index_buffer;
     GPUDrawPushConstants push_constants;
-    RenderingCommandStream commands;
+    RenderingCommandStream* commands;
     FramePipelineInstantiation pipeline_instantiations[(u64)BUSTER_PIPELINE_COUNT];
+    VkDescriptorSet* resource_descriptor_sets;
+    VkDescriptorSet blur_descriptor_sets[2];
     BusterPipeline bound_pipeline;
-    u8 reserved[4];
+    bool blur_descriptor_valid;
+    u8 reserved[3];
 };
 
 #define MAX_TEXTURE_UPDATE_COUNT (32)
@@ -749,8 +755,9 @@ struct RenderingHandle
     VkColorSpaceKHR swapchain_color_space;
     VkCompositeAlphaFlagBitsKHR swapchain_composite_alpha;
     VkSampler sampler;
+    VkSampler blur_sampler;
     ImmediateContext immediate;
-    Pipeline pipelines[BUSTER_PIPELINE_COUNT];
+    Pipeline pipelines[BUSTER_PIPELINE_COUNT + 1];
     VulkanTexture textures[MAX_TEXTURE_COUNT];
 };
 
@@ -776,7 +783,112 @@ struct RenderingWindowHandle
     WindowFrame frames[MAX_SWAPCHAIN_IMAGE_COUNT];
     PipelineInstantiation pipeline_instantiations[BUSTER_PIPELINE_COUNT];
     VkDescriptorPool descriptor_pool;
+    TextureIndex rect_textures[RECT_TEXTURE_SLOT_COUNT];
+    VkDescriptorPool blur_descriptor_pool;
+    VulkanImage blur_source;
+    VulkanImage blur_horizontal;
+    u32 blur_width;
+    u32 blur_height;
+    bool blur_source_ready;
+    bool blur_horizontal_ready;
+    bool last_frame_error;
 };
+
+BUSTER_GLOBAL_LOCAL bool vulkan_blur_images_ensure(RenderingHandle* rendering, RenderingWindowHandle* window)
+{
+    RenderingBlurDimensions dimensions = rendering_blur_dimensions_make((RenderingWindowSize){.width = window->width, .height = window->height});
+    if (!dimensions.valid)
+    {
+        return false;
+    }
+    u32 blur_width = dimensions.half_width;
+    u32 blur_height = dimensions.half_height;
+    if (window->blur_source.handle && window->blur_horizontal.handle && window->blur_width == blur_width && window->blur_height == blur_height)
+    {
+        return true;
+    }
+    if (window->blur_source.handle)
+    {
+        destroy_image(rendering->device, rendering->allocator, window->blur_source.view, window->blur_source.handle, window->blur_source.memory.handle);
+        window->blur_source = (VulkanImage){0};
+    }
+    if (window->blur_horizontal.handle)
+    {
+        destroy_image(rendering->device, rendering->allocator, window->blur_horizontal.view, window->blur_horizontal.handle,
+                      window->blur_horizontal.memory.handle);
+        window->blur_horizontal = (VulkanImage){0};
+    }
+    window->blur_source_ready = false;
+    window->blur_horizontal_ready = false;
+    for (u32 frame_index = 0; frame_index < BUSTER_ARRAY_LENGTH(window->frames); frame_index += 1)
+    {
+        window->frames[frame_index].blur_descriptor_valid = false;
+    }
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    window->blur_source = vk_image_create(rendering->device, rendering->allocator, &rendering->device_memory_properties,
+                                          (VulkanImageCreate){
+                                              .width = blur_width,
+                                              .height = blur_height,
+                                              .mip_levels = 1,
+                                              .format = window->render_image.format,
+                                              .usage = usage,
+                                          });
+    window->blur_horizontal = vk_image_create(rendering->device, rendering->allocator, &rendering->device_memory_properties,
+                                              (VulkanImageCreate){
+                                                  .width = blur_width,
+                                                  .height = blur_height,
+                                                  .mip_levels = 1,
+                                                  .format = window->render_image.format,
+                                                  .usage = usage,
+                                              });
+    window->blur_width = blur_width;
+    window->blur_height = blur_height;
+    return window->blur_source.handle && window->blur_horizontal.handle;
+}
+
+BUSTER_GLOBAL_LOCAL bool vulkan_blur_descriptor_sets_update(RenderingHandle* rendering, RenderingWindowHandle* window, WindowFrame* frame)
+{
+    if (frame->blur_descriptor_valid)
+    {
+        return true;
+    }
+    if (!window->blur_source.view || !window->blur_horizontal.view || !rendering->blur_sampler)
+    {
+        return false;
+    }
+    VkDescriptorImageInfo source_descriptor = {
+        .sampler = rendering->blur_sampler,
+        .imageView = window->blur_source.view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    VkDescriptorImageInfo horizontal_descriptor = source_descriptor;
+    horizontal_descriptor.imageView = window->blur_horizontal.view;
+    VkWriteDescriptorSet writes[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = frame->blur_descriptor_sets[0],
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &source_descriptor,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = frame->blur_descriptor_sets[1],
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &horizontal_descriptor,
+        },
+    };
+    if (!writes[0].dstSet || !writes[1].dstSet || writes[0].dstSet == writes[1].dstSet)
+    {
+        return false;
+    }
+    vkUpdateDescriptorSets(rendering->device, BUSTER_ARRAY_LENGTH(writes), writes, 0, 0);
+    frame->blur_descriptor_valid = true;
+    return true;
+}
 
 BUSTER_GLOBAL_LOCAL RenderingHandle rendering_handle = {0};
 BUSTER_GLOBAL_LOCAL u32 vulkan_frame_begin_log_count = 0;
@@ -1531,6 +1643,8 @@ BUSTER_GLOBAL_LOCAL bool vulkan_load_device_functions(RenderingHandle* rendering
     BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering->device, vkCmdBindIndexBuffer);
     BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering->device, vkCmdPushConstants);
     BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering->device, vkCmdDrawIndexed);
+    BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering->device, vkCmdDraw);
+    BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering->device, vkCmdClearAttachments);
     BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering->device, vkCmdBlitImage2);
     BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering->device, vkQueuePresentKHR);
     BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering->device, vkDeviceWaitIdle);
@@ -1538,12 +1652,18 @@ BUSTER_GLOBAL_LOCAL bool vulkan_load_device_functions(RenderingHandle* rendering
     BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering->device, vkDestroyImage);
     BUSTER_VULKAN_LOAD_DEVICE_FUNCTION(rendering->device, vkFreeMemory);
 
-    return vkGetDeviceQueue && vkCreateCommandPool && vkAllocateCommandBuffers && vkCreateFence && vkCreateSampler && vkQueueSubmit2 && vkQueuePresentKHR &&
-           vkDeviceWaitIdle;
+    bool core_loaded = vkGetDeviceQueue && vkCreateCommandPool && vkAllocateCommandBuffers && vkCreateFence && vkCreateSampler && vkQueueSubmit2 &&
+                       vkQueuePresentKHR && vkDeviceWaitIdle;
+    return rendering_vulkan_device_functions_loaded_for_test(core_loaded, vkCmdClearAttachments != 0, vkCmdBlitImage2 != 0);
 }
 
 BUSTER_GLOBAL_LOCAL void vulkan_destroy_failed_device(RenderingHandle* rendering)
 {
+    if (rendering->blur_sampler && vkDestroySampler)
+    {
+        vkDestroySampler(rendering->device, rendering->blur_sampler, rendering->allocator);
+        rendering->blur_sampler = 0;
+    }
     if (rendering->sampler && vkDestroySampler)
     {
         vkDestroySampler(rendering->device, rendering->sampler, rendering->allocator);
@@ -1717,6 +1837,14 @@ BUSTER_GLOBAL_LOCAL bool vulkan_create_device_for_candidate(RenderingHandle* ren
         };
         result = vkCreateSampler(rendering->device, &sampler_create_info, rendering->allocator, &rendering->sampler);
         string_print(S8("Vulkan sampler creation: result={u64:x}, sampler={u64:x}\n"), (u64)(u32)result, (u64)rendering->sampler);
+        if (result == VK_SUCCESS)
+        {
+            sampler_create_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            sampler_create_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            sampler_create_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            result = vkCreateSampler(rendering->device, &sampler_create_info, rendering->allocator, &rendering->blur_sampler);
+            string_print(S8("Vulkan blur sampler creation: result={u64:x}, sampler={u64:x}\n"), (u64)(u32)result, (u64)rendering->blur_sampler);
+        }
     }
     if (result != VK_SUCCESS)
     {
@@ -1842,9 +1970,13 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
         // Shaders are shipped inside the APK and read via AAssetManager.
         S8("shaders/rect.vert.spv"),
         S8("shaders/rect.frag.spv"),
+        S8("shaders/blur.vert.spv"),
+        S8("shaders/blur.frag.spv"),
 #else
         S8(BUSTER_SHADER_RECT_VERT_SPV),
         S8(BUSTER_SHADER_RECT_FRAG_SPV),
+        S8(BUSTER_SHADER_BLUR_VERT_SPV),
+        S8(BUSTER_SHADER_BLUR_FRAG_SPV),
 #endif
     };
 
@@ -1883,10 +2015,36 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
         },
     };
 
+    BlurConstants blur_push_constants = {0};
+    PushConstantRange blur_push_constant_ranges[] = {
+        (PushConstantRange){
+            .offset = 0,
+            .size = sizeof(blur_push_constants),
+            .stage = SHADER_STAGE_FRAGMENT,
+        },
+    };
+    DescriptorSetLayoutBinding blur_descriptor_set_layout_bindings[] = {
+        {
+            .binding = 0,
+            .type = DESCRIPTOR_TYPE_IMAGE_PLUS_SAMPLER,
+            .stage = SHADER_STAGE_FRAGMENT,
+            .count = 1,
+        },
+    };
+    DescriptorSetLayoutCreate blur_descriptor_set_layouts[] = {
+        (DescriptorSetLayoutCreate){
+            .bindings = BUSTER_ARRAY_TO_SLICE(blur_descriptor_set_layout_bindings),
+        },
+    };
+
     PipelineLayoutCreate pipeline_layouts[] = {
         (PipelineLayoutCreate){
             .push_constant_ranges = BUSTER_ARRAY_TO_SLICE(rect_push_constant_ranges),
             .descriptor_set_layouts = BUSTER_ARRAY_TO_SLICE(rect_descriptor_set_layouts),
+        },
+        (PipelineLayoutCreate){
+            .push_constant_ranges = BUSTER_ARRAY_TO_SLICE(blur_push_constant_ranges),
+            .descriptor_set_layouts = BUSTER_ARRAY_TO_SLICE(blur_descriptor_set_layouts),
         },
     };
 
@@ -1895,6 +2053,10 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
         (PipelineCreate){
             .shader_source_indices = BUSTER_ARRAY_TO_SLICE(rect_pipeline_shader_source_indices),
             .layout_index = 0,
+        },
+        (PipelineCreate){
+            .shader_source_indices = (Sliceu16)BUSTER_ARRAY_TO_SLICE(((u16[]){2, 3})),
+            .layout_index = 1,
         },
     };
     GraphicsPipelinesCreate create_data = {
@@ -1909,9 +2071,9 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
     BUSTER_CHECK(pipeline_layout_count <= graphics_pipeline_count);
     u64 shader_count = create_data.shader_binaries.length;
 
-    VkPipeline pipeline_handles[BUSTER_PIPELINE_COUNT];
-    VkPipelineShaderStageCreateInfo shader_create_infos[MAX_SHADER_MODULE_COUNT_PER_PIPELINE];
-    VkGraphicsPipelineCreateInfo graphics_pipeline_create_infos[(u64)BUSTER_PIPELINE_COUNT];
+    VkPipeline pipeline_handles[BUSTER_PIPELINE_COUNT + 1];
+    VkPipelineShaderStageCreateInfo shader_create_infos[(u64)BUSTER_PIPELINE_COUNT + 1][MAX_SHADER_MODULE_COUNT_PER_PIPELINE];
+    VkGraphicsPipelineCreateInfo graphics_pipeline_create_infos[(u64)BUSTER_PIPELINE_COUNT + 1];
 
     VkPipelineVertexInputStateCreateInfo vertex_input_state_create_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -1981,9 +2143,9 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
         .maxDepthBounds = 1.0f,
     };
 
-    VkPipelineColorBlendAttachmentState attachments[] = {
+    VkPipelineColorBlendAttachmentState blend_attachments[] = {
         {
-            .blendEnable = 1,
+            .blendEnable = VK_TRUE,
             .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
             .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
             .colorBlendOp = VK_BLEND_OP_ADD,
@@ -1992,17 +2154,39 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
             .alphaBlendOp = VK_BLEND_OP_ADD,
             .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
         },
+        {
+            .blendEnable = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        },
     };
 
-    VkPipelineColorBlendStateCreateInfo color_blend_state_create_info = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .pNext = 0,
-        .flags = 0,
-        .logicOpEnable = VK_FALSE,
-        .logicOp = VK_LOGIC_OP_COPY,
-        .attachmentCount = BUSTER_ARRAY_LENGTH(attachments),
-        .pAttachments = attachments,
-        .blendConstants = {0},
+    VkPipelineColorBlendStateCreateInfo color_blend_state_create_infos[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .pNext = 0,
+            .flags = 0,
+            .logicOpEnable = VK_FALSE,
+            .logicOp = VK_LOGIC_OP_COPY,
+            .attachmentCount = 1,
+            .pAttachments = &blend_attachments[0],
+            .blendConstants = {0},
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .pNext = 0,
+            .flags = 0,
+            .logicOpEnable = VK_FALSE,
+            .logicOp = VK_LOGIC_OP_COPY,
+            .attachmentCount = 1,
+            .pAttachments = &blend_attachments[1],
+            .blendConstants = {0},
+        },
     };
 
     VkDynamicState states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -2187,12 +2371,12 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
             u16 shader_index = create.shader_source_indices.pointer[shader_i];
             String8 shader_source_path = create_data.shader_binaries.pointer[shader_index];
 
-            shader_create_infos[shader_i] = (VkPipelineShaderStageCreateInfo){
+            shader_create_infos[pipeline_i][shader_i] = (VkPipelineShaderStageCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .pNext = 0,
                 .flags = 0,
                 .stage = vulkan_shader_stage_from_path(shader_source_path),
-                .module = shader_modules[shader_i],
+                .module = shader_modules[shader_index],
                 .pName = "main",
                 .pSpecializationInfo = 0,
             };
@@ -2202,8 +2386,8 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
             .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext = &rendering_create_info,
             .flags = 0,
-            .stageCount = (u32)shader_count,
-            .pStages = shader_create_infos,
+            .stageCount = (u32)pipeline_shader_count,
+            .pStages = shader_create_infos[pipeline_i],
             .pVertexInputState = &vertex_input_state_create_info,
             .pInputAssemblyState = &input_assembly_state_create_info,
             .pTessellationState = 0,
@@ -2211,7 +2395,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
             .pRasterizationState = &rasterization_state_create_info,
             .pMultisampleState = &multisample_state_create_info,
             .pDepthStencilState = &depth_stencil_state_create_info,
-            .pColorBlendState = &color_blend_state_create_info,
+            .pColorBlendState = &color_blend_state_create_infos[pipeline_i],
             .pDynamicState = &dynamic_state_create_info,
             .layout = pipeline->layout,
             .renderPass = 0,
@@ -2744,6 +2928,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
 RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windowing, RenderingHandle* rendering, WmWindowHandle* window)
 {
     RenderingWindowHandle* result = arena_allocate(arena, RenderingWindowHandle, 1);
+    result->last_frame_error = false;
     WmNativeSurface native_surface = wm_window_get_native_surface(windowing, window);
     BUSTER_UNUSED(native_surface);
 #if defined(VK_USE_PLATFORM_XCB_KHR)
@@ -2861,10 +3046,11 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     swapchain_recreate(rendering, result);
     string_print(S8("Vulkan swapchain ready: swapchain={u64:x}, extent={u32}x{u32}, images={u32}\n"), result->swapchain, result->width, result->height,
                  result->swapchain_image_count);
-
     for (u64 frame_index = 0; frame_index < result->frame_count; frame_index += 1)
     {
         WindowFrame* frame = &result->frames[frame_index];
+        frame->commands = arena_allocate(arena, RenderingCommandStream, 1);
+        frame->resource_descriptor_sets = arena_allocate(arena, VkDescriptorSet, RENDERING_MAX_BATCH_COUNT);
 
         for (BusterPipeline pipeline_index = 0; pipeline_index < BUSTER_PIPELINE_COUNT; pipeline_index += 1)
         {
@@ -2875,9 +3061,9 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
             pipeline->index_buffer.gpu.type = BUFFER_TYPE_INDEX;
             pipeline->transient_buffer.type = BUFFER_TYPE_STAGING;
         }
-        rendering_command_stream_bind_buffers(&frame->commands, frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].vertex_buffer.cpu,
+        rendering_command_stream_bind_buffers(frame->commands, frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].vertex_buffer.cpu,
                                               frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].index_buffer.cpu);
-        rendering_command_stream_begin(&frame->commands, (RenderingWindowSize){.width = result->width, .height = result->height}, result->scale);
+        rendering_command_stream_begin(frame->commands, (RenderingWindowSize){.width = result->width, .height = result->height}, result->scale);
     }
 
     for (BusterPipeline pipeline_index = 0; pipeline_index < BUSTER_PIPELINE_COUNT; pipeline_index += 1)
@@ -2886,7 +3072,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
         BUSTER_CHECK(pipeline_descriptor->descriptor_set_count);
         PipelineInstantiation* pipeline_instantiation = &result->pipeline_instantiations[pipeline_index];
 
-        u16 descriptor_type_counter[(u64)DESCRIPTOR_TYPE_COUNT] = {0};
+        u32 descriptor_type_counter[(u64)DESCRIPTOR_TYPE_COUNT] = {0};
 
         for (u64 descriptor_index = 0; descriptor_index < pipeline_descriptor->descriptor_set_count; descriptor_index += 1)
         {
@@ -2896,9 +3082,9 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
             {
                 VkDescriptorSetLayoutBinding* binding_descriptor = &descriptor_set_layout_bindings->buffer[binding_index];
                 DescriptorType descriptor_type = descriptor_type_from_vulkan(binding_descriptor->descriptorType);
-                u16* counter_ptr = &descriptor_type_counter[(u64)descriptor_type];
-                u16 old_counter = *counter_ptr;
-                *counter_ptr = old_counter + (u16)binding_descriptor->descriptorCount;
+                u32* counter_ptr = &descriptor_type_counter[(u64)descriptor_type];
+                u32 old_counter = *counter_ptr;
+                *counter_ptr = old_counter + (u32)binding_descriptor->descriptorCount;
             }
         }
 
@@ -2907,7 +3093,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 
         for (DescriptorType i = 0; i < DESCRIPTOR_TYPE_COUNT; i += 1)
         {
-            u16 count = descriptor_type_counter[i];
+            u32 count = descriptor_type_counter[i] * (1 + result->frame_count * RENDERING_MAX_BATCH_COUNT);
             if (count != 0)
             {
                 VkDescriptorPoolSize* pool_size = &pool_sizes[pool_size_count];
@@ -2924,7 +3110,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = 0,
             .flags = 0,
-            .maxSets = pipeline_descriptor->descriptor_set_count,
+            .maxSets = pipeline_descriptor->descriptor_set_count + result->frame_count * RENDERING_MAX_BATCH_COUNT,
             .poolSizeCount = pool_size_count,
             .pPoolSizes = pool_sizes,
         };
@@ -2945,6 +3131,65 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
                 os_fail();
             }
             BUSTER_CHECK(pipeline_instantiation->descriptor_sets[0]);
+
+            if (pipeline_descriptor->descriptor_set_count == 1)
+            {
+                VkDescriptorSetLayout layouts[RENDERING_MAX_BATCH_COUNT];
+                for (u32 frame_index = 0; frame_index < result->frame_count; frame_index += 1)
+                {
+                    WindowFrame* frame = &result->frames[frame_index];
+                    for (u32 batch_index = 0; batch_index < RENDERING_MAX_BATCH_COUNT; batch_index += 1)
+                    {
+                        layouts[batch_index] = pipeline_descriptor->descriptor_set_layouts[0];
+                    }
+                    VkDescriptorSetAllocateInfo frame_allocate_info = {
+                        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                        .pNext = 0,
+                        .descriptorPool = result->descriptor_pool,
+                        .descriptorSetCount = RENDERING_MAX_BATCH_COUNT,
+                        .pSetLayouts = layouts,
+                    };
+                    if (vkAllocateDescriptorSets(rendering->device, &frame_allocate_info, frame->resource_descriptor_sets) != VK_SUCCESS)
+                    {
+                        os_fail();
+                    }
+                }
+            }
+        }
+    }
+
+    VkDescriptorPoolSize blur_pool_size = {
+        .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = result->frame_count * 2,
+    };
+    VkDescriptorPoolCreateInfo blur_pool_create_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = 0,
+        .flags = 0,
+        .maxSets = result->frame_count * 2,
+        .poolSizeCount = 1,
+        .pPoolSizes = &blur_pool_size,
+    };
+    if (vkCreateDescriptorPool(rendering->device, &blur_pool_create_info, rendering->allocator, &result->blur_descriptor_pool) != VK_SUCCESS)
+    {
+        os_fail();
+    }
+    VkDescriptorSetLayout blur_descriptor_set_layouts[2] = {
+        rendering->pipelines[VULKAN_BLUR_PIPELINE_INDEX].descriptor_set_layouts[0],
+        rendering->pipelines[VULKAN_BLUR_PIPELINE_INDEX].descriptor_set_layouts[0],
+    };
+    for (u32 frame_index = 0; frame_index < result->frame_count; frame_index += 1)
+    {
+        VkDescriptorSetAllocateInfo blur_allocate_info = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .pNext = 0,
+            .descriptorPool = result->blur_descriptor_pool,
+            .descriptorSetCount = BUSTER_ARRAY_LENGTH(blur_descriptor_set_layouts),
+            .pSetLayouts = blur_descriptor_set_layouts,
+        };
+        if (vkAllocateDescriptorSets(rendering->device, &blur_allocate_info, result->frames[frame_index].blur_descriptor_sets) != VK_SUCCESS)
+        {
+            os_fail();
         }
     }
 
@@ -3075,6 +3320,8 @@ void rendering_window_queue_pipeline_texture_update(RenderingHandle* rendering, 
 void rendering_window_queue_rect_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, RectTextureSlot slot, TextureIndex texture_index)
 {
     rendering_window_queue_pipeline_texture_update(rendering, window, BUSTER_PIPELINE_RECT, (u32)slot, texture_index);
+    window->rect_textures[(u32)slot] = texture_index;
+    rendering_command_stream_set_texture_binding(rendering_window_command_stream(window), (u32)slot, texture_index);
 }
 
 void rendering_window_rect_texture_update_end(RenderingHandle* rendering, RenderingWindowHandle* window)
@@ -3331,6 +3578,119 @@ BUSTER_GLOBAL_LOCAL void vk_image_copy(VkCommandBuffer command_buffer, VulkanCop
     vkCmdBlitImage2(command_buffer, &blit_info);
 }
 
+BUSTER_GLOBAL_LOCAL bool vulkan_record_background_blur(RenderingHandle* rendering, RenderingWindowHandle* window, WindowFrame* frame,
+                                                        VkRenderingInfo* target_rendering_info, VkRenderingAttachmentInfo* target_attachment,
+                                                        RenderingCommand command)
+{
+    RenderingBlurPlan plan = rendering_blur_plan_make((RenderingWindowSize){.width = window->width, .height = window->height}, command.blur_rect,
+                                                       command.blur_radius);
+    if (!plan.valid || !plan.radius)
+    {
+        return true;
+    }
+    RenderingBlurDescriptorBindings descriptor_bindings = rendering_blur_descriptor_bindings(0);
+    if (!vulkan_blur_images_ensure(rendering, window) || !vulkan_blur_descriptor_sets_update(rendering, window, frame) || !descriptor_bindings.valid ||
+        !descriptor_bindings.stable)
+    {
+        return false;
+    }
+    VkDescriptorSet horizontal_descriptor_set = frame->blur_descriptor_sets[descriptor_bindings.horizontal];
+    VkDescriptorSet vertical_descriptor_set = frame->blur_descriptor_sets[descriptor_bindings.vertical];
+    if (!horizontal_descriptor_set || !vertical_descriptor_set || horizontal_descriptor_set == vertical_descriptor_set)
+    {
+        return false;
+    }
+
+    vkCmdEndRendering(frame->command_buffer);
+    vk_image_transition(frame->command_buffer, window->render_image.handle, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vk_image_transition(frame->command_buffer, window->blur_source.handle,
+                        window->blur_source_ready ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vk_image_copy(frame->command_buffer, (VulkanCopyImageArgs){
+                                             .source = {.handle = window->render_image.handle, .extent = {.width = window->width, .height = window->height}},
+                                             .destination = {.handle = window->blur_source.handle, .extent = {.width = plan.half_width, .height = plan.half_height}},
+                                         });
+    vk_image_transition(frame->command_buffer, window->blur_source.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    window->blur_source_ready = true;
+
+    vk_image_transition(frame->command_buffer, window->blur_horizontal.handle,
+                        window->blur_horizontal_ready ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo horizontal_attachment = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = window->blur_horizontal.view,
+        .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+    };
+    VkRenderingInfo horizontal_rendering_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea = {.extent = {.width = plan.half_width, .height = plan.half_height}},
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &horizontal_attachment,
+    };
+    vkCmdBeginRendering(frame->command_buffer, &horizontal_rendering_info);
+    VkViewport horizontal_viewport = {
+        .x = 0,
+        .y = 0,
+        .width = (f32)plan.half_width,
+        .height = (f32)plan.half_height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    vkCmdSetViewport(frame->command_buffer, 0, 1, &horizontal_viewport);
+    VkRect2D horizontal_scissor = {.offset = {.x = 0, .y = 0}, .extent = {.width = plan.half_width, .height = plan.half_height}};
+    vkCmdSetScissor(frame->command_buffer, 0, 1, &horizontal_scissor);
+    Pipeline* blur_pipeline = &rendering->pipelines[VULKAN_BLUR_PIPELINE_INDEX];
+    vkCmdBindPipeline(frame->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, blur_pipeline->handle);
+    vkCmdBindDescriptorSets(frame->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, blur_pipeline->layout, 0, 1, &horizontal_descriptor_set, 0, 0);
+    BlurConstants horizontal_constants = {
+        .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
+        .radius = plan.radius,
+        .vertical = 0,
+    };
+    VkPushConstantRange blur_push_range = blur_pipeline->push_constant_ranges[0];
+    vkCmdPushConstants(frame->command_buffer, blur_pipeline->layout, blur_push_range.stageFlags, blur_push_range.offset, blur_push_range.size,
+                       &horizontal_constants);
+    vkCmdDraw(frame->command_buffer, 3, 1, 0, 0);
+    vkCmdEndRendering(frame->command_buffer);
+    vk_image_transition(frame->command_buffer, window->blur_horizontal.handle, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    window->blur_horizontal_ready = true;
+
+    vk_image_transition(frame->command_buffer, window->render_image.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    target_attachment->loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    target_attachment->imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL;
+    vkCmdBeginRendering(frame->command_buffer, target_rendering_info);
+    VkViewport target_viewport = {
+        .x = 0,
+        .y = 0,
+        .width = (f32)window->width,
+        .height = (f32)window->height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    vkCmdSetViewport(frame->command_buffer, 0, 1, &target_viewport);
+    VkRect2D blur_scissor = {
+        .offset = {.x = command.blur_rect.x0, .y = command.blur_rect.y0},
+        .extent = {.width = (u32)(command.blur_rect.x1 - command.blur_rect.x0), .height = (u32)(command.blur_rect.y1 - command.blur_rect.y0)},
+    };
+    vkCmdSetScissor(frame->command_buffer, 0, 1, &blur_scissor);
+    vkCmdBindPipeline(frame->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, blur_pipeline->handle);
+    vkCmdBindDescriptorSets(frame->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, blur_pipeline->layout, 0, 1, &vertical_descriptor_set, 0, 0);
+    BlurConstants vertical_constants = {
+        .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
+        .radius = plan.radius,
+        .vertical = 1,
+    };
+    vkCmdPushConstants(frame->command_buffer, blur_pipeline->layout, blur_push_range.stageFlags, blur_push_range.offset, blur_push_range.size,
+                       &vertical_constants);
+    vkCmdDraw(frame->command_buffer, 3, 1, 0, 0);
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL void vk_buffer_destroy(RenderingHandle* rendering, VulkanBuffer* buffer)
 {
     if (buffer->memory.handle)
@@ -3422,7 +3782,7 @@ BUSTER_GLOBAL_LOCAL WindowFrame* rendering_window_frame(RenderingWindowHandle* w
 
 RenderingCommandStream* rendering_window_command_stream(RenderingWindowHandle* window)
 {
-    return window ? &rendering_window_frame(window)->commands : 0;
+    return window ? rendering_window_frame(window)->commands : 0;
 }
 
 void rendering_window_set_content_scale_internal(RenderingWindowHandle* window, RenderingScale scale)
@@ -3431,10 +3791,10 @@ void rendering_window_set_content_scale_internal(RenderingWindowHandle* window, 
     {
         return;
     }
-    window->scale = scale.x > 0.0f && scale.y > 0.0f ? scale : (RenderingScale){.x = 1.0f, .y = 1.0f};
+    window->scale = rendering_scale_is_valid(scale) ? scale : (RenderingScale){.x = 1.0f, .y = 1.0f};
     for (u32 frame_index = 0; frame_index < window->frame_count && frame_index < BUSTER_ARRAY_LENGTH(window->frames); frame_index += 1)
     {
-        rendering_command_stream_set_scale(&window->frames[frame_index].commands, window->scale);
+        rendering_command_stream_set_scale(window->frames[frame_index].commands, window->scale);
     }
 }
 
@@ -3523,7 +3883,11 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         pipeline_instantiation->vertex_buffer.count = 0;
         arena_reset_to_start(pipeline_instantiation->index_buffer.cpu);
     }
-    rendering_command_stream_begin(&frame->commands, (RenderingWindowSize){.width = window->width, .height = window->height}, window->scale);
+    rendering_command_stream_begin(frame->commands, (RenderingWindowSize){.width = window->width, .height = window->height}, window->scale);
+    for (u32 slot = 0; slot < RECT_TEXTURE_SLOT_COUNT; slot += 1)
+    {
+        rendering_command_stream_set_texture_binding(frame->commands, slot, window->rect_textures[slot]);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void buffer_destroy(RenderingHandle* rendering, VulkanBuffer buffer)
@@ -3667,6 +4031,10 @@ BUSTER_GLOBAL_LOCAL void buffer_copy_to_local_command(VkCommandBuffer command_bu
 void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
     WindowFrame* frame = rendering_window_frame(window);
+    rendering_backend_trace_begin(frame->commands, RENDERING_BACKEND_VULKAN);
+    rendering_backend_trace_preflight(frame->commands);
+    bool submitted = false;
+    bool presented = false;
     if (vulkan_frame_end_log_count < 3)
     {
         string_print(S8("Vulkan frame end {u32}: swapchain={u64:x}, render_image={u64:x}, image_index={u32}, extent={u32}x{u32}\n"), vulkan_frame_end_log_count,
@@ -3684,7 +4052,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
         {
             FramePipelineInstantiation* frame_pipeline_instantiation = &frame->pipeline_instantiations[pipeline_index];
 
-            if (frame->commands.batch_count != 0)
+            if (rendering_command_stream_is_valid(frame->commands) && frame->commands->batch_count != 0)
             {
                 u64 new_vertex_buffer_size = arena_buffer_size(frame_pipeline_instantiation->vertex_buffer.cpu);
                 u64 new_index_buffer_size = arena_buffer_size(frame_pipeline_instantiation->index_buffer.cpu);
@@ -3799,98 +4167,151 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
 
         vkCmdBeginRendering(frame->command_buffer, &rendering_info);
 
-        for (BusterPipeline pipeline_index = 0; pipeline_index < BUSTER_PIPELINE_COUNT; pipeline_index += 1)
+        BusterPipeline bound_pipeline = BUSTER_PIPELINE_COUNT;
+        for (u32 command_index = 0; rendering_command_stream_is_valid(frame->commands) && command_index < frame->commands->command_count; command_index += 1)
         {
-            Pipeline* pipeline = &rendering->pipelines[pipeline_index];
-            PipelineInstantiation* pipeline_instantiation = &window->pipeline_instantiations[pipeline_index];
-            FramePipelineInstantiation* frame_pipeline_instantiation = &frame->pipeline_instantiations[pipeline_index];
-
-            if (!arena_buffer_is_empty(frame_pipeline_instantiation->vertex_buffer.cpu))
+            RenderingCommand command = frame->commands->commands[command_index];
+            if (command.kind == RENDERING_COMMAND_BACKGROUND_BLUR)
             {
-                // Bind pipeline and descriptor sets
+                if (!vulkan_record_background_blur(rendering, window, frame, &rendering_info, &color_attachments[0], command))
                 {
-                    vkCmdBindPipeline(frame->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->handle);
-                    // print("Binding pipeline: 0x{u64}\n", pipeline->handle);
-                    u32 dynamic_offset_count = 0;
-                    u32* dynamic_offsets = 0;
-                    u32 first_set = 0;
-                    vkCmdBindDescriptorSets(frame->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout, first_set, pipeline->descriptor_set_count,
-                                            pipeline_instantiation->descriptor_sets, dynamic_offset_count, dynamic_offsets);
-                    // print("Binding descriptor sets: 0x{u64}\n", pipeline_instantiation->descriptor_sets);
-                    frame->bound_pipeline = (BusterPipeline)pipeline_index;
+                    rendering_command_stream_mark_failure(frame->commands);
+                    VkClearAttachment clear_attachment = {
+                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                        .colorAttachment = 0,
+                        .clearValue = {.color = {.float32 = {255.0f, 0.0f, 255.0f, 1.0f}}},
+                    };
+                    VkClearRect clear_rect = {
+                        .rect = {.offset = {.x = 0, .y = 0}, .extent = {.width = window->width, .height = window->height}},
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    };
+                    vkCmdClearAttachments(frame->command_buffer, 1, &clear_attachment, 1, &clear_rect);
+                    break;
                 }
+                bound_pipeline = BUSTER_PIPELINE_COUNT;
+                continue;
+            }
+            if (command.kind != RENDERING_COMMAND_RECT || !rendering_command_stream_command_ends_batch(frame->commands, command_index))
+            {
+                if (command.kind != RENDERING_COMMAND_RECT)
+                {
+                    bound_pipeline = BUSTER_PIPELINE_COUNT;
+                }
+                continue;
+            }
+            if (command.batch_index >= frame->commands->batch_count)
+            {
+                continue;
+            }
+            RenderingBatch batch = frame->commands->batches[command.batch_index];
+            if (batch.target != RENDERING_TARGET_BACKBUFFER || rendering_clip_rect_is_empty(batch.clip) || batch.pipeline >= BUSTER_PIPELINE_COUNT)
+            {
+                continue;
+            }
+            Pipeline* pipeline = &rendering->pipelines[batch.pipeline];
+            PipelineInstantiation* pipeline_instantiation = &window->pipeline_instantiations[batch.pipeline];
+            FramePipelineInstantiation* frame_pipeline_instantiation = &frame->pipeline_instantiations[batch.pipeline];
+            if (arena_buffer_is_empty(frame_pipeline_instantiation->vertex_buffer.cpu))
+            {
+                continue;
+            }
 
-                // Bind index buffer
-                {
-                    vkCmdBindIndexBuffer(frame->command_buffer, frame_pipeline_instantiation->index_buffer.gpu.handle, 0, VK_INDEX_TYPE_UINT32);
-                    frame->index_buffer = frame_pipeline_instantiation->index_buffer.gpu.handle;
-                    // print("Binding descriptor sets: 0x{u64}\n", frame->index_buffer);
-                }
+            if (bound_pipeline != batch.pipeline)
+            {
+                vkCmdBindPipeline(frame->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->handle);
+                vkCmdBindIndexBuffer(frame->command_buffer, frame_pipeline_instantiation->index_buffer.gpu.handle, 0, VK_INDEX_TYPE_UINT32);
+                frame->index_buffer = frame_pipeline_instantiation->index_buffer.gpu.handle;
 
 #if BUSTER_ANDROID
-                // Point the rect descriptor set (set 0, binding 1) at this frame's
-                // vertex storage buffer. Safe to update mid-recording because Android
-                // keeps a single frame in flight, so no submission is using the set.
-                {
-                    VkDescriptorBufferInfo vertex_buffer_info = {
-                        .buffer = frame_pipeline_instantiation->vertex_buffer.gpu.handle,
-                        .offset = 0,
-                        .range = VK_WHOLE_SIZE,
-                    };
-                    VkWriteDescriptorSet vertex_buffer_write = {
-                        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                        .dstSet = pipeline_instantiation->descriptor_sets[0],
-                        .dstBinding = 1,
-                        .dstArrayElement = 0,
-                        .descriptorCount = 1,
-                        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                        .pBufferInfo = &vertex_buffer_info,
-                    };
-                    vkUpdateDescriptorSets(rendering->device, 1, &vertex_buffer_write, 0, 0);
-                }
-
-                // Vertices come from the descriptor above; only dimensions are pushed.
                 DrawConstants push_constants = {
                     .width = (f32)window->width,
                     .height = (f32)window->height,
                 };
-
-                {
-                    VkPushConstantRange push_constant_range = pipeline->push_constant_ranges[0];
-                    vkCmdPushConstants(frame->command_buffer, pipeline->layout, push_constant_range.stageFlags, push_constant_range.offset,
-                                       push_constant_range.size, &push_constants);
-                }
 #else
-                // Send vertex buffer and screen dimensions to the shader
                 GPUDrawPushConstants push_constants = {
                     .vertex_buffer = frame_pipeline_instantiation->vertex_buffer.gpu.address,
                     .width = (f32)window->width,
                     .height = (f32)window->height,
                 };
-
-                {
-                    VkPushConstantRange push_constant_range = pipeline->push_constant_ranges[0];
-                    vkCmdPushConstants(frame->command_buffer, pipeline->layout, push_constant_range.stageFlags, push_constant_range.offset,
-                                       push_constant_range.size, &push_constants);
-                    frame->push_constants = push_constants;
-                }
+                frame->push_constants = push_constants;
 #endif
+                VkPushConstantRange push_constant_range = pipeline->push_constant_ranges[0];
+                vkCmdPushConstants(frame->command_buffer, pipeline->layout, push_constant_range.stageFlags, push_constant_range.offset,
+                                   push_constant_range.size, &push_constants);
+                frame->bound_pipeline = batch.pipeline;
+                bound_pipeline = batch.pipeline;
+            }
 
-                for (u32 batch_index = 0; batch_index < frame->commands.batch_count; batch_index += 1)
+            VkDescriptorSet descriptor_sets[MAX_DESCRIPTOR_SET_COUNT];
+            for (u32 descriptor_index = 0; descriptor_index < pipeline->descriptor_set_count; descriptor_index += 1)
+            {
+                descriptor_sets[descriptor_index] = pipeline_instantiation->descriptor_sets[descriptor_index];
+            }
+            VkDescriptorImageInfo texture_descriptors[RECT_TEXTURE_SLOT_COUNT];
+            for (u32 slot = 0; slot < RECT_TEXTURE_SLOT_COUNT; slot += 1)
+            {
+                TextureIndex texture_index = batch.resources.textures[slot];
+                if (texture_index.value < rendering->texture_count)
                 {
-                    RenderingBatch batch = frame->commands.batches[batch_index];
-                    if (batch.pipeline != pipeline_index || rendering_clip_rect_is_empty(batch.clip))
-                    {
-                        continue;
-                    }
-                    VkRect2D batch_scissor = {
-                        .offset = {.x = batch.clip.x0, .y = batch.clip.y0},
-                        .extent = {.width = (u32)(batch.clip.x1 - batch.clip.x0), .height = (u32)(batch.clip.y1 - batch.clip.y0)},
+                    VulkanTexture* texture = &rendering->textures[texture_index.value];
+                    texture_descriptors[slot] = (VkDescriptorImageInfo){
+                        .sampler = texture->sampler,
+                        .imageView = texture->image.view,
+                        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     };
-                    vkCmdSetScissor(frame->command_buffer, 0, 1, &batch_scissor);
-                    vkCmdDrawIndexed(frame->command_buffer, batch.index_count, 1, batch.first_index, 0, 0);
+                }
+                else
+                {
+                    texture_descriptors[slot] = pipeline_instantiation->texture_descriptors[slot];
                 }
             }
+            if (frame->resource_descriptor_sets && command.batch_index < RENDERING_MAX_BATCH_COUNT)
+            {
+                VkDescriptorSet resource_descriptor_set = frame->resource_descriptor_sets[command.batch_index];
+                VkWriteDescriptorSet descriptor_writes[2] = {
+                    {
+                        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                        .dstSet = resource_descriptor_set,
+                        .dstBinding = 0,
+                        .dstArrayElement = 0,
+                        .descriptorCount = RECT_TEXTURE_SLOT_COUNT,
+                        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                        .pImageInfo = texture_descriptors,
+                    },
+                };
+                u32 descriptor_write_count = 1;
+#if BUSTER_ANDROID
+                VkDescriptorBufferInfo vertex_buffer_info = {
+                    .buffer = frame_pipeline_instantiation->vertex_buffer.gpu.handle,
+                    .offset = 0,
+                    .range = VK_WHOLE_SIZE,
+                };
+                descriptor_writes[1] = (VkWriteDescriptorSet){
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .dstSet = resource_descriptor_set,
+                    .dstBinding = 1,
+                    .dstArrayElement = 0,
+                    .descriptorCount = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .pBufferInfo = &vertex_buffer_info,
+                };
+                descriptor_write_count = 2;
+#endif
+                vkUpdateDescriptorSets(rendering->device, descriptor_write_count, descriptor_writes, 0, 0);
+                descriptor_sets[0] = resource_descriptor_set;
+            }
+            u32 dynamic_offset_count = 0;
+            u32* dynamic_offsets = 0;
+            vkCmdBindDescriptorSets(frame->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout, 0, pipeline->descriptor_set_count,
+                                    descriptor_sets, dynamic_offset_count, dynamic_offsets);
+
+            VkRect2D batch_scissor = {
+                .offset = {.x = batch.clip.x0, .y = batch.clip.y0},
+                .extent = {.width = (u32)(batch.clip.x1 - batch.clip.x0), .height = (u32)(batch.clip.y1 - batch.clip.y0)},
+            };
+            vkCmdSetScissor(frame->command_buffer, 0, 1, &batch_scissor);
+            vkCmdDrawIndexed(frame->command_buffer, batch.index_count, 1, batch.first_index, 0, 0);
         }
 
         vkCmdEndRendering(frame->command_buffer);
@@ -3971,6 +4392,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
             VkResult submit_result = vkQueueSubmit2(rendering->graphics_queue, BUSTER_ARRAY_LENGTH(submit_info), submit_info, frame->render_fence);
             if (submit_result == VK_SUCCESS)
             {
+                submitted = true;
                 const VkSwapchainKHR swapchains[] = {window->swapchain};
                 const u32 swapchain_image_indices[] = {window->swapchain_image_index};
                 const VkSemaphore wait_semaphores[] = {render_semaphore};
@@ -3987,6 +4409,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
                 };
 
                 VkResult present_result = vkQueuePresentKHR(rendering->present_queue, &present_info);
+                presented = present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR;
 
                 if (vulkan_frame_end_log_count < 3)
                 {
@@ -4035,6 +4458,49 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
         string_print(S8("Vulkan frame end command buffer failed: vkBeginCommandBuffer failed\n"));
         os_fail();
     }
+    bool error_frame = !rendering_command_stream_is_valid(frame->commands);
+    rendering_backend_trace_finish(frame->commands, submitted, presented, error_frame);
+    rendering_frame_error_commit(&window->last_frame_error, error_frame);
+    frame->commands->frame_active = false;
+}
+
+bool rendering_window_has_rendering_error_internal(RenderingWindowHandle* window)
+{
+    return !window || rendering_frame_error_query(&window->last_frame_error);
+}
+
+void rendering_backend_trace_command(RenderingCommandStream* stream, u32 command_index, RenderingCommand command)
+{
+    if (!stream)
+    {
+        return;
+    }
+    rendering_backend_trace_record_command(stream, command_index);
+    if (!rendering_backend_trace_validate_common(stream, command_index, command))
+    {
+        return;
+    }
+    if (command.kind == RENDERING_COMMAND_BACKGROUND_BLUR && command.blur_radius && !rendering_clip_rect_is_empty(command.blur_rect))
+    {
+        RenderingBlurDescriptorBindings bindings = rendering_blur_descriptor_bindings(0);
+        if (!bindings.valid || !bindings.stable || bindings.horizontal == bindings.vertical)
+        {
+            stream->backend_trace.valid = false;
+            rendering_command_stream_mark_failure(stream);
+            return;
+        }
+        stream->backend_trace.descriptor_snapshot_count += 2;
+    }
+}
+
+BUSTER_TEST_F_DECL RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity)
+{
+    RenderingBackendReplayResult result = rendering_backend_replay_policy(stream, RENDERING_BACKEND_VULKAN, events, capacity);
+    rendering_backend_trace_begin(stream, RENDERING_BACKEND_VULKAN);
+    rendering_backend_trace_preflight(stream);
+    rendering_backend_trace_finish(stream, false, false, !rendering_command_stream_is_valid(stream));
+    rendering_backend_trace_copy_result(&result, stream);
+    return result;
 }
 
 // TODO: support gradient
@@ -4099,8 +4565,12 @@ void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHa
         }
 
         vkDestroyDescriptorPool(rendering->device, window->descriptor_pool, rendering->allocator);
+        vkDestroyDescriptorPool(rendering->device, window->blur_descriptor_pool, rendering->allocator);
 
         destroy_image(rendering->device, rendering->allocator, window->render_image.view, window->render_image.handle, window->render_image.memory.handle);
+        destroy_image(rendering->device, rendering->allocator, window->blur_source.view, window->blur_source.handle, window->blur_source.memory.handle);
+        destroy_image(rendering->device, rendering->allocator, window->blur_horizontal.view, window->blur_horizontal.handle,
+                      window->blur_horizontal.memory.handle);
 
         u32 image_count = window->swapchain_image_count;
         if (image_count > BUSTER_ARRAY_LENGTH(window->swapchain_image_views))
@@ -4145,7 +4615,7 @@ void rendering_deinitialize(RenderingHandle* rendering)
     {
         if (rendering->device)
         {
-            for (BusterPipeline pipeline_index = 0; pipeline_index < BUSTER_PIPELINE_COUNT; pipeline_index += 1)
+            for (BusterPipeline pipeline_index = 0; pipeline_index <= BUSTER_PIPELINE_COUNT; pipeline_index += 1)
             {
                 Pipeline* pipeline = &rendering->pipelines[pipeline_index];
                 for (u32 d = 0; d < pipeline->descriptor_set_count; d += 1)
@@ -4157,7 +4627,14 @@ void rendering_deinitialize(RenderingHandle* rendering)
                 vkDestroyPipelineLayout(rendering->device, pipeline->layout, rendering->allocator);
             }
 
-            vkDestroySampler(rendering->device, rendering->sampler, rendering->allocator);
+            if (rendering->sampler)
+            {
+                vkDestroySampler(rendering->device, rendering->sampler, rendering->allocator);
+            }
+            if (rendering->blur_sampler)
+            {
+                vkDestroySampler(rendering->device, rendering->blur_sampler, rendering->allocator);
+            }
 
             for (u32 i = 0; i < rendering->texture_count; i += 1)
             {
