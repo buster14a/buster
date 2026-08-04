@@ -4,7 +4,9 @@
 #include <buster/lib/hash.h>
 #include <buster/lib/string.h>
 #include <buster/lib/system_headers.h>
+#if defined(__linux__) || defined(__APPLE__)
 #include <stdio.h>
+#endif
 
 typedef enum IdePathKind
 {
