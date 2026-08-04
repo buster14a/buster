@@ -202,7 +202,7 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     BUSTER_TEST(arguments, target_vector_register_size(x86_cpu_invocation.target) == 64);
     String8 feature_command_line[] = {
         S8("-c"),
-        S8("-mattr=+avx512f,+avx512vl,-avx2,+avx512bw"),
+        S8("-mattr=+avx512f,+avx512vl,+avx2,+avx512bw"),
         S8("--target=x86_64-linux"),
         S8("-march=haswell"),
         S8("-masm"),
@@ -214,12 +214,21 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     BUSTER_TEST(arguments, feature_invocation.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, feature_invocation.assembly_syntax == ASSEMBLY_SYNTAX_ATT);
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX));
-    BUSTER_TEST(arguments, !target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX2));
+    BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX2));
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX512F));
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX512VL));
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX512BW));
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, feature_invocation.target),
-                       S8("avx,avx512bw,avx512f,avx512vl,sse2,sse3"));
+                       S8("avx,avx2,avx512bw,avx512f,avx512vl,bmi1,cx16,lzcnt,popcnt,sse2,sse3"));
+    String8 invalid_avx512_dependency_command_line[] = {
+        S8("--target=x86_64-linux"),
+        S8("-mattr=+avx512f,+avx512vl,-avx2,+avx512bw"),
+        S8("-march=haswell"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation invalid_avx512_dependency =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_avx512_dependency_command_line));
+    BUSTER_TEST(arguments, invalid_avx512_dependency.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     String8 ordered_feature_command_line[] = {
         S8("--target=x86_64-linux"), S8("-march=haswell"), S8("-mattr=+avx512f"), S8("-mattr=-avx512f"), S8("source.c"),
     };
