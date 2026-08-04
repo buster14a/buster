@@ -2,12 +2,32 @@
 
 This directory contains deterministic, pointer-free assembly metadata emitted
 by `build import_assembly_metadata`. Normal builds do not parse JSON, execute
-XED/LLVM, or run TableGen. The AArch64 tables are currently an audit artifact:
-the acceptance importer fails closed while any record lacks an exact proven
-schema, and the current assembler runtime does not consume them yet.
+XED/LLVM, or run TableGen. The generated x86-64 C header is consumed by the
+x86-64 metadata ABI and bounded lookup layer, while the current assembler
+encoder does not yet consume its encoding fields. The AArch64 tables remain an
+audit artifact: the acceptance importer fails closed while any record lacks an
+exact proven schema, and the current assembler runtime does not consume them
+yet.
 
 - `x86_64-xed.jsonl`, `x86_64-assembly.generated.h`, and
   `x86_64-coverage.generated.inc` are the existing checked-in XED artifacts.
+- `x86_64-assembly.generated.h` is a 6,092,260-byte compact ABI artifact:
+  11,013 forms, 32,813 operands, a 1,726,254-byte logical string pool, and
+  immutable little-endian packed blobs accessed through bounded generated
+  accessors. Flat C string chunks are at most 4,092 payload bytes, avoiding a
+  nested initializer or runtime table construction in self-hosted builds.
+  Generated sorted indexes contain 1,942 mnemonic ranges/11,019 candidates,
+  1,995 iclass ranges/11,013 candidates, 5,855 iform ranges/7,525 candidates,
+  and form/coverage hash indexes with 11,013 ranges and candidates each.
+  Mnemonics are ASCII-case-insensitive source spellings from the first token of
+  Intel, AT&T, and generic disassembly fields; iclass and iform remain separate
+  exact diagnostic indexes. Numeric form IDs are snapshot row IDs; `stable_hash`
+  is the durable form identity.
+- `x86_64-coverage.generated.inc` is a 392,002-byte packed coverage include.
+  It has one checked row per form and reports DIRECT=0, NORMALIZED=10,636,
+  NOT64=268, PRIVILEGED=109, RESERVED=0, UNSUPPORTED_TOKEN=0, and
+  UNCLASSIFIED=0. NORMALIZED rows are metadata coverage, not a claim that the
+  runtime assembler can encode them.
 - `aarch64-llvm.jsonl` contains one reduced non-pseudo `AArch64Inst` record per
   line.
 - `aarch64-assembly.generated.h` contains compact fixed masks/values,
