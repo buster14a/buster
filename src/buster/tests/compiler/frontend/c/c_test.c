@@ -68,6 +68,36 @@ BUSTER_GLOBAL_LOCAL void c_test_auto_type_diagnostic(UnitTestArguments* argument
     scratch_end(temporary);
 }
 
+BUSTER_GLOBAL_LOCAL void c_test_case_range_lower_diagnostic(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source, String8 message)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    CIRLowerResult lowered = {0};
+    if (!parse.diagnostic_count)
+    {
+        lowered = c_lower_to_ir(temporary.arena, S8("case-range-invalid.c"), preprocess, parse, target_native);
+    }
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
+    if (lowered.diagnostic_count == 1)
+    {
+        BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+        BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message, message);
+    }
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+    scratch_end(temporary);
+}
+
 #if BUSTER_COMPILER_CLANG
 __attribute__((optnone))
 #endif
@@ -2653,6 +2683,137 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, switch_count == 1);
         BUSTER_TEST(arguments, ir_validate_canonical_module(switch_ir.program, module).error == IR_VALIDATION_NONE);
     }
+    CPreprocessResult case_range_tokens = c_preprocess(control_flow_temporary.arena,
+                                                       S8("int range_dispatch(int value) {\n"
+                                                          "    int result = 0;\n"
+                                                          "    switch (value) {\n"
+                                                          "    case -3 ... -1:\n"
+                                                          "        result = 10;\n"
+                                                          "        break;\n"
+                                                          "    case 0 ... 2:\n"
+                                                          "        result = 20;\n"
+                                                          "    case 3:\n"
+                                                          "        result += 30;\n"
+                                                          "        break;\n"
+                                                          "    default:\n"
+                                                          "        result = -1;\n"
+                                                          "        break;\n"
+                                                          "    }\n"
+                                                          "    return result;\n"
+                                                          "}\n"
+                                                          "int range_huge(unsigned int value) {\n"
+                                                          "    switch (value) {\n"
+                                                          "    case 0u ... 0xffffffffu: return 1;\n"
+                                                          "    default: return 2;\n"
+                                                          "    }\n"
+                                                          "}\n"
+                                                          "int read_range_value(int *calls, int value) {\n"
+                                                          "    *calls += 1;\n"
+                                                          "    return value;\n"
+                                                          "}\n"
+                                                          "int nested_range(int *calls, int value) {\n"
+                                                          "    switch (read_range_value(calls, value)) {\n"
+                                                          "    case 1 ... 2:\n"
+                                                          "        switch (value - 1) {\n"
+                                                          "        case 0 ... 0: return 1;\n"
+                                                          "        default: return 2;\n"
+                                                          "        }\n"
+                                                          "    default: return 3;\n"
+                                                          "    }\n"
+                                                          "}\n"),
+                                                       (CPreprocessOptions){
+                                                           .target = target_native,
+                                                           .data_layout = target_data_layout(target_native),
+                                                           .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                       });
+    CParseResult case_range_parse = c_parse(control_flow_temporary.arena, case_range_tokens);
+    CIRLowerResult case_range_ir =
+        c_lower_to_ir(control_flow_temporary.arena, S8("case-range.c"), case_range_tokens, case_range_parse, target_native);
+    BUSTER_TEST(arguments, case_range_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, case_range_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, case_range_ir.diagnostic_count == 0);
+    if (case_range_ir.program)
+    {
+        IrModule* module = &case_range_ir.program->modules[0];
+        IrFunction* dispatch = 0;
+        IrFunction* huge = 0;
+        IrFunction* nested = 0;
+        u32 switch_count = 0;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (string_equal(function->name, S8("range_dispatch")))
+            {
+                dispatch = function;
+            }
+            else if (string_equal(function->name, S8("range_huge")))
+            {
+                huge = function;
+            }
+            else if (string_equal(function->name, S8("nested_range")))
+            {
+                nested = function;
+            }
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                switch_count += function->instructions[instruction_index].opcode == IR_OPCODE_SWITCH;
+            }
+        }
+        BUSTER_TEST(arguments, dispatch != 0);
+        BUSTER_TEST(arguments, huge != 0);
+        BUSTER_TEST(arguments, nested != 0);
+        if (dispatch)
+        {
+            u32 branch_if_count = 0;
+            u32 binary_count = 0;
+            for (u32 instruction_index = 0; instruction_index < dispatch->instruction_count; instruction_index += 1)
+            {
+                IrOpcode opcode = dispatch->instructions[instruction_index].opcode;
+                branch_if_count += opcode == IR_OPCODE_BRANCH_IF;
+                binary_count += opcode == IR_OPCODE_BINARY;
+            }
+            BUSTER_TEST(arguments, branch_if_count >= 5);
+            BUSTER_TEST(arguments, binary_count >= 5);
+            BUSTER_TEST(arguments, dispatch->instruction_count < 100);
+        }
+        if (huge)
+        {
+            BUSTER_TEST(arguments, huge->instruction_count < 100);
+        }
+        if (nested)
+        {
+            u32 call_count = 0;
+            for (u32 instruction_index = 0; instruction_index < nested->instruction_count; instruction_index += 1)
+            {
+                call_count += nested->instructions[instruction_index].opcode == IR_OPCODE_CALL;
+            }
+            BUSTER_TEST(arguments, call_count == 1);
+        }
+        BUSTER_TEST(arguments, switch_count == 0);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(case_range_ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int malformed(int value) { switch (value) { case 1 ... 2 ... 3: return 0; } return 1; }\n"),
+                                       S8("in function 'malformed': malformed GNU case range"));
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int nonconstant_low(int value) { switch (value) { case value ... 2: return 0; } return 1; }\n"),
+                                       S8("in function 'nonconstant_low': case range lower bound is not an integer constant expression"));
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int nonconstant_high(int value) { switch (value) { case 1 ... value: return 0; } return 1; }\n"),
+                                       S8("in function 'nonconstant_high': case range upper bound is not an integer constant expression"));
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int reversed(int value) { switch (value) { case 3 ... 1: return 0; } return 1; }\n"),
+                                       S8("in function 'reversed': case range is not ordered after conversion to the switch type"));
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int singleton_overlap(int value) { switch (value) { case 1 ... 3: return 0; case 3: return 1; } return 2; }\n"),
+                                       S8("in function 'singleton_overlap': case label overlaps another case label"));
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int range_overlap(int value) { switch (value) { case 1 ... 3: return 0; case 3 ... 5: return 1; } return 2; }\n"),
+                                       S8("in function 'range_overlap': case label overlaps another case label"));
+    c_test_auto_type_diagnostic(arguments, &result,
+                                S8("int strict_range(int value) { switch (value) { case 1 ... 2: return 0; } return 1; }\n"), C_PREPROCESS_DIALECT_C23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                S8("in function 'strict_range': GNU case ranges are only available in GNU dialects"));
     CPreprocessResult goto_tokens = c_preprocess(control_flow_temporary.arena,
                                                  S8("int jump(int value) {\n"
                                                     "    goto target;\n"

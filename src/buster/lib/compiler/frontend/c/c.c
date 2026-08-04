@@ -26515,10 +26515,14 @@ struct CIrSwitchCase
     u32 label_start;
     u32 content_start;
     u32 content_end;
+    CIrConstantValue low_constant;
+    CIrConstantValue high_constant;
     u64 value;
+    u64 high_value;
     IrBlockId block;
     bool is_default;
-    u8 reserved[3];
+    bool is_range;
+    u8 reserved[2];
 };
 
 typedef struct CIrLabel CIrLabel;
@@ -26868,6 +26872,120 @@ BUSTER_GLOBAL_LOCAL bool c_ir_terminate_switch(CIntegerIrBuilder* builder, IrVal
         return false;
     }
     builder->function->blocks[builder->current_block.value].terminated = true;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL IrTypeId c_ir_switch_promoted_type(CIntegerIrBuilder* builder, IrTypeId type_id)
+{
+    IrType* type = ir_type_from_id(&builder->program->types, type_id);
+    if (!type || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM || (type->kind == IR_TYPE_INTEGER && type->bit_width < 32))
+    {
+        return builder->s32_type;
+    }
+    return type_id;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_switch_integer_less_equal(IrType* type, u64 left, u64 right)
+{
+    return type->is_signed ? c_ir_integer_signed_value(left, type) <= c_ir_integer_signed_value(right, type) : left <= right;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_terminate_switch_ranges(CIntegerIrBuilder* builder, IrValueId switched, CIrSwitchCase* cases, u32 case_count,
+                                                      IrBlockId default_block, IrSourceRange source)
+{
+    (void)source;
+    IrBlockId dispatch = builder->current_block;
+    for (u32 case_index = 0; case_index < case_count; case_index += 1)
+    {
+        CIrSwitchCase* current = cases + case_index;
+        if (current->is_default)
+        {
+            continue;
+        }
+        IrBlockId miss = default_block;
+        for (u32 next = case_index + 1; next < case_count; next += 1)
+        {
+            if (!cases[next].is_default)
+            {
+                miss = c_ir_block_create(builder);
+                break;
+            }
+        }
+        if (miss.value == IR_ID_UNDERLYING_INVALID || !c_ir_switch_block(builder, dispatch))
+        {
+            return false;
+        }
+        CToken label = builder->preprocess.tokens[current->label_start];
+        IrSourceRange label_source = c_ir_source_range(label.location, label.spelling.length);
+        IrValueId lower = c_ir_emit_integer_value_typed(builder, current->value, false, label, builder->function->values[switched.value].canonical_type);
+        if (lower.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        IrValueId condition = IR_VALUE_ID_INVALID;
+        IrValueId operands[2] = {switched, lower};
+        u32 operand_count = 2;
+        if (current->is_range)
+        {
+            IrBlockId upper_check = c_ir_block_create(builder);
+            if (upper_check.value == IR_ID_UNDERLYING_INVALID ||
+                !c_ir_apply_operation(builder, C_CONDITIONAL_GREATER_EQUAL, operands, &operand_count, label_source, IR_TYPE_ID_INVALID) ||
+                operand_count != 1)
+            {
+                return false;
+            }
+            condition = c_ir_truth_value(builder, operands[0], label_source);
+            if (condition.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+            IrBlockId lower_targets[2] = {upper_check, miss};
+            if (!c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, lower_targets, 2, label_source) || !c_ir_switch_block(builder, upper_check))
+            {
+                return false;
+            }
+            IrValueId upper = c_ir_emit_integer_value_typed(builder, current->high_value, false, label,
+                                                             builder->function->values[switched.value].canonical_type);
+            if (upper.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+            operands[0] = switched;
+            operands[1] = upper;
+            operand_count = 2;
+            if (!c_ir_apply_operation(builder, C_CONDITIONAL_LESS_EQUAL, operands, &operand_count, label_source, IR_TYPE_ID_INVALID) ||
+                operand_count != 1)
+            {
+                return false;
+            }
+            condition = c_ir_truth_value(builder, operands[0], label_source);
+            if (condition.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            operands[0] = switched;
+            operands[1] = lower;
+            operand_count = 2;
+            if (!c_ir_apply_operation(builder, C_CONDITIONAL_EQUAL, operands, &operand_count, label_source, IR_TYPE_ID_INVALID) || operand_count != 1)
+            {
+                return false;
+            }
+            condition = c_ir_truth_value(builder, operands[0], label_source);
+            if (condition.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+        }
+        IrBlockId targets[2] = {current->block, miss};
+        if (!c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, label_source))
+        {
+            return false;
+        }
+        dispatch = miss;
+    }
     return true;
 }
 
@@ -27624,7 +27742,7 @@ BUSTER_GLOBAL_LOCAL String8 c_ir_unsupported_gnu_construct(CPreprocessResult pre
             else if (!parentheses && !brackets && c_token_is_punctuator(case_token, S8("...")))
             {
                 *token_index_out = index;
-                return S8("GNU case ranges are not supported");
+                return c_preprocess_dialect_is_gnu(preprocess.dialect) ? (String8){0} : S8("GNU case ranges are only available in GNU dialects");
             }
             else if (!parentheses && !brackets && c_token_is_punctuator(case_token, S8(":")))
             {
@@ -27868,13 +27986,116 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
         else if (continuation == C_IR_LOWER_BODY_CONTINUE_SWITCH)
         {
             IrValueId switched = builder->lower_machine.child_result.value;
-            IrType* switched_type = switched.value < builder->function->value_count
-                                        ? ir_type_from_id(&builder->program->types, builder->function->values[switched.value].canonical_type)
-                                        : 0;
+            IrTypeId switched_type_id = switched.value < builder->function->value_count ? builder->function->values[switched.value].canonical_type : IR_TYPE_ID_INVALID;
+            IrType* switched_type = ir_type_from_id(&builder->program->types, switched_type_id);
+            bool has_range = false;
+            for (u32 case_index = 0; case_index < state->switch_case_count; case_index += 1)
+            {
+                has_range |= switch_cases[case_index].is_range;
+            }
             IrBlockId merge = c_ir_block_create(builder);
             if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || merge.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
+            }
+            if (has_range)
+            {
+                IrTypeId promoted_type = c_ir_switch_promoted_type(builder, switched_type_id);
+                if (promoted_type.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                if (promoted_type.value != switched_type_id.value)
+                {
+                    switched = c_ir_emit_cast(builder, switched, promoted_type, state->child_source);
+                    if (switched.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        return false;
+                    }
+                    switched_type_id = promoted_type;
+                    switched_type = ir_type_from_id(&builder->program->types, switched_type_id);
+                }
+                if (!switched_type)
+                {
+                    return false;
+                }
+                u64 switched_mask = c_ir_integer_type_mask(switched_type);
+                for (u32 case_index = 0; case_index < state->switch_case_count; case_index += 1)
+                {
+                    CIrSwitchCase* current = switch_cases + case_index;
+                    if (current->is_default)
+                    {
+                        continue;
+                    }
+                    CIrConstantValue converted = {0};
+                    if (!c_ir_constant_cast(builder, current->low_constant, switched_type_id, &converted) ||
+                        converted.kind != C_IR_CONSTANT_INTEGER)
+                    {
+                        builder->failure_message = S8("case label is not representable as the switch controlling type");
+                        builder->failure_token_index = current->label_start;
+                        return false;
+                    }
+                    current->value = converted.integer & switched_mask;
+                    current->high_value = current->value;
+                    if (current->is_range)
+                    {
+                        if (!c_ir_constant_cast(builder, current->high_constant, switched_type_id, &converted) ||
+                            converted.kind != C_IR_CONSTANT_INTEGER)
+                        {
+                            builder->failure_message = S8("case label is not representable as the switch controlling type");
+                            builder->failure_token_index = current->label_start;
+                            return false;
+                        }
+                        current->high_value = converted.integer & switched_mask;
+                        if (!c_ir_switch_integer_less_equal(switched_type, current->value, current->high_value))
+                        {
+                            builder->failure_message = S8("case range is not ordered after conversion to the switch type");
+                            builder->failure_token_index = current->label_start;
+                            return false;
+                        }
+                    }
+                }
+                for (u32 current_index = 0; current_index < state->switch_case_count; current_index += 1)
+                {
+                    CIrSwitchCase* current = switch_cases + current_index;
+                    if (current->is_default)
+                    {
+                        continue;
+                    }
+                    for (u32 previous_index = 0; previous_index < current_index; previous_index += 1)
+                    {
+                        CIrSwitchCase* previous = switch_cases + previous_index;
+                        if (previous->is_default)
+                        {
+                            continue;
+                        }
+                        bool overlaps = c_ir_switch_integer_less_equal(switched_type, current->value, previous->high_value) &&
+                                        c_ir_switch_integer_less_equal(switched_type, previous->value, current->high_value);
+                        if (overlaps)
+                        {
+                            builder->failure_message = S8("case label overlaps another case label");
+                            builder->failure_token_index = current->label_start;
+                            return false;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                for (u32 current_index = 0; current_index < state->switch_case_count; current_index += 1)
+                {
+                    if (switch_cases[current_index].is_default)
+                    {
+                        continue;
+                    }
+                    for (u32 previous_index = 0; previous_index < current_index; previous_index += 1)
+                    {
+                        if (!switch_cases[previous_index].is_default && switch_cases[previous_index].value == switch_cases[current_index].value)
+                        {
+                            return false;
+                        }
+                    }
+                }
             }
             IrBlockId default_block = merge;
             for (u32 case_index = 0; case_index < state->switch_case_count; case_index += 1)
@@ -27889,7 +28110,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                     default_block = switch_cases[case_index].block;
                 }
             }
-            if (!c_ir_terminate_switch(builder, switched, switch_cases, state->switch_case_count, default_block, state->child_source))
+            bool terminated = has_range ? c_ir_terminate_switch_ranges(builder, switched, switch_cases, state->switch_case_count, default_block,
+                                                                        state->child_source)
+                                         : c_ir_terminate_switch(builder, switched, switch_cases, state->switch_case_count, default_block,
+                                                                 state->child_source);
+            if (!terminated)
             {
                 return false;
             }
@@ -28175,6 +28400,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                         continue;
                     }
                     u32 colon = scan + 1;
+                    u32 range_operator = UINT32_MAX;
                     u32 nested = 0;
                     while (colon < body_close)
                     {
@@ -28195,9 +28421,28 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                         {
                             break;
                         }
+                        else if (!nested && c_token_is_punctuator(colon_token, S8("...")))
+                        {
+                            if (range_operator != UINT32_MAX)
+                            {
+                                builder->failure_message = S8("malformed GNU case range");
+                                builder->failure_token_index = colon;
+                                return false;
+                            }
+                            range_operator = colon;
+                        }
                         colon += 1;
                     }
-                    if (colon >= body_close || (is_default && colon != scan + 1) || (is_case && colon == scan + 1) || (is_default && has_default))
+                    if (colon >= body_close)
+                    {
+                        if (range_operator != UINT32_MAX)
+                        {
+                            builder->failure_message = S8("malformed GNU case range");
+                            builder->failure_token_index = range_operator;
+                        }
+                        return false;
+                    }
+                    if ((is_default && colon != scan + 1) || (is_case && colon == scan + 1) || (is_default && has_default))
                     {
                         return false;
                     }
@@ -28216,16 +28461,42 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                     };
                     if (is_case)
                     {
-                        if (!c_ir_integer_constant_evaluate(builder->arena, builder, scan + 1, colon, &switch_case.value))
+                        if (range_operator == UINT32_MAX)
                         {
-                            return false;
-                        }
-                        for (u32 previous = 0; previous < case_count; previous += 1)
-                        {
-                            if (!cases[previous].is_default && cases[previous].value == switch_case.value)
+                            if (!c_ir_constant_evaluate(builder, scan + 1, colon, &switch_case.low_constant) ||
+                                switch_case.low_constant.kind != C_IR_CONSTANT_INTEGER)
                             {
                                 return false;
                             }
+                            switch_case.value = switch_case.low_constant.integer;
+                            switch_case.high_value = switch_case.value;
+                            switch_case.high_constant = switch_case.low_constant;
+                        }
+                        else
+                        {
+                            if (range_operator == scan + 1 || range_operator + 1 >= colon)
+                            {
+                                builder->failure_message = S8("malformed GNU case range");
+                                builder->failure_token_index = range_operator;
+                                return false;
+                            }
+                            if (!c_ir_constant_evaluate(builder, scan + 1, range_operator, &switch_case.low_constant) ||
+                                switch_case.low_constant.kind != C_IR_CONSTANT_INTEGER)
+                            {
+                                builder->failure_message = S8("case range lower bound is not an integer constant expression");
+                                builder->failure_token_index = scan;
+                                return false;
+                            }
+                            if (!c_ir_constant_evaluate(builder, range_operator + 1, colon, &switch_case.high_constant) ||
+                                switch_case.high_constant.kind != C_IR_CONSTANT_INTEGER)
+                            {
+                                builder->failure_message = S8("case range upper bound is not an integer constant expression");
+                                builder->failure_token_index = range_operator + 1;
+                                return false;
+                            }
+                            switch_case.value = switch_case.low_constant.integer;
+                            switch_case.high_value = switch_case.high_constant.integer;
+                            switch_case.is_range = true;
                         }
                     }
                     else
