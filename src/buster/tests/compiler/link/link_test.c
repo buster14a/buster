@@ -731,7 +731,6 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, boo
     }
     *has_frame_register = false;
     *has_large_allocation = false;
-    ByteSlice pdata = object->sections[OBJECT_SECTION_WINDOWS_PDATA].data;
     ByteSlice xdata = object->sections[OBJECT_SECTION_WINDOWS_XDATA].data;
     u32 record_count = 0;
     for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
