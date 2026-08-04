@@ -70,6 +70,31 @@ BUSTER_TEST_F_DECL UnitTestResult string_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
 
+    {
+        String8 empty = {0};
+        String8 invalid = {.length = 1};
+        String8 x8 = S8("x");
+        BUSTER_TEST(arguments, string_equal(x8, x8));
+        BUSTER_TEST(arguments, string_equal(empty, S8("")));
+        BUSTER_TEST(arguments, string_equal(S8(""), empty));
+        BUSTER_TEST(arguments, !string_equal(empty, S8("x")));
+        BUSTER_TEST(arguments, !string_equal(S8("x"), empty));
+        BUSTER_TEST(arguments, !string_equal(invalid, S8("x")));
+        BUSTER_TEST(arguments, !string_equal(S8("x"), invalid));
+        BUSTER_TEST(arguments, !string_equal(invalid, invalid));
+
+        char16 x[] = {'x'};
+        String16 empty16 = {0};
+        String16 invalid16 = {.length = 1};
+        String16 x16 = {.pointer = x, .length = BUSTER_ARRAY_LENGTH(x)};
+        BUSTER_TEST(arguments, string16_equal(x16, x16));
+        BUSTER_TEST(arguments, string16_equal(empty16, (String16){.pointer = x}));
+        BUSTER_TEST(arguments, string16_equal((String16){.pointer = x}, empty16));
+        BUSTER_TEST(arguments, !string16_equal(invalid16, x16));
+        BUSTER_TEST(arguments, !string16_equal(x16, invalid16));
+        BUSTER_TEST(arguments, !string16_equal(invalid16, invalid16));
+    }
+
     // The formatter deliberately terminates the process for malformed input.
     // A child-mode hook lets the parent test that behavior without terminating
     // the main test process.

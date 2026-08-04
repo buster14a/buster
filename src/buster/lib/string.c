@@ -215,40 +215,62 @@ String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminat
 
 bool string_equal(String8 s1, String8 s2)
 {
-    bool is_equal = s1.length == s2.length;
-    if (is_equal & (s1.pointer != 0) & (s1.pointer != s2.pointer))
+    if (s1.length != s2.length)
     {
-#if BUSTER_OPTIMIZE
-        is_equal = memory_compare(s1.pointer, s2.pointer, s1.length * sizeof(char8));
-#else
-        for (u64 i = 0; i < s1.length; i += 1)
-        {
-            if (s1.pointer[i] != s2.pointer[i])
-            {
-                is_equal = false;
-                break;
-            }
-        }
-#endif
+        return false;
     }
-    return is_equal;
+    if (!s1.length)
+    {
+        return true;
+    }
+    if (!s1.pointer || !s2.pointer)
+    {
+        return false;
+    }
+    if (s1.pointer == s2.pointer)
+    {
+        return true;
+    }
+#if BUSTER_OPTIMIZE
+    return memory_compare(s1.pointer, s2.pointer, s1.length * sizeof(char8));
+#else
+    for (u64 i = 0; i < s1.length; i += 1)
+    {
+        if (s1.pointer[i] != s2.pointer[i])
+        {
+            return false;
+        }
+    }
+    return true;
+#endif
 }
 
 bool string16_equal(String16 s1, String16 s2)
 {
-    bool is_equal = s1.length == s2.length;
-    if (is_equal & (s1.pointer != 0) & (s1.pointer != s2.pointer))
+    if (s1.length != s2.length)
     {
-        for (u64 i = 0; i < s1.length; i += 1)
+        return false;
+    }
+    if (!s1.length)
+    {
+        return true;
+    }
+    if (!s1.pointer || !s2.pointer)
+    {
+        return false;
+    }
+    if (s1.pointer == s2.pointer)
+    {
+        return true;
+    }
+    for (u64 i = 0; i < s1.length; i += 1)
+    {
+        if (s1.pointer[i] != s2.pointer[i])
         {
-            if (s1.pointer[i] != s2.pointer[i])
-            {
-                is_equal = false;
-                break;
-            }
+            return false;
         }
     }
-    return is_equal;
+    return true;
 }
 
 bool string_ends_with_sequence(String8 string, String8 ending)
