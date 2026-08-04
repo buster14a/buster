@@ -2531,6 +2531,10 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         if (result == VK_SUCCESS && instance_extension_property_count <= BUSTER_ARRAY_LENGTH(instance_extension_properties))
                         {
                             result = vkEnumerateInstanceExtensionProperties(0, &instance_extension_property_count, instance_extension_properties);
+                            if (result == VK_SUCCESS && instance_extension_property_count > BUSTER_ARRAY_LENGTH(instance_extension_properties))
+                            {
+                                result = VK_ERROR_EXTENSION_NOT_PRESENT;
+                            }
                         }
                         else if (result == VK_SUCCESS)
                         {
