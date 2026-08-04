@@ -63,39 +63,39 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
 {
     TargetCpuFeatures result = TARGET_CPU_FEATURE_X86_SSE2;
     CpuId basic = input.basic;
-    if (basic.ecx & (UINT32_C(1) << 0))
+    if (basic.ecx & (UINT32_C(0x1)))
     {
         result |= TARGET_CPU_FEATURE_X86_SSE3;
     }
-    if (basic.ecx & (UINT32_C(1) << 13))
+    if (basic.ecx & (UINT32_C(0x2000)))
     {
         result |= TARGET_CPU_FEATURE_X86_CX16;
     }
-    if (basic.ecx & (UINT32_C(1) << 23))
+    if (basic.ecx & (UINT32_C(0x800000)))
     {
         result |= TARGET_CPU_FEATURE_X86_POPCNT;
     }
-    if (basic.ecx & (UINT32_C(1) << 25))
+    if (basic.ecx & (UINT32_C(0x2000000)))
     {
         result |= TARGET_CPU_FEATURE_X86_AES;
     }
-    if (basic.ecx & (UINT32_C(1) << 1))
+    if (basic.ecx & (UINT32_C(0x2)))
     {
         result |= TARGET_CPU_FEATURE_X86_PCLMUL;
     }
-    if (input.maximum_extended_leaf >= UINT32_C(0x80000001) && (input.extended_basic.ecx & (UINT32_C(1) << 5)))
+    if (input.maximum_extended_leaf >= UINT32_C(0x80000001) && (input.extended_basic.ecx & (UINT32_C(0x20))))
     {
         result |= TARGET_CPU_FEATURE_X86_LZCNT;
     }
 
-    bool has_osxsave = (basic.ecx & (UINT32_C(1) << 27)) != 0;
-    bool has_avx_hardware = (basic.ecx & (UINT32_C(1) << 28)) != 0;
+    bool has_osxsave = (basic.ecx & (UINT32_C(0x8000000))) != 0;
+    bool has_avx_hardware = (basic.ecx & (UINT32_C(0x10000000))) != 0;
     bool avx_state = has_osxsave && (input.xcr0 & UINT64_C(0x6)) == UINT64_C(0x6);
     bool avx_usable = has_avx_hardware && avx_state;
     bool avx512_state = avx_usable && (input.xcr0 & UINT64_C(0xe0)) == UINT64_C(0xe0);
     bool amx_state = has_osxsave &&
-                     (input.xcr0 & (UINT64_C(1) << 17 | UINT64_C(1) << 18)) == (UINT64_C(1) << 17 | UINT64_C(1) << 18);
-    bool apx_state = has_osxsave && (input.xcr0 & (UINT64_C(1) << 19)) != 0;
+                     (input.xcr0 & (UINT64_C(0x20000) | UINT64_C(0x40000))) == (UINT64_C(0x20000) | UINT64_C(0x40000));
+    bool apx_state = has_osxsave && (input.xcr0 & (UINT64_C(0x80000))) != 0;
     if (avx_usable)
     {
         result |= TARGET_CPU_FEATURE_X86_AVX;
@@ -106,102 +106,102 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     bool has_leaf_7 = input.maximum_basic_leaf >= 7;
     bool has_leaf_7_1 = has_leaf_7 && leaf_7_0.eax >= 1;
     bool avx2_usable = false;
-    if (has_leaf_7 && (result & TARGET_CPU_FEATURE_X86_AVX) && (leaf_7_0.ebx & (UINT32_C(1) << 5)))
+    if (has_leaf_7 && (result & TARGET_CPU_FEATURE_X86_AVX) && (leaf_7_0.ebx & (UINT32_C(0x20))))
     {
         result |= TARGET_CPU_FEATURE_X86_AVX2;
         avx2_usable = true;
     }
-    if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(1) << 3)))
+    if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x8))))
     {
         result |= TARGET_CPU_FEATURE_X86_BMI1;
     }
-    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(1) << 8)))
+    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x100))))
     {
         result |= TARGET_CPU_FEATURE_X86_GFNI;
     }
-    if (avx2_usable && (result & TARGET_CPU_FEATURE_X86_AES) && (leaf_7_0.ecx & (UINT32_C(1) << 9)))
+    if (avx2_usable && (result & TARGET_CPU_FEATURE_X86_AES) && (leaf_7_0.ecx & (UINT32_C(0x200))))
     {
         result |= TARGET_CPU_FEATURE_X86_VAES;
     }
-    if (avx_usable && (result & TARGET_CPU_FEATURE_X86_PCLMUL) && (leaf_7_0.ecx & (UINT32_C(1) << 10)))
+    if (avx_usable && (result & TARGET_CPU_FEATURE_X86_PCLMUL) && (leaf_7_0.ecx & (UINT32_C(0x400))))
     {
         result |= TARGET_CPU_FEATURE_X86_VPCLMULQDQ;
     }
-    bool avx10_hardware = has_leaf_7_1 && (leaf_7_1.edx & (UINT32_C(1) << 19)) != 0;
+    bool avx10_hardware = has_leaf_7_1 && (leaf_7_1.edx & (UINT32_C(0x80000))) != 0;
     bool has_leaf_24 = input.maximum_basic_leaf >= UINT32_C(0x24);
     u32 avx10_version = has_leaf_24 ? input.leaf_24_0.ebx & UINT32_C(0xff) : 0;
     bool avx10_usable = avx2_usable && avx512_state && avx10_hardware && avx10_version >= 1;
-    bool avx512f_usable = avx2_usable && avx512_state && (leaf_7_0.ebx & (UINT32_C(1) << 16)) != 0;
+    bool avx512f_usable = avx2_usable && avx512_state && (leaf_7_0.ebx & (UINT32_C(0x10000))) != 0;
     bool avx512_path_usable = avx512f_usable || avx10_usable;
-    bool avx512bw_hardware = (leaf_7_0.ebx & (UINT32_C(1) << 30)) != 0;
+    bool avx512bw_hardware = (leaf_7_0.ebx & (UINT32_C(0x40000000))) != 0;
     if (avx512_path_usable)
     {
         result |= TARGET_CPU_FEATURE_X86_AVX512F;
-        if (leaf_7_0.ebx & (UINT32_C(1) << 17))
+        if (leaf_7_0.ebx & (UINT32_C(0x20000)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512DQ;
         }
-        if (leaf_7_0.ebx & (UINT32_C(1) << 21))
+        if (leaf_7_0.ebx & (UINT32_C(0x200000)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512IFMA;
         }
-        if (leaf_7_0.ebx & (UINT32_C(1) << 26))
+        if (leaf_7_0.ebx & (UINT32_C(0x4000000)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512PF;
         }
-        if (leaf_7_0.ebx & (UINT32_C(1) << 27))
+        if (leaf_7_0.ebx & (UINT32_C(0x8000000)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512ER;
         }
-        if (leaf_7_0.ebx & (UINT32_C(1) << 28))
+        if (leaf_7_0.ebx & (UINT32_C(0x10000000)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512CD;
         }
-        if (leaf_7_0.ebx & (UINT32_C(1) << 30))
+        if (leaf_7_0.ebx & (UINT32_C(0x40000000)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512BW;
         }
-        if (leaf_7_0.ebx & (UINT32_C(1) << 31))
+        if (leaf_7_0.ebx & (UINT32_C(0x80000000)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512VL;
         }
-        if (avx512bw_hardware && (leaf_7_0.ecx & (UINT32_C(1) << 1)))
+        if (avx512bw_hardware && (leaf_7_0.ecx & (UINT32_C(0x2))))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512VBMI;
         }
-        if (avx512bw_hardware && (leaf_7_0.ecx & (UINT32_C(1) << 6)))
+        if (avx512bw_hardware && (leaf_7_0.ecx & (UINT32_C(0x40))))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512VBMI2;
         }
-        if (leaf_7_0.ecx & (UINT32_C(1) << 11))
+        if (leaf_7_0.ecx & (UINT32_C(0x800)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512VNNI;
         }
-        if (avx512bw_hardware && (leaf_7_0.ecx & (UINT32_C(1) << 12)))
+        if (avx512bw_hardware && (leaf_7_0.ecx & (UINT32_C(0x1000))))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512BITALG;
         }
-        if (leaf_7_0.ecx & (UINT32_C(1) << 14))
+        if (leaf_7_0.ecx & (UINT32_C(0x4000)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ;
         }
-        if (leaf_7_0.edx & (UINT32_C(1) << 2))
+        if (leaf_7_0.edx & (UINT32_C(0x4)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX5124VNNIW;
         }
-        if (leaf_7_0.edx & (UINT32_C(1) << 3))
+        if (leaf_7_0.edx & (UINT32_C(0x8)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX5124FMAPS;
         }
-        if (leaf_7_0.edx & (UINT32_C(1) << 8))
+        if (leaf_7_0.edx & (UINT32_C(0x100)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT;
         }
-        if (avx512bw_hardware && (leaf_7_0.edx & (UINT32_C(1) << 23)))
+        if (avx512bw_hardware && (leaf_7_0.edx & (UINT32_C(0x800000))))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512FP16;
         }
-        if (avx512bw_hardware && has_leaf_7_1 && (leaf_7_1.eax & (UINT32_C(1) << 5)))
+        if (avx512bw_hardware && has_leaf_7_1 && (leaf_7_1.eax & (UINT32_C(0x20))))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX512BF16;
         }
@@ -215,7 +215,7 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
         // not decode the reserved field as independent capabilities.
         result |= TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX2 | TARGET_CPU_FEATURE_X86_AVX512F |
                   TARGET_CPU_FEATURE_X86_AVX10_1 | TARGET_CPU_FEATURE_X86_AVX10_512;
-        if (avx10_version >= 2 && has_leaf_24 && input.leaf_24_0.eax >= 1 && (input.leaf_24_1.ecx & (UINT32_C(1) << 2)))
+        if (avx10_version >= 2 && has_leaf_24 && input.leaf_24_0.eax >= 1 && (input.leaf_24_1.ecx & (UINT32_C(0x4))))
         {
             // AVX10.2 and AVX10_V1_AUX co-enumerate on conforming hardware.
             // Require both fields so malformed synthetic input under-reports
@@ -226,23 +226,23 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
 
     if (has_leaf_7_1 && avx2_usable)
     {
-        if (leaf_7_1.eax & (UINT32_C(1) << 4))
+        if (leaf_7_1.eax & (UINT32_C(0x10)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX_VNNI;
         }
-        if (leaf_7_1.eax & (UINT32_C(1) << 23))
+        if (leaf_7_1.eax & (UINT32_C(0x800000)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX_IFMA;
         }
-        if (leaf_7_1.edx & (UINT32_C(1) << 4))
+        if (leaf_7_1.edx & (UINT32_C(0x10)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8;
         }
-        if (leaf_7_1.edx & (UINT32_C(1) << 5))
+        if (leaf_7_1.edx & (UINT32_C(0x20)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT;
         }
-        if (leaf_7_1.edx & (UINT32_C(1) << 10))
+        if (leaf_7_1.edx & (UINT32_C(0x400)))
         {
             result |= TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16;
         }
@@ -251,13 +251,13 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     // MOVRS is a separate scalar/vector capability.  The EVEX vector forms
     // additionally require AVX10 at encoding time, but the CPUID feature is
     // usable and reportable independently of AVX10.
-    if (has_leaf_7_1 && (leaf_7_1.eax & (UINT32_C(1) << 31)))
+    if (has_leaf_7_1 && (leaf_7_1.eax & (UINT32_C(0x80000000))))
     {
         result |= TARGET_CPU_FEATURE_X86_MOVRS;
     }
 
-    bool apx_hardware = has_leaf_7_1 && (leaf_7_1.edx & (UINT32_C(1) << 21)) != 0;
-    bool apx_nci_hardware = input.maximum_basic_leaf >= UINT32_C(0x29) && (input.leaf_29_0.ebx & (UINT32_C(1) << 0)) != 0;
+    bool apx_hardware = has_leaf_7_1 && (leaf_7_1.edx & (UINT32_C(0x200000))) != 0;
+    bool apx_nci_hardware = input.maximum_basic_leaf >= UINT32_C(0x29) && (input.leaf_29_0.ebx & (UINT32_C(0x1))) != 0;
     // APX-F and APX_NCI_NDD_NF co-enumerate on conforming hardware.  Require
     // both fields and usable APX state so malformed synthetic input under-
     // reports the pair instead of publishing an impossible target.
@@ -267,20 +267,20 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     }
 
     bool has_leaf_1e_1 = input.maximum_basic_leaf >= UINT32_C(0x1e) && input.leaf_1e_0.eax >= 1;
-    bool amx_tile_hardware = has_leaf_7 && (leaf_7_0.edx & (UINT32_C(1) << 24)) != 0;
-    bool amx_int8_hardware = has_leaf_7 && (leaf_7_0.edx & (UINT32_C(1) << 25)) != 0;
-    bool amx_bf16_hardware = has_leaf_7 && (leaf_7_0.edx & (UINT32_C(1) << 22)) != 0;
-    bool amx_fp16_hardware = has_leaf_7_1 && (leaf_7_1.eax & (UINT32_C(1) << 21)) != 0;
-    bool amx_complex_hardware = has_leaf_7_1 && (leaf_7_1.edx & (UINT32_C(1) << 8)) != 0;
+    bool amx_tile_hardware = has_leaf_7 && (leaf_7_0.edx & (UINT32_C(0x1000000))) != 0;
+    bool amx_int8_hardware = has_leaf_7 && (leaf_7_0.edx & (UINT32_C(0x2000000))) != 0;
+    bool amx_bf16_hardware = has_leaf_7 && (leaf_7_0.edx & (UINT32_C(0x400000))) != 0;
+    bool amx_fp16_hardware = has_leaf_7_1 && (leaf_7_1.eax & (UINT32_C(0x200000))) != 0;
+    bool amx_complex_hardware = has_leaf_7_1 && (leaf_7_1.edx & (UINT32_C(0x100))) != 0;
     if (has_leaf_1e_1)
     {
         // CPUID.1E.1 mirrors these four AMX fields from legacy leaves.  Once
         // the mirror exists, require both copies so malformed one-sided
         // synthetic input cannot publish a feature.
-        amx_int8_hardware = amx_int8_hardware && (input.leaf_1e_1.eax & (UINT32_C(1) << 0)) != 0;
-        amx_bf16_hardware = amx_bf16_hardware && (input.leaf_1e_1.eax & (UINT32_C(1) << 1)) != 0;
-        amx_complex_hardware = amx_complex_hardware && (input.leaf_1e_1.eax & (UINT32_C(1) << 2)) != 0;
-        amx_fp16_hardware = amx_fp16_hardware && (input.leaf_1e_1.eax & (UINT32_C(1) << 3)) != 0;
+        amx_int8_hardware = amx_int8_hardware && (input.leaf_1e_1.eax & (UINT32_C(0x1))) != 0;
+        amx_bf16_hardware = amx_bf16_hardware && (input.leaf_1e_1.eax & (UINT32_C(0x2))) != 0;
+        amx_complex_hardware = amx_complex_hardware && (input.leaf_1e_1.eax & (UINT32_C(0x4))) != 0;
+        amx_fp16_hardware = amx_fp16_hardware && (input.leaf_1e_1.eax & (UINT32_C(0x8))) != 0;
     }
     if (amx_state && amx_tile_hardware)
     {
@@ -301,14 +301,14 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
         {
             result |= TARGET_CPU_FEATURE_X86_AMX_COMPLEX;
         }
-        if (has_leaf_1e_1 && (input.leaf_1e_1.eax & (UINT32_C(1) << 4)))
+        if (has_leaf_1e_1 && (input.leaf_1e_1.eax & (UINT32_C(0x10))))
         {
             result |= TARGET_CPU_FEATURE_X86_AMX_FP8;
         }
         // AMX-AVX512 instructions also consume the AVX-512 architectural
         // state.  AMX tile state alone is sufficient for the other AMX
         // families, but must not make this vector-state family usable.
-        if (has_leaf_1e_1 && (input.leaf_1e_1.eax & (UINT32_C(1) << 7)) && avx512_state &&
+        if (has_leaf_1e_1 && (input.leaf_1e_1.eax & (UINT32_C(0x80))) && avx512_state &&
             (result & (TARGET_CPU_FEATURE_X86_AVX512F | TARGET_CPU_FEATURE_X86_AVX10_1)))
         {
             result |= TARGET_CPU_FEATURE_X86_AMX_AVX512;
@@ -316,7 +316,7 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
         // AMX-MOVRS is independently enumerated.  Its tile instructions
         // still require the independent AMX tile state above, but do not
         // require APX state.
-        if (has_leaf_1e_1 && (input.leaf_1e_1.eax & (UINT32_C(1) << 8)))
+        if (has_leaf_1e_1 && (input.leaf_1e_1.eax & (UINT32_C(0x100))))
         {
             result |= TARGET_CPU_FEATURE_X86_AMX_MOVRS;
         }
@@ -367,7 +367,7 @@ TargetCpuFeatures cpu_detect_features_x86_64(void)
     {
         input.leaf_29_0 = cpuid(UINT32_C(0x29), 0);
     }
-    if (input.basic.ecx & (UINT32_C(1) << 27))
+    if (input.basic.ecx & (UINT32_C(0x8000000)))
     {
         input.xcr0 = xgetbv(0);
     }

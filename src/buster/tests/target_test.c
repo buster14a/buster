@@ -450,7 +450,7 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
         BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(feature_names[feature_index].feature), feature_names[feature_index].name);
     }
     BUSTER_TEST(arguments, sizeof(TargetCpuFeature) == sizeof(u64));
-    BUSTER_TEST(arguments, (TARGET_CPU_FEATURE_X86_MOVRS & (UINT64_C(1) << 52)) != 0);
+    BUSTER_TEST(arguments, (TARGET_CPU_FEATURE_X86_MOVRS & (UINT64_C(0x10000000000000))) != 0);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("avx2")) == TARGET_CPU_FEATURE_X86_AVX2);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("avx10-vnni-int")) == TARGET_CPU_FEATURE_NONE);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("sse3")) == TARGET_CPU_FEATURE_X86_SSE3);
@@ -469,32 +469,32 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     X86_64CpuFeatureInput full_cpuid = {
         .maximum_basic_leaf = 0x29,
         .maximum_extended_leaf = 0x80000001,
-        .basic = {.ecx = (UINT32_C(1) << 0) | (UINT32_C(1) << 1) | (UINT32_C(1) << 13) | (UINT32_C(1) << 23) |
-                           (UINT32_C(1) << 25) | (UINT32_C(1) << 27) | (UINT32_C(1) << 28)},
-        .extended_basic = {.ecx = UINT32_C(1) << 5},
+        .basic = {.ecx = (UINT32_C(0x1)) | (UINT32_C(0x2)) | (UINT32_C(0x2000)) | (UINT32_C(0x800000)) |
+                           (UINT32_C(0x2000000)) | (UINT32_C(0x8000000)) | (UINT32_C(0x10000000))},
+        .extended_basic = {.ecx = UINT32_C(0x20)},
         .leaf_7_0 =
             {
                 .eax = 1,
-                .ebx = (UINT32_C(1) << 3) | (UINT32_C(1) << 5) | (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 21) |
-                       (UINT32_C(1) << 26) | (UINT32_C(1) << 27) | (UINT32_C(1) << 28) | (UINT32_C(1) << 30) | (UINT32_C(1) << 31),
-                .ecx = (UINT32_C(1) << 1) | (UINT32_C(1) << 6) | (UINT32_C(1) << 8) | (UINT32_C(1) << 9) | (UINT32_C(1) << 10) |
-                       (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 14),
-                .edx = (UINT32_C(1) << 2) | (UINT32_C(1) << 3) | (UINT32_C(1) << 8) | (UINT32_C(1) << 22) | (UINT32_C(1) << 23) |
-                       (UINT32_C(1) << 24) | (UINT32_C(1) << 25),
+                .ebx = (UINT32_C(0x8)) | (UINT32_C(0x20)) | (UINT32_C(0x10000)) | (UINT32_C(0x20000)) | (UINT32_C(0x200000)) |
+                       (UINT32_C(0x4000000)) | (UINT32_C(0x8000000)) | (UINT32_C(0x10000000)) | (UINT32_C(0x40000000)) | (UINT32_C(0x80000000)),
+                .ecx = (UINT32_C(0x2)) | (UINT32_C(0x40)) | (UINT32_C(0x100)) | (UINT32_C(0x200)) | (UINT32_C(0x400)) |
+                       (UINT32_C(0x800)) | (UINT32_C(0x1000)) | (UINT32_C(0x4000)),
+                .edx = (UINT32_C(0x4)) | (UINT32_C(0x8)) | (UINT32_C(0x100)) | (UINT32_C(0x400000)) | (UINT32_C(0x800000)) |
+                       (UINT32_C(0x1000000)) | (UINT32_C(0x2000000)),
             },
         .leaf_7_1 =
             {
-                .eax = (UINT32_C(1) << 4) | (UINT32_C(1) << 5) | (UINT32_C(1) << 21) | (UINT32_C(1) << 23) | (UINT32_C(1) << 31),
-                .edx = (UINT32_C(1) << 4) | (UINT32_C(1) << 5) | (UINT32_C(1) << 8) | (UINT32_C(1) << 10) | (UINT32_C(1) << 19) |
-                       (UINT32_C(1) << 21),
+                .eax = (UINT32_C(0x10)) | (UINT32_C(0x20)) | (UINT32_C(0x200000)) | (UINT32_C(0x800000)) | (UINT32_C(0x80000000)),
+                .edx = (UINT32_C(0x10)) | (UINT32_C(0x20)) | (UINT32_C(0x100)) | (UINT32_C(0x400)) | (UINT32_C(0x80000)) |
+                       (UINT32_C(0x200000)),
             },
         .leaf_1e_0 = {.eax = 1},
-        .leaf_1e_1 = {.eax = (UINT32_C(1) << 0) | (UINT32_C(1) << 1) | (UINT32_C(1) << 2) | (UINT32_C(1) << 3) | (UINT32_C(1) << 4) |
-                              (UINT32_C(1) << 6) | (UINT32_C(1) << 7) | (UINT32_C(1) << 8)},
-        .leaf_24_0 = {.eax = 1, .ebx = 2 | (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18)},
-        .leaf_24_1 = {.ecx = UINT32_C(1) << 2},
-        .leaf_29_0 = {.ebx = UINT32_C(1) << 0},
-        .xcr0 = UINT64_C(0xe7) | (UINT64_C(1) << 17) | (UINT64_C(1) << 18) | (UINT64_C(1) << 19),
+        .leaf_1e_1 = {.eax = (UINT32_C(0x1)) | (UINT32_C(0x2)) | (UINT32_C(0x4)) | (UINT32_C(0x8)) | (UINT32_C(0x10)) |
+                              (UINT32_C(0x40)) | (UINT32_C(0x80)) | (UINT32_C(0x100))},
+        .leaf_24_0 = {.eax = 1, .ebx = 2 | (UINT32_C(0x10000)) | (UINT32_C(0x20000)) | (UINT32_C(0x40000))},
+        .leaf_24_1 = {.ecx = UINT32_C(0x4)},
+        .leaf_29_0 = {.ebx = UINT32_C(0x1)},
+        .xcr0 = UINT64_C(0xe7) | (UINT64_C(0x20000)) | (UINT64_C(0x40000)) | (UINT64_C(0x80000)),
     };
     TargetCpuFeatures full_features = x86_64_cpu_features_from_cpuid(full_cpuid);
     TargetCpuFeatures full_expected = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_SSE3 | TARGET_CPU_FEATURE_X86_POPCNT |
@@ -524,7 +524,7 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
                                         .cpu_features = full_features,
                                     }));
     X86_64CpuFeatureInput no_avx2_hardware = full_cpuid;
-    no_avx2_hardware.leaf_7_0.ebx &= ~(UINT32_C(1) << 5);
+    no_avx2_hardware.leaf_7_0.ebx &= ~(UINT32_C(0x20));
     TargetCpuFeatures no_avx2_hardware_features = x86_64_cpu_features_from_cpuid(no_avx2_hardware);
     BUSTER_TEST(arguments, !(no_avx2_hardware_features & (TARGET_CPU_FEATURE_X86_AVX2 | TARGET_CPU_FEATURE_X86_AVX512F |
                                                            TARGET_CPU_FEATURE_X86_AVX10_1 | TARGET_CPU_FEATURE_X86_AVX10_2 |
@@ -535,17 +535,17 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, (no_avx2_hardware_features & TARGET_CPU_FEATURE_X86_GFNI) != 0);
     BUSTER_TEST(arguments, (no_avx2_hardware_features & TARGET_CPU_FEATURE_X86_VPCLMULQDQ) != 0);
     X86_64CpuFeatureInput no_aes_hardware = full_cpuid;
-    no_aes_hardware.basic.ecx &= ~(UINT32_C(1) << 25);
+    no_aes_hardware.basic.ecx &= ~(UINT32_C(0x2000000));
     TargetCpuFeatures no_aes_hardware_features = x86_64_cpu_features_from_cpuid(no_aes_hardware);
     BUSTER_TEST(arguments, !(no_aes_hardware_features & (TARGET_CPU_FEATURE_X86_AES | TARGET_CPU_FEATURE_X86_VAES)));
     BUSTER_TEST(arguments, (no_aes_hardware_features & TARGET_CPU_FEATURE_X86_VPCLMULQDQ) != 0);
     X86_64CpuFeatureInput no_pclmul_hardware = full_cpuid;
-    no_pclmul_hardware.basic.ecx &= ~(UINT32_C(1) << 1);
+    no_pclmul_hardware.basic.ecx &= ~(UINT32_C(0x2));
     TargetCpuFeatures no_pclmul_hardware_features = x86_64_cpu_features_from_cpuid(no_pclmul_hardware);
     BUSTER_TEST(arguments, !(no_pclmul_hardware_features & (TARGET_CPU_FEATURE_X86_PCLMUL | TARGET_CPU_FEATURE_X86_VPCLMULQDQ)));
     BUSTER_TEST(arguments, (no_pclmul_hardware_features & TARGET_CPU_FEATURE_X86_VAES) != 0);
     X86_64CpuFeatureInput no_avx512bw_hardware = full_cpuid;
-    no_avx512bw_hardware.leaf_7_0.ebx &= ~(UINT32_C(1) << 30);
+    no_avx512bw_hardware.leaf_7_0.ebx &= ~(UINT32_C(0x40000000));
     TargetCpuFeatures no_avx512bw_hardware_features = x86_64_cpu_features_from_cpuid(no_avx512bw_hardware);
     BUSTER_TEST(arguments, (no_avx512bw_hardware_features & TARGET_CPU_FEATURE_X86_AVX512F) != 0);
     BUSTER_TEST(arguments, !(no_avx512bw_hardware_features & (TARGET_CPU_FEATURE_X86_AVX512VBMI |
@@ -554,49 +554,49 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
                                                                TARGET_CPU_FEATURE_X86_AVX512BITALG |
                                                                TARGET_CPU_FEATURE_X86_AVX512FP16)));
     X86_64CpuFeatureInput reserved_avx10_vl = full_cpuid;
-    reserved_avx10_vl.leaf_24_0.ebx &= ~((UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18));
+    reserved_avx10_vl.leaf_24_0.ebx &= ~((UINT32_C(0x10000)) | (UINT32_C(0x20000)) | (UINT32_C(0x40000)));
     BUSTER_TEST(arguments, x86_64_cpu_features_from_cpuid(reserved_avx10_vl) == full_features);
     X86_64CpuFeatureInput reserved_amx_bits = full_cpuid;
-    reserved_amx_bits.leaf_1e_1.eax |= (UINT32_C(1) << 5) | (UINT32_C(1) << 6);
+    reserved_amx_bits.leaf_1e_1.eax |= (UINT32_C(0x20)) | (UINT32_C(0x40));
     BUSTER_TEST(arguments, x86_64_cpu_features_from_cpuid(reserved_amx_bits) == full_features);
     X86_64CpuFeatureInput amx_int8_legacy_only = full_cpuid;
-    amx_int8_legacy_only.leaf_1e_1.eax &= ~(UINT32_C(1) << 0);
+    amx_int8_legacy_only.leaf_1e_1.eax &= ~(UINT32_C(0x1));
     BUSTER_TEST(arguments, !(x86_64_cpu_features_from_cpuid(amx_int8_legacy_only) & TARGET_CPU_FEATURE_X86_AMX_INT8));
     X86_64CpuFeatureInput amx_int8_mirror_only = full_cpuid;
-    amx_int8_mirror_only.leaf_7_0.edx &= ~(UINT32_C(1) << 25);
+    amx_int8_mirror_only.leaf_7_0.edx &= ~(UINT32_C(0x2000000));
     BUSTER_TEST(arguments, !(x86_64_cpu_features_from_cpuid(amx_int8_mirror_only) & TARGET_CPU_FEATURE_X86_AMX_INT8));
     X86_64CpuFeatureInput amx_bf16_legacy_only = full_cpuid;
-    amx_bf16_legacy_only.leaf_1e_1.eax &= ~(UINT32_C(1) << 1);
+    amx_bf16_legacy_only.leaf_1e_1.eax &= ~(UINT32_C(0x2));
     TargetCpuFeatures amx_bf16_legacy_only_features = x86_64_cpu_features_from_cpuid(amx_bf16_legacy_only);
     BUSTER_TEST(arguments, !(amx_bf16_legacy_only_features & TARGET_CPU_FEATURE_X86_AMX_BF16));
     BUSTER_TEST(arguments, (amx_bf16_legacy_only_features & TARGET_CPU_FEATURE_X86_AVX512BF16) != 0);
     X86_64CpuFeatureInput amx_bf16_mirror_only = full_cpuid;
-    amx_bf16_mirror_only.leaf_7_0.edx &= ~(UINT32_C(1) << 22);
+    amx_bf16_mirror_only.leaf_7_0.edx &= ~(UINT32_C(0x400000));
     TargetCpuFeatures amx_bf16_mirror_only_features = x86_64_cpu_features_from_cpuid(amx_bf16_mirror_only);
     BUSTER_TEST(arguments, !(amx_bf16_mirror_only_features & TARGET_CPU_FEATURE_X86_AMX_BF16));
     BUSTER_TEST(arguments, (amx_bf16_mirror_only_features & TARGET_CPU_FEATURE_X86_AVX512BF16) != 0);
     X86_64CpuFeatureInput amx_bf16_without_avx512_bf16 = full_cpuid;
-    amx_bf16_without_avx512_bf16.leaf_7_1.eax &= ~(UINT32_C(1) << 5);
+    amx_bf16_without_avx512_bf16.leaf_7_1.eax &= ~(UINT32_C(0x20));
     TargetCpuFeatures amx_bf16_without_avx512_bf16_features = x86_64_cpu_features_from_cpuid(amx_bf16_without_avx512_bf16);
     BUSTER_TEST(arguments, (amx_bf16_without_avx512_bf16_features & TARGET_CPU_FEATURE_X86_AMX_BF16) != 0);
     BUSTER_TEST(arguments, !(amx_bf16_without_avx512_bf16_features & TARGET_CPU_FEATURE_X86_AVX512BF16));
     X86_64CpuFeatureInput avx512_bf16_without_amx_bf16 = full_cpuid;
-    avx512_bf16_without_amx_bf16.leaf_7_0.edx &= ~(UINT32_C(1) << 22);
-    avx512_bf16_without_amx_bf16.leaf_1e_1.eax &= ~(UINT32_C(1) << 1);
+    avx512_bf16_without_amx_bf16.leaf_7_0.edx &= ~(UINT32_C(0x400000));
+    avx512_bf16_without_amx_bf16.leaf_1e_1.eax &= ~(UINT32_C(0x2));
     TargetCpuFeatures avx512_bf16_without_amx_bf16_features = x86_64_cpu_features_from_cpuid(avx512_bf16_without_amx_bf16);
     BUSTER_TEST(arguments, (avx512_bf16_without_amx_bf16_features & TARGET_CPU_FEATURE_X86_AVX512BF16) != 0);
     BUSTER_TEST(arguments, !(avx512_bf16_without_amx_bf16_features & TARGET_CPU_FEATURE_X86_AMX_BF16));
     X86_64CpuFeatureInput amx_complex_legacy_only = full_cpuid;
-    amx_complex_legacy_only.leaf_1e_1.eax &= ~(UINT32_C(1) << 2);
+    amx_complex_legacy_only.leaf_1e_1.eax &= ~(UINT32_C(0x4));
     BUSTER_TEST(arguments, !(x86_64_cpu_features_from_cpuid(amx_complex_legacy_only) & TARGET_CPU_FEATURE_X86_AMX_COMPLEX));
     X86_64CpuFeatureInput amx_complex_mirror_only = full_cpuid;
-    amx_complex_mirror_only.leaf_7_1.edx &= ~(UINT32_C(1) << 8);
+    amx_complex_mirror_only.leaf_7_1.edx &= ~(UINT32_C(0x100));
     BUSTER_TEST(arguments, !(x86_64_cpu_features_from_cpuid(amx_complex_mirror_only) & TARGET_CPU_FEATURE_X86_AMX_COMPLEX));
     X86_64CpuFeatureInput amx_fp16_legacy_only = full_cpuid;
-    amx_fp16_legacy_only.leaf_1e_1.eax &= ~(UINT32_C(1) << 3);
+    amx_fp16_legacy_only.leaf_1e_1.eax &= ~(UINT32_C(0x8));
     BUSTER_TEST(arguments, !(x86_64_cpu_features_from_cpuid(amx_fp16_legacy_only) & TARGET_CPU_FEATURE_X86_AMX_FP16));
     X86_64CpuFeatureInput amx_fp16_mirror_only = full_cpuid;
-    amx_fp16_mirror_only.leaf_7_1.eax &= ~(UINT32_C(1) << 21);
+    amx_fp16_mirror_only.leaf_7_1.eax &= ~(UINT32_C(0x200000));
     BUSTER_TEST(arguments, !(x86_64_cpu_features_from_cpuid(amx_fp16_mirror_only) & TARGET_CPU_FEATURE_X86_AMX_FP16));
     X86_64CpuFeatureInput legacy_amx_without_mirror = full_cpuid;
     legacy_amx_without_mirror.maximum_basic_leaf = 7;
@@ -606,7 +606,7 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
                                (TARGET_CPU_FEATURE_X86_AMX_INT8 | TARGET_CPU_FEATURE_X86_AMX_BF16 |
                                 TARGET_CPU_FEATURE_X86_AMX_FP16 | TARGET_CPU_FEATURE_X86_AMX_COMPLEX));
     X86_64CpuFeatureInput avx10_version1 = full_cpuid;
-    avx10_version1.leaf_24_0.ebx = 1 | (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18);
+    avx10_version1.leaf_24_0.ebx = 1 | (UINT32_C(0x10000)) | (UINT32_C(0x20000)) | (UINT32_C(0x40000));
     avx10_version1.leaf_24_1.ecx = 0;
     TargetCpuFeatures avx10_version1_features = x86_64_cpu_features_from_cpuid(avx10_version1);
     BUSTER_TEST(arguments, (avx10_version1_features & (TARGET_CPU_FEATURE_X86_AVX10_1 | TARGET_CPU_FEATURE_X86_AVX10_512)) ==
@@ -619,14 +619,14 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, (full_features & (TARGET_CPU_FEATURE_X86_AVX10_2 | TARGET_CPU_FEATURE_X86_AVX10_V1_AUX)) ==
                                (TARGET_CPU_FEATURE_X86_AVX10_2 | TARGET_CPU_FEATURE_X86_AVX10_V1_AUX));
     X86_64CpuFeatureInput avx10_v1_aux = full_cpuid;
-    avx10_v1_aux.leaf_24_0.ebx = 1 | (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18);
-    avx10_v1_aux.leaf_24_1.ecx = UINT32_C(1) << 2;
+    avx10_v1_aux.leaf_24_0.ebx = 1 | (UINT32_C(0x10000)) | (UINT32_C(0x20000)) | (UINT32_C(0x40000));
+    avx10_v1_aux.leaf_24_1.ecx = UINT32_C(0x4);
     TargetCpuFeatures avx10_v1_aux_features = x86_64_cpu_features_from_cpuid(avx10_v1_aux);
     BUSTER_TEST(arguments, (avx10_v1_aux_features & (TARGET_CPU_FEATURE_X86_AVX10_1 | TARGET_CPU_FEATURE_X86_AVX10_512)) ==
                                (TARGET_CPU_FEATURE_X86_AVX10_1 | TARGET_CPU_FEATURE_X86_AVX10_512));
     BUSTER_TEST(arguments, !(avx10_v1_aux_features & (TARGET_CPU_FEATURE_X86_AVX10_2 | TARGET_CPU_FEATURE_X86_AVX10_V1_AUX)));
     X86_64CpuFeatureInput no_avx10 = full_cpuid;
-    no_avx10.leaf_7_1.edx &= ~(UINT32_C(1) << 19);
+    no_avx10.leaf_7_1.edx &= ~(UINT32_C(0x80000));
     TargetCpuFeatures no_avx10_features = x86_64_cpu_features_from_cpuid(no_avx10);
     BUSTER_TEST(arguments, !(no_avx10_features & (TARGET_CPU_FEATURE_X86_AVX10_1 | TARGET_CPU_FEATURE_X86_AVX10_2 |
                                                    TARGET_CPU_FEATURE_X86_AVX10_512)));
@@ -652,7 +652,7 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !(no_vector_state_features & (TARGET_CPU_FEATURE_X86_VAES | TARGET_CPU_FEATURE_X86_VPCLMULQDQ)));
     BUSTER_TEST(arguments, (no_vector_state_features & TARGET_CPU_FEATURE_X86_MOVRS) != 0);
     X86_64CpuFeatureInput no_amx_state = full_cpuid;
-    no_amx_state.xcr0 &= ~((UINT64_C(1) << 17) | (UINT64_C(1) << 18));
+    no_amx_state.xcr0 &= ~((UINT64_C(0x20000)) | (UINT64_C(0x40000)));
     TargetCpuFeatures no_amx_state_features = x86_64_cpu_features_from_cpuid(no_amx_state);
     BUSTER_TEST(arguments, !(no_amx_state_features & (TARGET_CPU_FEATURE_X86_AMX_TILE | TARGET_CPU_FEATURE_X86_AMX_INT8 |
                                                        TARGET_CPU_FEATURE_X86_AMX_BF16 | TARGET_CPU_FEATURE_X86_AMX_FP16 |
@@ -660,7 +660,7 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
                                                        TARGET_CPU_FEATURE_X86_AMX_AVX512 | TARGET_CPU_FEATURE_X86_AMX_MOVRS)));
     BUSTER_TEST(arguments, (no_amx_state_features & TARGET_CPU_FEATURE_X86_AVX512F) != 0);
     X86_64CpuFeatureInput amx_state_without_avx512_state = full_cpuid;
-    amx_state_without_avx512_state.xcr0 = UINT64_C(0x6) | (UINT64_C(1) << 17) | (UINT64_C(1) << 18);
+    amx_state_without_avx512_state.xcr0 = UINT64_C(0x6) | (UINT64_C(0x20000)) | (UINT64_C(0x40000));
     TargetCpuFeatures amx_state_without_avx512_state_features = x86_64_cpu_features_from_cpuid(amx_state_without_avx512_state);
     BUSTER_TEST(arguments, (amx_state_without_avx512_state_features & TARGET_CPU_FEATURE_X86_AMX_TILE) != 0);
     BUSTER_TEST(arguments, (amx_state_without_avx512_state_features & TARGET_CPU_FEATURE_X86_AMX_BF16) != 0);
@@ -668,29 +668,29 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !(amx_state_without_avx512_state_features & TARGET_CPU_FEATURE_X86_AVX512F));
     BUSTER_TEST(arguments, !(amx_state_without_avx512_state_features & TARGET_CPU_FEATURE_X86_AMX_AVX512));
     X86_64CpuFeatureInput amx_avx512_with_vector_state = full_cpuid;
-    amx_avx512_with_vector_state.leaf_7_0.ebx &= ~(UINT32_C(1) << 16);
-    amx_avx512_with_vector_state.leaf_7_1.edx &= ~(UINT32_C(1) << 19);
+    amx_avx512_with_vector_state.leaf_7_0.ebx &= ~(UINT32_C(0x10000));
+    amx_avx512_with_vector_state.leaf_7_1.edx &= ~(UINT32_C(0x80000));
     amx_avx512_with_vector_state.leaf_24_0.ebx = 0;
     TargetCpuFeatures amx_avx512_with_vector_state_features = x86_64_cpu_features_from_cpuid(amx_avx512_with_vector_state);
     BUSTER_TEST(arguments, !(amx_avx512_with_vector_state_features & (TARGET_CPU_FEATURE_X86_AVX512F |
                                                                        TARGET_CPU_FEATURE_X86_AVX10_1 |
                                                                        TARGET_CPU_FEATURE_X86_AMX_AVX512)));
     X86_64CpuFeatureInput avx512_state_without_amx_state = full_cpuid;
-    avx512_state_without_amx_state.xcr0 &= ~((UINT64_C(1) << 17) | (UINT64_C(1) << 18));
+    avx512_state_without_amx_state.xcr0 &= ~((UINT64_C(0x20000)) | (UINT64_C(0x40000)));
     TargetCpuFeatures avx512_state_without_amx_state_features = x86_64_cpu_features_from_cpuid(avx512_state_without_amx_state);
     BUSTER_TEST(arguments, (avx512_state_without_amx_state_features & TARGET_CPU_FEATURE_X86_AVX512F) != 0);
     BUSTER_TEST(arguments, !(avx512_state_without_amx_state_features & TARGET_CPU_FEATURE_X86_AMX_TILE));
     X86_64CpuFeatureInput no_apx_state = full_cpuid;
-    no_apx_state.xcr0 &= ~(UINT64_C(1) << 19);
+    no_apx_state.xcr0 &= ~(UINT64_C(0x80000));
     TargetCpuFeatures no_apx_state_features = x86_64_cpu_features_from_cpuid(no_apx_state);
     BUSTER_TEST(arguments, !(no_apx_state_features & (TARGET_CPU_FEATURE_X86_APX | TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF)));
     BUSTER_TEST(arguments, (no_apx_state_features & TARGET_CPU_FEATURE_X86_AMX_MOVRS) != 0);
     X86_64CpuFeatureInput no_apx_nci_hardware = full_cpuid;
-    no_apx_nci_hardware.leaf_29_0.ebx &= ~(UINT32_C(1) << 0);
+    no_apx_nci_hardware.leaf_29_0.ebx &= ~(UINT32_C(0x1));
     TargetCpuFeatures no_apx_nci_hardware_features = x86_64_cpu_features_from_cpuid(no_apx_nci_hardware);
     BUSTER_TEST(arguments, !(no_apx_nci_hardware_features & (TARGET_CPU_FEATURE_X86_APX | TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF)));
     X86_64CpuFeatureInput no_apx_f_hardware = full_cpuid;
-    no_apx_f_hardware.leaf_7_1.edx &= ~(UINT32_C(1) << 21);
+    no_apx_f_hardware.leaf_7_1.edx &= ~(UINT32_C(0x200000));
     TargetCpuFeatures no_apx_f_hardware_features = x86_64_cpu_features_from_cpuid(no_apx_f_hardware);
     BUSTER_TEST(arguments, !(no_apx_f_hardware_features & (TARGET_CPU_FEATURE_X86_APX | TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF)));
     Target detected_x86 = {
