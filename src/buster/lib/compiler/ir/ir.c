@@ -3312,6 +3312,29 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(AnalysisResult* analysis
         return instruction->operand_count == 0 && instruction->immediate_count == 0 && instruction->result.value == IR_ID_UNDERLYING_INVALID &&
                ir_type_id_equal(instruction->type, analysis->types.builtin.void_type);
     }
+    if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
+    {
+        AnalysisType* type = analysis_type_from_id(analysis, instruction->type);
+        return type && type->kind == ANALYSIS_TYPE_POINTER && instruction->operand_count == 0 && instruction->target_count == 1 &&
+               instruction->targets[0].value < function->block_count && instruction->immediate_count == 0 && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+               function->values[instruction->result.value].is_label_value &&
+               function->values[instruction->result.value].label_block.value == instruction->targets[0].value;
+    }
+    if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
+    {
+        AnalysisType* type = analysis_type_from_id(analysis, instruction->type);
+        IrValue* operand = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+        AnalysisType* operand_type = operand ? analysis_type_from_id(analysis, operand->type) : 0;
+        bool label_target = false;
+        for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
+        {
+            label_target |= instruction->targets[target_index].value < function->block_count &&
+                            instruction->targets[target_index].value == operand->label_block.value;
+        }
+        return type && type->kind == ANALYSIS_TYPE_VOID && operand_type && operand_type->kind == ANALYSIS_TYPE_POINTER && operand->is_label_value &&
+               instruction->operand_count == 1 && instruction->target_count != 0 && instruction->immediate_count == 0 &&
+               instruction->result.value == IR_ID_UNDERLYING_INVALID && label_target;
+    }
     if (instruction->opcode == IR_OPCODE_LENGTH || instruction->opcode == IR_OPCODE_REVERSE)
     {
         if (instruction->operand_count != 1 || instruction->conversion_operation != IR_CONVERSION_COUNT || instruction->unary_operation != IR_UNARY_COUNT ||
@@ -3687,8 +3710,9 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
                     }
                 }
                 bool terminator = instruction->opcode == IR_OPCODE_BRANCH || instruction->opcode == IR_OPCODE_BRANCH_IF ||
-                                  instruction->opcode == IR_OPCODE_SWITCH || instruction->opcode == IR_OPCODE_RETURN ||
-                                  instruction->opcode == IR_OPCODE_UNREACHABLE;
+                                  instruction->opcode == IR_OPCODE_SWITCH || instruction->opcode == IR_OPCODE_INDIRECT_BRANCH ||
+                                  instruction->opcode == IR_OPCODE_RETURN || instruction->opcode == IR_OPCODE_UNREACHABLE ||
+                                  (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count != 0);
                 saw_terminator = terminator;
                 instruction_id = instruction->next;
             }
@@ -4173,8 +4197,13 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                     IrType* destination = ir_type_from_id(&program->types, instruction->canonical_type);
                     IrValue* operand = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
                     IrType* source = operand ? ir_type_from_id(&program->types, operand->canonical_type) : 0;
+                    IrValue* label_result = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
+                    bool label_conversion_valid = !operand || !operand->is_label_value ||
+                                                  (source && destination && source->kind == IR_TYPE_POINTER && destination->kind == IR_TYPE_POINTER &&
+                                                   source->id.value == destination->id.value && label_result && label_result->is_label_value &&
+                                                   label_result->label_block.value == operand->label_block.value);
                     if (!ir_canonical_conversion_valid(source, destination, instruction->conversion_operation) ||
-                        instruction->result.value == IR_ID_UNDERLYING_INVALID)
+                        instruction->result.value == IR_ID_UNDERLYING_INVALID || !label_conversion_valid)
                     {
                         return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
@@ -4290,7 +4319,12 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                 {
                     IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
                     bool valid = type && type->kind == IR_TYPE_VOID && instruction->operand_count == instruction->immediate_count &&
-                                 instruction->result.value == IR_ID_UNDERLYING_INVALID;
+                                 instruction->result.value == IR_ID_UNDERLYING_INVALID &&
+                                 (instruction->target_count == 0 || instruction->target_count >= 2);
+                    for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
+                    {
+                        valid = instruction->targets[target_index].value < function->block_count;
+                    }
                     for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
                     {
                         IrValue* operand = function->values + instruction->operands[operand_index].value;
@@ -4298,6 +4332,19 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                         bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
                         valid &= (constraint & 0xff) < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT && operand->category == (output ? IR_VALUE_PLACE : IR_VALUE_VALUE);
                     }
+                    if (!valid)
+                    {
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
+                    }
+                }
+                else if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
+                {
+                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    bool valid = type && type->kind == IR_TYPE_POINTER && instruction->operand_count == 0 && instruction->target_count == 1 &&
+                                 instruction->targets[0].value < function->block_count && instruction->immediate_count == 0 &&
+                                 instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                                 function->values[instruction->result.value].is_label_value &&
+                                 function->values[instruction->result.value].label_block.value == instruction->targets[0].value;
                     if (!valid)
                     {
                         return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
@@ -4331,6 +4378,24 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                         return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
                     }
                 }
+                else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
+                {
+                    IrValue* target = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+                    IrType* target_type = target ? ir_type_from_id(&program->types, target->canonical_type) : 0;
+                    bool valid = target && target_type && target_type->kind == IR_TYPE_POINTER && target->is_label_value && instruction->operand_count == 1 &&
+                                 instruction->target_count != 0 && instruction->result.value == IR_ID_UNDERLYING_INVALID;
+                    bool label_target = false;
+                    for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
+                    {
+                        valid &= instruction->targets[target_index].value < function->block_count;
+                        label_target |= instruction->targets[target_index].value == target->label_block.value;
+                    }
+                    valid &= label_target;
+                    if (!valid)
+                    {
+                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
+                    }
+                }
                 else if (instruction->opcode == IR_OPCODE_SWITCH)
                 {
                     IrValue* switched = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
@@ -4359,7 +4424,8 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                     }
                 }
                 terminated = instruction->opcode == IR_OPCODE_BRANCH || instruction->opcode == IR_OPCODE_BRANCH_IF || instruction->opcode == IR_OPCODE_SWITCH ||
-                             instruction->opcode == IR_OPCODE_RETURN || instruction->opcode == IR_OPCODE_UNREACHABLE;
+                             instruction->opcode == IR_OPCODE_INDIRECT_BRANCH || instruction->opcode == IR_OPCODE_RETURN || instruction->opcode == IR_OPCODE_UNREACHABLE ||
+                             (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count != 0);
                 instruction_id = instruction->next;
             }
             if (!terminated)
@@ -4451,12 +4517,16 @@ BUSTER_GLOBAL_LOCAL String8 ir_opcode_name(IrOpcode opcode)
         return S8("va_arg");
     case IR_OPCODE_INLINE_ASSEMBLY:
         return S8("inline_assembly");
+    case IR_OPCODE_LABEL_ADDRESS:
+        return S8("label_address");
     case IR_OPCODE_BRANCH:
         return S8("branch");
     case IR_OPCODE_BRANCH_IF:
         return S8("branch_if");
     case IR_OPCODE_SWITCH:
         return S8("switch");
+    case IR_OPCODE_INDIRECT_BRANCH:
+        return S8("indirect_branch");
     case IR_OPCODE_RETURN:
         return S8("return");
     case IR_OPCODE_DEBUG_TRAP:

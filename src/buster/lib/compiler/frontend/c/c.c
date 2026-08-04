@@ -5976,6 +5976,8 @@ BUSTER_GLOBAL_LOCAL void c_parse_static_assert_check(CTypeParseMachine* machine,
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_decode_quoted(Arena* arena, CToken token, u8 delimiter, ByteSlice* contents);
+BUSTER_GLOBAL_LOCAL bool c_parse_label_address_prefix(CPreprocessResult preprocess, u32 expression_start, u32 index);
+BUSTER_GLOBAL_LOCAL bool c_ir_named_label_at(CPreprocessResult preprocess, u32 body_start, u32 index, u32 body_end);
 
 BUSTER_GLOBAL_LOCAL bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
 
@@ -10314,7 +10316,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_auto_initializer_identifiers(Arena* arena,
                          string_equal(preprocess.tokens[use_index - 1].spelling, S8("union")) ||
                          string_equal(preprocess.tokens[use_index - 1].spelling, S8("enum")));
         if (use.kind == C_TOKEN_IDENTIFIER && !c_declaration_keyword_for_dialect(use.spelling, preprocess.dialect) && !member && !tag_name &&
-            !c_parse_identifier_is_bound(result, use_index))
+            !(use_index && c_parse_label_address_prefix(preprocess, start, use_index - 1)) && !c_parse_identifier_is_bound(result, use_index))
         {
             c_parse_bind_identifier(arena, result, preprocess, scope, use_index);
         }
@@ -10842,7 +10844,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
                 (string_equal(preprocess.tokens[use_index - 1].spelling, S8("struct")) ||
                  string_equal(preprocess.tokens[use_index - 1].spelling, S8("union")) || string_equal(preprocess.tokens[use_index - 1].spelling, S8("enum")));
             if (use.kind == C_TOKEN_IDENTIFIER && !c_declaration_keyword_for_dialect(use.spelling, preprocess.dialect) && !member && !tag_name &&
-                !c_parse_identifier_is_bound(result, use_index))
+                !(use_index && c_parse_label_address_prefix(preprocess, initializer_start, use_index - 1)) && !c_parse_identifier_is_bound(result, use_index))
             {
                 c_parse_bind_identifier(arena, result, preprocess, scope, use_index);
             }
@@ -10854,6 +10856,200 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
 
 BUSTER_GLOBAL_LOCAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* scratch_arena, Arena* result_arena,
                                                               CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration);
+
+BUSTER_GLOBAL_LOCAL bool c_parse_label_address_prefix(CPreprocessResult preprocess, u32 body_start, u32 index)
+{
+    if (index >= preprocess.token_count || !c_token_is_punctuator(preprocess.tokens[index], S8("&&")))
+    {
+        return false;
+    }
+    if (index == body_start)
+    {
+        return true;
+    }
+    if (!index)
+    {
+        return false;
+    }
+    CToken previous = preprocess.tokens[index - 1];
+    if (previous.kind == C_TOKEN_IDENTIFIER)
+    {
+        return string_equal(previous.spelling, S8("return")) || string_equal(previous.spelling, S8("case"));
+    }
+    if (previous.kind == C_TOKEN_PREPROCESSING_NUMBER || previous.kind == C_TOKEN_CHARACTER_LITERAL || previous.kind == C_TOKEN_STRING_LITERAL)
+    {
+        return false;
+    }
+    if (c_token_is_punctuator(previous, S8(")")))
+    {
+        u32 depth = 0;
+        u32 open = UINT32_MAX;
+        u32 scan = index - 1;
+        for (;;)
+        {
+            CToken candidate = preprocess.tokens[scan];
+            if (c_token_is_punctuator(candidate, S8(")")))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(candidate, S8("(")))
+            {
+                depth -= 1;
+                if (!depth)
+                {
+                    open = scan;
+                    break;
+                }
+            }
+            if (scan == body_start)
+            {
+                break;
+            }
+            scan -= 1;
+        }
+        if (open != UINT32_MAX)
+        {
+            if (open > body_start && preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
+                (string_equal(preprocess.tokens[open - 1].spelling, S8("sizeof")) || c_parse_alignof_word(preprocess.tokens[open - 1].spelling)))
+            {
+                return false;
+            }
+            bool type_like = false;
+            bool tag_name = false;
+            for (scan = open + 1; scan < index - 1; scan += 1)
+            {
+                CToken candidate = preprocess.tokens[scan];
+                if (candidate.kind == C_TOKEN_IDENTIFIER)
+                {
+                    if (tag_name)
+                    {
+                        tag_name = false;
+                        type_like = true;
+                    }
+                    else if (string_equal(candidate.spelling, S8("struct")) || string_equal(candidate.spelling, S8("union")) ||
+                             string_equal(candidate.spelling, S8("enum")))
+                    {
+                        tag_name = true;
+                        type_like = true;
+                    }
+                    else if (c_parse_type_word_for_dialect(candidate.spelling, preprocess.dialect))
+                    {
+                        type_like = true;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                else if (!c_token_is_punctuator(candidate, S8("*")) && !c_token_is_punctuator(candidate, S8("(")) &&
+                         !c_token_is_punctuator(candidate, S8(")")))
+                {
+                    return false;
+                }
+            }
+            if (type_like && !tag_name)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+    return !c_token_is_punctuator(previous, S8("]")) && !c_token_is_punctuator(previous, S8("++")) && !c_token_is_punctuator(previous, S8("--"));
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_asm_goto_label_range(CPreprocessResult preprocess, u32 start, u32 end, u32* label_start_out, u32* label_end_out)
+{
+    u32 open = start + 1;
+    while (open < end && preprocess.tokens[open].kind == C_TOKEN_IDENTIFIER &&
+           (string_equal(preprocess.tokens[open].spelling, S8("volatile")) || string_equal(preprocess.tokens[open].spelling, S8("__volatile__")) ||
+            string_equal(preprocess.tokens[open].spelling, S8("inline")) || string_equal(preprocess.tokens[open].spelling, S8("__inline__")) ||
+            string_equal(preprocess.tokens[open].spelling, S8("goto"))))
+    {
+        open += 1;
+    }
+    if (open + 1 >= end || !c_token_is_punctuator(preprocess.tokens[open], S8("(")) || preprocess.tokens[open + 1].kind != C_TOKEN_STRING_LITERAL)
+    {
+        return false;
+    }
+    u32 close = c_parse_matching_delimiter(preprocess, open, end, S8("("), S8(")"));
+    if (close >= end)
+    {
+        return false;
+    }
+    u32 template_end = open + 1;
+    while (template_end < close && preprocess.tokens[template_end].kind == C_TOKEN_STRING_LITERAL)
+    {
+        template_end += 1;
+    }
+    u32 separators[4] = {0};
+    u32 separator_count = 0;
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    for (u32 index = template_end; index < close; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(token, S8("(")))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(token, S8(")")) && parentheses)
+        {
+            parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(token, S8("[")))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(token, S8("]")) && brackets)
+        {
+            brackets -= 1;
+        }
+        else if (c_token_is_punctuator(token, S8("{")))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(token, S8("}")) && braces)
+        {
+            braces -= 1;
+        }
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(token, S8(":")))
+        {
+            if (separator_count == BUSTER_ARRAY_LENGTH(separators))
+            {
+                return false;
+            }
+            separators[separator_count++] = index;
+        }
+    }
+    if (separator_count != 4)
+    {
+        return false;
+    }
+    *label_start_out = separators[3] + 1;
+    *label_end_out = close;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_asm_goto_qualifier(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 index = start + 1;
+    while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+    {
+        String8 spelling = preprocess.tokens[index].spelling;
+        if (string_equal(spelling, S8("goto")))
+        {
+            return true;
+        }
+        if (!string_equal(spelling, S8("volatile")) && !string_equal(spelling, S8("__volatile__")) && !string_equal(spelling, S8("inline")) &&
+            !string_equal(spelling, S8("__inline__")))
+        {
+            break;
+        }
+        index += 1;
+    }
+    return false;
+}
 
 BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                     CPreprocessResult preprocess, u32 declaration_index)
@@ -10875,13 +11071,25 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(CTypeParseMachine* machine, 
     u32 body_end = declaration->body_start + declaration->body_token_count;
     u32 index = declaration->body_start;
     bool statement_start = true;
+    u32 asm_goto_label_start = UINT32_MAX;
+    u32 asm_goto_label_end = UINT32_MAX;
     while (index < body_end)
     {
+        if (asm_goto_label_end != UINT32_MAX && index >= asm_goto_label_end)
+        {
+            asm_goto_label_start = UINT32_MAX;
+            asm_goto_label_end = UINT32_MAX;
+        }
         while (scope_count > 1 && scope_end_stack[scope_count - 1] == index)
         {
             scope_count -= 1;
         }
         CToken token = preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            (string_equal(token.spelling, S8("asm")) || string_equal(token.spelling, S8("__asm")) || string_equal(token.spelling, S8("__asm__"))))
+        {
+            c_parse_asm_goto_label_range(preprocess, index, body_end, &asm_goto_label_start, &asm_goto_label_end);
+        }
         if (token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("__builtin_offsetof")) && index + 1 < body_end &&
             c_token_is_punctuator(preprocess.tokens[index + 1], S8("(")))
         {
@@ -11094,11 +11302,13 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(CTypeParseMachine* machine, 
         bool tag_name = index > declaration->body_start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
                         (string_equal(preprocess.tokens[index - 1].spelling, S8("struct")) ||
                          string_equal(preprocess.tokens[index - 1].spelling, S8("union")) || string_equal(preprocess.tokens[index - 1].spelling, S8("enum")));
-        bool label = statement_start && index + 1 < body_end && c_token_is_punctuator(preprocess.tokens[index + 1], S8(":"));
+        bool label = c_ir_named_label_at(preprocess, declaration->body_start, index, body_end);
         bool goto_target = index > declaration->body_start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
                            string_equal(preprocess.tokens[index - 1].spelling, S8("goto"));
+        bool label_address = index > declaration->body_start && c_parse_label_address_prefix(preprocess, declaration->body_start, index - 1);
+        bool asm_goto_label = asm_goto_label_start != UINT32_MAX && index >= asm_goto_label_start && index < asm_goto_label_end;
         if (token.kind == C_TOKEN_IDENTIFIER && !c_declaration_keyword_for_dialect(token.spelling, preprocess.dialect) && !member && !tag_name && !label &&
-            !goto_target)
+            !goto_target && !label_address && !asm_goto_label)
         {
             c_parse_bind_identifier(result_arena, result, preprocess, scope_stack[scope_count - 1], index);
         }
@@ -12816,6 +13026,13 @@ BUSTER_GLOBAL_LOCAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId en
 }
 
 typedef struct CIntegerIrBuilder CIntegerIrBuilder;
+typedef struct CIrLabel CIrLabel;
+struct CIrLabel
+{
+    String8 name;
+    u32 token_index;
+    IrBlockId block;
+};
 
 typedef enum CIrConstantValueKind
 {
@@ -13149,6 +13366,8 @@ struct CIntegerIrBuilder
     IrModule* module;
     IrFunction* function;
     IrBlockId current_block;
+    CIrLabel* labels;
+    u32 label_count;
     CPreprocessResult preprocess;
     CParseResult parse;
     CEntityId* token_entities;
@@ -13636,6 +13855,12 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_add_result(CIntegerIrBuilder* builder, IrType
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void c_ir_copy_label_provenance(IrValue* destination, IrValue* source)
+{
+    destination->is_label_value = source->is_label_value;
+    destination->label_block = source->label_block;
+}
+
 BUSTER_GLOBAL_LOCAL CIntegerIrLocal* c_ir_find_local_by_entity(CIntegerIrBuilder* builder, CEntityId entity)
 {
     for (u32 index = builder->local_count; index != 0; index -= 1)
@@ -13881,6 +14106,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntege
     if (local->place.value < builder->function->value_count)
     {
         builder->function->values[result.value].points_to_read_only = builder->function->values[local->place.value].points_to_read_only;
+        c_ir_copy_label_provenance(builder->function->values + result.value, builder->function->values + local->place.value);
     }
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
     operands[0] = local->place;
@@ -13950,6 +14176,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builde
     if (place.value < builder->function->value_count)
     {
         builder->function->values[result.value].points_to_read_only = builder->function->values[place.value].points_to_read_only;
+        c_ir_copy_label_provenance(builder->function->values + result.value, builder->function->values + place.value);
     }
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
     operands[0] = place;
@@ -13988,15 +14215,56 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, I
     return value;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_ir_place_may_have_static_storage(CIntegerIrBuilder* builder, IrValueId place)
+{
+    u32 value = place.value;
+    u32 steps = builder->function->value_count + 1;
+    while (value < builder->function->value_count && steps)
+    {
+        steps -= 1;
+        IrValue* current = builder->function->values + value;
+        IrInstructionId definition = current->definition;
+        if (definition.value >= builder->function->instruction_count)
+        {
+            return true;
+        }
+        IrInstruction* instruction = builder->function->instructions + definition.value;
+        if (instruction->opcode == IR_OPCODE_GLOBAL)
+        {
+            return true;
+        }
+        if (instruction->opcode == IR_OPCODE_LOCAL)
+        {
+            return false;
+        }
+        if ((instruction->opcode == IR_OPCODE_FIELD || instruction->opcode == IR_OPCODE_INDEX || instruction->opcode == IR_OPCODE_DEREFERENCE ||
+             instruction->opcode == IR_OPCODE_ADDRESS_OF || instruction->opcode == IR_OPCODE_CAST) &&
+            instruction->operand_count == 1)
+        {
+            value = instruction->operands[0].value;
+            continue;
+        }
+        return true;
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source);
 
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_cast_instruction(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrConversionOperation operation,
                                                          IrSourceRange source)
 {
+    if (value.value < builder->function->value_count && builder->function->values[value.value].is_label_value &&
+        builder->function->values[value.value].canonical_type.value != target_type.value)
+    {
+        builder->failure_message = S8("a label address may only be used as its original void pointer type");
+        return IR_VALUE_ID_INVALID;
+    }
     IrValueId result = c_ir_add_result(builder, target_type);
     if (value.value < builder->function->value_count)
     {
         builder->function->values[result.value].points_to_read_only = builder->function->values[value.value].points_to_read_only;
+        c_ir_copy_label_provenance(builder->function->values + result.value, builder->function->values + value.value);
     }
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
     operands[0] = value;
@@ -14025,6 +14293,11 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValue
     IrType* target_value = ir_type_from_id(&builder->program->types, target_type);
     if (!source_value || !target_value)
     {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (builder->function->values[value.value].is_label_value && target_type.value != source_type.value)
+    {
+        builder->failure_message = S8("a label address may only be used as its original void pointer type");
         return IR_VALUE_ID_INVALID;
     }
     if (target_value->is_nullptr && !source_value->is_nullptr)
@@ -14147,6 +14420,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrVal
     {
         return false;
     }
+    if (value.value < builder->function->value_count && builder->function->values[value.value].is_label_value && c_ir_place_may_have_static_storage(builder, place))
+    {
+        builder->failure_message = S8("a label address may not be stored in static storage");
+        return false;
+    }
+    c_ir_copy_label_provenance(builder->function->values + place.value, builder->function->values + value.value);
     IrField* bit_field = c_ir_bit_field_from_place(builder, place);
     IrType* value_type = ir_type_from_id(&builder->program->types, stored_type);
     if (bit_field && value_type && value_type->kind == IR_TYPE_INTEGER && bit_field->bit_width && bit_field->bit_width <= value_type->bit_width &&
@@ -14184,6 +14463,11 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder
 {
     if (operand.value >= builder->function->value_count)
     {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (builder->function->values[operand.value].is_label_value && c_token_is_punctuator(access, S8("->")))
+    {
+        builder->failure_message = S8("a label address may not be dereferenced");
         return IR_VALUE_ID_INVALID;
     }
     IrValueId base = operand;
@@ -14367,6 +14651,11 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, 
     {
         return IR_VALUE_ID_INVALID;
     }
+    if (builder->function->values[base.value].is_label_value)
+    {
+        builder->failure_message = S8("a label address may not be dereferenced");
+        return IR_VALUE_ID_INVALID;
+    }
     IrType* base_type = ir_type_from_id(&builder->program->types, builder->function->values[base.value].canonical_type);
     IrType* index_type = ir_type_from_id(&builder->program->types, builder->function->values[index.value].canonical_type);
     if (index_type && index_type->kind == IR_TYPE_BOOLEAN)
@@ -14426,10 +14715,35 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* buil
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_label_address(CIntegerIrBuilder* builder, IrBlockId label, IrSourceRange source)
+{
+    IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+    IrValueId result = c_ir_add_result(builder, pointer_type);
+    if (result.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return result;
+    }
+    builder->function->values[result.value].is_label_value = true;
+    builder->function->values[result.value].label_block = label;
+    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_LABEL_ADDRESS, pointer_type, source);
+    instruction.targets = arena_allocate(builder->arena, IrBlockId, 1);
+    instruction.targets[0] = label;
+    instruction.target_count = 1;
+    instruction.result = result;
+    IrInstructionId id = c_ir_append_instruction(builder, instruction);
+    builder->function->values[result.value].definition = id;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_dereference_place(CIntegerIrBuilder* builder, IrValueId pointer, IrSourceRange source)
 {
     if (pointer.value >= builder->function->value_count)
     {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (builder->function->values[pointer.value].is_label_value)
+    {
+        builder->failure_message = S8("a label address may not be dereferenced");
         return IR_VALUE_ID_INVALID;
     }
     IrType* pointer_type = ir_type_from_id(&builder->program->types, builder->function->values[pointer.value].canonical_type);
@@ -15951,6 +16265,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaratio
                                          IrValueId* statement_expression_result);
 
 typedef struct CIrLowerBodyState CIrLowerBodyState;
+BUSTER_GLOBAL_LOCAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, String8 name);
 BUSTER_GLOBAL_LOCAL void c_ir_lower_body_step(CIntegerIrBuilder* builder);
 
 BUSTER_GLOBAL_LOCAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder);
@@ -16153,6 +16468,7 @@ typedef enum CIrLowerBodyContinuation
     C_IR_LOWER_BODY_CONTINUE_TRAILING_EXPRESSION,
     C_IR_LOWER_BODY_CONTINUE_RETURN,
     C_IR_LOWER_BODY_CONTINUE_INLINE_ASSEMBLY,
+    C_IR_LOWER_BODY_CONTINUE_COMPUTED_GOTO,
     C_IR_LOWER_BODY_CONTINUE_AUTOMATIC_DECLARATION,
     C_IR_LOWER_BODY_CONTINUE_SWITCH,
     C_IR_LOWER_BODY_CONTINUE_VLA_DECLARATION,
@@ -16215,6 +16531,7 @@ struct CIrLowerInlineAssemblyState
 {
     IrValueId* operands;
     u64* constraints;
+    IrBlockId* label_blocks;
     u32 separators[4];
     u32 start;
     u32 end;
@@ -16227,9 +16544,12 @@ struct CIrLowerInlineAssemblyState
     u32 segment_end;
     u32 constraint_index;
     u32 operand_close;
+    u32 label_count;
     u64 temporary_mark;
     bool output;
-    u8 reserved[7];
+    bool asm_goto;
+    bool goto_qualifier;
+    u8 reserved[5];
 };
 
 typedef struct CIrLowerAutomaticDeclarationListState CIrLowerAutomaticDeclarationListState;
@@ -17846,7 +18166,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_has_root_control_operator(CIntegerIrBuilder* build
             }
             braces -= 1;
         }
-        else if (!parentheses && !brackets && !braces && (c_token_is_punctuator(token, S8("&&")) || c_token_is_punctuator(token, S8("||"))))
+        else if (!parentheses && !brackets && !braces &&
+                 ((c_token_is_punctuator(token, S8("&&")) && !c_parse_label_address_prefix(builder->preprocess, start, index)) ||
+                  c_token_is_punctuator(token, S8("||"))))
         {
             return true;
         }
@@ -19798,6 +20120,11 @@ BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CInte
                 return C_IR_PREPARED_CALL_STEP_FAILED;
             }
             IrValueId value = child_value;
+            if (value.value < builder->function->value_count && builder->function->values[value.value].is_label_value)
+            {
+                builder->failure_message = S8("a label address may not be passed to a function");
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            }
             IrSourceRange source =
                 c_ir_source_range(builder->preprocess.tokens[index].location, builder->preprocess.tokens[index].spelling.length);
             if (argument_count < signature.parameter_count)
@@ -23166,6 +23493,10 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* buil
     {
         if (!machine->child_result.success)
         {
+            if (!builder->failure_message.length)
+            {
+                builder->failure_message = S8("could not prepare control expressions");
+            }
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -23179,6 +23510,10 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* buil
     BUSTER_CHECK(frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS);
     if (!machine->child_result.success)
     {
+        if (!builder->failure_message.length)
+        {
+            builder->failure_message = S8("could not prepare C calls");
+        }
         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         return;
     }
@@ -23297,6 +23632,34 @@ c_ir_expression_core_loop:
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
             return;
+        }
+        if (expect_operand && c_token_is_punctuator(token, S8("&&")))
+        {
+            if (index + 1 >= end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
+            {
+                builder->failure_message = S8("label address operator requires a label identifier");
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            CToken label_token = builder->preprocess.tokens[index + 1];
+            CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, label_token.spelling);
+            if (!label)
+            {
+                builder->failure_message = string_format(builder->arena, S8("label '{S8}' is not defined in this function"), label_token.spelling);
+                builder->failure_token_index = index + 1;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            IrValueId value = c_ir_emit_label_address(builder, label->block, source);
+            if (value.value == IR_ID_UNDERLYING_INVALID)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            values[value_count++] = value;
+            expect_operand = false;
+            index += 1;
+            continue;
         }
         if (expect_operand)
         {
@@ -24618,7 +24981,8 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             {
                 logical_or = index;
             }
-            else if (!parentheses && !brackets && !braces && logical_and == UINT32_MAX && c_token_is_punctuator(token, S8("&&")))
+            else if (!parentheses && !brackets && !braces && logical_and == UINT32_MAX && c_token_is_punctuator(token, S8("&&")) &&
+                     !c_parse_label_address_prefix(builder->preprocess, task.start, index))
             {
                 logical_and = index;
             }
@@ -25470,7 +25834,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* bui
             }
             braces -= 1;
         }
-        else if (!parentheses && !brackets && !braces && (c_token_is_punctuator(token, S8("&&")) || c_token_is_punctuator(token, S8("||"))))
+        else if (!parentheses && !brackets && !braces &&
+                 ((c_token_is_punctuator(token, S8("&&")) && !c_parse_label_address_prefix(builder->preprocess, start, index)) ||
+                  c_token_is_punctuator(token, S8("||"))))
         {
             return true;
         }
@@ -25486,6 +25852,10 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builde
     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_LOGICAL_VALUE);
     if (frame->stage == C_IR_LOWER_STAGE_LOGICAL_CORE)
     {
+        if (!machine->child_result.success && !builder->failure_message.length)
+        {
+            builder->failure_message = S8("could not lower logical expression core");
+        }
         c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
         return;
     }
@@ -25776,7 +26146,8 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt
             if (!parentheses && !brackets && !braces &&
                 (c_token_is_punctuator(token, S8("==")) || c_token_is_punctuator(token, S8("!=")) || c_token_is_punctuator(token, S8("<")) ||
                  c_token_is_punctuator(token, S8("<=")) || c_token_is_punctuator(token, S8(">")) || c_token_is_punctuator(token, S8(">=")) ||
-                 c_token_is_punctuator(token, S8("&&")) || c_token_is_punctuator(token, S8("||")) || (index == start && c_token_is_punctuator(token, S8("!")))))
+                 (c_token_is_punctuator(token, S8("&&")) && !c_parse_label_address_prefix(builder->preprocess, start, index)) ||
+                 c_token_is_punctuator(token, S8("||")) || (index == start && c_token_is_punctuator(token, S8("!")))))
             {
                 return builder->s32_type;
             }
@@ -27493,12 +27864,6 @@ struct CIrSwitchCase
 };
 
 typedef struct CIrLabel CIrLabel;
-struct CIrLabel
-{
-    String8 name;
-    u32 token_index;
-    IrBlockId block;
-};
 
 BUSTER_GLOBAL_LOCAL bool c_ir_named_label_at(CPreprocessResult preprocess, u32 body_start, u32 index, u32 body_end)
 {
@@ -27512,8 +27877,42 @@ BUSTER_GLOBAL_LOCAL bool c_ir_named_label_at(CPreprocessResult preprocess, u32 b
         return true;
     }
     CToken previous = preprocess.tokens[index - 1];
+    if (c_token_is_punctuator(previous, S8(")")))
+    {
+        u32 depth = 0;
+        u32 open = UINT32_MAX;
+        for (u32 scan = index - 1;; scan -= 1)
+        {
+            CToken token = preprocess.tokens[scan];
+            if (c_token_is_punctuator(token, S8(")")))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(token, S8("(")))
+            {
+                depth -= 1;
+                if (!depth)
+                {
+                    open = scan;
+                    break;
+                }
+            }
+            if (scan == body_start)
+            {
+                break;
+            }
+        }
+        if (open > body_start && preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 control = preprocess.tokens[open - 1].spelling;
+            return string_equal(control, S8("if")) || string_equal(control, S8("for")) || string_equal(control, S8("while")) ||
+                   string_equal(control, S8("switch"));
+        }
+        return false;
+    }
     return c_token_is_punctuator(previous, S8("{")) || c_token_is_punctuator(previous, S8("}")) || c_token_is_punctuator(previous, S8(";")) ||
-           c_token_is_punctuator(previous, S8(":"));
+           c_token_is_punctuator(previous, S8(":")) ||
+           (previous.kind == C_TOKEN_IDENTIFIER && (string_equal(previous.spelling, S8("do")) || string_equal(previous.spelling, S8("else"))));
 }
 
 BUSTER_GLOBAL_LOCAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, String8 name)
@@ -28414,6 +28813,54 @@ BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_clobbers_valid(CIntegerIrBuilder* 
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_labels_parse(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u32 start, u32 end)
+{
+    if (start >= end)
+    {
+        return false;
+    }
+    state->label_blocks = arena_allocate(builder->arena, IrBlockId, end - start);
+    state->label_count = 0;
+    u32 index = start;
+    while (index < end)
+    {
+        if (builder->preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+        {
+            return false;
+        }
+        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, builder->preprocess.tokens[index].spelling);
+        if (!label)
+        {
+            builder->failure_message = string_format(builder->arena, S8("asm goto label '{S8}' is not defined in this function"),
+                                                     builder->preprocess.tokens[index].spelling);
+            builder->failure_token_index = index;
+            return false;
+        }
+        for (u32 previous = 0; previous < state->label_count; previous += 1)
+        {
+            if (state->label_blocks[previous].value == label->block.value)
+            {
+                builder->failure_message = string_format(builder->arena, S8("asm goto label '{S8}' is listed more than once"),
+                                                         builder->preprocess.tokens[index].spelling);
+                builder->failure_token_index = index;
+                return false;
+            }
+        }
+        state->label_blocks[state->label_count++] = label->block;
+        index += 1;
+        if (index == end)
+        {
+            break;
+        }
+        if (!c_token_is_punctuator(builder->preprocess.tokens[index], S8(",")))
+        {
+            return false;
+        }
+        index += 1;
+    }
+    return state->label_count != 0;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
 {
     u64 assembly_length = 0;
@@ -28453,6 +28900,28 @@ BUSTER_GLOBAL_LOCAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder,
     instruction.operand_count = state->operand_count;
     instruction.immediates = state->constraints;
     instruction.immediate_count = state->operand_count;
+    if (state->asm_goto)
+    {
+        if (!state->label_count)
+        {
+            return false;
+        }
+        IrBlockId fallthrough = c_ir_block_create(builder);
+        if (fallthrough.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        instruction.targets = arena_allocate(builder->arena, IrBlockId, state->label_count + 1);
+        instruction.targets[0] = fallthrough;
+        memcpy(instruction.targets + 1, state->label_blocks, sizeof(IrBlockId) * state->label_count);
+        instruction.target_count = state->label_count + 1;
+        if (c_ir_append_instruction(builder, instruction).value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        builder->function->blocks[builder->current_block.value].terminated = true;
+        return c_ir_switch_block(builder, fallthrough);
+    }
     return c_ir_append_instruction(builder, instruction).value != IR_ID_UNDERLYING_INVALID;
 }
 
@@ -28469,8 +28938,10 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* buil
                (string_equal(builder->preprocess.tokens[state->open].spelling, S8("volatile")) ||
                 string_equal(builder->preprocess.tokens[state->open].spelling, S8("__volatile__")) ||
                 string_equal(builder->preprocess.tokens[state->open].spelling, S8("inline")) ||
-                string_equal(builder->preprocess.tokens[state->open].spelling, S8("__inline__"))))
+                string_equal(builder->preprocess.tokens[state->open].spelling, S8("__inline__")) ||
+                string_equal(builder->preprocess.tokens[state->open].spelling, S8("goto"))))
         {
+            state->goto_qualifier |= string_equal(builder->preprocess.tokens[state->open].spelling, S8("goto"));
             state->open += 1;
         }
         if (state->open + 2 >= state->end || !c_token_is_punctuator(builder->preprocess.tokens[state->open], S8("(")) ||
@@ -28492,6 +28963,8 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* buil
         }
         memset(state->separators, 0xff, sizeof(state->separators));
         u32 parentheses = 0;
+        u32 brackets = 0;
+        u32 braces = 0;
         for (u32 index = state->template_end; index < state->close; index += 1)
         {
             CToken token = builder->preprocess.tokens[index];
@@ -28503,7 +28976,23 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* buil
             {
                 parentheses -= 1;
             }
-            else if (!parentheses && c_token_is_punctuator(token, S8(":")))
+            else if (c_token_is_punctuator(token, S8("[")))
+            {
+                brackets += 1;
+            }
+            else if (c_token_is_punctuator(token, S8("]")) && brackets)
+            {
+                brackets -= 1;
+            }
+            else if (c_token_is_punctuator(token, S8("{")))
+            {
+                braces += 1;
+            }
+            else if (c_token_is_punctuator(token, S8("}")) && braces)
+            {
+                braces -= 1;
+            }
+            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(token, S8(":")))
             {
                 if (state->separator_count >= BUSTER_ARRAY_LENGTH(state->separators))
                 {
@@ -28518,13 +29007,16 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* buil
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        if (state->separator_count == 4)
+        state->asm_goto = state->separator_count == 4;
+        if (state->goto_qualifier && !state->asm_goto)
         {
-            builder->failure_message = S8("GNU asm goto is not yet supported");
+            builder->failure_message = S8("asm goto requires four colon sections");
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        if (state->separator_count == 3 && !c_ir_inline_assembly_clobbers_valid(builder, state->separators[2] + 1, state->close))
+        u32 clobber_start = state->separator_count >= 3 ? state->separators[2] + 1 : state->close;
+        u32 clobber_end = state->separator_count == 4 ? state->separators[3] : state->close;
+        if (state->separator_count >= 3 && !c_ir_inline_assembly_clobbers_valid(builder, clobber_start, clobber_end))
         {
             builder->failure_message = S8("unsupported GNU inline assembly clobber");
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -28578,9 +29070,21 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* buil
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
+            if (builder->function->values[state->operands[state->operand_count].value].is_label_value)
+            {
+                builder->failure_message = S8("a label address may not be used as an inline assembly operand");
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
         }
         else
         {
+            if (value.value < builder->function->value_count && builder->function->values[value.value].is_label_value)
+            {
+                builder->failure_message = S8("a label address may not be used as an inline assembly operand");
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
             state->operands[state->operand_count] = value;
         }
         if (!c_ir_inline_assembly_constraint(builder, builder->preprocess.tokens[state->constraint_index], state->output,
@@ -28610,8 +29114,17 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* buil
             {
                 state->output = false;
                 state->segment_index = state->separators[1] + 1;
-                state->segment_end = state->separator_count == 3 ? state->separators[2] : state->close;
+                state->segment_end = state->separator_count >= 3 ? state->separators[2] : state->close;
                 continue;
+            }
+            if (state->asm_goto && !c_ir_inline_assembly_labels_parse(builder, state, state->separators[3] + 1, state->close))
+            {
+                if (!builder->failure_message.length)
+                {
+                    builder->failure_message = S8("malformed asm goto label list");
+                }
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             bool success = c_ir_finish_inline_assembly(builder, state);
             if (!success && !builder->failure_message.length)
@@ -28668,8 +29181,27 @@ BUSTER_GLOBAL_LOCAL String8 c_ir_unsupported_gnu_construct(CPreprocessResult pre
         if (token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("goto")) && index + 1 < end &&
             c_token_is_punctuator(preprocess.tokens[index + 1], S8("*")))
         {
+            if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
+            {
+                *token_index_out = index;
+                return S8("GNU computed goto is only available in GNU dialects");
+            }
+            continue;
+        }
+        if (c_parse_label_address_prefix(preprocess, start, index) && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
+            !c_preprocess_dialect_is_gnu(preprocess.dialect))
+        {
             *token_index_out = index;
-            return S8("GNU computed goto is not supported");
+            return S8("GNU labels-as-values are only available in GNU dialects");
+        }
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            (string_equal(token.spelling, S8("asm")) || string_equal(token.spelling, S8("__asm")) || string_equal(token.spelling, S8("__asm__"))))
+        {
+            if (c_parse_asm_goto_qualifier(preprocess, index, end) && !c_preprocess_dialect_is_gnu(preprocess.dialect))
+            {
+                *token_index_out = index;
+                return S8("GNU extended asm goto is only available in GNU dialects");
+            }
         }
         if (token.kind != C_TOKEN_IDENTIFIER || !string_equal(token.spelling, S8("case")))
         {
@@ -28788,6 +29320,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, 
         }
         if (c_ir_label_find(state->labels, state->label_count, token.spelling))
         {
+            builder->failure_message = string_format(builder->arena, S8("duplicate label '{S8}'"), token.spelling);
+            builder->failure_token_index = index;
             return false;
         }
         IrBlockId block = c_ir_block_create(builder);
@@ -28800,6 +29334,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, 
             .token_index = index,
             .block = block,
         };
+    }
+    if (!builder->labels)
+    {
+        builder->labels = state->labels;
+        builder->label_count = state->label_count;
     }
     u64 task_capacity = (u64)declaration.body_token_count + 4;
     u32 switch_case_capacity = 0;
@@ -28933,10 +29472,45 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
         else if (continuation == C_IR_LOWER_BODY_CONTINUE_RETURN)
         {
             IrValueId value = builder->lower_machine.child_result.value;
+            if (value.value < builder->function->value_count && builder->function->values[value.value].is_label_value)
+            {
+                builder->failure_message = S8("a label address may not escape through a function return");
+                return false;
+            }
             value = c_ir_decay_array(builder, value, builder->return_type, state->child_source);
             value = c_ir_emit_cast(builder, value, builder->return_type, state->child_source);
             if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_cleanup_calls(builder, tasks, task_count, C_SCOPE_ID_INVALID, UINT32_MAX, state->child_source) ||
                 !c_ir_terminate(builder, IR_OPCODE_RETURN, &value, 1, 0, 0, state->child_source))
+            {
+                return false;
+            }
+        }
+        else if (continuation == C_IR_LOWER_BODY_CONTINUE_COMPUTED_GOTO)
+        {
+            IrValueId target = builder->lower_machine.child_result.value;
+            if (target.value >= builder->function->value_count || !builder->function->values[target.value].is_label_value)
+            {
+                builder->failure_message = S8("computed goto requires a label address from this function");
+                return false;
+            }
+            CIrLabel* function_labels = builder->labels ? builder->labels : state->labels;
+            u32 function_label_count = builder->labels ? builder->label_count : state->label_count;
+            if (!function_label_count)
+            {
+                builder->failure_message = S8("computed goto has no label targets in this function");
+                return false;
+            }
+            if (c_ir_has_cleanup_state(builder))
+            {
+                builder->failure_message = S8("computed goto is not valid in a function with cleanup-state locals");
+                return false;
+            }
+            IrBlockId* targets = arena_allocate(builder->arena, IrBlockId, function_label_count);
+            for (u32 label_index = 0; label_index < function_label_count; label_index += 1)
+            {
+                targets[label_index] = function_labels[label_index].block;
+            }
+            if (!c_ir_terminate(builder, IR_OPCODE_INDIRECT_BRANCH, &target, 1, targets, function_label_count, state->child_source))
             {
                 return false;
             }
@@ -30022,8 +30596,29 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
             }
             if (first.kind == C_TOKEN_IDENTIFIER && string_equal(first.spelling, S8("goto")))
             {
+                if (index + 1 < end && c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("*")))
+                {
+                    if (index + 2 >= end)
+                    {
+                        builder->failure_message = S8("computed goto requires an expression");
+                        return false;
+                    }
+                    state->child_source = c_ir_source_range(first.location, first.spelling.length);
+                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1, C_IR_LOWER_BODY_CONTINUE_COMPUTED_GOTO,
+                                          (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                              .as.expression =
+                                                  {
+                                                      .start = index + 2,
+                                                      .end = end,
+                                                  },
+                                          });
+                    state->task_count = task_count;
+                    return false;
+                }
                 if (index + 2 != end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
                 {
+                    builder->failure_message = S8("malformed goto statement");
                     return false;
                 }
                 CIrLabel* label = c_ir_label_find(labels, label_count, builder->preprocess.tokens[index + 1].spelling);
@@ -30033,7 +30628,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                                                                                    : C_SCOPE_ID_INVALID,
                     label ? label->token_index : UINT32_MAX);
                 IrSourceRange goto_source = c_ir_source_range(first.location, first.spelling.length);
-                if (!label || !c_ir_emit_cleanup_calls(builder, tasks, task_count, label_scope, label->token_index, goto_source) ||
+                if (!label)
+                {
+                    builder->failure_message = string_format(builder->arena, S8("label '{S8}' is not defined in this function"),
+                                                             builder->preprocess.tokens[index + 1].spelling);
+                    builder->failure_token_index = index + 1;
+                    return false;
+                }
+                if (!c_ir_emit_cleanup_calls(builder, tasks, task_count, label_scope, label->token_index, goto_source) ||
                     !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &label->block, 1, goto_source))
                 {
                     return false;
@@ -32734,6 +33336,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
     {
         global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
         return true;
+    }
+    for (u32 index = start; index < end; index += 1)
+    {
+        if (c_parse_label_address_prefix(preprocess, start, index) && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
+        {
+            builder->failure_message = S8("a label address may not be used in static storage");
+            return false;
+        }
     }
     bool aggregate_type = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
     if (!aggregate_type && end > start + 1 && c_token_is_punctuator(preprocess.tokens[start], S8("{")) &&

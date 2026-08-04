@@ -771,6 +771,42 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_field(IrExecutionFrame* frame, AnalysisT
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_inline_assembly_jump_target(IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out)
+{
+    if (!instruction || !target_index_out || literal.length <= prefix.length)
+    {
+        return false;
+    }
+    for (u64 index = 0; index < prefix.length; index += 1)
+    {
+        if (literal.pointer[index] != prefix.pointer[index])
+        {
+            return false;
+        }
+    }
+    u64 operand_index = 0;
+    for (u64 index = prefix.length; index < literal.length; index += 1)
+    {
+        u8 digit = (u8)literal.pointer[index];
+        if (digit < '0' || digit > '9' || operand_index > (UINT64_MAX - (digit - '0')) / 10)
+        {
+            return false;
+        }
+        operand_index = operand_index * 10 + (digit - '0');
+    }
+    if (operand_index < instruction->operand_count)
+    {
+        return false;
+    }
+    u64 label_index = operand_index - instruction->operand_count;
+    if (!instruction->target_count || label_index >= instruction->target_count - 1)
+    {
+        return false;
+    }
+    *target_index_out = 1 + (u32)label_index;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame* frame, IrInstruction* instruction)
 {
     if (!frame || !instruction || instruction->opcode >= IR_OPCODE_COUNT || !ir_interpreter_type_id_valid(frame->analysis, instruction->type) ||
@@ -861,13 +897,39 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame
     case IR_OPCODE_BINARY:
         return instruction->operand_count == 2 && instruction->target_count == 0 && instruction->immediate_count == 0;
     case IR_OPCODE_INLINE_ASSEMBLY:
-        return instruction->operand_count == instruction->immediate_count && instruction->target_count == 0;
+    {
+        bool valid = instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2);
+        for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
+        {
+            valid = instruction->targets[target_index].value < frame->function->block_count;
+        }
+        return valid;
+    }
+    case IR_OPCODE_LABEL_ADDRESS:
+        return instruction->operand_count == 0 && instruction->target_count == 1 && instruction->targets[0].value < frame->function->block_count &&
+               instruction->immediate_count == 0 && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+               instruction->result.value < frame->function->value_count && frame->function->values[instruction->result.value].is_label_value &&
+               frame->function->values[instruction->result.value].label_block.value == instruction->targets[0].value;
     case IR_OPCODE_BRANCH:
         return instruction->operand_count == 0 && instruction->target_count == 1 && instruction->immediate_count == 0;
     case IR_OPCODE_BRANCH_IF:
         return instruction->operand_count == 1 && instruction->target_count == 2 && instruction->immediate_count == 0;
     case IR_OPCODE_SWITCH:
         return instruction->operand_count == 1 && instruction->immediate_count != UINT32_MAX && instruction->target_count == instruction->immediate_count + 1;
+    case IR_OPCODE_INDIRECT_BRANCH:
+    {
+        bool valid = instruction->operand_count == 1 && instruction->operands[0].value < frame->function->value_count && instruction->target_count != 0 &&
+                     instruction->immediate_count == 0 && instruction->result.value == IR_ID_UNDERLYING_INVALID &&
+                     frame->function->values[instruction->operands[0].value].is_label_value;
+        bool label_target = false;
+        for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
+        {
+            valid &= instruction->targets[target_index].value < frame->function->block_count;
+            label_target |= instruction->targets[target_index].value ==
+                            frame->function->values[instruction->operands[0].value].label_block.value;
+        }
+        return valid && label_target;
+    }
     case IR_OPCODE_RETURN:
         return instruction->operand_count <= 1 && instruction->target_count == 0 && instruction->immediate_count == 0;
     case IR_OPCODE_COUNT:
@@ -2465,6 +2527,17 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             produced.instantiation = instruction->instantiation;
         }
         break;
+        case IR_OPCODE_LABEL_ADDRESS:
+        {
+            if (instruction->target_count != 1)
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+                break;
+            }
+            produced.bits = instruction->targets[0].value;
+            produced.kind = IR_RUNTIME_VALUE_SCALAR;
+        }
+        break;
         case IR_OPCODE_CAST:
         {
             IrRuntimeValue operand = frame->values[instruction->operands[0].value];
@@ -2749,7 +2822,30 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
         break;
         case IR_OPCODE_INLINE_ASSEMBLY:
         {
-            operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+            if (!instruction->target_count)
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
+            IrBlockId target = instruction->targets[0];
+            u32 jump_target_index = 0;
+            bool jump_label = ir_interpreter_inline_assembly_jump_target(instruction, instruction->literal, S8("jmp %l"), &jump_target_index) ||
+                              ir_interpreter_inline_assembly_jump_target(instruction, instruction->literal, S8("j %l"), &jump_target_index) ||
+                              ir_interpreter_inline_assembly_jump_target(instruction, instruction->literal, S8("b %l"), &jump_target_index);
+            if (jump_label)
+            {
+                target = instruction->targets[jump_target_index];
+            }
+            else if (instruction->literal.length)
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
+            if (!ir_interpreter_block_enter(frame, target, frame->block))
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+            }
+            advance = false;
         }
         break;
         case IR_OPCODE_BRANCH:
@@ -2798,6 +2894,30 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             }
             IrBlockId predecessor = frame->block;
             if (!ir_interpreter_block_enter(frame, instruction->targets[target_index], predecessor))
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+            }
+            advance = false;
+        }
+        break;
+        case IR_OPCODE_INDIRECT_BRANCH:
+        {
+            if (instruction->operand_count != 1 || !instruction->target_count)
+            {
+                operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+                break;
+            }
+            u64 label = frame->values[instruction->operands[0].value].bits;
+            IrBlockId target = IR_BLOCK_ID_INVALID;
+            for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
+            {
+                if (instruction->targets[target_index].value == label)
+                {
+                    target = instruction->targets[target_index];
+                    break;
+                }
+            }
+            if (target.value == IR_ID_UNDERLYING_INVALID || !ir_interpreter_block_enter(frame, target, frame->block))
             {
                 operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
             }

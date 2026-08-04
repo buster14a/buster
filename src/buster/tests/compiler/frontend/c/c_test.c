@@ -6248,6 +6248,260 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_validate_canonical_module(vulkan_reachable_ir.program, module).error == IR_VALIDATION_NONE);
         }
         scratch_end(vulkan_call_temporary);
+        TemporalArena labels_temporary = scratch_begin(0, 0);
+        String8 labels_source = S8("int labels_and_asm(int selector) {"
+                                   " void *target = (void *)&&dispatch;"
+                                   " if (selector) goto *target;"
+                                   " return 3;"
+                                   "dispatch: __asm__ goto (\"\" : : \"r\"(selector) : \"cc\" : done);"
+                                   " return 5;"
+                                   "done: return 7; }\n");
+        CPreprocessResult labels_tokens = c_preprocess(labels_temporary.arena, labels_source,
+                                                       (CPreprocessOptions){
+                                                           .target = target_native,
+                                                           .data_layout = target_data_layout(target_native),
+                                                           .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                       });
+        CParseResult labels_parse = c_parse(labels_temporary.arena, labels_tokens);
+        CIRLowerResult labels_lowered = c_lower_to_ir(labels_temporary.arena, S8("labels-as-values.c"), labels_tokens, labels_parse, target_native);
+        BUSTER_TEST(arguments, labels_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, labels_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, labels_lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, labels_lowered.program != 0);
+        if (labels_lowered.program)
+        {
+            IrModule* labels_module = labels_lowered.program->modules;
+            BUSTER_TEST(arguments, labels_module->function_count == 1);
+            if (labels_module->function_count == 1)
+            {
+                IrFunction* labels_function = labels_module->functions;
+                u32 label_address_count = 0;
+                u32 indirect_branch_count = 0;
+                u32 asm_goto_count = 0;
+                IrInstruction* label_address = 0;
+                IrInstruction* indirect_branch = 0;
+                IrInstruction* asm_goto = 0;
+                for (u32 instruction_index = 0; instruction_index < labels_function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = labels_function->instructions + instruction_index;
+                    if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
+                    {
+                        label_address_count += 1;
+                        label_address = instruction;
+                    }
+                    else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
+                    {
+                        indirect_branch_count += 1;
+                        indirect_branch = instruction;
+                    }
+                    else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count)
+                    {
+                        asm_goto_count += 1;
+                        asm_goto = instruction;
+                    }
+                }
+                BUSTER_TEST(arguments, label_address_count == 1);
+                BUSTER_TEST(arguments, indirect_branch_count == 1);
+                BUSTER_TEST(arguments, asm_goto_count == 1);
+                if (label_address && label_address->result.value < labels_function->value_count)
+                {
+                    IrValue* label_value = labels_function->values + label_address->result.value;
+                    BUSTER_TEST(arguments, label_value->is_label_value);
+                    BUSTER_TEST(arguments, label_address->target_count == 1 && label_value->label_block.value == label_address->targets[0].value);
+                }
+                if (indirect_branch && indirect_branch->operand_count == 1 && indirect_branch->target_count >= 2 &&
+                    indirect_branch->operands[0].value < labels_function->value_count)
+                {
+                    IrValue* target_value = labels_function->values + indirect_branch->operands[0].value;
+                    BUSTER_TEST(arguments, target_value->is_label_value);
+                    bool target_in_successors = false;
+                    for (u32 target_index = 0; target_index < indirect_branch->target_count; target_index += 1)
+                    {
+                        target_in_successors |= indirect_branch->targets[target_index].value == target_value->label_block.value;
+                    }
+                    BUSTER_TEST(arguments, target_in_successors);
+                }
+                if (asm_goto)
+                {
+                    BUSTER_TEST(arguments, asm_goto->target_count == 2);
+                    BUSTER_TEST(arguments, asm_goto->literal.length == 0);
+                }
+                BUSTER_TEST(arguments, ir_validate_canonical_module(labels_lowered.program, labels_module).error == IR_VALIDATION_NONE);
+            }
+        }
+        scratch_end(labels_temporary);
+    }
+    {
+        TemporalArena invalid_labels_temporary = scratch_begin(0, 0);
+        String8 invalid_labels_source = S8("int invalid_labels(void) { void *target = (void *)0; goto *target; }\n");
+        CPreprocessResult invalid_labels_tokens = c_preprocess(invalid_labels_temporary.arena, invalid_labels_source,
+                                                               (CPreprocessOptions){
+                                                                   .target = target_native,
+                                                                   .data_layout = target_data_layout(target_native),
+                                                                   .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                               });
+        CParseResult invalid_labels_parse = c_parse(invalid_labels_temporary.arena, invalid_labels_tokens);
+        CIRLowerResult invalid_labels_lowered = c_lower_to_ir(invalid_labels_temporary.arena, S8("invalid-label-target.c"), invalid_labels_tokens,
+                                                              invalid_labels_parse, target_native);
+        BUSTER_TEST(arguments, invalid_labels_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_labels_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_labels_lowered.diagnostic_count == 1);
+        if (invalid_labels_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, invalid_labels_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_labels': computed goto requires a label address from this function"));
+        }
+        scratch_end(invalid_labels_temporary);
+    }
+    {
+        TemporalArena duplicate_labels_temporary = scratch_begin(0, 0);
+        CPreprocessResult duplicate_labels_tokens = c_preprocess(duplicate_labels_temporary.arena,
+                                                                  S8("int duplicate_labels(void) { goto *&&target; target: return 0; target: return 1; }\n"),
+                                                                  (CPreprocessOptions){
+                                                                      .target = target_native,
+                                                                      .data_layout = target_data_layout(target_native),
+                                                                      .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                  });
+        CParseResult duplicate_labels_parse = c_parse(duplicate_labels_temporary.arena, duplicate_labels_tokens);
+        CIRLowerResult duplicate_labels_lowered = c_lower_to_ir(duplicate_labels_temporary.arena, S8("duplicate-labels.c"), duplicate_labels_tokens,
+                                                                  duplicate_labels_parse, target_native);
+        BUSTER_TEST(arguments, duplicate_labels_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, duplicate_labels_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, duplicate_labels_lowered.diagnostic_count == 1);
+        if (duplicate_labels_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, duplicate_labels_lowered.diagnostics[0].message, S8("in function 'duplicate_labels': duplicate label 'target'"));
+        }
+        scratch_end(duplicate_labels_temporary);
+    }
+    {
+        TemporalArena invalid_label_cast_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_label_cast_tokens = c_preprocess(invalid_label_cast_temporary.arena,
+                                                                    S8("int invalid_label_cast(void) { return (int)&&target; target: return 0; }\n"),
+                                                                    (CPreprocessOptions){
+                                                                        .target = target_native,
+                                                                        .data_layout = target_data_layout(target_native),
+                                                                        .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                    });
+        CParseResult invalid_label_cast_parse = c_parse(invalid_label_cast_temporary.arena, invalid_label_cast_tokens);
+        CIRLowerResult invalid_label_cast_lowered = c_lower_to_ir(invalid_label_cast_temporary.arena, S8("invalid-label-cast.c"), invalid_label_cast_tokens,
+                                                                    invalid_label_cast_parse, target_native);
+        BUSTER_TEST(arguments, invalid_label_cast_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_label_cast_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_label_cast_lowered.diagnostic_count == 1);
+        if (invalid_label_cast_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, invalid_label_cast_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_label_cast': a label address may only be used as its original void pointer type"));
+        }
+        scratch_end(invalid_label_cast_temporary);
+    }
+    {
+        TemporalArena invalid_label_deref_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_label_deref_tokens = c_preprocess(invalid_label_deref_temporary.arena,
+                                                                     S8("int invalid_label_deref(void) { return *&&target; target: return 0; }\n"),
+                                                                     (CPreprocessOptions){
+                                                                         .target = target_native,
+                                                                         .data_layout = target_data_layout(target_native),
+                                                                         .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                     });
+        CParseResult invalid_label_deref_parse = c_parse(invalid_label_deref_temporary.arena, invalid_label_deref_tokens);
+        CIRLowerResult invalid_label_deref_lowered = c_lower_to_ir(invalid_label_deref_temporary.arena, S8("invalid-label-deref.c"), invalid_label_deref_tokens,
+                                                                     invalid_label_deref_parse, target_native);
+        BUSTER_TEST(arguments, invalid_label_deref_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_label_deref_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_label_deref_lowered.diagnostic_count == 1);
+        if (invalid_label_deref_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, invalid_label_deref_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_label_deref': a label address may not be dereferenced"));
+        }
+        scratch_end(invalid_label_deref_temporary);
+    }
+    {
+        TemporalArena invalid_asm_goto_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_asm_goto_tokens = c_preprocess(invalid_asm_goto_temporary.arena,
+                                                                 S8("int invalid_asm_goto(void) { __asm__ goto (\"\" ::: : missing); return 0; }\n"),
+                                                                 (CPreprocessOptions){
+                                                                     .target = target_native,
+                                                                     .data_layout = target_data_layout(target_native),
+                                                                     .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                 });
+        CParseResult invalid_asm_goto_parse = c_parse(invalid_asm_goto_temporary.arena, invalid_asm_goto_tokens);
+        CIRLowerResult invalid_asm_goto_lowered = c_lower_to_ir(invalid_asm_goto_temporary.arena, S8("invalid-asm-goto.c"), invalid_asm_goto_tokens,
+                                                                  invalid_asm_goto_parse, target_native);
+        BUSTER_TEST(arguments, invalid_asm_goto_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_asm_goto_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_asm_goto_lowered.diagnostic_count == 1);
+        if (invalid_asm_goto_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, invalid_asm_goto_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_asm_goto': asm goto label 'missing' is not defined in this function"));
+        }
+        scratch_end(invalid_asm_goto_temporary);
+    }
+    {
+        TemporalArena duplicate_asm_goto_temporary = scratch_begin(0, 0);
+        CPreprocessResult duplicate_asm_goto_tokens = c_preprocess(duplicate_asm_goto_temporary.arena,
+                                                                    S8("int duplicate_asm_goto(void) { target: __asm__ goto (\"\" ::: : target, target); return 0; }\n"),
+                                                                    (CPreprocessOptions){
+                                                                        .target = target_native,
+                                                                        .data_layout = target_data_layout(target_native),
+                                                                        .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                    });
+        CParseResult duplicate_asm_goto_parse = c_parse(duplicate_asm_goto_temporary.arena, duplicate_asm_goto_tokens);
+        CIRLowerResult duplicate_asm_goto_lowered = c_lower_to_ir(duplicate_asm_goto_temporary.arena, S8("duplicate-asm-goto.c"), duplicate_asm_goto_tokens,
+                                                                    duplicate_asm_goto_parse, target_native);
+        BUSTER_TEST(arguments, duplicate_asm_goto_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, duplicate_asm_goto_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, duplicate_asm_goto_lowered.diagnostic_count == 1);
+        if (duplicate_asm_goto_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, duplicate_asm_goto_lowered.diagnostics[0].message,
+                               S8("in function 'duplicate_asm_goto': asm goto label 'target' is listed more than once"));
+        }
+        scratch_end(duplicate_asm_goto_temporary);
+    }
+    {
+        TemporalArena malformed_asm_goto_temporary = scratch_begin(0, 0);
+        CPreprocessResult malformed_asm_goto_tokens = c_preprocess(malformed_asm_goto_temporary.arena,
+                                                                    S8("int malformed_asm_goto(void) { __asm__ goto (\"\"); return 0; }\n"),
+                                                                    (CPreprocessOptions){
+                                                                        .target = target_native,
+                                                                        .data_layout = target_data_layout(target_native),
+                                                                        .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                    });
+        CParseResult malformed_asm_goto_parse = c_parse(malformed_asm_goto_temporary.arena, malformed_asm_goto_tokens);
+        CIRLowerResult malformed_asm_goto_lowered = c_lower_to_ir(malformed_asm_goto_temporary.arena, S8("malformed-asm-goto.c"), malformed_asm_goto_tokens,
+                                                                    malformed_asm_goto_parse, target_native);
+        BUSTER_TEST(arguments, malformed_asm_goto_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, malformed_asm_goto_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, malformed_asm_goto_lowered.diagnostic_count == 1);
+        if (malformed_asm_goto_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, malformed_asm_goto_lowered.diagnostics[0].message,
+                               S8("in function 'malformed_asm_goto': asm goto requires four colon sections"));
+        }
+        scratch_end(malformed_asm_goto_temporary);
+    }
+    {
+        TemporalArena c_labels_temporary = scratch_begin(0, 0);
+        CPreprocessResult c_labels_tokens = c_preprocess(c_labels_temporary.arena,
+                                                         S8("int c_labels(void) { return &&target; target: return 0; }\n"),
+                                                         (CPreprocessOptions){
+                                                             .target = target_native,
+                                                             .data_layout = target_data_layout(target_native),
+                                                             .dialect = C_PREPROCESS_DIALECT_C23,
+                                                         });
+        CParseResult c_labels_parse = c_parse(c_labels_temporary.arena, c_labels_tokens);
+        BUSTER_TEST(arguments, c_labels_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, c_labels_parse.diagnostic_count == 1);
+        if (c_labels_parse.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, c_labels_parse.diagnostics[0].message,
+                               S8("in function 'c_labels': GNU labels-as-values are only available in GNU dialects"));
+        }
+        scratch_end(c_labels_temporary);
     }
     return result;
 }

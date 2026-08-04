@@ -1548,6 +1548,53 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_aggregate_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    String8 c_labels_path = buster_test_temporary_path(arguments->arena, S8("buster-c-labels"),
+#if BUSTER_WINDOWS
+                                                       S8(".exe"));
+#else
+                                                       S8(""));
+#endif
+    String8 c_labels_command_line[] = {
+        S8("-o"),
+        c_labels_path,
+        S8("tests/basic_c_labels.c"),
+    };
+    CompilerDriverResult c_labels = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_labels_command_line)));
+    BUSTER_TEST(arguments, c_labels.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_labels.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_labels_arguments[] = {
+            c_labels_path,
+        };
+        ProcessSpawnResult c_labels_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_labels_arguments), (SliceString8){0}, (SliceString8){0},
+                                                             (ProcessSpawnOptions){
+                                                                 .use_process_environment = true,
+                                                             });
+        BUSTER_TEST(arguments, c_labels_spawn.handle != 0);
+        if (c_labels_spawn.handle)
+        {
+            ProcessWaitResult c_labels_wait = os_process_wait_sync(arguments->arena, c_labels_spawn);
+            BUSTER_TEST(arguments, c_labels_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    String8 c_labels_aarch64_path = buster_test_temporary_path(arguments->arena, S8("buster-c-labels-aarch64"), S8(".o"));
+    String8 c_labels_aarch64_command_line[] = {
+        S8("-c"),
+        S8("-target"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("-o"),
+        c_labels_aarch64_path,
+        S8("tests/basic_c_labels.c"),
+    };
+    CompilerDriverResult c_labels_aarch64 = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_labels_aarch64_command_line)));
+    BUSTER_TEST(arguments, c_labels_aarch64.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_labels_aarch64.has_object);
+    if (c_labels_aarch64.has_object)
+    {
+        BUSTER_TEST(arguments, c_labels_aarch64.object.sections[OBJECT_SECTION_TEXT].data.length != 0);
+    }
 #if (BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64) || BUSTER_MACOS
     String8 c_thread_local_path = buster_test_temporary_path(arguments->arena, S8("buster-c-thread-local"), S8(""));
     String8 c_thread_local_command_line[] = {

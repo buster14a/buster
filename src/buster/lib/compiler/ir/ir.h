@@ -84,9 +84,11 @@ typedef enum IrOpcode
     IR_OPCODE_VA_END,
     IR_OPCODE_VA_ARG,
     IR_OPCODE_INLINE_ASSEMBLY,
+    IR_OPCODE_LABEL_ADDRESS,
     IR_OPCODE_BRANCH,
     IR_OPCODE_BRANCH_IF,
     IR_OPCODE_SWITCH,
+    IR_OPCODE_INDIRECT_BRANCH,
     IR_OPCODE_RETURN,
     IR_OPCODE_DEBUG_TRAP,
     IR_OPCODE_UNREACHABLE,
@@ -249,7 +251,9 @@ struct IrValue
     u32 alignment;
     bool is_read_only;
     bool points_to_read_only;
-    u8 reserved[2];
+    bool is_label_value;
+    u8 reserved;
+    IrBlockId label_block;
 };
 
 typedef struct IrIncoming IrIncoming;

@@ -9,6 +9,42 @@
 #define X64_VALUE_SLOT_COMPONENT_COUNT 4
 #define A64_VALUE_SLOT_SIZE 32
 
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_jump_target(IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out)
+{
+    if (!instruction || !target_index_out || literal.length <= prefix.length)
+    {
+        return false;
+    }
+    for (u64 index = 0; index < prefix.length; index += 1)
+    {
+        if (literal.pointer[index] != prefix.pointer[index])
+        {
+            return false;
+        }
+    }
+    u64 operand_index = 0;
+    for (u64 index = prefix.length; index < literal.length; index += 1)
+    {
+        u8 digit = (u8)literal.pointer[index];
+        if (digit < '0' || digit > '9' || operand_index > (UINT64_MAX - (digit - '0')) / 10)
+        {
+            return false;
+        }
+        operand_index = operand_index * 10 + (digit - '0');
+    }
+    if (operand_index < instruction->operand_count)
+    {
+        return false;
+    }
+    u64 label_index = operand_index - instruction->operand_count;
+    if (!instruction->target_count || label_index >= instruction->target_count - 1)
+    {
+        return false;
+    }
+    *target_index_out = 1 + (u32)label_index;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL u32 codegen_align_u32(u32 value, u32 alignment)
 {
     return (value + alignment - 1) & ~(alignment - 1);
@@ -8761,7 +8797,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         u32 offset;
         bool aarch64;
         bool conditional;
-        u8 reserved[2];
+        bool label_address;
+        u8 reserved;
     };
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
@@ -11763,6 +11800,24 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         }
                         C_X64_STORE_RESULT();
                     }
+                    else if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
+                    {
+                        if (instruction->target_count != 1)
+                        {
+                            result.error = CODEGEN_ERROR_INVALID_IR;
+                            return result;
+                        }
+                        codegen_emit_u8(&buffer, 0x48);
+                        codegen_emit_u8(&buffer, 0x8d);
+                        codegen_emit_u8(&buffer, 0x05);
+                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                            .target = instruction->targets[0],
+                            .offset = (u32)buffer.count,
+                            .label_address = true,
+                        };
+                        codegen_emit_u32(&buffer, 0);
+                        C_X64_STORE_RESULT();
+                    }
                     else if (instruction->opcode == IR_OPCODE_BRANCH)
                     {
                         codegen_emit_u8(&buffer, 0xe9);
@@ -11791,6 +11846,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             .offset = (u32)buffer.count,
                         };
                         codegen_emit_u32(&buffer, 0);
+                    }
+                    else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
+                    {
+                        if (instruction->operand_count != 1)
+                        {
+                            result.error = CODEGEN_ERROR_INVALID_IR;
+                            return result;
+                        }
+                        C_X64_LOAD(0x85, instruction->operands[0]);
+                        codegen_emit_u8(&buffer, 0xff);
+                        codegen_emit_u8(&buffer, 0xe0);
                     }
                     else if (instruction->opcode == IR_OPCODE_SWITCH)
                     {
@@ -11828,8 +11894,12 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         bool nop = string_equal(instruction->literal, S8("nop"));
                         bool pause = string_equal(instruction->literal, S8("pause"));
                         bool interrupt = string_equal(instruction->literal, S8("int3"));
+                        u32 jump_target_index = 0;
+                        bool jump_label = codegen_inline_assembly_jump_target(instruction, instruction->literal, S8("jmp %l"), &jump_target_index) ||
+                                          codegen_inline_assembly_jump_target(instruction, instruction->literal, S8("j %l"), &jump_target_index);
                         bool operandless = undefined || nop || pause || interrupt;
-                        if ((!cpuid && !xgetbv && !operandless && !no_instruction) || (operandless && instruction->operand_count) ||
+                        if ((!cpuid && !xgetbv && !operandless && !no_instruction && !jump_label) || (operandless && instruction->operand_count) ||
+                            (jump_label && instruction->target_count < 2) ||
                             instruction->operand_count != instruction->immediate_count)
                         {
                             result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
@@ -11872,7 +11942,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             codegen_emit_u8(&buffer, (u8)(0x85 | (registers[constraint_index] << 3)));
                             codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[input.value]));
                         }
-                        if (cpuid || xgetbv || undefined)
+                        if (jump_label)
+                        {
+                            codegen_emit_u8(&buffer, 0xe9);
+                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                                .target = instruction->targets[jump_target_index],
+                                .offset = (u32)buffer.count,
+                            };
+                            codegen_emit_u32(&buffer, 0);
+                        }
+                        else if (cpuid || xgetbv || undefined)
                         {
                             codegen_emit_u8(&buffer, 0x0f);
                             codegen_emit_u8(&buffer, cpuid ? 0xa2 : xgetbv ? 0x01 : 0x0b);
@@ -11938,6 +12017,15 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         if (preserve_b)
                         {
                             codegen_emit_u8(&buffer, 0x5b);
+                        }
+                        if (instruction->target_count && !jump_label)
+                        {
+                            codegen_emit_u8(&buffer, 0xe9);
+                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                                .target = instruction->targets[0],
+                                .offset = (u32)buffer.count,
+                            };
+                            codegen_emit_u32(&buffer, 0);
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_DEBUG_TRAP)
@@ -13820,6 +13908,22 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         codegen_emit_u32(&buffer, operation | wide_mask);
                         C_A64_STORE(9);
                     }
+                    else if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
+                    {
+                        if (instruction->target_count != 1)
+                        {
+                            result.error = CODEGEN_ERROR_INVALID_IR;
+                            return result;
+                        }
+                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                            .target = instruction->targets[0],
+                            .offset = (u32)buffer.count,
+                            .aarch64 = true,
+                            .label_address = true,
+                        };
+                        codegen_emit_u32(&buffer, 0x10000009);
+                        C_A64_STORE(9);
+                    }
                     else if (instruction->opcode == IR_OPCODE_BRANCH)
                     {
                         branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
@@ -13828,6 +13932,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             .aarch64 = true,
                         };
                         codegen_emit_u32(&buffer, 0x14000000);
+                    }
+                    else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
+                    {
+                        if (instruction->operand_count != 1)
+                        {
+                            result.error = CODEGEN_ERROR_INVALID_IR;
+                            return result;
+                        }
+                        C_A64_LOAD(9, instruction->operands[0]);
+                        codegen_emit_u32(&buffer, 0xd61f0120);
                     }
                     else if (instruction->opcode == IR_OPCODE_BRANCH_IF)
                     {
@@ -13883,13 +13997,31 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         bool wait_interrupt = string_equal(instruction->literal, S8("wfi"));
                         bool send_event = string_equal(instruction->literal, S8("sev"));
                         bool send_event_local = string_equal(instruction->literal, S8("sevl"));
-                        if ((!empty && !brk && !nop && !yield && !wait_event && !wait_interrupt && !send_event && !send_event_local) ||
-                            instruction->operand_count || instruction->immediate_count)
+                        u32 jump_target_index = 0;
+                        bool jump_label = codegen_inline_assembly_jump_target(instruction, instruction->literal, S8("b %l"), &jump_target_index);
+                        bool has_output = false;
+                        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+                        {
+                            has_output |= (instruction->immediates[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+                        }
+                        bool allow_goto_inputs = instruction->target_count != 0 && !has_output && (empty || jump_label);
+                        if ((!empty && !brk && !nop && !yield && !wait_event && !wait_interrupt && !send_event && !send_event_local && !jump_label) ||
+                            (jump_label && instruction->target_count < 2) ||
+                            (!allow_goto_inputs && (instruction->operand_count || instruction->immediate_count)))
                         {
                             result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                             return result;
                         }
-                        if (!empty)
+                        if (jump_label)
+                        {
+                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                                .target = instruction->targets[jump_target_index],
+                                .offset = (u32)buffer.count,
+                                .aarch64 = true,
+                            };
+                            codegen_emit_u32(&buffer, 0x14000000);
+                        }
+                        else if (!empty)
                         {
                             codegen_emit_u32(&buffer, brk              ? 0xd4200000
                                                       : nop            ? 0xd503201f
@@ -13898,6 +14030,15 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                                       : wait_interrupt ? 0xd503207f
                                                       : send_event     ? 0xd503209f
                                                                        : 0xd50320bf);
+                        }
+                        if (instruction->target_count && !jump_label)
+                        {
+                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                                .target = instruction->targets[0],
+                                .offset = (u32)buffer.count,
+                                .aarch64 = true,
+                            };
+                            codegen_emit_u32(&buffer, 0x14000000);
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_DEBUG_TRAP)
@@ -14065,6 +14206,21 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             }
             else
             {
+                if (patch.label_address)
+                {
+                    if ((delta & 3) || delta < -(1 << 20) || delta >= (1 << 20))
+                    {
+                        result.error = CODEGEN_ERROR_CAPACITY;
+                        return result;
+                    }
+                    u32 instruction = 0;
+                    memcpy(&instruction, buffer.bytes + patch.offset, sizeof(instruction));
+                    u32 immediate = (u32)(delta >> 2);
+                    instruction |= ((u32)delta & 3) << 29;
+                    instruction |= (immediate & 0x7ffff) << 5;
+                    memcpy(buffer.bytes + patch.offset, &instruction, sizeof(instruction));
+                    continue;
+                }
                 if ((delta & 3) || (patch.conditional ? delta < -(1 << 20) || delta >= (1 << 20) : delta < -(1 << 27) || delta >= (1 << 27)))
                 {
                     result.error = CODEGEN_ERROR_CAPACITY;
