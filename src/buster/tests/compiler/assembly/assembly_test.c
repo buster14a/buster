@@ -211,6 +211,276 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_absolute_memory.relocation_count == 1 && x86_absolute_memory.relocations[0].offset == 3 &&
                                x86_absolute_memory.relocations[0].addend == 8 &&
                                x86_absolute_memory.relocations[0].kind == ASSEMBLY_RELOCATION_X86_32);
+
+    u8 expected_x86_adc_sbb[] = {
+        0x10, 0xd8,
+        0x66, 0x11, 0xc8,
+        0x11, 0xc8,
+        0x4d, 0x11, 0xc8,
+        0x45, 0x10, 0x4c, 0x24, 0x08,
+        0x66, 0x45, 0x13, 0x55, 0x7f,
+        0x48, 0x83, 0xd0, 0x7f,
+        0x48, 0x81, 0xd3, 0x80, 0x00, 0x00, 0x00,
+        0x18, 0xd8,
+        0x66, 0x19, 0xc8,
+        0x19, 0xc8,
+        0x4d, 0x19, 0xc8,
+        0x45, 0x18, 0x4c, 0x24, 0x08,
+        0x66, 0x45, 0x1b, 0x55, 0x7f,
+        0x48, 0x83, 0xd8, 0x7f,
+        0x48, 0x81, 0xdb, 0x80, 0x00, 0x00, 0x00,
+    };
+    String8 x86_intel_adc_sbb_source =
+        S8("adc al, bl\n"
+           "adc ax, cx\n"
+           "adc eax, ecx\n"
+           "adc r8, r9\n"
+           "adc byte ptr [r12 + 8], r9b\n"
+           "adc r10w, word ptr [r13 + 127]\n"
+           "adc rax, 127\n"
+           "adc rbx, 128\n"
+           "sbb al, bl\n"
+           "sbb ax, cx\n"
+           "sbb eax, ecx\n"
+           "sbb r8, r9\n"
+           "sbb byte ptr [r12 + 8], r9b\n"
+           "sbb r10w, word ptr [r13 + 127]\n"
+           "sbb rax, 127\n"
+           "sbb rbx, 128\n");
+    AssemblyEncodeResult x86_intel_adc_sbb = assembly_encode(
+        arguments->arena, x86_intel_adc_sbb_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_adc_sbb.diagnostic_count == 0 &&
+                               x86_intel_adc_sbb.bytes.length == sizeof(expected_x86_adc_sbb) &&
+                               memcmp(x86_intel_adc_sbb.bytes.pointer, expected_x86_adc_sbb, sizeof(expected_x86_adc_sbb)) == 0);
+    String8 x86_att_adc_sbb_source =
+        S8("adcb %bl, %al\n"
+           "adcw %cx, %ax\n"
+           "adcl %ecx, %eax\n"
+           "adcq %r9, %r8\n"
+           "adcb %r9b, 8(%r12)\n"
+           "adcw 127(%r13), %r10w\n"
+           "adcq $127, %rax\n"
+           "adcq $128, %rbx\n"
+           "sbbb %bl, %al\n"
+           "sbbw %cx, %ax\n"
+           "sbbl %ecx, %eax\n"
+           "sbbq %r9, %r8\n"
+           "sbbb %r9b, 8(%r12)\n"
+           "sbbw 127(%r13), %r10w\n"
+           "sbbq $127, %rax\n"
+           "sbbq $128, %rbx\n");
+    AssemblyEncodeResult x86_att_adc_sbb = assembly_encode(
+        arguments->arena, x86_att_adc_sbb_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_adc_sbb.diagnostic_count == 0 &&
+                               x86_att_adc_sbb.bytes.length == sizeof(expected_x86_adc_sbb) &&
+                               memcmp(x86_att_adc_sbb.bytes.pointer, expected_x86_adc_sbb, sizeof(expected_x86_adc_sbb)) == 0);
+
+    u8 expected_x86_unary_integer[] = {
+        0xf6, 0xe0,
+        0x66, 0xf7, 0xe1,
+        0xf7, 0xe2,
+        0x49, 0xf7, 0xe0,
+        0xf6, 0xeb,
+        0x66, 0xf7, 0xe9,
+        0xf7, 0xea,
+        0x49, 0xf7, 0xe9,
+        0x41, 0xf6, 0x64, 0x24, 0x08,
+        0x66, 0x41, 0xf7, 0x6d, 0x10,
+        0x41, 0xf7, 0x30,
+        0x49, 0xf7, 0x79, 0x7f,
+        0xf6, 0xf1,
+        0x66, 0xf7, 0xf6,
+        0xf7, 0xf6,
+        0x49, 0xf7, 0xf2,
+        0xf6, 0xf9,
+        0x66, 0xf7, 0xff,
+        0xf7, 0xfe,
+        0x49, 0xf7, 0xfb,
+    };
+    String8 x86_intel_unary_integer_source =
+        S8("mul al\n"
+           "mul cx\n"
+           "mul edx\n"
+           "mul r8\n"
+           "imul bl\n"
+           "imul cx\n"
+           "imul edx\n"
+           "imul r9\n"
+           "mul byte ptr [r12 + 8]\n"
+           "imul word ptr [r13 + 16]\n"
+           "div dword ptr [r8]\n"
+           "idiv qword ptr [r9 + 127]\n"
+           "div cl\n"
+           "div si\n"
+           "div esi\n"
+           "div r10\n"
+           "idiv cl\n"
+           "idiv di\n"
+           "idiv esi\n"
+           "idiv r11\n");
+    AssemblyEncodeResult x86_intel_unary_integer = assembly_encode(
+        arguments->arena, x86_intel_unary_integer_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_unary_integer.diagnostic_count == 0 &&
+                               x86_intel_unary_integer.bytes.length == sizeof(expected_x86_unary_integer) &&
+                               memcmp(x86_intel_unary_integer.bytes.pointer, expected_x86_unary_integer,
+                                      sizeof(expected_x86_unary_integer)) == 0);
+    String8 x86_att_unary_integer_source =
+        S8("mulb %al\n"
+           "mulw %cx\n"
+           "mull %edx\n"
+           "mulq %r8\n"
+           "imulb %bl\n"
+           "imulw %cx\n"
+           "imull %edx\n"
+           "imulq %r9\n"
+           "mulb 8(%r12)\n"
+           "imulw 16(%r13)\n"
+           "divl (%r8)\n"
+           "idivq 127(%r9)\n"
+           "divb %cl\n"
+           "divw %si\n"
+           "divl %esi\n"
+           "divq %r10\n"
+           "idivb %cl\n"
+           "idivw %di\n"
+           "idivl %esi\n"
+           "idivq %r11\n");
+    AssemblyEncodeResult x86_att_unary_integer = assembly_encode(
+        arguments->arena, x86_att_unary_integer_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_unary_integer.diagnostic_count == 0 &&
+                               x86_att_unary_integer.bytes.length == sizeof(expected_x86_unary_integer) &&
+                               memcmp(x86_att_unary_integer.bytes.pointer, expected_x86_unary_integer,
+                                      sizeof(expected_x86_unary_integer)) == 0);
+
+    u8 expected_x86_imul_integer[] = {
+        0x66, 0x0f, 0xaf, 0xc1,
+        0x41, 0x0f, 0xaf, 0xc1,
+        0x4d, 0x0f, 0xaf, 0xd3,
+        0x66, 0x45, 0x0f, 0xaf, 0x65, 0x20,
+        0x66, 0x6b, 0xc0, 0x80,
+        0x6b, 0xc0, 0x7f,
+        0x4d, 0x69, 0xc0, 0x80, 0x00, 0x00, 0x00,
+        0x4d, 0x69, 0xc9, 0x7f, 0xff, 0xff, 0xff,
+        0x66, 0x6b, 0xc1, 0x80,
+        0x41, 0x6b, 0x44, 0x24, 0x08, 0x7f,
+        0x4d, 0x69, 0xc1, 0x80, 0x00, 0x00, 0x00,
+        0x4d, 0x69, 0x54, 0x24, 0x08, 0x7f, 0xff, 0xff, 0xff,
+    };
+    String8 x86_intel_imul_integer_source =
+        S8("imul ax, cx\n"
+           "imul eax, r9d\n"
+           "imul r10, r11\n"
+           "imul r12w, word ptr [r13 + 32]\n"
+           "imul ax, -128\n"
+           "imul eax, 127\n"
+           "imul r8, 128\n"
+           "imul r9, -129\n"
+           "imul ax, cx, -128\n"
+           "imul eax, dword ptr [r12 + 8], 127\n"
+           "imul r8, r9, 128\n"
+           "imul r10, qword ptr [r12 + 8], -129\n");
+    AssemblyEncodeResult x86_intel_imul_integer = assembly_encode(
+        arguments->arena, x86_intel_imul_integer_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_imul_integer.diagnostic_count == 0 &&
+                               x86_intel_imul_integer.bytes.length == sizeof(expected_x86_imul_integer) &&
+                               memcmp(x86_intel_imul_integer.bytes.pointer, expected_x86_imul_integer,
+                                      sizeof(expected_x86_imul_integer)) == 0);
+    String8 x86_att_imul_integer_source =
+        S8("imulw %cx, %ax\n"
+           "imull %r9d, %eax\n"
+           "imulq %r11, %r10\n"
+           "imulw 32(%r13), %r12w\n"
+           "imulw $-128, %ax\n"
+           "imull $127, %eax\n"
+           "imulq $128, %r8\n"
+           "imulq $-129, %r9\n"
+           "imulw $-128, %cx, %ax\n"
+           "imull $127, 8(%r12), %eax\n"
+           "imulq $128, %r9, %r8\n"
+           "imulq $-129, 8(%r12), %r10\n");
+    AssemblyEncodeResult x86_att_imul_integer = assembly_encode(
+        arguments->arena, x86_att_imul_integer_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_imul_integer.diagnostic_count == 0 &&
+                               x86_att_imul_integer.bytes.length == sizeof(expected_x86_imul_integer) &&
+                               memcmp(x86_att_imul_integer.bytes.pointer, expected_x86_imul_integer,
+                                      sizeof(expected_x86_imul_integer)) == 0);
+
+    u8 expected_x86_cwd_cdq_cqo[] = {0x66, 0x99, 0x99, 0x48, 0x99};
+    AssemblyEncodeResult x86_intel_cwd_cdq_cqo = assembly_encode(
+        arguments->arena, S8("cwd\ncdq\ncqo\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_cwd_cdq_cqo.diagnostic_count == 0 &&
+                               x86_intel_cwd_cdq_cqo.bytes.length == sizeof(expected_x86_cwd_cdq_cqo) &&
+                               memcmp(x86_intel_cwd_cdq_cqo.bytes.pointer, expected_x86_cwd_cdq_cqo,
+                                      sizeof(expected_x86_cwd_cdq_cqo)) == 0);
+    AssemblyEncodeResult x86_att_cwd_cdq_cqo = assembly_encode(
+        arguments->arena, S8("cwtd\ncltd\ncqto\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_cwd_cdq_cqo.diagnostic_count == 0 &&
+                               x86_att_cwd_cdq_cqo.bytes.length == sizeof(expected_x86_cwd_cdq_cqo) &&
+                               memcmp(x86_att_cwd_cdq_cqo.bytes.pointer, expected_x86_cwd_cdq_cqo,
+                                      sizeof(expected_x86_cwd_cdq_cqo)) == 0);
+
+    u8 expected_x86_imul_rip_relative[] = {0x4c, 0x0f, 0xaf, 0x15, 0x00, 0x00, 0x00, 0x00};
+    AssemblyEncodeResult x86_intel_imul_rip_relative = assembly_encode(
+        arguments->arena, S8("imul r10, qword ptr [rip + external]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_imul_rip_relative.diagnostic_count == 0 &&
+                               x86_intel_imul_rip_relative.bytes.length == sizeof(expected_x86_imul_rip_relative) &&
+                               memcmp(x86_intel_imul_rip_relative.bytes.pointer, expected_x86_imul_rip_relative,
+                                      sizeof(expected_x86_imul_rip_relative)) == 0);
+    BUSTER_TEST(arguments, x86_intel_imul_rip_relative.relocation_count == 1 &&
+                               x86_intel_imul_rip_relative.relocations[0].offset == 4 &&
+                               x86_intel_imul_rip_relative.relocations[0].addend == -4 &&
+                               x86_intel_imul_rip_relative.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                               string_equal(x86_intel_imul_rip_relative.symbols[x86_intel_imul_rip_relative.relocations[0].symbol].name,
+                                            S8("external")));
+    AssemblyEncodeResult x86_att_imul_rip_relative = assembly_encode(
+        arguments->arena, S8("imulq external(%rip), %r10\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_imul_rip_relative.diagnostic_count == 0 &&
+                               x86_att_imul_rip_relative.bytes.length == sizeof(expected_x86_imul_rip_relative) &&
+                               memcmp(x86_att_imul_rip_relative.bytes.pointer, expected_x86_imul_rip_relative,
+                                      sizeof(expected_x86_imul_rip_relative)) == 0 &&
+                               x86_att_imul_rip_relative.relocation_count == 1 &&
+                               x86_att_imul_rip_relative.relocations[0].offset == 4 &&
+                               x86_att_imul_rip_relative.relocations[0].addend == -4 &&
+                               x86_att_imul_rip_relative.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult invalid_x86_integer_increment = assembly_encode(
+        arguments->arena,
+        S8("adc eax, rbx\n"
+           "sbb rax, external\n"
+           "mul eax, ecx\n"
+           "imul al, bl\n"
+           "imul al, bl, 1\n"
+           "imul eax, ebx, external\n"
+           "imul eax, ebx, 0x80000000\n"
+           "cwd eax\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_x86_integer_increment.diagnostic_count == 8);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_integer_increment.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_x86_integer_increment.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+    AssemblyEncodeResult invalid_att_integer_increment = assembly_encode(
+        arguments->arena,
+        S8("adcq %rax, %eax\n"
+           "sbbq external, %rax\n"
+           "mulq $1, %rax\n"
+           "imulb %bl, %al\n"
+           "imulb $1, %bl, %al\n"
+           "imulq $external, %rax\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, invalid_att_integer_increment.diagnostic_count == 6);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_att_integer_increment.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_att_integer_increment.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
     u8 expected_x86_sse2[] = {
         0x0f, 0x28, 0xc1,
         0x47, 0x0f, 0x10, 0x44, 0x4c, 0x20,

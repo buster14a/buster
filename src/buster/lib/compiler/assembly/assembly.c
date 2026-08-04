@@ -11,13 +11,18 @@ typedef enum AssemblyOpcode
     ASSEMBLY_OPCODE_X86_JMP,
     ASSEMBLY_OPCODE_X86_MOV,
     ASSEMBLY_OPCODE_X86_ADD,
+    ASSEMBLY_OPCODE_X86_ADC,
     ASSEMBLY_OPCODE_X86_SUB,
+    ASSEMBLY_OPCODE_X86_SBB,
     ASSEMBLY_OPCODE_X86_AND,
     ASSEMBLY_OPCODE_X86_OR,
     ASSEMBLY_OPCODE_X86_XOR,
     ASSEMBLY_OPCODE_X86_CMP,
     ASSEMBLY_OPCODE_X86_TEST,
     ASSEMBLY_OPCODE_X86_IMUL,
+    ASSEMBLY_OPCODE_X86_MUL,
+    ASSEMBLY_OPCODE_X86_DIV,
+    ASSEMBLY_OPCODE_X86_IDIV,
     ASSEMBLY_OPCODE_X86_PUSH,
     ASSEMBLY_OPCODE_X86_POP,
     ASSEMBLY_OPCODE_X86_INC,
@@ -30,6 +35,9 @@ typedef enum AssemblyOpcode
     ASSEMBLY_OPCODE_X86_CBW,
     ASSEMBLY_OPCODE_X86_CWDE,
     ASSEMBLY_OPCODE_X86_CDQE,
+    ASSEMBLY_OPCODE_X86_CWD,
+    ASSEMBLY_OPCODE_X86_CDQ,
+    ASSEMBLY_OPCODE_X86_CQO,
     ASSEMBLY_OPCODE_X86_JCC,
     ASSEMBLY_OPCODE_X86_SETCC,
     ASSEMBLY_OPCODE_X86_CMOVCC,
@@ -917,10 +925,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic,
         {S8_INITIALIZER("nop"), ASSEMBLY_OPCODE_X86_NOP, 0},       {S8_INITIALIZER("ret"), ASSEMBLY_OPCODE_X86_RET, 0},
         {S8_INITIALIZER("int3"), ASSEMBLY_OPCODE_X86_INT3, 0},    {S8_INITIALIZER("call"), ASSEMBLY_OPCODE_X86_CALL, 1},
         {S8_INITIALIZER("jmp"), ASSEMBLY_OPCODE_X86_JMP, 1},      {S8_INITIALIZER("mov"), ASSEMBLY_OPCODE_X86_MOV, 2},
-        {S8_INITIALIZER("add"), ASSEMBLY_OPCODE_X86_ADD, 2},      {S8_INITIALIZER("sub"), ASSEMBLY_OPCODE_X86_SUB, 2},
+        {S8_INITIALIZER("add"), ASSEMBLY_OPCODE_X86_ADD, 2},      {S8_INITIALIZER("adc"), ASSEMBLY_OPCODE_X86_ADC, 2},
+        {S8_INITIALIZER("sub"), ASSEMBLY_OPCODE_X86_SUB, 2},      {S8_INITIALIZER("sbb"), ASSEMBLY_OPCODE_X86_SBB, 2},
         {S8_INITIALIZER("and"), ASSEMBLY_OPCODE_X86_AND, 2},      {S8_INITIALIZER("or"), ASSEMBLY_OPCODE_X86_OR, 2},
         {S8_INITIALIZER("xor"), ASSEMBLY_OPCODE_X86_XOR, 2},      {S8_INITIALIZER("cmp"), ASSEMBLY_OPCODE_X86_CMP, 2},
         {S8_INITIALIZER("test"), ASSEMBLY_OPCODE_X86_TEST, 2},    {S8_INITIALIZER("imul"), ASSEMBLY_OPCODE_X86_IMUL, 2},
+        {S8_INITIALIZER("mul"), ASSEMBLY_OPCODE_X86_MUL, 1},      {S8_INITIALIZER("div"), ASSEMBLY_OPCODE_X86_DIV, 1},
+        {S8_INITIALIZER("idiv"), ASSEMBLY_OPCODE_X86_IDIV, 1},
         {S8_INITIALIZER("push"), ASSEMBLY_OPCODE_X86_PUSH, 1},    {S8_INITIALIZER("pop"), ASSEMBLY_OPCODE_X86_POP, 1},
         {S8_INITIALIZER("inc"), ASSEMBLY_OPCODE_X86_INC, 1},      {S8_INITIALIZER("dec"), ASSEMBLY_OPCODE_X86_DEC, 1},
         {S8_INITIALIZER("neg"), ASSEMBLY_OPCODE_X86_NEG, 1},      {S8_INITIALIZER("not"), ASSEMBLY_OPCODE_X86_NOT, 1},
@@ -929,6 +940,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic,
         {S8_INITIALIZER("cbw"), ASSEMBLY_OPCODE_X86_CBW, 0},      {S8_INITIALIZER("cwde"), ASSEMBLY_OPCODE_X86_CWDE, 0},
         {S8_INITIALIZER("cdqe"), ASSEMBLY_OPCODE_X86_CDQE, 0},    {S8_INITIALIZER("cbtw"), ASSEMBLY_OPCODE_X86_CBW, 0},
         {S8_INITIALIZER("cwtl"), ASSEMBLY_OPCODE_X86_CWDE, 0},    {S8_INITIALIZER("cltq"), ASSEMBLY_OPCODE_X86_CDQE, 0},
+        {S8_INITIALIZER("cwd"), ASSEMBLY_OPCODE_X86_CWD, 0},      {S8_INITIALIZER("cdq"), ASSEMBLY_OPCODE_X86_CDQ, 0},
+        {S8_INITIALIZER("cqo"), ASSEMBLY_OPCODE_X86_CQO, 0},      {S8_INITIALIZER("cwtd"), ASSEMBLY_OPCODE_X86_CWD, 0},
+        {S8_INITIALIZER("cltd"), ASSEMBLY_OPCODE_X86_CDQ, 0},     {S8_INITIALIZER("cqto"), ASSEMBLY_OPCODE_X86_CQO, 0},
         {S8_INITIALIZER("movaps"), ASSEMBLY_OPCODE_X86_MOVAPS, 2}, {S8_INITIALIZER("movups"), ASSEMBLY_OPCODE_X86_MOVUPS, 2},
         {S8_INITIALIZER("movapd"), ASSEMBLY_OPCODE_X86_MOVAPD, 2}, {S8_INITIALIZER("movupd"), ASSEMBLY_OPCODE_X86_MOVUPD, 2},
         {S8_INITIALIZER("movdqa"), ASSEMBLY_OPCODE_X86_MOVDQA, 2}, {S8_INITIALIZER("movdqu"), ASSEMBLY_OPCODE_X86_MOVDQU, 2},
@@ -1250,8 +1264,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_zero_operand(AssemblyOpcode 
     return opcode >= ASSEMBLY_OPCODE_X86_F2XM1 && opcode <= ASSEMBLY_OPCODE_X86_FWAIT;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_x87_operand_count_valid(AssemblyOpcode opcode, u8 count, u8 canonical_count)
+BUSTER_GLOBAL_LOCAL bool assembly_x86_operand_count_valid(AssemblyOpcode opcode, u8 count, u8 canonical_count)
 {
+    if (opcode == ASSEMBLY_OPCODE_X86_IMUL)
+    {
+        return count >= 1 && count <= 3;
+    }
     if (assembly_x86_opcode_is_x87_arithmetic(opcode) || assembly_x86_opcode_is_x87_pop_arithmetic(opcode))
     {
         return count <= 2;
@@ -1425,12 +1443,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     AssemblyOperand* second = instruction->operands + 1;
     AssemblyOpcode opcode = instruction->opcode;
     if (opcode == ASSEMBLY_OPCODE_X86_NOP || opcode == ASSEMBLY_OPCODE_X86_RET || opcode == ASSEMBLY_OPCODE_X86_INT3 ||
-        opcode == ASSEMBLY_OPCODE_X86_CWDE)
+        opcode == ASSEMBLY_OPCODE_X86_CWDE || opcode == ASSEMBLY_OPCODE_X86_CDQ)
     {
         instruction->size = 1;
         return instruction->operand_count == 0;
     }
-    if (opcode == ASSEMBLY_OPCODE_X86_CBW || opcode == ASSEMBLY_OPCODE_X86_CDQE)
+    if (opcode == ASSEMBLY_OPCODE_X86_CBW || opcode == ASSEMBLY_OPCODE_X86_CDQE || opcode == ASSEMBLY_OPCODE_X86_CWD ||
+        opcode == ASSEMBLY_OPCODE_X86_CQO)
     {
         instruction->size = 2;
         return instruction->operand_count == 0;
@@ -1854,10 +1873,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
         return true;
     }
     if (opcode == ASSEMBLY_OPCODE_X86_INC || opcode == ASSEMBLY_OPCODE_X86_DEC || opcode == ASSEMBLY_OPCODE_X86_NEG ||
-        opcode == ASSEMBLY_OPCODE_X86_NOT)
+        opcode == ASSEMBLY_OPCODE_X86_NOT || opcode == ASSEMBLY_OPCODE_X86_MUL || opcode == ASSEMBLY_OPCODE_X86_DIV ||
+        opcode == ASSEMBLY_OPCODE_X86_IDIV || (opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction->operand_count == 1))
     {
         instruction->width = assembly_operand_width(*first);
-        if (!instruction->width || (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY))
+        if (!instruction->width || (instruction->width != 8 && instruction->width != 16 && instruction->width != 32 && instruction->width != 64) ||
+            instruction->operand_count != 1 ||
+            (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY))
         {
             return false;
         }
@@ -1870,6 +1892,44 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
             return false;
         }
         instruction->size = (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) + 1 + address_size;
+        return true;
+    }
+    if (opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction->operand_count == 3)
+    {
+        AssemblyOperand* third = instruction->operands + 2;
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.width == 8 ||
+            (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
+            (second->kind == ASSEMBLY_OPERAND_REGISTER &&
+             (second->reg.class != ASSEMBLY_REGISTER_GPR || second->reg.width != first->reg.width)) ||
+            third->kind != ASSEMBLY_OPERAND_EXPRESSION || third->expression.has_symbol)
+        {
+            return false;
+        }
+        instruction->width = first->reg.width;
+        if (second->kind == ASSEMBLY_OPERAND_MEMORY)
+        {
+            if (second->memory.width && second->memory.width != instruction->width)
+            {
+                return false;
+            }
+            second->memory.width = instruction->width;
+        }
+        u8 full_immediate_width = instruction->width == 64 ? 32 : instruction->width;
+        s64 immediate = third->expression.addend;
+        if (!assembly_x86_immediate_fits(immediate, full_immediate_width, true))
+        {
+            return false;
+        }
+        u32 address_size = 1;
+        bool rex = second->kind == ASSEMBLY_OPERAND_REGISTER
+                       ? assembly_x86_rex_needed(instruction->width, first->reg, second->reg)
+                       : assembly_x86_memory_rex_needed(instruction->width, first->reg, second->memory);
+        if (second->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(second->memory, &address_size))
+        {
+            return false;
+        }
+        u32 immediate_size = immediate >= INT8_MIN && immediate <= INT8_MAX ? 1 : full_immediate_width / 8;
+        instruction->size = (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) + 1 + address_size + immediate_size;
         return true;
     }
     if (opcode == ASSEMBLY_OPCODE_X86_SHL || opcode == ASSEMBLY_OPCODE_X86_SHR || opcode == ASSEMBLY_OPCODE_X86_SAR)
@@ -1902,7 +1962,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     {
         instruction->width = assembly_operand_width(*second);
     }
-    if (!instruction->width)
+    if (!instruction->width ||
+        (instruction->width != 8 && instruction->width != 16 && instruction->width != 32 && instruction->width != 64))
     {
         return false;
     }
@@ -1927,7 +1988,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
         if ((second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.width != instruction->width) ||
             (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY) ||
             (opcode == ASSEMBLY_OPCODE_X86_IMUL && first->kind != ASSEMBLY_OPERAND_REGISTER) ||
-            (opcode != ASSEMBLY_OPCODE_X86_MOV && opcode != ASSEMBLY_OPCODE_X86_ADD && opcode != ASSEMBLY_OPCODE_X86_SUB &&
+            (opcode != ASSEMBLY_OPCODE_X86_MOV && opcode != ASSEMBLY_OPCODE_X86_ADD && opcode != ASSEMBLY_OPCODE_X86_ADC &&
+             opcode != ASSEMBLY_OPCODE_X86_SUB && opcode != ASSEMBLY_OPCODE_X86_SBB &&
              opcode != ASSEMBLY_OPCODE_X86_AND && opcode != ASSEMBLY_OPCODE_X86_OR && opcode != ASSEMBLY_OPCODE_X86_XOR &&
              opcode != ASSEMBLY_OPCODE_X86_CMP && opcode != ASSEMBLY_OPCODE_X86_TEST && opcode != ASSEMBLY_OPCODE_X86_IMUL))
         {
@@ -1975,8 +2037,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
                             (first->kind == ASSEMBLY_OPERAND_MEMORY ? address_size : 0) + immediate_width / 8;
         return true;
     }
-    if (opcode != ASSEMBLY_OPCODE_X86_ADD && opcode != ASSEMBLY_OPCODE_X86_SUB && opcode != ASSEMBLY_OPCODE_X86_AND &&
-        opcode != ASSEMBLY_OPCODE_X86_OR && opcode != ASSEMBLY_OPCODE_X86_XOR && opcode != ASSEMBLY_OPCODE_X86_CMP &&
+    if (opcode != ASSEMBLY_OPCODE_X86_ADD && opcode != ASSEMBLY_OPCODE_X86_ADC && opcode != ASSEMBLY_OPCODE_X86_SUB &&
+        opcode != ASSEMBLY_OPCODE_X86_SBB && opcode != ASSEMBLY_OPCODE_X86_AND && opcode != ASSEMBLY_OPCODE_X86_OR &&
+        opcode != ASSEMBLY_OPCODE_X86_XOR && opcode != ASSEMBLY_OPCODE_X86_CMP &&
         opcode != ASSEMBLY_OPCODE_X86_TEST)
     {
         return false;
@@ -2139,7 +2202,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         }
     }
     bool valid_operand_count = target.cpu_arch == CPU_ARCH_X86_64
-                                   ? assembly_x86_x87_operand_count_valid(info.opcode, parsed_operand_count, info.operand_count)
+                                   ? assembly_x86_operand_count_valid(info.opcode, parsed_operand_count, info.operand_count)
                                    : parsed_operand_count == info.operand_count;
     if (!valid_operand_count || operand_start < operands.length)
     {
@@ -2159,6 +2222,12 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         AssemblyOperand destination = instruction.operands[2];
         instruction.operands[2] = instruction.operands[0];
         instruction.operands[0] = destination;
+        if (instruction.opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction.operands[1].kind == ASSEMBLY_OPERAND_EXPRESSION)
+        {
+            AssemblyOperand immediate = instruction.operands[1];
+            instruction.operands[1] = instruction.operands[2];
+            instruction.operands[2] = immediate;
+        }
     }
     if (target.cpu_arch == CPU_ARCH_X86_64 && syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 2 &&
         instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER && instruction.operands[0].reg.class == ASSEMBLY_REGISTER_X87 &&
@@ -2179,6 +2248,13 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
         assembly_x86_x87_normalize_omitted_operands(&instruction, syntax);
+        if (instruction.opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction.operand_count == 2 &&
+            instruction.operands[1].kind == ASSEMBLY_OPERAND_EXPRESSION)
+        {
+            instruction.operands[2] = instruction.operands[1];
+            instruction.operands[1] = instruction.operands[0];
+            instruction.operand_count = 3;
+        }
     }
     if (target.cpu_arch == CPU_ARCH_X86_64 && instruction.opcode == ASSEMBLY_OPCODE_X86_MOV &&
         ((instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER &&
@@ -2662,17 +2738,22 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             continue;
         }
         if (instruction->opcode == ASSEMBLY_OPCODE_X86_CBW || instruction->opcode == ASSEMBLY_OPCODE_X86_CWDE ||
-            instruction->opcode == ASSEMBLY_OPCODE_X86_CDQE)
+            instruction->opcode == ASSEMBLY_OPCODE_X86_CDQE || instruction->opcode == ASSEMBLY_OPCODE_X86_CWD ||
+            instruction->opcode == ASSEMBLY_OPCODE_X86_CDQ || instruction->opcode == ASSEMBLY_OPCODE_X86_CQO)
         {
-            if (instruction->opcode == ASSEMBLY_OPCODE_X86_CBW)
+            if (instruction->opcode == ASSEMBLY_OPCODE_X86_CBW || instruction->opcode == ASSEMBLY_OPCODE_X86_CWD)
             {
                 assembly_emit_byte(builder, 0x66);
             }
-            else if (instruction->opcode == ASSEMBLY_OPCODE_X86_CDQE)
+            else if (instruction->opcode == ASSEMBLY_OPCODE_X86_CDQE || instruction->opcode == ASSEMBLY_OPCODE_X86_CQO)
             {
                 assembly_emit_byte(builder, 0x48);
             }
-            assembly_emit_byte(builder, 0x98);
+            assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_CWD ||
+                                           instruction->opcode == ASSEMBLY_OPCODE_X86_CDQ ||
+                                           instruction->opcode == ASSEMBLY_OPCODE_X86_CQO
+                                       ? 0x99
+                                       : 0x98);
             continue;
         }
         if (instruction->opcode == ASSEMBLY_OPCODE_X86_EMMS)
@@ -3198,7 +3279,10 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 continue;
             }
             if (instruction->opcode == ASSEMBLY_OPCODE_X86_INC || instruction->opcode == ASSEMBLY_OPCODE_X86_DEC ||
-                instruction->opcode == ASSEMBLY_OPCODE_X86_NEG || instruction->opcode == ASSEMBLY_OPCODE_X86_NOT)
+                instruction->opcode == ASSEMBLY_OPCODE_X86_NEG || instruction->opcode == ASSEMBLY_OPCODE_X86_NOT ||
+                instruction->opcode == ASSEMBLY_OPCODE_X86_MUL ||
+                (instruction->opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction->operand_count == 1) ||
+                instruction->opcode == ASSEMBLY_OPCODE_X86_DIV || instruction->opcode == ASSEMBLY_OPCODE_X86_IDIV)
             {
                 if (first.kind == ASSEMBLY_OPERAND_MEMORY)
                 {
@@ -3214,13 +3298,44 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 u8 extension = instruction->opcode == ASSEMBLY_OPCODE_X86_INC   ? 0
                                : instruction->opcode == ASSEMBLY_OPCODE_X86_DEC ? 1
                                : instruction->opcode == ASSEMBLY_OPCODE_X86_NOT ? 2
-                                                                                : 3;
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_NEG ? 3
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_MUL ? 4
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_IMUL ? 5
+                               : instruction->opcode == ASSEMBLY_OPCODE_X86_DIV ? 6
+                                                                                : 7;
                 if (!assembly_x86_emit_rm(builder, instruction, extension, first))
                 {
                     assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
                                         S8("x86 memory displacement is out of range"));
                     return;
                 }
+                continue;
+            }
+            if (instruction->opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction->operand_count == 3)
+            {
+                AssemblyOperand source = instruction->operands[1];
+                AssemblyOperand immediate = instruction->operands[2];
+                AssemblyRegister destination = first.reg;
+                u8 full_immediate_width = instruction->width == 64 ? 32 : instruction->width;
+                u8 immediate_size = immediate.expression.addend >= INT8_MIN && immediate.expression.addend <= INT8_MAX
+                                        ? 1
+                                        : (u8)(full_immediate_width / 8);
+                if (source.kind == ASSEMBLY_OPERAND_MEMORY)
+                {
+                    assembly_x86_emit_memory_prefix(builder, instruction->width, destination, source.memory);
+                }
+                else
+                {
+                    assembly_x86_emit_prefix(builder, instruction->width, destination, source.reg);
+                }
+                assembly_emit_byte(builder, immediate_size == 1 ? 0x6b : 0x69);
+                if (!assembly_x86_emit_rm(builder, instruction, destination.index, source))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                        S8("x86 memory displacement is out of range"));
+                    return;
+                }
+                assembly_emit_immediate(builder, (u64)immediate.expression.addend, immediate_size);
                 continue;
             }
             if (instruction->opcode == ASSEMBLY_OPCODE_X86_SHL || instruction->opcode == ASSEMBLY_OPCODE_X86_SHR ||
@@ -3270,14 +3385,16 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 }
                 else
                 {
-                    u8 opcode = instruction->opcode == ASSEMBLY_OPCODE_X86_MOV    ? 0x89
-                                : instruction->opcode == ASSEMBLY_OPCODE_X86_ADD  ? 0x01
-                                : instruction->opcode == ASSEMBLY_OPCODE_X86_OR   ? 0x09
-                                : instruction->opcode == ASSEMBLY_OPCODE_X86_AND  ? 0x21
-                                : instruction->opcode == ASSEMBLY_OPCODE_X86_SUB  ? 0x29
-                                : instruction->opcode == ASSEMBLY_OPCODE_X86_XOR  ? 0x31
-                                : instruction->opcode == ASSEMBLY_OPCODE_X86_CMP  ? 0x39
-                                                                                  : 0x85;
+                    u8 opcode = instruction->opcode == ASSEMBLY_OPCODE_X86_MOV ? 0x89
+                                : instruction->opcode == ASSEMBLY_OPCODE_X86_ADD ? 0x01
+                                : instruction->opcode == ASSEMBLY_OPCODE_X86_ADC ? 0x11
+                                : instruction->opcode == ASSEMBLY_OPCODE_X86_OR ? 0x09
+                                : instruction->opcode == ASSEMBLY_OPCODE_X86_SBB ? 0x19
+                                : instruction->opcode == ASSEMBLY_OPCODE_X86_AND ? 0x21
+                                : instruction->opcode == ASSEMBLY_OPCODE_X86_SUB ? 0x29
+                                : instruction->opcode == ASSEMBLY_OPCODE_X86_XOR ? 0x31
+                                : instruction->opcode == ASSEMBLY_OPCODE_X86_CMP ? 0x39
+                                                                                   : 0x85;
                     if (instruction->width == 8)
                     {
                         opcode -= 1;
@@ -3333,8 +3450,10 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             assembly_emit_byte(builder, test ? (instruction->width == 8 ? 0xf6 : 0xf7)
                                              : immediate_size == 1 ? (instruction->width == 8 ? 0x80 : 0x83)
                                                                    : (instruction->width == 8 ? 0x80 : 0x81));
-            u8 extension = instruction->opcode == ASSEMBLY_OPCODE_X86_ADD   ? 0
-                           : instruction->opcode == ASSEMBLY_OPCODE_X86_OR  ? 1
+            u8 extension = instruction->opcode == ASSEMBLY_OPCODE_X86_ADD ? 0
+                           : instruction->opcode == ASSEMBLY_OPCODE_X86_OR ? 1
+                           : instruction->opcode == ASSEMBLY_OPCODE_X86_ADC ? 2
+                           : instruction->opcode == ASSEMBLY_OPCODE_X86_SBB ? 3
                            : instruction->opcode == ASSEMBLY_OPCODE_X86_AND ? 4
                            : instruction->opcode == ASSEMBLY_OPCODE_X86_SUB ? 5
                            : instruction->opcode == ASSEMBLY_OPCODE_X86_XOR ? 6
