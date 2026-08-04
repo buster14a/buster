@@ -41,6 +41,184 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL SliceWmWindowHandle get_windows(WmHandle*
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool wm_utf8_code_unit_is_continuation(u8 code_unit)
+{
+    return (code_unit & 0xc0u) == 0x80u;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_utf8_string_is_valid(String8 string)
+{
+    bool result = true;
+    for (u64 index = 0; result && index < string.length;)
+    {
+        u8 first = (u8)string.pointer[index];
+        if (first <= 0x7fu)
+        {
+            index += 1;
+        }
+        else if (first >= 0xc2u && first <= 0xdfu)
+        {
+            result = index + 1 < string.length && wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 1]);
+            index += result ? 2 : 1;
+        }
+        else if (first == 0xe0u)
+        {
+            result = index + 2 < string.length && (u8)string.pointer[index + 1] >= 0xa0u && (u8)string.pointer[index + 1] <= 0xbfu &&
+                     wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 2]);
+            index += result ? 3 : 1;
+        }
+        else if (first >= 0xe1u && first <= 0xecu)
+        {
+            result = index + 2 < string.length && wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 1]) &&
+                     wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 2]);
+            index += result ? 3 : 1;
+        }
+        else if (first == 0xedu)
+        {
+            result = index + 2 < string.length && (u8)string.pointer[index + 1] >= 0x80u && (u8)string.pointer[index + 1] <= 0x9fu &&
+                     wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 2]);
+            index += result ? 3 : 1;
+        }
+        else if (first >= 0xeeu && first <= 0xefu)
+        {
+            result = index + 2 < string.length && wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 1]) &&
+                     wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 2]);
+            index += result ? 3 : 1;
+        }
+        else if (first == 0xf0u)
+        {
+            result = index + 3 < string.length && (u8)string.pointer[index + 1] >= 0x90u && (u8)string.pointer[index + 1] <= 0xbfu &&
+                     wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 2]) && wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 3]);
+            index += result ? 4 : 1;
+        }
+        else if (first >= 0xf1u && first <= 0xf3u)
+        {
+            result = index + 3 < string.length && wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 1]) &&
+                     wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 2]) && wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 3]);
+            index += result ? 4 : 1;
+        }
+        else if (first == 0xf4u)
+        {
+            result = index + 3 < string.length && (u8)string.pointer[index + 1] >= 0x80u && (u8)string.pointer[index + 1] <= 0x8fu &&
+                     wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 2]) && wm_utf8_code_unit_is_continuation((u8)string.pointer[index + 3]);
+            index += result ? 4 : 1;
+        }
+        else
+        {
+            result = false;
+            index += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_file_path_is_valid(String8 path)
+{
+    bool result = path.pointer != 0 && path.length != 0 && wm_utf8_string_is_valid(path);
+    for (u64 index = 0; result && index < path.length; index += 1)
+    {
+        result = path.pointer[index] != 0;
+    }
+    return result;
+}
+
+BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL u64 wm_native_file_drop_max_path_count(void)
+{
+    return BUSTER_NATIVE_FILE_DROP_MAX_PATH_COUNT;
+}
+
+BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL u64 wm_native_file_drop_max_path_bytes(void)
+{
+    return BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES;
+}
+
+BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL bool wm_native_file_drop_budget_allows(u64 path_count, u64 output_bytes)
+{
+    return path_count <= BUSTER_NATIVE_FILE_DROP_MAX_PATH_COUNT && output_bytes <= BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES;
+}
+
+BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL bool wm_native_file_drop_array_size_allowed(u64 count, u64 element_size)
+{
+    return element_size != 0 && count <= UINT64_MAX / element_size;
+}
+
+#if BUSTER_MACOS || BUSTER_INCLUDE_TESTS
+BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL SliceString8 wm_apple_file_paths_from_values(Arena* arena, SliceWmAppleFileUrlPath values)
+{
+    u64 valid_count = 0;
+    u64 output_bytes = 0;
+    if (!wm_native_file_drop_budget_allows(values.length, 0))
+    {
+        return (SliceString8){0};
+    }
+    for (u64 index = 0; index < values.length; index += 1)
+    {
+        WmAppleFileUrlPath value = values.pointer[index];
+        if (value.is_file_url && wm_file_path_is_valid(value.path))
+        {
+            if (value.path.length > BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES - output_bytes)
+            {
+                return (SliceString8){0};
+            }
+            output_bytes += value.path.length;
+            valid_count += 1;
+        }
+    }
+
+    if (!wm_native_file_drop_budget_allows(valid_count, output_bytes) || !wm_native_file_drop_array_size_allowed(valid_count, sizeof(String8)))
+    {
+        return (SliceString8){0};
+    }
+
+    SliceString8 result = {0};
+    if (valid_count != 0)
+    {
+        result.pointer = arena_allocate(arena, String8, valid_count);
+        result.length = valid_count;
+        u64 output_index = 0;
+        for (u64 index = 0; index < values.length; index += 1)
+        {
+            WmAppleFileUrlPath value = values.pointer[index];
+            if (value.is_file_url && wm_file_path_is_valid(value.path))
+            {
+                result.pointer[output_index] = string_duplicate_arena(arena, value.path, false);
+                output_index += 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL s16 wm_s16_from_f64(f64 value)
+{
+    s16 result = 0;
+    if (value == value)
+    {
+        if (value <= -32768.0)
+        {
+            result = -32768;
+        }
+        else if (value >= 32767.0)
+        {
+            result = 32767;
+        }
+        else
+        {
+            result = (s16)value;
+        }
+    }
+    return result;
+}
+
+BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL WmOffset wm_apple_drop_position_from_content_point(f64 x, f64 y, f64 height)
+{
+    return (WmOffset){
+        .x = wm_s16_from_f64(x),
+        .y = wm_s16_from_f64(height - y),
+    };
+}
+#endif
+
 #if BUSTER_LINUX
 #include <buster/lib/window/xcb.c>
 #elif defined(_WIN32)

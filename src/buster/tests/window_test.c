@@ -13,6 +13,14 @@
 BUSTER_TEST_F_DECL UnitTestResult window_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    u64 max_drop_paths = wm_native_file_drop_max_path_count();
+    u64 max_drop_bytes = wm_native_file_drop_max_path_bytes();
+    BUSTER_TEST(arguments, max_drop_paths != 0 && max_drop_bytes != 0);
+    BUSTER_TEST(arguments, wm_native_file_drop_budget_allows(max_drop_paths, max_drop_bytes));
+    BUSTER_TEST(arguments, !wm_native_file_drop_budget_allows(max_drop_paths + 1, 0));
+    BUSTER_TEST(arguments, !wm_native_file_drop_budget_allows(0, max_drop_bytes + 1));
+    BUSTER_TEST(arguments, wm_native_file_drop_array_size_allowed(max_drop_paths, sizeof(String8)));
+    BUSTER_TEST(arguments, !wm_native_file_drop_array_size_allowed(UINT64_MAX, sizeof(String8)));
 #if BUSTER_LINUX
     BUSTER_TEST(arguments, wm_x11_utf8_result_length(-1, 64) == 0);
     BUSTER_TEST(arguments, wm_x11_utf8_result_length(0, 64) == 0);
@@ -25,7 +33,153 @@ BUSTER_TEST_F_DECL UnitTestResult window_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, xim_attempt == 9);
     BUSTER_TEST(arguments, wm_xim_next_input_style_attempt(xim_attempt) == xim_attempt);
+
+    bool valid_uri = false;
+    String8 decoded_uri = wm_x11_decode_file_uri(arguments->arena, S8("file:///tmp/%E2%82%AC"), &valid_uri);
+    BUSTER_TEST(arguments, valid_uri);
+    BUSTER_STRING_TEST(arguments, decoded_uri, S8("/tmp/\xe2\x82\xac"));
+    valid_uri = false;
+    decoded_uri = wm_x11_decode_file_uri(arguments->arena, S8("FiLe:///tmp/mixed"), &valid_uri);
+    BUSTER_TEST(arguments, valid_uri);
+    BUSTER_STRING_TEST(arguments, decoded_uri, S8("/tmp/mixed"));
+
+    String8 uri_list = S8("# comment\r\nfile:///tmp/first%20file\r\nfile://localhost/tmp/\xc3\xa9\nfile://remote/tmp/rejected\nfile:///tmp/first%20file\r\nhttp://localhost/tmp/rejected\r\nfile:///tmp/bad%ZZ\r\n");
+    SliceString8 parsed_paths = wm_x11_parse_uri_list(arguments->arena, uri_list);
+    BUSTER_TEST(arguments, parsed_paths.length == 3);
+    if (parsed_paths.length == 3)
+    {
+        BUSTER_STRING_TEST(arguments, parsed_paths.pointer[0], S8("/tmp/first file"));
+        BUSTER_STRING_TEST(arguments, parsed_paths.pointer[1], S8("/tmp/\xc3\xa9"));
+        BUSTER_STRING_TEST(arguments, parsed_paths.pointer[2], S8("/tmp/first file"));
+    }
+
+    bool malformed_uri = true;
+    String8 malformed_path = wm_x11_decode_file_uri(arguments->arena, S8("file://remote/tmp/file"), &malformed_uri);
+    BUSTER_TEST(arguments, !malformed_uri && malformed_path.length == 0);
+    malformed_uri = true;
+    malformed_path = wm_x11_decode_file_uri(arguments->arena, S8("filex/tmp/file"), &malformed_uri);
+    BUSTER_TEST(arguments, !malformed_uri && malformed_path.length == 0);
+    malformed_uri = true;
+    malformed_path = wm_x11_decode_file_uri(arguments->arena, S8("file///tmp/file"), &malformed_uri);
+    BUSTER_TEST(arguments, !malformed_uri && malformed_path.length == 0);
+    malformed_uri = true;
+    malformed_path = wm_x11_decode_file_uri(arguments->arena, S8("file/tmp/file"), &malformed_uri);
+    BUSTER_TEST(arguments, !malformed_uri && malformed_path.length == 0);
+    malformed_uri = true;
+    malformed_path = wm_x11_decode_file_uri(arguments->arena, S8("file:///tmp/%00"), &malformed_uri);
+    BUSTER_TEST(arguments, !malformed_uri && malformed_path.length == 0);
+    BUSTER_TEST(arguments, wm_x11_parse_uri_list(arguments->arena, S8("")).length == 0);
+
+    BUSTER_TEST(arguments, wm_x11_xdnd_version_supported(3));
+    BUSTER_TEST(arguments, wm_x11_xdnd_version_supported(5));
+    BUSTER_TEST(arguments, !wm_x11_xdnd_version_supported(2));
+    BUSTER_TEST(arguments, !wm_x11_xdnd_version_supported(6));
+    BUSTER_TEST(arguments, wm_x11_xdnd_transaction_matches(17, 29, 17, 29));
+    BUSTER_TEST(arguments, !wm_x11_xdnd_transaction_matches(17, 29, 18, 29));
+    BUSTER_TEST(arguments, !wm_x11_xdnd_transaction_matches(17, 29, 17, 30));
+
+    u32 source_watch_bit = wm_x11_xdnd_source_watch_event_mask(0);
+    u32 source_mask = wm_x11_xdnd_source_watch_event_mask(0x24);
+    BUSTER_TEST(arguments, source_watch_bit != 0);
+    BUSTER_TEST(arguments, source_mask == (source_watch_bit | 0x24));
+    BUSTER_TEST(arguments, wm_x11_xdnd_source_restore_event_mask(source_mask) == source_mask);
+    BUSTER_TEST(arguments, wm_x11_xdnd_source_destroyed(true, 17, 17));
+    BUSTER_TEST(arguments, !wm_x11_xdnd_source_destroyed(false, 17, 17));
+    BUSTER_TEST(arguments, !wm_x11_xdnd_source_destroyed(true, 17, 18));
+
+    u64 max_transfer_bytes = wm_x11_xdnd_max_transfer_bytes();
+    BUSTER_TEST(arguments, max_transfer_bytes != 0);
+    BUSTER_TEST(arguments, wm_x11_xdnd_transfer_length_allowed(0, max_transfer_bytes));
+    BUSTER_TEST(arguments, wm_x11_xdnd_transfer_length_allowed(max_transfer_bytes - 1, 1));
+    BUSTER_TEST(arguments, !wm_x11_xdnd_transfer_length_allowed(max_transfer_bytes, 1));
+    BUSTER_TEST(arguments, !wm_x11_xdnd_transfer_length_allowed(max_transfer_bytes - 1, 2));
+    BUSTER_TEST(arguments, !wm_x11_xdnd_transfer_length_allowed(max_transfer_bytes + 1, 0));
+
+    Arena* hostile_lines_arena = arena_create((ArenaCreation){0});
+    if (hostile_lines_arena)
+    {
+        u64 hostile_length = max_transfer_bytes;
+        char8* hostile_lines = arena_allocate(hostile_lines_arena, char8, hostile_length);
+        for (u64 index = 0; index < hostile_length; index += 2)
+        {
+            hostile_lines[index] = 'x';
+            hostile_lines[index + 1] = '\n';
+        }
+        u64 position_before_parse = hostile_lines_arena->position;
+        SliceString8 hostile_paths = wm_x11_parse_uri_list(hostile_lines_arena, (String8){.pointer = hostile_lines, .length = hostile_length});
+        BUSTER_TEST(arguments, hostile_paths.length == 0);
+        BUSTER_TEST(arguments, hostile_lines_arena->position == position_before_parse);
+        arena_destroy(hostile_lines_arena, 1);
+    }
+    else
+    {
+        BUSTER_TEST(arguments, false);
+    }
+
+    String8 exact_uri_line = S8("file:///x\n");
+    if (max_drop_paths <= UINT64_MAX / exact_uri_line.length)
+    {
+        u64 exact_input_length = max_drop_paths * exact_uri_line.length;
+        Arena* exact_boundary_arena = arena_create((ArenaCreation){0});
+        if (exact_boundary_arena)
+        {
+            char8* exact_input = arena_allocate(exact_boundary_arena, char8, exact_input_length);
+            for (u64 line_index = 0; line_index < max_drop_paths; line_index += 1)
+            {
+                u64 line_start = line_index * exact_uri_line.length;
+                for (u64 character_index = 0; character_index < exact_uri_line.length; character_index += 1)
+                {
+                    exact_input[line_start + character_index] = exact_uri_line.pointer[character_index];
+                }
+            }
+            SliceString8 exact_paths = wm_x11_parse_uri_list(exact_boundary_arena, (String8){.pointer = exact_input, .length = exact_input_length});
+            BUSTER_TEST(arguments, exact_paths.length == max_drop_paths);
+            if (exact_paths.length == max_drop_paths)
+            {
+                BUSTER_STRING_TEST(arguments, exact_paths.pointer[0], S8("/x"));
+                BUSTER_STRING_TEST(arguments, exact_paths.pointer[exact_paths.length - 1], S8("/x"));
+            }
+            arena_destroy(exact_boundary_arena, 1);
+        }
+        else
+        {
+            BUSTER_TEST(arguments, false);
+        }
+    }
+    else
+    {
+        BUSTER_TEST(arguments, false);
+    }
+
+    WmOffset x11_position = wm_x11_drop_position_from_root(-10, -20, 5, 30);
+    BUSTER_TEST(arguments, x11_position.x == -15 && x11_position.y == -50);
 #endif
+
+    WmAppleFileUrlPath apple_values[] = {
+        {.path = S8("/tmp/first"), .is_file_url = true},
+        {.path = S8("https://example.test/not-a-file"), .is_file_url = false},
+        {.path = S8("/tmp/\xc3\xa9"), .is_file_url = true},
+        {.path = S8("/tmp/first"), .is_file_url = true},
+        {.path = S8("\xff"), .is_file_url = true},
+        {.path = S8(""), .is_file_url = true},
+    };
+    SliceString8 apple_paths = wm_apple_file_paths_from_values(arguments->arena,
+                                                               (SliceWmAppleFileUrlPath){.pointer = apple_values, .length = BUSTER_ARRAY_LENGTH(apple_values)});
+    BUSTER_TEST(arguments, apple_paths.length == 3);
+    if (apple_paths.length == 3)
+    {
+        BUSTER_STRING_TEST(arguments, apple_paths.pointer[0], S8("/tmp/first"));
+        BUSTER_STRING_TEST(arguments, apple_paths.pointer[1], S8("/tmp/\xc3\xa9"));
+        BUSTER_STRING_TEST(arguments, apple_paths.pointer[2], S8("/tmp/first"));
+    }
+    SliceString8 too_many_apple_paths = wm_apple_file_paths_from_values(arguments->arena,
+                                                                         (SliceWmAppleFileUrlPath){.pointer = 0, .length = max_drop_paths + 1});
+    BUSTER_TEST(arguments, too_many_apple_paths.length == 0);
+    WmOffset apple_position = wm_apple_drop_position_from_content_point(17.75, 25.0, 100.0);
+    BUSTER_TEST(arguments, apple_position.x == 17 && apple_position.y == 75);
+    apple_position = wm_apple_drop_position_from_content_point(-4.0, 120.0, 100.0);
+    BUSTER_TEST(arguments, apple_position.x == -4 && apple_position.y == -20);
+
 #if defined(_WIN32)
     struct WmWin32KeyTestCase
     {

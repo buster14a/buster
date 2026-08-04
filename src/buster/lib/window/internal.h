@@ -43,6 +43,12 @@
 #include <buster/lib/ui_core.h>
 #include <buster/lib/entry_point.h>
 
+// Native file drops reject the whole transfer when either bound is exceeded.
+// The path-count limit keeps metadata allocations bounded; the byte limit is
+// shared by XDND decoded paths and AppKit UTF-8 paths.
+#define BUSTER_NATIVE_FILE_DROP_MAX_PATH_COUNT ((u64)65536)
+#define BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES ((u64)16 * 1024 * 1024)
+
 #if defined(_WIN32)
 #include <buster/lib/system_headers.h>
 #include <dwmapi.h>
@@ -70,6 +76,25 @@ struct WmHandle
     u32 xim_synchronous_event_mask;
     u32 xim_supported_input_style_count;
     u32 xim_supported_input_styles[32];
+    Arena* xdnd_transfer_arena;
+    xcb_window_t xdnd_source;
+    u32 xdnd_source_event_mask;
+    bool xdnd_source_event_mask_saved;
+    bool xdnd_source_destroy_observed;
+    WmWindowHandle* xdnd_window;
+    xcb_atom_t xdnd_property;
+    xcb_timestamp_t xdnd_position_time;
+    WmOffset xdnd_position;
+    u32 xdnd_version;
+    bool xdnd_active;
+    bool xdnd_uri_list_supported;
+    bool xdnd_position_seen;
+    bool xdnd_accept;
+    bool xdnd_drop_pending;
+    bool xdnd_incremental;
+    u64 xdnd_transfer_expected;
+    u64 xdnd_transfer_capacity;
+    String8 xdnd_transfer_data;
     Arena* poll_arena;
     WmEventList* poll_event_list;
     WmWindowHandle* focused_window;
@@ -132,3 +157,6 @@ BUSTER_WINDOW_INTERNAL_LINKAGE WmEvent* wm_event_push(WmHandle* windowing, WmEve
 BUSTER_WINDOW_INTERNAL_LINKAGE SliceWmWindowHandle get_windows(WmHandle* handle);
 
 #undef BUSTER_WINDOW_INTERNAL_LINKAGE
+
+BUSTER_TEST_F_DECL SliceString8 wm_apple_file_paths_from_values(Arena* arena, SliceWmAppleFileUrlPath values);
+BUSTER_TEST_F_DECL WmOffset wm_apple_drop_position_from_content_point(f64 x, f64 y, f64 height);

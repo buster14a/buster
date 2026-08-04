@@ -29,6 +29,21 @@ BUSTER_GLOBAL_LOCAL void buster_msg_void_id(id receiver, const char* selector, i
 }
 
 #if BUSTER_MACOS
+BUSTER_GLOBAL_LOCAL BusterNSUInteger buster_msg_ulong(id receiver, const char* selector)
+{
+    return ((BusterNSUInteger (*)(id, SEL))objc_msgSend)(receiver, buster_sel(selector));
+}
+
+BUSTER_GLOBAL_LOCAL id buster_msg_id_ulong(id receiver, const char* selector, BusterNSUInteger argument)
+{
+    return ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(receiver, buster_sel(selector), argument);
+}
+
+BUSTER_GLOBAL_LOCAL void buster_msg_void_ulong(id receiver, const char* selector, BusterNSUInteger argument)
+{
+    ((void (*)(id, SEL, BusterNSUInteger))objc_msgSend)(receiver, buster_sel(selector), argument);
+}
+
 BUSTER_GLOBAL_LOCAL void buster_msg_void_bool(id receiver, const char* selector, bool argument)
 {
     ((void (*)(id, SEL, bool))objc_msgSend)(receiver, buster_sel(selector), argument);

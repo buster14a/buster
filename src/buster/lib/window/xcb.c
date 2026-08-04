@@ -1,9 +1,74 @@
 #include <buster/lib/window/internal.h>
 
+#define BUSTER_X11_XDND_MAX_TRANSFER_BYTES BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES
+
 BUSTER_TEST_F_DECL u64 wm_x11_utf8_result_length(int result, u64 capacity)
 {
     return result > 0 && (u64)result < capacity ? (u64)result : 0;
 }
+
+BUSTER_TEST_F_DECL bool wm_x11_xdnd_version_supported(u8 version)
+{
+    return version >= 3 && version <= 5;
+}
+
+BUSTER_TEST_F_DECL bool wm_x11_xdnd_transaction_matches(u32 active_source, u32 active_target, u32 source, u32 target)
+{
+    return active_source != 0 && active_target != 0 && active_source == source && active_target == target;
+}
+
+BUSTER_TEST_F_DECL u32 wm_x11_xdnd_source_watch_event_mask(u32 previous_mask)
+{
+    return previous_mask | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+}
+
+BUSTER_TEST_F_DECL u32 wm_x11_xdnd_source_restore_event_mask(u32 saved_mask)
+{
+    return saved_mask;
+}
+
+BUSTER_TEST_F_DECL bool wm_x11_xdnd_source_destroyed(bool source_destroy_observed, u32 source, u32 destroyed_window)
+{
+    return source_destroy_observed && source != XCB_WINDOW_NONE && source == destroyed_window;
+}
+
+BUSTER_TEST_F_DECL u64 wm_x11_xdnd_max_transfer_bytes(void)
+{
+    return BUSTER_X11_XDND_MAX_TRANSFER_BYTES;
+}
+
+BUSTER_TEST_F_DECL bool wm_x11_xdnd_transfer_length_allowed(u64 current_length, u64 incoming_length)
+{
+    return current_length <= BUSTER_X11_XDND_MAX_TRANSFER_BYTES && incoming_length <= BUSTER_X11_XDND_MAX_TRANSFER_BYTES - current_length;
+}
+
+BUSTER_GLOBAL_LOCAL s16 wm_x11_s16_from_s32(s32 value)
+{
+    s16 result = 0;
+    if (value <= -32768)
+    {
+        result = -32768;
+    }
+    else if (value >= 32767)
+    {
+        result = 32767;
+    }
+    else
+    {
+        result = (s16)value;
+    }
+    return result;
+}
+
+BUSTER_TEST_F_DECL WmOffset wm_x11_drop_position_from_root(s32 root_x, s32 root_y, s32 window_root_x, s32 window_root_y)
+{
+    return (WmOffset){
+        .x = wm_x11_s16_from_s32(root_x - window_root_x),
+        .y = wm_x11_s16_from_s32(root_y - window_root_y),
+    };
+}
+
+BUSTER_GLOBAL_LOCAL xcb_screen_t* wm_x11_screen_from_handle(WmHandle* windowing);
 
 BUSTER_GLOBAL_LOCAL WmWindowHandle* wm_x11_window_from_xcb(WmHandle* handle, xcb_window_t window)
 {
@@ -49,7 +114,7 @@ BUSTER_GLOBAL_LOCAL u32 wm_x11_window_event_mask(WmHandle* handle)
 {
     u32 result = XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE | XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE |
                  XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_BUTTON_MOTION | XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-                 XCB_EVENT_MASK_FOCUS_CHANGE | handle->xim_forward_event_mask | handle->xim_synchronous_event_mask;
+                 XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE | handle->xim_forward_event_mask | handle->xim_synchronous_event_mask;
     return result;
 }
 
@@ -872,12 +937,43 @@ typedef enum X11Atom
     X11_ATOM_UTF8_STRING,
     X11_ATOM_WM_CLASS,
     X11_ATOM_RESOURCE_MANAGER,
+    X11_ATOM_XDND_AWARE,
+    X11_ATOM_XDND_ENTER,
+    X11_ATOM_XDND_POSITION,
+    X11_ATOM_XDND_STATUS,
+    X11_ATOM_XDND_TYPE_LIST,
+    X11_ATOM_XDND_ACTION_COPY,
+    X11_ATOM_XDND_DROP,
+    X11_ATOM_XDND_LEAVE,
+    X11_ATOM_XDND_FINISHED,
+    X11_ATOM_XDND_SELECTION,
+    X11_ATOM_XDND_SELECTION_PROPERTY,
+    X11_ATOM_TEXT_URI_LIST,
+    X11_ATOM_INCR,
     X11_ATOM_COUNT,
 } X11Atom;
 
 BUSTER_GLOBAL_LOCAL String8 atom_names[X11_ATOM_COUNT] = {
-    S8_INITIALIZER("WM_PROTOCOLS"), S8_INITIALIZER("WM_DELETE_WINDOW"), S8_INITIALIZER("WM_NAME"),          S8_INITIALIZER("_NET_WM_NAME"),
-    S8_INITIALIZER("UTF8_STRING"),  S8_INITIALIZER("WM_CLASS"),         S8_INITIALIZER("RESOURCE_MANAGER"),
+    S8_INITIALIZER("WM_PROTOCOLS"),
+    S8_INITIALIZER("WM_DELETE_WINDOW"),
+    S8_INITIALIZER("WM_NAME"),
+    S8_INITIALIZER("_NET_WM_NAME"),
+    S8_INITIALIZER("UTF8_STRING"),
+    S8_INITIALIZER("WM_CLASS"),
+    S8_INITIALIZER("RESOURCE_MANAGER"),
+    S8_INITIALIZER("XdndAware"),
+    S8_INITIALIZER("XdndEnter"),
+    S8_INITIALIZER("XdndPosition"),
+    S8_INITIALIZER("XdndStatus"),
+    S8_INITIALIZER("XdndTypeList"),
+    S8_INITIALIZER("XdndActionCopy"),
+    S8_INITIALIZER("XdndDrop"),
+    S8_INITIALIZER("XdndLeave"),
+    S8_INITIALIZER("XdndFinished"),
+    S8_INITIALIZER("XdndSelection"),
+    S8_INITIALIZER("BusterXdndSelection"),
+    S8_INITIALIZER("text/uri-list"),
+    S8_INITIALIZER("INCR"),
 };
 
 BUSTER_GLOBAL_LOCAL xcb_intern_atom_reply_t* atom_replies[BUSTER_ARRAY_LENGTH(atom_names)];
@@ -891,6 +987,670 @@ BUSTER_GLOBAL_LOCAL xcb_atom_t wm_x11_atom(X11Atom atom)
         result = atom_replies[atom]->atom;
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_ascii_equal_ignore_case(String8 value, const char* literal)
+{
+    u64 literal_length = 0;
+    while (literal[literal_length])
+    {
+        literal_length += 1;
+    }
+
+    bool result = value.length == literal_length;
+    for (u64 index = 0; result && index < value.length; index += 1)
+    {
+        u8 a = (u8)value.pointer[index];
+        u8 b = (u8)literal[index];
+        if ('A' <= a && a <= 'Z')
+        {
+            a = (u8)(a + ('a' - 'A'));
+        }
+        if ('A' <= b && b <= 'Z')
+        {
+            b = (u8)(b + ('a' - 'A'));
+        }
+        result = a == b;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u8 wm_x11_hex_value(u8 code_unit)
+{
+    u8 result = 0xffu;
+    if ('0' <= code_unit && code_unit <= '9')
+    {
+        result = (u8)(code_unit - '0');
+    }
+    else if ('a' <= code_unit && code_unit <= 'f')
+    {
+        result = (u8)(code_unit - 'a' + 10);
+    }
+    else if ('A' <= code_unit && code_unit <= 'F')
+    {
+        result = (u8)(code_unit - 'A' + 10);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 wm_x11_file_uri_decoded_length(String8 uri, u64* path_start_out, bool* valid_out)
+{
+    bool valid = uri.pointer != 0 && uri.length >= 5 && uri.pointer[4] == ':' &&
+                 wm_x11_ascii_equal_ignore_case(string_from_pointer_length(uri.pointer, 4), "file");
+    u64 path_start = 5;
+    if (valid && path_start + 1 < uri.length && uri.pointer[path_start] == '/' && uri.pointer[path_start + 1] == '/')
+    {
+        u64 authority_start = path_start + 2;
+        u64 authority_end = authority_start;
+        while (authority_end < uri.length && uri.pointer[authority_end] != '/' && uri.pointer[authority_end] != '?' && uri.pointer[authority_end] != '#')
+        {
+            authority_end += 1;
+        }
+        String8 authority = string_from_pointer_length(uri.pointer + authority_start, authority_end - authority_start);
+        valid = authority.length == 0 || wm_x11_ascii_equal_ignore_case(authority, "localhost");
+        valid = valid && authority_end < uri.length && uri.pointer[authority_end] == '/';
+        path_start = authority_end;
+    }
+    else if (valid)
+    {
+        valid = path_start < uri.length && uri.pointer[path_start] == '/';
+    }
+
+    u64 decoded_length = 0;
+    for (u64 index = path_start; valid && index < uri.length; index += 1)
+    {
+        u8 code_unit = (u8)uri.pointer[index];
+        if (code_unit == '?' || code_unit == '#' || code_unit < 0x20u || code_unit == 0x7fu)
+        {
+            valid = false;
+        }
+        else if (code_unit == '%')
+        {
+            if (uri.length - index < 3)
+            {
+                valid = false;
+            }
+            else
+            {
+                u8 high = wm_x11_hex_value((u8)uri.pointer[index + 1]);
+                u8 low = wm_x11_hex_value((u8)uri.pointer[index + 2]);
+                u8 decoded = (u8)((high << 4) | low);
+                valid = high != 0xffu && low != 0xffu && decoded != 0 && decoded >= 0x20u && decoded != 0x7fu;
+                index += 2;
+            }
+        }
+        if (valid)
+        {
+            if (decoded_length == UINT64_MAX)
+            {
+                valid = false;
+            }
+            else
+            {
+                decoded_length += 1;
+            }
+        }
+    }
+
+    if (!valid || decoded_length == 0)
+    {
+        valid = false;
+        decoded_length = 0;
+    }
+
+    if (path_start_out)
+    {
+        *path_start_out = path_start;
+    }
+    if (valid_out)
+    {
+        *valid_out = valid;
+    }
+    return decoded_length;
+}
+
+BUSTER_TEST_F_DECL String8 wm_x11_decode_file_uri(Arena* arena, String8 uri, bool* valid_out)
+{
+    u64 path_start = 0;
+    bool valid = false;
+    u64 decoded_length = wm_x11_file_uri_decoded_length(uri, &path_start, &valid);
+    String8 result = {0};
+    if (valid)
+    {
+        result.pointer = arena_allocate(arena, char8, decoded_length);
+        result.length = decoded_length;
+        u64 output_index = 0;
+        for (u64 index = path_start; index < uri.length; index += 1)
+        {
+            u8 code_unit = (u8)uri.pointer[index];
+            if (code_unit == '%')
+            {
+                u8 high = wm_x11_hex_value((u8)uri.pointer[index + 1]);
+                u8 low = wm_x11_hex_value((u8)uri.pointer[index + 2]);
+                result.pointer[output_index] = (char8)((high << 4) | low);
+                output_index += 1;
+                index += 2;
+            }
+            else
+            {
+                result.pointer[output_index] = (char8)code_unit;
+                output_index += 1;
+            }
+        }
+        valid = wm_file_path_is_valid(result);
+        if (!valid)
+        {
+            result = (String8){0};
+        }
+    }
+    if (valid_out)
+    {
+        *valid_out = valid;
+    }
+    return result;
+}
+
+BUSTER_TEST_F_DECL SliceString8 wm_x11_parse_uri_list(Arena* arena, String8 uri_list)
+{
+    u64 candidate_count = 0;
+    u64 decoded_path_bytes = 0;
+    bool budget_valid = true;
+    u64 line_start = 0;
+    for (u64 index = 0; index <= uri_list.length && budget_valid; index += 1)
+    {
+        bool at_end = index == uri_list.length;
+        if (at_end || uri_list.pointer[index] == '\n')
+        {
+            u64 line_end = index;
+            if (line_end > line_start && uri_list.pointer[line_end - 1] == '\r')
+            {
+                line_end -= 1;
+            }
+            if (line_end > line_start && uri_list.pointer[line_start] != '#')
+            {
+                if (candidate_count >= BUSTER_NATIVE_FILE_DROP_MAX_PATH_COUNT)
+                {
+                    budget_valid = false;
+                }
+                else
+                {
+                    candidate_count += 1;
+                    String8 uri = string_from_pointer_length(uri_list.pointer + line_start, line_end - line_start);
+                    bool uri_valid = false;
+                    u64 path_length = wm_x11_file_uri_decoded_length(uri, 0, &uri_valid);
+                    if (uri_valid)
+                    {
+                        if (path_length > BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES - decoded_path_bytes)
+                        {
+                            budget_valid = false;
+                        }
+                        else
+                        {
+                            decoded_path_bytes += path_length;
+                        }
+                    }
+                }
+            }
+            line_start = index + 1;
+        }
+    }
+
+    SliceString8 result = {0};
+    if (budget_valid && candidate_count != 0)
+    {
+        u64 accepted_count = 0;
+        line_start = 0;
+        for (u64 index = 0; index <= uri_list.length; index += 1)
+        {
+            bool at_end = index == uri_list.length;
+            if (at_end || uri_list.pointer[index] == '\n')
+            {
+                u64 line_end = index;
+                if (line_end > line_start && uri_list.pointer[line_end - 1] == '\r')
+                {
+                    line_end -= 1;
+                }
+                if (line_end > line_start && uri_list.pointer[line_start] != '#')
+                {
+                    bool uri_valid = false;
+                    String8 uri = string_from_pointer_length(uri_list.pointer + line_start, line_end - line_start);
+                    wm_x11_file_uri_decoded_length(uri, 0, &uri_valid);
+                    if (uri_valid)
+                    {
+                        if (accepted_count == UINT64_MAX)
+                        {
+                            return result;
+                        }
+                        accepted_count += 1;
+                    }
+                }
+                line_start = index + 1;
+            }
+        }
+
+        if (!wm_native_file_drop_array_size_allowed(accepted_count, sizeof(String8)))
+        {
+            return result;
+        }
+        if (accepted_count != 0)
+        {
+            result.pointer = arena_allocate(arena, String8, accepted_count);
+            result.length = accepted_count;
+        }
+        u64 output_index = 0;
+        line_start = 0;
+        for (u64 index = 0; index <= uri_list.length; index += 1)
+        {
+            bool at_end = index == uri_list.length;
+            if (at_end || uri_list.pointer[index] == '\n')
+            {
+                u64 line_end = index;
+                if (line_end > line_start && uri_list.pointer[line_end - 1] == '\r')
+                {
+                    line_end -= 1;
+                }
+                if (line_end > line_start && uri_list.pointer[line_start] != '#')
+                {
+                    bool valid = false;
+                    String8 uri = string_from_pointer_length(uri_list.pointer + line_start, line_end - line_start);
+                    String8 path = wm_x11_decode_file_uri(arena, uri, &valid);
+                    if (valid)
+                    {
+                        result.pointer[output_index] = path;
+                        output_index += 1;
+                    }
+                }
+                line_start = index + 1;
+            }
+        }
+        result.length = output_index;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void wm_x11_xdnd_clear_transfer_data(WmHandle* windowing)
+{
+    if (windowing->xdnd_transfer_arena)
+    {
+        arena_reset_to_start(windowing->xdnd_transfer_arena);
+    }
+    windowing->xdnd_transfer_data = (String8){0};
+    windowing->xdnd_transfer_capacity = 0;
+    windowing->xdnd_transfer_expected = 0;
+    windowing->xdnd_incremental = false;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_change_source_event_mask(WmHandle* windowing, xcb_window_t source, u32 event_mask)
+{
+    bool result = false;
+    if (windowing->connection && source != XCB_WINDOW_NONE)
+    {
+        xcb_void_cookie_t cookie = xcb_change_window_attributes_checked(windowing->connection, source, XCB_CW_EVENT_MASK, &event_mask);
+        xcb_generic_error_t* error = xcb_request_check(windowing->connection, cookie);
+        result = error == 0;
+        free(error);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_watch_source(WmHandle* windowing, xcb_window_t source)
+{
+    bool result = false;
+    if (windowing->connection && source != XCB_WINDOW_NONE)
+    {
+        WmWindowHandle* known_window = wm_x11_window_from_xcb(windowing, source);
+        if (known_window)
+        {
+            windowing->xdnd_source_destroy_observed = true;
+            result = true;
+        }
+        else
+        {
+            xcb_generic_error_t* error = 0;
+            xcb_get_window_attributes_cookie_t cookie = xcb_get_window_attributes(windowing->connection, source);
+            xcb_get_window_attributes_reply_t* reply = xcb_get_window_attributes_reply(windowing->connection, cookie, &error);
+            if (reply)
+            {
+                u32 saved_mask = reply->your_event_mask;
+                u32 watched_mask = wm_x11_xdnd_source_watch_event_mask(saved_mask);
+                free(reply);
+                if (wm_x11_xdnd_change_source_event_mask(windowing, source, watched_mask))
+                {
+                    windowing->xdnd_source_event_mask = saved_mask;
+                    windowing->xdnd_source_event_mask_saved = true;
+                    windowing->xdnd_source_destroy_observed = true;
+                    result = true;
+                }
+            }
+            free(error);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void wm_x11_xdnd_restore_source_watch(WmHandle* windowing)
+{
+    if (windowing->xdnd_source_event_mask_saved && windowing->connection && windowing->xdnd_source != XCB_WINDOW_NONE)
+    {
+        u32 saved_mask = wm_x11_xdnd_source_restore_event_mask(windowing->xdnd_source_event_mask);
+        // A source can disappear between the transaction reset and this checked restore.
+        // BadWindow is deliberately ignored; no stale observation remains in our state.
+        wm_x11_xdnd_change_source_event_mask(windowing, windowing->xdnd_source, saved_mask);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void wm_x11_xdnd_reset(WmHandle* windowing)
+{
+    wm_x11_xdnd_restore_source_watch(windowing);
+    wm_x11_xdnd_clear_transfer_data(windowing);
+    windowing->xdnd_source = XCB_WINDOW_NONE;
+    windowing->xdnd_source_event_mask = 0;
+    windowing->xdnd_source_event_mask_saved = false;
+    windowing->xdnd_source_destroy_observed = false;
+    windowing->xdnd_window = 0;
+    windowing->xdnd_property = XCB_ATOM_NONE;
+    windowing->xdnd_position_time = XCB_CURRENT_TIME;
+    windowing->xdnd_position = (WmOffset){0};
+    windowing->xdnd_version = 0;
+    windowing->xdnd_active = false;
+    windowing->xdnd_uri_list_supported = false;
+    windowing->xdnd_position_seen = false;
+    windowing->xdnd_accept = false;
+    windowing->xdnd_drop_pending = false;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_append_transfer(WmHandle* windowing, const u8* bytes, u64 length)
+{
+    bool result = windowing->xdnd_transfer_arena != 0 &&
+                  wm_x11_xdnd_transfer_length_allowed(windowing->xdnd_transfer_data.length, length);
+    if (result && length != 0)
+    {
+        u64 required = windowing->xdnd_transfer_data.length + length;
+        if (required > windowing->xdnd_transfer_capacity)
+        {
+            u64 capacity = windowing->xdnd_transfer_capacity ? windowing->xdnd_transfer_capacity : 4096;
+            while (capacity < required)
+            {
+                if (capacity > UINT64_MAX / 2)
+                {
+                    capacity = required;
+                    break;
+                }
+                capacity *= 2;
+            }
+            char8* destination = arena_allocate(windowing->xdnd_transfer_arena, char8, capacity);
+            if (windowing->xdnd_transfer_data.length != 0)
+            {
+                memcpy(destination, windowing->xdnd_transfer_data.pointer, windowing->xdnd_transfer_data.length);
+            }
+            windowing->xdnd_transfer_data.pointer = destination;
+            windowing->xdnd_transfer_capacity = capacity;
+        }
+        memcpy(windowing->xdnd_transfer_data.pointer + windowing->xdnd_transfer_data.length, bytes, length);
+        windowing->xdnd_transfer_data.length = required;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 wm_x11_xdnd_property_request_length(u64 remaining_bytes)
+{
+    u64 result = remaining_bytes > UINT64_MAX - 3 ? UINT64_MAX : (remaining_bytes + 3) / 4;
+    return result > UINT32_MAX ? UINT32_MAX : (u32)result;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_property_contains_atom(WmHandle* windowing, xcb_window_t window, xcb_atom_t property, xcb_atom_t wanted)
+{
+    bool result = false;
+    u32 offset = 0;
+    while (!result)
+    {
+        xcb_get_property_cookie_t cookie = xcb_get_property(windowing->connection, false, window, property, XCB_ATOM_ATOM, offset, UINT32_MAX);
+        xcb_get_property_reply_t* reply = xcb_get_property_reply(windowing->connection, cookie, 0);
+        if (!reply)
+        {
+            break;
+        }
+        int value_length = xcb_get_property_value_length(reply);
+        if (reply->type != XCB_ATOM_ATOM || reply->format != 32 || value_length < 0 || (value_length % (int)sizeof(u32)) != 0)
+        {
+            free(reply);
+            break;
+        }
+        u32* values = (u32*)xcb_get_property_value(reply);
+        u32 value_count = (u32)value_length / (u32)sizeof(u32);
+        for (u32 index = 0; index < value_count; index += 1)
+        {
+            if (values[index] == wanted)
+            {
+                result = true;
+                break;
+            }
+        }
+        u32 bytes_after = reply->bytes_after;
+        u32 increment = ((u32)value_length + 3u) / 4u;
+        free(reply);
+        if (result || bytes_after == 0 || increment == 0 || offset > UINT32_MAX - increment)
+        {
+            break;
+        }
+        offset += increment;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_source_supports_uri_list(WmHandle* windowing, xcb_client_message_event_t* message)
+{
+    xcb_atom_t uri_list = wm_x11_atom(X11_ATOM_TEXT_URI_LIST);
+    bool result = uri_list != XCB_ATOM_NONE;
+    if (result)
+    {
+        result = message->data.data32[2] == uri_list || message->data.data32[3] == uri_list || message->data.data32[4] == uri_list;
+    }
+    if (!result && (message->data.data32[1] & 1u) != 0 && wm_x11_atom(X11_ATOM_XDND_TYPE_LIST) != XCB_ATOM_NONE)
+    {
+        result = wm_x11_xdnd_property_contains_atom(windowing, message->data.data32[0], wm_x11_atom(X11_ATOM_XDND_TYPE_LIST), uri_list);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void wm_x11_xdnd_send_message(WmHandle* windowing, xcb_window_t destination, xcb_atom_t type, u32 data0, u32 data1, u32 data2,
+                                                   u32 data3, u32 data4)
+{
+    if (windowing->connection && destination != XCB_WINDOW_NONE && type != XCB_ATOM_NONE)
+    {
+        xcb_client_message_event_t message = {0};
+        message.response_type = XCB_CLIENT_MESSAGE;
+        message.window = destination;
+        message.type = type;
+        message.format = 32;
+        message.data.data32[0] = data0;
+        message.data.data32[1] = data1;
+        message.data.data32[2] = data2;
+        message.data.data32[3] = data3;
+        message.data.data32[4] = data4;
+        xcb_send_event(windowing->connection, false, destination, XCB_EVENT_MASK_NO_EVENT, (const char*)&message);
+        xcb_flush(windowing->connection);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void wm_x11_xdnd_send_status(WmHandle* windowing, bool accepted)
+{
+    if (windowing->xdnd_active && windowing->xdnd_window)
+    {
+        xcb_atom_t action = accepted ? wm_x11_atom(X11_ATOM_XDND_ACTION_COPY) : XCB_ATOM_NONE;
+        wm_x11_xdnd_send_message(windowing, windowing->xdnd_source, wm_x11_atom(X11_ATOM_XDND_STATUS), windowing->xdnd_window->handle, accepted ? 1u : 0u, 0,
+                                 0, action);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void wm_x11_xdnd_send_finished(WmHandle* windowing, bool accepted)
+{
+    if (windowing->xdnd_active && windowing->xdnd_window)
+    {
+        xcb_atom_t action = accepted ? wm_x11_atom(X11_ATOM_XDND_ACTION_COPY) : XCB_ATOM_NONE;
+        wm_x11_xdnd_send_message(windowing, windowing->xdnd_source, wm_x11_atom(X11_ATOM_XDND_FINISHED), windowing->xdnd_window->handle, accepted ? 1u : 0u,
+                                 action, 0, 0);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_position_from_event(WmHandle* windowing, xcb_window_t target, u32 packed_position, WmOffset* position)
+{
+    bool result = false;
+    xcb_screen_t* screen = wm_x11_screen_from_handle(windowing);
+    if (screen && position)
+    {
+        s32 root_x = (s32)(s16)(packed_position >> 16);
+        s32 root_y = (s32)(s16)(packed_position & 0xffffu);
+        xcb_translate_coordinates_cookie_t cookie = xcb_translate_coordinates(windowing->connection, screen->root, target, (s16)root_x, (s16)root_y);
+        xcb_translate_coordinates_reply_t* reply = xcb_translate_coordinates_reply(windowing->connection, cookie, 0);
+        if (reply)
+        {
+            *position = wm_x11_drop_position_from_root(root_x, root_y, root_x - (s32)reply->dst_x, root_y - (s32)reply->dst_y);
+            result = true;
+            free(reply);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_read_property(WmHandle* windowing, xcb_window_t requestor, xcb_atom_t property)
+{
+    bool result = true;
+    u32 offset = 0;
+    while (result)
+    {
+        u64 current_length = windowing->xdnd_transfer_data.length;
+        u64 remaining_bytes = current_length <= BUSTER_X11_XDND_MAX_TRANSFER_BYTES ? BUSTER_X11_XDND_MAX_TRANSFER_BYTES - current_length : 0;
+        u32 request_length = wm_x11_xdnd_property_request_length(remaining_bytes);
+        xcb_get_property_cookie_t cookie = xcb_get_property(windowing->connection, false, requestor, property, XCB_ATOM_ANY, offset, request_length);
+        xcb_get_property_reply_t* reply = xcb_get_property_reply(windowing->connection, cookie, 0);
+        if (!reply)
+        {
+            result = false;
+            break;
+        }
+        int value_length = xcb_get_property_value_length(reply);
+        if (reply->type != wm_x11_atom(X11_ATOM_TEXT_URI_LIST) || reply->format != 8 || value_length < 0)
+        {
+            result = false;
+        }
+        else if (!wm_x11_xdnd_append_transfer(windowing, (const u8*)xcb_get_property_value(reply), (u64)value_length))
+        {
+            result = false;
+        }
+        u32 bytes_after = reply->bytes_after;
+        u32 increment = ((u32)(value_length > 0 ? value_length : 0) + 3u) / 4u;
+        free(reply);
+        if (!result || bytes_after == 0)
+        {
+            break;
+        }
+        if (increment == 0 || offset > UINT32_MAX - increment)
+        {
+            result = false;
+            break;
+        }
+        offset += increment;
+    }
+    xcb_delete_property(windowing->connection, requestor, property);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_read_increment(WmHandle* windowing, bool* complete)
+{
+    bool result = true;
+    *complete = false;
+    u64 current_length = windowing->xdnd_transfer_data.length;
+    u64 remaining_bytes = current_length <= BUSTER_X11_XDND_MAX_TRANSFER_BYTES ? BUSTER_X11_XDND_MAX_TRANSFER_BYTES - current_length : 0;
+    u32 request_length = wm_x11_xdnd_property_request_length(remaining_bytes);
+    xcb_get_property_cookie_t cookie = xcb_get_property(windowing->connection, true, windowing->xdnd_window->handle, windowing->xdnd_property, XCB_ATOM_ANY, 0,
+                                                        request_length);
+    xcb_get_property_reply_t* reply = xcb_get_property_reply(windowing->connection, cookie, 0);
+    if (!reply)
+    {
+        result = false;
+    }
+    else
+    {
+        int value_length = xcb_get_property_value_length(reply);
+        if (reply->bytes_after != 0 || value_length < 0 || (value_length != 0 && (reply->type != wm_x11_atom(X11_ATOM_TEXT_URI_LIST) || reply->format != 8)))
+        {
+            result = false;
+        }
+        else if (!wm_x11_xdnd_append_transfer(windowing, (const u8*)xcb_get_property_value(reply), (u64)value_length))
+        {
+            result = false;
+        }
+        *complete = value_length == 0;
+        free(reply);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_start_transfer(WmHandle* windowing)
+{
+    bool result = false;
+    wm_x11_xdnd_clear_transfer_data(windowing);
+    u32 request_length = wm_x11_xdnd_property_request_length(BUSTER_X11_XDND_MAX_TRANSFER_BYTES);
+    xcb_get_property_cookie_t cookie = xcb_get_property(windowing->connection, false, windowing->xdnd_window->handle, windowing->xdnd_property, XCB_ATOM_ANY, 0,
+                                                        request_length);
+    xcb_get_property_reply_t* reply = xcb_get_property_reply(windowing->connection, cookie, 0);
+    if (reply)
+    {
+        int value_length = xcb_get_property_value_length(reply);
+        if (reply->type == wm_x11_atom(X11_ATOM_INCR))
+        {
+            if (reply->format == 32 && value_length >= (int)sizeof(u32))
+            {
+                // The advertised INCR length is only a hint. Every chunk is bounded by
+                // BUSTER_X11_XDND_MAX_TRANSFER_BYTES before entering the transfer arena.
+                windowing->xdnd_transfer_expected = *(u32*)xcb_get_property_value(reply);
+                windowing->xdnd_incremental = true;
+                xcb_delete_property(windowing->connection, windowing->xdnd_window->handle, windowing->xdnd_property);
+                result = true;
+            }
+        }
+        else
+        {
+            result = reply->type == wm_x11_atom(X11_ATOM_TEXT_URI_LIST) && reply->format == 8 && value_length >= 0;
+        }
+        free(reply);
+        if (result && !windowing->xdnd_incremental)
+        {
+            result = wm_x11_xdnd_read_property(windowing, windowing->xdnd_window->handle, windowing->xdnd_property);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void wm_x11_xdnd_complete(WmHandle* windowing, bool transfer_success)
+{
+    bool accepted = false;
+    if (transfer_success && windowing->event_arena && windowing->xdnd_transfer_data.length != 0)
+    {
+        SliceString8 paths = wm_x11_parse_uri_list(windowing->event_arena, windowing->xdnd_transfer_data);
+        if (paths.length != 0)
+        {
+            WmOffset position = {.x = 0, .y = 0};
+            if (windowing->xdnd_position_seen)
+            {
+                position = windowing->xdnd_position;
+            }
+            wm_event_push(windowing, (WmEvent){
+                                         .kind = WM_EVENT_FILE_DROP,
+                                         .window = windowing->xdnd_window,
+                                         .position = position,
+                                         .paths = paths,
+                                     });
+            accepted = true;
+        }
+    }
+    if (windowing->xdnd_drop_pending && windowing->xdnd_window && windowing->xdnd_property != XCB_ATOM_NONE)
+    {
+        xcb_delete_property(windowing->connection, windowing->xdnd_window->handle, windowing->xdnd_property);
+    }
+    wm_x11_xdnd_send_finished(windowing, accepted);
+    wm_x11_xdnd_reset(windowing);
 }
 
 BUSTER_GLOBAL_LOCAL void wm_x11_window_set_metadata(WmWindowHandle* window, WmWindowCreate create)
@@ -922,6 +1682,13 @@ BUSTER_GLOBAL_LOCAL void wm_x11_window_set_metadata(WmWindowHandle* window, WmWi
         if (wm_class_atom)
         {
             xcb_change_property(connection, XCB_PROP_MODE_REPLACE, window->handle, wm_class_atom, XCB_ATOM_STRING, 8, sizeof(wm_class), wm_class);
+        }
+
+        xcb_atom_t xdnd_aware = wm_x11_atom(X11_ATOM_XDND_AWARE);
+        if (xdnd_aware)
+        {
+            u32 xdnd_version = 5;
+            xcb_change_property(connection, XCB_PROP_MODE_REPLACE, window->handle, xdnd_aware, XCB_ATOM_ATOM, 32, 1, &xdnd_version);
         }
     }
 }
@@ -2472,6 +3239,13 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                 case XCB_DESTROY_NOTIFY: // 17
                 {
                     xcb_destroy_notify_event_t* destroy_notify_event = (xcb_destroy_notify_event_t*)event;
+                    bool source_destroyed = wm_x11_xdnd_source_destroyed(windowing->xdnd_source_destroy_observed, windowing->xdnd_source,
+                                                                        destroy_notify_event->window);
+                    if (source_destroyed ||
+                        (windowing->xdnd_window && destroy_notify_event->window == windowing->xdnd_window->handle))
+                    {
+                        wm_x11_xdnd_reset(windowing);
+                    }
 
                     //                 xcb_destroy_notify_event_t(3)                                                              XCB Events
                     //                 xcb_destroy_notify_event_t(3)
@@ -3017,17 +3791,20 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                 case XCB_PROPERTY_NOTIFY: // 28
                 {
                     xcb_property_notify_event_t* property_notify_event = (xcb_property_notify_event_t*)event;
-                    xcb_atom_t property_atom = property_notify_event->atom;
-                    xcb_get_atom_name_cookie_t name_cookie = xcb_get_atom_name(connection, property_atom);
-                    xcb_generic_error_t* error;
-                    xcb_get_atom_name_reply_t* reply = xcb_get_atom_name_reply(connection, name_cookie, &error);
-                    if (reply)
+                    if (windowing->xdnd_active && windowing->xdnd_drop_pending && windowing->xdnd_incremental && windowing->xdnd_window &&
+                        property_notify_event->window == windowing->xdnd_window->handle && property_notify_event->atom == windowing->xdnd_property &&
+                        property_notify_event->state == XCB_PROPERTY_NEW_VALUE)
                     {
-                        char* name_pointer = xcb_get_atom_name_name(reply);
-                        int name_length = xcb_get_atom_name_name_length(reply);
-                        String8 name = {.pointer = name_pointer, .length = (u64)name_length};
-                        string_print(S8("\nProperty changed: {S8}\n"), name);
-                        free(reply);
+                        bool complete = false;
+                        bool success = wm_x11_xdnd_read_increment(windowing, &complete);
+                        if (!success)
+                        {
+                            wm_x11_xdnd_complete(windowing, false);
+                        }
+                        else if (complete)
+                        {
+                            wm_x11_xdnd_complete(windowing, true);
+                        }
                     }
 
                     //                 xcb_property_notify_event_t(3)                                                             XCB Events
@@ -3180,8 +3957,26 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                 case XCB_SELECTION_NOTIFY: // 31
                 {
                     xcb_selection_notify_event_t* selection_notify_event = (xcb_selection_notify_event_t*)event;
-                    u8 k = selection_notify_event->response_type;
-                    BUSTER_UNUSED(k);
+                    bool current = windowing->xdnd_active && windowing->xdnd_drop_pending && windowing->xdnd_window &&
+                                   selection_notify_event->requestor == windowing->xdnd_window->handle &&
+                                   selection_notify_event->selection == wm_x11_atom(X11_ATOM_XDND_SELECTION) &&
+                                   selection_notify_event->target == wm_x11_atom(X11_ATOM_TEXT_URI_LIST);
+                    if (current && selection_notify_event->property == XCB_ATOM_NONE)
+                    {
+                        wm_x11_xdnd_complete(windowing, false);
+                    }
+                    else if (current && selection_notify_event->property == windowing->xdnd_property)
+                    {
+                        bool success = wm_x11_xdnd_start_transfer(windowing);
+                        if (!success)
+                        {
+                            wm_x11_xdnd_complete(windowing, false);
+                        }
+                        else if (!windowing->xdnd_incremental)
+                        {
+                            wm_x11_xdnd_complete(windowing, true);
+                        }
+                    }
 
                     //                 xcb_selection_notify_event_t(3)                                                            XCB Events
                     //                 xcb_selection_notify_event_t(3)
@@ -3285,12 +4080,112 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                 case XCB_CLIENT_MESSAGE: // 33
                 {
                     xcb_client_message_event_t* client_message_event = (xcb_client_message_event_t*)event;
-                    if (client_message_event->data.data32[0] == atom_replies[X11_ATOM_WM_DELETE_WINDOW]->atom)
+                    xcb_atom_t message_type = client_message_event->type;
+                    bool message_format_32 = client_message_event->format == 32;
+                    if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_WM_PROTOCOLS) &&
+                        client_message_event->data.data32[0] == wm_x11_atom(X11_ATOM_WM_DELETE_WINDOW))
                     {
                         wm_event_push(windowing, (WmEvent){
                                                      .kind = WM_EVENT_WINDOW_CLOSE,
                                                      .window = wm_x11_window_from_xcb(windowing, client_message_event->window),
                                                  });
+                    }
+                    else if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_XDND_ENTER))
+                    {
+                        WmWindowHandle* window = wm_x11_window_from_xcb(windowing, client_message_event->window);
+                        u8 version = (u8)(client_message_event->data.data32[1] >> 24);
+                        if (windowing->xdnd_active)
+                        {
+                            if (windowing->xdnd_drop_pending)
+                            {
+                                wm_x11_xdnd_complete(windowing, false);
+                            }
+                            else
+                            {
+                                wm_x11_xdnd_reset(windowing);
+                            }
+                        }
+                        xcb_window_t source = client_message_event->data.data32[0];
+                        if (window && source != XCB_WINDOW_NONE && wm_x11_xdnd_version_supported(version) && wm_x11_xdnd_watch_source(windowing, source))
+                        {
+                            windowing->xdnd_source = source;
+                            windowing->xdnd_window = window;
+                            windowing->xdnd_version = version;
+                            windowing->xdnd_active = true;
+                            windowing->xdnd_uri_list_supported = wm_x11_xdnd_source_supports_uri_list(windowing, client_message_event);
+                        }
+                    }
+                    else if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_XDND_POSITION))
+                    {
+                        WmWindowHandle* window = wm_x11_window_from_xcb(windowing, client_message_event->window);
+                        bool current = window && windowing->xdnd_active &&
+                                       wm_x11_xdnd_transaction_matches(windowing->xdnd_source, windowing->xdnd_window ? windowing->xdnd_window->handle : 0,
+                                                                       client_message_event->data.data32[0], client_message_event->window);
+                        if (current)
+                        {
+                            WmOffset position = {0};
+                            bool position_valid = wm_x11_xdnd_position_from_event(windowing, window->handle, client_message_event->data.data32[2], &position);
+                            windowing->xdnd_position = position;
+                            windowing->xdnd_position_seen = position_valid;
+                            windowing->xdnd_position_time = client_message_event->data.data32[3];
+                            windowing->xdnd_accept = windowing->xdnd_uri_list_supported && position_valid;
+                            wm_x11_xdnd_send_status(windowing, windowing->xdnd_accept);
+                        }
+                    }
+                    else if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_XDND_LEAVE))
+                    {
+                        bool current = windowing->xdnd_active &&
+                                       wm_x11_xdnd_transaction_matches(windowing->xdnd_source, windowing->xdnd_window ? windowing->xdnd_window->handle : 0,
+                                                                       client_message_event->data.data32[0], client_message_event->window);
+                        if (current)
+                        {
+                            if (windowing->xdnd_drop_pending)
+                            {
+                                wm_x11_xdnd_complete(windowing, false);
+                            }
+                            else
+                            {
+                                wm_x11_xdnd_reset(windowing);
+                            }
+                        }
+                    }
+                    else if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_XDND_DROP))
+                    {
+                        bool current = windowing->xdnd_active && windowing->xdnd_window &&
+                                       wm_x11_xdnd_transaction_matches(windowing->xdnd_source, windowing->xdnd_window->handle,
+                                                                       client_message_event->data.data32[0], client_message_event->window);
+                        if (current && windowing->xdnd_accept && windowing->xdnd_position_seen && wm_x11_atom(X11_ATOM_XDND_SELECTION) != XCB_ATOM_NONE &&
+                            wm_x11_atom(X11_ATOM_TEXT_URI_LIST) != XCB_ATOM_NONE && wm_x11_atom(X11_ATOM_XDND_SELECTION_PROPERTY) != XCB_ATOM_NONE)
+                        {
+                            windowing->xdnd_property = wm_x11_atom(X11_ATOM_XDND_SELECTION_PROPERTY);
+                            xcb_timestamp_t selection_time = client_message_event->data.data32[2];
+                            if (selection_time == XCB_CURRENT_TIME)
+                            {
+                                selection_time = windowing->xdnd_position_time;
+                            }
+                            xcb_convert_selection(connection, windowing->xdnd_window->handle, wm_x11_atom(X11_ATOM_XDND_SELECTION),
+                                                  wm_x11_atom(X11_ATOM_TEXT_URI_LIST), windowing->xdnd_property, selection_time);
+                            windowing->xdnd_drop_pending = true;
+                            xcb_flush(connection);
+                        }
+                        else if (current)
+                        {
+                            wm_x11_xdnd_complete(windowing, false);
+                        }
+                    }
+                    else if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_XDND_STATUS))
+                    {
+                        // XdndStatus is normally sent by this target to the source. A
+                        // status arriving at the target is stale and must not change
+                        // the active transaction.
+                    }
+                    else if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_XDND_FINISHED))
+                    {
+                        if (windowing->xdnd_active && windowing->xdnd_window && client_message_event->window == windowing->xdnd_source &&
+                            client_message_event->data.data32[0] == windowing->xdnd_window->handle)
+                        {
+                            wm_x11_xdnd_reset(windowing);
+                        }
                     }
                 }
                 break;
@@ -3378,7 +4273,9 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
                 .setup = setup,
                 .screen_id = screen_id,
                 .key_symbols = xcb_key_symbols_alloc(connection),
+                .xdnd_transfer_arena = arena_create((ArenaCreation){0}),
             };
+            wm_x11_xdnd_reset(&windowing_handle);
             wm_x11_xkb_initialize(&windowing_handle);
             xcb_compound_text_init();
             windowing_handle.xim = xcb_xim_create(connection, screen_id, 0);
@@ -3417,6 +4314,7 @@ BUSTER_GLOBAL_LOCAL void wm_platform_deinitialize(WmHandle* windowing)
 {
     if (windowing->connection)
     {
+        wm_x11_xdnd_reset(windowing);
         if (windowing->xim)
         {
             SliceWmWindowHandle windows = get_windows(windowing);
@@ -3445,6 +4343,11 @@ BUSTER_GLOBAL_LOCAL void wm_platform_deinitialize(WmHandle* windowing)
         {
             free(atom_replies[i]);
             atom_replies[i] = 0;
+        }
+        if (windowing->xdnd_transfer_arena)
+        {
+            arena_destroy(windowing->xdnd_transfer_arena, 1);
+            windowing->xdnd_transfer_arena = 0;
         }
     }
 }

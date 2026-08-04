@@ -298,6 +298,23 @@ struct WmWindowCreate
     u8 reserved[4];
 };
 
+// Native drag destinations use this small value type to pass ordered NSURL
+// paths through the platform adapter without retaining native objects. The
+// output of the corresponding test seam is copied into its caller-owned arena.
+typedef struct WmAppleFileUrlPath WmAppleFileUrlPath;
+struct WmAppleFileUrlPath
+{
+    String8 path;
+    bool is_file_url;
+};
+
+typedef struct SliceWmAppleFileUrlPath SliceWmAppleFileUrlPath;
+struct SliceWmAppleFileUrlPath
+{
+    WmAppleFileUrlPath* pointer;
+    u64 length;
+};
+
 BUSTER_F_DECL WmHandle* wm_initialize(void);
 BUSTER_F_DECL void wm_deinitialize(WmHandle* windowing);
 BUSTER_F_DECL WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create);
