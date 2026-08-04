@@ -156,22 +156,26 @@ enabled.
   Clang-compiled `ide` executable, whose generated host code has the best
   quality; buster-compiled stage executables are useful for self-hosting
   validation, not as the default benchmark host.
-- `ide bench` (built via the `bench_all` ninja target) parses the
-  `parser_file_test_cases` corpus 200 times and prints one line,
-  `BENCH parse_all_tests iterations=... files=... min_ns=... median_ns=...`.
-  It's implemented by `parser_parse_bench()` in
+- `ide bench` (built via the `bench_all` ninja target) runs both modes over the
+  `parser_file_test_cases` corpus 200 times and prints one line per mode:
+  `BENCH_IO parse_all_tests iterations=... files=... min_ns=... median_ns=...`
+  reads every source during every iteration, while
+  `BENCH_PARSE parse_all_tests iterations=... files=... min_ns=... median_ns=...`
+  loads every source once and repeatedly tokenizes/parses the preloaded bytes.
+  Both modes share `parser_bench_run()` in
   `src/buster/lib/compiler/frontend/buster/parser.c`, deliberately **not** gated
-  behind `BUSTER_INCLUDE_TESTS` (it's a benchmark, not a test, and must stay
-  buildable in Release) and deliberately independent of the windowing/
-  rendering path `ide test` also drives, so it runs headless on a plain CI
-  runner with no display server.
+  behind `BUSTER_INCLUDE_TESTS` (they are benchmarks, not tests, and must stay
+  buildable in Release) and deliberately independent of the windowing/rendering
+  path `ide test` also drives, so they run headless on a plain CI runner with no
+  display server.
 - **`BUSTER_INSTRUMENT`** (CMake option, mirrors `BUSTER_TIME_TRACE`
   end-to-end — `--instrument`/`--no-instrument` on `generate`) compiles in
   finer-grained bench timing, compiled out entirely by default. With it on,
-  `ide bench` additionally prints `BENCH_PHASE tokenize|parse min_ns=...
-  median_ns=...` (splitting `tokenize()` from `parser_parse()`) and one
-  `BENCH_FILE path=... min_ns=... median_ns=...` line per test file, slowest
-  first.
+  `ide bench` additionally prints `BENCH_IO_PHASE`/`BENCH_PARSE_PHASE`
+  tokenize/parse lines (splitting `tokenize()` from `parser_parse()`) and
+  `BENCH_IO_FILE`/`BENCH_PARSE_FILE` lines per test file, slowest first. The
+  mode prefix is part of every diagnostic line so phase and per-file timings
+  cannot be confused between the filesystem and preloaded runs.
 - **`ninja_log_summary <build-dir> [--limit N]`** and **`time_trace_summary
   <json-path>... [--limit N]`** (both new `build/build` commands, same
   shape as `cmake_profile_summary` — see `build.c`) are diagnostics for
@@ -196,13 +200,15 @@ enabled.
   (`ts=... runner=... config=... commit=... metric=... value=...
   [file=...]`, plain text, no JSON/`jq`) — and emits a **warning without
   failing the CI job** if
-  `compile_milliseconds` or `bench_median_ns_per_file` regresses more than
+  `compile_milliseconds` or `bench_parse_median_ns_per_file` regresses more than
   15% (`PERF_REGRESSION_THRESHOLD`) past that `(runner, config)`'s median.
   Regressions emit both a `::warning` Actions annotation for CI interfaces
   that support workflow commands and a plain stderr warning as a fallback.
-  The raw `bench_median_ns` and `bench_file_count` metrics are also retained,
-  but the normalized metric is gated so growing the parser corpus does not
-  register as a performance regression. `compile_milliseconds` times CMake
+  Mode-specific raw medians and file counts are also retained, but only
+  `bench_parse_median_ns_per_file` is gated so growing the parser corpus does
+  not register as a performance regression. The file-read-per-iteration
+  `bench_io_*` rows are diagnostic only, and the old unqualified benchmark
+  metric names are never reused. `compile_milliseconds` times CMake
   generation plus the clean `ide` build; `bench_all` runs afterward, outside
   that timer, so growing the corpus cannot inflate the compile metric. The
   `bench_all` invocation is wall-clock timed separately and recorded as
@@ -211,10 +217,11 @@ enabled.
   `PERF_TOTAL config=... compile_milliseconds=... bench_run_milliseconds=...`
   line to the CI log; Debug and Release totals are reported independently,
   never summed. The
-  phase (`bench_tokenize_median_ns`, `bench_parse_median_ns`) and per-file
-  (`bench_file_median_ns` + `file=`) rows are recorded for trend/diagnostic
-  purposes but never gate the build — 20+ per-file checks per run would make
-  the job flaky on any one noisy file. History is only appended/pushed on
+  mode-specific phase (`bench_io_tokenize_median_ns`,
+  `bench_parse_tokenize_median_ns`, and corresponding parse rows) and per-file
+  rows are recorded for trend/diagnostic purposes but never gate the build —
+  20+ per-file checks per run would make the job flaky on any one noisy file.
+  History is only appended/pushed on
   `main`; other branches are compared but don't pollute it. Pushing needs a
   `PERF_HISTORY_TOKEN` repo secret with push access, since the main
   `Checkout` step deliberately uses `persist-credentials: false`.
@@ -229,36 +236,36 @@ enabled.
 - `build/Debug` split compilation hotspots (same summary):
   `parser.c.o` (`707 ms`), `codegen.c.o` (`582 ms`), `analysis.c.o` (`475 ms`),
   `ir.c.o` (`361 ms`).
-- `bench_all` result snapshots:
-  - Release: `BENCH parse_all_tests iterations=200 files=59 min_ns=398673 median_ns=418340`.
-  - Debug: `BENCH parse_all_tests iterations=200 files=59 min_ns=941358 median_ns=975512`.
+- Pre-refactor `bench_all` result snapshots (the default was the I/O mode):
+  - Release: `BENCH_IO parse_all_tests iterations=200 files=59 min_ns=398673 median_ns=418340`.
+  - Debug: `BENCH_IO parse_all_tests iterations=200 files=59 min_ns=941358 median_ns=975512`.
 - In `BUSTER_INSTRUMENT` mode:
   - Tokenize: `55_363 ns` median (Release), `297_607 ns` median (Debug).
   - Parse: `48_272 ns` median (Release), `340_853 ns` median (Debug).
-- `BENCH_FILE` output is consistently slowest-first; `tests/basic_variadic.bbb`
+- Pre-refactor `BENCH_FILE` output was consistently slowest-first; `tests/basic_variadic.bbb`
   is the dominant long-tail input across both configs.
-- Superluminal capture of `ide bench` shows `parser_parse_bench` paths flowing
+- Superluminal capture of the old `ide bench` shows `parser_parse_bench` paths flowing
   heavily through `file_read -> os_file_open -> __libc_open64`, indicating
   benchmark procedure repeatedly performs disk reads instead of amortizing source
   input.
-- Recommended next optimization experiment:
-  - Add a preloaded-source benchmark mode to separate parser throughput
-    (`tokenize`/`parse`) from filesystem input, then compare both modes via
-    `perf_file_median_ns` and `bench_median_ns_per_file`.
+- The two-mode benchmark now separates parser throughput from filesystem input;
+  compare `BENCH_PARSE` and `BENCH_IO` using their mode-specific phase and
+  per-file rows, while only `bench_parse_median_ns_per_file` participates in
+  regression gating.
 
 `2026-08-02` (Linux x86_64, Release `bench_all`, `BUSTER_INSTRUMENT=1`):
 
-- Added an opt-in mmap benchmark path selected by `BUSTER_BENCH_MMAP=1`:
-  - `BENCH parse_all_tests ... median_ns=421736` (baseline: `file_read` each iteration).
-  - `BENCH_MMAP parse_all_tests ... median_ns=90831` (files memory-mapped once, then reused).
-- Mapped benchmark reduced total wall time by roughly `78.5%` (`421736 -> 90831`).
+- Before the two-mode refactor, an opt-in preloaded-source benchmark path produced:
+  - `BENCH_IO parse_all_tests ... median_ns=421736` (baseline: `file_read` each iteration).
+  - `BENCH_PARSE parse_all_tests ... median_ns=90831` (files memory-mapped once, then reused).
+- The preloaded benchmark reduced total wall time by roughly `78.5%` (`421736 -> 90831`).
 - Tokenize/parse split moved only modestly:
-  - Baseline `BENCH_PHASE tokenize` median: `57241`, parse median: `48711`.
-  - Mapped `BENCH_MMAP_PHASE tokenize` median: `50023`, parse median: `39756`.
+  - Baseline `BENCH_IO_PHASE tokenize` median: `57241`, parse median: `48711`.
+  - Preloaded `BENCH_PARSE_PHASE tokenize` median: `50023`, parse median: `39756`.
 - The remaining gap between modes is mostly filesystem read overhead in the old
   path; parser/tokenization itself improves only ~12–19%.
 - The dominant input is still `tests/basic_variadic.bbb`, but its parse path also
-  drops (median `11171 -> 10430`) under mmap reuse.
+  drops (median `11171 -> 10430`) under preloaded-source reuse.
 
 ## Core rules
 

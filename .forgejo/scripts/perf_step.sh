@@ -77,9 +77,15 @@ for config in Debug Release; do
     BENCH_RUN_MILLISECONDS=$(awk '{ printf "%.0f\n", $1 * 1000 }' "$timing_file")
     rm -f "$timing_file"
 
-    export BENCH_LINE=$(grep '^BENCH ' "$build_dir/bench_output.log" | tail -n1)
-    export BENCH_PHASE_LINES=$(grep '^BENCH_PHASE ' "$build_dir/bench_output.log" || true)
-    export BENCH_FILE_LINES=$(grep '^BENCH_FILE ' "$build_dir/bench_output.log" || true)
+    export BENCH_IO_LINE=$(grep '^BENCH_IO ' "$build_dir/bench_output.log" | tail -n1)
+    export BENCH_PARSE_LINE=$(grep '^BENCH_PARSE ' "$build_dir/bench_output.log" | tail -n1)
+    export BENCH_PHASE_LINES=$(grep -E '^BENCH_(IO|PARSE)_PHASE ' "$build_dir/bench_output.log" || true)
+    export BENCH_FILE_LINES=$(grep -E '^BENCH_(IO|PARSE)_FILE ' "$build_dir/bench_output.log" || true)
+
+    if [[ -z "$BENCH_IO_LINE" || -z "$BENCH_PARSE_LINE" ]]; then
+        echo "error: bench_all did not print both BENCH_IO and BENCH_PARSE lines for $config" >&2
+        exit 1
+    fi
 
     # Per-config totals; Debug and Release each report their own, never summed.
     echo "PERF_TOTAL config=$config generation_milliseconds=$generation_milliseconds ide_build_milliseconds=$ide_build_milliseconds compile_milliseconds=$COMPILE_MILLISECONDS bench_run_milliseconds=$BENCH_RUN_MILLISECONDS"

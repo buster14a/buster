@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Records one CI run's compile-time/run-time numbers into the `perf-history`
-# orphan branch, and warns if compile time or parse time per corpus file
+# orphan branch, and warns if compile time or preloaded parse time per corpus file
 # regresses past PERF_REGRESSION_THRESHOLD relative to that runner's own recent
-# median for the same config. Gating the aggregate parse time would make every
-# legitimate corpus addition look like a performance regression.
+# median for the same config. The file-read-per-iteration BENCH_IO mode remains
+# diagnostic only; its old filesystem-dominated history is never read as the
+# new gate.
 #
 # History is kept as one row per metric, not one wide line per run: phase
 # (tokenize/parse) and per-file breakdown (from BUSTER_INSTRUMENT builds)
@@ -19,8 +20,10 @@
 #   RUNNER_NAME     matrix.runner name
 #   CONFIG          build config, e.g. Debug or Release
 #   COMPILE_MILLISECONDS wall-clock milliseconds for the clean build
-#   BENCH_LINE      the raw "BENCH parse_all_tests iterations=... files=...
+#   BENCH_IO_LINE   the raw "BENCH_IO parse_all_tests iterations=... files=...
 #                   min_ns=... median_ns=..." line printed by `ide bench`
+#   BENCH_PARSE_LINE the raw "BENCH_PARSE parse_all_tests iterations=... files=...
+#                    min_ns=... median_ns=..." line printed by `ide bench`
 #   COMMIT_SHA      git sha for this run
 #   REPO_PUSH_URL   https URL (with embedded push credentials) for the
 #                   perf-history remote; used for both the read (baseline
@@ -31,11 +34,11 @@
 #                               (compile time excluded). Recorded, not gated:
 #                               it includes ninja/process overhead, so the
 #                               per-file median remains the gated signal.
-#   BENCH_PHASE_LINES          newline-separated "BENCH_PHASE <name> min_ns=..
-#                               median_ns=.." lines (BUSTER_INSTRUMENT only).
-#                               Recorded, not gated.
-#   BENCH_FILE_LINES            newline-separated "BENCH_FILE path=..
-#                               min_ns=.. median_ns=.." lines (BUSTER_INSTRUMENT
+#   BENCH_PHASE_LINES          newline-separated "BENCH_IO_PHASE" or
+#                               "BENCH_PARSE_PHASE" lines (BUSTER_INSTRUMENT
+#                               only). Recorded, not gated.
+#   BENCH_FILE_LINES            newline-separated "BENCH_IO_FILE" or
+#                               "BENCH_PARSE_FILE" lines (BUSTER_INSTRUMENT
 #                               only). Recorded, not gated -- 21+ per-file
 #                               numbers would make the job flaky on any one
 #                               noisy file; the aggregate already tells you
@@ -52,7 +55,8 @@ set -euo pipefail
 : "${RUNNER_NAME:?RUNNER_NAME is required}"
 : "${CONFIG:?CONFIG is required}"
 : "${COMPILE_MILLISECONDS:?COMPILE_MILLISECONDS is required}"
-: "${BENCH_LINE:?BENCH_LINE is required}"
+: "${BENCH_IO_LINE:?BENCH_IO_LINE is required}"
+: "${BENCH_PARSE_LINE:?BENCH_PARSE_LINE is required}"
 : "${COMMIT_SHA:?COMMIT_SHA is required}"
 : "${REPO_PUSH_URL:?REPO_PUSH_URL is required}"
 
@@ -70,16 +74,40 @@ field_of() {
     printf '%s\n' "$1" | grep -o "${2}=[0-9.]*" | head -n1 | cut -d= -f2
 }
 
-bench_median_ns=$(field_of "$BENCH_LINE" "median_ns")
-bench_min_ns=$(field_of "$BENCH_LINE" "min_ns")
-bench_file_count=$(field_of "$BENCH_LINE" "files")
+case "$BENCH_IO_LINE" in
+    BENCH_IO\ *) ;;
+    *)
+        echo "record_perf.sh: BENCH_IO_LINE has an unexpected prefix: $BENCH_IO_LINE" >&2
+        exit 1
+        ;;
+esac
+case "$BENCH_PARSE_LINE" in
+    BENCH_PARSE\ *) ;;
+    *)
+        echo "record_perf.sh: BENCH_PARSE_LINE has an unexpected prefix: $BENCH_PARSE_LINE" >&2
+        exit 1
+        ;;
+esac
 
-if [[ -z "$bench_median_ns" || -z "$bench_min_ns" || -z "$bench_file_count" || "$bench_file_count" == "0" ]]; then
-    echo "record_perf.sh: could not parse nonzero files and median_ns/min_ns out of BENCH_LINE: $BENCH_LINE" >&2
+bench_io_median_ns=$(field_of "$BENCH_IO_LINE" "median_ns")
+bench_io_min_ns=$(field_of "$BENCH_IO_LINE" "min_ns")
+bench_io_file_count=$(field_of "$BENCH_IO_LINE" "files")
+bench_parse_median_ns=$(field_of "$BENCH_PARSE_LINE" "median_ns")
+bench_parse_min_ns=$(field_of "$BENCH_PARSE_LINE" "min_ns")
+bench_parse_file_count=$(field_of "$BENCH_PARSE_LINE" "files")
+
+if [[ -z "$bench_io_median_ns" || -z "$bench_io_min_ns" || -z "$bench_io_file_count" || "$bench_io_file_count" == "0" ]]; then
+    echo "record_perf.sh: could not parse nonzero files and median_ns/min_ns out of BENCH_IO_LINE: $BENCH_IO_LINE" >&2
+    exit 1
+fi
+if [[ -z "$bench_parse_median_ns" || -z "$bench_parse_min_ns" || -z "$bench_parse_file_count" || "$bench_parse_file_count" == "0" ]]; then
+    echo "record_perf.sh: could not parse nonzero files and median_ns/min_ns out of BENCH_PARSE_LINE: $BENCH_PARSE_LINE" >&2
     exit 1
 fi
 
-bench_median_ns_per_file=$(awk -v median="$bench_median_ns" -v files="$bench_file_count" \
+bench_io_median_ns_per_file=$(awk -v median="$bench_io_median_ns" -v files="$bench_io_file_count" \
+    'BEGIN { printf "%.0f\n", median / files }')
+bench_parse_median_ns_per_file=$(awk -v median="$bench_parse_median_ns" -v files="$bench_parse_file_count" \
     'BEGIN { printf "%.0f\n", median / files }')
 
 # Rows to append this run, built up as we parse the inputs: each entry is
@@ -90,30 +118,46 @@ new_rows+=("metric=compile_milliseconds value=$COMPILE_MILLISECONDS")
 if [[ -n "$BENCH_RUN_MILLISECONDS" ]]; then
     new_rows+=("metric=bench_run_milliseconds value=$BENCH_RUN_MILLISECONDS")
 fi
-new_rows+=("metric=bench_median_ns value=$bench_median_ns")
-new_rows+=("metric=bench_min_ns value=$bench_min_ns")
-new_rows+=("metric=bench_file_count value=$bench_file_count")
-new_rows+=("metric=bench_median_ns_per_file value=$bench_median_ns_per_file")
+new_rows+=("metric=bench_io_median_ns value=$bench_io_median_ns")
+new_rows+=("metric=bench_io_min_ns value=$bench_io_min_ns")
+new_rows+=("metric=bench_io_file_count value=$bench_io_file_count")
+new_rows+=("metric=bench_io_median_ns_per_file value=$bench_io_median_ns_per_file")
+new_rows+=("metric=bench_parse_median_ns value=$bench_parse_median_ns")
+new_rows+=("metric=bench_parse_min_ns value=$bench_parse_min_ns")
+new_rows+=("metric=bench_parse_file_count value=$bench_parse_file_count")
+new_rows+=("metric=bench_parse_median_ns_per_file value=$bench_parse_median_ns_per_file")
 
 if [[ -n "$BENCH_PHASE_LINES" ]]; then
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
+        phase_prefix=$(printf '%s\n' "$line" | awk '{print $1}')
         phase_name=$(printf '%s\n' "$line" | awk '{print $2}')
         median_ns=$(field_of "$line" "median_ns")
         min_ns=$(field_of "$line" "min_ns")
+        case "$phase_prefix" in
+            BENCH_IO_PHASE) phase_mode=io ;;
+            BENCH_PARSE_PHASE) phase_mode=parse ;;
+            *) continue ;;
+        esac
         [[ -z "$phase_name" || -z "$median_ns" || -z "$min_ns" ]] && continue
-        new_rows+=("metric=bench_${phase_name}_median_ns value=$median_ns")
-        new_rows+=("metric=bench_${phase_name}_min_ns value=$min_ns")
+        new_rows+=("metric=bench_${phase_mode}_${phase_name}_median_ns value=$median_ns")
+        new_rows+=("metric=bench_${phase_mode}_${phase_name}_min_ns value=$min_ns")
     done <<< "$BENCH_PHASE_LINES"
 fi
 
 if [[ -n "$BENCH_FILE_LINES" ]]; then
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
+        file_prefix=$(printf '%s\n' "$line" | awk '{print $1}')
         file_path=$(printf '%s\n' "$line" | grep -o 'path=[^ ]*' | cut -d= -f2)
         median_ns=$(field_of "$line" "median_ns")
+        case "$file_prefix" in
+            BENCH_IO_FILE) file_mode=io ;;
+            BENCH_PARSE_FILE) file_mode=parse ;;
+            *) continue ;;
+        esac
         [[ -z "$file_path" || -z "$median_ns" ]] && continue
-        new_rows+=("metric=bench_file_median_ns value=$median_ns file=$file_path")
+        new_rows+=("metric=bench_${file_mode}_file_median_ns value=$median_ns file=$file_path")
     done <<< "$BENCH_FILE_LINES"
 fi
 
@@ -149,8 +193,8 @@ touch "$history_path"
 
 # Prints the value's median for a given metric across this (runner, config)'s
 # last HISTORY_LOOKBACK samples. Integer-division upper-middle index for
-# count entries (index count/2 zero-based), matching parser_parse_bench's
-# own median. Returns failure if there's no prior history for this metric,
+# count entries (index count/2 zero-based), matching parser_bench_run's own
+# median. Returns failure if there's no prior history for this metric,
 # so callers can skip the check on a cold history.
 median_of() {
     local metric="$1"
@@ -193,8 +237,8 @@ check_regression() {
     '
 }
 
-for gated_metric in compile_milliseconds bench_median_ns_per_file; do
-    gated_value=$([[ "$gated_metric" == "compile_milliseconds" ]] && echo "$COMPILE_MILLISECONDS" || echo "$bench_median_ns_per_file")
+for gated_metric in compile_milliseconds bench_parse_median_ns_per_file; do
+    gated_value=$([[ "$gated_metric" == "compile_milliseconds" ]] && echo "$COMPILE_MILLISECONDS" || echo "$bench_parse_median_ns_per_file")
     if baseline=$(median_of "$gated_metric"); then
         check_regression "$gated_metric" "$gated_value" "$baseline"
     else

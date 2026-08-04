@@ -2782,6 +2782,27 @@ BUSTER_TEST_F_DECL UnitTestResult parser_result_tests(UnitTestArguments* argumen
         scratch_end(caller_scratch);
     }
 
+    // The benchmark modes share the parser path but own their source storage
+    // differently: IO reloads each file through the iteration scratch arena,
+    // while parse preloads and releases the complete corpus separately.
+    {
+        ParserBenchResult io_result = parser_bench_run(arena, 1, PARSER_BENCH_MODE_IO);
+        ParserBenchResult parse_result = parser_bench_run(arena, 1, PARSER_BENCH_MODE_PARSE);
+        BUSTER_TEST(arguments, io_result.source_load_succeeded);
+        BUSTER_TEST(arguments, parse_result.source_load_succeeded);
+        BUSTER_TEST(arguments, io_result.file_count == PARSER_FILE_TEST_CASE_COUNT);
+        BUSTER_TEST(arguments, parse_result.file_count == PARSER_FILE_TEST_CASE_COUNT);
+        BUSTER_TEST(arguments, io_result.iterations == 1);
+        BUSTER_TEST(arguments, parse_result.iterations == 1);
+#if BUSTER_INSTRUMENT
+        BUSTER_TEST(arguments, io_result.files != 0);
+        BUSTER_TEST(arguments, parse_result.files != 0);
+#endif
+
+        ParserBenchResult invalid_result = parser_bench_run(arena, 1, PARSER_BENCH_MODE_COUNT);
+        BUSTER_TEST(arguments, !invalid_result.source_load_succeeded);
+    }
+
     bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
     BUSTER_CHECK(expression_arena_destroyed);
     return result;

@@ -722,32 +722,38 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
 // Deliberately independent of the windowing/rendering path `test` drives via
 // run_graphical_app(): bench must run headless on a plain CI runner with no
 // display server, and BUSTER_INCLUDE_TESTS off must not disable it either.
+BUSTER_GLOBAL_LOCAL void print_benchmark_result(String8 label, ParserBenchResult result)
+{
+    string_print(
+        S8("{S8} parse_all_tests iterations={u64} files={u64} min_ns={u64} median_ns={u64}\n"), label, result.iterations, result.file_count,
+        result.min_ns, result.median_ns);
+
+#if BUSTER_INSTRUMENT
+    string_print(S8("{S8}_PHASE tokenize min_ns={u64} median_ns={u64}\n"), label, result.tokenize_min_ns, result.tokenize_median_ns);
+    string_print(S8("{S8}_PHASE parse min_ns={u64} median_ns={u64}\n"), label, result.parse_min_ns, result.parse_median_ns);
+    for (u64 i = 0; i < result.file_count; i += 1)
+    {
+        ParserBenchFileResult file_result = result.files[i];
+        string_print(S8("{S8}_FILE path={S8} min_ns={u64} median_ns={u64}\n"), label, file_result.path, file_result.min_ns, file_result.median_ns);
+    }
+#endif
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_benchmarks(void)
 {
     Arena* arena = arena_create((ArenaCreation){0});
 
-    String8 benchmark_label = S8("BENCH");
-    String8 mmap_flag = os_get_environment_variable(S8("BUSTER_BENCH_MMAP"));
-    bool use_mmap = string_equal(mmap_flag, S8("1")) || string_equal(mmap_flag, S8("true"));
-    ParserBenchResult parse_result = use_mmap ? parser_parse_bench_mmap(arena, 200) : parser_parse_bench(arena, 200);
-    if (use_mmap)
+    ParserBenchResult io_result = parser_bench_run(arena, 200, PARSER_BENCH_MODE_IO);
+    ParserBenchResult parse_result = parser_bench_run(arena, 200, PARSER_BENCH_MODE_PARSE);
+    if (!io_result.source_load_succeeded || !parse_result.source_load_succeeded)
     {
-        benchmark_label = S8("BENCH_MMAP");
+        string_print(S8("parser benchmark source load failed\n"));
+        arena_destroy(arena, 1);
+        return PROCESS_RESULT_FAILED;
     }
-    string_print(
-        S8("{S8} parse_all_tests iterations={u64} files={u64} min_ns={u64} median_ns={u64}\n"), benchmark_label, parse_result.iterations,
-        parse_result.file_count, parse_result.min_ns, parse_result.median_ns);
 
-#if BUSTER_INSTRUMENT
-    string_print(S8("{S8}_PHASE tokenize min_ns={u64} median_ns={u64}\n"), benchmark_label, parse_result.tokenize_min_ns, parse_result.tokenize_median_ns);
-    string_print(S8("{S8}_PHASE parse min_ns={u64} median_ns={u64}\n"), benchmark_label, parse_result.parse_min_ns, parse_result.parse_median_ns);
-    for (u64 i = 0; i < parse_result.file_count; i += 1)
-    {
-        ParserBenchFileResult file_result = parse_result.files[i];
-        string_print(S8("{S8}_FILE path={S8} min_ns={u64} median_ns={u64}\n"), benchmark_label, file_result.path, file_result.min_ns,
-                    file_result.median_ns);
-    }
-#endif
+    print_benchmark_result(S8("BENCH_IO"), io_result);
+    print_benchmark_result(S8("BENCH_PARSE"), parse_result);
 
     arena_destroy(arena, 1);
     return PROCESS_RESULT_SUCCESS;

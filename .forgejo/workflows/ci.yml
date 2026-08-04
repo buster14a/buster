@@ -193,12 +193,13 @@ jobs:
             $benchOutput | ForEach-Object { Write-Output $_ }
             if ($benchExitCode -ne 0) { exit $benchExitCode }
 
-            $benchLine = ($benchOutput | Select-String '^BENCH ' | Select-Object -Last 1).Line
-            if (-not $benchLine) {
-              throw "Perf: no BENCH line found in bench_all output for $config"
+            $benchIoLine = ($benchOutput | Select-String '^BENCH_IO ' | Select-Object -Last 1).Line
+            $benchParseLine = ($benchOutput | Select-String '^BENCH_PARSE ' | Select-Object -Last 1).Line
+            if (-not $benchIoLine -or -not $benchParseLine) {
+              throw "Perf: both BENCH_IO and BENCH_PARSE lines are required in bench_all output for $config"
             }
-            $benchPhaseLines = ($benchOutput | Select-String '^BENCH_PHASE ' | ForEach-Object { $_.Line }) -join "`n"
-            $benchFileLines = ($benchOutput | Select-String '^BENCH_FILE ' | ForEach-Object { $_.Line }) -join "`n"
+            $benchPhaseLines = ($benchOutput | Select-String '^BENCH_(IO|PARSE)_PHASE ' | ForEach-Object { $_.Line }) -join "`n"
+            $benchFileLines = ($benchOutput | Select-String '^BENCH_(IO|PARSE)_FILE ' | ForEach-Object { $_.Line }) -join "`n"
 
             $generationMilliseconds = [int](($genEnd - $genStart).TotalMilliseconds)
             $ideBuildMilliseconds = [int](($buildEnd - $buildStart).TotalMilliseconds)
@@ -212,7 +213,8 @@ jobs:
             $env:CONFIG = $config
             $env:COMPILE_MILLISECONDS = "$compileMilliseconds"
             $env:BENCH_RUN_MILLISECONDS = "$benchRunMilliseconds"
-            $env:BENCH_LINE = $benchLine
+            $env:BENCH_IO_LINE = $benchIoLine
+            $env:BENCH_PARSE_LINE = $benchParseLine
             $env:BENCH_PHASE_LINES = $benchPhaseLines
             $env:BENCH_FILE_LINES = $benchFileLines
             $env:COMMIT_SHA = "${{ github.sha }}"

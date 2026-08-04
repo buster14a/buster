@@ -777,6 +777,13 @@ struct ParserBenchFileResult
 };
 #endif
 
+typedef enum ParserBenchMode
+{
+    PARSER_BENCH_MODE_IO,
+    PARSER_BENCH_MODE_PARSE,
+    PARSER_BENCH_MODE_COUNT,
+} ParserBenchMode;
+
 typedef struct ParserBenchResult ParserBenchResult;
 struct ParserBenchResult
 {
@@ -784,6 +791,7 @@ struct ParserBenchResult
     u64 file_count;
     u64 min_ns;
     u64 median_ns;
+    bool source_load_succeeded;
 #if BUSTER_INSTRUMENT
     u64 tokenize_min_ns;
     u64 tokenize_median_ns;
@@ -794,12 +802,10 @@ struct ParserBenchResult
 #endif
 };
 
-// Parses every entry in the file-test corpus `iterations` times, timing each
-// full pass, and returns min/median wall time. Not gated by
-// BUSTER_INCLUDE_TESTS: this is a benchmark, not a test, and must stay
-// buildable in Release for CI perf tracking.
-BUSTER_F_DECL ParserBenchResult parser_parse_bench(Arena* arena, u64 iterations);
-
-// Parses the file-test corpus with pre-mapped source contents to isolate
-// filesystem read costs from tokenizer/parser throughput.
-BUSTER_F_DECL ParserBenchResult parser_parse_bench_mmap(Arena* arena, u64 iterations);
+// Runs one parser benchmark mode over every entry in the file-test corpus
+// `iterations` times, timing each full pass and returning min/median wall time.
+// PARSER_BENCH_MODE_IO reads every source during every iteration. The parse
+// mode loads every source once, then repeatedly tokenizes and parses the
+// preloaded contents. Not gated by BUSTER_INCLUDE_TESTS: this is a benchmark,
+// not a test, and must stay buildable in Release for CI perf tracking.
+BUSTER_F_DECL ParserBenchResult parser_bench_run(Arena* arena, u64 iterations, ParserBenchMode mode);
