@@ -364,10 +364,11 @@ BUSTER_GLOBAL_LOCAL void link_test_runtime_stack_walk_skip(UnitTestArguments* ar
 }
 
 #if !BUSTER_SANITIZE && !BUSTER_ANDROID && !BUSTER_IOS && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
-BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
+BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(Arena* arena)
 {
 #if BUSTER_WINDOWS
-    return S8("typedef unsigned long long RuntimeU64;"
+    String8 parts[] = {
+        S8("typedef unsigned long long RuntimeU64;"
               "typedef unsigned int RuntimeU32;"
               "typedef unsigned short RuntimeU16;"
               "extern unsigned short RtlCaptureStackBackTrace(unsigned long skip, unsigned long count, void** buffer, unsigned long* hash);"
@@ -397,7 +398,8 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "static RuntimeU64 runtime_large_epilog_unwind_pc;"
               "static RuntimeU64 runtime_body_status;"
               "static RuntimeU64 runtime_large_body_status;"
-              "static RuntimeU32 runtime_unwind_read_u16(unsigned char* bytes)"
+              "static RuntimeU32 runtime_unwind_read_u16(unsigned char* bytes)"),
+        S8(
               "{ return (RuntimeU32)bytes[0] | ((RuntimeU32)bytes[1] << 8); }"
               "static RuntimeU64 runtime_unwind_read_u32(unsigned char* bytes)"
               "{ return (RuntimeU64)bytes[0] | ((RuntimeU64)bytes[1] << 8) | ((RuntimeU64)bytes[2] << 16) | ((RuntimeU64)bytes[3] << 24); }"
@@ -427,7 +429,8 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "        if (length)"
               "        {"
               "            RuntimeU64 candidate_base = 0;"
-              "            RuntimeFunction* candidate_entry = RtlLookupFunctionEntry((RuntimeU64)(bytes + offset) + 1, &candidate_base, 0);"
+              "            RuntimeFunction* candidate_entry = RtlLookupFunctionEntry((RuntimeU64)(bytes + offset) + 1, &candidate_base, 0);"),
+        S8(
               "            if (candidate_entry == target_entry && candidate_base == function_base)"
               "            { result = (RuntimeU64)(bytes + offset); found_length = length; }"
               "        }"
@@ -457,7 +460,8 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "        {"
               "            if (info == 0)"
               "            {"
-              "                if (slot + 1 >= code_count) { return 0; }"
+              "                if (slot + 1 >= code_count) { return 0; }"),
+        S8(
               "                RuntimeU32 size = 8 * runtime_unwind_read_u16(unwind + 4 + (slot + 1) * 2);"
               "                if (!size || fixed_size > 0xffffffffU - size) { return 0; }"
               "                fixed_size += size; slot += 1;"
@@ -487,7 +491,8 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "    }"
               "    RuntimeU64 function_offset = (RuntimeU64)function - image_base;"
               "    RuntimeU64 function_begin = image_base + function_entry->begin_address;"
-              "    RuntimeU64 function_end = image_base + function_entry->end_address;"
+              "    RuntimeU64 function_end = image_base + function_entry->end_address;"),
+        S8(
               "    if (!context || function_begin > 0xffffffffffffffffULL - prolog_size) { return 0; }"
               "    RuntimeU64 prolog_end = function_begin + prolog_size;"
               "    RuntimeU64 captured_pc = context->rip; RuntimeU64 captured_base = 0;"
@@ -517,7 +522,8 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "    for (RuntimeU32 index = 0; index < 156; index += 1) { context_storage[index] = 0; }"
               "    RuntimeContext* context = (RuntimeContext*)(((RuntimeU64)(void*)&context_storage[0] + 15) & ~(RuntimeU64)15);"
               "    fake_stack[0] = 0x1122334455667788ULL; fake_stack[1] = (RuntimeU64)expected_main + 16;"
-              "    context->context_flags = 0x0010001f; context->rsp = (RuntimeU64)&fake_stack[0]; context->rip = control_pc + (RuntimeU64)add_length;"
+              "    context->context_flags = 0x0010001f; context->rsp = (RuntimeU64)&fake_stack[0]; context->rip = control_pc + (RuntimeU64)add_length;"),
+        S8(
               "    void* handler_data = 0;"
               "    RuntimeU64 establisher_frame = 0;"
               "    RtlVirtualUnwind(0, image_base, context->rip, function_entry, context, &handler_data, &establisher_frame, 0);"
@@ -547,7 +553,8 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "    runtime_body_status = (RuntimeU64)runtime_unwind_body((void*)stack_walk_normal, (void*)main, body_context);"
               "    runtime_epilog_status = (RuntimeU64)runtime_unwind_epilog((void*)stack_walk_normal, (void*)main);"
               "    int frame_count = (int)RtlCaptureStackBackTrace(0, (unsigned long)size, buffer, 0);"
-              "    if (dynamic_padding[0] != (unsigned char)(pressure ^ 0x5a) || dynamic_padding[32] != (unsigned char)(pressure ^ 0x3c) ||"
+              "    if (dynamic_padding[0] != (unsigned char)(pressure ^ 0x5a) || dynamic_padding[32] != (unsigned char)(pressure ^ 0x3c) ||"),
+        S8(
               "        dynamic_padding[dynamic_size - 1] != (unsigned char)((pressure >> 8) ^ 0xa5)) { return -2; }"
               "    return frame_count;"
               "}"
@@ -577,7 +584,8 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "    runtime_mutate_register(original);"
               "    runtime_mutate_stack(1, 2, 3, 4, original);"
               "    return runtime_add_one(0) == 1 && runtime_add_many(1, 2, 3, 4, 5) == 15 &&"
-              "           original.first == 1 && original.second == 2 && original.third == 3 &&"
+              "           original.first == 1 && original.second == 2 && original.third == 3 &&"),
+        S8(
               "           made.first == 4 && made.second == 5 && made.third == 6 && transformed.first == 2;"
               "}"
               "int stack_walk_large(void** buffer, int size, int first, int second, int third, RuntimeBig incoming)"
@@ -607,7 +615,8 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "    runtime_large_epilog_unwind_pc = runtime_epilog_unwind_pc;"
               "    int frame_count = (int)RtlCaptureStackBackTrace(0, (unsigned long)size, buffer, 0);"
               "    if (dynamic_padding[0] != (unsigned char)(pressure ^ 0x5a) || dynamic_padding[32] != (unsigned char)(pressure ^ 0x3c) ||"
-              "        dynamic_padding[dynamic_size - 1] != (unsigned char)((pressure >> 8) ^ 0xa5) ||"
+              "        dynamic_padding[dynamic_size - 1] != (unsigned char)((pressure >> 8) ^ 0xa5) ||"),
+        S8(
               "        padding[0] != (unsigned char)pressure || padding[39999] != (unsigned char)(pressure >> 8)) { return -2; }"
               "    return frame_count;"
               "}"
@@ -638,8 +647,11 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "    WriteFile(GetStdHandle(-11), &report, sizeof(report), &written, 0);"
               "    return normal_count > 0 && large_count > 0 && report.semantic_status != 0 && report.body_status != 0 && report.large_body_status != 0 &&"
               "           report.epilog_status != 0 && report.large_epilog_status != 0 ? 0 : 1;"
-              "}");
+              "}"),
+    };
+    return string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
 #elif BUSTER_LINUX || BUSTER_MACOS
+    BUSTER_UNUSED(arena);
     return S8("typedef unsigned long long RuntimeU64;"
               "extern int backtrace(void** buffer, int size);"
               "extern long write(int file_descriptor, void* buffer, unsigned long byte_count);"
@@ -681,6 +693,7 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "    return normal_count > 0 && large_count > 0 ? 0 : 1;"
               "}");
 #else
+    BUSTER_UNUSED(arena);
     return (String8){0};
 #endif
 }
@@ -1027,7 +1040,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk(UnitTestArgument
 #elif BUSTER_WINDOWS && !(BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
     link_test_runtime_stack_walk_skip(arguments, S8("Windows runtime stack walking is only enabled for native x64 and AArch64"));
 #elif !BUSTER_SANITIZE && !BUSTER_ANDROID && !BUSTER_IOS && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
-    String8 source = link_test_runtime_stack_walk_source();
+    String8 source = link_test_runtime_stack_walk_source(arguments->arena);
     String8 source_path = link_test_temporary_executable_path(arguments->arena, S8("buster-runtime-stack-walk"), S8(".c"));
 #if BUSTER_WINDOWS
     String8 output_suffix = S8(".exe");
