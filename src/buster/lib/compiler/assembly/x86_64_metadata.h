@@ -4,6 +4,8 @@
 
 #define BUSTER_X86_METADATA_MAX_OPERAND_SHAPE 32
 #define BUSTER_X86_METADATA_ANY_U8 0xff
+#define BUSTER_X86_METADATA_OPERAND_ANY BUSTER_X86_METADATA_ANY_U8
+#define BUSTER_X86_METADATA_ADDRESS_SIZE_ANY 0
 
 typedef enum BusterX86MetadataCoverageClass
 {
@@ -74,6 +76,52 @@ typedef enum BusterX86MetadataOperandKind
     BUSTER_X86_METADATA_OPERAND_KIND_COUNT,
 } BusterX86MetadataOperandKind;
 
+typedef enum BusterX86MetadataPhysicalClass
+{
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_NONE,
+    // The compact snapshot keeps the source atom but does not publish a
+    // generated physical class for every spelling.  UNKNOWN is distinct from
+    // SPECIAL so callers can tell a known architectural pseudo-register from
+    // an unclassified token and refine the latter with has_atom.
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_BND,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_CONTROL,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_DEBUG,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_SEGMENT,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_MEMORY,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_IMMEDIATE,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_RELATIVE,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_ABSOLUTE,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_BASE,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_ADDRESS_GENERATOR,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_PSEUDO,
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_COUNT,
+} BusterX86MetadataPhysicalClass;
+
+enum
+{
+    BUSTER_X86_METADATA_PHYSICAL_CLASS_ANY = BUSTER_X86_METADATA_ANY_U8,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_8 = 1u << 0,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_16 = 1u << 1,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_32 = 1u << 2,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_64 = 1u << 3,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_80 = 1u << 4,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_128 = 1u << 5,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_256 = 1u << 6,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_512 = 1u << 7,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_1024 = 1u << 8,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN = 1u << 15,
+    BUSTER_X86_METADATA_PHYSICAL_WIDTH_ANY = 0,
+};
+
 enum
 {
     BUSTER_X86_METADATA_ACCESS_READ = 1u << 0,
@@ -142,6 +190,19 @@ enum
     BUSTER_X86_METADATA_MODE_EANOT16 = 1u << 7,
 };
 
+typedef enum BusterX86MetadataExecutionMode
+{
+    // The normal resolver mode.  This API describes x86-64 instruction
+    // candidates; include_not64 is an explicit opt-in for inspecting rows
+    // that are useful for coverage/debugging but are not legal x86-64 forms.
+    BUSTER_X86_METADATA_EXECUTION_MODE_64,
+    // An explicit inspection mode.  Non-64 rows still require include_not64;
+    // this value only says not to prefer the MODE_64 bit when inspecting a
+    // deliberately widened snapshot query.
+    BUSTER_X86_METADATA_EXECUTION_MODE_ANY,
+    BUSTER_X86_METADATA_EXECUTION_MODE_COUNT,
+} BusterX86MetadataExecutionMode;
+
 enum
 {
     BUSTER_X86_METADATA_FIELD_MODRM = 1u << 0,
@@ -203,6 +264,12 @@ struct BusterX86MetadataOperand
     u8 access;
     u8 field_source;
     u8 reserved[3];
+    // These are normalized views derived from the imported XED operand
+    // vocabulary.  A zero/UNKNOWN width is deliberate when the source token
+    // is symbolic; callers can still match the physical class without
+    // guessing an operand-size choice.
+    u8 physical_class;
+    u16 physical_width_flags;
 };
 
 typedef struct BusterX86MetadataForm BusterX86MetadataForm;
@@ -303,6 +370,7 @@ typedef enum BusterX86MetadataValidationError
     BUSTER_X86_METADATA_VALIDATION_COVERAGE_CLASSIFICATION,
     BUSTER_X86_METADATA_VALIDATION_RESERVED,
     BUSTER_X86_METADATA_VALIDATION_INDEX_CAPACITY,
+    BUSTER_X86_METADATA_VALIDATION_ENCODING_FIELDS,
     BUSTER_X86_METADATA_VALIDATION_ERROR_COUNT,
 } BusterX86MetadataValidationError;
 
@@ -377,6 +445,105 @@ struct BusterX86MetadataCandidateIterator
     u32 position;
 };
 
+typedef struct BusterX86MetadataOperandSignature BusterX86MetadataOperandSignature;
+struct BusterX86MetadataOperandSignature
+{
+    // Resolution consumes operands in generated metadata order.  By default
+    // only visible operands are considered; set include_implicit on the query
+    // when the caller intentionally supplies the complete metadata sequence.
+    // An immediate/relative signature with no physical width is intentionally
+    // retained across symbolic width families; value-range checking and final
+    // encoding selection are separate later stages.
+    String8 atom;
+    String8 width;
+    u8 kind;
+    u8 field_source;
+    u8 access;
+    u8 slot;
+    u8 physical_class;
+    u16 physical_width_flags;
+    bool has_atom;
+    bool has_width;
+    bool has_field_source;
+    bool has_access;
+    bool has_slot;
+    bool has_physical_class;
+    bool has_physical_width;
+    bool has_visible;
+    u8 visible;
+    u8 reserved[2];
+};
+
+typedef struct BusterX86MetadataFeatureInput BusterX86MetadataFeatureInput;
+struct BusterX86MetadataFeatureInput
+{
+    // Names are borrowed and never modified.  Matching is case-insensitive.
+    // Raw snapshot ISA names remain accepted for compatibility, while known
+    // composite ISA names are conservatively mapped to the canonical target
+    // feature spellings (for example AMX_TILE -> amx-tile and AVX10.2 forms
+    // require both avx10.2 and their specific auxiliary feature).  A literal
+    // "*" explicitly accepts any feature and is intended only for callers
+    // that deliberately bypass target-feature filtering.
+    String8 const* names;
+    u32 count;
+};
+
+typedef enum BusterX86MetadataResolveStatus
+{
+    BUSTER_X86_METADATA_RESOLVE_INVALID_INPUT,
+    BUSTER_X86_METADATA_RESOLVE_UNKNOWN_MNEMONIC,
+    BUSTER_X86_METADATA_RESOLVE_WRONG_OPERAND_COUNT,
+    BUSTER_X86_METADATA_RESOLVE_EXECUTION_MODE_MISMATCH,
+    BUSTER_X86_METADATA_RESOLVE_OPERAND_CLASS_WIDTH_MISMATCH,
+    BUSTER_X86_METADATA_RESOLVE_ADDRESSING_FIELD_MISMATCH,
+    BUSTER_X86_METADATA_RESOLVE_UNSUPPORTED_DECORATOR,
+    BUSTER_X86_METADATA_RESOLVE_UNAVAILABLE_TARGET_FEATURE,
+    BUSTER_X86_METADATA_RESOLVE_AMBIGUOUS_OR_UNSUPPORTED_METADATA,
+    BUSTER_X86_METADATA_RESOLVE_OUTPUT_CAPACITY,
+    BUSTER_X86_METADATA_RESOLVE_SUCCESS,
+    BUSTER_X86_METADATA_RESOLVE_STATUS_COUNT,
+} BusterX86MetadataResolveStatus;
+
+typedef struct BusterX86MetadataResolveQuery BusterX86MetadataResolveQuery;
+struct BusterX86MetadataResolveQuery
+{
+    String8 mnemonic;
+    BusterX86MetadataOperandSignature const* operands;
+    u32 operand_count;
+    BusterX86MetadataFeatureInput features;
+    u16 decorator_flags;
+    u16 apx_flags;
+    u16 amx_flags;
+    // These are exact required/forbidden bits from the generated field_flags
+    // contract.  They cover MODRM/SIB/VSIB, memory/register, displacement,
+    // immediate, relative, and FIELD_END; no addressing property is inferred
+    // from address_size alone.
+    u16 required_field_flags;
+    u16 forbidden_field_flags;
+    u8 address_size;
+    u8 execution_mode;
+    bool include_implicit;
+    bool include_privileged;
+    bool include_not64;
+    u8 reserved;
+};
+
+typedef struct BusterX86MetadataResolveResult BusterX86MetadataResolveResult;
+struct BusterX86MetadataResolveResult
+{
+    BusterX86MetadataResolveStatus status;
+    u32* form_ids;
+    u32 form_id_capacity;
+    u32 candidate_count;
+    u32 required_candidate_count;
+    BusterX86MetadataCandidateRange mnemonic_candidates;
+    BusterX86MetadataString required_feature;
+    u16 unsupported_decorator_flags;
+    u16 unsupported_apx_flags;
+    u16 unsupported_amx_flags;
+    u16 reserved;
+};
+
 BUSTER_F_DECL u32 buster_x86_metadata_schema_version(void);
 BUSTER_F_DECL u32 buster_x86_metadata_form_count(void);
 BUSTER_F_DECL u32 buster_x86_metadata_normalized_form_count(void);
@@ -404,6 +571,11 @@ BUSTER_F_DECL bool buster_x86_metadata_candidate_at(BusterX86MetadataCandidateRa
 BUSTER_F_DECL bool buster_x86_metadata_coverage_candidate_at(BusterX86MetadataCoverageRange candidates, u32 position,
                                                                u32* coverage_id);
 BUSTER_F_DECL bool buster_x86_metadata_candidate_next(BusterX86MetadataCandidateIterator* iterator, u32* form_id);
+// Resolves a typed signature to every matching snapshot-local form ID in
+// generated canonical order. This filters candidates only; it does not choose
+// an encoding. Use each returned form's stable_hash for durable identity.
+BUSTER_F_DECL BusterX86MetadataResolveResult buster_x86_metadata_resolve(BusterX86MetadataResolveQuery query, u32* form_ids,
+                                                                          u32 form_id_capacity);
 
 #if BUSTER_INCLUDE_TESTS
 typedef enum BusterX86MetadataValidationPatchKind
@@ -414,9 +586,19 @@ typedef enum BusterX86MetadataValidationPatchKind
     BUSTER_X86_METADATA_PATCH_FORM_OPERAND_RANGE,
     BUSTER_X86_METADATA_PATCH_FORM_COVERAGE_CLASS,
     BUSTER_X86_METADATA_PATCH_FORM_PREFIX_KIND,
+    BUSTER_X86_METADATA_PATCH_FORM_FIELD_FLAGS,
+    BUSTER_X86_METADATA_PATCH_FORM_DECORATOR_FLAGS,
+    BUSTER_X86_METADATA_PATCH_FORM_APX_FLAGS,
+    BUSTER_X86_METADATA_PATCH_FORM_AMX_FLAGS,
+    BUSTER_X86_METADATA_PATCH_FORM_MODE_FLAGS,
+    BUSTER_X86_METADATA_PATCH_FORM_ENCODING_WIDTHS,
+    BUSTER_X86_METADATA_PATCH_FORM_MANDATORY_PREFIX,
     BUSTER_X86_METADATA_PATCH_FORM_RESERVED,
     BUSTER_X86_METADATA_PATCH_FORM_RESERVED2,
     BUSTER_X86_METADATA_PATCH_OPERAND_RESERVED,
+    BUSTER_X86_METADATA_PATCH_OPERAND_KIND,
+    BUSTER_X86_METADATA_PATCH_OPERAND_FIELD_SOURCE,
+    BUSTER_X86_METADATA_PATCH_OPERAND_ACCESS,
     BUSTER_X86_METADATA_PATCH_COVERAGE_SOURCE_HASH,
     BUSTER_X86_METADATA_PATCH_COVERAGE_FORM_ID,
     BUSTER_X86_METADATA_PATCH_COVERAGE_CLASS,
@@ -439,4 +621,6 @@ struct BusterX86MetadataValidationPatch
 
 BUSTER_TEST_F_DECL bool buster_x86_metadata_validate_patch(BusterX86MetadataValidationPatch patch,
                                                             BusterX86MetadataValidationResult* result);
+BUSTER_TEST_F_DECL bool buster_x86_metadata_test_execution_mode_matches(u16 mode_flags, u8 coverage_class,
+                                                                         bool include_not64, u8 execution_mode);
 #endif
