@@ -1744,7 +1744,7 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
         u64 comment = original.length;
         for (u64 index = 0; index < original.length; index += 1)
         {
-            if (original.pointer[index] == ';' ||
+            if (original.pointer[index] == ';' || (syntax == ASSEMBLY_SYNTAX_ATT && original.pointer[index] == '#') ||
                 (original.pointer[index] == '/' && index + 1 < original.length && original.pointer[index + 1] == '/'))
             {
                 comment = index;
@@ -1787,11 +1787,45 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
             }
             if (statement.length)
             {
-                u32 instruction_count = builder->instruction_count;
-                assembly_instruction_parse(builder, statement, line, column, output_offset, target, syntax);
-                if (builder->instruction_count != instruction_count)
+                u64 directive_end = 0;
+                while (directive_end < statement.length && !assembly_space(statement.pointer[directive_end]))
                 {
-                    output_offset += builder->instructions[builder->instruction_count - 1].size;
+                    directive_end += 1;
+                }
+                String8 directive = string_slice(statement, 0, directive_end);
+                String8 qualifier = assembly_trim(string_slice(statement, directive_end, statement.length));
+                if (assembly_word_equal(directive, S8(".intel_syntax")))
+                {
+                    if (target.cpu_arch != CPU_ARCH_X86_64 || !assembly_word_equal(qualifier, S8("noprefix")))
+                    {
+                        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_SYNTAX, line, column, (u32)statement.length,
+                                            S8(".intel_syntax requires the x86 'noprefix' qualifier"));
+                    }
+                    else
+                    {
+                        syntax = ASSEMBLY_SYNTAX_INTEL;
+                    }
+                }
+                else if (assembly_word_equal(directive, S8(".att_syntax")))
+                {
+                    if (target.cpu_arch != CPU_ARCH_X86_64 || !assembly_word_equal(qualifier, S8("prefix")))
+                    {
+                        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_SYNTAX, line, column, (u32)statement.length,
+                                            S8(".att_syntax requires the x86 'prefix' qualifier"));
+                    }
+                    else
+                    {
+                        syntax = ASSEMBLY_SYNTAX_ATT;
+                    }
+                }
+                else
+                {
+                    u32 instruction_count = builder->instruction_count;
+                    assembly_instruction_parse(builder, statement, line, column, output_offset, target, syntax);
+                    if (builder->instruction_count != instruction_count)
+                    {
+                        output_offset += builder->instructions[builder->instruction_count - 1].size;
+                    }
                 }
             }
         }

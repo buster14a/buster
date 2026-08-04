@@ -23,6 +23,39 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86.relocation_count == 1 && x86.relocations[0].offset == 2 && x86.relocations[0].symbol == 1 &&
                                x86.relocations[0].addend == -4 && x86.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
 
+    AssemblyEncodeResult x86_syntax_switches = assembly_encode(
+        arguments->arena,
+        S8("mov rax, rbx ; Intel comment\n"
+           ".att_syntax prefix\n"
+           "movq %rcx, %rdx # AT&T comment\n"
+           ".intel_syntax noprefix\n"
+           "add r8, r9 // common comment\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_x86_syntax_switches[] = {
+        0x48, 0x89, 0xd8,
+        0x48, 0x89, 0xca,
+        0x4d, 0x01, 0xc8,
+    };
+    BUSTER_TEST(arguments, x86_syntax_switches.diagnostic_count == 0 &&
+                               x86_syntax_switches.bytes.length == sizeof(expected_x86_syntax_switches) &&
+                               memcmp(x86_syntax_switches.bytes.pointer, expected_x86_syntax_switches,
+                                      sizeof(expected_x86_syntax_switches)) == 0);
+    AssemblyEncodeResult invalid_x86_syntax_switches = assembly_encode(
+        arguments->arena, S8(".intel_syntax prefix\n.att_syntax noprefix\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_x86_syntax_switches.diagnostic_count == 2 &&
+                               invalid_x86_syntax_switches.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_SYNTAX &&
+                               invalid_x86_syntax_switches.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_INVALID_SYNTAX);
+    Target aarch64_syntax_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    AssemblyEncodeResult invalid_aarch64_syntax_switch = assembly_encode(
+        arguments->arena, S8(".intel_syntax noprefix\n"),
+        (AssemblyEncodeOptions){.target = aarch64_syntax_target, .syntax = ASSEMBLY_SYNTAX_DEFAULT});
+    BUSTER_TEST(arguments, invalid_aarch64_syntax_switch.diagnostic_count == 1 &&
+                               invalid_aarch64_syntax_switch.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_SYNTAX);
+
     u8 expected_x86_register_forms[] = {
         0x48, 0x89, 0xd8,
         0x49, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
