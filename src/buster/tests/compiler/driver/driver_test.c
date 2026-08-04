@@ -219,7 +219,7 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX512VL));
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_AVX512BW));
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, feature_invocation.target),
-                       S8("avx,avx2,avx512bw,avx512f,avx512vl,bmi1,cx16,lzcnt,popcnt,sse2,sse3"));
+                       S8("avx,avx2,avx512bw,avx512f,avx512vl,bmi1,cx16,lzcnt,pclmul,popcnt,sse2,sse3"));
     String8 invalid_avx512_dependency_command_line[] = {
         S8("--target=x86_64-linux"),
         S8("-mattr=+avx512f,+avx512vl,-avx2,+avx512bw"),

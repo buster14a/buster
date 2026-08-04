@@ -412,7 +412,19 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     {
         result |= TARGET_CPU_FEATURE_X86_CX16;
     }
-    TargetCpuFeatures avx512_skylake = TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX2 | TARGET_CPU_FEATURE_X86_AVX512F |
+    TargetCpuFeatures avx2_haswell = TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX2 | TARGET_CPU_FEATURE_X86_PCLMUL;
+    TargetCpuFeatures avx2_skylake = avx2_haswell | TARGET_CPU_FEATURE_X86_AES;
+    TargetCpuFeatures avx2_alderlake = avx2_skylake | TARGET_CPU_FEATURE_X86_GFNI | TARGET_CPU_FEATURE_X86_VAES |
+                                       TARGET_CPU_FEATURE_X86_VPCLMULQDQ | TARGET_CPU_FEATURE_X86_AVX_VNNI;
+    TargetCpuFeatures avx2_arrowlake = avx2_alderlake | TARGET_CPU_FEATURE_X86_AVX_IFMA | TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT |
+                                       TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8;
+    TargetCpuFeatures avx2_arrowlake_s = avx2_arrowlake | TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16;
+    TargetCpuFeatures amd_btver2 = TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AES | TARGET_CPU_FEATURE_X86_PCLMUL;
+    TargetCpuFeatures amd_bdver1 = amd_btver2;
+    TargetCpuFeatures amd_bdver4 = amd_bdver1 | TARGET_CPU_FEATURE_X86_AVX2;
+    TargetCpuFeatures amd_zen1 = avx2_haswell | TARGET_CPU_FEATURE_X86_AES;
+    TargetCpuFeatures amd_zen3 = amd_zen1 | TARGET_CPU_FEATURE_X86_VAES | TARGET_CPU_FEATURE_X86_VPCLMULQDQ;
+    TargetCpuFeatures avx512_skylake = avx2_skylake | TARGET_CPU_FEATURE_X86_AVX512F |
                                        TARGET_CPU_FEATURE_X86_AVX512VL | TARGET_CPU_FEATURE_X86_AVX512BW | TARGET_CPU_FEATURE_X86_AVX512CD |
                                        TARGET_CPU_FEATURE_X86_AVX512DQ;
     TargetCpuFeatures avx512_cannonlake = avx512_skylake | TARGET_CPU_FEATURE_X86_AVX512IFMA | TARGET_CPU_FEATURE_X86_AVX512VBMI;
@@ -430,19 +442,42 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     {
     case CPU_MODEL_AMD_ZEN_1:
     case CPU_MODEL_AMD_ZEN_2:
+        result |= amd_zen1;
+        break;
     case CPU_MODEL_AMD_ZEN_3:
+        result |= amd_zen3;
+        break;
+    case CPU_MODEL_AMD_BT_2:
+        result |= amd_btver2;
+        break;
+    case CPU_MODEL_AMD_BD_1:
+    case CPU_MODEL_AMD_BD_2:
+    case CPU_MODEL_AMD_BD_3:
+        result |= amd_bdver1;
+        break;
+    case CPU_MODEL_AMD_BD_4:
+        result |= amd_bdver4;
+        break;
     case CPU_MODEL_INTEL_HASWELL:
     case CPU_MODEL_INTEL_BROADWELL:
+        result |= avx2_haswell;
+        break;
     case CPU_MODEL_INTEL_SKYLAKE:
+        result |= avx2_skylake;
+        break;
     case CPU_MODEL_INTEL_ALDERLAKE:
     case CPU_MODEL_INTEL_RAPTORLAKE:
     case CPU_MODEL_INTEL_METEORLAKE:
     case CPU_MODEL_INTEL_GRACEMONT:
+        result |= avx2_alderlake;
+        break;
     case CPU_MODEL_INTEL_ARROWLAKE:
+        result |= avx2_arrowlake;
+        break;
     case CPU_MODEL_INTEL_ARROWLAKE_S:
     case CPU_MODEL_INTEL_LUNARLAKE:
     case CPU_MODEL_INTEL_PANTHERLAKE:
-        result |= TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX2;
+        result |= avx2_arrowlake_s;
         break;
     case CPU_MODEL_AMD_ZEN_4:
         result |= avx512_ice_lake | TARGET_CPU_FEATURE_X86_AVX512BF16;
@@ -481,12 +516,14 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
         break;
     case CPU_MODEL_INTEL_KNL:
         result |= TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX2 | TARGET_CPU_FEATURE_X86_AVX512F | TARGET_CPU_FEATURE_X86_AVX512CD |
-                  TARGET_CPU_FEATURE_X86_AVX512PF | TARGET_CPU_FEATURE_X86_AVX512ER;
+                  TARGET_CPU_FEATURE_X86_AVX512PF | TARGET_CPU_FEATURE_X86_AVX512ER | TARGET_CPU_FEATURE_X86_AES |
+                  TARGET_CPU_FEATURE_X86_PCLMUL;
         break;
     case CPU_MODEL_INTEL_KNM:
         result |= TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX2 | TARGET_CPU_FEATURE_X86_AVX512F | TARGET_CPU_FEATURE_X86_AVX512CD |
                   TARGET_CPU_FEATURE_X86_AVX512PF | TARGET_CPU_FEATURE_X86_AVX512ER | TARGET_CPU_FEATURE_X86_AVX5124VNNIW |
-                  TARGET_CPU_FEATURE_X86_AVX5124FMAPS;
+                  TARGET_CPU_FEATURE_X86_AVX5124FMAPS | TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ | TARGET_CPU_FEATURE_X86_AES |
+                  TARGET_CPU_FEATURE_X86_PCLMUL;
         break;
     case CPU_MODEL_INTEL_GRANITE_RAPIDS:
         result |= granite_rapids;
@@ -499,12 +536,31 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                   TARGET_CPU_FEATURE_X86_MOVRS | TARGET_CPU_FEATURE_X86_APX |
                   TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF |
                   TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8 | TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16 | TARGET_CPU_FEATURE_X86_AVX_IFMA |
-                  TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT | TARGET_CPU_FEATURE_X86_AMX_FP8 | TARGET_CPU_FEATURE_X86_AMX_AVX512 |
+                  TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT | TARGET_CPU_FEATURE_X86_AMX_FP8 |
+                  TARGET_CPU_FEATURE_X86_AMX_AVX512 |
                   TARGET_CPU_FEATURE_X86_AMX_MOVRS;
+        break;
+    case CPU_MODEL_INTEL_WESTMERE:
+    case CPU_MODEL_INTEL_SILVERMONT:
+        result |= TARGET_CPU_FEATURE_X86_PCLMUL;
+        break;
+    case CPU_MODEL_INTEL_GOLDMONT:
+    case CPU_MODEL_INTEL_GOLDMONT_PLUS:
+        result |= TARGET_CPU_FEATURE_X86_AES | TARGET_CPU_FEATURE_X86_PCLMUL;
+        break;
+    case CPU_MODEL_INTEL_TREMONT:
+        result |= TARGET_CPU_FEATURE_X86_AES | TARGET_CPU_FEATURE_X86_PCLMUL | TARGET_CPU_FEATURE_X86_GFNI;
+        break;
+    case CPU_MODEL_INTEL_SIERRAFOREST:
+    case CPU_MODEL_INTEL_GRANDRIDGE:
+        result |= avx2_arrowlake;
+        break;
+    case CPU_MODEL_INTEL_CLEARWATERFOREST:
+        result |= avx2_arrowlake_s;
         break;
     case CPU_MODEL_INTEL_SANDY_BRIDGE:
     case CPU_MODEL_INTEL_IVY_BRIDGE:
-        result |= TARGET_CPU_FEATURE_X86_AVX;
+        result |= TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_PCLMUL;
         break;
     default:
         break;
@@ -621,6 +677,8 @@ bool target_cpu_features_are_valid(Target target)
     {
         return false;
     }
+    // Native decoding conservatively under-reports malformed hardware pairs;
+    // explicit synthetic targets must obey the same AVX10 co-enumeration rule.
     if (!!(features & TARGET_CPU_FEATURE_X86_AVX10_2) != !!(features & TARGET_CPU_FEATURE_X86_AVX10_V1_AUX))
     {
         return false;
@@ -629,6 +687,7 @@ bool target_cpu_features_are_valid(Target target)
     {
         return false;
     }
+    // APX-F and APX_NCI_NDD_NF are likewise a co-enumerated hardware pair.
     if (!!(features & TARGET_CPU_FEATURE_X86_APX) != !!(features & TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF))
     {
         return false;
@@ -641,7 +700,8 @@ bool target_cpu_features_are_valid(Target target)
         return false;
     }
     TargetCpuFeatures amx_subfeatures = TARGET_CPU_FEATURE_X86_AMX_INT8 | TARGET_CPU_FEATURE_X86_AMX_BF16 | TARGET_CPU_FEATURE_X86_AMX_FP16 |
-                                        TARGET_CPU_FEATURE_X86_AMX_COMPLEX | TARGET_CPU_FEATURE_X86_AMX_FP8 | TARGET_CPU_FEATURE_X86_AMX_AVX512 |
+                                        TARGET_CPU_FEATURE_X86_AMX_COMPLEX | TARGET_CPU_FEATURE_X86_AMX_FP8 |
+                                        TARGET_CPU_FEATURE_X86_AMX_AVX512 |
                                         TARGET_CPU_FEATURE_X86_AMX_MOVRS;
     if ((features & amx_subfeatures) && !(features & TARGET_CPU_FEATURE_X86_AMX_TILE))
     {

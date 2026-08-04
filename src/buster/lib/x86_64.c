@@ -215,15 +215,12 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
         // not decode the reserved field as independent capabilities.
         result |= TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX2 | TARGET_CPU_FEATURE_X86_AVX512F |
                   TARGET_CPU_FEATURE_X86_AVX10_1 | TARGET_CPU_FEATURE_X86_AVX10_512;
-        if (avx10_version >= 2)
-        {
-            result |= TARGET_CPU_FEATURE_X86_AVX10_2;
-        }
         if (avx10_version >= 2 && has_leaf_24 && input.leaf_24_0.eax >= 1 && (input.leaf_24_1.ecx & (UINT32_C(1) << 2)))
         {
             // AVX10.2 and AVX10_V1_AUX co-enumerate on conforming hardware.
-            // A version-one processor must not acquire the auxiliary bit.
-            result |= TARGET_CPU_FEATURE_X86_AVX10_V1_AUX;
+            // Require both fields so malformed synthetic input under-reports
+            // the pair instead of manufacturing an impossible target.
+            result |= TARGET_CPU_FEATURE_X86_AVX10_2 | TARGET_CPU_FEATURE_X86_AVX10_V1_AUX;
         }
     }
 
@@ -261,6 +258,9 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
 
     bool apx_hardware = has_leaf_7_1 && (leaf_7_1.edx & (UINT32_C(1) << 21)) != 0;
     bool apx_nci_hardware = input.maximum_basic_leaf >= UINT32_C(0x29) && (input.leaf_29_0.ebx & (UINT32_C(1) << 0)) != 0;
+    // APX-F and APX_NCI_NDD_NF co-enumerate on conforming hardware.  Require
+    // both fields and usable APX state so malformed synthetic input under-
+    // reports the pair instead of publishing an impossible target.
     if (apx_hardware && apx_nci_hardware && apx_state)
     {
         result |= TARGET_CPU_FEATURE_X86_APX | TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF;
@@ -274,10 +274,13 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     bool amx_complex_hardware = has_leaf_7_1 && (leaf_7_1.edx & (UINT32_C(1) << 8)) != 0;
     if (has_leaf_1e_1)
     {
-        amx_int8_hardware |= (input.leaf_1e_1.eax & (UINT32_C(1) << 0)) != 0;
-        amx_bf16_hardware |= (input.leaf_1e_1.eax & (UINT32_C(1) << 1)) != 0;
-        amx_complex_hardware |= (input.leaf_1e_1.eax & (UINT32_C(1) << 2)) != 0;
-        amx_fp16_hardware |= (input.leaf_1e_1.eax & (UINT32_C(1) << 3)) != 0;
+        // CPUID.1E.1 mirrors these four AMX fields from legacy leaves.  Once
+        // the mirror exists, require both copies so malformed one-sided
+        // synthetic input cannot publish a feature.
+        amx_int8_hardware = amx_int8_hardware && (input.leaf_1e_1.eax & (UINT32_C(1) << 0)) != 0;
+        amx_bf16_hardware = amx_bf16_hardware && (input.leaf_1e_1.eax & (UINT32_C(1) << 1)) != 0;
+        amx_complex_hardware = amx_complex_hardware && (input.leaf_1e_1.eax & (UINT32_C(1) << 2)) != 0;
+        amx_fp16_hardware = amx_fp16_hardware && (input.leaf_1e_1.eax & (UINT32_C(1) << 3)) != 0;
     }
     if (amx_state && amx_tile_hardware)
     {
