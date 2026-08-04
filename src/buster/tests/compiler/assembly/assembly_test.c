@@ -2263,9 +2263,7 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyEncodeResult advanced_apx = assembly_encode(
         arguments->arena,
         S8("add r16d, r17d, r18d\n"
-           "add{nf} r16d, r17d, r18d\n"
            "{nf} add r16d, r17d\n"
-           "addnf r16d, r17d\n"
            "{nf} add dword ptr [r16], r17d\n"
            "{nf} add dword ptr [r16+r17*4], r18d\n"
            "{nf} add dword ptr [r24+r25*4+64], r26d\n"
@@ -2279,8 +2277,6 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
         (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     u8 expected_advanced_apx[] = {
         0x62, 0xec, 0x7c, 0x10, 0x01, 0xd1,
-        0x62, 0xec, 0x7c, 0x90, 0x01, 0xd1,
-        0x62, 0xec, 0x7c, 0x0c, 0x01, 0xc8,
         0x62, 0xec, 0x7c, 0x0c, 0x01, 0xc8,
         0x62, 0xec, 0x7c, 0x0c, 0x01, 0x08,
         0x62, 0xec, 0x78, 0x0c, 0x01, 0x14, 0x88,
@@ -2309,6 +2305,338 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                advanced_apx_att_nf.bytes.length == sizeof(expected_advanced_apx_att_nf) &&
                                memcmp(advanced_apx_att_nf.bytes.pointer, expected_advanced_apx_att_nf,
                                       sizeof(expected_advanced_apx_att_nf)) == 0);
+
+    AssemblyEncodeResult advanced_apx_ndd_memory_immediate = assembly_encode(
+        arguments->arena,
+        S8("add r16d, r17d, dword ptr [r18]\n"
+           "add r16d, dword ptr [r18], 5\n"
+           "add r16d, r17d, 5\n"
+           "{nf} add r16d, 5\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_ndd_memory_immediate[] = {
+        0x62, 0xec, 0x7c, 0x10, 0x03, 0x0a,
+        0x62, 0xfc, 0x7c, 0x10, 0x83, 0x02, 0x05,
+        0x62, 0xfc, 0x7c, 0x10, 0x83, 0xc1, 0x05,
+        0x62, 0xfc, 0x7c, 0x0c, 0x83, 0xc0, 0x05,
+    };
+    BUSTER_TEST(arguments, advanced_apx_ndd_memory_immediate.diagnostic_count == 0 &&
+                               advanced_apx_ndd_memory_immediate.bytes.length == sizeof(expected_advanced_apx_ndd_memory_immediate) &&
+                               memcmp(advanced_apx_ndd_memory_immediate.bytes.pointer, expected_advanced_apx_ndd_memory_immediate,
+                                      sizeof(expected_advanced_apx_ndd_memory_immediate)) == 0);
+
+    AssemblyEncodeResult advanced_apx_ndd_egpr_sib = assembly_encode(
+        arguments->arena,
+        S8("add r16d, r17d, dword ptr [r24+r25*4+64]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_ndd_egpr_sib[] = {0x62, 0x8c, 0x78, 0x10, 0x03, 0x4c, 0x88, 0x40};
+    BUSTER_TEST(arguments, advanced_apx_ndd_egpr_sib.diagnostic_count == 0 &&
+                               advanced_apx_ndd_egpr_sib.bytes.length == sizeof(expected_advanced_apx_ndd_egpr_sib) &&
+                               memcmp(advanced_apx_ndd_egpr_sib.bytes.pointer, expected_advanced_apx_ndd_egpr_sib,
+                                      sizeof(expected_advanced_apx_ndd_egpr_sib)) == 0);
+
+    AssemblyEncodeResult advanced_apx_ndd_immediate_sib = assembly_encode(
+        arguments->arena,
+        S8("add r16d, dword ptr [r24+r25*4+64], 5\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_ndd_immediate_sib[] = {
+        0x62, 0x9c, 0x78, 0x10, 0x83, 0x44, 0x88, 0x40, 0x05,
+    };
+    BUSTER_TEST(arguments, advanced_apx_ndd_immediate_sib.diagnostic_count == 0 &&
+                               advanced_apx_ndd_immediate_sib.bytes.length == sizeof(expected_advanced_apx_ndd_immediate_sib) &&
+                               memcmp(advanced_apx_ndd_immediate_sib.bytes.pointer, expected_advanced_apx_ndd_immediate_sib,
+                                      sizeof(expected_advanced_apx_ndd_immediate_sib)) == 0);
+
+    AssemblyEncodeResult advanced_apx_ndd_immediate_sib_att = assembly_encode(
+        arguments->arena,
+        S8("addl $5, 64(%r24,%r25,4), %r16d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_ndd_immediate_sib_att.diagnostic_count == 0 &&
+                               advanced_apx_ndd_immediate_sib_att.bytes.length == sizeof(expected_advanced_apx_ndd_immediate_sib) &&
+                               memcmp(advanced_apx_ndd_immediate_sib_att.bytes.pointer, expected_advanced_apx_ndd_immediate_sib,
+                                      sizeof(expected_advanced_apx_ndd_immediate_sib)) == 0);
+
+    AssemblyEncodeResult advanced_apx_ndd_relocation = assembly_encode(
+        arguments->arena,
+        S8("add r16d, r17d, dword ptr [rip+apx_ndd_external]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_ndd_relocation[] = {0x62, 0xe4, 0x7c, 0x10, 0x03, 0x0d, 0x00, 0x00, 0x00, 0x00};
+    BUSTER_TEST(arguments, advanced_apx_ndd_relocation.diagnostic_count == 0);
+    BUSTER_TEST(arguments, advanced_apx_ndd_relocation.bytes.length == sizeof(expected_advanced_apx_ndd_relocation));
+    BUSTER_TEST(arguments, memcmp(advanced_apx_ndd_relocation.bytes.pointer, expected_advanced_apx_ndd_relocation,
+                                  sizeof(expected_advanced_apx_ndd_relocation)) == 0);
+    BUSTER_TEST(arguments, advanced_apx_ndd_relocation.relocation_count == 1);
+    BUSTER_TEST(arguments, advanced_apx_ndd_relocation.relocations[0].offset == 6);
+    BUSTER_TEST(arguments, advanced_apx_ndd_relocation.relocations[0].addend == -4);
+    BUSTER_TEST(arguments, advanced_apx_ndd_relocation.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_apx_ndd_immediate_relocation = assembly_encode(
+        arguments->arena,
+        S8("add r16d, dword ptr [rip+apx_ndd_immediate_external], 5\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_ndd_immediate_relocation[] = {
+        0x62, 0xf4, 0x7c, 0x10, 0x83, 0x05, 0x00, 0x00, 0x00, 0x00, 0x05,
+    };
+    BUSTER_TEST(arguments, advanced_apx_ndd_immediate_relocation.diagnostic_count == 0 &&
+                               advanced_apx_ndd_immediate_relocation.bytes.length == sizeof(expected_advanced_apx_ndd_immediate_relocation) &&
+                               memcmp(advanced_apx_ndd_immediate_relocation.bytes.pointer,
+                                      expected_advanced_apx_ndd_immediate_relocation,
+                                      sizeof(expected_advanced_apx_ndd_immediate_relocation)) == 0 &&
+                               advanced_apx_ndd_immediate_relocation.relocation_count == 1 &&
+                               advanced_apx_ndd_immediate_relocation.relocations[0].offset == 6 &&
+                               advanced_apx_ndd_immediate_relocation.relocations[0].addend == -5 &&
+                               advanced_apx_ndd_immediate_relocation.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_apx_ndd_immediate_relocation_att = assembly_encode(
+        arguments->arena,
+        S8("addl $5, apx_ndd_immediate_att_external(%rip), %r16d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_ndd_immediate_relocation_att.diagnostic_count == 0 &&
+                               advanced_apx_ndd_immediate_relocation_att.bytes.length ==
+                                   sizeof(expected_advanced_apx_ndd_immediate_relocation) &&
+                               memcmp(advanced_apx_ndd_immediate_relocation_att.bytes.pointer,
+                                      expected_advanced_apx_ndd_immediate_relocation,
+                                      sizeof(expected_advanced_apx_ndd_immediate_relocation)) == 0 &&
+                               advanced_apx_ndd_immediate_relocation_att.relocation_count == 1 &&
+                               advanced_apx_ndd_immediate_relocation_att.relocations[0].offset == 6 &&
+                               advanced_apx_ndd_immediate_relocation_att.relocations[0].addend == -5 &&
+                               advanced_apx_ndd_immediate_relocation_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_apx_nf_memory_immediate_relocation = assembly_encode(
+        arguments->arena,
+        S8("{nf} add dword ptr [rip+apx_nf_external], 5\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_nf_memory_immediate_relocation[] = {
+        0x62, 0xf4, 0x7c, 0x0c, 0x83, 0x05, 0x00, 0x00, 0x00, 0x00, 0x05,
+    };
+    BUSTER_TEST(arguments, advanced_apx_nf_memory_immediate_relocation.diagnostic_count == 0 &&
+                               advanced_apx_nf_memory_immediate_relocation.bytes.length ==
+                                   sizeof(expected_advanced_apx_nf_memory_immediate_relocation) &&
+                               memcmp(advanced_apx_nf_memory_immediate_relocation.bytes.pointer,
+                                      expected_advanced_apx_nf_memory_immediate_relocation,
+                                      sizeof(expected_advanced_apx_nf_memory_immediate_relocation)) == 0 &&
+                               advanced_apx_nf_memory_immediate_relocation.relocation_count == 1 &&
+                               advanced_apx_nf_memory_immediate_relocation.relocations[0].offset == 6 &&
+                               advanced_apx_nf_memory_immediate_relocation.relocations[0].addend == -5 &&
+                               advanced_apx_nf_memory_immediate_relocation.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_apx_ndd_memory_immediate_att = assembly_encode(
+        arguments->arena,
+        S8("addl (%r18), %r17d, %r16d\n"
+           "addl $5, (%r18), %r16d\n"
+           "addl $5, %r17d, %r16d\n"
+           "{nf} addl $5, %r16d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_ndd_memory_immediate_att.diagnostic_count == 0 &&
+                               advanced_apx_ndd_memory_immediate_att.bytes.length == sizeof(expected_advanced_apx_ndd_memory_immediate) &&
+                               memcmp(advanced_apx_ndd_memory_immediate_att.bytes.pointer, expected_advanced_apx_ndd_memory_immediate,
+                                      sizeof(expected_advanced_apx_ndd_memory_immediate)) == 0);
+
+    AssemblyEncodeResult invalid_apx_att_immediate_order = assembly_encode(
+        arguments->arena,
+        S8("addl %r17d, $5, %r16d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, invalid_apx_att_immediate_order.diagnostic_count == 1 &&
+                               invalid_apx_att_immediate_order.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+
+    AssemblyEncodeResult advanced_apx_ndd_carry = assembly_encode(
+        arguments->arena,
+        S8("adc r16d, r17d, r18d\n"
+           "sbb r16d, r17d, 5\n"
+           "adc r16d, r17d, dword ptr [r18]\n"
+           "sbb r16d, dword ptr [r18], r17d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_ndd_carry[] = {
+        0x62, 0xec, 0x7c, 0x10, 0x11, 0xd1,
+        0x62, 0xfc, 0x7c, 0x10, 0x83, 0xd9, 0x05,
+        0x62, 0xec, 0x7c, 0x10, 0x13, 0x0a,
+        0x62, 0xec, 0x7c, 0x10, 0x19, 0x0a,
+    };
+    BUSTER_TEST(arguments, advanced_apx_ndd_carry.diagnostic_count == 0 &&
+                               advanced_apx_ndd_carry.bytes.length == sizeof(expected_advanced_apx_ndd_carry) &&
+                               memcmp(advanced_apx_ndd_carry.bytes.pointer, expected_advanced_apx_ndd_carry,
+                                      sizeof(expected_advanced_apx_ndd_carry)) == 0);
+
+    AssemblyEncodeResult advanced_apx_ndd_carry_att = assembly_encode(
+        arguments->arena,
+        S8("adcl %r18d, %r17d, %r16d\n"
+           "sbbl $5, %r17d, %r16d\n"
+           "adcl (%r18), %r17d, %r16d\n"
+           "sbbl %r17d, (%r18), %r16d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_ndd_carry_att.diagnostic_count == 0 &&
+                               advanced_apx_ndd_carry_att.bytes.length == sizeof(expected_advanced_apx_ndd_carry) &&
+                               memcmp(advanced_apx_ndd_carry_att.bytes.pointer, expected_advanced_apx_ndd_carry,
+                                      sizeof(expected_advanced_apx_ndd_carry)) == 0);
+
+    AssemblyEncodeResult advanced_apx_ndd_nf = assembly_encode(
+        arguments->arena,
+        S8("{nf} add r16d, r17d, r18d\n"
+           "{nf} sub r24, r25, qword ptr [r26+r27*8+64]\n"
+           "{nf} xor r16b, r17b, 255\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_ndd_nf[] = {
+        0x62, 0xec, 0x7c, 0x14, 0x01, 0xd1,
+        0x62, 0x0c, 0xb8, 0x14, 0x2b, 0x4c, 0xda, 0x40,
+        0x62, 0xfc, 0x7c, 0x14, 0x80, 0xf1, 0xff,
+    };
+    BUSTER_TEST(arguments, advanced_apx_ndd_nf.diagnostic_count == 0 &&
+                               advanced_apx_ndd_nf.bytes.length == sizeof(expected_advanced_apx_ndd_nf) &&
+                               memcmp(advanced_apx_ndd_nf.bytes.pointer, expected_advanced_apx_ndd_nf,
+                                      sizeof(expected_advanced_apx_ndd_nf)) == 0);
+
+    AssemblyEncodeResult advanced_apx_ndd_nf_att = assembly_encode(
+        arguments->arena,
+        S8("{nf} addl %r18d, %r17d, %r16d\n"
+           "{nf} subq 64(%r26,%r27,8), %r25, %r24\n"
+           "{nf} xorb $255, %r17b, %r16b\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_ndd_nf_att.diagnostic_count == 0 &&
+                               advanced_apx_ndd_nf_att.bytes.length == sizeof(expected_advanced_apx_ndd_nf) &&
+                               memcmp(advanced_apx_ndd_nf_att.bytes.pointer, expected_advanced_apx_ndd_nf,
+                                      sizeof(expected_advanced_apx_ndd_nf)) == 0);
+
+    AssemblyEncodeResult invalid_apx_nf_carry = assembly_encode(
+        arguments->arena,
+        S8("{nf} adc r16d, r17d\n"
+           "{nf} sbb r16d, r17d\n"
+           "{nf} adc r16d, r17d, r18d\n"
+           "{nf} sbb r16d, r17d, r18d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_apx_nf_carry.diagnostic_count == 4);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_apx_nf_carry.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_apx_nf_carry.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    AssemblyEncodeResult invalid_apx_nf_carry_att = assembly_encode(
+        arguments->arena,
+        S8("{nf} adcl %r17d, %r16d\n"
+           "{nf} sbbl %r17d, %r16d\n"
+           "{nf} adcl %r18d, %r17d, %r16d\n"
+           "{nf} sbbl %r18d, %r17d, %r16d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, invalid_apx_nf_carry_att.diagnostic_count == 4);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_apx_nf_carry_att.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_apx_nf_carry_att.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    AssemblyEncodeResult advanced_apx_nf_memory_immediate_relocation_att = assembly_encode(
+        arguments->arena,
+        S8("{nf} addl $5, apx_nf_att_external(%rip)\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_nf_memory_immediate_relocation_att.diagnostic_count == 0 &&
+                               advanced_apx_nf_memory_immediate_relocation_att.bytes.length ==
+                                   sizeof(expected_advanced_apx_nf_memory_immediate_relocation) &&
+                               memcmp(advanced_apx_nf_memory_immediate_relocation_att.bytes.pointer,
+                                      expected_advanced_apx_nf_memory_immediate_relocation,
+                                      sizeof(expected_advanced_apx_nf_memory_immediate_relocation)) == 0 &&
+                               advanced_apx_nf_memory_immediate_relocation_att.relocation_count == 1 &&
+                               advanced_apx_nf_memory_immediate_relocation_att.relocations[0].offset == 6 &&
+                               advanced_apx_nf_memory_immediate_relocation_att.relocations[0].addend == -5 &&
+                               advanced_apx_nf_memory_immediate_relocation_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_apx_nf_shift_relocation = assembly_encode(
+        arguments->arena,
+        S8("{nf} shl dword ptr [rip+apx_nf_shift_external], 5\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_nf_shift_relocation[] = {
+        0x62, 0xf4, 0x7c, 0x0c, 0xc1, 0x25, 0x00, 0x00, 0x00, 0x00, 0x05,
+    };
+    BUSTER_TEST(arguments, advanced_apx_nf_shift_relocation.diagnostic_count == 0 &&
+                               advanced_apx_nf_shift_relocation.bytes.length == sizeof(expected_advanced_apx_nf_shift_relocation) &&
+                               memcmp(advanced_apx_nf_shift_relocation.bytes.pointer, expected_advanced_apx_nf_shift_relocation,
+                                      sizeof(expected_advanced_apx_nf_shift_relocation)) == 0 &&
+                               advanced_apx_nf_shift_relocation.relocation_count == 1 &&
+                               advanced_apx_nf_shift_relocation.relocations[0].offset == 6 &&
+                               advanced_apx_nf_shift_relocation.relocations[0].addend == -5 &&
+                               advanced_apx_nf_shift_relocation.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_apx_nf_shift_relocation_att = assembly_encode(
+        arguments->arena,
+        S8("{nf} shll $5, apx_nf_shift_att_external(%rip)\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_nf_shift_relocation_att.diagnostic_count == 0 &&
+                               advanced_apx_nf_shift_relocation_att.bytes.length == sizeof(expected_advanced_apx_nf_shift_relocation) &&
+                               memcmp(advanced_apx_nf_shift_relocation_att.bytes.pointer, expected_advanced_apx_nf_shift_relocation,
+                                      sizeof(expected_advanced_apx_nf_shift_relocation)) == 0 &&
+                               advanced_apx_nf_shift_relocation_att.relocation_count == 1 &&
+                               advanced_apx_nf_shift_relocation_att.relocations[0].offset == 6 &&
+                               advanced_apx_nf_shift_relocation_att.relocations[0].addend == -5 &&
+                               advanced_apx_nf_shift_relocation_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult invalid_apx_ndd_memory_immediate = assembly_encode(
+        arguments->arena,
+        S8("add r16d, dword ptr [r17], dword ptr [r18]\n"
+           "add r16d, 4294967296\n"
+           "{nf} add dword ptr [r16], 4294967296\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_apx_ndd_memory_immediate.diagnostic_count == 3);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_apx_ndd_memory_immediate.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_apx_ndd_memory_immediate.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    AssemblyEncodeResult advanced_vrndscale_signed_immediate = assembly_encode(
+        arguments->arena,
+        S8("vrndscaleps zmm0, zmm1, -1\n"
+           "vrndscaleps zmm0, zmm1, -128\n"
+           "vrndscaleps zmm0, zmm1, 255\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_vrndscale_signed_immediate[] = {
+        0x62, 0xf3, 0x7d, 0x48, 0x08, 0xc1, 0xff,
+        0x62, 0xf3, 0x7d, 0x48, 0x08, 0xc1, 0x80,
+        0x62, 0xf3, 0x7d, 0x48, 0x08, 0xc1, 0xff,
+    };
+    BUSTER_TEST(arguments, advanced_vrndscale_signed_immediate.diagnostic_count == 0 &&
+                               advanced_vrndscale_signed_immediate.bytes.length == sizeof(expected_advanced_vrndscale_signed_immediate) &&
+                               memcmp(advanced_vrndscale_signed_immediate.bytes.pointer, expected_advanced_vrndscale_signed_immediate,
+                                      sizeof(expected_advanced_vrndscale_signed_immediate)) == 0);
+
+    AssemblyEncodeResult advanced_vrndscale_signed_immediate_att = assembly_encode(
+        arguments->arena,
+        S8("vrndscaleps $-1, %zmm1, %zmm0\n"
+           "vrndscaleps $-128, %zmm1, %zmm0\n"
+           "vrndscaleps $255, %zmm1, %zmm0\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_vrndscale_signed_immediate_att.diagnostic_count == 0 &&
+                               advanced_vrndscale_signed_immediate_att.bytes.length == sizeof(expected_advanced_vrndscale_signed_immediate) &&
+                               memcmp(advanced_vrndscale_signed_immediate_att.bytes.pointer, expected_advanced_vrndscale_signed_immediate,
+                                      sizeof(expected_advanced_vrndscale_signed_immediate)) == 0);
+
+    AssemblyEncodeResult invalid_vrndscale_signed_immediate = assembly_encode(
+        arguments->arena,
+        S8("vrndscaleps zmm0, zmm1, -129\n"
+           "vrndscaleps zmm0, zmm1, 256\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_vrndscale_signed_immediate.diagnostic_count == 2);
+    AssemblyEncodeResult invalid_vrndscale_signed_immediate_att = assembly_encode(
+        arguments->arena,
+        S8("vrndscaleps $-129, %zmm1, %zmm0\n"
+           "vrndscaleps $256, %zmm1, %zmm0\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, invalid_vrndscale_signed_immediate_att.diagnostic_count == 2);
+
+    AssemblyEncodeResult invalid_nf_aliases = assembly_encode(
+        arguments->arena,
+        S8("{nf} add{nf} r16d, r17d\n"
+           "{nf} addnf r16d, r17d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_nf_aliases.diagnostic_count == 2);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_nf_aliases.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_nf_aliases.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+    }
+    AssemblyEncodeResult invalid_nf_aliases_att = assembly_encode(
+        arguments->arena,
+        S8("{nf} addl{nf} %r17d, %r16d\n"
+           "{nf} addnfl %r17d, %r16d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, invalid_nf_aliases_att.diagnostic_count == 2);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_nf_aliases_att.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_nf_aliases_att.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+    }
 
     AssemblyEncodeResult advanced_apx_legacy_memory = assembly_encode(
         arguments->arena,
@@ -2354,6 +2682,289 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                memcmp(advanced_apx_legacy_memory_att.bytes.pointer, expected_advanced_apx_legacy_memory_att,
                                       sizeof(expected_advanced_apx_legacy_memory_att)) == 0);
 
+    AssemblyEncodeResult advanced_apx_rex2_families = assembly_encode(
+        arguments->arena,
+        S8("lea r16, [r17+r18*4+64]\n"
+           "call r16\n"
+           "jmp qword ptr [r19]\n"
+           "movaps xmm0, [r16]\n"
+           "movdqa xmm1, [r17]\n"
+           "movdqu xmm0, [r16]\n"
+           "addss xmm2, dword ptr [r18]\n"
+           "addsd xmm3, qword ptr [r19]\n"
+           "adc r16d, r17d\n"
+           "sbb r18d, dword ptr [r19]\n"
+           "imul r20d, r21d\n"
+           "shl r22d, 3\n"
+           "shl r23d, cl\n"
+           "mov r16d, 5\n"
+           "mov qword ptr [r16], 5\n"
+           "add r16d, 5\n"
+           "imul r16d, r17d, 5\n"
+           "imul r16d, dword ptr [r18], 5\n"
+           "imul r24\n"
+           "imul qword ptr [r25]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_apx_rex2_families[] = {
+        0xd5, 0x78, 0x8d, 0x44, 0x91, 0x40,
+        0xd5, 0x10, 0xff, 0xd0,
+        0xd5, 0x10, 0xff, 0x23,
+        0xd5, 0x90, 0x28, 0x00,
+        0x66, 0xd5, 0x90, 0x6f, 0x09,
+        0xf3, 0xd5, 0x90, 0x6f, 0x00,
+        0xf3, 0xd5, 0x90, 0x58, 0x12,
+        0xf2, 0xd5, 0x90, 0x58, 0x1b,
+        0xd5, 0x50, 0x11, 0xc8,
+        0xd5, 0x50, 0x1b, 0x13,
+        0xd5, 0xd0, 0xaf, 0xe5,
+        0xd5, 0x10, 0xc1, 0xe6, 0x03,
+        0xd5, 0x10, 0xd3, 0xe7,
+        0xd5, 0x10, 0xb8, 0x05, 0x00, 0x00, 0x00,
+        0xd5, 0x18, 0xc7, 0x00, 0x05, 0x00, 0x00, 0x00,
+        0xd5, 0x10, 0x83, 0xc0, 0x05,
+        0xd5, 0x50, 0x6b, 0xc1, 0x05,
+        0xd5, 0x50, 0x6b, 0x02, 0x05,
+        0xd5, 0x19, 0xf7, 0xe8,
+        0xd5, 0x19, 0xf7, 0x29,
+    };
+    BUSTER_TEST(arguments, advanced_apx_rex2_families.diagnostic_count == 0 &&
+                               advanced_apx_rex2_families.bytes.length == sizeof(expected_apx_rex2_families) &&
+                               memcmp(advanced_apx_rex2_families.bytes.pointer, expected_apx_rex2_families,
+                                      sizeof(expected_apx_rex2_families)) == 0);
+
+    AssemblyEncodeResult advanced_apx_rex2_families_att = assembly_encode(
+        arguments->arena,
+        S8("leaq 64(%r17,%r18,4), %r16\n"
+           "call *%r16\n"
+           "jmp *(%r19)\n"
+           "movaps (%r16), %xmm0\n"
+           "movdqa (%r17), %xmm1\n"
+           "movdqu (%r16), %xmm0\n"
+           "addss (%r18), %xmm2\n"
+           "addsd (%r19), %xmm3\n"
+           "adcl %r17d, %r16d\n"
+           "sbbl (%r19), %r18d\n"
+           "imull %r21d, %r20d\n"
+           "shll $3, %r22d\n"
+           "shll %cl, %r23d\n"
+           "movl $5, %r16d\n"
+           "movq $5, (%r16)\n"
+           "addl $5, %r16d\n"
+           "imull $5, %r17d, %r16d\n"
+           "imull $5, (%r18), %r16d\n"
+           "imulq %r24\n"
+           "imulq (%r25)\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_rex2_families_att.diagnostic_count == 0 &&
+                               advanced_apx_rex2_families_att.bytes.length == sizeof(expected_apx_rex2_families) &&
+                               memcmp(advanced_apx_rex2_families_att.bytes.pointer, expected_apx_rex2_families,
+                                      sizeof(expected_apx_rex2_families)) == 0);
+
+    AssemblyEncodeResult advanced_apx_rex2_unary = assembly_encode(
+        arguments->arena,
+        S8("inc r16b\n"
+           "dec byte ptr [r17]\n"
+           "neg r16b\n"
+           "not byte ptr [r17]\n"
+           "inc r16d\n"
+           "dec dword ptr [r17]\n"
+           "neg r16d\n"
+           "not dword ptr [r17]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_apx_rex2_unary[] = {
+        0xd5, 0x10, 0xfe, 0xc0,
+        0xd5, 0x10, 0xfe, 0x09,
+        0xd5, 0x10, 0xf6, 0xd8,
+        0xd5, 0x10, 0xf6, 0x11,
+        0xd5, 0x10, 0xff, 0xc0,
+        0xd5, 0x10, 0xff, 0x09,
+        0xd5, 0x10, 0xf7, 0xd8,
+        0xd5, 0x10, 0xf7, 0x11,
+    };
+    BUSTER_TEST(arguments, advanced_apx_rex2_unary.diagnostic_count == 0 &&
+                               advanced_apx_rex2_unary.bytes.length == sizeof(expected_apx_rex2_unary) &&
+                               memcmp(advanced_apx_rex2_unary.bytes.pointer, expected_apx_rex2_unary,
+                                      sizeof(expected_apx_rex2_unary)) == 0);
+
+    AssemblyEncodeResult advanced_apx_rex2_unary_att = assembly_encode(
+        arguments->arena,
+        S8("incb %r16b\n"
+           "decb (%r17)\n"
+           "negb %r16b\n"
+           "notb (%r17)\n"
+           "incl %r16d\n"
+           "decl (%r17)\n"
+           "negl %r16d\n"
+           "notl (%r17)\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_rex2_unary_att.diagnostic_count == 0 &&
+                               advanced_apx_rex2_unary_att.bytes.length == sizeof(expected_apx_rex2_unary) &&
+                               memcmp(advanced_apx_rex2_unary_att.bytes.pointer, expected_apx_rex2_unary,
+                                      sizeof(expected_apx_rex2_unary)) == 0);
+
+    AssemblyEncodeResult advanced_apx_rex2_byte_imul = assembly_encode(
+        arguments->arena, S8("imul r16b\nimul byte ptr [r17]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_apx_rex2_byte_imul[] = {
+        0xd5, 0x10, 0xf6, 0xe8,
+        0xd5, 0x10, 0xf6, 0x29,
+    };
+    BUSTER_TEST(arguments, advanced_apx_rex2_byte_imul.diagnostic_count == 0 &&
+                               advanced_apx_rex2_byte_imul.bytes.length == sizeof(expected_apx_rex2_byte_imul) &&
+                               memcmp(advanced_apx_rex2_byte_imul.bytes.pointer, expected_apx_rex2_byte_imul,
+                                      sizeof(expected_apx_rex2_byte_imul)) == 0);
+
+    AssemblyEncodeResult advanced_apx_rex2_byte_imul_att = assembly_encode(
+        arguments->arena, S8("imulb %r16b\nimulb (%r17)\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_rex2_byte_imul_att.diagnostic_count == 0 &&
+                               advanced_apx_rex2_byte_imul_att.bytes.length == sizeof(expected_apx_rex2_byte_imul) &&
+                               memcmp(advanced_apx_rex2_byte_imul_att.bytes.pointer, expected_apx_rex2_byte_imul,
+                                      sizeof(expected_apx_rex2_byte_imul)) == 0);
+
+    AssemblyEncodeResult invalid_apx_rex2_byte_imul = assembly_encode(
+        arguments->arena,
+        S8("imul r16b, r17b\n"
+           "imul r16b, r17b, 5\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_apx_rex2_byte_imul.diagnostic_count == 2);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_apx_rex2_byte_imul.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_apx_rex2_byte_imul.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    AssemblyEncodeResult invalid_apx_rex2_byte_imul_att = assembly_encode(
+        arguments->arena,
+        S8("imulb %r17b, %r16b\n"
+           "imulb $5, %r17b, %r16b\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, invalid_apx_rex2_byte_imul_att.diagnostic_count == 2);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_apx_rex2_byte_imul_att.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments,
+                    invalid_apx_rex2_byte_imul_att.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    AssemblyEncodeResult advanced_apx_rex2_mov_immediate = assembly_encode(
+        arguments->arena,
+        S8("mov r16b, 5\n"
+           "mov r16w, 5\n"
+           "mov r16d, 5\n"
+           "mov r16, 5\n"
+           "mov r16, 0x1122334455667788\n"
+           "mov byte ptr [r16], 5\n"
+           "mov word ptr [r16], 5\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_apx_rex2_mov_immediate[] = {
+        0xd5, 0x10, 0xb0, 0x05,
+        0x66, 0xd5, 0x10, 0xb8, 0x05, 0x00,
+        0xd5, 0x10, 0xb8, 0x05, 0x00, 0x00, 0x00,
+        0xd5, 0x18, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00,
+        0xd5, 0x18, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+        0xd5, 0x10, 0xc6, 0x00, 0x05,
+        0x66, 0xd5, 0x10, 0xc7, 0x00, 0x05, 0x00,
+    };
+    BUSTER_TEST(arguments, advanced_apx_rex2_mov_immediate.diagnostic_count == 0 &&
+                               advanced_apx_rex2_mov_immediate.bytes.length == sizeof(expected_apx_rex2_mov_immediate) &&
+                               memcmp(advanced_apx_rex2_mov_immediate.bytes.pointer, expected_apx_rex2_mov_immediate,
+                                      sizeof(expected_apx_rex2_mov_immediate)) == 0);
+
+    AssemblyEncodeResult advanced_apx_rex2_mov_immediate_att = assembly_encode(
+        arguments->arena,
+        S8("movb $5, %r16b\n"
+           "movw $5, %r16w\n"
+           "movl $5, %r16d\n"
+           "movq $5, %r16\n"
+           "movq $0x1122334455667788, %r16\n"
+           "movb $5, (%r16)\n"
+           "movw $5, (%r16)\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_rex2_mov_immediate_att.diagnostic_count == 0 &&
+                               advanced_apx_rex2_mov_immediate_att.bytes.length == sizeof(expected_apx_rex2_mov_immediate) &&
+                               memcmp(advanced_apx_rex2_mov_immediate_att.bytes.pointer, expected_apx_rex2_mov_immediate,
+                                      sizeof(expected_apx_rex2_mov_immediate)) == 0);
+
+    AssemblyEncodeResult advanced_apx_evex_ndd_families = assembly_encode(
+        arguments->arena,
+        S8("imul r16d, r17d, r18d\n"
+           "{nf} imul r16d, r17d, r18d\n"
+           "shl r16d, r17d, 3\n"
+           "{nf} shl r16d, r17d, 3\n"
+           "shl r16d, r17d, cl\n"
+           "{nf} inc r16d\n"
+           "{nf} dec dword ptr [r17]\n"
+           "{nf} neg r18d\n"
+           "{nf} imul r19d, r20d\n"
+           "{nf} shl r21d, 3\n"
+           "{nf} shr r22d, cl\n"
+           "{nf} inc r16b\n"
+           "{nf} dec byte ptr [r17]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_apx_evex_ndd_families[] = {
+        0x62, 0xec, 0x7c, 0x10, 0xaf, 0xca,
+        0x62, 0xec, 0x7c, 0x14, 0xaf, 0xca,
+        0x62, 0xfc, 0x7c, 0x10, 0xc1, 0xe1, 0x03,
+        0x62, 0xfc, 0x7c, 0x14, 0xc1, 0xe1, 0x03,
+        0x62, 0xfc, 0x7c, 0x10, 0xd3, 0xe1,
+        0x62, 0xfc, 0x7c, 0x0c, 0xff, 0xc0,
+        0x62, 0xfc, 0x7c, 0x0c, 0xff, 0x09,
+        0x62, 0xfc, 0x7c, 0x0c, 0xf7, 0xda,
+        0x62, 0xec, 0x7c, 0x0c, 0xaf, 0xdc,
+        0x62, 0xfc, 0x7c, 0x0c, 0xc1, 0xe5, 0x03,
+        0x62, 0xfc, 0x7c, 0x0c, 0xd3, 0xee,
+        0x62, 0xfc, 0x7c, 0x0c, 0xfe, 0xc0,
+        0x62, 0xfc, 0x7c, 0x0c, 0xfe, 0x09,
+    };
+    BUSTER_TEST(arguments, advanced_apx_evex_ndd_families.diagnostic_count == 0 &&
+                               advanced_apx_evex_ndd_families.bytes.length == sizeof(expected_apx_evex_ndd_families) &&
+                               memcmp(advanced_apx_evex_ndd_families.bytes.pointer, expected_apx_evex_ndd_families,
+                                      sizeof(expected_apx_evex_ndd_families)) == 0);
+
+    AssemblyEncodeResult advanced_apx_evex_ndd_families_att = assembly_encode(
+        arguments->arena,
+        S8("imull %r18d, %r17d, %r16d\n"
+           "{nf} imull %r18d, %r17d, %r16d\n"
+           "shll $3, %r17d, %r16d\n"
+           "{nf} shll $3, %r17d, %r16d\n"
+           "shll %cl, %r17d, %r16d\n"
+           "{nf} incl %r16d\n"
+           "{nf} decl (%r17)\n"
+           "{nf} negl %r18d\n"
+           "{nf} imull %r20d, %r19d\n"
+           "{nf} shll $3, %r21d\n"
+           "{nf} shrl %cl, %r22d\n"
+           "{nf} incb %r16b\n"
+           "{nf} decb (%r17)\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_evex_ndd_families_att.diagnostic_count == 0 &&
+                               advanced_apx_evex_ndd_families_att.bytes.length == sizeof(expected_apx_evex_ndd_families) &&
+                               memcmp(advanced_apx_evex_ndd_families_att.bytes.pointer, expected_apx_evex_ndd_families,
+                                      sizeof(expected_apx_evex_ndd_families)) == 0);
+
+    AssemblyEncodeResult advanced_apx_nf_immediate_imul = assembly_encode(
+        arguments->arena,
+        S8("{nf} imul r16d, r17d, 5\n"
+           "{nf} imul r16d, dword ptr [r18], 5\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_nf_immediate_imul[] = {
+        0x62, 0xec, 0x7c, 0x0c, 0x6b, 0xc1, 0x05,
+        0x62, 0xec, 0x7c, 0x0c, 0x6b, 0x02, 0x05,
+    };
+    BUSTER_TEST(arguments, advanced_apx_nf_immediate_imul.diagnostic_count == 0 &&
+                               advanced_apx_nf_immediate_imul.bytes.length == sizeof(expected_advanced_apx_nf_immediate_imul) &&
+                               memcmp(advanced_apx_nf_immediate_imul.bytes.pointer, expected_advanced_apx_nf_immediate_imul,
+                                      sizeof(expected_advanced_apx_nf_immediate_imul)) == 0);
+
+    AssemblyEncodeResult advanced_apx_nf_immediate_imul_att = assembly_encode(
+        arguments->arena,
+        S8("{nf} imull $5, %r17d, %r16d\n"
+           "{nf} imull $5, (%r18), %r16d\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_nf_immediate_imul_att.diagnostic_count == 0 &&
+                               advanced_apx_nf_immediate_imul_att.bytes.length == sizeof(expected_advanced_apx_nf_immediate_imul) &&
+                               memcmp(advanced_apx_nf_immediate_imul_att.bytes.pointer, expected_advanced_apx_nf_immediate_imul,
+                                      sizeof(expected_advanced_apx_nf_immediate_imul)) == 0);
+
     AssemblyEncodeResult advanced_apx_legacy_lock = assembly_encode(
         arguments->arena, S8("lock add qword ptr [r16], r17\n"),
         (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -2370,6 +2981,23 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                advanced_apx_legacy_lock_att.bytes.length == sizeof(expected_advanced_apx_legacy_lock) &&
                                memcmp(advanced_apx_legacy_lock_att.bytes.pointer, expected_advanced_apx_legacy_lock,
                                       sizeof(expected_advanced_apx_legacy_lock)) == 0);
+
+    AssemblyEncodeResult advanced_apx_legacy_lock_immediate = assembly_encode(
+        arguments->arena, S8("lock add dword ptr [r17], 5\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_legacy_lock_immediate[] = {0xf0, 0xd5, 0x10, 0x83, 0x01, 0x05};
+    BUSTER_TEST(arguments, advanced_apx_legacy_lock_immediate.diagnostic_count == 0 &&
+                               advanced_apx_legacy_lock_immediate.bytes.length == sizeof(expected_advanced_apx_legacy_lock_immediate) &&
+                               memcmp(advanced_apx_legacy_lock_immediate.bytes.pointer, expected_advanced_apx_legacy_lock_immediate,
+                                      sizeof(expected_advanced_apx_legacy_lock_immediate)) == 0);
+
+    AssemblyEncodeResult advanced_apx_legacy_lock_immediate_att = assembly_encode(
+        arguments->arena, S8("lock addl $5, (%r17)\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_apx_legacy_lock_immediate_att.diagnostic_count == 0 &&
+                               advanced_apx_legacy_lock_immediate_att.bytes.length == sizeof(expected_advanced_apx_legacy_lock_immediate) &&
+                               memcmp(advanced_apx_legacy_lock_immediate_att.bytes.pointer, expected_advanced_apx_legacy_lock_immediate,
+                                      sizeof(expected_advanced_apx_legacy_lock_immediate)) == 0);
 
     AssemblyEncodeResult invalid_apx_nf_lock = assembly_encode(
         arguments->arena, S8("lock {nf} add qword ptr [r16], r17\n"),
@@ -2577,6 +3205,18 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, invalid_advanced_broadcasts.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
+    AssemblyEncodeResult invalid_advanced_broadcasts_att = assembly_encode(
+        arguments->arena,
+        S8("vpaddb (%rax){1to64}, %zmm1, %zmm0\n"
+           "vpmullw (%rax){1to32}, %zmm1, %zmm0\n"
+           "vpcmpeqb (%rax){1to64}, %zmm2, %k1\n"
+           "vpcmpw $7, (%rax){1to32}, %zmm2, %k1\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, invalid_advanced_broadcasts_att.diagnostic_count == 4);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_advanced_broadcasts_att.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_advanced_broadcasts_att.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
 
     AssemblyEncodeResult invalid_advanced_rounding = assembly_encode(
         arguments->arena,
@@ -2594,6 +3234,23 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_advanced_rounding.diagnostic_count; diagnostic_index += 1)
     {
         BUSTER_TEST(arguments, invalid_advanced_rounding.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+    AssemblyEncodeResult invalid_advanced_rounding_att = assembly_encode(
+        arguments->arena,
+        S8("vaddps {rn-sae}, %xmm2, %xmm1, %xmm0\n"
+           "vaddps {rn-sae}, %ymm2, %ymm1, %ymm0\n"
+           "vcmpps $7, {sae}, %xmm3, %xmm2, %k1\n"
+           "vcmpps $7, {sae}, %ymm3, %ymm2, %k1\n"
+           "vrndscaleps $4, {sae}, %xmm1, %xmm0\n"
+           "vrndscaleps $4, {sae}, %ymm1, %ymm0\n"
+           "vcmpps $7, {rn-sae}, %zmm3, %zmm2, %k1\n"
+           "vrndscaleps $4, {rn-sae}, %zmm1, %zmm0\n"
+           "vrndscalepd $4, {rd-sae}, %zmm1, %zmm0\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, invalid_advanced_rounding_att.diagnostic_count == 9);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_advanced_rounding_att.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_advanced_rounding_att.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
     Target scalar_evex_target = advanced_target;
