@@ -43,6 +43,59 @@ BUSTER_GLOBAL_LOCAL CEntityId c_test_find_local_entity(CParseResult* parse, Stri
     return C_ENTITY_ID_INVALID;
 }
 
+BUSTER_GLOBAL_LOCAL IrFunction* c_test_find_ir_function(IrModule* module, String8 name)
+{
+    if (!module)
+    {
+        return 0;
+    }
+    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    {
+        IrFunction* function = module->functions + function_index;
+        if (string_equal(function->name, name))
+        {
+            return function;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_test_ir_direct_call_count(IrProgram* program, IrFunction* function, String8 target_name)
+{
+    if (!program || !function)
+    {
+        return 0;
+    }
+    u32 count = 0;
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        IrInstruction* instruction = function->instructions + instruction_index;
+        if (instruction->opcode != IR_OPCODE_CALL)
+        {
+            continue;
+        }
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
+        count += symbol && string_equal(symbol->name, target_name);
+    }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL CIRLowerResult c_test_lower_source(Arena* arena, String8 source, String8 source_path, Target target,
+                                                       CPreprocessResult* preprocess_out, CParseResult* parse_out)
+{
+    *preprocess_out = c_preprocess(arena, source,
+                                   (CPreprocessOptions){
+                                       .target = target,
+                                       .data_layout = target_data_layout(target),
+                                   });
+    *parse_out = c_parse(arena, *preprocess_out);
+    if (preprocess_out->diagnostic_count || parse_out->diagnostic_count)
+    {
+        return (CIRLowerResult){0};
+    }
+    return c_lower_to_ir(arena, source_path, *preprocess_out, *parse_out, target);
+}
+
 BUSTER_GLOBAL_LOCAL void c_test_auto_type_diagnostic(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
                                                      CPreprocessDialect dialect, CDiagnosticKind kind, String8 message)
 {
@@ -5933,6 +5986,267 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_validate_canonical_module(mixed_ir_lowered.program, mixed_ir_module).error == IR_VALIDATION_NONE);
         }
         BUSTER_TEST(arguments, arena_destroy(mixed_ir_arena, 1));
+    }
+    {
+        TemporalArena call_reachability_temporary = scratch_begin(0, 0);
+        CPreprocessResult call_lower_scalar_tokens = {0};
+        CParseResult call_lower_scalar_parse = {0};
+        CIRLowerResult call_lower_scalar_ir = c_test_lower_source(
+            call_reachability_temporary.arena,
+            S8("static int scalar_helper(int value) { return value + 1; }\n"
+               "static int scalar_caller(int value) { return scalar_helper(value); }\n"
+               "int main(void) { return scalar_caller(0); }\n"),
+            S8("static-call-scalar.c"), target_native, &call_lower_scalar_tokens, &call_lower_scalar_parse);
+        BUSTER_TEST(arguments, call_lower_scalar_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, call_lower_scalar_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, call_lower_scalar_ir.diagnostic_count == 0);
+        if (call_lower_scalar_ir.program)
+        {
+            IrModule* module = call_lower_scalar_ir.program->modules;
+            IrFunction* helper = c_test_find_ir_function(module, S8("scalar_helper"));
+            IrFunction* caller = c_test_find_ir_function(module, S8("scalar_caller"));
+            IrFunction* main_function = c_test_find_ir_function(module, S8("main"));
+            BUSTER_TEST(arguments, helper && caller && main_function);
+            BUSTER_TEST(arguments, helper && helper->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, caller && caller->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, main_function && main_function->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, c_test_ir_direct_call_count(call_lower_scalar_ir.program, caller, S8("scalar_helper")) == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(call_lower_scalar_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(call_reachability_temporary);
+    }
+    {
+        TemporalArena aggregate_call_temporary = scratch_begin(0, 0);
+        CPreprocessResult aggregate_call_tokens = {0};
+        CParseResult aggregate_call_parse = {0};
+        String8 aggregate_call_source = S8("typedef struct AggregatePair { int left; int right; } AggregatePair;\n"
+                                            "static AggregatePair aggregate_helper(AggregatePair left, AggregatePair right) {\n"
+                                            "    AggregatePair result = { left.left + right.left, left.right + right.right };\n"
+                                            "    return result;\n"
+                                            "}\n"
+                                            "static AggregatePair aggregate_caller(AggregatePair value) {\n"
+                                            "    AggregatePair other = { 3, 4 };\n"
+                                            "    return aggregate_helper(value, other);\n"
+                                            "}\n"
+                                            "int main(void) {\n"
+                                            "    AggregatePair value = { 1, 2 };\n"
+                                            "    AggregatePair result = aggregate_caller(value);\n"
+                                            "    return result.left == 4 && result.right == 6 ? 0 : 1;\n"
+                                            "}\n");
+        CIRLowerResult aggregate_call_ir = c_test_lower_source(
+            aggregate_call_temporary.arena,
+            aggregate_call_source,
+            S8("static-call-aggregate.c"), target_native, &aggregate_call_tokens, &aggregate_call_parse);
+        BUSTER_TEST(arguments, aggregate_call_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aggregate_call_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aggregate_call_ir.diagnostic_count == 0);
+        if (aggregate_call_ir.program)
+        {
+            IrModule* module = aggregate_call_ir.program->modules;
+            IrFunction* helper = c_test_find_ir_function(module, S8("aggregate_helper"));
+            IrFunction* caller = c_test_find_ir_function(module, S8("aggregate_caller"));
+            BUSTER_TEST(arguments, helper && caller);
+            BUSTER_TEST(arguments, helper && helper->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, caller && caller->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, c_test_ir_direct_call_count(aggregate_call_ir.program, caller, S8("aggregate_helper")) == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(aggregate_call_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        Target aggregate_call_targets[] = {
+            target_native,
+            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+        };
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(aggregate_call_targets); target_index += 1)
+        {
+            TemporalArena cross_target_temporary = scratch_begin(0, 0);
+            CPreprocessResult cross_target_tokens = {0};
+            CParseResult cross_target_parse = {0};
+            CIRLowerResult cross_target_ir = c_test_lower_source(cross_target_temporary.arena, aggregate_call_source,
+                                                                  S8("static-call-aggregate-cross-target.c"), aggregate_call_targets[target_index],
+                                                                  &cross_target_tokens, &cross_target_parse);
+            BUSTER_TEST(arguments, cross_target_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, cross_target_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, cross_target_ir.diagnostic_count == 0);
+            if (cross_target_ir.program)
+            {
+                IrModule* module = cross_target_ir.program->modules;
+                IrFunction* helper = c_test_find_ir_function(module, S8("aggregate_helper"));
+                IrFunction* caller = c_test_find_ir_function(module, S8("aggregate_caller"));
+                BUSTER_TEST(arguments, helper && caller);
+                BUSTER_TEST(arguments, helper && helper->state == IR_FUNCTION_LOWERED);
+                BUSTER_TEST(arguments, caller && caller->state == IR_FUNCTION_LOWERED);
+                BUSTER_TEST(arguments, c_test_ir_direct_call_count(cross_target_ir.program, caller, S8("aggregate_helper")) == 1);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(cross_target_ir.program, module).error == IR_VALIDATION_NONE);
+            }
+            scratch_end(cross_target_temporary);
+        }
+        scratch_end(aggregate_call_temporary);
+    }
+    {
+        TemporalArena prototype_call_temporary = scratch_begin(0, 0);
+        CPreprocessResult prototype_call_tokens = {0};
+        CParseResult prototype_call_parse = {0};
+        CIRLowerResult prototype_call_ir = c_test_lower_source(
+            prototype_call_temporary.arena,
+            S8("static int prototyped_helper(int value);\n"
+               "static int prototyped_helper(int value) { return value + 1; }\n"
+               "static int prototyped_caller(int value) { return prototyped_helper(value); }\n"
+               "int main(void) { return prototyped_caller(0); }\n"),
+            S8("static-call-prototype.c"), target_native, &prototype_call_tokens, &prototype_call_parse);
+        BUSTER_TEST(arguments, prototype_call_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, prototype_call_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, prototype_call_ir.diagnostic_count == 0);
+        if (prototype_call_ir.program)
+        {
+            IrModule* module = prototype_call_ir.program->modules;
+            IrFunction* helper = c_test_find_ir_function(module, S8("prototyped_helper"));
+            IrFunction* caller = c_test_find_ir_function(module, S8("prototyped_caller"));
+            BUSTER_TEST(arguments, helper && caller);
+            BUSTER_TEST(arguments, helper && helper->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, caller && caller->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, c_test_ir_direct_call_count(prototype_call_ir.program, caller, S8("prototyped_helper")) == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(prototype_call_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(prototype_call_temporary);
+    }
+    {
+        TemporalArena dead_call_temporary = scratch_begin(0, 0);
+        CPreprocessResult dead_call_tokens = {0};
+        CParseResult dead_call_parse = {0};
+        CIRLowerResult dead_call_ir = c_test_lower_source(
+            dead_call_temporary.arena,
+            S8("static int dead_caller(int value);\n"
+               "static int dead_helper(int value) { return value + 1; }\n"
+               "static int dead_caller(int value) { return dead_helper(value); }\n"
+               "int main(void) { return 0; }\n"),
+            S8("static-call-dead.c"), target_native, &dead_call_tokens, &dead_call_parse);
+        BUSTER_TEST(arguments, dead_call_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, dead_call_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, dead_call_ir.diagnostic_count == 0);
+        if (dead_call_ir.program)
+        {
+            IrModule* module = dead_call_ir.program->modules;
+            IrFunction* caller = c_test_find_ir_function(module, S8("dead_caller"));
+            IrFunction* helper = c_test_find_ir_function(module, S8("dead_helper"));
+            BUSTER_TEST(arguments, caller != 0);
+            BUSTER_TEST(arguments, caller && caller->state != IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, helper == 0);
+            BUSTER_TEST(arguments, module->lowered_function_count == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(dead_call_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(dead_call_temporary);
+    }
+    {
+        TemporalArena vulkan_call_temporary = scratch_begin(0, 0);
+        String8 vulkan_source = S8("typedef unsigned char u8;\n"
+                                    "typedef unsigned int u32;\n"
+                                    "typedef unsigned long long u64;\n"
+                                    "typedef _Bool bool;\n"
+                                    "typedef struct String8 String8;\n"
+                                    "struct String8 { char *pointer; u64 length; };\n"
+                                    "typedef struct QueueFamilySelection QueueFamilySelection;\n"
+                                    "struct QueueFamilySelection {\n"
+                                    "    u32 graphics_family_index;\n"
+                                    "    u32 present_family_index;\n"
+                                    "    bool eligible;\n"
+                                    "    u8 reserved[3];\n"
+                                    "};\n"
+                                    "typedef struct Candidate Candidate;\n"
+                                    "struct Candidate {\n"
+                                    "    String8 name;\n"
+                                    "    u32 vendor_id;\n"
+                                    "    u32 device_id;\n"
+                                    "    u32 enumeration_index;\n"
+                                    "    u32 device_type;\n"
+                                    "    QueueFamilySelection queues;\n"
+                                    "    bool has_required_extension;\n"
+                                    "    bool has_required_features;\n"
+                                    "    bool has_surface_support;\n"
+                                    "    bool excluded;\n"
+                                    "    u8 reserved[4];\n"
+                                    "};\n"
+                                    "typedef struct CandidateSlice CandidateSlice;\n"
+                                    "struct CandidateSlice { Candidate *pointer; u64 length; };\n"
+                                    "typedef struct Selection Selection;\n"
+                                    "struct Selection { u32 candidate_index; u64 score; bool found; u8 reserved[3]; };\n"
+                                    "static Selection vulkan_select_device(CandidateSlice candidates);\n"
+                                    "static int vulkan_device_name_compare(String8 left, String8 right)\n"
+                                    "{\n"
+                                    "    if (left.length < right.length) return -1;\n"
+                                    "    if (left.length > right.length) return 1;\n"
+                                    "    return 0;\n"
+                                    "}\n"
+                                    "static bool vulkan_device_is_better(Candidate candidate, Candidate current, u64 candidate_score, u64 current_score)\n"
+                                    "{\n"
+                                    "    if (candidate_score != current_score) return candidate_score > current_score;\n"
+                                    "    int name_comparison = vulkan_device_name_compare(candidate.name, current.name);\n"
+                                    "    if (name_comparison != 0) return name_comparison < 0;\n"
+                                    "    if (candidate.vendor_id != current.vendor_id) return candidate.vendor_id < current.vendor_id;\n"
+                                    "    if (candidate.device_id != current.device_id) return candidate.device_id < current.device_id;\n"
+                                    "    return candidate.enumeration_index < current.enumeration_index;\n"
+                                    "}\n"
+                                    "static Selection vulkan_select_device(CandidateSlice candidates)\n"
+                                    "{\n"
+                                    "    Selection result = { 0 };\n"
+                                    "    for (u32 i = 0; i < candidates.length; i += 1)\n"
+                                    "    {\n"
+                                    "        Candidate candidate = candidates.pointer[i];\n"
+                                    "        if (candidate.excluded) continue;\n"
+                                    "        u64 score = candidate.vendor_id;\n"
+                                    "        if (!result.found || vulkan_device_is_better(candidate, candidates.pointer[result.candidate_index], score, result.score))\n"
+                                    "        {\n"
+                                    "            result.candidate_index = i;\n"
+                                    "            result.score = score;\n"
+                                    "            result.found = 1;\n"
+                                    "        }\n"
+                                    "    }\n"
+                                    "    return result;\n"
+                                    "}\n");
+        CPreprocessResult vulkan_dead_tokens = {0};
+        CParseResult vulkan_dead_parse = {0};
+        CIRLowerResult vulkan_dead_ir = c_test_lower_source(vulkan_call_temporary.arena, vulkan_source, S8("vulkan-selection-dead.c"), target_native,
+                                                             &vulkan_dead_tokens, &vulkan_dead_parse);
+        BUSTER_TEST(arguments, vulkan_dead_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, vulkan_dead_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, vulkan_dead_ir.diagnostic_count == 0);
+        if (vulkan_dead_ir.program)
+        {
+            IrModule* module = vulkan_dead_ir.program->modules;
+            IrFunction* select = c_test_find_ir_function(module, S8("vulkan_select_device"));
+            IrFunction* helper = c_test_find_ir_function(module, S8("vulkan_device_is_better"));
+            BUSTER_TEST(arguments, select != 0);
+            BUSTER_TEST(arguments, select && select->state != IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, helper == 0);
+            BUSTER_TEST(arguments, module->lowered_function_count == 0);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(vulkan_dead_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        String8 vulkan_reachable_parts[] = {
+            vulkan_source,
+            S8("int main(void) { CandidateSlice values = { 0 }; return vulkan_select_device(values).found; }\n"),
+        };
+        String8 vulkan_reachable_source = string_join_arena(vulkan_call_temporary.arena,
+                                                             (SliceString8)BUSTER_ARRAY_TO_SLICE(vulkan_reachable_parts), false);
+        CPreprocessResult vulkan_reachable_tokens = {0};
+        CParseResult vulkan_reachable_parse = {0};
+        CIRLowerResult vulkan_reachable_ir = c_test_lower_source(vulkan_call_temporary.arena, vulkan_reachable_source,
+                                                                  S8("vulkan-selection-reachable.c"), target_native, &vulkan_reachable_tokens,
+                                                                  &vulkan_reachable_parse);
+        BUSTER_TEST(arguments, vulkan_reachable_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, vulkan_reachable_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, vulkan_reachable_ir.diagnostic_count == 0);
+        if (vulkan_reachable_ir.program)
+        {
+            IrModule* module = vulkan_reachable_ir.program->modules;
+            IrFunction* select = c_test_find_ir_function(module, S8("vulkan_select_device"));
+            IrFunction* helper = c_test_find_ir_function(module, S8("vulkan_device_is_better"));
+            BUSTER_TEST(arguments, select && helper);
+            BUSTER_TEST(arguments, select && select->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, helper && helper->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, c_test_ir_direct_call_count(vulkan_reachable_ir.program, select, S8("vulkan_device_is_better")) == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(vulkan_reachable_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(vulkan_call_temporary);
     }
     return result;
 }

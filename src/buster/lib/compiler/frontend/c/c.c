@@ -34640,6 +34640,12 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             continue;
         }
+        bool internal = c_declaration_has_token(preprocess, declaration, S8("static"));
+        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
+        if ((internal || inline_definition) && !function_needed[declaration_index])
+        {
+            continue;
+        }
         u32 unsupported_token_index = UINT32_MAX;
         String8 unsupported_construct = c_ir_unsupported_gnu_construct(
             preprocess, declaration.token_start, declaration.body_start + declaration.body_token_count, &unsupported_token_index);
