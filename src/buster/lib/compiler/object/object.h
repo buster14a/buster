@@ -184,3 +184,7 @@ BUSTER_F_DECL ObjectFile object_read(Arena* arena, ByteSlice bytes, Target targe
 BUSTER_F_DECL ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target);
 BUSTER_F_DECL ObjectExecutable object_link_executable(ObjectFile* object);
 BUSTER_F_DECL void object_release_executable(ObjectExecutable executable);
+
+#if BUSTER_FUZZ_AVAILABLE
+BUSTER_F_DECL s32 object_fuzz_test_input(const u8* pointer, size_t size);
+#endif

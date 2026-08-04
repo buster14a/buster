@@ -198,7 +198,7 @@ BUSTER_GLOBAL_LOCAL void ide_window_update_font_for_dpi(IdeWindow* window)
 #if BUSTER_FUZZ_AVAILABLE
 s32 buster_fuzz_test_input(const u8* pointer, size_t size)
 {
-    if (size > BUSTER_KB(4))
+    if (size > BUSTER_KB(64))
     {
         return 0;
     }
@@ -206,6 +206,8 @@ s32 buster_fuzz_test_input(const u8* pointer, size_t size)
     {
         return 0;
     }
+
+    object_fuzz_test_input(pointer, size);
 
     Arena* result_arena = arena_create((ArenaCreation){
         .reserved_size = BUSTER_MB(64),
@@ -976,7 +978,7 @@ ProcessResult entry_point(void)
         String8 artifact_prefix = string_format_z(program_state->arena, S8("-artifact_prefix={S8}buster-fuzz-{u64}-"), ide_fuzz_scratch_root(),
                                                   os_get_current_process_id());
         String8 fuzz_arguments[] = {
-            S8("-max_len=4096"),
+            S8("-max_len=65536"),
             S8("-max_total_time=2"),
             artifact_prefix,
             ide_fuzz_output_corpus,

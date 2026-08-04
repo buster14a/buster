@@ -2960,11 +2960,76 @@ BUSTER_GLOBAL_LOCAL bool object_read_s64(ByteSlice bytes, u64 offset, s64* value
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL String8 object_read_string(ByteSlice bytes, u64 table_offset, u64 table_size, u32 string_offset)
+BUSTER_GLOBAL_LOCAL bool object_reader_arena_position_after(Arena* arena, u64 position, u64 size, u64 alignment, u64* result)
+{
+    if (!arena || !result || !alignment || (alignment & (alignment - 1)) || position > arena->reserved_size || position > UINT64_MAX - (alignment - 1))
+    {
+        return false;
+    }
+    u64 aligned_position = (position + alignment - 1) & ~(alignment - 1);
+    if (aligned_position > arena->reserved_size || size > arena->reserved_size - aligned_position)
+    {
+        return false;
+    }
+    *result = aligned_position + size;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_reader_arena_can_allocate_bytes(Arena* arena, u64 size, u64 alignment)
+{
+    u64 position = 0;
+    return arena && object_reader_arena_position_after(arena, arena->position, size, alignment, &position);
+}
+
+BUSTER_GLOBAL_LOCAL bool object_reader_arena_can_allocate_count(Arena* arena, u64 count, u64 element_size, u64 alignment)
+{
+    if (element_size && count > UINT64_MAX / element_size)
+    {
+        return false;
+    }
+    return object_reader_arena_can_allocate_bytes(arena, count * element_size, alignment);
+}
+
+BUSTER_GLOBAL_LOCAL bool object_reader_section_sizes_valid(Arena* arena, u64 const* sizes)
+{
+    u64 total = 0;
+    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+    {
+        if (sizes[kind] > UINT64_MAX - total)
+        {
+            return false;
+        }
+        total += sizes[kind];
+    }
+    u64 data_total = 0;
+    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+    {
+        if (!object_section_kind_is_zero_fill((ObjectSectionKind)kind))
+        {
+            if (sizes[kind] > UINT64_MAX - data_total)
+            {
+                return false;
+            }
+            data_total += sizes[kind];
+        }
+    }
+    return object_reader_arena_can_allocate_bytes(arena, data_total, BUSTER_ALIGN_OF(u8));
+}
+
+BUSTER_GLOBAL_LOCAL u64 object_reader_hash_u64(u64 value)
+{
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    return value ^ (value >> 31);
+}
+
+BUSTER_GLOBAL_LOCAL bool object_read_string_checked(ByteSlice bytes, u64 table_offset, u64 table_size, u32 string_offset, String8* result)
 {
     if (string_offset >= table_size || table_offset > bytes.length || table_size > bytes.length - table_offset)
     {
-        return (String8){0};
+        return false;
     }
     u64 offset = table_offset + string_offset;
     u64 remaining = table_size - string_offset;
@@ -2975,12 +3040,13 @@ BUSTER_GLOBAL_LOCAL String8 object_read_string(ByteSlice bytes, u64 table_offset
     }
     if (length == remaining)
     {
-        return (String8){0};
+        return false;
     }
-    return (String8){
+    *result = (String8){
         .pointer = (char8*)bytes.pointer + offset,
         .length = length,
     };
+    return true;
 }
 
 String8 object_section_name_for_kind(ObjectSectionKind kind)
@@ -3094,6 +3160,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         ELF_SECTION_HEADER_SIZE = 64,
         ELF_SYMBOL_SIZE = 24,
         ELF_RELOCATION_SIZE = 24,
+        ELF_SHN_LORESERVE = 0xff00,
     };
     u16 type = 0;
     u16 machine = 0;
@@ -3101,7 +3168,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
     u16 section_entry_size = 0;
     u16 section_count = 0;
     u16 section_string_index = 0;
-    if (!arena || bytes.length < ELF_HEADER_SIZE ||
+    if (!arena || !bytes.pointer || bytes.length < ELF_HEADER_SIZE ||
         memcmp(bytes.pointer,
                "\x7f"
                "ELF",
@@ -3109,7 +3176,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         bytes.pointer[4] != 2 || bytes.pointer[5] != 1 || !object_read_u16(bytes, 16, &type) || type != 1 || !object_read_u16(bytes, 18, &machine) ||
         !object_read_u64(bytes, 40, &section_table) || !object_read_u16(bytes, 58, &section_entry_size) || !object_read_u16(bytes, 60, &section_count) ||
         !object_read_u16(bytes, 62, &section_string_index) || section_entry_size != ELF_SECTION_HEADER_SIZE || !section_count ||
-        section_string_index >= section_count || section_table > bytes.length || (u64)section_count * ELF_SECTION_HEADER_SIZE > bytes.length - section_table ||
+        section_string_index >= section_count || section_table < ELF_HEADER_SIZE || section_table > bytes.length ||
+        (u64)section_count * ELF_SECTION_HEADER_SIZE > bytes.length - section_table ||
         (machine == 62 && target.cpu_arch != CPU_ARCH_X86_64) || (machine == 183 && target.cpu_arch != CPU_ARCH_AARCH64) || (machine != 62 && machine != 183))
     {
         return result;
@@ -3121,12 +3189,21 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         u32 section_type = 0;
         if (!object_read_u32(bytes, section + 4, &section_type) || section_type != 3 || !object_read_u64(bytes, section + 24, &section_string_offset) ||
             !object_read_u64(bytes, section + 32, &section_string_size) || section_string_offset > bytes.length ||
-            section_string_size > bytes.length - section_string_offset)
+            !section_string_size || section_string_size > bytes.length - section_string_offset ||
+            bytes.pointer[section_string_offset] != 0)
         {
             return result;
         }
     }
+    if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+    {
+        return result;
+    }
     u32* section_kinds = arena_allocate(arena, u32, section_count);
+    if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
+    {
+        return result;
+    }
     u64* section_bases = arena_allocate(arena, u64, section_count);
     u64 section_sizes[OBJECT_SECTION_COUNT] = {0};
     u32 section_alignments[OBJECT_SECTION_COUNT];
@@ -3150,7 +3227,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         {
             return result;
         }
-        String8 name = object_read_string(bytes, section_string_offset, section_string_size, name_offset);
+        String8 name = {0};
+        if (!object_read_string_checked(bytes, section_string_offset, section_string_size, name_offset, &name))
+        {
+            return result;
+        }
         bool unwind = string_equal(name, S8(".eh_frame"));
         bool unwind_type = section_type == 1 || (target.cpu_arch == CPU_ARCH_X86_64 && section_type == 0x70000001);
         bool ignored = string_starts_with_sequence(name, S8(".gcc_except_table")) || string_starts_with_sequence(name, S8(".ARM.exidx")) ||
@@ -3185,11 +3266,23 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         section_sizes[kind] = base + size;
         section_alignments[kind] = BUSTER_MAX(section_alignments[kind], (u32)alignment);
     }
+    if (!object_reader_section_sizes_valid(arena, section_sizes))
+    {
+        return result;
+    }
+    if (!object_reader_arena_can_allocate_count(arena, OBJECT_SECTION_COUNT, sizeof(ObjectSection), BUSTER_ALIGN_OF(ObjectSection)))
+    {
+        return result;
+    }
     result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
     result.section_count = OBJECT_SECTION_COUNT;
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
         bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
+        if (!zero_fill && !object_reader_arena_can_allocate_count(arena, section_sizes[kind], sizeof(u8), BUSTER_ALIGN_OF(u8)))
+        {
+            return result;
+        }
         result.sections[kind] = (ObjectSection){
             .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
@@ -3232,7 +3325,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         if (section_type == 2)
         {
             if (symbol_section != UINT32_MAX || entry_size != ELF_SYMBOL_SIZE || size % ELF_SYMBOL_SIZE || offset > bytes.length ||
-                size > bytes.length - offset || link >= section_count)
+                size > bytes.length - offset || size / ELF_SYMBOL_SIZE > UINT32_MAX || link >= section_count)
             {
                 return result;
             }
@@ -3250,13 +3343,23 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         u64 section = section_table + (u64)string_section * ELF_SECTION_HEADER_SIZE;
         u32 section_type = 0;
         if (!object_read_u32(bytes, section + 4, &section_type) || section_type != 3 || !object_read_u64(bytes, section + 24, &string_offset) ||
-            !object_read_u64(bytes, section + 32, &string_size) || string_offset > bytes.length || string_size > bytes.length - string_offset)
+            !object_read_u64(bytes, section + 32, &string_size) || !string_size || string_offset > bytes.length ||
+            string_size > bytes.length - string_offset || bytes.pointer[string_offset] != 0)
         {
             return result;
         }
     }
+    if (!object_reader_arena_can_allocate_count(arena, symbol_count, sizeof(ObjectSymbol), BUSTER_ALIGN_OF(ObjectSymbol)))
+    {
+        return result;
+    }
     result.symbols = arena_allocate(arena, ObjectSymbol, symbol_count);
+    if (!object_reader_arena_can_allocate_count(arena, symbol_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+    {
+        return result;
+    }
     u32* symbol_map = arena_allocate(arena, u32, symbol_count);
+    u64 symbol_name_bytes = 0;
     for (u32 source_index = 0; source_index < symbol_count; source_index += 1)
     {
         symbol_map[source_index] = UINT32_MAX;
@@ -3280,19 +3383,66 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         {
             continue;
         }
-        if (section_index != 0 && (section_index >= section_count || section_kinds[section_index] == UINT32_MAX))
+        // Absolute, common, processor-specific, and SHN_XINDEX symbols do
+        // not identify one of the ordinary section headers represented by an
+        // ObjectFile.  Keep them unsupported-but-skippable, as the previous
+        // reader did, while still rejecting malformed ordinary indexes.
+        if (section_index >= ELF_SHN_LORESERVE)
         {
             continue;
         }
-        String8 name = object_read_string(bytes, string_offset, string_size, name_offset);
+        if (section_index != 0 && section_index >= section_count)
+        {
+            return result;
+        }
+        if (section_index != 0 && section_kinds[section_index] == UINT32_MAX)
+        {
+            continue;
+        }
+        String8 name = {0};
+        if (!object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
+        {
+            return result;
+        }
+        if (name.length > UINT64_MAX - symbol_name_bytes)
+        {
+            return result;
+        }
+        symbol_name_bytes += name.length;
         if (!name.length)
         {
+            String8 prefix = S8(".Lobject.");
+            if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
+            {
+                return result;
+            }
             name = string_format(arena, S8(".Lobject.{u32}"), source_index);
         }
+        if (!object_reader_arena_can_allocate_bytes(arena, name.length, BUSTER_ALIGN_OF(char8)))
+        {
+            return result;
+        }
         ObjectSymbol* destination = &result.symbols[result.symbol_count];
+        u64 symbol_value = 0;
+        if (section_index)
+        {
+            ObjectSectionKind symbol_kind = (ObjectSectionKind)section_kinds[section_index];
+            u64 symbol_base = section_bases[section_index];
+            u64 section_virtual_size = result.sections[symbol_kind].virtual_size;
+            if (symbol_base > section_virtual_size)
+            {
+                return result;
+            }
+            u64 section_remaining = section_virtual_size - symbol_base;
+            if (value > section_remaining || size > section_remaining - value || value > UINT64_MAX - symbol_base || size > UINT64_MAX - value)
+            {
+                return result;
+            }
+            symbol_value = symbol_base + value;
+        }
         *destination = (ObjectSymbol){
             .name = string_duplicate_arena(arena, name, false),
-            .value = section_index ? section_bases[section_index] + value : 0,
+            .value = symbol_value,
             .size = size,
             .section = section_index ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
             .kind = symbol_type == 2 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
@@ -3305,10 +3455,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
     {
         u64 section = section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE;
         u32 section_type = 0;
+        u64 offset = 0;
         u64 size = 0;
         u64 entry_size = 0;
         u32 target_section = 0;
-        if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_u64(bytes, section + 32, &size) ||
+        if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_u64(bytes, section + 24, &offset) ||
+            !object_read_u64(bytes, section + 32, &size) ||
             !object_read_u32(bytes, section + 44, &target_section) || !object_read_u64(bytes, section + 56, &entry_size))
         {
             return result;
@@ -3317,7 +3469,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         {
             continue;
         }
-        if (entry_size != ELF_RELOCATION_SIZE || size % ELF_RELOCATION_SIZE || target_section >= section_count)
+        if (entry_size != ELF_RELOCATION_SIZE || size % ELF_RELOCATION_SIZE || offset > bytes.length || size > bytes.length - offset ||
+            size / ELF_RELOCATION_SIZE > UINT32_MAX || target_section >= section_count)
         {
             return result;
         }
@@ -3330,6 +3483,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             return result;
         }
         relocation_capacity += (u32)(size / ELF_RELOCATION_SIZE);
+    }
+    if (!object_reader_arena_can_allocate_count(arena, relocation_capacity, sizeof(ObjectRelocation), BUSTER_ALIGN_OF(ObjectRelocation)))
+    {
+        return result;
     }
     result.relocations = arena_allocate(arena, ObjectRelocation, relocation_capacity);
     for (u16 section_index = 0; section_index < section_count; section_index += 1)
@@ -3399,7 +3556,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     result.symbols[symbol_map[source_symbol]].kind = OBJECT_SYMBOL_FUNCTION;
                 }
             }
-            if (kind == OBJECT_RELOCATION_COUNT || source_offset > result.sections[section_kinds[target_section]].virtual_size - section_bases[target_section])
+            u64 relocation_size = kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+            ObjectSection* target_section_data = &result.sections[section_kinds[target_section]];
+            if (kind == OBJECT_RELOCATION_COUNT || source_offset > target_section_data->virtual_size - section_bases[target_section] ||
+                relocation_size > target_section_data->virtual_size - section_bases[target_section] - source_offset)
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 return result;
@@ -3417,8 +3577,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL String8 object_read_coff_name(ByteSlice bytes, u64 offset, u64 string_offset, u64 string_size)
+BUSTER_GLOBAL_LOCAL String8 object_read_coff_name(ByteSlice bytes, u64 offset, u64 string_offset, u64 string_size, bool strict_long_name, bool* valid)
 {
+    *valid = false;
     if (offset > bytes.length || 8 > bytes.length - offset)
     {
         return (String8){0};
@@ -3445,9 +3606,15 @@ BUSTER_GLOBAL_LOCAL String8 object_read_coff_name(ByteSlice bytes, u64 offset, u
             padding &= bytes.pointer[offset + index] == 0;
             index += 1;
         }
-        if (any && padding)
+        if (any && (padding || strict_long_name))
         {
-            return object_read_string(bytes, string_offset, string_size, parsed);
+            if (!padding)
+            {
+                return (String8){0};
+            }
+            String8 result = {0};
+            *valid = object_read_string_checked(bytes, string_offset, string_size, parsed, &result);
+            return result;
         }
     }
     u32 zero = 0;
@@ -3456,13 +3623,16 @@ BUSTER_GLOBAL_LOCAL String8 object_read_coff_name(ByteSlice bytes, u64 offset, u
     memcpy(&name_offset, bytes.pointer + offset + 4, sizeof(name_offset));
     if (!zero)
     {
-        return object_read_string(bytes, string_offset, string_size, name_offset);
+        String8 result = {0};
+        *valid = object_read_string_checked(bytes, string_offset, string_size, name_offset, &result);
+        return result;
     }
     u64 length = 0;
     while (length < 8 && bytes.pointer[offset + length])
     {
         length += 1;
     }
+    *valid = true;
     return (String8){
         .pointer = (char8*)bytes.pointer + offset,
         .length = length,
@@ -3487,7 +3657,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
     u32 symbol_offset = 0;
     u32 symbol_count = 0;
     u16 optional_size = 0;
-    if (!arena || bytes.length < COFF_HEADER_SIZE || !object_read_u16(bytes, 0, &machine) || !object_read_u16(bytes, 2, &section_count) ||
+    if (!arena || !bytes.pointer || bytes.length < COFF_HEADER_SIZE || !object_read_u16(bytes, 0, &machine) || !object_read_u16(bytes, 2, &section_count) ||
         !object_read_u32(bytes, 8, &symbol_offset) || !object_read_u32(bytes, 12, &symbol_count) || !object_read_u16(bytes, 16, &optional_size) ||
         optional_size || !section_count || (machine == 0x8664 && target.cpu_arch != CPU_ARCH_X86_64) ||
         (machine == 0xaa64 && target.cpu_arch != CPU_ARCH_AARCH64) || (machine != 0x8664 && machine != 0xaa64) ||
@@ -3503,7 +3673,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
         return result;
     }
     u64 string_size = string_size_u32;
+    if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+    {
+        return result;
+    }
     u32* section_kinds = arena_allocate(arena, u32, section_count);
+    if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
+    {
+        return result;
+    }
     u64* section_bases = arena_allocate(arena, u64, section_count);
     u64 section_sizes[OBJECT_SECTION_COUNT] = {0};
     u32 section_alignments[OBJECT_SECTION_COUNT];
@@ -3522,19 +3700,19 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
         u32 characteristics = 0;
         if (!object_read_u32(bytes, section + 16, &raw_size) || !object_read_u32(bytes, section + 20, &raw_offset) ||
             !object_read_u32(bytes, section + 24, &relocation_offset) || !object_read_u16(bytes, section + 32, &relocation_count) ||
-            !object_read_u32(bytes, section + 36, &characteristics) || (raw_offset && (raw_offset > bytes.length || raw_size > bytes.length - raw_offset)) ||
+            !object_read_u32(bytes, section + 36, &characteristics) ||
+            ((characteristics & 0x80) != 0 && raw_offset && raw_size) ||
+            (raw_offset && (raw_offset > bytes.length || raw_size > bytes.length - raw_offset)) ||
             (relocation_count && (relocation_offset > bytes.length || (u64)relocation_count * COFF_RELOCATION_SIZE > bytes.length - relocation_offset)) ||
             relocation_count > UINT32_MAX - relocation_capacity)
         {
             return result;
         }
-        String8 name = {
-            .pointer = (char8*)bytes.pointer + section,
-            .length = 0,
-        };
-        while (name.length < 8 && name.pointer[name.length])
+        bool name_valid = false;
+        String8 name = object_read_coff_name(bytes, section, string_offset, string_size, true, &name_valid);
+        if (!name_valid)
         {
-            name.length += 1;
+            return result;
         }
         bool is_thread_local =
             string_starts_with_sequence(name, S8(".tls")) || string_starts_with_sequence(name, S8(".tdata")) || string_starts_with_sequence(name, S8(".tbss"));
@@ -3570,11 +3748,23 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
         section_alignments[kind] = BUSTER_MAX(section_alignments[kind], alignment);
         relocation_capacity += relocation_count;
     }
+    if (!object_reader_section_sizes_valid(arena, section_sizes))
+    {
+        return result;
+    }
+    if (!object_reader_arena_can_allocate_count(arena, OBJECT_SECTION_COUNT, sizeof(ObjectSection), BUSTER_ALIGN_OF(ObjectSection)))
+    {
+        return result;
+    }
     result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
     result.section_count = OBJECT_SECTION_COUNT;
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
         bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
+        if (!zero_fill && !object_reader_arena_can_allocate_count(arena, section_sizes[kind], sizeof(u8), BUSTER_ALIGN_OF(u8)))
+        {
+            return result;
+        }
         result.sections[kind] = (ObjectSection){
             .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
@@ -3604,8 +3794,17 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + raw_offset, raw_size);
         }
     }
+    if (!object_reader_arena_can_allocate_count(arena, symbol_count, sizeof(ObjectSymbol), BUSTER_ALIGN_OF(ObjectSymbol)))
+    {
+        return result;
+    }
     result.symbols = arena_allocate(arena, ObjectSymbol, symbol_count);
+    if (!object_reader_arena_can_allocate_count(arena, symbol_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+    {
+        return result;
+    }
     u32* symbol_map = arena_allocate(arena, u32, symbol_count);
+    u64 symbol_name_bytes = 0;
     for (u32 source_index = 0; source_index < symbol_count;)
     {
         symbol_map[source_index] = UINT32_MAX;
@@ -3629,24 +3828,64 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
         {
             symbol_map[source_index + auxiliary + 1] = UINT32_MAX;
         }
-        if (section_number >= 0 && (section_number == 0 || (section_number <= section_count && section_kinds[(u16)section_number - 1] != UINT32_MAX)))
+        if (section_number > 0 && section_number > section_count)
         {
-            String8 name = object_read_coff_name(bytes, source, string_offset, string_size);
+            return result;
+        }
+        if (section_number > 0 && section_kinds[(u16)section_number - 1] == UINT32_MAX)
+        {
+            source_index += (u32)auxiliary_count + 1;
+            continue;
+        }
+        if (section_number >= 0)
+        {
+            u16 section_index = section_number ? (u16)section_number - 1 : 0;
+            ObjectSectionKind symbol_kind = section_number ? (ObjectSectionKind)section_kinds[section_index] : OBJECT_SECTION_COUNT;
+            u64 symbol_base = section_number ? section_bases[section_index] : 0;
+            if (section_number && (symbol_base > section_sizes[symbol_kind] || (u64)value > section_sizes[symbol_kind] - symbol_base ||
+                                  (u64)value > UINT64_MAX - symbol_base))
+            {
+                return result;
+            }
+            bool name_valid = false;
+            String8 name = object_read_coff_name(bytes, source, string_offset, string_size, false, &name_valid);
+            if (!name_valid)
+            {
+                return result;
+            }
+            if (name.length > UINT64_MAX - symbol_name_bytes)
+            {
+                return result;
+            }
+            symbol_name_bytes += name.length;
             if (!name.length)
             {
+                String8 prefix = S8(".Lcoff.");
+                if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
+                {
+                    return result;
+                }
                 name = string_format(arena, S8(".Lcoff.{u32}"), source_index);
+            }
+            if (!object_reader_arena_can_allocate_bytes(arena, name.length, BUSTER_ALIGN_OF(char8)))
+            {
+                return result;
             }
             u32 destination_index = result.symbol_count++;
             result.symbols[destination_index] = (ObjectSymbol){
                 .name = string_duplicate_arena(arena, name, false),
-                .value = section_number ? section_bases[(u16)section_number - 1] + value : 0,
-                .section = section_number ? section_kinds[(u16)section_number - 1] : OBJECT_SECTION_UNDEFINED,
+                .value = section_number ? symbol_base + value : 0,
+                .section = section_number ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
                 .kind = symbol_type & 0x20 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                 .global = storage == 2 || storage == 105,
             };
             symbol_map[source_index] = destination_index;
         }
         source_index += (u32)auxiliary_count + 1;
+    }
+    if (!object_reader_arena_can_allocate_count(arena, relocation_capacity, sizeof(ObjectRelocation), BUSTER_ALIGN_OF(ObjectRelocation)))
+    {
+        return result;
     }
     result.relocations = arena_allocate(arena, ObjectRelocation, relocation_capacity);
     for (u16 section_index = 0; section_index < section_count; section_index += 1)
@@ -3683,6 +3922,31 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             // relocations, so CodeView sections select the debug meaning.
             bool codeview_section = section_kinds[section_index] == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS ||
                                     section_kinds[section_index] == OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
+            u32 relocation_width = 0;
+            if (codeview_section)
+            {
+                relocation_width = relocation_type == (target.cpu_arch == CPU_ARCH_X86_64 ? 0x000b : 0x0008) ? 4
+                                   : relocation_type == (target.cpu_arch == CPU_ARCH_X86_64 ? 0x000a : 0x0007) ? 2
+                                                                                                               : 0;
+            }
+            else if (target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                relocation_width = relocation_type == 1 ? 8
+                                   : relocation_type == 3 || (relocation_type >= 4 && relocation_type <= 9) || relocation_type == 0xb ? 4
+                                                                                                                                    : 0;
+            }
+            else
+            {
+                relocation_width = relocation_type == 0xe ? 8
+                                   : relocation_type == 2 || relocation_type == 3 || relocation_type == 4 || relocation_type == 7 ||
+                                             relocation_type == 0xf
+                                         ? 4
+                                         : 0;
+            }
+            if (relocation_width && (source_offset > raw_size || relocation_width > raw_size - source_offset || !raw_offset))
+            {
+                return result;
+            }
             if (codeview_section)
             {
                 u16 secrel_type = target.cpu_arch == CPU_ARCH_X86_64 ? 0x000b : 0x0008;
@@ -3813,6 +4077,10 @@ BUSTER_TEST_F_DECL bool object_mach_compact_decode(Arena* arena, ByteSlice text,
         X64_RBP_REGISTER = 5,
     };
     if (!arena || !descriptor || function_offset > text.length || function_size > text.length - function_offset || (encoding & 0xf0000000))
+    {
+        return false;
+    }
+    if (!object_reader_arena_can_allocate_count(arena, ACTION_CAPACITY, sizeof(CodegenUnwindAction), BUSTER_ALIGN_OF(CodegenUnwindAction)))
     {
         return false;
     }
@@ -4005,7 +4273,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
     u32 file_type = 0;
     u32 command_count = 0;
     u32 commands_size = 0;
-    if (!arena || bytes.length < MACH_HEADER_SIZE || !object_read_u32(bytes, 0, &magic) || magic != 0xfeedfacf || !object_read_u32(bytes, 4, &cpu_type) ||
+    if (!arena || !bytes.pointer || bytes.length < MACH_HEADER_SIZE || !object_read_u32(bytes, 0, &magic) || magic != 0xfeedfacf ||
+        !object_read_u32(bytes, 4, &cpu_type) ||
         !object_read_u32(bytes, 12, &file_type) || file_type != 1 || !object_read_u32(bytes, 16, &command_count) ||
         !object_read_u32(bytes, 20, &commands_size) || commands_size > bytes.length - MACH_HEADER_SIZE ||
         (cpu_type == 0x01000007 && target.cpu_arch != CPU_ARCH_X86_64) || (cpu_type == 0x0100000c && target.cpu_arch != CPU_ARCH_AARCH64) ||
@@ -4019,12 +4288,14 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
     u32 string_offset = 0;
     u32 string_size = 0;
     u64 command = MACH_HEADER_SIZE;
+    u64 command_table_end = MACH_HEADER_SIZE + commands_size;
+    bool symbol_command_seen = false;
     for (u32 command_index = 0; command_index < command_count; command_index += 1)
     {
         u32 kind = 0;
         u32 size = 0;
-        if (!object_read_u32(bytes, command, &kind) || !object_read_u32(bytes, command + 4, &size) || size < 8 || command > bytes.length ||
-            size > bytes.length - command)
+        if (!object_read_u32(bytes, command, &kind) || !object_read_u32(bytes, command + 4, &size) || size < 8 || command > command_table_end ||
+            size > command_table_end - command || command > bytes.length || size > bytes.length - command)
         {
             return result;
         }
@@ -4040,24 +4311,50 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         }
         else if (kind == MACH_SYMTAB_COMMAND)
         {
-            if (size < 24 || symbol_offset || !object_read_u32(bytes, command + 8, &symbol_offset) || !object_read_u32(bytes, command + 12, &symbol_count) ||
+            if (size < 24 || symbol_command_seen || !object_read_u32(bytes, command + 8, &symbol_offset) || !object_read_u32(bytes, command + 12, &symbol_count) ||
                 !object_read_u32(bytes, command + 16, &string_offset) || !object_read_u32(bytes, command + 20, &string_size))
             {
                 return result;
             }
+            symbol_command_seen = true;
         }
         command += size;
     }
-    if (!mach_section_count || !symbol_offset || symbol_offset > bytes.length || (u64)symbol_count * MACH_SYMBOL_SIZE > bytes.length - symbol_offset ||
-        string_offset > bytes.length || string_size > bytes.length - string_offset)
+    if (command != command_table_end || !mach_section_count || !symbol_command_seen || !symbol_offset || symbol_offset > bytes.length ||
+        (u64)symbol_count * MACH_SYMBOL_SIZE > bytes.length - symbol_offset ||
+        !string_size || string_offset > bytes.length || string_size > bytes.length - string_offset || bytes.pointer[string_offset] != 0)
+    {
+        return result;
+    }
+    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
     {
         return result;
     }
     u64* mach_sections = arena_allocate(arena, u64, mach_section_count);
+    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+    {
+        return result;
+    }
     u32* section_kinds = arena_allocate(arena, u32, mach_section_count);
+    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
+    {
+        return result;
+    }
     u64* section_bases = arena_allocate(arena, u64, mach_section_count);
+    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
+    {
+        return result;
+    }
     u64* section_addresses = arena_allocate(arena, u64, mach_section_count);
+    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(bool), BUSTER_ALIGN_OF(bool)))
+    {
+        return result;
+    }
     bool* compact_sections = arena_allocate(arena, bool, mach_section_count);
+    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(bool), BUSTER_ALIGN_OF(bool)))
+    {
+        return result;
+    }
     bool* eh_frame_sections = arena_allocate(arena, bool, mach_section_count);
     memset(compact_sections, 0, (u64)mach_section_count * sizeof(*compact_sections));
     memset(eh_frame_sections, 0, (u64)mach_section_count * sizeof(*eh_frame_sections));
@@ -4165,11 +4462,28 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         section_sizes[OBJECT_SECTION_UNWIND] = 0;
         relocation_capacity += compact_entry_count;
     }
+    if (!object_reader_section_sizes_valid(arena, section_sizes))
+    {
+        return result;
+    }
+    u64 symbol_capacity = (u64)symbol_count + mach_section_count + compact_entry_count;
+    if (symbol_capacity > UINT32_MAX)
+    {
+        return result;
+    }
+    if (!object_reader_arena_can_allocate_count(arena, OBJECT_SECTION_COUNT, sizeof(ObjectSection), BUSTER_ALIGN_OF(ObjectSection)))
+    {
+        return result;
+    }
     result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
     result.section_count = OBJECT_SECTION_COUNT;
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
         bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
+        if (!zero_fill && !object_reader_arena_can_allocate_count(arena, section_sizes[kind], sizeof(u8), BUSTER_ALIGN_OF(u8)))
+        {
+            return result;
+        }
         result.sections[kind] = (ObjectSection){
             .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
@@ -4198,8 +4512,17 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + offset, size);
         }
     }
-    result.symbols = arena_allocate(arena, ObjectSymbol, symbol_count + mach_section_count + compact_entry_count);
+    if (!object_reader_arena_can_allocate_count(arena, symbol_capacity, sizeof(ObjectSymbol), BUSTER_ALIGN_OF(ObjectSymbol)))
+    {
+        return result;
+    }
+    result.symbols = arena_allocate(arena, ObjectSymbol, symbol_capacity);
+    if (!object_reader_arena_can_allocate_count(arena, symbol_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+    {
+        return result;
+    }
     u32* symbol_map = arena_allocate(arena, u32, symbol_count);
+    u64 symbol_name_bytes = 0;
     for (u32 source_index = 0; source_index < symbol_count; source_index += 1)
     {
         symbol_map[source_index] = UINT32_MAX;
@@ -4217,11 +4540,28 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             continue;
         }
         u8 kind = symbol_type & 0x0e;
-        if ((kind != 0 && kind != 0x0e) || (kind == 0x0e && (!section_number || section_number > mach_section_count)))
+        if (kind == 0x0e && (!section_number || section_number > mach_section_count))
+        {
+            return result;
+        }
+        if (kind == 0x0e && section_kinds[section_number - 1] == UINT32_MAX)
         {
             continue;
         }
-        String8 name = object_read_string(bytes, string_offset, string_size, name_offset);
+        if (kind != 0 && kind != 0x0e)
+        {
+            continue;
+        }
+        String8 name = {0};
+        if (!object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
+        {
+            return result;
+        }
+        if (name.length > UINT64_MAX - symbol_name_bytes)
+        {
+            return result;
+        }
+        symbol_name_bytes += name.length;
         if (name.length && name.pointer[0] == '_')
         {
             name.pointer += 1;
@@ -4229,7 +4569,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         }
         if (!name.length)
         {
+            String8 prefix = S8(".Lmach.");
+            if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
+            {
+                return result;
+            }
             name = string_format(arena, S8(".Lmach.{u32}"), source_index);
+        }
+        if (!object_reader_arena_can_allocate_bytes(arena, name.length, BUSTER_ALIGN_OF(char8)))
+        {
+            return result;
         }
         u32 destination_index = result.symbol_count++;
         u64 section_value = 0;
@@ -4240,7 +4589,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             {
                 return result;
             }
-            section_value = section_bases[section_index] + value - section_addresses[section_index];
+            u64 relative_value = value - section_addresses[section_index];
+            ObjectSectionKind symbol_kind = (ObjectSectionKind)section_kinds[section_index];
+            u64 symbol_base = section_bases[section_index];
+            if (symbol_base > result.sections[symbol_kind].virtual_size || relative_value > result.sections[symbol_kind].virtual_size - symbol_base ||
+                relative_value > UINT64_MAX - symbol_base)
+            {
+                return result;
+            }
+            section_value = symbol_base + relative_value;
         }
         result.symbols[destination_index] = (ObjectSymbol){
             .name = string_duplicate_arena(arena, name, false),
@@ -4251,10 +4608,18 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         };
         symbol_map[source_index] = destination_index;
     }
+    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+    {
+        return result;
+    }
     u32* section_symbol_maps = arena_allocate(arena, u32, mach_section_count);
     for (u32 section_index = 0; section_index < mach_section_count; section_index += 1)
     {
         section_symbol_maps[section_index] = UINT32_MAX;
+    }
+    if (!object_reader_arena_can_allocate_count(arena, relocation_capacity, sizeof(ObjectRelocation), BUSTER_ALIGN_OF(ObjectRelocation)))
+    {
+        return result;
     }
     result.relocations = arena_allocate(arena, ObjectRelocation, relocation_capacity);
     for (u32 section_index = 0; section_index < mach_section_count; section_index += 1)
@@ -4285,6 +4650,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             u32 relocation_type = information >> 28;
             u32 length = (information >> 25) & 0x3;
             if (source_offset < 0 || (u64)source_offset > section_size)
+            {
+                return result;
+            }
+            u32 relocation_width = 1u << length;
+            if (object_section_kind_is_zero_fill((ObjectSectionKind)section_kinds[section_index]) ||
+                relocation_width > section_size - (u64)source_offset)
             {
                 return result;
             }
@@ -4344,9 +4715,18 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     return result;
                 }
                 u32 referenced_section = source_symbol - 1;
+                if (section_kinds[referenced_section] == UINT32_MAX)
+                {
+                    return result;
+                }
                 destination_symbol = section_symbol_maps[referenced_section];
                 if (destination_symbol == UINT32_MAX)
                 {
+                    String8 prefix = S8(".Lmach_section.");
+                    if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
+                    {
+                        return result;
+                    }
                     destination_symbol = result.symbol_count++;
                     section_symbol_maps[referenced_section] = destination_symbol;
                     result.symbols[destination_symbol] = (ObjectSymbol){
@@ -4441,9 +4821,60 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             };
         }
     }
+    u32* text_symbol_map = 0;
+    u64 text_symbol_map_capacity = 0;
     if (has_compact)
     {
+        u64 desired_capacity = (u64)result.symbol_count * 2 + 1;
+        text_symbol_map_capacity = 1;
+        while (text_symbol_map_capacity < desired_capacity)
+        {
+            if (text_symbol_map_capacity > UINT64_MAX / 2)
+            {
+                return result;
+            }
+            text_symbol_map_capacity *= 2;
+        }
+        if (!object_reader_arena_can_allocate_count(arena, text_symbol_map_capacity, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            return result;
+        }
+        text_symbol_map = arena_allocate(arena, u32, text_symbol_map_capacity);
+        memset(text_symbol_map, 0xff, sizeof(*text_symbol_map) * text_symbol_map_capacity);
+        for (u32 symbol_index = 0; symbol_index < result.symbol_count; symbol_index += 1)
+        {
+            if (result.symbols[symbol_index].section != OBJECT_SECTION_TEXT)
+            {
+                continue;
+            }
+            u64 bucket = object_reader_hash_u64(result.symbols[symbol_index].value) & (text_symbol_map_capacity - 1);
+            for (u64 probe = 0; probe < text_symbol_map_capacity; probe += 1)
+            {
+                u32 candidate = text_symbol_map[bucket];
+                if (candidate == UINT32_MAX)
+                {
+                    text_symbol_map[bucket] = symbol_index;
+                    break;
+                }
+                if (result.symbols[candidate].value == result.symbols[symbol_index].value)
+                {
+                    break;
+                }
+                bucket = (bucket + 1) & (text_symbol_map_capacity - 1);
+            }
+        }
+    }
+    if (has_compact)
+    {
+        if (!object_reader_arena_can_allocate_count(arena, compact_entry_count, sizeof(CodegenFunctionDescriptor), BUSTER_ALIGN_OF(CodegenFunctionDescriptor)))
+        {
+            return result;
+        }
         CodegenFunctionDescriptor* functions = arena_allocate(arena, CodegenFunctionDescriptor, compact_entry_count);
+        if (!object_reader_arena_can_allocate_count(arena, compact_entry_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            return result;
+        }
         u32* function_symbols = arena_allocate(arena, u32, compact_entry_count);
         u32 function_count = 0;
         for (u32 section_index = 0; section_index < mach_section_count; section_index += 1)
@@ -4467,6 +4898,32 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 return result;
             }
+            if (entry_count && !object_reader_arena_can_allocate_count(arena, entry_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+            {
+                return result;
+            }
+            u32* compact_relocation_map = entry_count ? arena_allocate(arena, u32, entry_count) : 0;
+            for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
+            {
+                compact_relocation_map[entry_index] = UINT32_MAX;
+            }
+            for (u32 relocation_index = 0; relocation_index < relocation_count; relocation_index += 1)
+            {
+                u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
+                u32 source_offset = 0;
+                if (!object_read_u32(bytes, relocation, &source_offset) || source_offset % 32 != 0 || source_offset / 32 >= entry_count)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    return result;
+                }
+                u32 compact_entry_index = source_offset / 32;
+                if (compact_relocation_map[compact_entry_index] != UINT32_MAX)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    return result;
+                }
+                compact_relocation_map[compact_entry_index] = relocation_index;
+            }
             for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
             {
                 u32 entry_offset = entry_index * 32;
@@ -4481,27 +4938,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                     return result;
                 }
-                u32 matching_relocation = UINT32_MAX;
+                u32 relocation_index = compact_relocation_map[entry_index];
                 u32 information = 0;
-                for (u32 relocation_index = 0; relocation_index < relocation_count; relocation_index += 1)
-                {
-                    u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
-                    u32 source_offset = 0;
-                    u32 candidate_information = 0;
-                    object_read_u32(bytes, relocation, &source_offset);
-                    object_read_u32(bytes, relocation + 4, &candidate_information);
-                    if (source_offset == entry_offset)
-                    {
-                        if (matching_relocation != UINT32_MAX)
-                        {
-                            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                            return result;
-                        }
-                        matching_relocation = relocation_index;
-                        information = candidate_information;
-                    }
-                }
-                if (matching_relocation == UINT32_MAX || (information >> 28) != 0 || ((information >> 25) & 0x3) != 3 || (information & (1u << 24)))
+                if (relocation_index == UINT32_MAX ||
+                    !object_read_u32(bytes, relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE + 4, &information) ||
+                    (information >> 28) != 0 || ((information >> 25) & 0x3) != 3 || (information & (1u << 24)))
                 {
                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                     return result;
@@ -4553,18 +4994,29 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     return result;
                 }
                 u32 function_symbol = UINT32_MAX;
-                for (u32 symbol_index = 0; symbol_index < result.symbol_count; symbol_index += 1)
+                u64 bucket = object_reader_hash_u64(function_offset) & (text_symbol_map_capacity - 1);
+                for (u64 probe = 0; probe < text_symbol_map_capacity; probe += 1)
                 {
-                    ObjectSymbol* symbol = result.symbols + symbol_index;
-                    if (symbol->section == OBJECT_SECTION_TEXT && symbol->value == function_offset)
+                    u32 symbol_index = text_symbol_map[bucket];
+                    if (symbol_index == UINT32_MAX)
                     {
-                        function_symbol = symbol_index;
-                        symbol->kind = OBJECT_SYMBOL_FUNCTION;
                         break;
                     }
+                    if (result.symbols[symbol_index].value == function_offset)
+                    {
+                        function_symbol = symbol_index;
+                        result.symbols[symbol_index].kind = OBJECT_SYMBOL_FUNCTION;
+                        break;
+                    }
+                    bucket = (bucket + 1) & (text_symbol_map_capacity - 1);
                 }
                 if (function_symbol == UINT32_MAX)
                 {
+                    String8 prefix = S8(".Lmach_unwind.");
+                    if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
+                    {
+                        return result;
+                    }
                     function_symbol = result.symbol_count++;
                     result.symbols[function_symbol] = (ObjectSymbol){
                         .name = string_format(arena, S8(".Lmach_unwind.{u32}"), function_count),
@@ -4576,6 +5028,22 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 }
                 function_symbols[function_count++] = function_symbol;
             }
+        }
+        u64 cfi_capacity = 64;
+        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        {
+            u64 action_bytes = (u64)functions[function_index].unwind_action_count * 24;
+            if (action_bytes > UINT64_MAX - 64 || cfi_capacity > UINT64_MAX - 64 - action_bytes)
+            {
+                return result;
+            }
+            cfi_capacity += 64 + action_bytes;
+        }
+        u64 cfi_position = 0;
+        if (!object_reader_arena_position_after(arena, arena->position, cfi_capacity, BUSTER_ALIGN_OF(u8), &cfi_position) ||
+            !object_reader_arena_position_after(arena, cfi_position, (u64)function_count * sizeof(DwarfCfiRelocation), BUSTER_ALIGN_OF(DwarfCfiRelocation), &cfi_position))
+        {
+            return result;
         }
         DwarfCfiResult cfi = dwarf_cfi_build(arena, (DwarfCfiInput){
                                                         .functions = functions,
@@ -4635,6 +5103,13 @@ ObjectFile object_read(Arena* arena, ByteSlice bytes, Target target)
                 // one translation unit, so retain a deterministic synthetic
                 // module rather than collapsing its CodeView into the linker's
                 // anonymous stream.
+                if (result.sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length &&
+                    (!object_reader_arena_can_allocate_count(arena, 1, sizeof(ObjectDebugModule), BUSTER_ALIGN_OF(ObjectDebugModule)) ||
+                     !object_reader_arena_can_allocate_bytes(arena, S8("object.obj").length, BUSTER_ALIGN_OF(char8))))
+                {
+                    result.error = OBJECT_ERROR_INVALID_INPUT;
+                    return result;
+                }
                 object_debug_module_set(arena, &result, S8("object.obj"), result.sections[OBJECT_SECTION_TEXT].data.length);
             }
             return result;
@@ -4657,6 +5132,10 @@ ObjectFile object_read(Arena* arena, ByteSlice bytes, Target target)
 
 BUSTER_GLOBAL_LOCAL bool object_archive_decimal(u8 const* bytes, u64 length, u64* value)
 {
+    if (length && !bytes)
+    {
+        return false;
+    }
     u64 result = 0;
     bool digit_found = false;
     for (u64 index = 0; index < length; index += 1)
@@ -4683,6 +5162,10 @@ BUSTER_GLOBAL_LOCAL bool object_archive_decimal(u8 const* bytes, u64 length, u64
 
 BUSTER_GLOBAL_LOCAL bool object_bytes_are_object(ByteSlice bytes)
 {
+    if (bytes.length && !bytes.pointer)
+    {
+        return false;
+    }
     if (bytes.length >= 4 && (memcmp(bytes.pointer,
                                      "\x7f"
                                      "ELF",
@@ -4706,14 +5189,28 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
         .error = OBJECT_ERROR_INVALID_INPUT,
     };
     static char const archive_magic[] = "!<arch>\n";
-    if (!arena || bytes.length < sizeof(archive_magic) - 1 || memcmp(bytes.pointer, archive_magic, sizeof(archive_magic) - 1) != 0)
+    if (!arena || !bytes.pointer || bytes.length < sizeof(archive_magic) - 1 || memcmp(bytes.pointer, archive_magic, sizeof(archive_magic) - 1) != 0)
     {
         return result;
     }
-    u32 member_capacity = (u32)BUSTER_MIN(bytes.length / 60, (u64)UINT32_MAX);
+    u64 member_capacity_u64 = bytes.length / 60;
+    if (member_capacity_u64 > UINT32_MAX)
+    {
+        return result;
+    }
+    u32 member_capacity = (u32)member_capacity_u64;
+    if (!object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(ObjectFile), BUSTER_ALIGN_OF(ObjectFile)))
+    {
+        return result;
+    }
     result.objects = arena_allocate(arena, ObjectFile, member_capacity);
+    if (!object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(String8), BUSTER_ALIGN_OF(String8)))
+    {
+        return result;
+    }
     result.member_names = arena_allocate(arena, String8, member_capacity);
     String8 long_names = {0};
+    u64 member_name_bytes = 0;
     u64 cursor = sizeof(archive_magic) - 1;
     while (cursor < bytes.length)
     {
@@ -4777,11 +5274,20 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
             {
                 return result;
             }
+            if (name_offset && long_names.pointer[name_offset - 1] != '\n' && long_names.pointer[name_offset - 1] != 0)
+            {
+                return result;
+            }
             u64 name_length = 0;
-            while (name_offset + name_length < long_names.length && long_names.pointer[name_offset + name_length] != '\n' &&
+            u64 name_remaining = long_names.length - name_offset;
+            while (name_length < name_remaining && long_names.pointer[name_offset + name_length] != '\n' &&
                    long_names.pointer[name_offset + name_length] != 0)
             {
                 name_length += 1;
+            }
+            if (name_length == name_remaining)
+            {
+                return result;
             }
             if (name_length && long_names.pointer[name_offset + name_length - 1] == '/')
             {
@@ -4802,6 +5308,15 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
         };
         if (!metadata && object_bytes_are_object(object_bytes))
         {
+            if (member_name.length > UINT64_MAX - member_name_bytes)
+            {
+                return result;
+            }
+            member_name_bytes += member_name.length;
+            if (!object_reader_arena_can_allocate_bytes(arena, member_name.length, BUSTER_ALIGN_OF(char8)))
+            {
+                return result;
+            }
             ObjectFile object = object_read(arena, object_bytes, target);
             if (object.error != OBJECT_ERROR_NONE || result.object_count == member_capacity)
             {
@@ -4815,6 +5330,10 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
         cursor = member_offset + member_size;
         if (cursor & 1)
         {
+            if (cursor >= bytes.length || bytes.pointer[cursor] != '\n')
+            {
+                return result;
+            }
             cursor += 1;
         }
     }
@@ -4825,6 +5344,887 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
     result.error = OBJECT_ERROR_NONE;
     return result;
 }
+
+#if BUSTER_FUZZ_AVAILABLE
+enum
+{
+    OBJECT_FUZZ_MAX_GENERATED_BYTES = BUSTER_MB(1),
+    OBJECT_FUZZ_MUTATION_COUNT = 24,
+};
+
+BUSTER_GLOBAL_LOCAL bool object_fuzz_archive_decimal_field(u8* field, u32 width, u64 value)
+{
+    memset(field, ' ', width);
+    u32 cursor = width;
+    do
+    {
+        if (!cursor)
+        {
+            return false;
+        }
+        field[--cursor] = (u8)('0' + value % 10);
+        value /= 10;
+    } while (value);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_archive_make(Arena* arena, ByteSlice member, u32 archive_kind)
+{
+    String8 name = S8("seed.o");
+    String8 long_name = S8("long-seed-object.o/\n");
+    bool bsd_name = archive_kind == 1;
+    bool gnu_long_name = archive_kind == 2;
+    u64 first_member_size = gnu_long_name ? long_name.length : member.length + (bsd_name ? name.length : 0);
+    u64 total_size = sizeof("!<arch>\n") - 1 + 60 + first_member_size + (first_member_size & 1) +
+                     (gnu_long_name ? 60 + member.length + (member.length & 1) : 0);
+    if (!arena || !member.pointer || member.length > OBJECT_FUZZ_MAX_GENERATED_BYTES || first_member_size > UINT64_MAX - 68 ||
+        total_size > OBJECT_FUZZ_MAX_GENERATED_BYTES)
+    {
+        return (ByteSlice){0};
+    }
+    u8* bytes = arena_allocate(arena, u8, total_size);
+    memset(bytes, ' ', total_size);
+    memcpy(bytes, "!<arch>\n", sizeof("!<arch>\n") - 1);
+    u8* header = bytes + sizeof("!<arch>\n") - 1;
+    if (gnu_long_name)
+    {
+        memcpy(header, "//", 2);
+    }
+    else if (bsd_name)
+    {
+        memcpy(header, "#1/6", 4);
+    }
+    else
+    {
+        memcpy(header, "seed.o/", 7);
+    }
+    header[58] = '`';
+    header[59] = '\n';
+    if (!object_fuzz_archive_decimal_field(header + 48, 10, first_member_size))
+    {
+        return (ByteSlice){0};
+    }
+    u8* payload = header + 60;
+    if (gnu_long_name)
+    {
+        memcpy(payload, long_name.pointer, long_name.length);
+        payload += long_name.length;
+        if (first_member_size & 1)
+        {
+            *payload++ = '\n';
+        }
+        header = payload;
+        memcpy(header, "/0", 2);
+        header[58] = '`';
+        header[59] = '\n';
+        if (!object_fuzz_archive_decimal_field(header + 48, 10, member.length))
+        {
+            return (ByteSlice){0};
+        }
+        payload = header + 60;
+        memcpy(payload, member.pointer, member.length);
+        if (member.length & 1)
+        {
+            payload[member.length] = '\n';
+        }
+        return (ByteSlice){.pointer = bytes, .length = total_size};
+    }
+    if (bsd_name)
+    {
+        memcpy(payload, name.pointer, name.length);
+        payload += name.length;
+    }
+    memcpy(payload, member.pointer, member.length);
+    if (first_member_size & 1)
+    {
+        bytes[sizeof("!<arch>\n") - 1 + 60 + first_member_size] = '\n';
+    }
+    return (ByteSlice){.pointer = bytes, .length = total_size};
+}
+
+BUSTER_GLOBAL_LOCAL void object_fuzz_write_u16(u8* bytes, u64 length, u64 offset, u16 value)
+{
+    if (offset <= length && sizeof(value) <= length - offset)
+    {
+        memcpy(bytes + offset, &value, sizeof(value));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void object_fuzz_write_u8(u8* bytes, u64 length, u64 offset, u8 value)
+{
+    if (offset < length)
+    {
+        bytes[offset] = value;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void object_fuzz_write_u32(u8* bytes, u64 length, u64 offset, u32 value)
+{
+    if (offset <= length && sizeof(value) <= length - offset)
+    {
+        memcpy(bytes + offset, &value, sizeof(value));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void object_fuzz_write_u64(u8* bytes, u64 length, u64 offset, u64 value)
+{
+    if (offset <= length && sizeof(value) <= length - offset)
+    {
+        memcpy(bytes + offset, &value, sizeof(value));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool object_fuzz_elf_find_section(ByteSlice bytes, u32 type, u64* header, u64* offset, u64* size)
+{
+    if (!bytes.pointer || bytes.length < 64)
+    {
+        return false;
+    }
+    u64 section_table = 0;
+    u16 section_count = 0;
+    if (!object_read_u64(bytes, 40, &section_table) || !object_read_u16(bytes, 60, &section_count) || section_table > bytes.length ||
+        (u64)section_count * 64 > bytes.length - section_table)
+    {
+        return false;
+    }
+    for (u16 section_index = 0; section_index < section_count; section_index += 1)
+    {
+        u64 section = section_table + (u64)section_index * 64;
+        u32 section_type = 0;
+        u64 section_offset = 0;
+        u64 section_size = 0;
+        if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_u64(bytes, section + 24, &section_offset) ||
+            !object_read_u64(bytes, section + 32, &section_size))
+        {
+            return false;
+        }
+        if (section_type == type)
+        {
+            if (section_offset > bytes.length || section_size > bytes.length - section_offset)
+            {
+                return false;
+            }
+            if (header)
+            {
+                *header = section;
+            }
+            if (offset)
+            {
+                *offset = section_offset;
+            }
+            if (size)
+            {
+                *size = section_size;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_fuzz_mach_find_command(ByteSlice bytes, u32 kind, u64* result)
+{
+    if (!bytes.pointer || bytes.length < 32)
+    {
+        return false;
+    }
+    u32 command_count = 0;
+    if (!object_read_u32(bytes, 16, &command_count))
+    {
+        return false;
+    }
+    u64 command = 32;
+    for (u32 command_index = 0; command_index < command_count; command_index += 1)
+    {
+        u32 command_kind = 0;
+        u32 command_size = 0;
+        if (command > bytes.length || 8 > bytes.length - command || !object_read_u32(bytes, command, &command_kind) ||
+            !object_read_u32(bytes, command + 4, &command_size) || command_size < 8 || command_size > bytes.length - command)
+        {
+            return false;
+        }
+        if (command_kind == kind)
+        {
+            *result = command;
+            return true;
+        }
+        command += command_size;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, const u8* input, u64 input_size, ObjectFormat format, bool archive,
+                                                  u32 mutation_index)
+{
+    ByteSlice result = seed;
+    if (!seed.pointer || !seed.length)
+    {
+        return result;
+    }
+    if (mutation_index == 0)
+    {
+        result.length -= 1;
+        return result;
+    }
+    if (mutation_index == 1)
+    {
+        result.length = BUSTER_MAX((u64)1, seed.length / 2);
+        return result;
+    }
+    u8* bytes = arena_allocate(arena, u8, seed.length);
+    if (!bytes)
+    {
+        return result;
+    }
+    memcpy(bytes, seed.pointer, seed.length);
+    result.pointer = bytes;
+    u64 input_value = 0;
+    if (input_size)
+    {
+        u64 input_index = ((u64)mutation_index * 17 + 5) % input_size;
+        for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+        {
+            input_value = (input_value << 8) | input[(input_index + byte_index) % input_size];
+        }
+    }
+    if (mutation_index == 2 || mutation_index == 3 || mutation_index == 7)
+    {
+        u8 value = input_size ? (u8)input_value : 0xa5;
+        u64 offset = input_size ? input_value % seed.length : (u64)mutation_index % seed.length;
+        if (mutation_index == 2)
+        {
+            bytes[offset] ^= value ? value : 0xa5;
+        }
+        else if (mutation_index == 3)
+        {
+            u64 count = BUSTER_MIN((u64)8, seed.length - offset);
+            for (u64 index = 0; index < count; index += 1)
+            {
+                bytes[offset + index] = (u8)(value + index * 17 + mutation_index);
+            }
+        }
+        else
+        {
+            result.length = BUSTER_MAX((u64)1, (u64)value % seed.length);
+        }
+        return result;
+    }
+    if (archive)
+    {
+        if (mutation_index == 4)
+        {
+            memset(bytes + 8 + 48, '9', BUSTER_MIN((u64)10, seed.length > 56 ? seed.length - 56 : 0));
+        }
+        else if (mutation_index == 5)
+        {
+            memset(bytes + 8, '/', BUSTER_MIN((u64)16, seed.length > 8 ? seed.length - 8 : 0));
+        }
+        else if (mutation_index == 6)
+        {
+            u64 offset = 8 + 58;
+            if (offset < seed.length)
+            {
+                bytes[offset] ^= 1;
+            }
+        }
+        else if (mutation_index == 8)
+        {
+            if (seed.length >= 8)
+            {
+                memset(bytes + 8, ' ', BUSTER_MIN((u64)16, seed.length - 8));
+            }
+            object_fuzz_write_u8(bytes, seed.length, 8, '/');
+            object_fuzz_write_u8(bytes, seed.length, 9, '1');
+        }
+        else if (mutation_index == 9)
+        {
+            if (seed.length >= 56)
+            {
+                memset(bytes + 8 + 48, '9', BUSTER_MIN((u64)10, seed.length - 56));
+            }
+        }
+        else if (mutation_index == 10)
+        {
+            object_fuzz_write_u8(bytes, seed.length, 8 + 58, '`' ^ 1);
+        }
+        else if (mutation_index == 11)
+        {
+            object_fuzz_write_u8(bytes, seed.length, 8 + 59, 'x');
+        }
+        else if (mutation_index == 12)
+        {
+            object_fuzz_write_u8(bytes, seed.length, 8 + 60, 'x');
+        }
+        else if (mutation_index == 13)
+        {
+            if (seed.length > 68)
+            {
+                u64 table_offset = input_size ? input_value % BUSTER_MIN((u64)16, seed.length - 68) : 0;
+                object_fuzz_write_u8(bytes, seed.length, 8 + 60 + table_offset, 0);
+            }
+        }
+        else if (mutation_index == 14)
+        {
+            if (seed.length > 8)
+            {
+                u64 truncation = input_size ? input_value % BUSTER_MIN((u64)32, seed.length - 8) : 1;
+                result.length = BUSTER_MAX((u64)8, seed.length - truncation);
+            }
+        }
+        else
+        {
+            u64 offset = input_size ? input_value % seed.length : (u64)mutation_index % seed.length;
+            bytes[offset] ^= (u8)(0x5a + mutation_index);
+        }
+        return result;
+    }
+    switch (format)
+    {
+    case OBJECT_FORMAT_ELF64:
+        if (mutation_index == 4)
+        {
+            object_fuzz_write_u64(bytes, seed.length, 40, UINT64_MAX);
+        }
+        else if (mutation_index == 5)
+        {
+            object_fuzz_write_u16(bytes, seed.length, 60, UINT16_MAX);
+        }
+        else if (mutation_index == 6)
+        {
+            object_fuzz_write_u64(bytes, seed.length, 48, UINT64_MAX);
+        }
+        else if (mutation_index == 8)
+        {
+            u64 symbol_offset = 0;
+            u64 symbol_size = 0;
+            if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+            {
+                object_fuzz_write_u64(bytes, seed.length, symbol_offset + 24 + 16, UINT64_MAX);
+            }
+        }
+        else if (mutation_index == 9)
+        {
+            u64 symbol_offset = 0;
+            u64 symbol_size = 0;
+            if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+            {
+                object_fuzz_write_u16(bytes, seed.length, symbol_offset + 24 + 6, UINT16_MAX);
+            }
+        }
+        else if (mutation_index == 10)
+        {
+            u64 relocation_offset = 0;
+            u64 relocation_size = 0;
+            if (object_fuzz_elf_find_section(seed, 4, 0, &relocation_offset, &relocation_size) && relocation_size >= 24)
+            {
+                object_fuzz_write_u64(bytes, seed.length, relocation_offset + 8, UINT64_MAX);
+            }
+        }
+        else if (mutation_index == 11)
+        {
+            u64 string_offset = 0;
+            u64 string_size = 0;
+            if (object_fuzz_elf_find_section(seed, 3, 0, &string_offset, &string_size) && string_size)
+            {
+                object_fuzz_write_u8(bytes, seed.length, string_offset + string_size - 1, 'x');
+            }
+        }
+        else if (mutation_index == 12)
+        {
+            u64 symbol_header = 0;
+            if (object_fuzz_elf_find_section(seed, 2, &symbol_header, 0, 0))
+            {
+                object_fuzz_write_u32(bytes, seed.length, symbol_header + 40, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 13)
+        {
+            u64 relocation_offset = 0;
+            u64 relocation_size = 0;
+            if (object_fuzz_elf_find_section(seed, 4, 0, &relocation_offset, &relocation_size) && relocation_size >= 24)
+            {
+                object_fuzz_write_u64(bytes, seed.length, relocation_offset, UINT64_MAX);
+            }
+        }
+        else if (mutation_index == 14)
+        {
+            u64 section_offset = 0;
+            u64 section_size = 0;
+            if (object_fuzz_elf_find_section(seed, 1, 0, &section_offset, &section_size) && section_size)
+            {
+                object_fuzz_write_u8(bytes, seed.length, section_offset + (input_size ? input_value % section_size : 0), (u8)input_value);
+            }
+        }
+        else if (mutation_index == 15)
+        {
+            u64 section_header = 0;
+            if (object_fuzz_elf_find_section(seed, 4, &section_header, 0, 0))
+            {
+                object_fuzz_write_u64(bytes, seed.length, section_header + 32, UINT64_MAX);
+            }
+        }
+        else if (mutation_index == 16)
+        {
+            u64 symbol_offset = 0;
+            u64 symbol_size = 0;
+            if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+            {
+                object_fuzz_write_u16(bytes, seed.length, symbol_offset + 24 + 6, 0x7fff);
+            }
+        }
+        else if (mutation_index == 17)
+        {
+            u64 symbol_offset = 0;
+            u64 symbol_size = 0;
+            if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+            {
+                object_fuzz_write_u32(bytes, seed.length, symbol_offset + 24, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 18)
+        {
+            u64 relocation_header = 0;
+            if (object_fuzz_elf_find_section(seed, 4, &relocation_header, 0, 0))
+            {
+                object_fuzz_write_u64(bytes, seed.length, relocation_header + 56, UINT64_MAX);
+            }
+        }
+        else if (mutation_index == 19)
+        {
+            u64 relocation_header = 0;
+            if (object_fuzz_elf_find_section(seed, 4, &relocation_header, 0, 0))
+            {
+                object_fuzz_write_u32(bytes, seed.length, relocation_header + 40, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 20)
+        {
+            u64 section_header = 0;
+            if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+            {
+                object_fuzz_write_u32(bytes, seed.length, section_header, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 21)
+        {
+            u64 section_header = 0;
+            if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+            {
+                object_fuzz_write_u64(bytes, seed.length, section_header + 48, UINT64_MAX);
+            }
+        }
+        else if (mutation_index == 22)
+        {
+            u64 section_header = 0;
+            if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+            {
+                object_fuzz_write_u64(bytes, seed.length, section_header + 8, UINT64_MAX);
+            }
+        }
+        else
+        {
+            object_fuzz_write_u16(bytes, seed.length, 62, (u16)input_value);
+        }
+        break;
+    case OBJECT_FORMAT_COFF:
+        if (mutation_index == 4)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 8, UINT32_MAX);
+        }
+        else if (mutation_index == 5)
+        {
+            object_fuzz_write_u16(bytes, seed.length, 2, UINT16_MAX);
+        }
+        else if (mutation_index == 6)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 12, UINT32_MAX);
+        }
+        else if (mutation_index == 8)
+        {
+            u32 symbol_offset = 0;
+            u32 symbol_count = 0;
+            if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) && symbol_count > 1)
+            {
+                object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 4, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 9)
+        {
+            object_fuzz_write_u8(bytes, seed.length, 20, '/');
+            object_fuzz_write_u8(bytes, seed.length, 21, '9');
+            object_fuzz_write_u8(bytes, seed.length, 22, '9');
+            object_fuzz_write_u8(bytes, seed.length, 23, '9');
+            object_fuzz_write_u8(bytes, seed.length, 24, '9');
+            object_fuzz_write_u8(bytes, seed.length, 25, '9');
+            object_fuzz_write_u8(bytes, seed.length, 26, '9');
+        }
+        else if (mutation_index == 10)
+        {
+            u32 symbol_offset = 0;
+            u32 symbol_count = 0;
+            if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
+                (u64)symbol_offset + (u64)symbol_count * 18 < seed.length)
+            {
+                object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18 + 3, 'x');
+            }
+        }
+        else if (mutation_index == 11)
+        {
+            u32 relocation_offset = 0;
+            u16 relocation_count = 0;
+            if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
+            {
+                object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 12)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 20 + 20, UINT32_MAX);
+        }
+        else if (mutation_index == 13)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 20 + 24, UINT32_MAX);
+        }
+        else if (mutation_index == 14)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 20 + 16, UINT32_MAX);
+        }
+        else if (mutation_index == 15)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 20 + 36, 0x02000800);
+        }
+        else if (mutation_index == 16)
+        {
+            u32 symbol_offset = 0;
+            if (object_read_u32(seed, 8, &symbol_offset))
+            {
+                object_fuzz_write_u16(bytes, seed.length, (u64)symbol_offset + 18 + 12, UINT16_MAX);
+            }
+        }
+        else if (mutation_index == 17)
+        {
+            u32 symbol_offset = 0;
+            if (object_read_u32(seed, 8, &symbol_offset))
+            {
+                object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 8, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 18)
+        {
+            u32 relocation_offset = 0;
+            u16 relocation_count = 0;
+            if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
+            {
+                object_fuzz_write_u16(bytes, seed.length, (u64)relocation_offset + 8, UINT16_MAX);
+            }
+        }
+        else if (mutation_index == 19)
+        {
+            u32 symbol_offset = 0;
+            u32 symbol_count = 0;
+            if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
+                (u64)symbol_offset + (u64)symbol_count * 18 + 4 <= seed.length)
+            {
+                object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 20)
+        {
+            object_fuzz_write_u8(bytes, seed.length, 20, (u8)input_value);
+        }
+        else if (mutation_index == 21)
+        {
+            u32 symbol_offset = 0;
+            if (object_read_u32(seed, 8, &symbol_offset))
+            {
+                object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + 18 + 17, UINT8_MAX);
+            }
+        }
+        else if (mutation_index == 22)
+        {
+            object_fuzz_write_u16(bytes, seed.length, 2, UINT16_MAX);
+        }
+        else
+        {
+            object_fuzz_write_u32(bytes, seed.length, 20, (u32)input_value);
+        }
+        break;
+    case OBJECT_FORMAT_MACH_O64:
+        if (mutation_index == 4)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 20, UINT32_MAX);
+        }
+        else if (mutation_index == 5)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 16, UINT32_MAX);
+        }
+        else if (mutation_index == 6)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 32 + 8, UINT32_MAX);
+        }
+        else if (mutation_index == 8)
+        {
+            u64 command = 0;
+            if (object_fuzz_mach_find_command(seed, 2, &command))
+            {
+                object_fuzz_write_u32(bytes, seed.length, command + 8, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 9)
+        {
+            u64 command = 0;
+            if (object_fuzz_mach_find_command(seed, 2, &command))
+            {
+                object_fuzz_write_u32(bytes, seed.length, command + 16, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 10)
+        {
+            u64 command = 0;
+            u32 string_offset = 0;
+            u32 string_size = 0;
+            if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 16, &string_offset) &&
+                object_read_u32(seed, command + 20, &string_size) && string_size && (u64)string_offset + string_size <= seed.length)
+            {
+                object_fuzz_write_u8(bytes, seed.length, (u64)string_offset + string_size - 1, 'x');
+            }
+        }
+        else if (mutation_index == 11)
+        {
+            u64 command = 0;
+            u32 symbol_offset = 0;
+            u32 symbol_count = 0;
+            if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 8, &symbol_offset) &&
+                object_read_u32(seed, command + 12, &symbol_count) && symbol_count)
+            {
+                object_fuzz_write_u32(bytes, seed.length, symbol_offset, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 12)
+        {
+            u64 section = 32 + 72;
+            u32 relocation_offset = 0;
+            u32 relocation_count = 0;
+            if (object_read_u32(seed, section + 56, &relocation_offset) && object_read_u32(seed, section + 60, &relocation_count) && relocation_count)
+            {
+                object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 13)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 48, UINT32_MAX);
+        }
+        else if (mutation_index == 14)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 56, UINT32_MAX);
+        }
+        else if (mutation_index == 15)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 60, UINT32_MAX);
+        }
+        else if (mutation_index == 16)
+        {
+            u64 command = 0;
+            if (object_fuzz_mach_find_command(seed, 2, &command))
+            {
+                object_fuzz_write_u32(bytes, seed.length, command + 12, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 17)
+        {
+            u64 command = 0;
+            if (object_fuzz_mach_find_command(seed, 2, &command))
+            {
+                object_fuzz_write_u32(bytes, seed.length, command + 20, UINT32_MAX);
+            }
+        }
+        else if (mutation_index == 18)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 32 + 4, UINT32_MAX);
+        }
+        else if (mutation_index == 19)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 16, UINT32_MAX);
+        }
+        else if (mutation_index == 20)
+        {
+            object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 64, UINT32_MAX);
+        }
+        else if (mutation_index == 21)
+        {
+            object_fuzz_write_u8(bytes, seed.length, 32 + 72, (u8)input_value);
+        }
+        else if (mutation_index == 22)
+        {
+            u64 command = 0;
+            if (object_fuzz_mach_find_command(seed, 2, &command))
+            {
+                object_fuzz_write_u32(bytes, seed.length, command + 4, UINT32_MAX);
+            }
+        }
+        else
+        {
+            object_fuzz_write_u32(bytes, seed.length, 32 + 12, (u32)input_value);
+        }
+        break;
+    case OBJECT_FORMAT_COUNT:
+        break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void object_fuzz_read_candidate(Arena* arena, ByteSlice bytes, Target target, bool archive)
+{
+    if (archive)
+    {
+        ObjectArchive result = object_archive_read(arena, bytes, target);
+        BUSTER_UNUSED(result);
+    }
+    else
+    {
+        ObjectFile result = object_read(arena, bytes, target);
+        BUSTER_UNUSED(result);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_fuzz_seed_write(Arena* arena, Target target, ObjectFormat format)
+{
+    u8 x86_text[] = {0xe8, 0, 0, 0, 0, 0xc3};
+    u8 aarch64_text[] = {0x00, 0x00, 0x00, 0x94, 0xc0, 0x03, 0x5f, 0xd6};
+    u8 read_only_data[] = {'f', 'u', 'z', 'z', 0};
+    u8 debug_data[] = {0};
+    ByteSlice text = target.cpu_arch == CPU_ARCH_AARCH64 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_text) : (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_text);
+    ObjectSection sections[OBJECT_SECTION_COUNT] = {0};
+    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+    {
+        sections[kind] = (ObjectSection){
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
+            .kind = (ObjectSectionKind)kind,
+            .alignment = object_section_default_alignment((ObjectSectionKind)kind),
+        };
+    }
+    sections[OBJECT_SECTION_TEXT].data = text;
+    sections[OBJECT_SECTION_TEXT].virtual_size = text.length;
+    sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(read_only_data);
+    sections[OBJECT_SECTION_READ_ONLY_DATA].virtual_size = sizeof(read_only_data);
+    sections[OBJECT_SECTION_DEBUG_INFO].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(debug_data);
+    sections[OBJECT_SECTION_DEBUG_INFO].virtual_size = sizeof(debug_data);
+    ObjectSymbol symbols[] = {
+        {
+            .name = S8("fuzz_seed"),
+            .size = text.length,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("fuzz_data"),
+            .size = sizeof(read_only_data),
+            .section = OBJECT_SECTION_READ_ONLY_DATA,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+        {
+            .name = S8("fuzz_external"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+    };
+    ObjectRelocation relocation = {
+        .addend = target.cpu_arch == CPU_ARCH_X86_64 ? -4 : 0,
+        .offset = target.cpu_arch == CPU_ARCH_X86_64 ? 1 : 0,
+        .section = OBJECT_SECTION_TEXT,
+        .symbol = 2,
+        .kind = target.cpu_arch == CPU_ARCH_X86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_CALL26,
+    };
+    ObjectFile object = {
+        .sections = sections,
+        .symbols = symbols,
+        .relocations = &relocation,
+        .target = target,
+        .section_count = OBJECT_SECTION_COUNT,
+        .symbol_count = BUSTER_ARRAY_LENGTH(symbols),
+        .relocation_count = 1,
+    };
+    return object_write(arena, &object, format);
+}
+
+BUSTER_F_DECL s32 object_fuzz_test_input(const u8* pointer, size_t size)
+{
+    if (size > BUSTER_KB(64) || (size && !pointer))
+    {
+        return -1;
+    }
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+    if (!arena)
+    {
+        return 0;
+    }
+    ByteSlice input = {.pointer = (u8*)pointer, .length = size};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    ObjectFormat formats[] = {
+        OBJECT_FORMAT_ELF64,
+        OBJECT_FORMAT_COFF,
+        OBJECT_FORMAT_MACH_O64,
+        OBJECT_FORMAT_ELF64,
+        OBJECT_FORMAT_COFF,
+        OBJECT_FORMAT_MACH_O64,
+    };
+    bool archive_input = size >= 8 && pointer && memcmp(pointer, "!<arch>\n", 8) == 0;
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena raw_scope = arena_begin_temporal(arena);
+        object_fuzz_read_candidate(arena, input, targets[target_index], archive_input);
+        arena_set_position(arena, raw_scope.position);
+    }
+    for (u32 seed_index = 0; seed_index < BUSTER_ARRAY_LENGTH(targets); seed_index += 1)
+    {
+        TemporalArena seed_scope = arena_begin_temporal(arena);
+        ObjectArtifact seed = object_fuzz_seed_write(arena, targets[seed_index], formats[seed_index]);
+        if (seed.error == OBJECT_ERROR_NONE && seed.bytes.pointer && seed.bytes.length <= OBJECT_FUZZ_MAX_GENERATED_BYTES)
+        {
+            TemporalArena parse_scope = arena_begin_temporal(arena);
+            object_fuzz_read_candidate(arena, seed.bytes, targets[seed_index], false);
+            arena_set_position(arena, parse_scope.position);
+            for (u32 mutation_index = 0; mutation_index < OBJECT_FUZZ_MUTATION_COUNT; mutation_index += 1)
+            {
+                TemporalArena mutation_scope = arena_begin_temporal(arena);
+                ByteSlice mutated = object_fuzz_mutate(arena, seed.bytes, pointer, size, formats[seed_index], false, mutation_index);
+                object_fuzz_read_candidate(arena, mutated, targets[seed_index], false);
+                arena_set_position(arena, mutation_scope.position);
+            }
+            for (u32 archive_kind = 0; archive_kind < 3; archive_kind += 1)
+            {
+                TemporalArena archive_scope = arena_begin_temporal(arena);
+                ByteSlice archive = object_fuzz_archive_make(arena, seed.bytes, archive_kind);
+                if (archive.pointer)
+                {
+                    object_fuzz_read_candidate(arena, archive, targets[seed_index], true);
+                    for (u32 mutation_index = 0; mutation_index < OBJECT_FUZZ_MUTATION_COUNT; mutation_index += 1)
+                    {
+                        TemporalArena mutation_scope = arena_begin_temporal(arena);
+                        ByteSlice mutated = object_fuzz_mutate(arena, archive, pointer, size, formats[seed_index], true, mutation_index);
+                        object_fuzz_read_candidate(arena, mutated, targets[seed_index], true);
+                        arena_set_position(arena, mutation_scope.position);
+                    }
+                }
+                arena_set_position(arena, archive_scope.position);
+            }
+        }
+        arena_set_position(arena, seed_scope.position);
+    }
+    arena_destroy(arena, 1);
+    return 0;
+}
+#endif
 
 BUSTER_TEST_F_DECL AnalysisEntity* object_entity_find(AnalysisResult* analysis, AnalysisEntityId entity)
 {

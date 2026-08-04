@@ -38,6 +38,150 @@ BUSTER_GLOBAL_LOCAL bool object_test_mach_compact_section_rewrite(ByteSlice byte
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL void object_test_write_u16(ByteSlice bytes, u64 offset, u16 value)
+{
+    if (offset <= bytes.length && sizeof(value) <= bytes.length - offset)
+    {
+        memcpy(bytes.pointer + offset, &value, sizeof(value));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void object_test_write_u32(ByteSlice bytes, u64 offset, u32 value)
+{
+    if (offset <= bytes.length && sizeof(value) <= bytes.length - offset)
+    {
+        memcpy(bytes.pointer + offset, &value, sizeof(value));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void object_test_write_u64(ByteSlice bytes, u64 offset, u64 value)
+{
+    if (offset <= bytes.length && sizeof(value) <= bytes.length - offset)
+    {
+        memcpy(bytes.pointer + offset, &value, sizeof(value));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u64 object_test_elf_symbol_offset(ByteSlice bytes, u32 symbol_index)
+{
+    if (!bytes.pointer || bytes.length < 64)
+    {
+        return UINT64_MAX;
+    }
+    u64 section_table = 0;
+    u16 section_count = 0;
+    memcpy(&section_table, bytes.pointer + 40, sizeof(section_table));
+    memcpy(&section_count, bytes.pointer + 60, sizeof(section_count));
+    if (section_table > bytes.length || (u64)section_count * 64 > bytes.length - section_table)
+    {
+        return UINT64_MAX;
+    }
+    for (u16 section_index = 0; section_index < section_count; section_index += 1)
+    {
+        u64 section = section_table + (u64)section_index * 64;
+        u32 section_type = 0;
+        u64 symbol_offset = 0;
+        u64 symbol_size = 0;
+        memcpy(&section_type, bytes.pointer + section + 4, sizeof(section_type));
+        memcpy(&symbol_offset, bytes.pointer + section + 24, sizeof(symbol_offset));
+        memcpy(&symbol_size, bytes.pointer + section + 32, sizeof(symbol_size));
+        if (section_type != 2 || symbol_size % 24 || symbol_index >= symbol_size / 24 || symbol_offset > bytes.length ||
+            symbol_size > bytes.length - symbol_offset)
+        {
+            continue;
+        }
+        u64 symbol = symbol_offset + (u64)symbol_index * 24;
+        if (symbol > bytes.length || 24 > bytes.length - symbol)
+        {
+            return UINT64_MAX;
+        }
+        return symbol;
+    }
+    return UINT64_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive(Arena* arena, ByteSlice member, bool bsd_name)
+{
+    String8 name = S8("member-name.o");
+    u64 member_size = member.length + (bsd_name ? name.length : 0);
+    u64 total_size = 8 + 60 + member_size + (member_size & 1);
+    u8* bytes = arena_allocate(arena, u8, total_size);
+    memset(bytes, ' ', total_size);
+    memcpy(bytes, "!<arch>\n", 8);
+    u8* header = bytes + 8;
+    if (bsd_name)
+    {
+        memcpy(header, "#1/13", 5);
+    }
+    else
+    {
+        memcpy(header, "member.o/", 9);
+    }
+    u64 decimal = member_size;
+    for (u32 index = 0; index < 10; index += 1)
+    {
+        header[57 - index] = (u8)('0' + decimal % 10);
+        decimal /= 10;
+    }
+    header[58] = '`';
+    header[59] = '\n';
+    u8* payload = header + 60;
+    if (bsd_name)
+    {
+        memcpy(payload, name.pointer, name.length);
+        payload += name.length;
+    }
+    memcpy(payload, member.pointer, member.length);
+    if (member_size & 1)
+    {
+        bytes[68 + member_size] = '\n';
+    }
+    return (ByteSlice){.pointer = bytes, .length = total_size};
+}
+
+BUSTER_GLOBAL_LOCAL void object_test_archive_write_size(u8* header, u64 size)
+{
+    for (u32 index = 0; index < 10; index += 1)
+    {
+        header[57 - index] = (u8)('0' + size % 10);
+        size /= 10;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive_long_name(Arena* arena, ByteSlice member)
+{
+    String8 long_name = S8("long-member-name.o/\n");
+    u64 table_size = long_name.length;
+    u64 object_size = member.length;
+    u64 total_size = 8 + 60 + table_size + (table_size & 1) + 60 + object_size + (object_size & 1);
+    u8* bytes = arena_allocate(arena, u8, total_size);
+    memset(bytes, ' ', total_size);
+    memcpy(bytes, "!<arch>\n", 8);
+
+    u8* table_header = bytes + 8;
+    memcpy(table_header, "//", 2);
+    object_test_archive_write_size(table_header, table_size);
+    table_header[58] = '`';
+    table_header[59] = '\n';
+    memcpy(table_header + 60, long_name.pointer, long_name.length);
+    if (table_size & 1)
+    {
+        table_header[60 + table_size] = '\n';
+    }
+    u64 object_header_offset = 8 + 60 + table_size + (table_size & 1);
+    u8* object_header = bytes + object_header_offset;
+    memcpy(object_header, "/0", 2);
+    object_test_archive_write_size(object_header, object_size);
+    object_header[58] = '`';
+    object_header[59] = '\n';
+    memcpy(object_header + 60, member.pointer, member.length);
+    if (object_size & 1)
+    {
+        object_header[60 + object_size] = '\n';
+    }
+    return (ByteSlice){.pointer = bytes, .length = total_size};
+}
+
 BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -243,6 +387,64 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, coff_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
         BUSTER_TEST(arguments, coff_roundtrip.relocations[0].addend == -4);
         BUSTER_STRING_TEST(arguments, coff_roundtrip.symbols[coff_roundtrip.relocations[0].symbol].name, S8("object_callee"));
+    }
+    {
+        u8 debug_data[] = {0};
+        ObjectSection long_coff_sections[OBJECT_SECTION_COUNT] = {0};
+        for (u32 section_index = 0; section_index < OBJECT_SECTION_COUNT; section_index += 1)
+        {
+            long_coff_sections[section_index] = (ObjectSection){
+                .name = object_section_name_for_kind((ObjectSectionKind)section_index),
+                .kind = (ObjectSectionKind)section_index,
+                .alignment = object_section_default_alignment((ObjectSectionKind)section_index),
+            };
+        }
+        for (u32 section_index = 0; section_index < BUSTER_ARRAY_LENGTH(sections); section_index += 1)
+        {
+            long_coff_sections[section_index] = sections[section_index];
+        }
+        long_coff_sections[OBJECT_SECTION_DEBUG_INFO].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(debug_data);
+        long_coff_sections[OBJECT_SECTION_DEBUG_INFO].virtual_size = sizeof(debug_data);
+        ObjectFile long_coff_object = object;
+        long_coff_object.sections = long_coff_sections;
+        long_coff_object.section_count = OBJECT_SECTION_COUNT;
+        ObjectArtifact long_coff = object_write(arguments->arena, &long_coff_object, OBJECT_FORMAT_COFF);
+        BUSTER_TEST(arguments, long_coff.error == OBJECT_ERROR_NONE);
+        ObjectFile long_coff_roundtrip = object_read(arguments->arena, long_coff.bytes,
+                                                     (Target){
+                                                         .cpu_arch = CPU_ARCH_X86_64,
+                                                         .os = OPERATING_SYSTEM_WINDOWS,
+                                                     });
+        BUSTER_TEST(arguments, long_coff_roundtrip.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, long_coff_roundtrip.sections[OBJECT_SECTION_DEBUG_INFO].data.length == sizeof(debug_data));
+        if (long_coff.bytes.pointer && long_coff.bytes.length > 0)
+        {
+            u64 section = 20 + (u64)OBJECT_SECTION_DEBUG_INFO * 40;
+            TemporalArena bad_offset_scope = arena_begin_temporal(arguments->arena);
+            ByteSlice bad_offset = {
+                .pointer = arena_allocate(arguments->arena, u8, long_coff.bytes.length),
+                .length = long_coff.bytes.length,
+            };
+            memcpy(bad_offset.pointer, long_coff.bytes.pointer, long_coff.bytes.length);
+            memset(bad_offset.pointer + section, 0, 8);
+            memcpy(bad_offset.pointer + section, "/999999", 7);
+            BUSTER_TEST(arguments, object_read(arguments->arena, bad_offset,
+                                               (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS})
+                                             .error != OBJECT_ERROR_NONE);
+            arena_set_position(arguments->arena, bad_offset_scope.position);
+
+            TemporalArena unterminated_scope = arena_begin_temporal(arguments->arena);
+            ByteSlice unterminated = {
+                .pointer = arena_allocate(arguments->arena, u8, long_coff.bytes.length),
+                .length = long_coff.bytes.length,
+            };
+            memcpy(unterminated.pointer, long_coff.bytes.pointer, long_coff.bytes.length);
+            unterminated.pointer[unterminated.length - 1] = 'x';
+            BUSTER_TEST(arguments, object_read(arguments->arena, unterminated,
+                                               (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS})
+                                             .error != OBJECT_ERROR_NONE);
+            arena_set_position(arguments->arena, unterminated_scope.position);
+        }
     }
     u16 coff_machine = 0;
     if (coff.bytes.pointer && coff.bytes.length >= 2)
@@ -777,5 +979,432 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
                                                                .os = OPERATING_SYSTEM_LINUX,
                                                            });
     BUSTER_TEST(arguments, invalid_object.error == OBJECT_ERROR_INVALID_INPUT);
+
+    Target x86_linux_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    {
+        TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice mutation = {
+            .pointer = arena_allocate(arguments->arena, u8, elf.bytes.length),
+            .length = elf.bytes.length,
+        };
+        memcpy(mutation.pointer, elf.bytes.pointer, elf.bytes.length);
+        object_test_write_u64(mutation, 40, UINT64_MAX);
+        BUSTER_TEST(arguments, object_read(arguments->arena, mutation, x86_linux_target).error != OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, mutation_scope.position);
+    }
+    {
+        u64 section_table = 0;
+        u16 section_count = 0;
+        u16 section_string_index = 0;
+        memcpy(&section_table, elf.bytes.pointer + 40, sizeof(section_table));
+        memcpy(&section_count, elf.bytes.pointer + 60, sizeof(section_count));
+        memcpy(&section_string_index, elf.bytes.pointer + 62, sizeof(section_string_index));
+        if (section_string_index < section_count)
+        {
+            TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+            ByteSlice mutation = {
+                .pointer = arena_allocate(arguments->arena, u8, elf.bytes.length),
+                .length = elf.bytes.length,
+            };
+            memcpy(mutation.pointer, elf.bytes.pointer, elf.bytes.length);
+            object_test_write_u32(mutation, section_table + (u64)section_string_index * 64, UINT32_MAX);
+            BUSTER_TEST(arguments, object_read(arguments->arena, mutation, x86_linux_target).error != OBJECT_ERROR_NONE);
+            arena_set_position(arguments->arena, mutation_scope.position);
+        }
+    }
+    {
+        u64 section_table = 0;
+        u16 section_count = 0;
+        memcpy(&section_table, elf.bytes.pointer + 40, sizeof(section_table));
+        memcpy(&section_count, elf.bytes.pointer + 60, sizeof(section_count));
+        for (u16 section_index = 0; section_index < section_count; section_index += 1)
+        {
+            u64 section = section_table + (u64)section_index * 64;
+            u32 section_type = 0;
+            memcpy(&section_type, elf.bytes.pointer + section + 4, sizeof(section_type));
+            if (section_type == 8)
+            {
+                TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+                ByteSlice mutation = {
+                    .pointer = arena_allocate(arguments->arena, u8, elf.bytes.length),
+                    .length = elf.bytes.length,
+                };
+                memcpy(mutation.pointer, elf.bytes.pointer, elf.bytes.length);
+                object_test_write_u64(mutation, section + 32, UINT64_MAX);
+                BUSTER_TEST(arguments, object_read(arguments->arena, mutation, x86_linux_target).error != OBJECT_ERROR_NONE);
+                arena_set_position(arguments->arena, mutation_scope.position);
+                break;
+            }
+        }
+    }
+    {
+        u64 section_table = 0;
+        u16 section_count = 0;
+        memcpy(&section_table, elf.bytes.pointer + 40, sizeof(section_table));
+        memcpy(&section_count, elf.bytes.pointer + 60, sizeof(section_count));
+        for (u16 section_index = 0; section_index < section_count; section_index += 1)
+        {
+            u64 section = section_table + (u64)section_index * 64;
+            u32 section_type = 0;
+            memcpy(&section_type, elf.bytes.pointer + section + 4, sizeof(section_type));
+            if (section_type == 4)
+            {
+                TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+                ByteSlice mutation = {
+                    .pointer = arena_allocate(arguments->arena, u8, elf.bytes.length),
+                    .length = elf.bytes.length,
+                };
+                memcpy(mutation.pointer, elf.bytes.pointer, elf.bytes.length);
+                object_test_write_u64(mutation, section + 24, UINT64_MAX);
+                BUSTER_TEST(arguments, object_read(arguments->arena, mutation, x86_linux_target).error != OBJECT_ERROR_NONE);
+                arena_set_position(arguments->arena, mutation_scope.position);
+                break;
+            }
+        }
+    }
+    {
+        u64 section_table = 0;
+        u16 section_count = 0;
+        memcpy(&section_table, elf.bytes.pointer + 40, sizeof(section_table));
+        memcpy(&section_count, elf.bytes.pointer + 60, sizeof(section_count));
+        for (u16 section_index = 0; section_index < section_count; section_index += 1)
+        {
+            u64 section = section_table + (u64)section_index * 64;
+            u32 section_type = 0;
+            u64 symbol_offset = 0;
+            u64 symbol_size = 0;
+            memcpy(&section_type, elf.bytes.pointer + section + 4, sizeof(section_type));
+            memcpy(&symbol_offset, elf.bytes.pointer + section + 24, sizeof(symbol_offset));
+            memcpy(&symbol_size, elf.bytes.pointer + section + 32, sizeof(symbol_size));
+            if (section_type == 2 && symbol_size >= 48)
+            {
+                TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+                ByteSlice mutation = {
+                    .pointer = arena_allocate(arguments->arena, u8, elf.bytes.length),
+                    .length = elf.bytes.length,
+                };
+                memcpy(mutation.pointer, elf.bytes.pointer, elf.bytes.length);
+                object_test_write_u16(mutation, symbol_offset + 24 + 6, 0x7fff);
+                BUSTER_TEST(arguments, object_read(arguments->arena, mutation, x86_linux_target).error != OBJECT_ERROR_NONE);
+                arena_set_position(arguments->arena, mutation_scope.position);
+                break;
+            }
+        }
+    }
+    {
+        u64 symbol = object_test_elf_symbol_offset(elf.bytes, 1);
+        BUSTER_TEST(arguments, symbol != UINT64_MAX);
+        if (symbol != UINT64_MAX)
+        {
+            u16 special_indexes[] = {0xfff1, 0xfff2, 0xffff};
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(special_indexes); index += 1)
+            {
+                TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+                ByteSlice mutation = {
+                    .pointer = arena_allocate(arguments->arena, u8, elf.bytes.length),
+                    .length = elf.bytes.length,
+                };
+                memcpy(mutation.pointer, elf.bytes.pointer, elf.bytes.length);
+                object_test_write_u16(mutation, symbol + 6, special_indexes[index]);
+                BUSTER_TEST(arguments, object_read(arguments->arena, mutation, x86_linux_target).error == OBJECT_ERROR_NONE);
+                arena_set_position(arguments->arena, mutation_scope.position);
+            }
+        }
+    }
+    {
+        u8 one_byte_text[] = {0xc3};
+        ObjectSection one_byte_section = {
+            .name = S8(".text"),
+            .data = BUSTER_ARRAY_TO_SLICE(one_byte_text),
+            .virtual_size = sizeof(one_byte_text),
+            .kind = OBJECT_SECTION_TEXT,
+            .alignment = 1,
+        };
+        ObjectSymbol one_byte_symbol = {
+            .name = S8("one_byte"),
+            .size = sizeof(one_byte_text),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        };
+        ObjectFile one_byte_object = {
+            .sections = &one_byte_section,
+            .symbols = &one_byte_symbol,
+            .target = x86_linux_target,
+            .section_count = 1,
+            .symbol_count = 1,
+        };
+        ObjectArtifact one_byte_elf = object_write(arguments->arena, &one_byte_object, OBJECT_FORMAT_ELF64);
+        BUSTER_TEST(arguments, one_byte_elf.error == OBJECT_ERROR_NONE);
+        u64 symbol = object_test_elf_symbol_offset(one_byte_elf.bytes, 1);
+        BUSTER_TEST(arguments, symbol != UINT64_MAX);
+        if (symbol != UINT64_MAX)
+        {
+            TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+            ByteSlice mutation = {
+                .pointer = arena_allocate(arguments->arena, u8, one_byte_elf.bytes.length),
+                .length = one_byte_elf.bytes.length,
+            };
+            memcpy(mutation.pointer, one_byte_elf.bytes.pointer, one_byte_elf.bytes.length);
+            object_test_write_u64(mutation, symbol + 16, UINT64_MAX);
+            BUSTER_TEST(arguments, object_read(arguments->arena, mutation, x86_linux_target).error != OBJECT_ERROR_NONE);
+            arena_set_position(arguments->arena, mutation_scope.position);
+        }
+    }
+    {
+        TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice mutation = {
+            .pointer = arena_allocate(arguments->arena, u8, coff.bytes.length),
+            .length = coff.bytes.length,
+        };
+        memcpy(mutation.pointer, coff.bytes.pointer, coff.bytes.length);
+        object_test_write_u32(mutation, 20 + 16, UINT32_MAX);
+        object_test_write_u32(mutation, 20 + 20, 0);
+        BUSTER_TEST(arguments, object_read(arguments->arena, mutation, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}).error !=
+                                   OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, mutation_scope.position);
+    }
+    {
+        TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice mutation = {
+            .pointer = arena_allocate(arguments->arena, u8, coff.bytes.length),
+            .length = coff.bytes.length,
+        };
+        memcpy(mutation.pointer, coff.bytes.pointer, coff.bytes.length);
+        object_test_write_u32(mutation, 8, UINT32_MAX);
+        BUSTER_TEST(arguments, object_read(arguments->arena, mutation, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}).error !=
+                                   OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, mutation_scope.position);
+    }
+    {
+        u32 symbol_offset = 0;
+        u32 symbol_count = 0;
+        memcpy(&symbol_offset, coff.bytes.pointer + 8, sizeof(symbol_offset));
+        memcpy(&symbol_count, coff.bytes.pointer + 12, sizeof(symbol_count));
+        if (symbol_count)
+        {
+            TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+            ByteSlice mutation = {
+                .pointer = arena_allocate(arguments->arena, u8, coff.bytes.length),
+                .length = coff.bytes.length,
+            };
+            memcpy(mutation.pointer, coff.bytes.pointer, coff.bytes.length);
+            object_test_write_u32(mutation, symbol_offset, 0);
+            object_test_write_u32(mutation, symbol_offset + 4, UINT32_MAX);
+            object_test_write_u32(mutation, symbol_offset + 8, 0);
+            object_test_write_u16(mutation, symbol_offset + 12, 1);
+            BUSTER_TEST(arguments, object_read(arguments->arena, mutation, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}).error !=
+                                       OBJECT_ERROR_NONE);
+            arena_set_position(arguments->arena, mutation_scope.position);
+        }
+    }
+    {
+        u16 section_count = 0;
+        u32 symbol_offset = 0;
+        u32 symbol_count = 0;
+        memcpy(&section_count, coff.bytes.pointer + 2, sizeof(section_count));
+        memcpy(&symbol_offset, coff.bytes.pointer + 8, sizeof(symbol_offset));
+        memcpy(&symbol_count, coff.bytes.pointer + 12, sizeof(symbol_count));
+        u16 ignored_section_number = 0;
+        u64 ignored_section = 0;
+        for (u16 section_index = 0; section_index < section_count; section_index += 1)
+        {
+            u64 section = 20 + (u64)section_index * 40;
+            if (memcmp(coff.bytes.pointer + section, ".bss", 4) == 0 && coff.bytes.pointer[section + 4] == 0)
+            {
+                ignored_section_number = section_index + 1;
+                ignored_section = section;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, ignored_section_number != 0);
+        if (ignored_section_number)
+        {
+            bool ignored_symbol = false;
+            for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
+            {
+                u16 symbol_section = 0;
+                u64 symbol = (u64)symbol_offset + (u64)symbol_index * 18;
+                memcpy(&symbol_section, coff.bytes.pointer + symbol + 12, sizeof(symbol_section));
+                ignored_symbol |= symbol_section == ignored_section_number;
+            }
+            BUSTER_TEST(arguments, ignored_symbol);
+
+            TemporalArena ignored_scope = arena_begin_temporal(arguments->arena);
+            ByteSlice ignored_bytes = {
+                .pointer = arena_allocate(arguments->arena, u8, coff.bytes.length),
+                .length = coff.bytes.length,
+            };
+            memcpy(ignored_bytes.pointer, coff.bytes.pointer, coff.bytes.length);
+            object_test_write_u32(ignored_bytes, ignored_section + 36, 0x02000800);
+            ObjectFile ignored_object = object_read(arguments->arena, ignored_bytes,
+                                                     (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS});
+            BUSTER_TEST(arguments, ignored_object.error == OBJECT_ERROR_NONE);
+            BUSTER_TEST(arguments, ignored_object.symbol_count < coff_roundtrip.symbol_count);
+            arena_set_position(arguments->arena, ignored_scope.position);
+
+            bool relocation_symbol = false;
+            u32 relocation_symbol_index = 0;
+            for (u16 section_index = 0; section_index < section_count && !relocation_symbol; section_index += 1)
+            {
+                if (section_index + 1 == ignored_section_number)
+                {
+                    continue;
+                }
+                u64 section = 20 + (u64)section_index * 40;
+                u32 relocation_offset = 0;
+                u16 relocation_count = 0;
+                memcpy(&relocation_offset, coff.bytes.pointer + section + 24, sizeof(relocation_offset));
+                memcpy(&relocation_count, coff.bytes.pointer + section + 32, sizeof(relocation_count));
+                if (relocation_count)
+                {
+                    memcpy(&relocation_symbol_index, coff.bytes.pointer + relocation_offset + 4, sizeof(relocation_symbol_index));
+                    relocation_symbol = relocation_symbol_index < symbol_count;
+                }
+            }
+            BUSTER_TEST(arguments, relocation_symbol);
+            if (relocation_symbol)
+            {
+                TemporalArena relocation_scope = arena_begin_temporal(arguments->arena);
+                ByteSlice relocation_bytes = {
+                    .pointer = arena_allocate(arguments->arena, u8, coff.bytes.length),
+                    .length = coff.bytes.length,
+                };
+                memcpy(relocation_bytes.pointer, coff.bytes.pointer, coff.bytes.length);
+                object_test_write_u32(relocation_bytes, ignored_section + 36, 0x02000800);
+                object_test_write_u16(relocation_bytes, (u64)symbol_offset + (u64)relocation_symbol_index * 18 + 12, ignored_section_number);
+                BUSTER_TEST(arguments, object_read(arguments->arena, relocation_bytes,
+                                                   (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS})
+                                                   .error != OBJECT_ERROR_NONE);
+                arena_set_position(arguments->arena, relocation_scope.position);
+            }
+        }
+    }
+    {
+        TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice mutation = {
+            .pointer = arena_allocate(arguments->arena, u8, mach.bytes.length),
+            .length = mach.bytes.length,
+        };
+        memcpy(mutation.pointer, mach.bytes.pointer, mach.bytes.length);
+        object_test_write_u32(mutation, 20, 8);
+        BUSTER_TEST(arguments, object_read(arguments->arena, mutation, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}).error !=
+                                   OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, mutation_scope.position);
+    }
+    {
+        TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice mutation = {
+            .pointer = arena_allocate(arguments->arena, u8, mach.bytes.length),
+            .length = mach.bytes.length,
+        };
+        memcpy(mutation.pointer, mach.bytes.pointer, mach.bytes.length);
+        object_test_write_u32(mutation, 16, UINT32_MAX);
+        BUSTER_TEST(arguments, object_read(arguments->arena, mutation, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}).error !=
+                                   OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, mutation_scope.position);
+    }
+    {
+        u32 command_count = 0;
+        memcpy(&command_count, mach.bytes.pointer + 16, sizeof(command_count));
+        u64 command = 32;
+        for (u32 command_index = 0; command_index < command_count; command_index += 1)
+        {
+            u32 kind = 0;
+            u32 command_size = 0;
+            memcpy(&kind, mach.bytes.pointer + command, sizeof(kind));
+            memcpy(&command_size, mach.bytes.pointer + command + 4, sizeof(command_size));
+            if (kind == 2)
+            {
+                TemporalArena mutation_scope = arena_begin_temporal(arguments->arena);
+                ByteSlice mutation = {
+                    .pointer = arena_allocate(arguments->arena, u8, mach.bytes.length),
+                    .length = mach.bytes.length,
+                };
+                memcpy(mutation.pointer, mach.bytes.pointer, mach.bytes.length);
+                object_test_write_u32(mutation, command + 16, UINT32_MAX);
+                BUSTER_TEST(arguments, object_read(arguments->arena, mutation, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}).error !=
+                                           OBJECT_ERROR_NONE);
+                arena_set_position(arguments->arena, mutation_scope.position);
+                break;
+            }
+            command += command_size;
+        }
+    }
+    {
+        TemporalArena archive_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice normal_archive = object_test_archive(arguments->arena, elf.bytes, false);
+        ObjectArchive normal = object_archive_read(arguments->arena, normal_archive, x86_linux_target);
+        BUSTER_TEST(arguments, normal.error == OBJECT_ERROR_NONE && normal.object_count == 1);
+        ByteSlice bsd_archive = object_test_archive(arguments->arena, elf.bytes, true);
+        ObjectArchive bsd = object_archive_read(arguments->arena, bsd_archive, x86_linux_target);
+        BUSTER_TEST(arguments, bsd.error == OBJECT_ERROR_NONE && bsd.object_count == 1);
+        ByteSlice long_name_archive = object_test_archive_long_name(arguments->arena, elf.bytes);
+        ObjectArchive long_name = object_archive_read(arguments->arena, long_name_archive, x86_linux_target);
+        BUSTER_TEST(arguments, long_name.error == OBJECT_ERROR_NONE && long_name.object_count == 1);
+        if (long_name.error == OBJECT_ERROR_NONE && long_name.object_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, long_name.member_names[0], S8("long-member-name.o"));
+        }
+        {
+            u64 long_table_size = S8("long-member-name.o/\n").length;
+            u64 object_header = 8 + 60 + long_table_size + (long_table_size & 1);
+            TemporalArena boundary_scope = arena_begin_temporal(arguments->arena);
+            ByteSlice bad_boundary = {
+                .pointer = arena_allocate(arguments->arena, u8, long_name_archive.length),
+                .length = long_name_archive.length,
+            };
+            memcpy(bad_boundary.pointer, long_name_archive.pointer, long_name_archive.length);
+            bad_boundary.pointer[object_header] = '/';
+            bad_boundary.pointer[object_header + 1] = '1';
+            BUSTER_TEST(arguments, object_archive_read(arguments->arena, bad_boundary, x86_linux_target).error != OBJECT_ERROR_NONE);
+            arena_set_position(arguments->arena, boundary_scope.position);
+        }
+        TemporalArena long_name_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice bad_long_name = {
+            .pointer = arena_allocate(arguments->arena, u8, long_name_archive.length),
+            .length = long_name_archive.length,
+        };
+        memcpy(bad_long_name.pointer, long_name_archive.pointer, long_name_archive.length);
+        bad_long_name.pointer[8 + 60 + S8("long-member-name.o/\n").length - 1] = 'x';
+        BUSTER_TEST(arguments, object_archive_read(arguments->arena, bad_long_name, x86_linux_target).error != OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, long_name_scope.position);
+        ByteSlice padded_archive = elf.bytes.length & 1 ? normal_archive : bsd_archive;
+        TemporalArena padding_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice bad_padding = {
+            .pointer = arena_allocate(arguments->arena, u8, padded_archive.length),
+            .length = padded_archive.length,
+        };
+        memcpy(bad_padding.pointer, padded_archive.pointer, padded_archive.length);
+        bad_padding.pointer[bad_padding.length - 1] = 0;
+        BUSTER_TEST(arguments, object_archive_read(arguments->arena, bad_padding, x86_linux_target).error != OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, padding_scope.position);
+        TemporalArena size_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice bad_size = {
+            .pointer = arena_allocate(arguments->arena, u8, normal_archive.length),
+            .length = normal_archive.length,
+        };
+        memcpy(bad_size.pointer, normal_archive.pointer, normal_archive.length);
+        memset(bad_size.pointer + 8 + 48, '9', 10);
+        BUSTER_TEST(arguments, object_archive_read(arguments->arena, bad_size, x86_linux_target).error != OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, size_scope.position);
+        ObjectArchive null_archive = object_archive_read(arguments->arena, (ByteSlice){.length = 8}, x86_linux_target);
+        BUSTER_TEST(arguments, null_archive.error != OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, archive_scope.position);
+    }
+#if BUSTER_FUZZ_AVAILABLE
+    {
+        TemporalArena fuzz_scope = arena_begin_temporal(arguments->arena);
+        u64 boundary_size = BUSTER_KB(64);
+        u8* boundary_input = arena_allocate(arguments->arena, u8, boundary_size + 1);
+        memset(boundary_input, 0, boundary_size + 1);
+        BUSTER_TEST(arguments, object_fuzz_test_input(boundary_input, boundary_size) == 0);
+        BUSTER_TEST(arguments, object_fuzz_test_input(boundary_input, boundary_size + 1) == -1);
+        arena_set_position(arguments->arena, fuzz_scope.position);
+    }
+#endif
     return result;
 }
