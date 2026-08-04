@@ -29,6 +29,45 @@ BUSTER_GLOBAL_LOCAL void c_test_preprocessed_token(UnitTestArguments* arguments,
     outer_result->succeeded_test_count += result.succeeded_test_count;
 }
 
+BUSTER_GLOBAL_LOCAL CEntityId c_test_find_local_entity(CParseResult* parse, String8 name, CScopeId scope)
+{
+    for (u32 entity_index = 0; entity_index < parse->entity_count; entity_index += 1)
+    {
+        CEntity* entity = &parse->entities[entity_index];
+        if (entity->kind == C_ENTITY_LOCAL && (scope.value == C_ID_UNDERLYING_INVALID || entity->scope.value == scope.value) &&
+            string_equal(entity->name, name))
+        {
+            return (CEntityId){.value = entity_index};
+        }
+    }
+    return C_ENTITY_ID_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_auto_type_diagnostic(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
+                                                     CPreprocessDialect dialect, CDiagnosticKind kind, String8 message)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                    .dialect = dialect,
+                                                });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 1);
+    if (parse.diagnostic_count == 1)
+    {
+        BUSTER_TEST(arguments, parse.diagnostics[0].kind == kind);
+        BUSTER_STRING_TEST(arguments, parse.diagnostics[0].message, message);
+    }
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+    scratch_end(temporary);
+}
+
 #if BUSTER_COMPILER_CLANG
 __attribute__((optnone))
 #endif
@@ -2198,6 +2237,207 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, function->local_count == 3);
         BUSTER_TEST(arguments, ir_validate_canonical_module(shadow_ir.program, &shadow_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
+
+    CPreprocessResult auto_type_tokens = c_preprocess(arguments->arena,
+                                                      S8("int auto_type_decay_function(void) { return 17; }\n"
+                                                         "struct AutoTypeIrPair { int left; int right; };\n"
+                                                         "int auto_type_decay_test(void) {\n"
+                                                         "    __auto_type array_result = (int[2]){ 4, 9 };\n"
+                                                         "    __auto_type function_result = auto_type_decay_function;\n"
+                                                         "    const __auto_type qualified_result = 3;\n"
+                                                         "    __auto_type float_result = 1.5f;\n"
+                                                         "    const int qualified_source = 5;\n"
+                                                         "    __auto_type unqualified_lvalue_result = qualified_source;\n"
+                                                         "    return array_result[1] + function_result() + qualified_result + unqualified_lvalue_result;\n"
+                                                         "}\n"
+                                                         "int auto_type_ir_shape_test(void) {\n"
+                                                         "    __auto_type ir_scalar = 1;\n"
+                                                         "    __auto_type ir_pointer = (int *)0;\n"
+                                                         "    __auto_type ir_float = 1.25f;\n"
+                                                         "    __auto_type ir_aggregate = (struct AutoTypeIrPair){ 2, 3 };\n"
+                                                         "    return ir_scalar + (int)ir_float + (ir_pointer == 0) + ir_aggregate.left;\n"
+                                                         "}\n"
+                                                         "int auto_type_scope_test(void) {\n"
+                                                         "    int value = 7;\n"
+                                                         "    { __auto_type value = value; return value; }\n"
+                                                         "}\n"),
+                                                      (CPreprocessOptions){
+                                                          .target = target_native,
+                                                          .data_layout = target_data_layout(target_native),
+                                                          .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                      });
+    CParseResult auto_type_parse = c_parse(arguments->arena, auto_type_tokens);
+    BUSTER_TEST(arguments, auto_type_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, auto_type_parse.diagnostic_count == 0);
+    CEntityId array_entity = c_test_find_local_entity(&auto_type_parse, S8("array_result"), C_SCOPE_ID_INVALID);
+    CEntityId function_entity = c_test_find_local_entity(&auto_type_parse, S8("function_result"), C_SCOPE_ID_INVALID);
+    CEntityId qualified_entity = c_test_find_local_entity(&auto_type_parse, S8("qualified_result"), C_SCOPE_ID_INVALID);
+    CEntityId float_entity = c_test_find_local_entity(&auto_type_parse, S8("float_result"), C_SCOPE_ID_INVALID);
+    CEntityId unqualified_lvalue_entity = c_test_find_local_entity(&auto_type_parse, S8("unqualified_lvalue_result"), C_SCOPE_ID_INVALID);
+    BUSTER_TEST(arguments, array_entity.value < auto_type_parse.entity_count);
+    BUSTER_TEST(arguments, function_entity.value < auto_type_parse.entity_count);
+    BUSTER_TEST(arguments, qualified_entity.value < auto_type_parse.entity_count);
+    BUSTER_TEST(arguments, float_entity.value < auto_type_parse.entity_count);
+    BUSTER_TEST(arguments, unqualified_lvalue_entity.value < auto_type_parse.entity_count);
+    CType* auto_array_type = array_entity.value < auto_type_parse.entity_count
+                                 ? c_type_from_id(&auto_type_parse, auto_type_parse.entities[array_entity.value].type)
+                                 : 0;
+    CType* auto_array_element = auto_array_type ? c_type_from_id(&auto_type_parse, auto_array_type->element_type) : 0;
+    CType* auto_function_type = function_entity.value < auto_type_parse.entity_count
+                                    ? c_type_from_id(&auto_type_parse, auto_type_parse.entities[function_entity.value].type)
+                                    : 0;
+    CType* auto_function_value = auto_function_type ? c_type_from_id(&auto_type_parse, auto_function_type->element_type) : 0;
+    CType* auto_function_return = auto_function_value ? c_type_from_id(&auto_type_parse, auto_function_value->return_type) : 0;
+    CType* auto_qualified_type = qualified_entity.value < auto_type_parse.entity_count
+                                     ? c_type_from_id(&auto_type_parse, auto_type_parse.entities[qualified_entity.value].type)
+                                     : 0;
+    CType* auto_float_type = float_entity.value < auto_type_parse.entity_count
+                                 ? c_type_from_id(&auto_type_parse, auto_type_parse.entities[float_entity.value].type)
+                                 : 0;
+    CType* auto_unqualified_lvalue_type = unqualified_lvalue_entity.value < auto_type_parse.entity_count
+                                             ? c_type_from_id(&auto_type_parse, auto_type_parse.entities[unqualified_lvalue_entity.value].type)
+                                             : 0;
+    BUSTER_TEST(arguments, auto_array_type && auto_array_type->kind == C_TYPE_POINTER);
+    BUSTER_TEST(arguments, auto_array_element && auto_array_element->kind == C_TYPE_INT);
+    BUSTER_TEST(arguments, auto_array_element && auto_array_element->kind != C_TYPE_ARRAY);
+    BUSTER_TEST(arguments, auto_function_type && auto_function_type->kind == C_TYPE_POINTER);
+    BUSTER_TEST(arguments, auto_function_value && auto_function_value->kind == C_TYPE_FUNCTION);
+    BUSTER_TEST(arguments, auto_function_return && auto_function_return->kind == C_TYPE_INT);
+    BUSTER_TEST(arguments, auto_qualified_type && auto_qualified_type->kind == C_TYPE_INT && auto_qualified_type->is_const);
+    BUSTER_TEST(arguments, auto_float_type && auto_float_type->kind == C_TYPE_FLOAT);
+    BUSTER_TEST(arguments, auto_unqualified_lvalue_type && auto_unqualified_lvalue_type->kind == C_TYPE_INT && !auto_unqualified_lvalue_type->is_const);
+
+    CEntityId outer_value = C_ENTITY_ID_INVALID;
+    CEntityId inner_value = C_ENTITY_ID_INVALID;
+    for (u32 entity_index = 0; entity_index < auto_type_parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = &auto_type_parse.entities[entity_index];
+        if (entity->kind != C_ENTITY_LOCAL || !string_equal(entity->name, S8("value")))
+        {
+            continue;
+        }
+        if (outer_value.value == C_ID_UNDERLYING_INVALID)
+        {
+            outer_value = (CEntityId){.value = entity_index};
+        }
+        else if (entity->scope.value != auto_type_parse.entities[outer_value.value].scope.value)
+        {
+            inner_value = (CEntityId){.value = entity_index};
+        }
+    }
+    u32 auto_initializer_token = UINT32_MAX;
+    for (u32 token_index = 0; token_index + 3 < auto_type_tokens.token_count; token_index += 1)
+    {
+        if (string_equal(auto_type_tokens.tokens[token_index].spelling, S8("__auto_type")) &&
+            string_equal(auto_type_tokens.tokens[token_index + 1].spelling, S8("value")) &&
+            auto_type_tokens.tokens[token_index + 2].kind == C_TOKEN_PUNCTUATOR &&
+            string_equal(auto_type_tokens.tokens[token_index + 2].spelling, S8("=")) &&
+            string_equal(auto_type_tokens.tokens[token_index + 3].spelling, S8("value")))
+        {
+            auto_initializer_token = token_index + 3;
+            break;
+        }
+    }
+    CEntityId initializer_entity = C_ENTITY_ID_INVALID;
+    for (u32 use_index = 0; use_index < auto_type_parse.identifier_use_count; use_index += 1)
+    {
+        CIdentifierUse use = auto_type_parse.identifier_uses[use_index];
+        if (use.token_index == auto_initializer_token)
+        {
+            initializer_entity = use.entity;
+            break;
+        }
+    }
+    BUSTER_TEST(arguments, outer_value.value < auto_type_parse.entity_count);
+    BUSTER_TEST(arguments, inner_value.value < auto_type_parse.entity_count);
+    BUSTER_TEST(arguments, auto_initializer_token < auto_type_tokens.token_count);
+    BUSTER_TEST(arguments, initializer_entity.value == outer_value.value);
+    BUSTER_TEST(arguments, initializer_entity.value != inner_value.value);
+    CIRLowerResult auto_type_ir = c_lower_to_ir(arguments->arena, S8("auto-type-frontend.c"), auto_type_tokens, auto_type_parse, target_native);
+    BUSTER_TEST(arguments, auto_type_ir.diagnostic_count == 0);
+    if (auto_type_ir.program)
+    {
+        BUSTER_TEST(arguments, auto_type_ir.program->module_count == 1);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(auto_type_ir.program, &auto_type_ir.program->modules[0]).error == IR_VALIDATION_NONE);
+        IrFunction* auto_ir_shape_function = 0;
+        IrModule* auto_ir_module = &auto_type_ir.program->modules[0];
+        for (u32 function_index = 0; function_index < auto_ir_module->function_count; function_index += 1)
+        {
+            if (string_equal(auto_ir_module->functions[function_index].name, S8("auto_type_ir_shape_test")))
+            {
+                auto_ir_shape_function = &auto_ir_module->functions[function_index];
+                break;
+            }
+        }
+        bool found_auto_ir_integer = false;
+        bool found_auto_ir_pointer = false;
+        bool found_auto_ir_float = false;
+        bool found_auto_ir_struct = false;
+        if (auto_ir_shape_function)
+        {
+            for (u32 instruction_index = 0; instruction_index < auto_ir_shape_function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = &auto_ir_shape_function->instructions[instruction_index];
+                if (instruction->opcode != IR_OPCODE_LOCAL)
+                {
+                    continue;
+                }
+                IrType* instruction_type = ir_type_from_id(&auto_type_ir.program->types, instruction->canonical_type);
+                if (!instruction_type)
+                {
+                    continue;
+                }
+                found_auto_ir_integer |= instruction_type->kind == IR_TYPE_INTEGER && instruction_type->bit_width == 32 && instruction_type->is_signed;
+                if (instruction_type->kind == IR_TYPE_POINTER && instruction_type->element_type.value < auto_type_ir.program->types.count)
+                {
+                    IrType* pointer_element = ir_type_from_id(&auto_type_ir.program->types, instruction_type->element_type);
+                    found_auto_ir_pointer |= pointer_element && pointer_element->kind == IR_TYPE_INTEGER && pointer_element->bit_width == 32;
+                }
+                found_auto_ir_float |= instruction_type->kind == IR_TYPE_FLOAT && instruction_type->bit_width == 32;
+                found_auto_ir_struct |= instruction_type->kind == IR_TYPE_STRUCT && instruction_type->field_count == 2;
+            }
+        }
+        BUSTER_TEST(arguments, auto_ir_shape_function != 0);
+        BUSTER_TEST(arguments, found_auto_ir_integer);
+        BUSTER_TEST(arguments, found_auto_ir_pointer);
+        BUSTER_TEST(arguments, found_auto_ir_float);
+        BUSTER_TEST(arguments, found_auto_ir_struct);
+    }
+
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { __auto_type value; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type requires an initialized data declaration"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { __auto_type left = 1, right = 2; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type may only be used with a single declarator"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { __auto_type *value = (int *)0; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type requires a plain identifier as declarator"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { __auto_type value[2] = { 1, 2 }; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type requires a plain identifier as declarator"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { __auto_type value(void) = 0; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type requires a plain identifier as declarator"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { static __auto_type value = 1; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type requires an automatic object declaration"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { extern __auto_type value = 1; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type requires an automatic object declaration"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { __thread __auto_type value = 1; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type requires an automatic object declaration"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { typedef __auto_type value = 1; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type requires an automatic object declaration"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { int __auto_type value = 1; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type cannot be combined with another type specifier"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(__auto_type parameter) { return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                S8("GNU __auto_type is supported only for one initialized automatic object declaration"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("struct AutoTypeInvalidMember { __auto_type member; };\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                S8("GNU __auto_type is supported only for one initialized automatic object declaration"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { __auto_type value = value; return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, S8("use of undeclared identifier 'value'"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("__auto_type value = 1;\nint f(void) { return 0; }\n"), C_PREPROCESS_DIALECT_GNU23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                S8("GNU __auto_type is supported only for one initialized automatic object declaration"));
+    c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { __auto_type value = 1; return 0; }\n"), C_PREPROCESS_DIALECT_C23,
+                                C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type is only available in GNU dialects"));
+
     TemporalArena control_flow_temporary = scratch_begin(0, 0);
     CPreprocessResult if_tokens = c_preprocess(control_flow_temporary.arena,
                                                S8("int choose(int value) {\n"

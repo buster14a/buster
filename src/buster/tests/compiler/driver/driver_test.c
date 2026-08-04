@@ -747,6 +747,38 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
             BUSTER_TEST(arguments, c_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    String8 c_auto_type_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-auto-type"),
+#if BUSTER_WINDOWS
+                                                                      S8(".exe"));
+#else
+                                                                      S8(""));
+#endif
+    String8 c_auto_type_command_line[] = {
+        S8("-std=gnu23"),
+        S8("-o"),
+        c_auto_type_executable_path,
+        S8("tests/basic_c_auto_type.c"),
+    };
+    CompilerDriverResult c_auto_type = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_auto_type_command_line)));
+    BUSTER_TEST(arguments, c_auto_type.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_auto_type.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_auto_type_run_arguments[] = {
+            c_auto_type_executable_path,
+        };
+        ProcessSpawnResult c_auto_type_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_auto_type_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_auto_type_spawn.handle != 0);
+        if (c_auto_type_spawn.handle)
+        {
+            ProcessWaitResult c_auto_type_wait = os_process_wait_sync(arguments->arena, c_auto_type_spawn);
+            BUSTER_TEST(arguments, c_auto_type_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     String8 c_artifact_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-frontend-artifacts"),
 #if BUSTER_WINDOWS
                                                                      S8(".exe"));

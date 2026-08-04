@@ -3709,6 +3709,11 @@ BUSTER_GLOBAL_LOCAL bool c_token_is_punctuator(CToken token, String8 spelling)
     return token.kind == C_TOKEN_PUNCTUATOR && c_token_spelling_equal(token, spelling);
 }
 
+BUSTER_GLOBAL_LOCAL bool c_parse_auto_type_word(String8 spelling)
+{
+    return string_equal(spelling, S8("__auto_type"));
+}
+
 BUSTER_GLOBAL_LOCAL bool c_declaration_keyword(String8 spelling)
 {
     static char const* keywords[] = {
@@ -3717,7 +3722,7 @@ BUSTER_GLOBAL_LOCAL bool c_declaration_keyword(String8 spelling)
         "inline",        "int",       "long",           "register",      "restrict",      "return",     "short",        "signed",
         "sizeof",        "static",    "struct",         "switch",        "typedef",       "union",      "unsigned",     "void",
         "volatile",      "while",     "_Alignas",       "_Alignof",      "_Atomic",       "_Bool",      "_Complex",     "_Generic",
-        "_Imaginary",    "_Noreturn", "_Static_assert", "_Thread_local", "__attribute__", "__declspec", "__thread",     "__typeof__",
+        "_Imaginary",    "_Noreturn", "_Static_assert", "_Thread_local", "__attribute__", "__declspec", "__auto_type", "__thread",     "__typeof__",
         "__extension__", "__inline",  "__inline__",     "__const",       "__const__",     "__volatile", "__volatile__", "__restrict",
         "__restrict__",  "__signed",  "__signed__",     "__asm",         "__asm__",       "__alignof",   "__alignof__",   "_Nonnull",
         "_Nullable",     "_Null_unspecified",
@@ -3843,7 +3848,8 @@ struct CTypeParseFrame
     bool has_function_suffix;
     bool original_type_valid;
     bool is_bit_field;
-    u8 reserved[2];
+    bool auto_conditional;
+    u8 reserved[1];
 };
 
 struct CTypeParseMachine
@@ -5304,6 +5310,9 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, C
     return c_parse_direct_expression_type(arena, preprocess, result, scope, start, end, &type) ? type : C_TYPE_ID_INVALID;
 }
 
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId type);
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId left,
+                                                                CTypeId right);
 
 BUSTER_GLOBAL_LOCAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
@@ -5611,7 +5620,11 @@ BUSTER_GLOBAL_LOCAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CT
         break;
         case C_PARSE_EXPRESSION_TYPE_CONDITIONAL:
         {
-            if (left.value == right.value || (left_type->kind == right_type->kind && left_type->kind != C_TYPE_POINTER))
+            if (frame->auto_conditional)
+            {
+                last = c_parse_conditional_expression_type(arena, preprocess, result, left, right);
+            }
+            else if (left.value == right.value || (left_type->kind == right_type->kind && left_type->kind != C_TYPE_POINTER))
             {
                 last = left;
             }
@@ -5647,8 +5660,8 @@ BUSTER_GLOBAL_LOCAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CT
     c_type_parse_frame_complete(machine, last, end, true);
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_sizeof_expression_type(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
+BUSTER_GLOBAL_LOCAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                       CScopeId scope, u32 start, u32 end, bool auto_conditional, CTypeId* type_out)
 {
     u32 frame_start = machine->frame_count;
     CParseResult checkpoint = *result;
@@ -5663,6 +5676,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_sizeof_expression_type(CTypeParseMachine* machi
                                               .start = start,
                                               .end = end,
                                               .kind = C_TYPE_PARSE_FRAME_SIZEOF,
+                                              .auto_conditional = auto_conditional,
                                           });
     if (pushed)
     {
@@ -5675,6 +5689,13 @@ BUSTER_GLOBAL_LOCAL bool c_parse_sizeof_expression_type(CTypeParseMachine* machi
         *type_out = machine->result_type;
     }
     return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_sizeof_expression_type(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                        CScopeId scope, u32 start, u32 end,
+                                                        CTypeId* type_out)
+{
+    return c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, false, type_out);
 }
 
 
@@ -6212,6 +6233,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_word(String8 spelling)
 BUSTER_GLOBAL_LOCAL bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect)
 {
     return c_parse_type_word(spelling) ||
+           (c_preprocess_dialect_is_gnu(dialect) && string_equal(spelling, S8("__auto_type"))) ||
            ((c_preprocess_dialect_is_gnu(dialect) || c_preprocess_dialect_is_c23(dialect)) && string_equal(spelling, S8("typeof"))) ||
            (c_preprocess_dialect_is_c23(dialect) && (string_equal(spelling, S8("constexpr")) || string_equal(spelling, S8("typeof_unqual"))));
 }
@@ -6912,8 +6934,14 @@ BUSTER_GLOBAL_LOCAL void c_type_parse_expression_leaf_step(CTypeParseMachine* ma
 {
     if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
     {
-        CTypeId type = machine->result_valid && machine->result_index == frame->close ? machine->result_type : C_TYPE_ID_INVALID;
-        if (type.value != C_ID_UNDERLYING_INVALID)
+        CTypeId type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
+        u32 type_index = machine->result_index;
+        if (type.value != C_ID_UNDERLYING_INVALID && type_index < frame->close)
+        {
+            type = c_parse_pointer_chain(frame->result, frame->preprocess, type, &type_index, frame->close);
+            type = c_parse_array_suffixes(frame->result, frame->preprocess, type, &type_index, frame->close);
+        }
+        if (type.value != C_ID_UNDERLYING_INVALID && type_index == frame->close)
         {
             c_type_parse_frame_complete(machine, type, frame->end, true);
             return;
@@ -8601,10 +8629,35 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_declarator_segment_end(CPreprocessResult preproc
     return end;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_parse_auto_type_token_in_declaration(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out)
+{
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word(token.spelling))
+        {
+            *token_index_out = index;
+            return true;
+        }
+    }
+    *token_index_out = UINT32_MAX;
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                   CDeclaration* declaration)
 {
     u32 end = declaration->token_start + declaration->token_count;
+    u32 auto_declaration_end = declaration->body_start ? declaration->body_start - 1 : end;
+    u32 auto_token_index = UINT32_MAX;
+    if (c_parse_auto_type_token_in_declaration(preprocess, declaration->token_start, auto_declaration_end, &auto_token_index))
+    {
+        c_parse_diagnostic(result, preprocess.tokens[auto_token_index].location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                           c_preprocess_dialect_is_gnu(preprocess.dialect)
+                               ? S8("GNU __auto_type is supported only for one initialized automatic object declaration")
+                               : S8("GNU __auto_type is only available in GNU dialects"));
+        return;
+    }
     if (declaration->kind == C_DECLARATION_TYPE)
     {
         u32 declarator_start = declaration->token_start;
@@ -9092,6 +9145,86 @@ BUSTER_GLOBAL_LOCAL bool c_parse_types_compatible(Arena* result_arena, CParseRes
     return compatible;
 }
 
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId left,
+                                                                CTypeId right)
+{
+    left = c_parse_auto_decay_type(result, left);
+    right = c_parse_auto_decay_type(result, right);
+    if (left.value >= result->type_count || right.value >= result->type_count)
+    {
+        return C_TYPE_ID_INVALID;
+    }
+    CType left_value = result->types[left.value];
+    CType right_value = result->types[right.value];
+    if (left_value.kind == C_TYPE_NULLPTR && right_value.kind == C_TYPE_POINTER)
+    {
+        return right;
+    }
+    if (right_value.kind == C_TYPE_NULLPTR && left_value.kind == C_TYPE_POINTER)
+    {
+        return left;
+    }
+    if (left_value.kind == C_TYPE_POINTER && right_value.kind == C_TYPE_POINTER)
+    {
+        CTypeId left_element = c_parse_unqualified_type(result, left_value.element_type);
+        CTypeId right_element = c_parse_unqualified_type(result, right_value.element_type);
+        if (left_element.value >= result->type_count || right_element.value >= result->type_count)
+        {
+            return C_TYPE_ID_INVALID;
+        }
+        CType left_element_value = result->types[left_element.value];
+        CType right_element_value = result->types[right_element.value];
+        bool void_compatible = (left_element_value.kind == C_TYPE_VOID && right_element_value.kind != C_TYPE_FUNCTION) ||
+                               (right_element_value.kind == C_TYPE_VOID && left_element_value.kind != C_TYPE_FUNCTION);
+        bool element_compatible = void_compatible || c_parse_types_compatible(arena, result, preprocess, left_element, right_element);
+        if (!element_compatible)
+        {
+            return C_TYPE_ID_INVALID;
+        }
+        CTypeId element = left_element_value.kind == C_TYPE_VOID ? left_element : right_element_value.kind == C_TYPE_VOID ? right_element : left_element;
+        CType element_qualifiers = {
+            .is_const = result->types[left_value.element_type.value].is_const || result->types[right_value.element_type.value].is_const,
+            .is_volatile = result->types[left_value.element_type.value].is_volatile || result->types[right_value.element_type.value].is_volatile,
+            .is_restrict = result->types[left_value.element_type.value].is_restrict || result->types[right_value.element_type.value].is_restrict,
+            .is_atomic = result->types[left_value.element_type.value].is_atomic || result->types[right_value.element_type.value].is_atomic,
+        };
+        if (element_qualifiers.is_const || element_qualifiers.is_volatile || element_qualifiers.is_restrict || element_qualifiers.is_atomic)
+        {
+            element = c_parse_add_qualified_type(result, element, element_qualifiers);
+        }
+        return c_parse_add_type(result, (CType){
+                                                .element_type = element,
+                                                .return_type = C_TYPE_ID_INVALID,
+                                                .array_bound = C_ARRAY_BOUND_INVALID,
+                                                .kind = C_TYPE_POINTER,
+                                            });
+    }
+    if (left_value.kind == right_value.kind &&
+        (left_value.kind == C_TYPE_STRUCT || left_value.kind == C_TYPE_UNION || left_value.kind == C_TYPE_ENUM))
+    {
+        CTypeId left_unqualified = c_parse_unqualified_type(result, left);
+        CTypeId right_unqualified = c_parse_unqualified_type(result, right);
+        if (c_parse_types_compatible(arena, result, preprocess, left_unqualified, right_unqualified))
+        {
+            CType qualifiers = {
+                .is_const = left_value.is_const || right_value.is_const,
+                .is_volatile = left_value.is_volatile || right_value.is_volatile,
+                .is_restrict = left_value.is_restrict || right_value.is_restrict,
+                .is_atomic = left_value.is_atomic || right_value.is_atomic,
+            };
+            return (qualifiers.is_const || qualifiers.is_volatile || qualifiers.is_restrict || qualifiers.is_atomic)
+                       ? c_parse_add_qualified_type(result, left_unqualified, qualifiers)
+                       : left_unqualified;
+        }
+        return C_TYPE_ID_INVALID;
+    }
+    if (left.value == right.value)
+    {
+        return left;
+    }
+    return c_parse_expression_arithmetic_type(result, preprocess.target, left, right);
+}
+
 BUSTER_GLOBAL_LOCAL void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity)
 {
     CScope* value = &result->scopes[scope.value];
@@ -9164,7 +9297,7 @@ BUSTER_GLOBAL_LOCAL CEntityId c_parse_lookup_typedef_name(CParseResult* result, 
 
 BUSTER_GLOBAL_LOCAL bool c_parse_type_start(CParseResult* result, CScopeId scope, String8 spelling, CPreprocessDialect dialect)
 {
-    if (c_parse_type_word_for_dialect(spelling, dialect))
+    if (c_parse_type_word_for_dialect(spelling, dialect) || c_parse_auto_type_word(spelling))
     {
         return true;
     }
@@ -9439,27 +9572,431 @@ BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_initializer(CTypeParseMachin
     return true;
 }
 
+typedef struct CAutoDeclarationInfo CAutoDeclarationInfo;
+struct CAutoDeclarationInfo
+{
+    CType qualifiers;
+    u32 auto_index;
+    u32 name_index;
+    u32 initializer_start;
+    u32 initializer_end;
+    bool has_auto_type;
+    bool has_initializer;
+    bool has_multiple_declarators;
+    bool invalid_declarator;
+    bool conflicting_specifier;
+    bool is_typedef;
+    bool is_static_storage;
+    bool is_extern;
+    bool is_thread_local;
+};
+
+BUSTER_GLOBAL_LOCAL u32 c_parse_auto_skip_specifier(CPreprocessResult preprocess, u32 index, u32 end)
+{
+    u32 skipped = c_parse_skip_attributes(preprocess, index, end);
+    if (skipped != index)
+    {
+        return skipped;
+    }
+    if (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && string_equal(preprocess.tokens[index].spelling, S8("_Alignas")) &&
+        index + 1 < end && c_token_is_punctuator(preprocess.tokens[index + 1], S8("(")))
+    {
+        u32 depth = 1;
+        index += 2;
+        while (index < end && depth)
+        {
+            if (c_token_is_punctuator(preprocess.tokens[index], S8("(")))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(preprocess.tokens[index], S8(")")))
+            {
+                depth -= 1;
+            }
+            index += 1;
+        }
+        return index;
+    }
+    return index;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_auto_storage_word(String8 spelling, CAutoDeclarationInfo* info)
+{
+    if (string_equal(spelling, S8("auto")) || string_equal(spelling, S8("register")) || string_equal(spelling, S8("__extension__")))
+    {
+        return true;
+    }
+    if (string_equal(spelling, S8("typedef")))
+    {
+        info->is_typedef = true;
+        return true;
+    }
+    if (string_equal(spelling, S8("static")))
+    {
+        info->is_static_storage = true;
+        return true;
+    }
+    if (string_equal(spelling, S8("extern")))
+    {
+        info->is_extern = true;
+        return true;
+    }
+    if (string_equal(spelling, S8("_Thread_local")) || string_equal(spelling, S8("__thread")))
+    {
+        info->is_thread_local = true;
+        return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_auto_declaration_info(CPreprocessResult preprocess, u32 start, u32 end, CAutoDeclarationInfo* info)
+{
+    *info = (CAutoDeclarationInfo){
+        .auto_index = UINT32_MAX,
+        .name_index = UINT32_MAX,
+        .initializer_start = UINT32_MAX,
+        .initializer_end = UINT32_MAX,
+    };
+    u32 specifier_end = end;
+    u32 depth = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(token, S8("(")) || c_token_is_punctuator(token, S8("[")) || c_token_is_punctuator(token, S8("{")))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(token, S8(")")) || c_token_is_punctuator(token, S8("]")) || c_token_is_punctuator(token, S8("}")))
+        {
+            depth -= depth != 0;
+        }
+        else if (!depth && (c_token_is_punctuator(token, S8("=")) || c_token_is_punctuator(token, S8(",")) || c_token_is_punctuator(token, S8(";"))))
+        {
+            specifier_end = index;
+            break;
+        }
+    }
+    u32 scan = start;
+    while (scan < specifier_end)
+    {
+        u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, specifier_end);
+        if (skipped != scan)
+        {
+            scan = skipped;
+            continue;
+        }
+        if (preprocess.tokens[scan].kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word(preprocess.tokens[scan].spelling))
+        {
+            if (info->has_auto_type)
+            {
+                info->conflicting_specifier = true;
+            }
+            else
+            {
+                info->has_auto_type = true;
+                info->auto_index = scan;
+            }
+        }
+        scan += 1;
+    }
+    if (!info->has_auto_type)
+    {
+        return false;
+    }
+    scan = start;
+    while (scan < info->auto_index)
+    {
+        u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, info->auto_index);
+        if (skipped != scan)
+        {
+            scan = skipped;
+            continue;
+        }
+        CToken token = preprocess.tokens[scan];
+        if (token.kind != C_TOKEN_IDENTIFIER || (!c_parse_type_qualifier_word(token.spelling, &info->qualifiers) &&
+                                                  !c_parse_auto_storage_word(token.spelling, info)))
+        {
+            info->conflicting_specifier = true;
+        }
+        scan += 1;
+    }
+    scan = info->auto_index + 1;
+    while (scan < specifier_end)
+    {
+        u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, specifier_end);
+        if (skipped != scan)
+        {
+            scan = skipped;
+            continue;
+        }
+        CToken token = preprocess.tokens[scan];
+        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(token.spelling, &info->qualifiers))
+        {
+            scan += 1;
+            continue;
+        }
+        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word(token.spelling))
+        {
+            info->conflicting_specifier = true;
+            scan += 1;
+            continue;
+        }
+        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_storage_word(token.spelling, info))
+        {
+            scan += 1;
+            continue;
+        }
+        info->name_index = scan;
+        break;
+    }
+    if (info->name_index < specifier_end && preprocess.tokens[info->name_index].kind == C_TOKEN_IDENTIFIER &&
+        !c_declaration_keyword(preprocess.tokens[info->name_index].spelling) &&
+        !c_parse_type_word_for_dialect(preprocess.tokens[info->name_index].spelling, preprocess.dialect))
+    {
+        scan = info->name_index + 1;
+        while (scan < specifier_end)
+        {
+            u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, specifier_end);
+            if (skipped != scan)
+            {
+                scan = skipped;
+                continue;
+            }
+            info->invalid_declarator = true;
+            break;
+        }
+    }
+    else
+    {
+        info->invalid_declarator = true;
+    }
+    depth = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(token, S8("(")) || c_token_is_punctuator(token, S8("[")) || c_token_is_punctuator(token, S8("{")))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(token, S8(")")) || c_token_is_punctuator(token, S8("]")) || c_token_is_punctuator(token, S8("}")))
+        {
+            depth -= depth != 0;
+        }
+        else if (!depth && c_token_is_punctuator(token, S8(",")))
+        {
+            info->has_multiple_declarators = true;
+        }
+        else if (!depth && c_token_is_punctuator(token, S8("=")) && !info->has_initializer)
+        {
+            info->has_initializer = true;
+            info->initializer_start = index + 1;
+        }
+    }
+    info->initializer_end = end;
+    if (info->initializer_end > start && c_token_is_punctuator(preprocess.tokens[info->initializer_end - 1], S8(";")))
+    {
+        info->initializer_end -= 1;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId type)
+{
+    if (type.value >= result->type_count)
+    {
+        return C_TYPE_ID_INVALID;
+    }
+    type = c_parse_unqualified_type(result, type);
+    if (type.value >= result->type_count)
+    {
+        return C_TYPE_ID_INVALID;
+    }
+    CType value = result->types[type.value];
+    if (value.kind == C_TYPE_ARRAY)
+    {
+        return c_parse_add_type(result, (CType){
+                                                .element_type = value.element_type,
+                                                .return_type = C_TYPE_ID_INVALID,
+                                                .array_bound = C_ARRAY_BOUND_INVALID,
+                                                .kind = C_TYPE_POINTER,
+                                            });
+    }
+    if (value.kind == C_TYPE_FUNCTION)
+    {
+        return c_parse_add_type(result, (CType){
+                                                .element_type = type,
+                                                .return_type = C_TYPE_ID_INVALID,
+                                                .array_bound = C_ARRAY_BOUND_INVALID,
+                                                .kind = C_TYPE_POINTER,
+                                            });
+    }
+    return type;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_auto_initializer_type(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                       CScopeId scope, u32 start, u32 end, CTypeId* type_out)
+{
+    CTypeId type = C_TYPE_ID_INVALID;
+    if (start >= end || !c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, true, &type))
+    {
+        return false;
+    }
+    type = c_parse_auto_decay_type(result, type);
+    if (type.value >= result->type_count || result->types[type.value].kind == C_TYPE_VOID)
+    {
+        return false;
+    }
+    *type_out = type;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                                    u32 start, u32 end)
+{
+    for (u32 use_index = start; use_index < end; use_index += 1)
+    {
+        CToken use = preprocess.tokens[use_index];
+        if (use.kind == C_TOKEN_IDENTIFIER && string_equal(use.spelling, S8("__builtin_offsetof")) && use_index + 1 < end &&
+            c_token_is_punctuator(preprocess.tokens[use_index + 1], S8("(")))
+        {
+            u32 builtin_depth = 0;
+            for (use_index += 1; use_index < end; use_index += 1)
+            {
+                if (c_token_is_punctuator(preprocess.tokens[use_index], S8("(")))
+                {
+                    builtin_depth += 1;
+                }
+                else if (c_token_is_punctuator(preprocess.tokens[use_index], S8(")")))
+                {
+                    if (builtin_depth)
+                    {
+                        builtin_depth -= 1;
+                    }
+                    if (!builtin_depth)
+                    {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        bool member = use_index > start && (c_token_is_punctuator(preprocess.tokens[use_index - 1], S8(".")) ||
+                                            c_token_is_punctuator(preprocess.tokens[use_index - 1], S8("->")));
+        bool tag_name = use_index > start && preprocess.tokens[use_index - 1].kind == C_TOKEN_IDENTIFIER &&
+                        (string_equal(preprocess.tokens[use_index - 1].spelling, S8("struct")) ||
+                         string_equal(preprocess.tokens[use_index - 1].spelling, S8("union")) ||
+                         string_equal(preprocess.tokens[use_index - 1].spelling, S8("enum")));
+        if (use.kind == C_TOKEN_IDENTIFIER && !c_declaration_keyword_for_dialect(use.spelling, preprocess.dialect) && !member && !tag_name &&
+            !c_parse_identifier_is_bound(result, use_index))
+        {
+            c_parse_bind_identifier(arena, result, preprocess, scope, use_index);
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                     CScopeId scope, u32 declaration_index, u32 start, u32 end)
 {
+    CAutoDeclarationInfo auto_info = {0};
+    bool is_auto_type = c_parse_auto_declaration_info(preprocess, start, end, &auto_info);
+    CTypeId auto_type = C_TYPE_ID_INVALID;
     bool is_typedef = false;
     bool is_static_storage = false;
     bool is_register = false;
     bool is_constexpr = false;
+    bool is_extern = false;
+    bool is_thread_local = false;
     for (u32 token_index = start; token_index < end; token_index += 1)
     {
         is_typedef |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(preprocess.tokens[token_index].spelling, S8("typedef"));
         is_static_storage |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(preprocess.tokens[token_index].spelling, S8("static"));
         is_register |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(preprocess.tokens[token_index].spelling, S8("register"));
+        is_extern |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(preprocess.tokens[token_index].spelling, S8("extern"));
+        is_thread_local |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
+                          (string_equal(preprocess.tokens[token_index].spelling, S8("_Thread_local")) ||
+                           string_equal(preprocess.tokens[token_index].spelling, S8("__thread")));
         is_constexpr |= c_preprocess_dialect_is_c23(preprocess.dialect) && preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
                         string_equal(preprocess.tokens[token_index].spelling, S8("constexpr"));
     }
+    if (is_auto_type)
+    {
+        is_typedef |= auto_info.is_typedef;
+        is_static_storage |= auto_info.is_static_storage;
+        is_extern |= auto_info.is_extern;
+        is_thread_local |= auto_info.is_thread_local;
+        if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
+        {
+            c_parse_diagnostic(result, preprocess.tokens[auto_info.auto_index].location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               S8("GNU __auto_type is only available in GNU dialects"));
+            return false;
+        }
+        if (auto_info.has_multiple_declarators)
+        {
+            c_parse_diagnostic(result, preprocess.tokens[auto_info.auto_index].location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               S8("GNU __auto_type may only be used with a single declarator"));
+            return false;
+        }
+        if (is_typedef || is_static_storage || is_extern || is_thread_local)
+        {
+            c_parse_diagnostic(result, preprocess.tokens[auto_info.auto_index].location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               S8("GNU __auto_type requires an automatic object declaration"));
+            return false;
+        }
+        if (auto_info.conflicting_specifier)
+        {
+            c_parse_diagnostic(result, preprocess.tokens[auto_info.auto_index].location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               S8("GNU __auto_type cannot be combined with another type specifier"));
+            return false;
+        }
+        if (auto_info.invalid_declarator || auto_info.name_index >= end)
+        {
+            c_parse_diagnostic(result, preprocess.tokens[auto_info.auto_index].location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               S8("GNU __auto_type requires a plain identifier as declarator"));
+            return false;
+        }
+        if (!auto_info.has_initializer || auto_info.initializer_start >= auto_info.initializer_end)
+        {
+            c_parse_diagnostic(result, preprocess.tokens[auto_info.auto_index].location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               S8("GNU __auto_type requires an initialized data declaration"));
+            return false;
+        }
+        u32 diagnostic_checkpoint = result->diagnostic_count;
+        c_parse_bind_auto_initializer_identifiers(arena, result, preprocess, scope, auto_info.initializer_start, auto_info.initializer_end);
+        CTypeId inferred = C_TYPE_ID_INVALID;
+        if (!c_parse_auto_initializer_type(machine, arena, preprocess, result, scope, auto_info.initializer_start, auto_info.initializer_end, &inferred))
+        {
+            if (result->diagnostic_count == diagnostic_checkpoint)
+            {
+                c_parse_diagnostic(result, preprocess.tokens[auto_info.auto_index].location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   S8("could not infer the type of the GNU __auto_type initializer"));
+            }
+            return false;
+        }
+        if (auto_info.qualifiers.is_restrict && inferred.value < result->type_count && result->types[inferred.value].kind != C_TYPE_POINTER)
+        {
+            c_parse_diagnostic(result, preprocess.tokens[auto_info.auto_index].location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               S8("restrict-qualified GNU __auto_type must infer a pointer type"));
+            return false;
+        }
+        if (auto_info.qualifiers.is_const || auto_info.qualifiers.is_volatile || auto_info.qualifiers.is_restrict || auto_info.qualifiers.is_atomic)
+        {
+            inferred = c_parse_add_qualified_type(result, inferred, auto_info.qualifiers);
+        }
+        auto_type = inferred;
+    }
     u32 enum_member_start = result->enum_member_count;
     u32 declarator_start = start;
-    CTypeId base = c_parse_scalar_type_in_scope(machine, result, preprocess, scope, start, end, &declarator_start);
+    CTypeId base = is_auto_type ? C_TYPE_ID_INVALID : c_parse_scalar_type_in_scope(machine, result, preprocess, scope, start, end, &declarator_start);
+    if (is_auto_type)
+    {
+        declarator_start = auto_info.name_index;
+    }
     if (base.value == C_ID_UNDERLYING_INVALID)
     {
-        return false;
+        if (!is_auto_type)
+        {
+            return false;
+        }
     }
     u32 alignment_start = 0;
     u32 alignment_count = 0;
@@ -9542,10 +10079,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
             }
         }
         u32 index = segment_start;
-        CTypeId type = c_parse_pointer_chain(result, preprocess, base, &index, suffix_end);
+        CTypeId type = is_auto_type ? auto_type : c_parse_pointer_chain(result, preprocess, base, &index, suffix_end);
         CToken name = {0};
         u32 name_index = UINT32_MAX;
-        bool parenthesized = index < suffix_end && c_token_is_punctuator(preprocess.tokens[index], S8("("));
+        bool parenthesized = !is_auto_type && index < suffix_end && c_token_is_punctuator(preprocess.tokens[index], S8("("));
         if (parenthesized)
         {
             u32 close = index + 1;
@@ -9587,7 +10124,14 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
             type = c_parse_array_suffixes(result, preprocess, type, &index, suffix_end);
             index = c_parse_skip_attributes(preprocess, index, suffix_end);
         }
-        type = c_parse_apply_vector_attribute(result, preprocess, type, segment_start, suffix_end);
+        if (is_auto_type)
+        {
+            type = auto_type;
+        }
+        else
+        {
+            type = c_parse_apply_vector_attribute(result, preprocess, type, segment_start, suffix_end);
+        }
         if (is_constexpr && type.value < result->type_count)
         {
             type = c_parse_add_qualified_type(result, type,
@@ -9746,7 +10290,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
                 use_index > initializer_start && preprocess.tokens[use_index - 1].kind == C_TOKEN_IDENTIFIER &&
                 (string_equal(preprocess.tokens[use_index - 1].spelling, S8("struct")) ||
                  string_equal(preprocess.tokens[use_index - 1].spelling, S8("union")) || string_equal(preprocess.tokens[use_index - 1].spelling, S8("enum")));
-            if (use.kind == C_TOKEN_IDENTIFIER && !c_declaration_keyword_for_dialect(use.spelling, preprocess.dialect) && !member && !tag_name)
+            if (use.kind == C_TOKEN_IDENTIFIER && !c_declaration_keyword_for_dialect(use.spelling, preprocess.dialect) && !member && !tag_name &&
+                !c_parse_identifier_is_bound(result, use_index))
             {
                 c_parse_bind_identifier(arena, result, preprocess, scope, use_index);
             }
@@ -9950,7 +10495,8 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(CTypeParseMachine* machine, 
         if (statement_start && declaration_type_start < body_end && preprocess.tokens[declaration_type_start].kind == C_TOKEN_IDENTIFIER &&
             c_parse_type_start(result, scope_stack[scope_count - 1], preprocess.tokens[declaration_type_start].spelling, preprocess.dialect))
         {
-            if (!c_parse_type_word_for_dialect(preprocess.tokens[declaration_type_start].spelling, preprocess.dialect))
+            if (!c_parse_type_word_for_dialect(preprocess.tokens[declaration_type_start].spelling, preprocess.dialect) &&
+                !c_parse_auto_type_word(preprocess.tokens[declaration_type_start].spelling))
             {
                 c_parse_bind_identifier(result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_type_start);
             }
@@ -9976,8 +10522,16 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(CTypeParseMachine* machine, 
                 }
                 end += 1;
             }
+            CAutoDeclarationInfo auto_declaration_info = {0};
+            bool auto_declaration = c_parse_auto_declaration_info(preprocess, index, end, &auto_declaration_info);
             if (end < body_end &&
                 c_parse_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index, index, end))
+            {
+                index = end + 1;
+                statement_start = true;
+                continue;
+            }
+            if (auto_declaration && end < body_end)
             {
                 index = end + 1;
                 statement_start = true;
@@ -27019,11 +27573,6 @@ BUSTER_GLOBAL_LOCAL String8 c_ir_unsupported_gnu_construct(CPreprocessResult pre
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("__auto_type")))
-        {
-            *token_index_out = index;
-            return S8("GNU __auto_type is not supported");
-        }
         if (token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("goto")) && index + 1 < end &&
             c_token_is_punctuator(preprocess.tokens[index + 1], S8("*")))
         {
