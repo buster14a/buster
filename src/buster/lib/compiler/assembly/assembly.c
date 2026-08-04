@@ -68,6 +68,29 @@ typedef enum AssemblyOpcode
     ASSEMBLY_OPCODE_X86_VMULPD,
     ASSEMBLY_OPCODE_X86_VDIVPS,
     ASSEMBLY_OPCODE_X86_VDIVPD,
+    ASSEMBLY_OPCODE_X86_VMOVDQA,
+    ASSEMBLY_OPCODE_X86_VMOVDQU,
+    ASSEMBLY_OPCODE_X86_VPADDB,
+    ASSEMBLY_OPCODE_X86_VPADDW,
+    ASSEMBLY_OPCODE_X86_VPADDD,
+    ASSEMBLY_OPCODE_X86_VPADDQ,
+    ASSEMBLY_OPCODE_X86_VPSUBB,
+    ASSEMBLY_OPCODE_X86_VPSUBW,
+    ASSEMBLY_OPCODE_X86_VPSUBD,
+    ASSEMBLY_OPCODE_X86_VPSUBQ,
+    ASSEMBLY_OPCODE_X86_VPAND,
+    ASSEMBLY_OPCODE_X86_VPOR,
+    ASSEMBLY_OPCODE_X86_VPXOR,
+    ASSEMBLY_OPCODE_X86_VPCMPEQB,
+    ASSEMBLY_OPCODE_X86_VPCMPEQW,
+    ASSEMBLY_OPCODE_X86_VPCMPEQD,
+    ASSEMBLY_OPCODE_X86_VPCMPEQQ,
+    ASSEMBLY_OPCODE_X86_VPCMPGTB,
+    ASSEMBLY_OPCODE_X86_VPCMPGTW,
+    ASSEMBLY_OPCODE_X86_VPCMPGTD,
+    ASSEMBLY_OPCODE_X86_VPCMPGTQ,
+    ASSEMBLY_OPCODE_X86_VPMULLW,
+    ASSEMBLY_OPCODE_X86_VPMULLD,
     ASSEMBLY_OPCODE_AARCH64_NOP,
     ASSEMBLY_OPCODE_AARCH64_RET,
     ASSEMBLY_OPCODE_AARCH64_B,
@@ -793,6 +816,18 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic,
         {S8_INITIALIZER("vsubps"), ASSEMBLY_OPCODE_X86_VSUBPS, 3},   {S8_INITIALIZER("vsubpd"), ASSEMBLY_OPCODE_X86_VSUBPD, 3},
         {S8_INITIALIZER("vmulps"), ASSEMBLY_OPCODE_X86_VMULPS, 3},   {S8_INITIALIZER("vmulpd"), ASSEMBLY_OPCODE_X86_VMULPD, 3},
         {S8_INITIALIZER("vdivps"), ASSEMBLY_OPCODE_X86_VDIVPS, 3},   {S8_INITIALIZER("vdivpd"), ASSEMBLY_OPCODE_X86_VDIVPD, 3},
+        {S8_INITIALIZER("vmovdqa"), ASSEMBLY_OPCODE_X86_VMOVDQA, 2}, {S8_INITIALIZER("vmovdqu"), ASSEMBLY_OPCODE_X86_VMOVDQU, 2},
+        {S8_INITIALIZER("vpaddb"), ASSEMBLY_OPCODE_X86_VPADDB, 3},   {S8_INITIALIZER("vpaddw"), ASSEMBLY_OPCODE_X86_VPADDW, 3},
+        {S8_INITIALIZER("vpaddd"), ASSEMBLY_OPCODE_X86_VPADDD, 3},   {S8_INITIALIZER("vpaddq"), ASSEMBLY_OPCODE_X86_VPADDQ, 3},
+        {S8_INITIALIZER("vpsubb"), ASSEMBLY_OPCODE_X86_VPSUBB, 3},   {S8_INITIALIZER("vpsubw"), ASSEMBLY_OPCODE_X86_VPSUBW, 3},
+        {S8_INITIALIZER("vpsubd"), ASSEMBLY_OPCODE_X86_VPSUBD, 3},   {S8_INITIALIZER("vpsubq"), ASSEMBLY_OPCODE_X86_VPSUBQ, 3},
+        {S8_INITIALIZER("vpand"), ASSEMBLY_OPCODE_X86_VPAND, 3},     {S8_INITIALIZER("vpor"), ASSEMBLY_OPCODE_X86_VPOR, 3},
+        {S8_INITIALIZER("vpxor"), ASSEMBLY_OPCODE_X86_VPXOR, 3},     {S8_INITIALIZER("vpcmpeqb"), ASSEMBLY_OPCODE_X86_VPCMPEQB, 3},
+        {S8_INITIALIZER("vpcmpeqw"), ASSEMBLY_OPCODE_X86_VPCMPEQW, 3}, {S8_INITIALIZER("vpcmpeqd"), ASSEMBLY_OPCODE_X86_VPCMPEQD, 3},
+        {S8_INITIALIZER("vpcmpeqq"), ASSEMBLY_OPCODE_X86_VPCMPEQQ, 3}, {S8_INITIALIZER("vpcmpgtb"), ASSEMBLY_OPCODE_X86_VPCMPGTB, 3},
+        {S8_INITIALIZER("vpcmpgtw"), ASSEMBLY_OPCODE_X86_VPCMPGTW, 3}, {S8_INITIALIZER("vpcmpgtd"), ASSEMBLY_OPCODE_X86_VPCMPGTD, 3},
+        {S8_INITIALIZER("vpcmpgtq"), ASSEMBLY_OPCODE_X86_VPCMPGTQ, 3}, {S8_INITIALIZER("vpmullw"), ASSEMBLY_OPCODE_X86_VPMULLW, 3},
+        {S8_INITIALIZER("vpmulld"), ASSEMBLY_OPCODE_X86_VPMULLD, 3},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(instructions); index += 1)
     {
@@ -889,7 +924,26 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_sse2(AssemblyOpcode opcode)
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_avx(AssemblyOpcode opcode)
 {
-    return opcode >= ASSEMBLY_OPCODE_X86_VMOVAPS && opcode <= ASSEMBLY_OPCODE_X86_VDIVPD;
+    return opcode >= ASSEMBLY_OPCODE_X86_VMOVAPS && opcode <= ASSEMBLY_OPCODE_X86_VPMULLD;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_avx_move(AssemblyOpcode opcode)
+{
+    return (opcode >= ASSEMBLY_OPCODE_X86_VMOVAPS && opcode <= ASSEMBLY_OPCODE_X86_VMOVUPD) ||
+           opcode == ASSEMBLY_OPCODE_X86_VMOVDQA || opcode == ASSEMBLY_OPCODE_X86_VMOVDQU;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_avx_integer(AssemblyOpcode opcode)
+{
+    return opcode >= ASSEMBLY_OPCODE_X86_VPADDB && opcode <= ASSEMBLY_OPCODE_X86_VPMULLD;
+}
+
+BUSTER_GLOBAL_LOCAL u8 assembly_x86_avx_map(AssemblyOpcode opcode)
+{
+    return opcode == ASSEMBLY_OPCODE_X86_VPCMPEQQ || opcode == ASSEMBLY_OPCODE_X86_VPCMPGTQ ||
+                   opcode == ASSEMBLY_OPCODE_X86_VPMULLD
+               ? 2
+               : 1;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_rex_needed(u8 width, AssemblyRegister first, AssemblyRegister second)
@@ -1101,7 +1155,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     }
     if (assembly_x86_opcode_is_avx(opcode))
     {
-        bool move = opcode >= ASSEMBLY_OPCODE_X86_VMOVAPS && opcode <= ASSEMBLY_OPCODE_X86_VMOVUPD;
+        bool move = assembly_x86_opcode_is_avx_move(opcode);
         bool scalar = opcode == ASSEMBLY_OPCODE_X86_VADDSS || opcode == ASSEMBLY_OPCODE_X86_VADDSD;
         AssemblyOperand* source = move ? second : instruction->operands + 2;
         if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
@@ -1142,7 +1196,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
             return false;
         }
         instruction->width = vector_reg.width;
-        instruction->size = (assembly_x86_vex_three_byte_needed(*rm) ? 3 : 2) + 1 + address_size;
+        instruction->size = (assembly_x86_avx_map(opcode) != 1 || assembly_x86_vex_three_byte_needed(*rm) ? 3 : 2) + 1 + address_size;
         return true;
     }
     for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
@@ -1509,6 +1563,22 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
             }
         }
     }
+    if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_opcode_is_avx_integer(info.opcode) &&
+        !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX2))
+    {
+        bool requires_avx2 = false;
+        for (u32 operand_index = 0; operand_index < instruction.operand_count; operand_index += 1)
+        {
+            requires_avx2 = requires_avx2 || (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_REGISTER &&
+                                               instruction.operands[operand_index].reg.class == ASSEMBLY_REGISTER_YMM);
+        }
+        if (requires_avx2)
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                S8("256-bit packed integer instruction requires the avx2 target feature"));
+            return;
+        }
+    }
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
         if (!assembly_x86_instruction_size(&instruction) || (info.suffix_width && instruction.width && info.suffix_width != instruction.width))
@@ -1806,9 +1876,9 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_emit_sse_prefix(AssemblyBuilder* builder, 
 }
 
 BUSTER_GLOBAL_LOCAL void assembly_x86_emit_vex_prefix(AssemblyBuilder* builder, AssemblyRegister reg, AssemblyOperand rm,
-                                                       AssemblyRegisterClass vector_class, u8 source, u8 prefix)
+                                                       AssemblyRegisterClass vector_class, u8 source, u8 prefix, u8 map)
 {
-    bool three_byte = assembly_x86_vex_three_byte_needed(rm);
+    bool three_byte = map != 1 || assembly_x86_vex_three_byte_needed(rm);
     u8 inverted_reg = reg.index >= 8 ? 0 : UINT8_C(0x80);
     u8 vector_length = vector_class == ASSEMBLY_REGISTER_YMM ? UINT8_C(0x04) : 0;
     u8 inverted_source = (u8)((~source & 15) << 3);
@@ -1823,7 +1893,7 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_emit_vex_prefix(AssemblyBuilder* builder, 
                        : !rm.memory.has_base || rm.memory.base.index < 8 ? UINT8_C(0x20)
                                                                         : 0;
     assembly_emit_byte(builder, 0xc4);
-    assembly_emit_byte(builder, (u8)(inverted_reg | inverted_index | inverted_base | 1));
+    assembly_emit_byte(builder, (u8)(inverted_reg | inverted_index | inverted_base | map));
     assembly_emit_byte(builder, (u8)(inverted_source | vector_length | prefix));
 }
 
@@ -2028,7 +2098,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         {
             AssemblyOperand first = instruction->operands[0];
             AssemblyOperand second = instruction->operands[1];
-            bool move = instruction->opcode >= ASSEMBLY_OPCODE_X86_VMOVAPS && instruction->opcode <= ASSEMBLY_OPCODE_X86_VMOVUPD;
+            bool move = assembly_x86_opcode_is_avx_move(instruction->opcode);
             AssemblyOperand source = move ? second : instruction->operands[2];
             bool load = !move || first.kind == ASSEMBLY_OPERAND_REGISTER;
             AssemblyRegister reg = load ? first.reg : second.reg;
@@ -2036,14 +2106,16 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             AssemblyRegisterClass vector_class = reg.class;
             u8 vex_source = move ? 0 : second.reg.index;
             u8 prefix = instruction->opcode == ASSEMBLY_OPCODE_X86_VADDSD ? 3
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VADDSS ? 2
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VADDSS || instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVDQU ? 2
                         : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVAPD || instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVUPD ||
                                   instruction->opcode == ASSEMBLY_OPCODE_X86_VXORPD || instruction->opcode == ASSEMBLY_OPCODE_X86_VADDPD ||
                                   instruction->opcode == ASSEMBLY_OPCODE_X86_VSUBPD || instruction->opcode == ASSEMBLY_OPCODE_X86_VMULPD ||
-                                  instruction->opcode == ASSEMBLY_OPCODE_X86_VDIVPD
+                                  instruction->opcode == ASSEMBLY_OPCODE_X86_VDIVPD || instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVDQA ||
+                                  assembly_x86_opcode_is_avx_integer(instruction->opcode)
                               ? 1
                               : 0;
-            assembly_x86_emit_vex_prefix(builder, reg, rm, vector_class, vex_source, prefix);
+            assembly_x86_emit_vex_prefix(builder, reg, rm, vector_class, vex_source, prefix,
+                                          assembly_x86_avx_map(instruction->opcode));
             u8 opcode = instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVAPS ? (load ? 0x28 : 0x29)
                         : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVUPS ? (load ? 0x10 : 0x11)
                         : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVAPD ? (load ? 0x28 : 0x29)
@@ -2058,8 +2130,31 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                         : instruction->opcode == ASSEMBLY_OPCODE_X86_VSUBPD  ? 0x5c
                         : instruction->opcode == ASSEMBLY_OPCODE_X86_VMULPS  ? 0x59
                         : instruction->opcode == ASSEMBLY_OPCODE_X86_VMULPD  ? 0x59
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VDIVPS  ? 0x5e
-                                                                            : 0x5e;
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VDIVPS    ? 0x5e
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VDIVPD    ? 0x5e
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVDQA   ? (load ? 0x6f : 0x7f)
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVDQU   ? (load ? 0x6f : 0x7f)
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPADDB    ? 0xfc
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPADDW    ? 0xfd
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPADDD    ? 0xfe
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPADDQ    ? 0xd4
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPSUBB    ? 0xf8
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPSUBW    ? 0xf9
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPSUBD    ? 0xfa
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPSUBQ    ? 0xfb
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPAND     ? 0xdb
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPOR      ? 0xeb
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPXOR     ? 0xef
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPEQB  ? 0x74
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPEQW  ? 0x75
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPEQD  ? 0x76
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPEQQ  ? 0x29
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPGTB  ? 0x64
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPGTW  ? 0x65
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPGTD  ? 0x66
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPGTQ  ? 0x37
+                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPMULLW   ? 0xd5
+                                                                               : 0x40;
             assembly_emit_byte(builder, opcode);
             if (!assembly_x86_emit_rm(builder, instruction, reg.index, rm))
             {
