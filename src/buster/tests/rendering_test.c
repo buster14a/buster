@@ -220,60 +220,62 @@ BUSTER_TEST_F_DECL UnitTestResult rendering_tests(UnitTestArguments* arguments)
     Arena* stream_index_arena = arena_create((ArenaCreation){0});
     Arena* boundary_vertex_arena = arena_create((ArenaCreation){.reserved_size = 256, .granularity = 64, .initial_size = 256});
     Arena* boundary_index_arena = arena_create((ArenaCreation){.reserved_size = 256, .granularity = 64, .initial_size = 256});
-    RenderingCommandStream boundary_stream = {0};
-    rendering_command_stream_bind_buffers(&boundary_stream, boundary_vertex_arena, boundary_index_arena);
+    RenderingCommandStream* boundary_stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
+    memset(boundary_stream, 0, sizeof(*boundary_stream));
+    rendering_command_stream_bind_buffers(boundary_stream, boundary_vertex_arena, boundary_index_arena);
     u8 boundary_vertices[17] = {0};
     arena_set_position(boundary_vertex_arena, 240);
-    BUSTER_TEST(arguments, rendering_command_stream_add_vertices(&boundary_stream, (ByteSlice){.pointer = boundary_vertices, .length = 15}, 1) &&
-                                  boundary_vertex_arena->position == 255 && boundary_stream.vertex_count == 1);
-    boundary_stream.vertex_count = 0;
-    boundary_stream.overflowed = false;
+    BUSTER_TEST(arguments, rendering_command_stream_add_vertices(boundary_stream, (ByteSlice){.pointer = boundary_vertices, .length = 15}, 1) &&
+                                  boundary_vertex_arena->position == 255 && boundary_stream->vertex_count == 1);
+    boundary_stream->vertex_count = 0;
+    boundary_stream->overflowed = false;
     arena_set_position(boundary_vertex_arena, 240);
-    BUSTER_TEST(arguments, rendering_command_stream_add_vertices(&boundary_stream, (ByteSlice){.pointer = boundary_vertices, .length = 16}, 1) &&
-                                  boundary_vertex_arena->position == 256 && boundary_stream.vertex_count == 1);
-    boundary_stream.vertex_count = 0;
-    boundary_stream.overflowed = false;
+    BUSTER_TEST(arguments, rendering_command_stream_add_vertices(boundary_stream, (ByteSlice){.pointer = boundary_vertices, .length = 16}, 1) &&
+                                  boundary_vertex_arena->position == 256 && boundary_stream->vertex_count == 1);
+    boundary_stream->vertex_count = 0;
+    boundary_stream->overflowed = false;
     arena_set_position(boundary_vertex_arena, 240);
-    BUSTER_TEST(arguments, !rendering_command_stream_add_vertices(&boundary_stream, (ByteSlice){.pointer = boundary_vertices, .length = 17}, 1) &&
-                                  boundary_vertex_arena->position == 240 && boundary_stream.vertex_count == 0 &&
-                                  rendering_command_stream_replay(&boundary_stream, 0, 0) == 0);
+    BUSTER_TEST(arguments, !rendering_command_stream_add_vertices(boundary_stream, (ByteSlice){.pointer = boundary_vertices, .length = 17}, 1) &&
+                                  boundary_vertex_arena->position == 240 && boundary_stream->vertex_count == 0 &&
+                                  rendering_command_stream_replay(boundary_stream, 0, 0) == 0);
     u32 boundary_indices[3] = {0, 1, 2};
-    boundary_stream.index_count = 0;
-    boundary_stream.overflowed = false;
+    boundary_stream->index_count = 0;
+    boundary_stream->overflowed = false;
     arena_set_position(boundary_index_arena, 248);
-    BUSTER_TEST(arguments, rendering_command_stream_add_indices(&boundary_stream, (Sliceu32){.pointer = boundary_indices, .length = 1}) &&
-                                  boundary_index_arena->position == 252 && boundary_stream.index_count == 1);
-    boundary_stream.index_count = 0;
-    boundary_stream.overflowed = false;
+    BUSTER_TEST(arguments, rendering_command_stream_add_indices(boundary_stream, (Sliceu32){.pointer = boundary_indices, .length = 1}) &&
+                                  boundary_index_arena->position == 252 && boundary_stream->index_count == 1);
+    boundary_stream->index_count = 0;
+    boundary_stream->overflowed = false;
     arena_set_position(boundary_index_arena, 248);
-    BUSTER_TEST(arguments, rendering_command_stream_add_indices(&boundary_stream, (Sliceu32){.pointer = boundary_indices, .length = 2}) &&
-                                  boundary_index_arena->position == 256 && boundary_stream.index_count == 2);
-    boundary_stream.index_count = 0;
-    boundary_stream.overflowed = false;
+    BUSTER_TEST(arguments, rendering_command_stream_add_indices(boundary_stream, (Sliceu32){.pointer = boundary_indices, .length = 2}) &&
+                                  boundary_index_arena->position == 256 && boundary_stream->index_count == 2);
+    boundary_stream->index_count = 0;
+    boundary_stream->overflowed = false;
     arena_set_position(boundary_index_arena, 248);
-    BUSTER_TEST(arguments, !rendering_command_stream_add_indices(&boundary_stream, (Sliceu32){.pointer = boundary_indices, .length = 3}) &&
-                                  boundary_index_arena->position == 248 && boundary_stream.index_count == 0 &&
-                                  rendering_command_stream_replay(&boundary_stream, 0, 0) == 0);
-    RenderingCommandStream combined_boundary_stream = {0};
-    rendering_command_stream_bind_buffers(&combined_boundary_stream, boundary_vertex_arena, boundary_index_arena);
-    combined_boundary_stream.target_size = (RenderingWindowSize){.width = 20, .height = 20};
-    combined_boundary_stream.scale = (RenderingScale){.x = 1, .y = 1};
-    combined_boundary_stream.target = RENDERING_TARGET_BACKBUFFER;
-    combined_boundary_stream.clip_depth = 1;
-    combined_boundary_stream.clip_stack[0] = (RenderingClipRect){.x0 = 0, .y0 = 0, .x1 = 20, .y1 = 20};
-    combined_boundary_stream.force_new_batch = true;
+    BUSTER_TEST(arguments, !rendering_command_stream_add_indices(boundary_stream, (Sliceu32){.pointer = boundary_indices, .length = 3}) &&
+                                  boundary_index_arena->position == 248 && boundary_stream->index_count == 0 &&
+                                  rendering_command_stream_replay(boundary_stream, 0, 0) == 0);
+    RenderingCommandStream* combined_boundary_stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
+    memset(combined_boundary_stream, 0, sizeof(*combined_boundary_stream));
+    rendering_command_stream_bind_buffers(combined_boundary_stream, boundary_vertex_arena, boundary_index_arena);
+    combined_boundary_stream->target_size = (RenderingWindowSize){.width = 20, .height = 20};
+    combined_boundary_stream->scale = (RenderingScale){.x = 1, .y = 1};
+    combined_boundary_stream->target = RENDERING_TARGET_BACKBUFFER;
+    combined_boundary_stream->clip_depth = 1;
+    combined_boundary_stream->clip_stack[0] = (RenderingClipRect){.x0 = 0, .y0 = 0, .x1 = 20, .y1 = 20};
+    combined_boundary_stream->force_new_batch = true;
     arena_set_position(boundary_vertex_arena, 240);
     arena_set_position(boundary_index_arena, 248);
-    BUSTER_TEST(arguments, rendering_command_stream_rect_allocation_fits(&combined_boundary_stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = 0}, 0, 1, 16, 1));
+    BUSTER_TEST(arguments, rendering_command_stream_rect_allocation_fits(combined_boundary_stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = 0}, 0, 1, 16, 1));
     arena_set_position(boundary_vertex_arena, 240);
     arena_set_position(boundary_index_arena, 248);
-    BUSTER_TEST(arguments, !rendering_command_stream_rect_allocation_fits(&combined_boundary_stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = 0}, 0, 1, 17, 1) &&
+    BUSTER_TEST(arguments, !rendering_command_stream_rect_allocation_fits(combined_boundary_stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = 0}, 0, 1, 17, 1) &&
                                   boundary_vertex_arena->position == 240 && boundary_index_arena->position == 248);
     BUSTER_TEST(arguments, !rendering_arena_allocation_fits(boundary_vertex_arena, 17, 16));
     arena_destroy(boundary_vertex_arena, 1);
     arena_destroy(boundary_index_arena, 1);
     RenderingCommandStream* stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
-    *stream = (RenderingCommandStream){0};
+    memset(stream, 0, sizeof(*stream));
     rendering_command_stream_bind_buffers(stream, stream_vertex_arena, stream_index_arena);
     rendering_command_stream_begin(stream, (RenderingWindowSize){.width = 100, .height = 100}, (RenderingScale){.x = 1.0f, .y = 1.0f});
     rendering_command_stream_record_rect(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = 0}, 0, 6);
@@ -306,7 +308,7 @@ BUSTER_TEST_F_DECL UnitTestResult rendering_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, stream->overflowed);
 
     RenderingCommandStream* overflow_stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
-    *overflow_stream = (RenderingCommandStream){0};
+    memset(overflow_stream, 0, sizeof(*overflow_stream));
     rendering_command_stream_begin(overflow_stream, (RenderingWindowSize){.width = 100, .height = 100}, (RenderingScale){.x = 1, .y = 1});
     for (u32 clip_index = 1; clip_index < RENDERING_MAX_CLIP_DEPTH; clip_index += 1)
     {
@@ -324,7 +326,7 @@ BUSTER_TEST_F_DECL UnitTestResult rendering_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, overflow_stream->clip_depth == RENDERING_MAX_CLIP_DEPTH - 1);
 
     RenderingCommandStream* replay_stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
-    *replay_stream = (RenderingCommandStream){0};
+    memset(replay_stream, 0, sizeof(*replay_stream));
     rendering_command_stream_begin(replay_stream, (RenderingWindowSize){.width = 200, .height = 100}, (RenderingScale){.x = 2, .y = 1.5f});
     replay_stream->frame_active = false;
     rendering_command_stream_set_texture_binding(replay_stream, 0, (TextureIndex){.value = 10});
@@ -397,7 +399,7 @@ BUSTER_TEST_F_DECL UnitTestResult rendering_tests(UnitTestArguments* arguments)
                                   replay_events[12].batch_index != replay_events[8].batch_index);
 
     RenderingCommandStream* command_overflow_stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
-    *command_overflow_stream = (RenderingCommandStream){0};
+    memset(command_overflow_stream, 0, sizeof(*command_overflow_stream));
     rendering_command_stream_begin(command_overflow_stream, (RenderingWindowSize){.width = 100, .height = 100}, (RenderingScale){.x = 1, .y = 1});
     for (u32 draw_index = 0; draw_index < RENDERING_MAX_DRAW_COUNT + 1; draw_index += 1)
     {
@@ -413,7 +415,7 @@ BUSTER_TEST_F_DECL UnitTestResult rendering_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !invalid_backend_replay.submitted && !invalid_backend_replay.presented);
 
     RenderingCommandStream* invalid_pipeline_stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
-    *invalid_pipeline_stream = (RenderingCommandStream){0};
+    memset(invalid_pipeline_stream, 0, sizeof(*invalid_pipeline_stream));
     rendering_command_stream_begin(invalid_pipeline_stream, (RenderingWindowSize){.width = 20, .height = 20}, (RenderingScale){.x = 1, .y = 1});
     rendering_command_stream_record_rect(invalid_pipeline_stream, (BusterPipeline)BUSTER_PIPELINE_COUNT, (TextureIndex){.value = 0}, 0, 6);
     BUSTER_TEST(arguments, invalid_pipeline_stream->overflowed && invalid_pipeline_stream->command_count == 0 &&
@@ -421,45 +423,47 @@ BUSTER_TEST_F_DECL UnitTestResult rendering_tests(UnitTestArguments* arguments)
     RenderingBackendReplayResult invalid_pipeline_replay = rendering_backend_replay_for_test(invalid_pipeline_stream, invalid_backend_events,
                                                                                                BUSTER_ARRAY_LENGTH(invalid_backend_events));
     BUSTER_TEST(arguments, !invalid_pipeline_replay.valid && invalid_pipeline_replay.failure_propagated && invalid_pipeline_replay.error_frame);
-    RenderingCommandStream backend_invalid_pipeline_stream = {0};
-    rendering_command_stream_begin(&backend_invalid_pipeline_stream, (RenderingWindowSize){.width = 20, .height = 20}, (RenderingScale){.x = 1, .y = 1});
-    backend_invalid_pipeline_stream.commands[0] = (RenderingCommand){
+    RenderingCommandStream* backend_invalid_pipeline_stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
+    memset(backend_invalid_pipeline_stream, 0, sizeof(*backend_invalid_pipeline_stream));
+    rendering_command_stream_begin(backend_invalid_pipeline_stream, (RenderingWindowSize){.width = 20, .height = 20}, (RenderingScale){.x = 1, .y = 1});
+    backend_invalid_pipeline_stream->commands[0] = (RenderingCommand){
         .kind = RENDERING_COMMAND_RECT,
         .pipeline = (BusterPipeline)BUSTER_PIPELINE_COUNT,
         .target = RENDERING_TARGET_BACKBUFFER,
         .batch_index = 0,
     };
-    backend_invalid_pipeline_stream.batches[0] = (RenderingBatch){.pipeline = BUSTER_PIPELINE_RECT, .target = RENDERING_TARGET_BACKBUFFER};
-    backend_invalid_pipeline_stream.command_count = 1;
-    backend_invalid_pipeline_stream.batch_count = 1;
+    backend_invalid_pipeline_stream->batches[0] = (RenderingBatch){.pipeline = BUSTER_PIPELINE_RECT, .target = RENDERING_TARGET_BACKBUFFER};
+    backend_invalid_pipeline_stream->command_count = 1;
+    backend_invalid_pipeline_stream->batch_count = 1;
     RenderingBackendReplayResult backend_invalid_pipeline_replay =
-        rendering_backend_replay_for_test(&backend_invalid_pipeline_stream, invalid_backend_events, BUSTER_ARRAY_LENGTH(invalid_backend_events));
+        rendering_backend_replay_for_test(backend_invalid_pipeline_stream, invalid_backend_events, BUSTER_ARRAY_LENGTH(invalid_backend_events));
     BUSTER_TEST(arguments, !backend_invalid_pipeline_replay.valid && backend_invalid_pipeline_replay.failure_propagated &&
-                                  backend_invalid_pipeline_stream.render_failed);
+                                  backend_invalid_pipeline_stream->render_failed);
 
-    RenderingCommandStream late_invalid_stream = {0};
-    rendering_command_stream_begin(&late_invalid_stream, (RenderingWindowSize){.width = 20, .height = 20}, (RenderingScale){.x = 1, .y = 1});
-    rendering_command_stream_record_rect(&late_invalid_stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = 0}, 0, 6);
-    late_invalid_stream.commands[late_invalid_stream.command_count] = (RenderingCommand){
+    RenderingCommandStream* late_invalid_stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
+    memset(late_invalid_stream, 0, sizeof(*late_invalid_stream));
+    rendering_command_stream_begin(late_invalid_stream, (RenderingWindowSize){.width = 20, .height = 20}, (RenderingScale){.x = 1, .y = 1});
+    rendering_command_stream_record_rect(late_invalid_stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = 0}, 0, 6);
+    late_invalid_stream->commands[late_invalid_stream->command_count] = (RenderingCommand){
         .kind = RENDERING_COMMAND_RECT,
         .pipeline = (BusterPipeline)BUSTER_PIPELINE_COUNT,
         .target = RENDERING_TARGET_BACKBUFFER,
-        .batch_index = late_invalid_stream.batches[0].pipeline == BUSTER_PIPELINE_RECT ? 0 : UINT32_MAX,
+        .batch_index = late_invalid_stream->batches[0].pipeline == BUSTER_PIPELINE_RECT ? 0 : UINT32_MAX,
     };
-    late_invalid_stream.command_count += 1;
+    late_invalid_stream->command_count += 1;
     RenderingBackendReplayResult late_invalid_replay =
-        rendering_backend_replay_for_test(&late_invalid_stream, invalid_backend_events, BUSTER_ARRAY_LENGTH(invalid_backend_events));
+        rendering_backend_replay_for_test(late_invalid_stream, invalid_backend_events, BUSTER_ARRAY_LENGTH(invalid_backend_events));
     BUSTER_TEST(arguments, !late_invalid_replay.valid && late_invalid_replay.backend_executed && late_invalid_replay.consumed_order_preserved &&
                                   late_invalid_replay.consumed_command_count == 2 && late_invalid_replay.failure_propagated && late_invalid_replay.error_frame &&
                                   !late_invalid_replay.submitted && !late_invalid_replay.presented);
 
     RenderingCommandStream* invalid_target_stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
-    *invalid_target_stream = (RenderingCommandStream){0};
+    memset(invalid_target_stream, 0, sizeof(*invalid_target_stream));
     rendering_command_stream_begin(invalid_target_stream, (RenderingWindowSize){.width = 20, .height = 20}, (RenderingScale){.x = 1, .y = 1});
     BUSTER_TEST(arguments, !rendering_command_stream_record_target(invalid_target_stream, RENDERING_TARGET_BACKBUFFER + 1) && invalid_target_stream->overflowed);
 
     RenderingCommandStream* empty_clip_stream = arena_allocate(arguments->arena, RenderingCommandStream, 1);
-    *empty_clip_stream = (RenderingCommandStream){0};
+    memset(empty_clip_stream, 0, sizeof(*empty_clip_stream));
     rendering_command_stream_begin(empty_clip_stream, (RenderingWindowSize){.width = 20, .height = 20}, (RenderingScale){.x = 1, .y = 1});
     rendering_command_stream_push_clip(empty_clip_stream, (F32Interval2){.x0 = 4, .y0 = 4, .x1 = 4, .y1 = 12});
     rendering_command_stream_record_rect(empty_clip_stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = 0}, 0, 6);
