@@ -18,7 +18,7 @@
   },
   "generated": {
     "header": "x86_64-assembly.generated.h",
-    "header_checksum": "3dd56100deee1cd5",
+    "header_checksum": "4dc127e5ded4be5e",
     "header_bytes": 6616876,
     "coverage": "x86_64-coverage.generated.inc",
     "coverage_checksum": "b0a467045a94e220",

@@ -5454,15 +5454,6 @@ BUSTER_GLOBAL_LOCAL bool xed_import_normalize_operands(XedGeneratedForm* form, S
         {
             form->field_flags |= XED_GENERATED_FIELD_RELATIVE | XED_GENERATED_FIELD_FIELD_END;
         }
-        if (string_starts_with_sequence(operand->atom, S8("TMM")))
-        {
-            form->amx_flags |= XED_GENERATED_AMX_TILE_REGISTER;
-            if (operand->kind == XED_GENERATED_OPERAND_MEMORY)
-            {
-                form->amx_flags |= XED_GENERATED_AMX_TILE_MEMORY;
-            }
-        }
-
         if (equals != BUSTER_STRING_NO_MATCH && equals + 1 < head_end)
         {
             operand->atom = string_slice(token, equals + 1, head_end);
@@ -5509,6 +5500,10 @@ BUSTER_GLOBAL_LOCAL bool xed_import_normalize_operands(XedGeneratedForm* form, S
                 operand->field_source = XED_GENERATED_FIELD_SOURCE_RM;
             }
         }
+        if (string_starts_with_sequence(operand->atom, S8("TMM")))
+        {
+            form->amx_flags |= XED_GENERATED_AMX_TILE_REGISTER;
+        }
 
         u64 part_start = head_end < token.length ? head_end + 1 : token.length;
         while (part_start < token.length)
@@ -5548,10 +5543,6 @@ BUSTER_GLOBAL_LOCAL bool xed_import_normalize_operands(XedGeneratedForm* form, S
         if (string_contains(token, S8("SAESTR")) || string_contains(token, S8("ROUNDC")))
         {
             form->decorator_flags |= XED_GENERATED_DECORATOR_SAE | XED_GENERATED_DECORATOR_ROUNDING;
-        }
-        if (string_equal(token, S8("NDD")))
-        {
-            form->apx_flags |= XED_GENERATED_APX_NDD;
         }
         start = end;
     }
@@ -5739,6 +5730,10 @@ BUSTER_GLOBAL_LOCAL bool xed_import_normalize_record(XedGeneratedForm* form, Xed
         {
             form->apx_flags |= XED_GENERATED_APX_EGPR;
         }
+    }
+    if (form->encoder_family == XED_GENERATED_ENCODER_AMX && (form->field_flags & XED_GENERATED_FIELD_MEMORY))
+    {
+        form->amx_flags |= XED_GENERATED_AMX_TILE_MEMORY;
     }
     if (string_starts_with_sequence(record->category, S8("SYSTEM")) || xed_import_attribute_contains(record->attributes, S8("RING0")))
     {
@@ -6852,6 +6847,80 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
                   XED_GENERATED_DECORATOR_SAE) &&
              normalized_form.tuple_kind == XED_GENERATED_TUPLE_FULL && normalized_form.operands[0].field_source == XED_GENERATED_FIELD_SOURCE_REG &&
              normalized_form.operands[2].field_source == XED_GENERATED_FIELD_SOURCE_RM;
+
+    XedImportRecord tdpbf16ps_record = {
+        .source = S8("amx-spr/amx-spr-isa.xed.txt"),
+        .iclass = S8("TDPBF16PS"),
+        .iform = S8("TDPBF16PS_TMMf32_TMM2bf16_TMM2bf16"),
+        .isa_set = S8("AMX_BF16"),
+        .category = S8("AMX_TILE"),
+        .extension = S8("AMX_TILE"),
+        .pattern = S8("VV1 0x5C VF3 V0F38 MOD[0b11] MOD=3 REG[rrr] RM[nnn] W0 VL128 mode64"),
+        .operands = S8("REG0=TMM_R():rw:tv:f32 REG1=TMM_B():r:tv:2bf16 REG2=TMM_N():r:tv:2bf16"),
+        .operands_present = true,
+    };
+    XedGeneratedForm tdpbf16ps_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_normalize_record(&tdpbf16ps_form, &tdpbf16ps_record, 0, &bad_token, &bad_operand) &&
+             tdpbf16ps_form.encoder_family == XED_GENERATED_ENCODER_AMX &&
+             (tdpbf16ps_form.amx_flags & XED_GENERATED_AMX_TILE_REGISTER) != 0 &&
+             (tdpbf16ps_form.amx_flags & XED_GENERATED_AMX_TILE_MEMORY) == 0;
+
+    XedImportRecord tileloadd_record = {
+        .source = S8("amx-spr/amx-spr-isa.xed.txt"),
+        .iclass = S8("TILELOADD"),
+        .iform = S8("TILELOADD_TMMu32_MEMu32"),
+        .isa_set = S8("AMX_TILE"),
+        .category = S8("AMX_TILE"),
+        .extension = S8("AMX_TILE"),
+        .pattern = S8("VV1 0x4B VF2 V0F38 MOD[mm] MOD!=3 REG[rrr] RM[0b100] MODRM() SIB W0 VL128 mode64 NOVSR"),
+        .operands = S8("REG0=TMM_R():w:tv:u32 MEM0:r:ptr:u32"),
+        .operands_present = true,
+    };
+    XedGeneratedForm tileloadd_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_normalize_record(&tileloadd_form, &tileloadd_record, 0, &bad_token, &bad_operand) &&
+             tileloadd_form.encoder_family == XED_GENERATED_ENCODER_AMX &&
+             (tileloadd_form.field_flags & XED_GENERATED_FIELD_MEMORY) != 0 &&
+             (tileloadd_form.amx_flags & (XED_GENERATED_AMX_TILE_REGISTER | XED_GENERATED_AMX_TILE_MEMORY)) ==
+                 (XED_GENERATED_AMX_TILE_REGISTER | XED_GENERATED_AMX_TILE_MEMORY);
+
+    XedImportRecord tilestored_record = {
+        .source = S8("amx-spr/amx-spr-isa.xed.txt"),
+        .iclass = S8("TILESTORED"),
+        .iform = S8("TILESTORED_MEMu32_TMMu32"),
+        .isa_set = S8("AMX_TILE"),
+        .category = S8("AMX_TILE"),
+        .extension = S8("AMX_TILE"),
+        .pattern = S8("VV1 0x4B VF3 V0F38 MOD[mm] MOD!=3 REG[rrr] RM[0b100] MODRM() SIB W0 VL128 mode64 NOVSR"),
+        .operands = S8("MEM0:w:ptr:u32 REG0=TMM_R():r:tv:u32"),
+        .operands_present = true,
+    };
+    XedGeneratedForm tilestored_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_normalize_record(&tilestored_form, &tilestored_record, 0, &bad_token, &bad_operand) &&
+             tilestored_form.encoder_family == XED_GENERATED_ENCODER_AMX &&
+             (tilestored_form.field_flags & XED_GENERATED_FIELD_MEMORY) != 0 &&
+             (tilestored_form.amx_flags & (XED_GENERATED_AMX_TILE_REGISTER | XED_GENERATED_AMX_TILE_MEMORY)) ==
+                 (XED_GENERATED_AMX_TILE_REGISTER | XED_GENERATED_AMX_TILE_MEMORY);
+
+    XedImportRecord apx_ndd_record = normalized_record;
+    apx_ndd_record.iclass = S8("ADD");
+    apx_ndd_record.iform = S8("ADD_APX_NDD");
+    apx_ndd_record.isa_set = S8("APX_F");
+    apx_ndd_record.category = S8("BINARY");
+    apx_ndd_record.extension = S8("APX_F");
+    apx_ndd_record.operand_annotation = S8("NDD");
+    XedGeneratedForm apx_ndd_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_normalize_record(&apx_ndd_form, &apx_ndd_record, 0, &bad_token, &bad_operand) &&
+             (apx_ndd_form.apx_flags & (XED_GENERATED_APX | XED_GENERATED_APX_NDD)) ==
+                 (XED_GENERATED_APX | XED_GENERATED_APX_NDD);
+
     XedImportRecord bad_pattern_record = normalized_record;
     bad_pattern_record.pattern = S8("BOGUS_PATTERN_TOKEN");
     XedGeneratedForm bad_pattern_form = {0};
