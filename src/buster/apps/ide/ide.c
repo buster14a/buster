@@ -840,10 +840,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
 BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 {
     Arena* arena = arena_create((ArenaCreation){
-        // A unity translation unit retains preprocessing, binding,
-        // typed IR, and object data through the driver call. This is
-        // virtual address space; pages are committed on demand.
-        .reserved_size = BUSTER_GB(4),
+        .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
     });
     if (!arena)
     {

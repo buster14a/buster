@@ -1965,12 +1965,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             single.action = COMPILER_DRIVER_ACTION_OBJECT;
         }
         Arena* unit_arena = arena_create((ArenaCreation){
-            // Large system headers can make one translation unit
-            // retain gigabytes of preprocessing and semantic data.
-            // Keep that transient state out of the result arena so
-            // multi-file builds scale with object size, not with the
-            // sum of every frontend working set.
-            .reserved_size = BUSTER_GB(4),
+            .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
         });
         if (!unit_arena)
         {
