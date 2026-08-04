@@ -368,26 +368,238 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
 {
 #if BUSTER_WINDOWS
     return S8("typedef unsigned long long RuntimeU64;"
+              "typedef unsigned int RuntimeU32;"
+              "typedef unsigned short RuntimeU16;"
               "extern unsigned short RtlCaptureStackBackTrace(unsigned long skip, unsigned long count, void** buffer, unsigned long* hash);"
+              "typedef struct RuntimeContext RuntimeContext;"
+              "struct RuntimeContext {"
+              "    RuntimeU64 p1_home; RuntimeU64 p2_home; RuntimeU64 p3_home; RuntimeU64 p4_home; RuntimeU64 p5_home; RuntimeU64 p6_home;"
+              "    RuntimeU32 context_flags; RuntimeU32 mxcsr;"
+              "    RuntimeU16 seg_cs; RuntimeU16 seg_ds; RuntimeU16 seg_es; RuntimeU16 seg_fs; RuntimeU16 seg_gs; RuntimeU16 seg_ss;"
+              "    RuntimeU32 eflags;"
+              "    RuntimeU64 dr0; RuntimeU64 dr1; RuntimeU64 dr2; RuntimeU64 dr3; RuntimeU64 dr6; RuntimeU64 dr7;"
+              "    RuntimeU64 rax; RuntimeU64 rcx; RuntimeU64 rdx; RuntimeU64 rbx; RuntimeU64 rsp; RuntimeU64 rbp; RuntimeU64 rsi; RuntimeU64 rdi;"
+              "    RuntimeU64 r8; RuntimeU64 r9; RuntimeU64 r10; RuntimeU64 r11; RuntimeU64 r12; RuntimeU64 r13; RuntimeU64 r14; RuntimeU64 r15; RuntimeU64 rip;"
+              "    RuntimeU64 extended[122];"
+              "};"
+              "typedef struct RuntimeFunction RuntimeFunction;"
+              "struct RuntimeFunction { RuntimeU32 begin_address; RuntimeU32 end_address; RuntimeU32 unwind_data; };"
+              "extern RuntimeFunction* RtlLookupFunctionEntry(RuntimeU64 control_pc, RuntimeU64* image_base, void* history);"
+              "extern void RtlCaptureContext(RuntimeContext* context);"
+              "extern void* RtlVirtualUnwind(unsigned long handler_type, RuntimeU64 image_base, RuntimeU64 control_pc, RuntimeFunction* function_entry,"
+              "                                 RuntimeContext* context, void** handler_data, RuntimeU64* establisher_frame, void* context_pointers);"
               "extern void* GetStdHandle(int standard_handle);"
               "extern int WriteFile(void* handle, void* buffer, unsigned long byte_count, unsigned long* written, void* overlapped);"
-              "int stack_walk_normal(void** buffer, int size)"
+              "int main(void);"
+              "static RuntimeU64 runtime_epilog_status;"
+              "static RuntimeU64 runtime_epilog_unwind_pc;"
+              "static RuntimeU64 runtime_large_epilog_status;"
+              "static RuntimeU64 runtime_large_epilog_unwind_pc;"
+              "static RuntimeU64 runtime_body_status;"
+              "static RuntimeU64 runtime_large_body_status;"
+              "static RuntimeU32 runtime_unwind_read_u16(unsigned char* bytes)"
+              "{ return (RuntimeU32)bytes[0] | ((RuntimeU32)bytes[1] << 8); }"
+              "static RuntimeU64 runtime_unwind_read_u32(unsigned char* bytes)"
+              "{ return (RuntimeU64)bytes[0] | ((RuntimeU64)bytes[1] << 8) | ((RuntimeU64)bytes[2] << 16) | ((RuntimeU64)bytes[3] << 24); }"
+              "static RuntimeU64 runtime_find_epilog(void* function, int* result_length)"
               "{"
+              "    unsigned char* bytes = (unsigned char*)function;"
+              "    RuntimeU64 function_base = 0;"
+              "    RuntimeFunction* target_entry = RtlLookupFunctionEntry((RuntimeU64)function + 1, &function_base, 0);"
+              "    RuntimeU64 function_offset = (RuntimeU64)function - function_base;"
+              "    RuntimeU64 function_length = target_entry && (RuntimeU64)target_entry->end_address > function_offset ? (RuntimeU64)target_entry->end_address - function_offset : 0;"
+              "    RuntimeU64 result = 0; int found_length = 0;"
+              "    for (RuntimeU64 offset = 0; offset + 6 <= function_length; offset += 1)"
+              "    {"
+              "        int length = 0;"
+              "        if (offset + 6 <= function_length && bytes[offset] == 0x48 && bytes[offset + 1] == 0x83 && bytes[offset + 2] == 0xc4 && "
+              "            bytes[offset + 4] == 0x5d && bytes[offset + 5] == 0xc3)"
+              "        { length = 4; }"
+              "        if (offset + 9 <= function_length && bytes[offset] == 0x48 && bytes[offset + 1] == 0x81 && bytes[offset + 2] == 0xc4 && "
+              "            bytes[offset + 7] == 0x5d && bytes[offset + 8] == 0xc3)"
+              "        { length = 7; }"
+              "        if (offset + 6 <= function_length && bytes[offset] == 0x48 && bytes[offset + 1] == 0x8d && bytes[offset + 2] == 0x65 && "
+              "            bytes[offset + 3] == 0x00 && bytes[offset + 4] == 0x5d && bytes[offset + 5] == 0xc3)"
+              "        { length = 4; }"
+              "        if (offset + 9 <= function_length && bytes[offset] == 0x48 && bytes[offset + 1] == 0x8d && bytes[offset + 2] == 0xa5 && "
+              "            bytes[offset + 7] == 0x5d && bytes[offset + 8] == 0xc3)"
+              "        { length = 7; }"
+              "        if (length)"
+              "        {"
+              "            RuntimeU64 candidate_base = 0;"
+              "            RuntimeFunction* candidate_entry = RtlLookupFunctionEntry((RuntimeU64)(bytes + offset) + 1, &candidate_base, 0);"
+              "            if (candidate_entry == target_entry && candidate_base == function_base)"
+              "            { result = (RuntimeU64)(bytes + offset); found_length = length; }"
+              "        }"
+              "    }"
+              "    *result_length = found_length; return result;"
+              "}"
+              "static int runtime_unwind_body(void* function, void* expected_main, RuntimeContext* context)"
+              "{"
+              "    RuntimeU64 image_base = 0;"
+              "    RuntimeFunction* function_entry = RtlLookupFunctionEntry((RuntimeU64)function + 1, &image_base, 0);"
+              "    if (!function_entry || !image_base) { return 0; }"
+              "    unsigned char* unwind = (unsigned char*)(image_base + function_entry->unwind_data);"
+              "    RuntimeU32 unwind_header = unwind[0]; RuntimeU32 prolog_size = unwind[1]; RuntimeU32 code_count = unwind[2];"
+              "    RuntimeU32 frame_header = unwind[3]; RuntimeU32 fixed_size = 0;"
+              "    RuntimeU32 push_count = 0; RuntimeU32 allocate_count = 0; RuntimeU32 frame_count = 0;"
+              "    if ((unwind_header & 7) != 1 || (unwind_header >> 3) != 0 || (frame_header & 0xf) != 5 || (frame_header >> 4) != 0 || code_count > 64) { return 0; }"
+              "    for (RuntimeU32 slot = 0; slot < code_count; slot += 1)"
+              "    {"
+              "        unsigned char* code = unwind + 4 + slot * 2;"
+              "        RuntimeU32 operation = code[1] & 0xf; RuntimeU32 info = code[1] >> 4;"
+              "        if (operation == 0)"
+              "        {"
+              "            if (info != 5) { return 0; }"
+              "            push_count += 1;"
+              "        }"
+              "        else if (operation == 1)"
+              "        {"
+              "            if (info == 0)"
+              "            {"
+              "                if (slot + 1 >= code_count) { return 0; }"
+              "                RuntimeU32 size = 8 * runtime_unwind_read_u16(unwind + 4 + (slot + 1) * 2);"
+              "                if (!size || fixed_size > 0xffffffffU - size) { return 0; }"
+              "                fixed_size += size; slot += 1;"
+              "            }"
+              "            else if (info == 1)"
+              "            {"
+              "                if (slot + 2 >= code_count) { return 0; }"
+              "                RuntimeU64 size = runtime_unwind_read_u32(unwind + 4 + (slot + 1) * 2);"
+              "                if (!size || size > 0xffffffffU || fixed_size > 0xffffffffU - (RuntimeU32)size) { return 0; }"
+              "                fixed_size += (RuntimeU32)size; slot += 2;"
+              "            }"
+              "            else { return 0; }"
+              "            allocate_count += 1;"
+              "        }"
+              "        else if (operation == 2)"
+              "        {"
+              "            RuntimeU32 size = (info + 1) * 8;"
+              "            if (fixed_size > 0xffffffffU - size) { return 0; }"
+              "            fixed_size += size; allocate_count += 1;"
+              "        }"
+              "        else if (operation == 3)"
+              "        {"
+              "            if (info != 0) { return 0; }"
+              "            frame_count += 1;"
+              "        }"
+              "        else { return 0; }"
+              "    }"
+              "    RuntimeU64 function_offset = (RuntimeU64)function - image_base;"
+              "    RuntimeU64 function_begin = image_base + function_entry->begin_address;"
+              "    RuntimeU64 function_end = image_base + function_entry->end_address;"
+              "    if (!context || function_begin > 0xffffffffffffffffULL - prolog_size) { return 0; }"
+              "    RuntimeU64 prolog_end = function_begin + prolog_size;"
+              "    RuntimeU64 captured_pc = context->rip; RuntimeU64 captured_base = 0;"
+              "    RuntimeFunction* captured_entry = RtlLookupFunctionEntry(captured_pc, &captured_base, 0);"
+              "    if (push_count != 1 || allocate_count != 1 || frame_count != 1 || !fixed_size || fixed_size % 8 ||"
+              "        function_offset != function_entry->begin_address || function_end <= function_begin || captured_entry != function_entry ||"
+              "        captured_base != image_base || captured_pc < prolog_end || captured_pc >= function_end)"
+              "    { return 0; }"
+              "    RuntimeU64 frame = context->rbp;"
+              "    if (frame > 0xffffffffffffffffULL - fixed_size - 16) { return 0; }"
+              "    RuntimeU64 saved_address = frame + fixed_size;"
+              "    RuntimeU64 saved_rbp = *(RuntimeU64*)(saved_address); RuntimeU64 saved_rip = *(RuntimeU64*)(saved_address + 8);"
+              "    RuntimeU64 expected_rsp = saved_address + 16;"
+              "    context->rip = captured_pc;"
+              "    void* handler_data = 0; RuntimeU64 establisher_frame = 0;"
+              "    RtlVirtualUnwind(0, image_base, context->rip, function_entry, context, &handler_data, &establisher_frame, 0);"
+              "    return context->rip == saved_rip && context->rip >= (RuntimeU64)expected_main && context->rip < (RuntimeU64)expected_main + 4096 &&"
+              "           context->rsp == expected_rsp && context->rbp == saved_rbp && establisher_frame == frame;"
+              "}"
+              "static int runtime_unwind_epilog(void* function, void* expected_main)"
+              "{"
+              "    int add_length = 0; RuntimeU64 control_pc = runtime_find_epilog(function, &add_length);"
+              "    RuntimeU64 image_base = 0;"
+              "    RuntimeFunction* function_entry = control_pc ? RtlLookupFunctionEntry(control_pc + (RuntimeU64)add_length, &image_base, 0) : 0;"
+              "    if (!function_entry) { return 0; }"
+              "    RuntimeU64 fake_stack[8]; RuntimeU64 context_storage[156];"
+              "    for (RuntimeU32 index = 0; index < 156; index += 1) { context_storage[index] = 0; }"
+              "    RuntimeContext* context = (RuntimeContext*)(((RuntimeU64)(void*)&context_storage[0] + 15) & ~(RuntimeU64)15);"
+              "    fake_stack[0] = 0x1122334455667788ULL; fake_stack[1] = (RuntimeU64)expected_main + 16;"
+              "    context->context_flags = 0x0010001f; context->rsp = (RuntimeU64)&fake_stack[0]; context->rip = control_pc + (RuntimeU64)add_length;"
+              "    void* handler_data = 0;"
+              "    RuntimeU64 establisher_frame = 0;"
+              "    RtlVirtualUnwind(0, image_base, context->rip, function_entry, context, &handler_data, &establisher_frame, 0);"
+              "    runtime_epilog_unwind_pc = context->rip;"
+              "    return context->rip >= (RuntimeU64)expected_main && context->rip < (RuntimeU64)expected_main + 4096;"
+              "}"
+              "static void runtime_touch_bytes(unsigned char* bytes, int size)"
+              "{ bytes[0] ^= 0x5a; bytes[size - 1] ^= 0xa5; }"
+              "typedef void* va_list;"
+              "int stack_walk_normal(void** buffer, int size, int marker, ...)"
+              "{"
+              "    int dynamic_size = marker + 157; unsigned char dynamic_padding[dynamic_size];"
+              "    va_list arguments; int extra = 0;"
+              "    RuntimeU64 body_context_storage[156];"
+              "    RuntimeContext* body_context = (RuntimeContext*)(((RuntimeU64)(void*)&body_context_storage[0] + 15) & ~(RuntimeU64)15);"
               "    RuntimeU64 a0 = 1; RuntimeU64 a1 = 2; RuntimeU64 a2 = 3; RuntimeU64 a3 = 4;"
               "    RuntimeU64 a4 = 5; RuntimeU64 a5 = 6; RuntimeU64 a6 = 7; RuntimeU64 a7 = 8;"
               "    RuntimeU64 a8 = 9; RuntimeU64 a9 = 10; RuntimeU64 a10 = 11; RuntimeU64 a11 = 12;"
               "    RuntimeU64 a12 = 13; RuntimeU64 a13 = 14; RuntimeU64 a14 = 15; RuntimeU64 a15 = 16;"
               "    RuntimeU64 pressure = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15;"
-              "    if (pressure == 0) { a0 = pressure; }"
+              "    __builtin_va_start(arguments, marker); extra = __builtin_va_arg(arguments, int); __builtin_va_end(arguments);"
+              "    dynamic_padding[0] = (unsigned char)pressure; dynamic_padding[dynamic_size - 1] = (unsigned char)(pressure >> 8);"
+              "    runtime_touch_bytes(dynamic_padding, dynamic_size);"
+              "    if (marker != 100 || extra != 23 || pressure == 0) { a0 = pressure; return -1; }"
+              "    RtlCaptureContext(body_context);"
+              "    runtime_body_status = (RuntimeU64)runtime_unwind_body((void*)stack_walk_normal, (void*)main, body_context);"
+              "    runtime_epilog_status = (RuntimeU64)runtime_unwind_epilog((void*)stack_walk_normal, (void*)main);"
               "    return (int)RtlCaptureStackBackTrace(0, (unsigned long)size, buffer, 0);"
               "}"
-              "int stack_walk_large(void** buffer, int size)"
+              "typedef struct RuntimeBig RuntimeBig;"
+              "struct RuntimeBig { RuntimeU64 first; RuntimeU64 second; RuntimeU64 third; };"
+              "static int runtime_add_one(int value) { return value + 1; }"
+              "static int runtime_add_many(int a, int b, int c, int d, int e) { return a + b + c + d + e; }"
+              "static void runtime_mutate_register(RuntimeBig value) { value.first += 9; }"
+              "static void runtime_mutate_stack(int a, int b, int c, int d, RuntimeBig value)"
+              "{ value.first += (RuntimeU64)(a + b + c + d); }"
+              "static RuntimeBig runtime_make_big(RuntimeU64 first, RuntimeU64 second, RuntimeU64 third)"
+              "{ return (RuntimeBig){first, second, third}; }"
+              "static RuntimeBig runtime_transform_big(RuntimeBig value)"
+              "{ value.first += 1; return value; }"
+              "static RuntimeBig runtime_dynamic_make_big(RuntimeU64 first, RuntimeU64 second, RuntimeU64 third)"
+              "{"
+              "    int dynamic_size = (int)first + 256; unsigned char dynamic_padding[dynamic_size];"
+              "    dynamic_padding[0] = (unsigned char)first; dynamic_padding[dynamic_size - 1] = (unsigned char)third;"
+              "    runtime_touch_bytes(dynamic_padding, dynamic_size);"
+              "    return (RuntimeBig){first, second, third};"
+              "}"
+              "static int runtime_copy_semantics(void)"
+              "{"
+              "    RuntimeBig original = (RuntimeBig){1, 2, 3};"
+              "    RuntimeBig made = runtime_make_big(4, 5, 6);"
+              "    RuntimeBig transformed = runtime_transform_big(original);"
+              "    runtime_mutate_register(original);"
+              "    runtime_mutate_stack(1, 2, 3, 4, original);"
+              "    return runtime_add_one(0) == 1 && runtime_add_many(1, 2, 3, 4, 5) == 15 &&"
+              "           original.first == 1 && original.second == 2 && original.third == 3 &&"
+              "           made.first == 4 && made.second == 5 && made.third == 6 && transformed.first == 2;"
+              "}"
+              "int stack_walk_large(void** buffer, int size, int first, int second, int third, RuntimeBig incoming)"
               "{"
               "    unsigned char padding[40000];"
+              "    int dynamic_size = first + 256; unsigned char dynamic_padding[dynamic_size];"
+              "    RuntimeU64 body_context_storage[156];"
+              "    RuntimeContext* body_context = (RuntimeContext*)(((RuntimeU64)(void*)&body_context_storage[0] + 15) & ~(RuntimeU64)15);"
               "    RuntimeU64 a0 = 17; RuntimeU64 a1 = 18; RuntimeU64 a2 = 19; RuntimeU64 a3 = 20;"
               "    RuntimeU64 a4 = 21; RuntimeU64 a5 = 22; RuntimeU64 a6 = 23; RuntimeU64 a7 = 24;"
               "    RuntimeU64 pressure = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7;"
               "    padding[0] = (unsigned char)pressure; padding[39999] = (unsigned char)(pressure >> 8);"
+              "    dynamic_padding[0] = (unsigned char)pressure; dynamic_padding[dynamic_size - 1] = (unsigned char)(pressure >> 8);"
+              "    runtime_touch_bytes(dynamic_padding, dynamic_size);"
+              "    if (first != 1 || second != 2 || third != 3 || incoming.first != 4 || incoming.second != 5 || incoming.third != 6) { return -1; }"
+              "    if (runtime_add_many(1, 2, 3, 4, 5) != 15) { return -1; }"
+              "    RuntimeBig dynamic_original = (RuntimeBig){1, 2, 3};"
+              "    runtime_mutate_stack(1, 2, 3, 4, dynamic_original);"
+              "    if (dynamic_original.first != 1 || dynamic_original.second != 2 || dynamic_original.third != 3) { return -1; }"
+              "    RuntimeBig dynamic_made = runtime_dynamic_make_big(7, 11, 13);"
+              "    if (dynamic_made.first != 7 || dynamic_made.second != 11 || dynamic_made.third != 13) { return -1; }"
+              "    if (!runtime_copy_semantics()) { return -1; }"
+              "    RtlCaptureContext(body_context);"
+              "    runtime_large_body_status = (RuntimeU64)runtime_unwind_body((void*)stack_walk_large, (void*)main, body_context);"
+              "    runtime_large_epilog_status = (RuntimeU64)runtime_unwind_epilog((void*)stack_walk_large, (void*)main);"
+              "    runtime_large_epilog_unwind_pc = runtime_epilog_unwind_pc;"
               "    return (int)RtlCaptureStackBackTrace(0, (unsigned long)size, buffer, 0);"
               "}"
               "typedef struct RuntimeReport RuntimeReport;"
@@ -395,19 +607,28 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(void)
               "{"
               "    void* normal_entry; void* large_entry; void* main_entry;"
               "    RuntimeU64 normal_count; RuntimeU64 large_count;"
+              "    RuntimeU64 semantic_status;"
+              "    RuntimeU64 body_status; RuntimeU64 large_body_status;"
+              "    RuntimeU64 epilog_status; RuntimeU64 epilog_unwind_pc;"
+              "    RuntimeU64 large_epilog_status; RuntimeU64 large_epilog_unwind_pc;"
               "    void* normal_frames[64]; void* large_frames[64];"
               "};"
               "int main(void)"
               "{"
               "    RuntimeReport report;"
               "    report.normal_entry = (void*)stack_walk_normal; report.large_entry = (void*)stack_walk_large; report.main_entry = (void*)main;"
-              "    int normal_count = stack_walk_normal(report.normal_frames, 64);"
-              "    int large_count = stack_walk_large(report.large_frames, 64);"
+              "    int normal_count = stack_walk_normal(report.normal_frames, 64, 100, 23);"
+              "    int large_count = stack_walk_large(report.large_frames, 64, 1, 2, 3, (RuntimeBig){4, 5, 6});"
               "    report.normal_count = normal_count > 0 ? (RuntimeU64)normal_count : 0;"
               "    report.large_count = large_count > 0 ? (RuntimeU64)large_count : 0;"
+              "    report.semantic_status = large_count > 0 ? 0x535441434b434f50ULL : 0;"
+              "    report.body_status = runtime_body_status; report.large_body_status = runtime_large_body_status;"
+              "    report.epilog_status = runtime_epilog_status; report.epilog_unwind_pc = runtime_epilog_unwind_pc;"
+              "    report.large_epilog_status = runtime_large_epilog_status; report.large_epilog_unwind_pc = runtime_large_epilog_unwind_pc;"
               "    unsigned long written = 0;"
               "    WriteFile(GetStdHandle(-11), &report, sizeof(report), &written, 0);"
-              "    return normal_count > 0 && large_count > 0 ? 0 : 1;"
+              "    return normal_count > 0 && large_count > 0 && report.semantic_status != 0 && report.body_status != 0 && report.large_body_status != 0 &&"
+              "           report.epilog_status != 0 && report.large_epilog_status != 0 ? 0 : 1;"
               "}");
 #elif BUSTER_LINUX || BUSTER_MACOS
     return S8("typedef unsigned long long RuntimeU64;"
@@ -463,6 +684,15 @@ struct LinkTestRuntimeReport
     u64 main_entry;
     u64 normal_count;
     u64 large_count;
+#if BUSTER_WINDOWS
+    u64 semantic_status;
+    u64 body_status;
+    u64 large_body_status;
+    u64 epilog_status;
+    u64 epilog_unwind_pc;
+    u64 large_epilog_status;
+    u64 large_epilog_unwind_pc;
+#endif
     u64 normal_frames[64];
     u64 large_frames[64];
 };
@@ -491,6 +721,82 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_symbol_find(ObjectFile* object, Strin
     }
     return false;
 }
+
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, bool* has_frame_register, bool* has_large_allocation)
+{
+    if (!object || !object->sections || !has_frame_register || !has_large_allocation)
+    {
+        return false;
+    }
+    *has_frame_register = false;
+    *has_large_allocation = false;
+    ByteSlice pdata = object->sections[OBJECT_SECTION_WINDOWS_PDATA].data;
+    ByteSlice xdata = object->sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    u32 record_count = 0;
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (relocation->section != OBJECT_SECTION_WINDOWS_PDATA || relocation->offset % 12 != 8 || relocation->addend < 0)
+        {
+            continue;
+        }
+        u64 xdata_offset = (u64)relocation->addend;
+        if (xdata_offset % 4 || xdata_offset > xdata.length || xdata.length - xdata_offset < 4)
+        {
+            return false;
+        }
+        u8 const* record = xdata.pointer + xdata_offset;
+        u64 record_bytes = 4 + (u64)record[2] * 2;
+        if (record_bytes > xdata.length - xdata_offset)
+        {
+            return false;
+        }
+        record_count += 1;
+        if ((record[3] & 15) == 5 && (record[3] >> 4) == 0)
+        {
+            *has_frame_register = true;
+        }
+        for (u32 code_index = 0; code_index < record[2];)
+        {
+            u8 unwind = record[5 + code_index * 2];
+            u8 operation = unwind & 15;
+            u8 information = unwind >> 4;
+            if (operation == 0 || operation == 2 || operation == 3)
+            {
+                code_index += 1;
+            }
+            else if (operation == 1 && information == 0)
+            {
+                if (code_index + 1 >= record[2])
+                {
+                    return false;
+                }
+                u16 scaled = 0;
+                memcpy(&scaled, record + 6 + code_index * 2, sizeof(scaled));
+                *has_large_allocation |= (u32)scaled * 8 > 4096;
+                code_index += 2;
+            }
+            else if (operation == 1 && information == 1)
+            {
+                if (code_index + 2 >= record[2])
+                {
+                    return false;
+                }
+                u32 size = 0;
+                memcpy(&size, record + 6 + code_index * 2, sizeof(size));
+                *has_large_allocation |= size > 4096;
+                code_index += 3;
+            }
+            else
+            {
+                return false;
+            }
+        }
+    }
+    return record_count != 0 && *has_frame_register && *has_large_allocation;
+}
+#endif
 
 #if BUSTER_LINUX
 BUSTER_GLOBAL_LOCAL bool link_test_runtime_has_eh_frame_header(ByteSlice image)
@@ -608,6 +914,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTest
     bool pdata_found = link_test_pe_section_find(image, S8(".pdata"), 0, 0);
     bool xdata_found = link_test_pe_section_find(image, S8(".xdata"), 0, 0);
     has_unwind = pdata_found && xdata_found;
+    bool has_frame_register = false;
+    bool has_large_allocation = false;
+    bool xdata_metadata_valid = link_test_runtime_windows_xdata(&compiled.object, &has_frame_register, &has_large_allocation);
+    BUSTER_TEST(arguments, xdata_metadata_valid && has_frame_register && has_large_allocation);
 #endif
     BUSTER_TEST(arguments, has_unwind);
 
@@ -652,6 +962,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTest
     BUSTER_TEST(arguments, report.normal_entry != 0 && report.large_entry != 0 && report.main_entry != 0);
     BUSTER_TEST(arguments, report.normal_count != 0 && report.normal_count <= BUSTER_ARRAY_LENGTH(report.normal_frames));
     BUSTER_TEST(arguments, report.large_count != 0 && report.large_count <= BUSTER_ARRAY_LENGTH(report.large_frames));
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, report.semantic_status == UINT64_C(0x535441434b434f50));
+    BUSTER_TEST(arguments, report.body_status == 1 && report.large_body_status == 1);
+    BUSTER_TEST(arguments, report.epilog_status == 1 && report.epilog_unwind_pc != 0);
+    BUSTER_TEST(arguments, report.large_epilog_status == 1 && report.large_epilog_unwind_pc != 0);
+#endif
     if (!report.normal_entry || !report.large_entry || !report.main_entry || !report.normal_count || !report.large_count ||
         report.normal_count > BUSTER_ARRAY_LENGTH(report.normal_frames) || report.large_count > BUSTER_ARRAY_LENGTH(report.large_frames))
     {
@@ -671,6 +987,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTest
     u64 normal_begin = normal_base + normal_value;
     u64 large_begin = normal_base + large_value;
     u64 main_begin = normal_base + main_value;
+#if BUSTER_WINDOWS
+    bool epilog_unwind_reached_main = report.epilog_unwind_pc >= main_begin && report.epilog_unwind_pc < main_begin + main_size;
+    BUSTER_TEST(arguments, epilog_unwind_reached_main);
+    bool large_epilog_unwind_reached_main = report.large_epilog_unwind_pc >= main_begin && report.large_epilog_unwind_pc < main_begin + main_size;
+    BUSTER_TEST(arguments, large_epilog_unwind_reached_main);
+#endif
     bool normal_contains_normal = link_test_runtime_frame_contains(report.normal_frames, report.normal_count, normal_begin, normal_size);
     bool normal_contains_main = link_test_runtime_frame_contains(report.normal_frames, report.normal_count, main_begin, main_size);
     bool large_contains_large = link_test_runtime_frame_contains(report.large_frames, report.large_count, large_begin, large_size);

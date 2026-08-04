@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/driver/driver_test.h>
+#include <buster/tests/compiler/codegen/codegen_test.h>
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, String8 name, u64* offset, u64* size, u64* address)
 {
@@ -95,6 +96,101 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_bytes_contain(ByteSl
     }
     return false;
 }
+
+#if BUSTER_CPU_ARCH_X86_64
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_unwind_records(ObjectFile* object, bool* has_frame_register)
+{
+    if (!object || !object->sections || !has_frame_register)
+    {
+        return false;
+    }
+    *has_frame_register = false;
+    ByteSlice xdata = object->sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    u32 record_count = 0;
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (relocation->section != OBJECT_SECTION_WINDOWS_PDATA || relocation->offset % 12 != 8 || relocation->addend < 0)
+        {
+            continue;
+        }
+        u64 xdata_offset = (u64)relocation->addend;
+        if (xdata_offset % 4 || xdata_offset > xdata.length || xdata.length - xdata_offset < 4)
+        {
+            return false;
+        }
+        u8 const* record = xdata.pointer + xdata_offset;
+        u64 record_bytes = 4 + (u64)record[2] * 2;
+        if (record_bytes > xdata.length - xdata_offset)
+        {
+            return false;
+        }
+        record_count += 1;
+        *has_frame_register |= (record[3] & 15) == 5 && (record[3] >> 4) == 0;
+        for (u32 code_index = 0; code_index < record[2];)
+        {
+            u8 unwind = record[5 + code_index * 2];
+            u8 operation = unwind & 15;
+            u8 information = unwind >> 4;
+            if (operation == 0 || operation == 2 || operation == 3)
+            {
+                code_index += 1;
+            }
+            else if (operation == 1 && information == 0)
+            {
+                if (code_index + 1 >= record[2])
+                {
+                    return false;
+                }
+                code_index += 2;
+            }
+            else if (operation == 1 && information == 1)
+            {
+                if (code_index + 2 >= record[2])
+                {
+                    return false;
+                }
+                code_index += 3;
+            }
+            else
+            {
+                return false;
+            }
+        }
+    }
+    return record_count != 0;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_has_frame_lea(ObjectFile* object)
+{
+    if (!object)
+    {
+        return false;
+    }
+    ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        if (symbol->kind != OBJECT_SYMBOL_FUNCTION || symbol->section != OBJECT_SECTION_TEXT || symbol->value > text.length || symbol->size > text.length - symbol->value)
+        {
+            continue;
+        }
+        u64 function_end = symbol->value + symbol->size;
+        for (u64 offset = symbol->value; offset + 6 <= function_end; offset += 1)
+        {
+            bool short_lea = text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8d && text.pointer[offset + 2] == 0x65 &&
+                             text.pointer[offset + 4] == 0x5d && text.pointer[offset + 5] == 0xc3;
+            bool long_lea = offset + 9 <= function_end && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8d &&
+                            text.pointer[offset + 2] == 0xa5 && text.pointer[offset + 7] == 0x5d && text.pointer[offset + 8] == 0xc3;
+            if (short_lea || long_lea)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_archive(Arena* arena, ByteSlice* members, String8* names, u32 member_count)
 {
@@ -1385,6 +1481,31 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
             BUSTER_TEST(arguments, c_vla_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+#if BUSTER_CPU_ARCH_X86_64
+    {
+        TemporalArena c_vla_windows_temporary = scratch_begin(&arguments->arena, 1);
+        String8 c_vla_windows_object_path = buster_test_temporary_path(c_vla_windows_temporary.arena, S8("buster-c-vla-windows"), S8(".obj"));
+        String8 c_vla_windows_command_line[] = {
+            S8("-c"), S8("-g"), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-o"), c_vla_windows_object_path, S8("tests/basic_c_vla.c"),
+        };
+        CompilerDriverResult c_vla_windows = compiler_driver_execute_invocation(
+            c_vla_windows_temporary.arena,
+            compiler_driver_parse_arguments(c_vla_windows_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_vla_windows_command_line)));
+        BUSTER_TEST(arguments, c_vla_windows.error == COMPILER_DRIVER_ERROR_NONE);
+        if (c_vla_windows.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, c_vla_windows.has_object);
+            if (c_vla_windows.has_object)
+            {
+                bool has_frame_register = false;
+                bool unwind_records_valid = compiler_driver_test_windows_x64_unwind_records(&c_vla_windows.object, &has_frame_register);
+                BUSTER_TEST(arguments, unwind_records_valid && has_frame_register);
+                BUSTER_TEST(arguments, compiler_driver_test_windows_x64_has_frame_lea(&c_vla_windows.object));
+            }
+        }
+        scratch_end(c_vla_windows_temporary);
+    }
+#endif
     String8 c_aggregate_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aggregate"),
 #if BUSTER_WINDOWS
                                                           S8(".exe"));
@@ -1768,12 +1889,6 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     BUSTER_TEST(arguments, c_float_abi_windows.error == COMPILER_DRIVER_ERROR_NONE);
     if (c_float_abi_windows.error == COMPILER_DRIVER_ERROR_NONE)
     {
-        static u8 const shadow_space[] = {
-            0x48,
-            0x83,
-            0xec,
-            0x20,
-        };
         static u8 const load_xmm0[] = {
             0xf2,
             0x0f,
@@ -1787,15 +1902,208 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
             0x08,
         };
         ByteSlice text = c_float_abi_windows.object.sections[OBJECT_SECTION_TEXT].data;
-        bool found_shadow_space = false;
+        ByteSlice xdata = c_float_abi_windows.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+        u32 text_function_count = 0;
+        u32 pdata_relocation_count = 0;
+        bool found_fixed_outgoing_frame = false;
+        bool found_call_with_fixed_frame = false;
+        bool found_single_fixed_allocation = false;
+        bool fixed_frame_alignment_valid = true;
+        bool body_stack_adjust_valid = true;
+        bool full_body_decode_valid = true;
+        bool full_body_stack_store_bounds_valid = true;
+        bool unwind_matches_frame = true;
+        bool unwind_allocation_count_matches = true;
         bool found_load_xmm0 = false;
         bool found_indirect_second_part = false;
+        for (u32 relocation_index = 0; relocation_index < c_float_abi_windows.object.relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation* relocation = c_float_abi_windows.object.relocations + relocation_index;
+            pdata_relocation_count += relocation->section == OBJECT_SECTION_WINDOWS_PDATA;
+        }
+        for (u32 symbol_index = 0; symbol_index < c_float_abi_windows.object.symbol_count; symbol_index += 1)
+        {
+            ObjectSymbol* symbol = c_float_abi_windows.object.symbols + symbol_index;
+            if (symbol->kind != OBJECT_SYMBOL_FUNCTION || symbol->section != OBJECT_SECTION_TEXT)
+            {
+                continue;
+            }
+            text_function_count += 1;
+            u64 function_start = symbol->value;
+            u64 function_end = function_start + symbol->size;
+            if (function_end > text.length || symbol->size < 8 || memcmp(text.pointer + function_start, (u8[]){0x55, 0x48, 0x89, 0xe5}, 4) != 0)
+            {
+                unwind_matches_frame = false;
+                continue;
+            }
+            u64 cursor = function_start + 4;
+            u32 prolog_stack_bytes = 0;
+            u32 prolog_stack_adjust_count = 0;
+            if (cursor + 4 <= function_end && text.pointer[cursor] == 0x48 && text.pointer[cursor + 1] == 0x83 &&
+                text.pointer[cursor + 2] == 0xec)
+            {
+                prolog_stack_bytes = text.pointer[cursor + 3];
+                prolog_stack_adjust_count += 1;
+                cursor += 4;
+            }
+            else if (cursor + 42 <= function_end && text.pointer[cursor] == 0x49 && text.pointer[cursor + 1] == 0x89 &&
+                     text.pointer[cursor + 2] == 0xe2 && text.pointer[cursor + 3] == 0x49 && text.pointer[cursor + 4] == 0x81 &&
+                     text.pointer[cursor + 5] == 0xea && text.pointer[cursor + 10] == 0x49 && text.pointer[cursor + 11] == 0x89 &&
+                     text.pointer[cursor + 12] == 0xe3 && text.pointer[cursor + 13] == 0x49 && text.pointer[cursor + 14] == 0x81 &&
+                     text.pointer[cursor + 15] == 0xeb && text.pointer[cursor + 20] == 0x4d && text.pointer[cursor + 21] == 0x39 &&
+                     text.pointer[cursor + 22] == 0xd3 && text.pointer[cursor + 23] == 0x76 && text.pointer[cursor + 25] == 0x41 &&
+                     text.pointer[cursor + 26] == 0xf6 && text.pointer[cursor + 27] == 0x03 && text.pointer[cursor + 28] == 0 &&
+                     text.pointer[cursor + 29] == 0xeb && text.pointer[cursor + 31] == 0x41 && text.pointer[cursor + 32] == 0xf6 &&
+                     text.pointer[cursor + 33] == 0x02 && text.pointer[cursor + 34] == 0 && text.pointer[cursor + 35] == 0x48 &&
+                     text.pointer[cursor + 36] == 0x81 && text.pointer[cursor + 37] == 0xec)
+            {
+                memcpy(&prolog_stack_bytes, text.pointer + cursor + 38, sizeof(prolog_stack_bytes));
+                prolog_stack_adjust_count += 1;
+                cursor += 42;
+            }
+            else if (cursor + 7 <= function_end && text.pointer[cursor] == 0x48 && text.pointer[cursor + 1] == 0x81 &&
+                     text.pointer[cursor + 2] == 0xec)
+            {
+                memcpy(&prolog_stack_bytes, text.pointer + cursor + 3, sizeof(prolog_stack_bytes));
+                prolog_stack_adjust_count += 1;
+                cursor += 7;
+            }
+            fixed_frame_alignment_valid &= prolog_stack_adjust_count == 0 || (prolog_stack_bytes != 0 && !(prolog_stack_bytes & 15));
+            if (prolog_stack_adjust_count > 1)
+            {
+                unwind_matches_frame = false;
+            }
+            if (cursor + 4 <= function_end && text.pointer[cursor] == 0xf6 && text.pointer[cursor + 1] == 0x04 &&
+                text.pointer[cursor + 2] == 0x24 && text.pointer[cursor + 3] == 0)
+            {
+                cursor += 4;
+            }
+            CodegenTestX64BodyScan full_body_scan = codegen_test_x64_scan_body(text, cursor, function_end, prolog_stack_bytes, UINT32_MAX);
+            full_body_decode_valid &= full_body_scan.valid;
+            full_body_stack_store_bounds_valid &= full_body_scan.valid &&
+                                                   (!full_body_scan.has_stack_store || full_body_scan.maximum_stack_store_end <= prolog_stack_bytes);
+            body_stack_adjust_valid &= full_body_scan.valid;
+            bool has_outgoing_stack_store = false;
+            u32 maximum_stack_store_end = 0;
+            for (u64 byte_index = cursor; byte_index + 8 <= function_end; byte_index += 1)
+            {
+                u8 rex = text.pointer[byte_index];
+                u8 modrm = text.pointer[byte_index + 2];
+                if ((rex == 0x48 || rex == 0x4c) && text.pointer[byte_index + 1] == 0x89 && (modrm & 0xc7) == 0x84 &&
+                    text.pointer[byte_index + 3] == 0x24)
+                {
+                    u32 displacement = 0;
+                    memcpy(&displacement, text.pointer + byte_index + 4, sizeof(displacement));
+                    if (displacement <= UINT32_MAX - 8)
+                    {
+                        has_outgoing_stack_store = true;
+                        maximum_stack_store_end = BUSTER_MAX(maximum_stack_store_end, displacement + 8);
+                    }
+                }
+            }
+            bool has_direct_call = false;
+            bool function_body_stack_adjust_valid = true;
+            for (u32 relocation_index = 0; relocation_index < c_float_abi_windows.object.relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation* relocation = c_float_abi_windows.object.relocations + relocation_index;
+                if (relocation->section != OBJECT_SECTION_TEXT || relocation->kind != OBJECT_RELOCATION_X86_64_PC32 || relocation->offset < function_start + 5 ||
+                    relocation->offset > function_end - 4 || text.pointer[relocation->offset - 1] != 0xe8)
+                {
+                    continue;
+                }
+                has_direct_call = true;
+                u64 call_start = relocation->offset - 1;
+                if ((call_start >= function_start + 4 && text.pointer[call_start - 4] == 0x48 && text.pointer[call_start - 3] == 0x83 &&
+                     text.pointer[call_start - 2] == 0xec) ||
+                    (call_start >= function_start + 7 && text.pointer[call_start - 7] == 0x48 && text.pointer[call_start - 6] == 0x81 &&
+                     text.pointer[call_start - 5] == 0xec))
+                {
+                    function_body_stack_adjust_valid = false;
+                }
+                u64 call_end = relocation->offset + 4;
+                if ((call_end + 4 <= function_end && text.pointer[call_end] == 0x48 && text.pointer[call_end + 1] == 0x83 &&
+                     text.pointer[call_end + 2] == 0xc4) ||
+                    (call_end + 7 <= function_end && text.pointer[call_end] == 0x48 && text.pointer[call_end + 1] == 0x81 &&
+                     text.pointer[call_end + 2] == 0xc4))
+                {
+                    function_body_stack_adjust_valid = false;
+                }
+            }
+            body_stack_adjust_valid &= function_body_stack_adjust_valid;
+            found_fixed_outgoing_frame |= has_direct_call && has_outgoing_stack_store && prolog_stack_adjust_count == 1 &&
+                                         prolog_stack_bytes >= maximum_stack_store_end;
+            found_call_with_fixed_frame |= has_direct_call && prolog_stack_adjust_count == 1;
+            found_single_fixed_allocation |= has_direct_call && prolog_stack_adjust_count == 1 && function_body_stack_adjust_valid;
+            u64 xdata_offset = UINT64_MAX;
+            for (u32 relocation_index = 0; relocation_index < c_float_abi_windows.object.relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation* relocation = c_float_abi_windows.object.relocations + relocation_index;
+                if (relocation->section == OBJECT_SECTION_WINDOWS_PDATA && relocation->offset == (u64)(text_function_count - 1) * 12 + 8)
+                {
+                    xdata_offset = relocation->addend >= 0 ? (u64)relocation->addend : UINT64_MAX;
+                    break;
+                }
+            }
+            if (xdata_offset == UINT64_MAX || xdata_offset + 4 > xdata.length)
+            {
+                unwind_matches_frame = false;
+                continue;
+            }
+            u8 code_slots = xdata.pointer[xdata_offset + 2];
+            if (xdata_offset + 4 + (u64)code_slots * 2 > xdata.length)
+            {
+                unwind_matches_frame = false;
+                continue;
+            }
+            u32 unwind_stack_bytes = 0;
+            u32 unwind_stack_adjust_count = 0;
+            for (u32 code_index = 0; code_index < code_slots;)
+            {
+                u8 unwind = xdata.pointer[xdata_offset + 5 + code_index * 2];
+                u8 operation = unwind & 15;
+                u8 information = unwind >> 4;
+                if (operation == 1 && information == 0 && code_index + 1 < code_slots)
+                {
+                    u16 scaled = 0;
+                    memcpy(&scaled, xdata.pointer + xdata_offset + 6 + code_index * 2, sizeof(scaled));
+                    if (unwind_stack_bytes > UINT32_MAX - (u32)scaled * 8)
+                    {
+                        unwind_matches_frame = false;
+                        break;
+                    }
+                    unwind_stack_bytes += (u32)scaled * 8;
+                    unwind_stack_adjust_count += 1;
+                    code_index += 2;
+                }
+                else if (operation == 1 && information == 1 && code_index + 2 < code_slots)
+                {
+                    u32 large = 0;
+                    memcpy(&large, xdata.pointer + xdata_offset + 6 + code_index * 2, sizeof(large));
+                    if (unwind_stack_bytes > UINT32_MAX - large)
+                    {
+                        unwind_matches_frame = false;
+                        break;
+                    }
+                    unwind_stack_bytes += large;
+                    unwind_stack_adjust_count += 1;
+                    code_index += 3;
+                }
+                else if (operation == 2)
+                {
+                    unwind_stack_bytes += ((u32)information + 1) * 8;
+                    unwind_stack_adjust_count += 1;
+                    code_index += 1;
+                }
+                else
+                {
+                    code_index += 1;
+                }
+            }
+            unwind_matches_frame &= unwind_stack_bytes == prolog_stack_bytes;
+            unwind_allocation_count_matches &= unwind_stack_adjust_count == prolog_stack_adjust_count;
+        }
         for (u64 byte_index = 0; byte_index < text.length; byte_index += 1)
         {
-            if (byte_index + sizeof(shadow_space) <= text.length && memcmp(text.pointer + byte_index, shadow_space, sizeof(shadow_space)) == 0)
-            {
-                found_shadow_space = true;
-            }
             if (byte_index + sizeof(load_xmm0) <= text.length && memcmp(text.pointer + byte_index, load_xmm0, sizeof(load_xmm0)) == 0)
             {
                 found_load_xmm0 = true;
@@ -1806,7 +2114,19 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
                 found_indirect_second_part = true;
             }
         }
-        BUSTER_TEST(arguments, found_shadow_space);
+        BUSTER_TEST(arguments, found_fixed_outgoing_frame);
+        BUSTER_TEST(arguments, found_call_with_fixed_frame);
+        BUSTER_TEST(arguments, found_single_fixed_allocation);
+        BUSTER_TEST(arguments, fixed_frame_alignment_valid);
+        BUSTER_TEST(arguments, body_stack_adjust_valid);
+        BUSTER_TEST(arguments, full_body_decode_valid);
+        BUSTER_TEST(arguments, full_body_stack_store_bounds_valid);
+        BUSTER_TEST(arguments, text_function_count != 0);
+        BUSTER_TEST(arguments, pdata_relocation_count == text_function_count * 3);
+        BUSTER_TEST(arguments, c_float_abi_windows.object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == (u64)text_function_count * 12);
+        BUSTER_TEST(arguments, c_float_abi_windows.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length != 0);
+        BUSTER_TEST(arguments, unwind_matches_frame);
+        BUSTER_TEST(arguments, unwind_allocation_count_matches);
         BUSTER_TEST(arguments, found_load_xmm0);
         BUSTER_TEST(arguments, found_indirect_second_part);
     }
@@ -1882,6 +2202,11 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     CompilerDriverResult c_multi = compiler_driver_execute_invocation(
         c_multi_arena, compiler_driver_parse_arguments(c_multi_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_multi_command_line)));
     BUSTER_TEST(arguments, c_multi.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_multi.has_object);
+    if (c_multi.has_object)
+    {
+        BUSTER_TEST(arguments, c_multi.object.section_count != 0 && c_multi.object.symbol_count != 0);
+    }
     if (c_multi.error == COMPILER_DRIVER_ERROR_NONE)
     {
         String8 c_multi_arguments[] = {
@@ -2009,6 +2334,11 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     CompilerDriverResult c_archive = compiler_driver_execute_invocation(
         c_multi_arena, compiler_driver_parse_arguments(c_multi_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_archive_command_line)));
     BUSTER_TEST(arguments, c_archive.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_archive.has_object);
+    if (c_archive.has_object)
+    {
+        BUSTER_TEST(arguments, c_archive.object.section_count != 0 && c_archive.object.symbol_count != 0);
+    }
     if (c_archive.error == COMPILER_DRIVER_ERROR_NONE)
     {
         String8 c_archive_arguments[] = {

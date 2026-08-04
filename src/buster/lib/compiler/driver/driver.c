@@ -2114,6 +2114,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
         goto finish;
     }
+    result.object = linked.object;
+    result.has_object = true;
     String8 output = invocation.output_path.length ? invocation.output_path :
 #if BUSTER_WINDOWS
                                                    S8("a.exe");

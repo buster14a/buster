@@ -74,9 +74,48 @@ struct X64Builder
     u32 last_wide_vector_size;
 };
 
+typedef IrAbiPart CodegenCanonicalAbiPart;
+typedef IrAbiValue CodegenCanonicalAbiValue;
+
+typedef struct CodegenCanonicalCallArgument CodegenCanonicalCallArgument;
+struct CodegenCanonicalCallArgument
+{
+    CodegenCanonicalAbiValue abi;
+    IrType* type;
+    u32 part_count;
+    u32 copy_offset;
+    u32 copy_size;
+    u32 copy_alignment;
+    u8 float_register;
+    bool aggregate;
+    bool on_stack;
+    bool windows_indirect;
+    bool system_v_aggregate;
+};
+
+typedef struct CodegenCanonicalCallLayout CodegenCanonicalCallLayout;
+struct CodegenCanonicalCallLayout
+{
+    CodegenCanonicalCallArgument* arguments;
+    CodegenCanonicalAbiValue return_abi;
+    u32 argument_count;
+    u32 stack_part_count;
+    u32 windows_stack_size;
+    u32 windows_copy_storage_size;
+    u32 simulated_registers;
+    u32 simulated_float_registers;
+    bool stack_padding;
+    bool indirect_return;
+    bool windows_indirect_return;
+};
+
 BUSTER_TEST_F_DECL CodegenAbiSignature codegen_classify_signature_with_arguments(Arena* arena, AnalysisResult* analysis,
                                                                                   AnalysisTypeId function_type_id, AnalysisTypeId* argument_types,
                                                                                   u32 argument_count, Target target);
+BUSTER_TEST_F_DECL CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target,
+                                                                     u32* stack_size);
+BUSTER_TEST_F_DECL CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
+                                                                    CodegenAbi abi, CodegenCanonicalCallLayout* layout);
 BUSTER_TEST_F_DECL Target codegen_target_for_abi(CodegenAbi abi);
 BUSTER_TEST_F_DECL void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column);
 BUSTER_TEST_F_DECL s32 codegen_debug_frame_offset(u32 offset, Target target, bool negative_offsets, u32 frame_size);
