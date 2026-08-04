@@ -824,6 +824,7 @@ buster_register_module(rendering "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSI
 buster_register_module(truetype "${BUSTER_SOURCE_DIR}/truetype${COMMON_EXTENSION}")
 buster_register_module(font_provider "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
 buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
+buster_register_module(ide_document "${BUSTER_SOURCE_DIR}/ide_document${COMMON_EXTENSION}")
 
 # Include-only module tests stay visible to IDEs without becoming independent
 # translation units. test.c includes the sources when tests are enabled.
@@ -839,6 +840,8 @@ set(BUSTER_TEST_FILES
     src/buster/tests/os_test.h
     src/buster/tests/file_test.c
     src/buster/tests/file_test.h
+    src/buster/tests/ide_document_test.c
+    src/buster/tests/ide_document_test.h
     src/buster/tests/window_test.c
     src/buster/tests/window_test.h
     src/buster/tests/rendering_test.c
@@ -1676,6 +1679,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     truetype
     font_provider
     hash
+    ide_document
 )
 
 if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND

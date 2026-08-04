@@ -17,6 +17,7 @@
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/ide_document.h>
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/lib/x86_64.h>
 #endif
@@ -27,6 +28,7 @@
 #include <buster/tests/string_test.h>
 #include <buster/tests/os_test.h>
 #include <buster/tests/file_test.h>
+#include <buster/tests/ide_document_test.h>
 #include <buster/tests/window_test.h>
 #include <buster/tests/rendering_test.h>
 #include <buster/tests/target_test.h>
@@ -53,6 +55,7 @@
 #include <buster/tests/string_test.c>
 #include <buster/tests/os_test.c>
 #include <buster/tests/file_test.c>
+#include <buster/tests/ide_document_test.c>
 #include <buster/tests/window_test.c>
 #include <buster/tests/rendering_test.c>
 #include <buster/tests/target_test.c>
@@ -167,6 +170,7 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &string_tests,
     &os_tests,
     &file_tests,
+    &ide_document_tests,
     &window_tests,
     &rendering_tests,
     &target_tests,

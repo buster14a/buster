@@ -20,6 +20,7 @@
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/ide_document.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/string.h>
 #if BUSTER_INCLUDE_TESTS
@@ -61,6 +62,7 @@
 #include <buster/lib/compiler/link/link.c>
 #include <buster/lib/compiler/driver/driver.c>
 #include <buster/lib/hash.c>
+#include <buster/lib/ide_document.c>
 #endif
 
 typedef struct IdePanel IdePanel;
