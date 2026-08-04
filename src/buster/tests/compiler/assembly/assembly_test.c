@@ -545,6 +545,152 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                x86_x87_relocation.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
                                string_equal(x86_x87_relocation.symbols[x86_x87_relocation.relocations[0].symbol].name,
                                             S8("external_x87")));
+    u8 expected_x86_x87_state[] = {
+        0xd9, 0x28, 0xd9, 0x39, 0x9b, 0xd9, 0x3a, 0xd9, 0x23, 0xd9, 0x34, 0x24, 0x9b, 0xd9, 0x75, 0x00,
+        0xdd, 0x26, 0xdd, 0x37, 0x9b, 0x41, 0xdd, 0x30, 0xdf, 0xe0, 0x9b, 0xdf, 0xe0, 0x41, 0xdd, 0x39,
+        0x9b, 0x41, 0xdd, 0x3a, 0x41, 0xdf, 0x23, 0x41, 0xdf, 0x34, 0x24, 0xdd, 0xc3, 0xdf, 0xc4,
+        0xd9, 0xf7, 0xd9, 0xf6,
+    };
+    String8 x86_intel_x87_state_source =
+        S8("fldcw word ptr [rax]\n"
+           "fnstcw word ptr [rcx]\n"
+           "fstcw word ptr [rdx]\n"
+           "fldenv [rbx]\n"
+           "fnstenv [rsp]\n"
+           "fstenv [rbp]\n"
+           "frstor [rsi]\n"
+           "fnsave [rdi]\n"
+           "fsave [r8]\n"
+           "fnstsw ax\n"
+           "fstsw ax\n"
+           "fnstsw word ptr [r9]\n"
+           "fstsw word ptr [r10]\n"
+           "fbld tbyte ptr [r11]\n"
+           "fbstp tbyte ptr [r12]\n"
+           "ffree st(3)\n"
+           "ffreep st(4)\n"
+           "fincstp\n"
+           "fdecstp\n");
+    AssemblyEncodeResult x86_intel_x87_state = assembly_encode(
+        arguments->arena, x86_intel_x87_state_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_x87_state.diagnostic_count == 0 &&
+                               x86_intel_x87_state.bytes.length == sizeof(expected_x86_x87_state) &&
+                               memcmp(x86_intel_x87_state.bytes.pointer, expected_x86_x87_state, sizeof(expected_x86_x87_state)) == 0);
+    String8 x86_att_x87_state_source =
+        S8("fldcw (%rax)\n"
+           "fnstcw (%rcx)\n"
+           "fstcw (%rdx)\n"
+           "fldenv (%rbx)\n"
+           "fnstenv (%rsp)\n"
+           "fstenv (%rbp)\n"
+           "frstor (%rsi)\n"
+           "fnsave (%rdi)\n"
+           "fsave (%r8)\n"
+           "fnstsw %ax\n"
+           "fstsw %ax\n"
+           "fnstsw (%r9)\n"
+           "fstsw (%r10)\n"
+           "fbld (%r11)\n"
+           "fbstp (%r12)\n"
+           "ffree %st(3)\n"
+           "ffreep %st(4)\n"
+           "fincstp\n"
+           "fdecstp\n");
+    AssemblyEncodeResult x86_att_x87_state = assembly_encode(
+        arguments->arena, x86_att_x87_state_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_x87_state.diagnostic_count == 0 &&
+                               x86_att_x87_state.bytes.length == sizeof(expected_x86_x87_state) &&
+                               memcmp(x86_att_x87_state.bytes.pointer, expected_x86_x87_state, sizeof(expected_x86_x87_state)) == 0);
+    AssemblyEncodeResult x86_x87_state_relocation = assembly_encode(
+        arguments->arena, S8("fldcw word ptr [rip + external_state]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_x86_x87_state_relocation[] = {0xd9, 0x2d, 0x00, 0x00, 0x00, 0x00};
+    BUSTER_TEST(arguments, x86_x87_state_relocation.diagnostic_count == 0 &&
+                               x86_x87_state_relocation.bytes.length == sizeof(expected_x86_x87_state_relocation) &&
+                               memcmp(x86_x87_state_relocation.bytes.pointer, expected_x86_x87_state_relocation,
+                                      sizeof(expected_x86_x87_state_relocation)) == 0);
+    BUSTER_TEST(arguments, x86_x87_state_relocation.relocation_count == 1 &&
+                               x86_x87_state_relocation.relocations[0].offset == 2 &&
+                               x86_x87_state_relocation.relocations[0].addend == -4 &&
+                               x86_x87_state_relocation.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                               string_equal(x86_x87_state_relocation.symbols[x86_x87_state_relocation.relocations[0].symbol].name,
+                                            S8("external_state")));
+    String8 x86_x87_alias_source_prefix =
+        S8("fxch\n"
+           "fcom\n"
+           "fcomp\n"
+           "fucom\n"
+           "fucomp\n"
+           "fadd\n"
+           "fmul\n"
+           "fsub\n"
+           "fsubr\n"
+           "fdiv\n"
+           "fdivr\n"
+           "faddp\n"
+           "fmulp\n"
+           "fsubp\n"
+           "fsubrp\n"
+           "fdivp\n"
+           "fdivrp\n");
+    String8 x86_intel_x87_alias_source = string_format(
+        arguments->arena,
+        S8("{S8}"
+           "fadd st(2)\n"
+           "fmul st(3)\n"
+           "fsub st(4)\n"
+           "fsubr st(5)\n"
+           "fdiv st(6)\n"
+           "fdivr st(7)\n"
+           "faddp st(2)\n"
+           "fmulp st(3)\n"
+           "fsubp st(4)\n"
+           "fsubrp st(5)\n"
+           "fdivp st(6)\n"
+           "fdivrp st(7)\n"),
+        x86_x87_alias_source_prefix);
+    u8 expected_x86_intel_x87_alias[] = {
+        0xd9, 0xc9, 0xd8, 0xd1, 0xd8, 0xd9, 0xdd, 0xe1, 0xdd, 0xe9,
+        0xde, 0xc1, 0xde, 0xc9, 0xde, 0xe9, 0xde, 0xe1, 0xde, 0xf9, 0xde, 0xf1,
+        0xde, 0xc1, 0xde, 0xc9, 0xde, 0xe9, 0xde, 0xe1, 0xde, 0xf9, 0xde, 0xf1,
+        0xd8, 0xc2, 0xd8, 0xcb, 0xd8, 0xe4, 0xd8, 0xed, 0xd8, 0xf6, 0xd8, 0xff,
+        0xde, 0xc2, 0xde, 0xcb, 0xde, 0xec, 0xde, 0xe5, 0xde, 0xfe, 0xde, 0xf7,
+    };
+    AssemblyEncodeResult x86_intel_x87_alias = assembly_encode(
+        arguments->arena, x86_intel_x87_alias_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_x87_alias.diagnostic_count == 0 &&
+                               x86_intel_x87_alias.bytes.length == sizeof(expected_x86_intel_x87_alias) &&
+                               memcmp(x86_intel_x87_alias.bytes.pointer, expected_x86_intel_x87_alias,
+                                      sizeof(expected_x86_intel_x87_alias)) == 0);
+    String8 x86_att_x87_alias_source = string_format(
+        arguments->arena,
+        S8("{S8}"
+           "fadd %st(2)\n"
+           "fmul %st(3)\n"
+           "fsub %st(4)\n"
+           "fsubr %st(5)\n"
+           "fdiv %st(6)\n"
+           "fdivr %st(7)\n"
+           "faddp %st(2)\n"
+           "fmulp %st(3)\n"
+           "fsubp %st(4)\n"
+           "fsubrp %st(5)\n"
+           "fdivp %st(6)\n"
+           "fdivrp %st(7)\n"),
+        x86_x87_alias_source_prefix);
+    u8 expected_x86_att_x87_alias[] = {
+        0xd9, 0xc9, 0xd8, 0xd1, 0xd8, 0xd9, 0xdd, 0xe1, 0xdd, 0xe9,
+        0xde, 0xc1, 0xde, 0xc9, 0xde, 0xe1, 0xde, 0xe9, 0xde, 0xf1, 0xde, 0xf9,
+        0xde, 0xc1, 0xde, 0xc9, 0xde, 0xe1, 0xde, 0xe9, 0xde, 0xf1, 0xde, 0xf9,
+        0xd8, 0xc2, 0xd8, 0xcb, 0xd8, 0xe4, 0xd8, 0xed, 0xd8, 0xf6, 0xd8, 0xff,
+        0xde, 0xc2, 0xde, 0xcb, 0xde, 0xe4, 0xde, 0xed, 0xde, 0xf6, 0xde, 0xff,
+    };
+    AssemblyEncodeResult x86_att_x87_alias = assembly_encode(
+        arguments->arena, x86_att_x87_alias_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_x87_alias.diagnostic_count == 0 &&
+                               x86_att_x87_alias.bytes.length == sizeof(expected_x86_att_x87_alias) &&
+                               memcmp(x86_att_x87_alias.bytes.pointer, expected_x86_att_x87_alias,
+                                      sizeof(expected_x86_att_x87_alias)) == 0);
     Target x86_sse3_target = x86_target;
     x86_sse3_target.cpu_features_explicit = true;
     x86_sse3_target.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_SSE3;
@@ -684,6 +830,23 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_x87.diagnostic_count; diagnostic_index += 1)
     {
         BUSTER_TEST(arguments, invalid_x86_x87.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+    AssemblyEncodeResult invalid_x86_x87_state = assembly_encode(
+        arguments->arena,
+        S8("fldcw dword ptr [rax]\n"
+           "fldenv qword ptr [rax]\n"
+           "fnstsw rax\n"
+           "fstsw bx\n"
+           "fstcw ax\n"
+           "fbld qword ptr [rax]\n"
+           "fbstp st(0)\n"
+           "ffree rax\n"
+           "fincstp st(0)\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_x86_x87_state.diagnostic_count == 9);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_x87_state.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_x86_x87_state.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
     AssemblyEncodeResult x86_xmm_packed = assembly_encode(
         arguments->arena, S8("paddd xmm0, xmm1\n"),
