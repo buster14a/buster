@@ -111,6 +111,56 @@ typedef enum AssemblyOpcode
     ASSEMBLY_OPCODE_X86_PCMPGTW_MMX,
     ASSEMBLY_OPCODE_X86_PCMPGTD_MMX,
     ASSEMBLY_OPCODE_X86_PMULLW_MMX,
+    ASSEMBLY_OPCODE_X86_FLD,
+    ASSEMBLY_OPCODE_X86_FST,
+    ASSEMBLY_OPCODE_X86_FSTP,
+    ASSEMBLY_OPCODE_X86_FILD,
+    ASSEMBLY_OPCODE_X86_FIST,
+    ASSEMBLY_OPCODE_X86_FISTP,
+    ASSEMBLY_OPCODE_X86_FADD,
+    ASSEMBLY_OPCODE_X86_FMUL,
+    ASSEMBLY_OPCODE_X86_FSUB,
+    ASSEMBLY_OPCODE_X86_FSUBR,
+    ASSEMBLY_OPCODE_X86_FDIV,
+    ASSEMBLY_OPCODE_X86_FDIVR,
+    ASSEMBLY_OPCODE_X86_FADDP,
+    ASSEMBLY_OPCODE_X86_FMULP,
+    ASSEMBLY_OPCODE_X86_FSUBP,
+    ASSEMBLY_OPCODE_X86_FSUBRP,
+    ASSEMBLY_OPCODE_X86_FDIVP,
+    ASSEMBLY_OPCODE_X86_FDIVRP,
+    ASSEMBLY_OPCODE_X86_FXCH,
+    ASSEMBLY_OPCODE_X86_F2XM1,
+    ASSEMBLY_OPCODE_X86_FABS,
+    ASSEMBLY_OPCODE_X86_FCHS,
+    ASSEMBLY_OPCODE_X86_FLD1,
+    ASSEMBLY_OPCODE_X86_FLDZ,
+    ASSEMBLY_OPCODE_X86_FLDPI,
+    ASSEMBLY_OPCODE_X86_FLDL2E,
+    ASSEMBLY_OPCODE_X86_FLDL2T,
+    ASSEMBLY_OPCODE_X86_FLDLG2,
+    ASSEMBLY_OPCODE_X86_FLDLN2,
+    ASSEMBLY_OPCODE_X86_FSQRT,
+    ASSEMBLY_OPCODE_X86_FSIN,
+    ASSEMBLY_OPCODE_X86_FCOS,
+    ASSEMBLY_OPCODE_X86_FSINCOS,
+    ASSEMBLY_OPCODE_X86_FPTAN,
+    ASSEMBLY_OPCODE_X86_FPATAN,
+    ASSEMBLY_OPCODE_X86_FYL2X,
+    ASSEMBLY_OPCODE_X86_FYL2XP1,
+    ASSEMBLY_OPCODE_X86_FRNDINT,
+    ASSEMBLY_OPCODE_X86_FSCALE,
+    ASSEMBLY_OPCODE_X86_FPREM,
+    ASSEMBLY_OPCODE_X86_FPREM1,
+    ASSEMBLY_OPCODE_X86_FXTRACT,
+    ASSEMBLY_OPCODE_X86_FTST,
+    ASSEMBLY_OPCODE_X86_FXAM,
+    ASSEMBLY_OPCODE_X86_FNOP,
+    ASSEMBLY_OPCODE_X86_FINIT,
+    ASSEMBLY_OPCODE_X86_FNINIT,
+    ASSEMBLY_OPCODE_X86_FCLEX,
+    ASSEMBLY_OPCODE_X86_FNCLEX,
+    ASSEMBLY_OPCODE_X86_FWAIT,
     ASSEMBLY_OPCODE_AARCH64_NOP,
     ASSEMBLY_OPCODE_AARCH64_RET,
     ASSEMBLY_OPCODE_AARCH64_B,
@@ -143,6 +193,7 @@ typedef enum AssemblyRegisterClass
     ASSEMBLY_REGISTER_XMM,
     ASSEMBLY_REGISTER_YMM,
     ASSEMBLY_REGISTER_MMX,
+    ASSEMBLY_REGISTER_X87,
     ASSEMBLY_REGISTER_CLASS_COUNT,
 } AssemblyRegisterClass;
 
@@ -522,6 +573,17 @@ BUSTER_GLOBAL_LOCAL bool assembly_register_parse(String8 text, AssemblySyntax sy
             return true;
         }
     }
+    if (assembly_word_equal(text, S8("st")))
+    {
+        *result = (AssemblyRegister){.width = 80, .class = ASSEMBLY_REGISTER_X87};
+        return true;
+    }
+    if (text.length == 5 && assembly_ascii_lower(text.pointer[0]) == 's' && assembly_ascii_lower(text.pointer[1]) == 't' &&
+        text.pointer[2] == '(' && text.pointer[4] == ')' && text.pointer[3] >= '0' && text.pointer[3] <= '7')
+    {
+        *result = (AssemblyRegister){.index = (u8)(text.pointer[3] - '0'), .width = 80, .class = ASSEMBLY_REGISTER_X87};
+        return true;
+    }
     return false;
 }
 
@@ -598,6 +660,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_intel(AssemblyBuilder* builde
         {S8_INITIALIZER("word ptr"), 16},
         {S8_INITIALIZER("dword ptr"), 32},
         {S8_INITIALIZER("qword ptr"), 64},
+        {S8_INITIALIZER("tbyte ptr"), 80},
         {S8_INITIALIZER("xmmword ptr"), 128},
         {S8_INITIALIZER("ymmword ptr"), UINT8_MAX},
     };
@@ -874,6 +937,32 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic,
         {S8_INITIALIZER("pcmpgtw"), ASSEMBLY_OPCODE_X86_PCMPGTW_MMX, 2},
         {S8_INITIALIZER("pcmpgtd"), ASSEMBLY_OPCODE_X86_PCMPGTD_MMX, 2},
         {S8_INITIALIZER("pmullw"), ASSEMBLY_OPCODE_X86_PMULLW_MMX, 2},
+        {S8_INITIALIZER("fld"), ASSEMBLY_OPCODE_X86_FLD, 1},       {S8_INITIALIZER("fst"), ASSEMBLY_OPCODE_X86_FST, 1},
+        {S8_INITIALIZER("fstp"), ASSEMBLY_OPCODE_X86_FSTP, 1},     {S8_INITIALIZER("fild"), ASSEMBLY_OPCODE_X86_FILD, 1},
+        {S8_INITIALIZER("fist"), ASSEMBLY_OPCODE_X86_FIST, 1},     {S8_INITIALIZER("fistp"), ASSEMBLY_OPCODE_X86_FISTP, 1},
+        {S8_INITIALIZER("fadd"), ASSEMBLY_OPCODE_X86_FADD, 2},     {S8_INITIALIZER("fmul"), ASSEMBLY_OPCODE_X86_FMUL, 2},
+        {S8_INITIALIZER("fsub"), ASSEMBLY_OPCODE_X86_FSUB, 2},     {S8_INITIALIZER("fsubr"), ASSEMBLY_OPCODE_X86_FSUBR, 2},
+        {S8_INITIALIZER("fdiv"), ASSEMBLY_OPCODE_X86_FDIV, 2},     {S8_INITIALIZER("fdivr"), ASSEMBLY_OPCODE_X86_FDIVR, 2},
+        {S8_INITIALIZER("faddp"), ASSEMBLY_OPCODE_X86_FADDP, 2},   {S8_INITIALIZER("fmulp"), ASSEMBLY_OPCODE_X86_FMULP, 2},
+        {S8_INITIALIZER("fsubp"), ASSEMBLY_OPCODE_X86_FSUBP, 2},   {S8_INITIALIZER("fsubrp"), ASSEMBLY_OPCODE_X86_FSUBRP, 2},
+        {S8_INITIALIZER("fdivp"), ASSEMBLY_OPCODE_X86_FDIVP, 2},   {S8_INITIALIZER("fdivrp"), ASSEMBLY_OPCODE_X86_FDIVRP, 2},
+        {S8_INITIALIZER("fxch"), ASSEMBLY_OPCODE_X86_FXCH, 1},     {S8_INITIALIZER("f2xm1"), ASSEMBLY_OPCODE_X86_F2XM1, 0},
+        {S8_INITIALIZER("fabs"), ASSEMBLY_OPCODE_X86_FABS, 0},     {S8_INITIALIZER("fchs"), ASSEMBLY_OPCODE_X86_FCHS, 0},
+        {S8_INITIALIZER("fld1"), ASSEMBLY_OPCODE_X86_FLD1, 0},     {S8_INITIALIZER("fldz"), ASSEMBLY_OPCODE_X86_FLDZ, 0},
+        {S8_INITIALIZER("fldpi"), ASSEMBLY_OPCODE_X86_FLDPI, 0},   {S8_INITIALIZER("fldl2e"), ASSEMBLY_OPCODE_X86_FLDL2E, 0},
+        {S8_INITIALIZER("fldl2t"), ASSEMBLY_OPCODE_X86_FLDL2T, 0}, {S8_INITIALIZER("fldlg2"), ASSEMBLY_OPCODE_X86_FLDLG2, 0},
+        {S8_INITIALIZER("fldln2"), ASSEMBLY_OPCODE_X86_FLDLN2, 0}, {S8_INITIALIZER("fsqrt"), ASSEMBLY_OPCODE_X86_FSQRT, 0},
+        {S8_INITIALIZER("fsin"), ASSEMBLY_OPCODE_X86_FSIN, 0},     {S8_INITIALIZER("fcos"), ASSEMBLY_OPCODE_X86_FCOS, 0},
+        {S8_INITIALIZER("fsincos"), ASSEMBLY_OPCODE_X86_FSINCOS, 0}, {S8_INITIALIZER("fptan"), ASSEMBLY_OPCODE_X86_FPTAN, 0},
+        {S8_INITIALIZER("fpatan"), ASSEMBLY_OPCODE_X86_FPATAN, 0}, {S8_INITIALIZER("fyl2x"), ASSEMBLY_OPCODE_X86_FYL2X, 0},
+        {S8_INITIALIZER("fyl2xp1"), ASSEMBLY_OPCODE_X86_FYL2XP1, 0}, {S8_INITIALIZER("frndint"), ASSEMBLY_OPCODE_X86_FRNDINT, 0},
+        {S8_INITIALIZER("fscale"), ASSEMBLY_OPCODE_X86_FSCALE, 0}, {S8_INITIALIZER("fprem"), ASSEMBLY_OPCODE_X86_FPREM, 0},
+        {S8_INITIALIZER("fprem1"), ASSEMBLY_OPCODE_X86_FPREM1, 0}, {S8_INITIALIZER("fxtract"), ASSEMBLY_OPCODE_X86_FXTRACT, 0},
+        {S8_INITIALIZER("ftst"), ASSEMBLY_OPCODE_X86_FTST, 0},     {S8_INITIALIZER("fxam"), ASSEMBLY_OPCODE_X86_FXAM, 0},
+        {S8_INITIALIZER("fnop"), ASSEMBLY_OPCODE_X86_FNOP, 0},     {S8_INITIALIZER("finit"), ASSEMBLY_OPCODE_X86_FINIT, 0},
+        {S8_INITIALIZER("fninit"), ASSEMBLY_OPCODE_X86_FNINIT, 0}, {S8_INITIALIZER("fclex"), ASSEMBLY_OPCODE_X86_FCLEX, 0},
+        {S8_INITIALIZER("fnclex"), ASSEMBLY_OPCODE_X86_FNCLEX, 0}, {S8_INITIALIZER("fwait"), ASSEMBLY_OPCODE_X86_FWAIT, 0},
+        {S8_INITIALIZER("wait"), ASSEMBLY_OPCODE_X86_FWAIT, 0},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(instructions); index += 1)
     {
@@ -911,6 +1000,43 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
 {
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
+        if (syntax == ASSEMBLY_SYNTAX_ATT)
+        {
+            static const struct
+            {
+                String8 name;
+                AssemblyOpcode opcode;
+                u8 width;
+            } x87_memory_instructions[] = {
+                {S8_INITIALIZER("flds"), ASSEMBLY_OPCODE_X86_FLD, 32},     {S8_INITIALIZER("fldl"), ASSEMBLY_OPCODE_X86_FLD, 64},
+                {S8_INITIALIZER("fldt"), ASSEMBLY_OPCODE_X86_FLD, 80},     {S8_INITIALIZER("fsts"), ASSEMBLY_OPCODE_X86_FST, 32},
+                {S8_INITIALIZER("fstl"), ASSEMBLY_OPCODE_X86_FST, 64},     {S8_INITIALIZER("fstps"), ASSEMBLY_OPCODE_X86_FSTP, 32},
+                {S8_INITIALIZER("fstpl"), ASSEMBLY_OPCODE_X86_FSTP, 64},   {S8_INITIALIZER("fstpt"), ASSEMBLY_OPCODE_X86_FSTP, 80},
+                {S8_INITIALIZER("filds"), ASSEMBLY_OPCODE_X86_FILD, 16},   {S8_INITIALIZER("fildl"), ASSEMBLY_OPCODE_X86_FILD, 32},
+                {S8_INITIALIZER("fildq"), ASSEMBLY_OPCODE_X86_FILD, 64},   {S8_INITIALIZER("fildll"), ASSEMBLY_OPCODE_X86_FILD, 64},
+                {S8_INITIALIZER("fists"), ASSEMBLY_OPCODE_X86_FIST, 16},   {S8_INITIALIZER("fistl"), ASSEMBLY_OPCODE_X86_FIST, 32},
+                {S8_INITIALIZER("fistps"), ASSEMBLY_OPCODE_X86_FISTP, 16}, {S8_INITIALIZER("fistpl"), ASSEMBLY_OPCODE_X86_FISTP, 32},
+                {S8_INITIALIZER("fistpq"), ASSEMBLY_OPCODE_X86_FISTP, 64}, {S8_INITIALIZER("fistpll"), ASSEMBLY_OPCODE_X86_FISTP, 64},
+                {S8_INITIALIZER("fadds"), ASSEMBLY_OPCODE_X86_FADD, 32},   {S8_INITIALIZER("faddl"), ASSEMBLY_OPCODE_X86_FADD, 64},
+                {S8_INITIALIZER("fmuls"), ASSEMBLY_OPCODE_X86_FMUL, 32},   {S8_INITIALIZER("fmull"), ASSEMBLY_OPCODE_X86_FMUL, 64},
+                {S8_INITIALIZER("fsubs"), ASSEMBLY_OPCODE_X86_FSUB, 32},   {S8_INITIALIZER("fsubl"), ASSEMBLY_OPCODE_X86_FSUB, 64},
+                {S8_INITIALIZER("fsubrs"), ASSEMBLY_OPCODE_X86_FSUBR, 32}, {S8_INITIALIZER("fsubrl"), ASSEMBLY_OPCODE_X86_FSUBR, 64},
+                {S8_INITIALIZER("fdivs"), ASSEMBLY_OPCODE_X86_FDIV, 32},   {S8_INITIALIZER("fdivl"), ASSEMBLY_OPCODE_X86_FDIV, 64},
+                {S8_INITIALIZER("fdivrs"), ASSEMBLY_OPCODE_X86_FDIVR, 32}, {S8_INITIALIZER("fdivrl"), ASSEMBLY_OPCODE_X86_FDIVR, 64},
+            };
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(x87_memory_instructions); index += 1)
+            {
+                if (assembly_word_equal(mnemonic, x87_memory_instructions[index].name))
+                {
+                    *result = (AssemblyInstructionInfo){
+                        .opcode = x87_memory_instructions[index].opcode,
+                        .operand_count = 1,
+                        .suffix_width = x87_memory_instructions[index].width,
+                    };
+                    return true;
+                }
+            }
+        }
         if (syntax == ASSEMBLY_SYNTAX_INTEL && assembly_word_equal(mnemonic, S8("movq")))
         {
             *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_X86_MOVQ_MMX, .operand_count = 2};
@@ -1000,6 +1126,26 @@ BUSTER_GLOBAL_LOCAL u8 assembly_x86_avx_map(AssemblyOpcode opcode)
 BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_legacy_packed(AssemblyOpcode opcode)
 {
     return opcode >= ASSEMBLY_OPCODE_X86_MOVQ_MMX && opcode <= ASSEMBLY_OPCODE_X86_PMULLW_MMX;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_data(AssemblyOpcode opcode)
+{
+    return opcode >= ASSEMBLY_OPCODE_X86_FLD && opcode <= ASSEMBLY_OPCODE_X86_FISTP;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_arithmetic(AssemblyOpcode opcode)
+{
+    return opcode >= ASSEMBLY_OPCODE_X86_FADD && opcode <= ASSEMBLY_OPCODE_X86_FDIVR;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_pop_arithmetic(AssemblyOpcode opcode)
+{
+    return opcode >= ASSEMBLY_OPCODE_X86_FADDP && opcode <= ASSEMBLY_OPCODE_X86_FDIVRP;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_zero_operand(AssemblyOpcode opcode)
+{
+    return opcode >= ASSEMBLY_OPCODE_X86_F2XM1 && opcode <= ASSEMBLY_OPCODE_X86_FWAIT;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_rex_needed(u8 width, AssemblyRegister first, AssemblyRegister second)
@@ -1104,6 +1250,87 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     {
         instruction->size = 2;
         return instruction->operand_count == 0;
+    }
+    if (assembly_x86_opcode_is_x87_zero_operand(opcode))
+    {
+        instruction->size = opcode == ASSEMBLY_OPCODE_X86_FWAIT ? 1
+                            : opcode == ASSEMBLY_OPCODE_X86_FINIT || opcode == ASSEMBLY_OPCODE_X86_FCLEX ? 3
+                                                                                                          : 2;
+        return instruction->operand_count == 0;
+    }
+    if (assembly_x86_opcode_is_x87_data(opcode))
+    {
+        if (first->kind == ASSEMBLY_OPERAND_REGISTER)
+        {
+            if ((opcode != ASSEMBLY_OPCODE_X86_FLD && opcode != ASSEMBLY_OPCODE_X86_FST && opcode != ASSEMBLY_OPCODE_X86_FSTP) ||
+                first->reg.class != ASSEMBLY_REGISTER_X87)
+            {
+                return false;
+            }
+            instruction->width = 80;
+            instruction->size = 2;
+            return true;
+        }
+        if (first->kind != ASSEMBLY_OPERAND_MEMORY)
+        {
+            return false;
+        }
+        u8 width = first->memory.width;
+        bool valid_width = opcode == ASSEMBLY_OPCODE_X86_FLD ? width == 32 || width == 64 || width == 80
+                           : opcode == ASSEMBLY_OPCODE_X86_FST ? width == 32 || width == 64
+                           : opcode == ASSEMBLY_OPCODE_X86_FSTP ? width == 32 || width == 64 || width == 80
+                           : opcode == ASSEMBLY_OPCODE_X86_FILD ? width == 16 || width == 32 || width == 64
+                           : opcode == ASSEMBLY_OPCODE_X86_FIST ? width == 16 || width == 32
+                                                               : width == 16 || width == 32 || width == 64;
+        u32 address_size = 0;
+        if (!valid_width || !assembly_x86_memory_encoding_size(first->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->width = width;
+        instruction->size = (assembly_x86_memory_rex_needed(0, (AssemblyRegister){0}, first->memory) ? 1 : 0) + 1 + address_size;
+        return true;
+    }
+    if (assembly_x86_opcode_is_x87_arithmetic(opcode))
+    {
+        if (instruction->operand_count == 1 && first->kind == ASSEMBLY_OPERAND_MEMORY &&
+            (first->memory.width == 32 || first->memory.width == 64))
+        {
+            u32 address_size = 0;
+            if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
+            {
+                return false;
+            }
+            instruction->width = first->memory.width;
+            instruction->size = (assembly_x86_memory_rex_needed(0, (AssemblyRegister){0}, first->memory) ? 1 : 0) + 1 + address_size;
+            return true;
+        }
+        if (instruction->operand_count != 2 || first->kind != ASSEMBLY_OPERAND_REGISTER || second->kind != ASSEMBLY_OPERAND_REGISTER ||
+            first->reg.class != ASSEMBLY_REGISTER_X87 || second->reg.class != ASSEMBLY_REGISTER_X87 ||
+            (first->reg.index != 0 && second->reg.index != 0))
+        {
+            return false;
+        }
+        instruction->width = 80;
+        instruction->size = 2;
+        return true;
+    }
+    if (assembly_x86_opcode_is_x87_pop_arithmetic(opcode))
+    {
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || second->kind != ASSEMBLY_OPERAND_REGISTER ||
+            first->reg.class != ASSEMBLY_REGISTER_X87 || second->reg.class != ASSEMBLY_REGISTER_X87 || second->reg.index != 0)
+        {
+            return false;
+        }
+        instruction->width = 80;
+        instruction->size = 2;
+        return true;
+    }
+    if (opcode == ASSEMBLY_OPCODE_X86_FXCH)
+    {
+        instruction->width = 80;
+        instruction->size = 2;
+        return first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class == ASSEMBLY_REGISTER_X87;
     }
     if (assembly_x86_opcode_is_legacy_packed(opcode))
     {
@@ -1625,12 +1852,15 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
             operand_start = operand_end + 1;
         }
     }
-    if (parsed_operand_count != info.operand_count || operand_start < operands.length)
+    bool x87_memory_arithmetic = target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_opcode_is_x87_arithmetic(info.opcode) &&
+                                 parsed_operand_count == 1;
+    if ((!x87_memory_arithmetic && parsed_operand_count != info.operand_count) || operand_start < operands.length)
     {
         assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
                             (u32)operands.length, S8("invalid instruction operands"));
         return;
     }
+    instruction.operand_count = parsed_operand_count;
     if (target.cpu_arch == CPU_ARCH_X86_64 && syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 2)
     {
         AssemblyOperand temporary = instruction.operands[0];
@@ -1642,6 +1872,22 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         AssemblyOperand destination = instruction.operands[2];
         instruction.operands[2] = instruction.operands[0];
         instruction.operands[0] = destination;
+    }
+    if (target.cpu_arch == CPU_ARCH_X86_64 && syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 2 &&
+        instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER && instruction.operands[0].reg.class == ASSEMBLY_REGISTER_X87 &&
+        instruction.operands[0].reg.index != 0)
+    {
+        // The historical AT&T x87 register spellings reverse the non-commutative
+        // opcode names as well as the operand order for a non-top destination.
+        instruction.opcode = instruction.opcode == ASSEMBLY_OPCODE_X86_FSUB ? ASSEMBLY_OPCODE_X86_FSUBR
+                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FSUBR ? ASSEMBLY_OPCODE_X86_FSUB
+                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FDIV ? ASSEMBLY_OPCODE_X86_FDIVR
+                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FDIVR ? ASSEMBLY_OPCODE_X86_FDIV
+                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FSUBP ? ASSEMBLY_OPCODE_X86_FSUBRP
+                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FSUBRP ? ASSEMBLY_OPCODE_X86_FSUBP
+                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FDIVP ? ASSEMBLY_OPCODE_X86_FDIVRP
+                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FDIVRP ? ASSEMBLY_OPCODE_X86_FDIVP
+                                                                                : instruction.opcode;
     }
     if (target.cpu_arch == CPU_ARCH_X86_64 && instruction.opcode == ASSEMBLY_OPCODE_X86_MOV &&
         ((instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER &&
@@ -2142,6 +2388,149 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         {
             assembly_emit_byte(builder, 0x0f);
             assembly_emit_byte(builder, 0x77);
+            continue;
+        }
+        if (assembly_x86_opcode_is_x87_zero_operand(instruction->opcode))
+        {
+            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FWAIT)
+            {
+                assembly_emit_byte(builder, 0x9b);
+                continue;
+            }
+            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FINIT || instruction->opcode == ASSEMBLY_OPCODE_X86_FCLEX)
+            {
+                assembly_emit_byte(builder, 0x9b);
+            }
+            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FINIT || instruction->opcode == ASSEMBLY_OPCODE_X86_FNINIT ||
+                instruction->opcode == ASSEMBLY_OPCODE_X86_FCLEX || instruction->opcode == ASSEMBLY_OPCODE_X86_FNCLEX)
+            {
+                assembly_emit_byte(builder, 0xdb);
+                assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_FINIT ||
+                                                   instruction->opcode == ASSEMBLY_OPCODE_X86_FNINIT
+                                               ? 0xe3
+                                               : 0xe2);
+                continue;
+            }
+            assembly_emit_byte(builder, 0xd9);
+            u8 second_byte = instruction->opcode == ASSEMBLY_OPCODE_X86_F2XM1 ? 0xf0
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FABS ? 0xe1
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FCHS ? 0xe0
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLD1 ? 0xe8
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDZ ? 0xee
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDPI ? 0xeb
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDL2E ? 0xea
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDL2T ? 0xe9
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDLG2 ? 0xec
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDLN2 ? 0xed
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FSQRT ? 0xfa
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FSIN ? 0xfe
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FCOS ? 0xff
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FSINCOS ? 0xfb
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FPTAN ? 0xf2
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FPATAN ? 0xf3
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FYL2X ? 0xf1
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FYL2XP1 ? 0xf9
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FRNDINT ? 0xfc
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FSCALE ? 0xfd
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FPREM ? 0xf8
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FPREM1 ? 0xf5
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FXTRACT ? 0xf4
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FTST ? 0xe4
+                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FXAM ? 0xe5
+                                                                              : 0xd0;
+            assembly_emit_byte(builder, second_byte);
+            continue;
+        }
+        if (assembly_x86_opcode_is_x87_data(instruction->opcode))
+        {
+            AssemblyOperand operand = instruction->operands[0];
+            if (operand.kind == ASSEMBLY_OPERAND_REGISTER)
+            {
+                assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_FLD ? 0xd9 : 0xdd);
+                assembly_emit_byte(builder, (u8)((instruction->opcode == ASSEMBLY_OPCODE_X86_FLD ? 0xc0
+                                                 : instruction->opcode == ASSEMBLY_OPCODE_X86_FST ? 0xd0
+                                                                                                  : 0xd8) +
+                                                operand.reg.index));
+                continue;
+            }
+            assembly_x86_emit_memory_prefix(builder, 0, (AssemblyRegister){0}, operand.memory);
+            u8 primary = instruction->opcode == ASSEMBLY_OPCODE_X86_FLD
+                             ? (instruction->width == 32 ? 0xd9 : instruction->width == 64 ? 0xdd : 0xdb)
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FST
+                             ? (instruction->width == 32 ? 0xd9 : 0xdd)
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FSTP
+                             ? (instruction->width == 32 ? 0xd9 : instruction->width == 64 ? 0xdd : 0xdb)
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FILD
+                             ? (instruction->width == 32 ? 0xdb : 0xdf)
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FIST
+                             ? (instruction->width == 32 ? 0xdb : 0xdf)
+                             : (instruction->width == 32 ? 0xdb : 0xdf);
+            u8 group = instruction->opcode == ASSEMBLY_OPCODE_X86_FLD ? (instruction->width == 80 ? 5 : 0)
+                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FST ? 2
+                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FSTP ? (instruction->width == 80 ? 7 : 3)
+                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FILD ? (instruction->width == 64 ? 5 : 0)
+                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FIST ? 2
+                                                                        : (instruction->width == 64 ? 7 : 3);
+            assembly_emit_byte(builder, primary);
+            if (!assembly_x86_emit_memory(builder, instruction, group, operand.memory))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                    S8("x87 memory displacement is out of range"));
+                return;
+            }
+            continue;
+        }
+        if (assembly_x86_opcode_is_x87_arithmetic(instruction->opcode))
+        {
+            if (instruction->operand_count == 1)
+            {
+                AssemblyMemory memory = instruction->operands[0].memory;
+                assembly_x86_emit_memory_prefix(builder, 0, (AssemblyRegister){0}, memory);
+                assembly_emit_byte(builder, instruction->width == 32 ? 0xd8 : 0xdc);
+                u8 group = instruction->opcode == ASSEMBLY_OPCODE_X86_FADD ? 0
+                           : instruction->opcode == ASSEMBLY_OPCODE_X86_FMUL ? 1
+                           : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUB ? 4
+                           : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUBR ? 5
+                           : instruction->opcode == ASSEMBLY_OPCODE_X86_FDIV ? 6
+                                                                            : 7;
+                if (!assembly_x86_emit_memory(builder, instruction, group, memory))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                        S8("x87 memory displacement is out of range"));
+                    return;
+                }
+                continue;
+            }
+            AssemblyRegister destination = instruction->operands[0].reg;
+            AssemblyRegister source = instruction->operands[1].reg;
+            bool destination_is_top = destination.index == 0;
+            u8 index = destination_is_top ? source.index : destination.index;
+            assembly_emit_byte(builder, destination_is_top ? 0xd8 : 0xdc);
+            u8 operation = instruction->opcode == ASSEMBLY_OPCODE_X86_FADD ? 0xc0
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FMUL ? 0xc8
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUB ? (destination_is_top ? 0xe0 : 0xe8)
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUBR ? (destination_is_top ? 0xe8 : 0xe0)
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FDIV ? (destination_is_top ? 0xf0 : 0xf8)
+                                                                           : (destination_is_top ? 0xf8 : 0xf0);
+            assembly_emit_byte(builder, (u8)(operation + index));
+            continue;
+        }
+        if (assembly_x86_opcode_is_x87_pop_arithmetic(instruction->opcode))
+        {
+            assembly_emit_byte(builder, 0xde);
+            u8 operation = instruction->opcode == ASSEMBLY_OPCODE_X86_FADDP ? 0xc0
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FMULP ? 0xc8
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUBP ? 0xe8
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUBRP ? 0xe0
+                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FDIVP ? 0xf8
+                                                                           : 0xf0;
+            assembly_emit_byte(builder, (u8)(operation + instruction->operands[0].reg.index));
+            continue;
+        }
+        if (instruction->opcode == ASSEMBLY_OPCODE_X86_FXCH)
+        {
+            assembly_emit_byte(builder, 0xd9);
+            assembly_emit_byte(builder, (u8)(0xc8 + instruction->operands[0].reg.index));
             continue;
         }
         if (assembly_x86_opcode_is_legacy_packed(instruction->opcode))

@@ -366,6 +366,201 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, x86_att_mmx_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
     BUSTER_TEST(arguments, x86_att_mmx.diagnostic_count == 0 && x86_att_mmx.bytes.length == sizeof(expected_x86_mmx) &&
                                memcmp(x86_att_mmx.bytes.pointer, expected_x86_mmx, sizeof(expected_x86_mmx)) == 0);
+    u8 expected_x86_x87[] = {
+        0xd9, 0xc3, 0xdd, 0xd4, 0xdd, 0xdd, 0xd9, 0xce,
+        0xd8, 0xc2, 0xdc, 0xcb, 0xd8, 0xe4, 0xdc, 0xe5,
+        0xd8, 0xf6, 0xdc, 0xf7, 0xde, 0xc1, 0xde, 0xca,
+        0xde, 0xeb, 0xde, 0xe4, 0xde, 0xfd, 0xde, 0xf6,
+        0xd9, 0x40, 0x08, 0x41, 0xdd, 0x01, 0x41, 0xdb, 0x2c, 0x24,
+        0x41, 0xd9, 0x55, 0x10, 0x41, 0xdd, 0x16, 0x41, 0xd9, 0x1f,
+        0xdd, 0x1b, 0xdb, 0x39, 0xdf, 0x02, 0xdb, 0x06, 0xdf, 0x2f,
+        0x41, 0xdf, 0x10, 0xdb, 0x55, 0x00, 0xdf, 0x1c, 0x24,
+        0x41, 0xdb, 0x1a, 0x41, 0xdf, 0x3b,
+        0xd8, 0x00, 0xdc, 0x09, 0xd8, 0x22, 0xdc, 0x2b, 0xd8, 0x36, 0xdc, 0x3f,
+        0xd9, 0xf0, 0xd9, 0xe1, 0xd9, 0xe0, 0xd9, 0xe8, 0xd9, 0xee,
+        0xd9, 0xeb, 0xd9, 0xea, 0xd9, 0xe9, 0xd9, 0xec, 0xd9, 0xed,
+        0xd9, 0xfa, 0xd9, 0xfe, 0xd9, 0xff, 0xd9, 0xfb, 0xd9, 0xf2,
+        0xd9, 0xf3, 0xd9, 0xf1, 0xd9, 0xf9, 0xd9, 0xfc, 0xd9, 0xfd,
+        0xd9, 0xf8, 0xd9, 0xf5, 0xd9, 0xf4, 0xd9, 0xe4, 0xd9, 0xe5,
+        0xd9, 0xd0, 0x9b, 0xdb, 0xe3, 0xdb, 0xe3, 0x9b, 0xdb, 0xe2, 0xdb, 0xe2, 0x9b,
+    };
+    String8 x86_intel_x87_source =
+        S8("fld st(3)\n"
+           "fst st(4)\n"
+           "fstp st(5)\n"
+           "fxch st(6)\n"
+           "fadd st(0), st(2)\n"
+           "fmul st(3), st(0)\n"
+           "fsub st(0), st(4)\n"
+           "fsubr st(5), st(0)\n"
+           "fdiv st(0), st(6)\n"
+           "fdivr st(7), st(0)\n"
+           "faddp st(1), st(0)\n"
+           "fmulp st(2), st(0)\n"
+           "fsubp st(3), st(0)\n"
+           "fsubrp st(4), st(0)\n"
+           "fdivp st(5), st(0)\n"
+           "fdivrp st(6), st(0)\n"
+           "fld dword ptr [rax + 8]\n"
+           "fld qword ptr [r9]\n"
+           "fld tbyte ptr [r12]\n"
+           "fst dword ptr [r13 + 16]\n"
+           "fst qword ptr [r14]\n"
+           "fstp dword ptr [r15]\n"
+           "fstp qword ptr [rbx]\n"
+           "fstp tbyte ptr [rcx]\n"
+           "fild word ptr [rdx]\n"
+           "fild dword ptr [rsi]\n"
+           "fild qword ptr [rdi]\n"
+           "fist word ptr [r8]\n"
+           "fist dword ptr [rbp]\n"
+           "fistp word ptr [rsp]\n"
+           "fistp dword ptr [r10]\n"
+           "fistp qword ptr [r11]\n"
+           "fadd dword ptr [rax]\n"
+           "fmul qword ptr [rcx]\n"
+           "fsub dword ptr [rdx]\n"
+           "fsubr qword ptr [rbx]\n"
+           "fdiv dword ptr [rsi]\n"
+           "fdivr qword ptr [rdi]\n"
+           "f2xm1\n"
+           "fabs\n"
+           "fchs\n"
+           "fld1\n"
+           "fldz\n"
+           "fldpi\n"
+           "fldl2e\n"
+           "fldl2t\n"
+           "fldlg2\n"
+           "fldln2\n"
+           "fsqrt\n"
+           "fsin\n"
+           "fcos\n"
+           "fsincos\n"
+           "fptan\n"
+           "fpatan\n"
+           "fyl2x\n"
+           "fyl2xp1\n"
+           "frndint\n"
+           "fscale\n"
+           "fprem\n"
+           "fprem1\n"
+           "fxtract\n"
+           "ftst\n"
+           "fxam\n"
+           "fnop\n"
+           "finit\n"
+           "fninit\n"
+           "fclex\n"
+           "fnclex\n"
+           "fwait\n");
+    AssemblyEncodeResult x86_intel_x87 = assembly_encode(
+        arguments->arena, x86_intel_x87_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_x87.diagnostic_count == 0 && x86_intel_x87.bytes.length == sizeof(expected_x86_x87) &&
+                               memcmp(x86_intel_x87.bytes.pointer, expected_x86_x87, sizeof(expected_x86_x87)) == 0);
+    String8 x86_att_x87_source =
+        S8("fld %st(3)\n"
+           "fst %st(4)\n"
+           "fstp %st(5)\n"
+           "fxch %st(6)\n"
+           "fadd %st(2), %st\n"
+           "fmul %st, %st(3)\n"
+           "fsub %st(4), %st\n"
+           "fsub %st, %st(5)\n"
+           "fdiv %st(6), %st\n"
+           "fdiv %st, %st(7)\n"
+           "faddp %st, %st(1)\n"
+           "fmulp %st, %st(2)\n"
+           "fsubrp %st, %st(3)\n"
+           "fsubp %st, %st(4)\n"
+           "fdivrp %st, %st(5)\n"
+           "fdivp %st, %st(6)\n"
+           "flds 8(%rax)\n"
+           "fldl (%r9)\n"
+           "fldt (%r12)\n"
+           "fsts 16(%r13)\n"
+           "fstl (%r14)\n"
+           "fstps (%r15)\n"
+           "fstpl (%rbx)\n"
+           "fstpt (%rcx)\n"
+           "filds (%rdx)\n"
+           "fildl (%rsi)\n"
+           "fildq (%rdi)\n"
+           "fists (%r8)\n"
+           "fistl (%rbp)\n"
+           "fistps (%rsp)\n"
+           "fistpl (%r10)\n"
+           "fistpq (%r11)\n"
+           "fadds (%rax)\n"
+           "fmull (%rcx)\n"
+           "fsubs (%rdx)\n"
+           "fsubrl (%rbx)\n"
+           "fdivs (%rsi)\n"
+           "fdivrl (%rdi)\n"
+           "f2xm1\n"
+           "fabs\n"
+           "fchs\n"
+           "fld1\n"
+           "fldz\n"
+           "fldpi\n"
+           "fldl2e\n"
+           "fldl2t\n"
+           "fldlg2\n"
+           "fldln2\n"
+           "fsqrt\n"
+           "fsin\n"
+           "fcos\n"
+           "fsincos\n"
+           "fptan\n"
+           "fpatan\n"
+           "fyl2x\n"
+           "fyl2xp1\n"
+           "frndint\n"
+           "fscale\n"
+           "fprem\n"
+           "fprem1\n"
+           "fxtract\n"
+           "ftst\n"
+           "fxam\n"
+           "fnop\n"
+           "finit\n"
+           "fninit\n"
+           "fclex\n"
+           "fnclex\n"
+           "fwait\n");
+    AssemblyEncodeResult x86_att_x87 = assembly_encode(
+        arguments->arena, x86_att_x87_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_x87.diagnostic_count == 0 && x86_att_x87.bytes.length == sizeof(expected_x86_x87) &&
+                               memcmp(x86_att_x87.bytes.pointer, expected_x86_x87, sizeof(expected_x86_x87)) == 0);
+    AssemblyEncodeResult x86_x87_relocation = assembly_encode(
+        arguments->arena, S8("fld qword ptr [rip + external_x87]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_x86_x87_relocation[] = {0xdd, 0x05, 0x00, 0x00, 0x00, 0x00};
+    BUSTER_TEST(arguments, x86_x87_relocation.diagnostic_count == 0 &&
+                               x86_x87_relocation.bytes.length == sizeof(expected_x86_x87_relocation) &&
+                               memcmp(x86_x87_relocation.bytes.pointer, expected_x86_x87_relocation,
+                                      sizeof(expected_x86_x87_relocation)) == 0);
+    BUSTER_TEST(arguments, x86_x87_relocation.relocation_count == 1 && x86_x87_relocation.relocations[0].offset == 2 &&
+                               x86_x87_relocation.relocations[0].addend == -4 &&
+                               x86_x87_relocation.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                               string_equal(x86_x87_relocation.symbols[x86_x87_relocation.relocations[0].symbol].name,
+                                            S8("external_x87")));
+    AssemblyEncodeResult invalid_x86_x87 = assembly_encode(
+        arguments->arena,
+        S8("fld [rax]\n"
+           "fstp word ptr [rax]\n"
+           "fild tbyte ptr [rax]\n"
+           "fistp tbyte ptr [rax]\n"
+           "fadd st(2), st(3)\n"
+           "fadd qword ptr [rax], st(0)\n"
+           "faddp st(2), st(1)\n"
+           "fxch rax\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_x86_x87.diagnostic_count == 8);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_x87.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_x86_x87.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
     AssemblyEncodeResult x86_xmm_packed = assembly_encode(
         arguments->arena, S8("paddd xmm0, xmm1\n"),
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
