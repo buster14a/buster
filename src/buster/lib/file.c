@@ -51,13 +51,19 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     FileMapRead result = {0};
 
 #if BUSTER_ANDROID || BUSTER_IOS
-    result.bytes = file_read(arena, path, options);
+    if (!options.map_required)
+    {
+        result.bytes = file_read(arena, path, options);
+    }
     return result;
 #endif
 
     if (!path.length || options.start_padding || options.end_padding || options.start_alignment || options.end_alignment)
     {
-        result.bytes = file_read(arena, path, options);
+        if (!options.map_required)
+        {
+            result.bytes = file_read(arena, path, options);
+        }
         return result;
     }
 
@@ -118,7 +124,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     }
 #endif
 
-    if (!result.bytes.pointer)
+    if (!result.bytes.pointer && !options.map_required)
     {
         result.bytes = file_read(arena, path, options);
     }

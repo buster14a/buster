@@ -914,30 +914,27 @@ BUSTER_GLOBAL_LOCAL bool self_host_find_rsds_path(ByteSlice image, SelfHostRsdsP
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL ByteSlice self_host_canonicalize_pe(Arena* arena, ByteSlice image)
+BUSTER_GLOBAL_LOCAL bool self_host_compare_pe(ByteSlice left, ByteSlice right)
 {
-    SelfHostRsdsPath path = {0};
-    if (!arena || !self_host_find_rsds_path(image, &path))
+    SelfHostRsdsPath left_path = {0};
+    SelfHostRsdsPath right_path = {0};
+    if (!self_host_find_rsds_path(left, &left_path) || !self_host_find_rsds_path(right, &right_path) || left_path.start != right_path.start ||
+        left_path.end > left.length || right_path.end > right.length)
     {
-        return (ByteSlice){0};
+        return false;
     }
-    String8 canonical_path = S8("self-host.pdb");
-    u64 path_size = path.end - path.start;
-    u64 canonical_size = canonical_path.length + 1;
-    if (path_size > image.length || image.length - path_size > UINT64_MAX - canonical_size)
+
+    // The old comparison replaced each path with the same "self-host.pdb\0"
+    // before comparing the full copies. Requiring the replacement point to be
+    // at the same offset preserves every PE byte before the path and prevents
+    // a shifted RSDS record from changing any other bytes under this exception.
+    u64 left_suffix_length = left.length - left_path.end;
+    u64 right_suffix_length = right.length - right_path.end;
+    if (left_suffix_length != right_suffix_length || !memory_compare(left.pointer, right.pointer, left_path.start))
     {
-        return (ByteSlice){0};
+        return false;
     }
-    u64 size = image.length - path_size + canonical_size;
-    u8* bytes = arena_allocate(arena, u8, size);
-    memcpy(bytes, image.pointer, path.start);
-    memcpy(bytes + path.start, canonical_path.pointer, canonical_path.length);
-    bytes[path.start + canonical_path.length] = 0;
-    memcpy(bytes + path.start + canonical_size, image.pointer + path.end, image.length - path.end);
-    return (ByteSlice){
-        .pointer = bytes,
-        .length = size,
-    };
+    return memory_compare(left.pointer + left_path.end, right.pointer + right_path.end, left_suffix_length);
 }
 #endif
 
@@ -997,23 +994,61 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* data)
 {
     SelfHostCompare* compare = data;
-    ByteSlice stage1 = file_read(arena, compare->stage1, (FileReadOptions){0});
-    ByteSlice stage2 = file_read(arena, compare->stage2, (FileReadOptions){0});
+    ByteSlice stage1 = {0};
+    ByteSlice stage2 = {0};
+#if BUSTER_WINDOWS
+    FileMapRead stage1_map = file_map_read(arena, compare->stage1, (FileReadOptions){.map_required = 1});
+    if (!stage1_map.mapped_pointer)
+    {
+        file_map_unmap(stage1_map);
+        string_print(S8("error: could not map self-host outputs\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    FileMapRead stage2_map = file_map_read(arena, compare->stage2, (FileReadOptions){.map_required = 1});
+    if (!stage2_map.mapped_pointer)
+    {
+        file_map_unmap(stage2_map);
+        file_map_unmap(stage1_map);
+        string_print(S8("error: could not map self-host outputs\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    FileMapRead pdb1_map = file_map_read(arena, compare->pdb1, (FileReadOptions){.map_required = 1});
+    if (!pdb1_map.mapped_pointer)
+    {
+        file_map_unmap(pdb1_map);
+        file_map_unmap(stage2_map);
+        file_map_unmap(stage1_map);
+        string_print(S8("error: could not map self-host outputs\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    FileMapRead pdb2_map = file_map_read(arena, compare->pdb2, (FileReadOptions){.map_required = 1});
+    if (!pdb2_map.mapped_pointer)
+    {
+        file_map_unmap(pdb2_map);
+        file_map_unmap(pdb1_map);
+        file_map_unmap(stage2_map);
+        file_map_unmap(stage1_map);
+        string_print(S8("error: could not map self-host outputs\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    stage1 = stage1_map.bytes;
+    stage2 = stage2_map.bytes;
+    bool executable_equal = stage1_map.mapped_pointer && stage2_map.mapped_pointer && self_host_compare_pe(stage1, stage2);
+    bool pdb_equal = pdb1_map.mapped_pointer && pdb2_map.mapped_pointer && pdb1_map.bytes.length == pdb2_map.bytes.length &&
+                     memory_compare(pdb1_map.bytes.pointer, pdb2_map.bytes.pointer, pdb1_map.bytes.length);
+    file_map_unmap(pdb2_map);
+    file_map_unmap(pdb1_map);
+    file_map_unmap(stage2_map);
+    file_map_unmap(stage1_map);
+    if (!executable_equal || !pdb_equal)
+#else
+    stage1 = file_read(arena, compare->stage1, (FileReadOptions){0});
+    stage2 = file_read(arena, compare->stage2, (FileReadOptions){0});
     if (!stage1.pointer || !stage2.pointer)
     {
         string_print(S8("error: could not read self-host stage outputs\n"));
         return PROCESS_RESULT_FAILED;
     }
-#if BUSTER_WINDOWS
-    ByteSlice canonical_stage1 = self_host_canonicalize_pe(arena, stage1);
-    ByteSlice canonical_stage2 = self_host_canonicalize_pe(arena, stage2);
-    ByteSlice pdb1 = file_read(arena, compare->pdb1, (FileReadOptions){0});
-    ByteSlice pdb2 = file_read(arena, compare->pdb2, (FileReadOptions){0});
-    bool executable_equal = canonical_stage1.pointer && canonical_stage2.pointer && canonical_stage1.length == canonical_stage2.length &&
-                            memory_compare(canonical_stage1.pointer, canonical_stage2.pointer, canonical_stage1.length);
-    bool pdb_equal = pdb1.pointer && pdb2.pointer && pdb1.length == pdb2.length && memory_compare(pdb1.pointer, pdb2.pointer, pdb1.length);
-    if (!executable_equal || !pdb_equal)
-#else
     if (stage1.length != stage2.length || !memory_compare(stage1.pointer, stage2.pointer, stage1.length))
 #endif
     {

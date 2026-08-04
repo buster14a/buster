@@ -22,6 +22,27 @@ BUSTER_TEST_F_DECL UnitTestResult file_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, copied, content);
     arguments->arena->position = arena_position;
 
+    FileMapRead required_map = file_map_read(arguments->arena, destination_path, (FileReadOptions){.map_required = 1});
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, required_map.mapped_pointer != 0);
+    BUSTER_TEST(arguments, required_map.bytes.pointer != 0);
+#else
+    BUSTER_TEST(arguments, required_map.mapped_pointer == 0);
+    BUSTER_TEST(arguments, required_map.bytes.pointer == 0);
+    BUSTER_TEST(arguments, arguments->arena->position == arena_position);
+#endif
+    file_map_unmap(required_map);
+
+    FileMapRead fallback_map = file_map_read(arguments->arena, destination_path, (FileReadOptions){0});
+    BUSTER_TEST(arguments, fallback_map.bytes.pointer != 0);
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, fallback_map.mapped_pointer != 0);
+#else
+    BUSTER_TEST(arguments, fallback_map.mapped_pointer == 0);
+#endif
+    file_map_unmap(fallback_map);
+    arguments->arena->position = arena_position;
+
     BUSTER_TEST(arguments, file_write(source_path, (ByteSlice){0}));
     ByteSlice empty = file_read(arguments->arena, source_path,
                                 (FileReadOptions){

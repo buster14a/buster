@@ -8,6 +8,7 @@ struct FileReadOptions
     u32 start_alignment;
     u32 end_padding;
     u32 end_alignment;
+    u32 map_required; // file_map_read returns an empty result instead of falling back to file_read.
 };
 
 typedef struct FileMapRead FileMapRead;
