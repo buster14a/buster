@@ -97,6 +97,7 @@ typedef enum BuildArgument
 {
     BUILD_ARGUMENT_BUILD_DIRECTORY,
     BUILD_ARGUMENT_BUILD_DIR,
+    BUILD_ARGUMENT_AUDIT,
     BUILD_ARGUMENT_CC,
     BUILD_ARGUMENT_CLANG,
     BUILD_ARGUMENT_CI,
@@ -139,6 +140,7 @@ typedef enum BuildArgument
 BUSTER_GLOBAL_LOCAL String8 build_arguments[] = {
     [BUILD_ARGUMENT_BUILD_DIRECTORY] = S8_INITIALIZER("--build-directory"),
     [BUILD_ARGUMENT_BUILD_DIR] = S8_INITIALIZER("--build-dir"),
+    [BUILD_ARGUMENT_AUDIT] = S8_INITIALIZER("--audit"),
     [BUILD_ARGUMENT_CC] = S8_INITIALIZER("--cc"),
     [BUILD_ARGUMENT_CLANG] = S8_INITIALIZER("--clang"),
     [BUILD_ARGUMENT_CI] = S8_INITIALIZER("--ci"),
@@ -1268,6 +1270,7 @@ struct AssemblyImportOptions
     u32 xed_datafiles_set : 1;
     u32 aarch64_json_set : 1;
     u32 output_directory_set : 1;
+    u32 audit : 1;
 };
 
 typedef struct CompileCommandEntry CompileCommandEntry;
@@ -6525,12 +6528,40 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_string_find(SliceString8 strings, Strin
     return low < strings.length && string_equal(strings.pointer[low], wanted);
 }
 
+BUSTER_GLOBAL_LOCAL bool aarch64_import_alias_source_present(String8 json)
+{
+    String8 instances = {0};
+    if (!json_raw_object_find(json, S8("!instanceof"), &instances))
+    {
+        return false;
+    }
+    String8 aliases = {0};
+    return json_raw_object_find(instances, S8("AArch64InstAlias"), &aliases) ||
+           json_raw_object_find(instances, S8("AArch64InstAliases"), &aliases) ||
+           json_raw_object_find(instances, S8("InstAlias"), &aliases);
+}
+
+BUSTER_GLOBAL_LOCAL String8 aarch64_import_alias_source_diagnostic(bool audit)
+{
+    return audit ? S8("audit: AArch64 alias records are present in the raw source but are not imported by this reduced schema path; generated artifacts remain blocked\n") :
+                   S8("error: AArch64 alias records are present in the raw source but are not imported by this reduced schema path\n");
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_alias_source_is_fatal(bool audit)
+{
+    return !audit;
+}
+
 BUSTER_GLOBAL_LOCAL SliceString8 aarch64_import_instruction_names(Arena* arena, String8 json, bool* valid)
 {
     SliceString8 result = {0};
     String8 instances = {0};
     String8 names_array = {0};
-    if (!json_raw_object_find(json, S8("!instanceof"), &instances) || !json_raw_object_find(instances, S8("AArch64Inst"), &names_array))
+    if (!json_raw_object_find(json, S8("!instanceof"), &instances))
+    {
+        return result;
+    }
+    if (!json_raw_object_find(instances, S8("AArch64Inst"), &names_array))
     {
         *valid = false;
         return result;
@@ -6572,6 +6603,68 @@ struct Aarch64ImportFields
     String8 input_operands;
     String8 predicates;
 };
+
+typedef struct Aarch64ImportRootObject Aarch64ImportRootObject;
+struct Aarch64ImportRootObject
+{
+    String8 name;
+    String8 object;
+};
+
+typedef struct Aarch64ImportReducedObject Aarch64ImportReducedObject;
+struct Aarch64ImportReducedObject
+{
+    String8 name;
+    Aarch64ImportFields fields;
+};
+
+BUSTER_GLOBAL_LOCAL int aarch64_import_root_object_compare(const void* left_pointer, const void* right_pointer)
+{
+    Aarch64ImportRootObject const* left = (Aarch64ImportRootObject const*)left_pointer;
+    Aarch64ImportRootObject const* right = (Aarch64ImportRootObject const*)right_pointer;
+    return assembly_import_string_compare(&left->name, &right->name);
+}
+
+BUSTER_GLOBAL_LOCAL int aarch64_import_reduced_object_compare(const void* left_pointer, const void* right_pointer)
+{
+    Aarch64ImportReducedObject const* left = (Aarch64ImportReducedObject const*)left_pointer;
+    Aarch64ImportReducedObject const* right = (Aarch64ImportReducedObject const*)right_pointer;
+    return assembly_import_string_compare(&left->name, &right->name);
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_emit_predicates(Arena* output, String8 predicates);
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_emit_record(Arena* output, String8 raw_name, Aarch64ImportFields fields,
+                                                     bool has_pseudo)
+{
+    if (!fields.inst.length || !fields.assembly.length || !fields.output_operands.length || !fields.input_operands.length ||
+        !fields.predicates.length || (has_pseudo && !fields.pseudo.length))
+    {
+        return false;
+    }
+    if (has_pseudo && !string_equal(fields.pseudo, S8("0")))
+    {
+        return true;
+    }
+
+    arena_append_string8(output, S8("{\"name\":"));
+    arena_append_string8(output, raw_name);
+    arena_append_string8(output, S8(",\"inst\":"));
+    arena_append_string8(output, fields.inst);
+    arena_append_string8(output, S8(",\"asm\":"));
+    arena_append_string8(output, fields.assembly);
+    arena_append_string8(output, S8(",\"out\":"));
+    arena_append_string8(output, fields.output_operands);
+    arena_append_string8(output, S8(",\"in\":"));
+    arena_append_string8(output, fields.input_operands);
+    arena_append_string8(output, S8(",\"predicates\":"));
+    if (!aarch64_import_emit_predicates(output, fields.predicates))
+    {
+        return false;
+    }
+    arena_append_string8(output, S8("}\n"));
+    return true;
+}
 
 BUSTER_GLOBAL_LOCAL bool aarch64_import_fields(String8 object, Aarch64ImportFields* fields)
 {
@@ -6638,6 +6731,19 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_emit_predicates(Arena* output, String8 p
             first = false;
             arena_append_string8(output, definition);
         }
+        else if (predicate.length >= 2 && predicate.pointer[0] == '"' && predicate.pointer[predicate.length - 1] == '"')
+        {
+            if (!first)
+            {
+                arena_append_char8(output, ',');
+            }
+            first = false;
+            arena_append_string8(output, predicate);
+        }
+        else
+        {
+            return false;
+        }
     }
     arena_append_char8(output, ']');
     return valid;
@@ -6647,14 +6753,119 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_emit(Arena* arena, Arena* output, String
 {
     bool valid = true;
     SliceString8 instruction_names = aarch64_import_instruction_names(arena, json, &valid);
-    if (!valid || !instruction_names.length)
+    if (!valid)
     {
         return false;
     }
 
+    // The checked-in audit file is also accepted as an importer input. This is
+    // useful for deterministic regeneration tests and keeps the canonical
+    // reduced JSONL independently consumable without llvm-tblgen.
+    if (!instruction_names.length)
+    {
+        u64 reduced_line_count = 0;
+        u64 start = 0;
+        while (start < json.length)
+        {
+            u64 end = start;
+            while (end < json.length && json.pointer[end] != '\n')
+            {
+                end += 1;
+            }
+            if (assembly_import_trim(string_slice(json, start, end)).length)
+            {
+                reduced_line_count += 1;
+            }
+            start = end + (end < json.length);
+        }
+        if (!reduced_line_count)
+        {
+            *imported_count = 0;
+            return false;
+        }
+        Aarch64ImportReducedObject* selected = arena_allocate(arena, Aarch64ImportReducedObject, reduced_line_count);
+        u64 selected_count = 0;
+        start = 0;
+        while (start < json.length)
+        {
+            u64 end = start;
+            while (end < json.length && json.pointer[end] != '\n')
+            {
+                end += 1;
+            }
+            String8 line = assembly_import_trim(string_slice(json, start, end));
+            if (line.length)
+            {
+                JsonParser line_parser = {.text = line};
+                bool line_valid = json_consume(&line_parser, '{');
+                String8 raw_name = {0};
+                Aarch64ImportFields fields = {0};
+                while (line_valid)
+                {
+                    String8 raw_key = {0};
+                    String8 value = {0};
+                    if (!json_raw_object_next(&line_parser, &raw_key, &value, &line_valid))
+                    {
+                        break;
+                    }
+                    String8 key = json_raw_key_text(raw_key);
+                    if (string_equal(key, S8("name")))
+                    {
+                        raw_name = value;
+                    }
+                    else if (string_equal(key, S8("inst")))
+                    {
+                        fields.inst = value;
+                    }
+                    else if (string_equal(key, S8("asm")))
+                    {
+                        fields.assembly = value;
+                    }
+                    else if (string_equal(key, S8("out")))
+                    {
+                        fields.output_operands = value;
+                    }
+                    else if (string_equal(key, S8("in")))
+                    {
+                        fields.input_operands = value;
+                    }
+                    else if (string_equal(key, S8("predicates")))
+                    {
+                        fields.predicates = value;
+                    }
+                }
+                json_skip_whitespace(&line_parser);
+                line_valid = line_valid && line_parser.index == line_parser.text.length && raw_name.length;
+                if (!line_valid || selected_count >= reduced_line_count)
+                {
+                    return false;
+                }
+                selected[selected_count++] = (Aarch64ImportReducedObject){.name = raw_name, .fields = fields};
+            }
+            start = end + (end < json.length);
+        }
+        if (selected_count != reduced_line_count)
+        {
+            return false;
+        }
+        if (selected_count > 1)
+        {
+            qsort(selected, selected_count, sizeof(selected[0]), aarch64_import_reduced_object_compare);
+        }
+        for (u64 index = 0; index < selected_count; index += 1)
+        {
+            if (!aarch64_import_emit_record(output, selected[index].name, selected[index].fields, false))
+            {
+                return false;
+            }
+        }
+        *imported_count = selected_count;
+        return true;
+    }
     JsonParser parser = {.text = json};
     valid = json_consume(&parser, '{');
-    u64 count = 0;
+    Aarch64ImportRootObject* selected = arena_allocate(arena, Aarch64ImportRootObject, instruction_names.length);
+    u64 selected_count = 0;
     while (valid)
     {
         String8 raw_name = {0};
@@ -6664,40 +6875,42 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_emit(Arena* arena, Arena* output, String
             break;
         }
         String8 name = json_raw_key_text(raw_name);
-        if (!assembly_import_string_find(instruction_names, name))
+        if (assembly_import_string_find(instruction_names, name))
         {
-            continue;
+            if (selected_count >= instruction_names.length)
+            {
+                valid = false;
+                break;
+            }
+            selected[selected_count++] = (Aarch64ImportRootObject){.name = raw_name, .object = object};
         }
-
+    }
+    json_skip_whitespace(&parser);
+    valid = valid && parser.index == parser.text.length;
+    if (valid && selected_count != instruction_names.length)
+    {
+        valid = false;
+    }
+    if (valid && selected_count > 1)
+    {
+        qsort(selected, selected_count, sizeof(selected[0]), aarch64_import_root_object_compare);
+    }
+    u64 count = 0;
+    for (u64 index = 0; valid && index < selected_count; index += 1)
+    {
         Aarch64ImportFields fields = {0};
-        if (!aarch64_import_fields(object, &fields))
+        if (!aarch64_import_fields(selected[index].object, &fields))
         {
             valid = false;
             break;
         }
-        if (!string_equal(fields.pseudo, S8("0")))
-        {
-            continue;
-        }
-
-        arena_append_string8(output, S8("{\"name\":"));
-        arena_append_string8(output, raw_name);
-        arena_append_string8(output, S8(",\"inst\":"));
-        arena_append_string8(output, fields.inst);
-        arena_append_string8(output, S8(",\"asm\":"));
-        arena_append_string8(output, fields.assembly);
-        arena_append_string8(output, S8(",\"out\":"));
-        arena_append_string8(output, fields.output_operands);
-        arena_append_string8(output, S8(",\"in\":"));
-        arena_append_string8(output, fields.input_operands);
-        arena_append_string8(output, S8(",\"predicates\":"));
-        if (!aarch64_import_emit_predicates(output, fields.predicates))
+        u64 before = output->position;
+        if (!aarch64_import_emit_record(output, selected[index].name, fields, true))
         {
             valid = false;
             break;
         }
-        arena_append_string8(output, S8("}\n"));
-        count += 1;
+        count += output->position != before;
     }
     *imported_count = count;
     return valid;
@@ -6712,6 +6925,3600 @@ BUSTER_GLOBAL_LOCAL String8 assembly_import_checksum(Arena* arena, String8 bytes
 {
     u64 checksum = buster_hash_64(bytes.pointer ? (u8*)bytes.pointer : (u8*)"", bytes.length);
     return string_format(arena, S8("{u64:x,width=[0,16],no_prefix}"), checksum);
+}
+
+BUSTER_GLOBAL_LOCAL u64 assembly_import_line_count(String8 text)
+{
+    if (!text.length)
+    {
+        return 0;
+    }
+    u64 count = 0;
+    for (u64 index = 0; index < text.length; index += 1)
+    {
+        count += text.pointer[index] == '\n';
+    }
+    return text.pointer[text.length - 1] == '\n' ? count : count + 1;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_jsonl_unique_field(Arena* arena, String8 jsonl, String8 key, u64* unique_count, u64* missing_count)
+{
+    u64 line_count = assembly_import_line_count(jsonl);
+    String8* values = line_count ? arena_allocate(arena, String8, line_count) : 0;
+    u64 value_count = 0;
+    u64 missing = 0;
+    u64 start = 0;
+    while (start < jsonl.length)
+    {
+        u64 end = start;
+        while (end < jsonl.length && jsonl.pointer[end] != '\n')
+        {
+            end += 1;
+        }
+        String8 line = assembly_import_trim(string_slice(jsonl, start, end));
+        if (line.length)
+        {
+            String8 raw = {0};
+            if (json_raw_object_find(line, key, &raw))
+            {
+                if (value_count >= line_count)
+                {
+                    return false;
+                }
+                values[value_count++] = raw;
+            }
+            else
+            {
+                missing += 1;
+            }
+        }
+        start = end + (end < jsonl.length);
+    }
+    if (value_count > 1)
+    {
+        qsort(values, value_count, sizeof(values[0]), assembly_import_string_compare);
+    }
+    u64 unique = 0;
+    for (u64 index = 0; index < value_count; index += 1)
+    {
+        if (!index || !string_equal(values[index - 1], values[index]))
+        {
+            unique += 1;
+        }
+    }
+    *unique_count = unique;
+    if (missing_count)
+    {
+        *missing_count = missing;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_validate_artifact(Arena* arena, String8 bytes, u64 expected_bytes, String8 expected_checksum)
+{
+    return bytes.length == expected_bytes && string_equal(assembly_import_checksum(arena, bytes), expected_checksum);
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_validate_checked_in_x86(Arena* arena, String8* artifacts)
+{
+    bool artifact_checks = assembly_import_validate_artifact(arena, artifacts[0], 4660881, S8("ba80aa3be0eb2e6f")) &&
+                           assembly_import_validate_artifact(arena, artifacts[1], 6616876, S8("4dc127e5ded4be5e")) &&
+                           assembly_import_validate_artifact(arena, artifacts[2], 649864, S8("b0a467045a94e220"));
+    bool invariant_checks = assembly_import_line_count(artifacts[0]) == 11013 &&
+                            string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_FORM_COUNT 11013")) &&
+                            string_contains(artifacts[2], S8("#define BUSTER_X86_GENERATED_COVERAGE_COUNT 11013"));
+    bool valid = artifact_checks && invariant_checks;
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_reduced_provenance(Arena* arena, String8 input, u64 count)
+{
+    return count == 7491 && string_equal(assembly_import_checksum(arena, input), S8("f2e553abd71696e5"));
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_full_provenance(Arena* arena, String8 input, u64 count)
+{
+    return count == 7491 && string_equal(assembly_import_checksum(arena, input), S8("4c3cec3a88d0c821"));
+}
+
+// --- AArch64 metadata normalization -------------------------------------
+//
+// The llvm-tblgen JSON is deliberately kept out of normal builds.  The
+// importer below turns each reduced JSONL record into a compact, pointer-free
+// schema.  It records the complete encoding grammar even when a later emitter
+// still needs to learn how to consume a particular operand family.
+
+typedef enum Aarch64ImportCoverageClass
+{
+    AARCH64_IMPORT_COVERAGE_DIRECT,
+    AARCH64_IMPORT_COVERAGE_NORMALIZED,
+    AARCH64_IMPORT_COVERAGE_ALIAS,
+    AARCH64_IMPORT_COVERAGE_PRIVILEGED_SYSTEM,
+    AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE,
+    AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN,
+    AARCH64_IMPORT_COVERAGE_UNCLASSIFIED,
+    AARCH64_IMPORT_COVERAGE_COUNT,
+} Aarch64ImportCoverageClass;
+
+typedef enum Aarch64ImportEncoderFamily
+{
+    AARCH64_IMPORT_ENCODER_SCALAR_INTEGER,
+    AARCH64_IMPORT_ENCODER_BRANCH,
+    AARCH64_IMPORT_ENCODER_LOAD_STORE,
+    AARCH64_IMPORT_ENCODER_FP_SIMD_NEON,
+    AARCH64_IMPORT_ENCODER_SVE_SVE2,
+    AARCH64_IMPORT_ENCODER_SME_SME2,
+    AARCH64_IMPORT_ENCODER_MTE,
+    AARCH64_IMPORT_ENCODER_ATOMIC_LSE,
+    AARCH64_IMPORT_ENCODER_CRYPTO,
+    AARCH64_IMPORT_ENCODER_SYSTEM,
+    AARCH64_IMPORT_ENCODER_COUNT,
+} Aarch64ImportEncoderFamily;
+
+typedef enum Aarch64ImportTestClass
+{
+    AARCH64_IMPORT_TEST_SCALAR,
+    AARCH64_IMPORT_TEST_BRANCH,
+    AARCH64_IMPORT_TEST_MEMORY,
+    AARCH64_IMPORT_TEST_SIMD_LIST_LANE,
+    AARCH64_IMPORT_TEST_SVE_PREDICATE,
+    AARCH64_IMPORT_TEST_SME_SYSTEM,
+    AARCH64_IMPORT_TEST_IMMEDIATE,
+    AARCH64_IMPORT_TEST_SCHEMA,
+    AARCH64_IMPORT_TEST_COUNT,
+} Aarch64ImportTestClass;
+
+typedef enum Aarch64ImportReason
+{
+    AARCH64_IMPORT_REASON_NONE,
+    AARCH64_IMPORT_REASON_ALIAS_OF_CANONICAL,
+    AARCH64_IMPORT_REASON_SYSTEM_OR_PRIVILEGED,
+    AARCH64_IMPORT_REASON_UNMAPPED_VARIABLE,
+    AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT,
+    AARCH64_IMPORT_REASON_MALFORMED_DAG,
+    AARCH64_IMPORT_REASON_MALFORMED_TEMPLATE,
+    AARCH64_IMPORT_REASON_UNKNOWN_FIELD,
+    AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE,
+    AARCH64_IMPORT_REASON_MISSING_OPERAND,
+    AARCH64_IMPORT_REASON_INVALID_JSON,
+    AARCH64_IMPORT_REASON_NULL_FIELD,
+    AARCH64_IMPORT_REASON_UNPROVEN_FIELD_SEMANTICS,
+    AARCH64_IMPORT_REASON_UNPROVEN_OPERAND_KIND,
+    AARCH64_IMPORT_REASON_UNPROVEN_IMMEDIATE_RANGE,
+    AARCH64_IMPORT_REASON_UNPROVEN_MEMORY_FORM,
+    AARCH64_IMPORT_REASON_UNPROVEN_TIED_OPERAND,
+    AARCH64_IMPORT_REASON_UNPROVEN_CORRESPONDENCE,
+    AARCH64_IMPORT_REASON_UNSUPPORTED_ADDRESS_GRAMMAR,
+    AARCH64_IMPORT_REASON_COUNT,
+} Aarch64ImportReason;
+
+typedef enum Aarch64ImportFieldTransform
+{
+    AARCH64_IMPORT_TRANSFORM_NONE,
+    AARCH64_IMPORT_TRANSFORM_REGISTER,
+    AARCH64_IMPORT_TRANSFORM_IMMEDIATE,
+    AARCH64_IMPORT_TRANSFORM_CONDITION,
+    AARCH64_IMPORT_TRANSFORM_SHIFT_EXTEND,
+    AARCH64_IMPORT_TRANSFORM_LANE,
+    AARCH64_IMPORT_TRANSFORM_PC_RELATIVE,
+    AARCH64_IMPORT_TRANSFORM_SYSTEM,
+} Aarch64ImportFieldTransform;
+
+typedef enum Aarch64ImportRelocationKind
+{
+    AARCH64_IMPORT_RELOC_NONE,
+    AARCH64_IMPORT_RELOC_BRANCH26,
+    AARCH64_IMPORT_RELOC_COND_BRANCH19,
+    AARCH64_IMPORT_RELOC_TEST_BRANCH14,
+    AARCH64_IMPORT_RELOC_LITERAL19,
+    AARCH64_IMPORT_RELOC_ADR21,
+    AARCH64_IMPORT_RELOC_ADRP21,
+} Aarch64ImportRelocationKind;
+
+typedef enum Aarch64ImportOperandKind
+{
+    AARCH64_IMPORT_OPERAND_REGISTER,
+    AARCH64_IMPORT_OPERAND_MEMORY,
+    AARCH64_IMPORT_OPERAND_IMMEDIATE,
+    AARCH64_IMPORT_OPERAND_RELATIVE,
+    AARCH64_IMPORT_OPERAND_COMPOUND,
+    AARCH64_IMPORT_OPERAND_SYSTEM,
+    AARCH64_IMPORT_OPERAND_LIST,
+    AARCH64_IMPORT_OPERAND_UNPROVEN,
+} Aarch64ImportOperandKind;
+
+typedef enum Aarch64ImportAddressKind
+{
+    AARCH64_IMPORT_ADDRESS_NONE,
+    AARCH64_IMPORT_ADDRESS_BASE,
+    AARCH64_IMPORT_ADDRESS_BASE_OFFSET,
+    AARCH64_IMPORT_ADDRESS_BASE_INDEX,
+    AARCH64_IMPORT_ADDRESS_LITERAL,
+    AARCH64_IMPORT_ADDRESS_BRANCH,
+    AARCH64_IMPORT_ADDRESS_SYSTEM,
+    AARCH64_IMPORT_ADDRESS_UNPROVEN,
+    AARCH64_IMPORT_ADDRESS_COUNT,
+} Aarch64ImportAddressKind;
+
+enum
+{
+    AARCH64_IMPORT_OPERAND_READ = 1u << 0,
+    AARCH64_IMPORT_OPERAND_WRITE = 1u << 1,
+    AARCH64_IMPORT_OPERAND_TIED = 1u << 2,
+    AARCH64_IMPORT_OPERAND_SUPPRESSED = 1u << 3,
+    AARCH64_IMPORT_OPERAND_IMPLICIT = 1u << 4,
+    AARCH64_IMPORT_OPERAND_OPTIONAL = 1u << 5,
+    AARCH64_IMPORT_OPERAND_FLAG_LIST = 1u << 6,
+    AARCH64_IMPORT_OPERAND_LANE = 1u << 7,
+};
+
+enum
+{
+    AARCH64_IMPORT_OPERAND_IMMEDIATE_RANGE_EXACT = 1u << 0,
+    AARCH64_IMPORT_OPERAND_IMMEDIATE_SIGNED = 1u << 1,
+    AARCH64_IMPORT_OPERAND_SCALE_EXACT = 1u << 2,
+    AARCH64_IMPORT_OPERAND_ADDRESS_EXACT = 1u << 3,
+    AARCH64_IMPORT_OPERAND_REGISTER_WIDTH_EXACT = 1u << 4,
+};
+
+enum
+{
+    AARCH64_IMPORT_FIELD_DESTINATION = 1u << 0,
+    AARCH64_IMPORT_FIELD_SOURCE = 1u << 1,
+    AARCH64_IMPORT_FIELD_IMMEDIATE = 1u << 2,
+    AARCH64_IMPORT_FIELD_PC_RELATIVE = 1u << 3,
+    AARCH64_IMPORT_FIELD_UNMAPPED = 1u << 4,
+};
+
+typedef struct Aarch64ImportBit Aarch64ImportBit;
+struct Aarch64ImportBit
+{
+    u8 instruction_bit;
+    u8 value_bit;
+    Aarch64ImportBit* next;
+};
+
+typedef struct Aarch64ImportVariable Aarch64ImportVariable;
+struct Aarch64ImportVariable
+{
+    String8 name;
+    Aarch64ImportBit* first_bit;
+    Aarch64ImportBit* last_bit;
+    u32 bit_count;
+    u32 source_mask;
+    u8 width;
+    u8 unmapped;
+    u8 transform;
+    u8 relocation;
+    u8 relocation_end;
+    u8 shift;
+    u8 flags;
+    Aarch64ImportVariable* next;
+};
+
+typedef struct Aarch64ImportOperand Aarch64ImportOperand;
+struct Aarch64ImportOperand
+{
+    String8 syntax;
+    String8 type;
+    String8 name;
+    u32 field_index;
+    s32 immediate_min;
+    s32 immediate_max;
+    u16 register_width;
+    u8 direction;
+    u8 kind;
+    u8 flags;
+    u8 scale;
+    u8 seen_in_asm;
+    u32 tied_to;
+    u8 immediate_flags;
+    u8 address_kind;
+    u8 address_flags;
+    u8 semantic_unproven;
+    u16 address_base_index;
+    u16 address_offset_index;
+    Aarch64ImportOperand* next;
+};
+
+typedef struct Aarch64ImportPredicate Aarch64ImportPredicate;
+struct Aarch64ImportPredicate
+{
+    String8 name;
+    Aarch64ImportPredicate* next;
+};
+
+typedef struct Aarch64ImportRecord Aarch64ImportRecord;
+struct Aarch64ImportRecord
+{
+    String8 name;
+    String8 inst_json;
+    String8 asm_json;
+    String8 out_json;
+    String8 in_json;
+    String8 predicates_json;
+    String8 assembly;
+    String8 output_operands;
+    String8 input_operands;
+    Aarch64ImportVariable* first_variable;
+    Aarch64ImportVariable* last_variable;
+    Aarch64ImportOperand* first_operand;
+    Aarch64ImportOperand* last_operand;
+    Aarch64ImportPredicate* first_predicate;
+    Aarch64ImportPredicate* last_predicate;
+    u32 variable_count;
+    u32 operand_count;
+    u32 predicate_count;
+    u32 fixed_mask;
+    u32 fixed_value;
+    u32 variable_instruction_mask;
+    u64 source_hash;
+    u64 signature_hash;
+    u32 source_index;
+    u32 normalized_form_id;
+    u8 coverage_class;
+    u8 encoder_family;
+    u8 test_class;
+    u8 reason_id;
+    u8 parse_reason;
+    u8 has_alternatives;
+    u64 name_hash;
+    String8 mnemonic;
+    u8 address_kind;
+    u8 address_flags;
+    u16 address_base_index;
+    u16 address_offset_index;
+    Aarch64ImportRecord* next;
+};
+
+typedef struct Aarch64ImportRecordList Aarch64ImportRecordList;
+struct Aarch64ImportRecordList
+{
+    Aarch64ImportRecord* first;
+    Aarch64ImportRecord* last;
+    u32 count;
+};
+
+typedef struct Aarch64GeneratedTableStats Aarch64GeneratedTableStats;
+struct Aarch64GeneratedTableStats
+{
+    u64 coverage_counts[AARCH64_IMPORT_COVERAGE_COUNT];
+    u64 reason_counts[AARCH64_IMPORT_REASON_COUNT];
+    u64 encoder_counts[AARCH64_IMPORT_ENCODER_COUNT];
+    u64 test_counts[AARCH64_IMPORT_TEST_COUNT];
+    u64 canonical_form_count;
+    u64 field_count;
+    u64 segment_count;
+    u64 operand_count;
+    u64 predicate_count;
+    u64 predicate_feature_count;
+    u64 mnemonic_range_count;
+    u64 signature_range_count;
+    u64 mnemonic_candidate_count;
+    u64 signature_candidate_count;
+    u64 string_pool_bytes;
+    u64 header_bytes;
+    u64 coverage_bytes;
+};
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_acceptance_ready(Aarch64GeneratedTableStats stats)
+{
+    return stats.coverage_counts[AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE] == 0 &&
+           stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN] == 0 &&
+           stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED] == 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_ascii_identifier(String8 string)
+{
+    if (!string.length)
+    {
+        return false;
+    }
+    for (u64 index = 0; index < string.length; index += 1)
+    {
+        char8 c = string.pointer[index];
+        bool okay = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '?';
+        if (!okay)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_u32(String8 text, u32* value)
+{
+    if (!text.length)
+    {
+        return false;
+    }
+    u64 result = 0;
+    for (u64 index = 0; index < text.length; index += 1)
+    {
+        char8 c = text.pointer[index];
+        if (c < '0' || c > '9')
+        {
+            return false;
+        }
+        u64 digit = (u64)(c - '0');
+        if (result > (UINT32_MAX - digit) / 10)
+        {
+            return false;
+        }
+        result = result * 10 + digit;
+    }
+    *value = (u32)result;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_decode_json_string(Arena* arena, String8 raw, String8* result)
+{
+    JsonParser parser = {.text = raw};
+    bool valid = true;
+    *result = json_parse_string(arena, &parser, &valid);
+    json_skip_whitespace(&parser);
+    return valid && parser.index == parser.text.length;
+}
+
+BUSTER_GLOBAL_LOCAL Aarch64ImportVariable* aarch64_import_variable_find_or_add(Arena* arena, Aarch64ImportRecord* record,
+                                                                                 String8 name)
+{
+    for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+    {
+        if (string_equal(variable->name, name))
+        {
+            return variable;
+        }
+    }
+    Aarch64ImportVariable* variable = arena_allocate(arena, Aarch64ImportVariable, 1);
+    *variable = (Aarch64ImportVariable){.name = name};
+    if (record->last_variable)
+    {
+        record->last_variable->next = variable;
+    }
+    else
+    {
+        record->first_variable = variable;
+    }
+    record->last_variable = variable;
+    record->variable_count += 1;
+    return variable;
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_import_variable_add_bit(Arena* arena, Aarch64ImportVariable* variable, u8 instruction_bit,
+                                                          u8 value_bit)
+{
+    Aarch64ImportBit* bit = arena_allocate(arena, Aarch64ImportBit, 1);
+    *bit = (Aarch64ImportBit){.instruction_bit = instruction_bit, .value_bit = value_bit};
+    if (variable->last_bit)
+    {
+        variable->last_bit->next = bit;
+    }
+    else
+    {
+        variable->first_bit = bit;
+    }
+    variable->last_bit = bit;
+    variable->bit_count += 1;
+    variable->source_mask |= 1u << value_bit;
+    variable->width = (u8)BUSTER_MAX(variable->width, (u32)value_bit + 1);
+}
+
+BUSTER_GLOBAL_LOCAL String8 aarch64_import_trim_local(String8 string)
+{
+    return assembly_import_trim(string);
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_import_reason_set(Aarch64ImportRecord* record, Aarch64ImportReason reason);
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_inst(Arena* arena, Aarch64ImportRecord* record)
+{
+    JsonParser parser = {.text = record->inst_json};
+    bool valid = json_consume(&parser, '[');
+    u32 bit = 0;
+    while (valid)
+    {
+        json_skip_whitespace(&parser);
+        if (json_consume(&parser, ']'))
+        {
+            break;
+        }
+        String8 raw = json_raw_value(&parser, &valid);
+        if (!valid)
+        {
+            break;
+        }
+        if (bit >= 32)
+        {
+            record->parse_reason = AARCH64_IMPORT_REASON_UNKNOWN_FIELD;
+        }
+        else if (raw.length && raw.pointer[0] == '{')
+        {
+            String8 kind_raw = {0};
+            String8 var_raw = {0};
+            String8 printable_raw = {0};
+            String8 index_raw = {0};
+            json_raw_object_find(raw, S8("kind"), &kind_raw);
+            json_raw_object_find(raw, S8("var"), &var_raw);
+            json_raw_object_find(raw, S8("printable"), &printable_raw);
+            json_raw_object_find(raw, S8("index"), &index_raw);
+            String8 kind = {0};
+            String8 variable_name = {0};
+            String8 printable = {0};
+            bool fields_valid = aarch64_import_decode_json_string(arena, kind_raw, &kind) &&
+                                 aarch64_import_decode_json_string(arena, var_raw, &variable_name) &&
+                                 aarch64_import_decode_json_string(arena, printable_raw, &printable);
+            if (!fields_valid || !aarch64_import_ascii_identifier(variable_name))
+            {
+                record->parse_reason = AARCH64_IMPORT_REASON_UNKNOWN_FIELD;
+            }
+            else if (string_equal(kind, S8("varbit")))
+            {
+                u32 value_bit = 0;
+                if (!aarch64_import_parse_u32(index_raw.length >= 2 ? string_slice(index_raw, 0, index_raw.length) : index_raw, &value_bit) ||
+                    value_bit >= 32 || !string_starts_with_sequence(printable, variable_name))
+                {
+                    record->parse_reason = AARCH64_IMPORT_REASON_UNKNOWN_FIELD;
+                }
+                else
+                {
+                    Aarch64ImportVariable* variable = aarch64_import_variable_find_or_add(arena, record, variable_name);
+                    if ((record->fixed_mask | record->variable_instruction_mask) & (1u << bit) ||
+                        variable->source_mask & (1u << value_bit))
+                    {
+                        record->parse_reason = AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT;
+                    }
+                    else
+                    {
+                        aarch64_import_variable_add_bit(arena, variable, (u8)bit, (u8)value_bit);
+                        record->variable_instruction_mask |= 1u << bit;
+                    }
+                }
+            }
+            else if (string_equal(kind, S8("var")))
+            {
+                Aarch64ImportVariable* variable = aarch64_import_variable_find_or_add(arena, record, variable_name);
+                variable->unmapped = 1;
+                if ((record->fixed_mask | record->variable_instruction_mask) & (1u << bit))
+                {
+                    record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT;
+                }
+                else
+                {
+                    record->variable_instruction_mask |= 1u << bit;
+                    record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_UNMAPPED_VARIABLE;
+                }
+            }
+            else
+            {
+                record->parse_reason = AARCH64_IMPORT_REASON_UNKNOWN_FIELD;
+            }
+        }
+        else
+        {
+            u32 value = 0;
+            if (string_equal(raw, S8("null")))
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_NULL_FIELD;
+            }
+            else if (!aarch64_import_parse_u32(raw, &value) || value > 1)
+            {
+                record->parse_reason = AARCH64_IMPORT_REASON_UNKNOWN_FIELD;
+            }
+            else if (record->variable_instruction_mask & (1u << bit))
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT;
+            }
+            else if (bit < 32)
+            {
+                record->fixed_mask |= 1u << bit;
+                record->fixed_value |= value << bit;
+            }
+        }
+        bit += 1;
+        json_skip_whitespace(&parser);
+        if (json_consume(&parser, ',') || (parser.index < parser.text.length && parser.text.pointer[parser.index] == ']'))
+        {
+            continue;
+        }
+        valid = false;
+    }
+    json_skip_whitespace(&parser);
+    if (bit != 32 || parser.index != parser.text.length)
+    {
+        valid = false;
+    }
+    if (record->fixed_mask & record->variable_instruction_mask)
+    {
+        aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT);
+    }
+    u32 instruction_bits = 0;
+    for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+    {
+        u32 source_bits = 0;
+        for (Aarch64ImportBit* field_bit = variable->first_bit; field_bit; field_bit = field_bit->next)
+        {
+            if (field_bit->instruction_bit >= 32 || field_bit->value_bit >= 32 ||
+                instruction_bits & (1u << field_bit->instruction_bit) || source_bits & (1u << field_bit->value_bit))
+            {
+                aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT);
+            }
+            else
+            {
+                instruction_bits |= 1u << field_bit->instruction_bit;
+                source_bits |= 1u << field_bit->value_bit;
+            }
+        }
+        if (source_bits != variable->source_mask)
+        {
+            aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT);
+        }
+    }
+    if (instruction_bits != record->variable_instruction_mask)
+    {
+        aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u32 aarch64_import_top_level_colon(String8 token)
+{
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    for (u32 index = 0; index < token.length; index += 1)
+    {
+        char8 c = token.pointer[index];
+        if (c == '(')
+        {
+            parentheses += 1;
+        }
+        else if (c == ')' && parentheses)
+        {
+            parentheses -= 1;
+        }
+        else if (c == '[')
+        {
+            brackets += 1;
+        }
+        else if (c == ']' && brackets)
+        {
+            brackets -= 1;
+        }
+        else if (c == '{')
+        {
+            braces += 1;
+        }
+        else if (c == '}' && braces)
+        {
+            braces -= 1;
+        }
+        else if (c == ':' && !parentheses && !brackets && !braces)
+        {
+            return index;
+        }
+    }
+    return UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL u32 aarch64_import_operand_width(String8 type)
+{
+    for (u32 index = 0; index < type.length; index += 1)
+    {
+        if (type.pointer[index] >= '0' && type.pointer[index] <= '9')
+        {
+            u32 value = 0;
+            u32 end = index;
+            while (end < type.length && type.pointer[end] >= '0' && type.pointer[end] <= '9')
+            {
+                u32 digit = (u32)(type.pointer[end] - '0');
+                if (value > (UINT32_MAX - digit) / 10)
+                {
+                    return 0;
+                }
+                value = value * 10 + digit;
+                end += 1;
+            }
+            if (value == 3 || value == 8 || value == 16 || value == 32 || value == 64 || value == 128 || value == 256 || value == 512)
+            {
+                return value;
+            }
+            index = end;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_operand_has_name(Aarch64ImportRecord* record, String8 name, u32* index_result)
+{
+    for (u32 index = 0; index < record->operand_count; index += 1)
+    {
+        Aarch64ImportOperand* operand = record->first_operand;
+        for (u32 skip = 0; operand && skip < index; skip += 1)
+        {
+            operand = operand->next;
+        }
+        if (operand && (string_equal(operand->name, name) ||
+                        (operand->name.length && operand->name.pointer[0] == '_' &&
+                         string_equal(string_slice(operand->name, 1, operand->name.length), name))))
+        {
+            if (index_result)
+            {
+                *index_result = index;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_import_reason_set(Aarch64ImportRecord* record, Aarch64ImportReason reason)
+{
+    if (!record->parse_reason)
+    {
+        record->parse_reason = (u8)reason;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_type_starts_any(String8 type, String8* prefixes, u32 count)
+{
+    for (u32 index = 0; index < count; index += 1)
+    {
+        if (string_starts_with_sequence(type, prefixes[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_type_is_register(String8 type)
+{
+    String8 prefixes[] = {
+        S8("GPR"), S8("FPR"), S8("V"), S8("ZPR"), S8("PPR"), S8("PNR"), S8("PP_"), S8("ZK"),
+        S8("MatrixOp"), S8("MatrixIndex"), S8("TileOp"), S8("TileVectorOp"),
+    };
+    if (aarch64_import_type_starts_any(type, prefixes, BUSTER_ARRAY_LENGTH(prefixes)))
+    {
+        if (string_equal(type, S8("V")) || string_equal(type, S8("ZK")))
+        {
+            return false;
+        }
+        if (string_starts_with_sequence(type, S8("V")) && type.length > 1 && type.pointer[1] != '6' && type.pointer[1] != '1')
+        {
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_type_is_list(String8 type)
+{
+    String8 prefixes[] = {S8("VecList"), S8("MatrixTileList"), S8("ZZ_"), S8("ZZZ_"), S8("ZZZZ_"), S8("VG")};
+    return aarch64_import_type_starts_any(type, prefixes, BUSTER_ARRAY_LENGTH(prefixes));
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_type_is_lane(String8 type)
+{
+    String8 prefixes[] = {S8("VectorIndex"), S8("sme_elm_idx"), S8("sve_elm_idx")};
+    return aarch64_import_type_starts_any(type, prefixes, BUSTER_ARRAY_LENGTH(prefixes));
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_type_is_relative(String8 type)
+{
+    String8 exact[] = {S8("am_b_target"), S8("am_bl_target"), S8("am_brcmpcond"), S8("am_brcond"),
+                       S8("am_ldrlit"), S8("am_pauth_pcrel"), S8("am_tbrcond"), S8("adrlabel"), S8("adrplabel")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(exact); index += 1)
+    {
+        if (string_equal(type, exact[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_type_is_system(String8 type)
+{
+    String8 exact[] = {
+        S8("mrs_sysreg_op"), S8("msr_sysreg_op"), S8("sys_cr_op"), S8("pstatefield1_op"), S8("pstatefield4_op"),
+        S8("svcr_op"), S8("barrier_op"), S8("barrier_nxs_op"), S8("prfop"), S8("rprfop"), S8("sve_prfop"),
+        S8("phint_op"), S8("CMHPriorityHint_op"), S8("TIndexhint_op"), S8("SyspXzrPairOperand"),
+        S8("MrrsMssrPairClassOperand"), S8("WSeqPairClassOperand"), S8("XSeqPairClassOperand"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(exact); index += 1)
+    {
+        if (string_equal(type, exact[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_type_is_compound(String8 type)
+{
+    return (type.length && type.pointer[0] == '(' && string_contains(type, S8("arith_shifted_reg"))) ||
+           (type.length && type.pointer[0] == '(' && string_contains(type, S8("arith_extended_reg"))) ||
+           (type.length && type.pointer[0] == '(' && string_contains(type, S8("logical_shifted_reg"))) ||
+           string_starts_with_sequence(type, S8("ro_Wextend")) || string_starts_with_sequence(type, S8("ro_Xextend")) ||
+           string_starts_with_sequence(type, S8("arith_extendlsl"));
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_decimal_at(String8 text, u32 start, u32* end_result, u32* value_result)
+{
+    if (start >= text.length || text.pointer[start] < '0' || text.pointer[start] > '9')
+    {
+        return false;
+    }
+    u32 value = 0;
+    u32 end = start;
+    while (end < text.length && text.pointer[end] >= '0' && text.pointer[end] <= '9')
+    {
+        u32 digit = (u32)(text.pointer[end] - '0');
+        if (value > (UINT32_MAX - digit) / 10)
+        {
+            return false;
+        }
+        value = value * 10 + digit;
+        end += 1;
+    }
+    *end_result = end;
+    *value_result = value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_set_immediate_width_range(u32 width, bool signed_range, s32* minimum, s32* maximum)
+{
+    if (!width || width >= 32)
+    {
+        return false;
+    }
+    u64 extent = 1ULL << width;
+    if (signed_range)
+    {
+        *minimum = -(s32)(extent / 2);
+        *maximum = (s32)(extent / 2 - 1);
+    }
+    else
+    {
+        if (extent - 1 > INT32_MAX)
+        {
+            return false;
+        }
+        *minimum = 0;
+        *maximum = (s32)(extent - 1);
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_set_immediate_range(String8 type, Aarch64ImportOperand* operand)
+{
+    if (string_equal(type, S8("ccode")))
+    {
+        operand->immediate_min = 0;
+        operand->immediate_max = 15;
+        operand->immediate_flags = AARCH64_IMPORT_OPERAND_IMMEDIATE_RANGE_EXACT;
+        return true;
+    }
+
+    String8 prefix = {0};
+    bool signed_range = false;
+    if (string_starts_with_sequence(type, S8("simm")))
+    {
+        prefix = S8("simm");
+        signed_range = true;
+    }
+    else if (string_starts_with_sequence(type, S8("uimm")))
+    {
+        prefix = S8("uimm");
+    }
+    else if (string_starts_with_sequence(type, S8("imm")) || string_starts_with_sequence(type, S8("timm")))
+    {
+        prefix = string_starts_with_sequence(type, S8("timm")) ? S8("timm") : S8("imm");
+    }
+    else
+    {
+        return false;
+    }
+
+    u32 cursor = (u32)prefix.length;
+    u32 first = 0;
+    u32 end = 0;
+    if (!aarch64_import_parse_decimal_at(type, cursor, &end, &first))
+    {
+        return false;
+    }
+
+    s32 minimum = 0;
+    s32 maximum = 0;
+    u32 scale = 0;
+    u8 flags = 0;
+    if (end == type.length)
+    {
+        if (!aarch64_import_set_immediate_width_range(first, signed_range, &minimum, &maximum))
+        {
+            return false;
+        }
+    }
+    else if (type.pointer[end] == 's')
+    {
+        u32 scale_end = 0;
+        if (!aarch64_import_parse_decimal_at(type, end + 1, &scale_end, &scale) || scale_end != type.length || !scale ||
+            scale > UINT8_MAX || !aarch64_import_set_immediate_width_range(first, signed_range, &minimum, &maximum))
+        {
+            return false;
+        }
+        flags = AARCH64_IMPORT_OPERAND_SCALE_EXACT;
+    }
+    else if (type.pointer[end] == '_')
+    {
+        u32 second = 0;
+        u32 second_end = 0;
+        if (!aarch64_import_parse_decimal_at(type, end + 1, &second_end, &second))
+        {
+            return false;
+        }
+        if (second_end == type.length)
+        {
+            // The two-component imm0_127/timm0_1 grammar is an explicit
+            // inclusive range. Other two-component spellings are ambiguous
+            // with operand-width suffixes and stay unsupported.
+            if (first != 0 || (!string_equal(prefix, S8("imm")) && !string_equal(prefix, S8("timm"))))
+            {
+                return false;
+            }
+            minimum = (s32)first;
+            if (second > INT32_MAX || second < first)
+            {
+                return false;
+            }
+            maximum = (s32)second;
+        }
+        else if (type.pointer[second_end] == 'b' && second_end + 1 == type.length)
+        {
+            // A suffix such as _64b describes the register/vector width;
+            // it is not the immediate range. The encoded width remains the
+            // first component of simm/uimm/imm/timm.
+            if (!aarch64_import_set_immediate_width_range(first, signed_range, &minimum, &maximum))
+            {
+                return false;
+            }
+        }
+        else if (type.pointer[second_end] == '_')
+        {
+            u32 third = 0;
+            u32 third_end = 0;
+            if (!aarch64_import_parse_decimal_at(type, second_end + 1, &third_end, &third))
+            {
+                return false;
+            }
+            if (third_end + 1 == type.length && type.pointer[third_end] == 'b')
+            {
+                // The explicit range is followed by an operand-width
+                // suffix, as in imm0_127_64b.
+                if (first != 0 || second > INT32_MAX)
+                {
+                    return false;
+                }
+                minimum = (s32)first;
+                maximum = (s32)second;
+            }
+            else if (third_end == type.length)
+            {
+                // The explicit width_range grammar is imm32_0_15 and its
+                // timm variants. The first component is operand width,
+                // followed by an inclusive low/high range.
+                if (second > third || third > INT32_MAX)
+                {
+                    return false;
+                }
+                minimum = (s32)second;
+                maximum = (s32)third;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    if (signed_range)
+    {
+        flags |= AARCH64_IMPORT_OPERAND_IMMEDIATE_SIGNED;
+    }
+    flags |= AARCH64_IMPORT_OPERAND_IMMEDIATE_RANGE_EXACT;
+    operand->immediate_min = minimum;
+    operand->immediate_max = maximum;
+    operand->scale = (u8)scale;
+    operand->immediate_flags = flags;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL Aarch64ImportRelocationKind aarch64_import_relocation_for_type(String8 type, u8* shift, u8* end)
+{
+    *shift = 0;
+    *end = 1;
+    if (string_equal(type, S8("am_b_target")) || string_equal(type, S8("am_bl_target")))
+    {
+        *shift = 2;
+        return AARCH64_IMPORT_RELOC_BRANCH26;
+    }
+    if (string_equal(type, S8("am_brcond")) || string_equal(type, S8("am_brcmpcond")))
+    {
+        *shift = 2;
+        return AARCH64_IMPORT_RELOC_COND_BRANCH19;
+    }
+    if (string_equal(type, S8("am_tbrcond")))
+    {
+        *shift = 2;
+        return AARCH64_IMPORT_RELOC_TEST_BRANCH14;
+    }
+    if (string_equal(type, S8("am_ldrlit")) || string_equal(type, S8("am_pauth_pcrel")))
+    {
+        *shift = 2;
+        return AARCH64_IMPORT_RELOC_LITERAL19;
+    }
+    if (string_equal(type, S8("adrlabel")))
+    {
+        return AARCH64_IMPORT_RELOC_ADR21;
+    }
+    if (string_equal(type, S8("adrplabel")))
+    {
+        *shift = 12;
+        return AARCH64_IMPORT_RELOC_ADRP21;
+    }
+    *end = 0;
+    return AARCH64_IMPORT_RELOC_NONE;
+}
+
+BUSTER_GLOBAL_LOCAL Aarch64ImportOperand* aarch64_import_operand_add(Arena* arena, Aarch64ImportRecord* record, String8 syntax,
+                                                                       String8 type, String8 name, u8 direction)
+{
+    Aarch64ImportOperand* operand = arena_allocate(arena, Aarch64ImportOperand, 1);
+    *operand = (Aarch64ImportOperand){.syntax = syntax, .type = type, .name = name, .direction = direction, .tied_to = UINT32_MAX};
+    u8 relocation_shift = 0;
+    u8 relocation_end = 0;
+    Aarch64ImportRelocationKind relocation = aarch64_import_relocation_for_type(type, &relocation_shift, &relocation_end);
+    if (aarch64_import_type_is_list(type))
+    {
+        operand->kind = AARCH64_IMPORT_OPERAND_LIST;
+        operand->flags |= AARCH64_IMPORT_OPERAND_FLAG_LIST;
+    }
+    else if (aarch64_import_type_is_lane(type))
+    {
+        operand->kind = AARCH64_IMPORT_OPERAND_IMMEDIATE;
+        operand->flags |= AARCH64_IMPORT_OPERAND_LANE;
+    }
+    else if (aarch64_import_type_is_relative(type))
+    {
+        operand->kind = AARCH64_IMPORT_OPERAND_RELATIVE;
+        operand->scale = relocation_shift;
+        operand->immediate_flags = AARCH64_IMPORT_OPERAND_SCALE_EXACT;
+        operand->address_kind = string_equal(type, S8("am_ldrlit")) || string_equal(type, S8("am_pauth_pcrel"))
+                                    ? AARCH64_IMPORT_ADDRESS_LITERAL
+                                    : AARCH64_IMPORT_ADDRESS_BRANCH;
+    }
+    else if (aarch64_import_type_is_register(type))
+    {
+        operand->kind = AARCH64_IMPORT_OPERAND_REGISTER;
+        operand->register_width = (u16)aarch64_import_operand_width(type);
+        operand->immediate_flags |= operand->register_width ? AARCH64_IMPORT_OPERAND_REGISTER_WIDTH_EXACT : 0;
+        if (!operand->register_width)
+        {
+            operand->semantic_unproven = 1;
+            aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_OPERAND_KIND);
+        }
+    }
+    else if (aarch64_import_type_is_system(type))
+    {
+        operand->kind = AARCH64_IMPORT_OPERAND_SYSTEM;
+    }
+    else if (aarch64_import_type_is_compound(type))
+    {
+        operand->kind = AARCH64_IMPORT_OPERAND_COMPOUND;
+        operand->semantic_unproven = 1;
+    }
+    else if (aarch64_import_set_immediate_range(type, operand))
+    {
+        operand->kind = AARCH64_IMPORT_OPERAND_IMMEDIATE;
+    }
+    else
+    {
+        operand->kind = AARCH64_IMPORT_OPERAND_UNPROVEN;
+        operand->semantic_unproven = 1;
+        aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_OPERAND_KIND);
+    }
+    (void)relocation;
+    if (name.length && name.pointer[0] == '_')
+    {
+        operand->flags |= AARCH64_IMPORT_OPERAND_TIED | AARCH64_IMPORT_OPERAND_SUPPRESSED;
+    }
+    if (record->last_operand)
+    {
+        record->last_operand->next = operand;
+    }
+    else
+    {
+        record->first_operand = operand;
+    }
+    record->last_operand = operand;
+    record->operand_count += 1;
+    return operand;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_dag(Arena* arena, Aarch64ImportRecord* record, String8 dag, u8 direction)
+{
+    dag = aarch64_import_trim_local(dag);
+    if (dag.length < 5 || dag.pointer[0] != '(' || dag.pointer[dag.length - 1] != ')')
+    {
+        record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_DAG;
+        return true;
+    }
+    u32 keyword_end = 1;
+    while (keyword_end < dag.length && dag.pointer[keyword_end] != ' ' && dag.pointer[keyword_end] != '\t' && dag.pointer[keyword_end] != ')')
+    {
+        keyword_end += 1;
+    }
+    String8 keyword = string_slice(dag, 1, keyword_end);
+    if (!string_equal(keyword, S8("outs")) && !string_equal(keyword, S8("ins")))
+    {
+        record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_DAG;
+        return true;
+    }
+
+    u32 body_start = keyword_end;
+    while (body_start < dag.length - 1 && character_is_space(dag.pointer[body_start]))
+    {
+        body_start += 1;
+    }
+    u32 token_start = body_start;
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    for (u32 index = body_start; index < dag.length - 1; index += 1)
+    {
+        char8 c = dag.pointer[index];
+        if (c == '(')
+        {
+            parentheses += 1;
+        }
+        else if (c == ')')
+        {
+            if (!parentheses)
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_DAG;
+                return true;
+            }
+            parentheses -= 1;
+        }
+        else if (c == '[')
+        {
+            brackets += 1;
+        }
+        else if (c == ']')
+        {
+            if (!brackets)
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_DAG;
+                return true;
+            }
+            brackets -= 1;
+        }
+        else if (c == '{')
+        {
+            braces += 1;
+        }
+        else if (c == '}')
+        {
+            if (!braces)
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_DAG;
+                return true;
+            }
+            braces -= 1;
+        }
+        bool at_separator = c == ',' && !parentheses && !brackets && !braces;
+        bool at_end = index == dag.length - 2;
+        if (at_separator || at_end)
+        {
+            u32 token_end = at_separator ? index : index + 1;
+            String8 token = aarch64_import_trim_local(string_slice(dag, token_start, token_end));
+            if (!token.length)
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_DAG;
+                return true;
+            }
+            u32 colon = aarch64_import_top_level_colon(token);
+            if (colon == UINT32_MAX || colon == 0 || colon + 1 >= token.length)
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_DAG;
+                return true;
+            }
+            String8 type = aarch64_import_trim_local(string_slice(token, 0, colon));
+            String8 operand_name = aarch64_import_trim_local(string_slice(token, colon + 1, token.length));
+            if (operand_name.length && operand_name.pointer[0] == '$')
+            {
+                operand_name = string_slice(operand_name, 1, operand_name.length);
+            }
+            if (!type.length || !aarch64_import_ascii_identifier(operand_name))
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_DAG;
+                return true;
+            }
+            aarch64_import_operand_add(arena, record, token, type, operand_name, direction);
+            token_start = index + 1;
+            while (token_start < dag.length - 1 && character_is_space(dag.pointer[token_start]))
+            {
+                token_start += 1;
+            }
+        }
+    }
+    if (parentheses || brackets || braces)
+    {
+        record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_DAG;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_predicates(Arena* arena, Aarch64ImportRecord* record)
+{
+    JsonParser parser = {.text = record->predicates_json};
+    bool valid = json_consume(&parser, '[');
+    while (valid)
+    {
+        String8 raw = {0};
+        if (!json_raw_array_next(&parser, &raw, &valid))
+        {
+            break;
+        }
+        String8 name_raw = raw;
+        if (raw.length && raw.pointer[0] == '{')
+        {
+            if (!json_raw_object_find(raw, S8("def"), &name_raw))
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE;
+                continue;
+            }
+        }
+        String8 name = {0};
+        if (!aarch64_import_decode_json_string(arena, name_raw, &name) || !aarch64_import_ascii_identifier(name))
+        {
+            record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE;
+            continue;
+        }
+        Aarch64ImportPredicate* predicate = arena_allocate(arena, Aarch64ImportPredicate, 1);
+        *predicate = (Aarch64ImportPredicate){.name = name};
+        if (record->last_predicate)
+        {
+            record->last_predicate->next = predicate;
+        }
+        else
+        {
+            record->first_predicate = predicate;
+        }
+        record->last_predicate = predicate;
+        record->predicate_count += 1;
+    }
+    json_skip_whitespace(&parser);
+    return valid && parser.index == parser.text.length;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_asm(Arena* arena, Aarch64ImportRecord* record)
+{
+    String8 assembly = record->assembly;
+    u32 braces = 0;
+    u32 brackets = 0;
+    bool in_comment = false;
+    for (u32 index = 0; index < assembly.length; index += 1)
+    {
+        char8 c = assembly.pointer[index];
+        if (c == '{')
+        {
+            braces += 1;
+            record->has_alternatives = 1;
+        }
+        else if (c == '}')
+        {
+            if (!braces)
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_TEMPLATE;
+            }
+            else
+            {
+                braces -= 1;
+            }
+        }
+        else if (c == '[')
+        {
+            brackets += 1;
+        }
+        else if (c == ']')
+        {
+            if (!brackets)
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_TEMPLATE;
+            }
+            else
+            {
+                brackets -= 1;
+            }
+        }
+        else if (c == '$' && !in_comment)
+        {
+            u32 start = index + 1;
+            u32 end = start;
+            while (end < assembly.length)
+            {
+                char8 token = assembly.pointer[end];
+                bool identifier = (token >= 'a' && token <= 'z') || (token >= 'A' && token <= 'Z') ||
+                                  (token >= '0' && token <= '9') || token == '_';
+                if (!identifier)
+                {
+                    break;
+                }
+                end += 1;
+            }
+            if (start == end)
+            {
+                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_TEMPLATE;
+            }
+            else
+            {
+                String8 name = string_slice(assembly, start, end);
+                u32 operand_index = 0;
+                if (!aarch64_import_operand_has_name(record, name, &operand_index))
+                {
+                    record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MISSING_OPERAND;
+                }
+                else
+                {
+                    Aarch64ImportOperand* operand = record->first_operand;
+                    for (u32 skip = 0; operand && skip < operand_index; skip += 1)
+                    {
+                        operand = operand->next;
+                    }
+                    if (operand)
+                    {
+                        operand->seen_in_asm = 1;
+                        operand->flags &= (u8)~AARCH64_IMPORT_OPERAND_IMPLICIT;
+                        if (braces)
+                        {
+                            operand->flags |= AARCH64_IMPORT_OPERAND_OPTIONAL;
+                        }
+                    }
+                }
+            }
+            index = end ? end - 1 : index;
+        }
+        in_comment = c == ';' ? true : (c == '\n' ? false : in_comment);
+    }
+    if (braces || brackets)
+    {
+        record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_MALFORMED_TEMPLATE;
+    }
+    for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+    {
+        if (operand->flags & AARCH64_IMPORT_OPERAND_TIED)
+        {
+            operand->flags |= AARCH64_IMPORT_OPERAND_SUPPRESSED;
+        }
+        else
+        {
+            if (!operand->seen_in_asm)
+            {
+                operand->flags |= AARCH64_IMPORT_OPERAND_IMPLICIT;
+            }
+        }
+    }
+
+    // Ties are structural DAG relationships. Preserve the target operand
+    // index instead of leaving a lossy "tied" bit for the future emitter.
+    u32 operand_index = 0;
+    for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next, operand_index += 1)
+    {
+        String8 base_name = operand->name;
+        if (base_name.length && base_name.pointer[0] == '_')
+        {
+            base_name = string_slice(base_name, 1, base_name.length);
+        }
+        u32 prior_index = 0;
+        Aarch64ImportOperand* prior = record->first_operand;
+        for (; prior && prior_index < operand_index; prior = prior->next, prior_index += 1)
+        {
+            String8 prior_name = prior->name;
+            if (prior_name.length && prior_name.pointer[0] == '_')
+            {
+                prior_name = string_slice(prior_name, 1, prior_name.length);
+            }
+            if (string_equal(base_name, prior_name))
+            {
+                break;
+            }
+        }
+        if (prior)
+        {
+            operand->tied_to = prior_index;
+            operand->flags |= AARCH64_IMPORT_OPERAND_TIED;
+            if (!string_equal(operand->type, prior->type))
+            {
+                aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_TIED_OPERAND);
+            }
+        }
+        else if (operand->flags & AARCH64_IMPORT_OPERAND_TIED)
+        {
+            aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_TIED_OPERAND);
+        }
+    }
+
+    // Normalize the simple AArch64 bracket-address grammar. More elaborate
+    // nested/alternative templates remain explicit unsupported schema rows;
+    // no address meaning is inferred from a mnemonic or a substring.
+    record->address_kind = AARCH64_IMPORT_ADDRESS_NONE;
+    record->address_base_index = UINT16_MAX;
+    record->address_offset_index = UINT16_MAX;
+    for (u32 index = 0; index < assembly.length; index += 1)
+    {
+        if (assembly.pointer[index] != '[' ||
+            (index && ((assembly.pointer[index - 1] >= 'a' && assembly.pointer[index - 1] <= 'z') ||
+                       (assembly.pointer[index - 1] >= 'A' && assembly.pointer[index - 1] <= 'Z') ||
+                       (assembly.pointer[index - 1] >= '0' && assembly.pointer[index - 1] <= '9') ||
+                       assembly.pointer[index - 1] == '_' || assembly.pointer[index - 1] == ']')))
+        {
+            continue;
+        }
+        if (record->address_kind != AARCH64_IMPORT_ADDRESS_NONE)
+        {
+            record->address_kind = AARCH64_IMPORT_ADDRESS_UNPROVEN;
+            aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_MEMORY_FORM);
+            break;
+        }
+        u32 close = index + 1;
+        u32 nesting = 1;
+        while (close < assembly.length && nesting)
+        {
+            if (assembly.pointer[close] == '[')
+            {
+                nesting += 1;
+            }
+            else if (assembly.pointer[close] == ']')
+            {
+                nesting -= 1;
+            }
+            close += 1;
+        }
+        if (nesting || close <= index + 1)
+        {
+            record->address_kind = AARCH64_IMPORT_ADDRESS_UNPROVEN;
+            aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNSUPPORTED_ADDRESS_GRAMMAR);
+            break;
+        }
+        u32 refs[3] = {0};
+        u32 ref_count = 0;
+        for (u32 cursor = index + 1; cursor + 1 < close; cursor += 1)
+        {
+            if (assembly.pointer[cursor] != '$')
+            {
+                continue;
+            }
+            u32 ref_start = cursor + 1;
+            u32 ref_end = ref_start;
+            while (ref_end < close - 1)
+            {
+                char8 c = assembly.pointer[ref_end];
+                bool identifier = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+                if (!identifier)
+                {
+                    break;
+                }
+                ref_end += 1;
+            }
+            if (ref_end == ref_start || ref_count >= BUSTER_ARRAY_LENGTH(refs))
+            {
+                record->address_kind = AARCH64_IMPORT_ADDRESS_UNPROVEN;
+                aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNSUPPORTED_ADDRESS_GRAMMAR);
+                break;
+            }
+            u32 found = 0;
+            if (!aarch64_import_operand_has_name(record, string_slice(assembly, ref_start, ref_end), &found))
+            {
+                record->address_kind = AARCH64_IMPORT_ADDRESS_UNPROVEN;
+                aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_MISSING_OPERAND);
+                break;
+            }
+            refs[ref_count++] = found;
+            cursor = ref_end;
+        }
+        if (record->address_kind == AARCH64_IMPORT_ADDRESS_UNPROVEN)
+        {
+            break;
+        }
+        Aarch64ImportOperand* base = 0;
+        Aarch64ImportOperand* offset = 0;
+        for (u32 ref_index = 0; ref_index < ref_count; ref_index += 1)
+        {
+            Aarch64ImportOperand* candidate = record->first_operand;
+            for (u32 skip = 0; candidate && skip < refs[ref_index]; skip += 1)
+            {
+                candidate = candidate->next;
+            }
+            if (ref_index == 0)
+            {
+                base = candidate;
+            }
+            else if (ref_index == 1)
+            {
+                offset = candidate;
+            }
+        }
+        if (!base || base->kind != AARCH64_IMPORT_OPERAND_REGISTER || ref_count > 2)
+        {
+            record->address_kind = AARCH64_IMPORT_ADDRESS_UNPROVEN;
+            aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_MEMORY_FORM);
+            break;
+        }
+        record->address_kind = ref_count == 1 ? AARCH64_IMPORT_ADDRESS_BASE :
+                               (offset->kind == AARCH64_IMPORT_OPERAND_REGISTER ? AARCH64_IMPORT_ADDRESS_BASE_INDEX
+                                                                                : AARCH64_IMPORT_ADDRESS_BASE_OFFSET);
+        record->address_base_index = (u16)refs[0];
+        record->address_offset_index = ref_count > 1 ? (u16)refs[1] : UINT16_MAX;
+        record->address_flags = (close < assembly.length && assembly.pointer[close] == '!') ? 1u : 0u;
+        if (close < assembly.length && assembly.pointer[close] == '!')
+        {
+            close += 1;
+        }
+        if (close < assembly.length && assembly.pointer[close] == ',')
+        {
+            record->address_flags |= 2u;
+        }
+        for (u32 ref_index = 0; ref_index < ref_count; ref_index += 1)
+        {
+            Aarch64ImportOperand* candidate = record->first_operand;
+            for (u32 skip = 0; candidate && skip < refs[ref_index]; skip += 1)
+            {
+                candidate = candidate->next;
+            }
+            if (candidate)
+            {
+                candidate->address_kind = record->address_kind;
+                candidate->address_flags = record->address_flags;
+                candidate->address_base_index = (u16)refs[0];
+                candidate->address_offset_index = record->address_offset_index;
+                candidate->immediate_flags |= AARCH64_IMPORT_OPERAND_ADDRESS_EXACT;
+            }
+        }
+        index = close;
+    }
+    if (record->address_kind != AARCH64_IMPORT_ADDRESS_NONE &&
+        (record->address_base_index >= record->operand_count ||
+         (record->address_offset_index != UINT16_MAX && record->address_offset_index >= record->operand_count)))
+    {
+        record->address_kind = AARCH64_IMPORT_ADDRESS_UNPROVEN;
+        aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_MEMORY_FORM);
+    }
+    (void)arena;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 aarch64_import_mnemonic(String8 assembly)
+{
+    u64 end = 0;
+    while (end < assembly.length && assembly.pointer[end] != ' ' && assembly.pointer[end] != '\t' && assembly.pointer[end] != '{')
+    {
+        end += 1;
+    }
+    return string_slice(assembly, 0, end);
+}
+
+BUSTER_GLOBAL_LOCAL Aarch64ImportVariable* aarch64_import_variable_find(Aarch64ImportRecord* record, String8 name)
+{
+    for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+    {
+        if (string_equal(variable->name, name))
+        {
+            return variable;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_operand_base_name_equal(String8 operand_name, String8 variable_name)
+{
+    if (operand_name.length && operand_name.pointer[0] == '_')
+    {
+        operand_name = string_slice(operand_name, 1, operand_name.length);
+    }
+    return string_equal(operand_name, variable_name);
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_import_set_field_semantics(Aarch64ImportRecord* record)
+{
+    // Only the operand type grammar is authoritative for a variable's
+    // encoding semantics. In particular, a variable name or mnemonic never
+    // supplies a register/immediate/relocation meaning by itself.
+    for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+    {
+        variable->transform = AARCH64_IMPORT_TRANSFORM_NONE;
+        variable->relocation = AARCH64_IMPORT_RELOC_NONE;
+        variable->relocation_end = 0;
+        variable->shift = 0;
+        bool mapped = false;
+        u32 mapped_count = 0;
+        u8 transform = AARCH64_IMPORT_TRANSFORM_NONE;
+        for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+        {
+            if (!aarch64_import_operand_base_name_equal(operand->name, variable->name))
+            {
+                continue;
+            }
+            mapped = true;
+            mapped_count += 1;
+            if (operand->semantic_unproven || operand->kind == AARCH64_IMPORT_OPERAND_UNPROVEN)
+            {
+                aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_FIELD_SEMANTICS);
+                continue;
+            }
+            u8 candidate_transform = AARCH64_IMPORT_TRANSFORM_NONE;
+            if (operand->kind == AARCH64_IMPORT_OPERAND_REGISTER)
+            {
+                candidate_transform = AARCH64_IMPORT_TRANSFORM_REGISTER;
+            }
+            else if (operand->kind == AARCH64_IMPORT_OPERAND_RELATIVE)
+            {
+                u8 shift = 0;
+                u8 relocation_end = 0;
+                Aarch64ImportRelocationKind relocation = aarch64_import_relocation_for_type(operand->type, &shift, &relocation_end);
+                if (relocation == AARCH64_IMPORT_RELOC_NONE)
+                {
+                    aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_FIELD_SEMANTICS);
+                    continue;
+                }
+                candidate_transform = AARCH64_IMPORT_TRANSFORM_PC_RELATIVE;
+                variable->relocation = (u8)relocation;
+                variable->relocation_end = relocation_end;
+                variable->shift = shift;
+                variable->flags |= AARCH64_IMPORT_FIELD_PC_RELATIVE;
+            }
+            else if (operand->kind == AARCH64_IMPORT_OPERAND_SYSTEM)
+            {
+                candidate_transform = AARCH64_IMPORT_TRANSFORM_SYSTEM;
+            }
+            else if (operand->flags & AARCH64_IMPORT_OPERAND_LANE)
+            {
+                candidate_transform = AARCH64_IMPORT_TRANSFORM_LANE;
+                aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_IMMEDIATE_RANGE);
+            }
+            else if (operand->kind == AARCH64_IMPORT_OPERAND_IMMEDIATE)
+            {
+                if (!(operand->immediate_flags & AARCH64_IMPORT_OPERAND_IMMEDIATE_RANGE_EXACT))
+                {
+                    aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_IMMEDIATE_RANGE);
+                    continue;
+                }
+                candidate_transform = string_equal(operand->type, S8("ccode")) ? AARCH64_IMPORT_TRANSFORM_CONDITION
+                                                                                : AARCH64_IMPORT_TRANSFORM_IMMEDIATE;
+            }
+            else if (operand->kind == AARCH64_IMPORT_OPERAND_COMPOUND)
+            {
+                candidate_transform = AARCH64_IMPORT_TRANSFORM_SHIFT_EXTEND;
+                aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_CORRESPONDENCE);
+            }
+            else
+            {
+                aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_FIELD_SEMANTICS);
+                continue;
+            }
+            if (transform && transform != candidate_transform)
+            {
+                aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_FIELD_SEMANTICS);
+            }
+            transform = candidate_transform;
+            if (operand->direction & AARCH64_IMPORT_OPERAND_WRITE)
+            {
+                variable->flags |= AARCH64_IMPORT_FIELD_DESTINATION;
+            }
+            if (operand->direction & AARCH64_IMPORT_OPERAND_READ)
+            {
+                variable->flags |= AARCH64_IMPORT_FIELD_SOURCE;
+            }
+        }
+        if (variable->unmapped)
+        {
+            variable->flags |= AARCH64_IMPORT_FIELD_UNMAPPED;
+            continue;
+        }
+        if (!mapped)
+        {
+            aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_CORRESPONDENCE);
+        }
+        else if (mapped_count > 1)
+        {
+            u32 untied_count = 0;
+            for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+            {
+                if (aarch64_import_operand_base_name_equal(operand->name, variable->name) && operand->tied_to == UINT32_MAX)
+                {
+                    untied_count += 1;
+                }
+            }
+            if (untied_count > 1)
+            {
+                aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_CORRESPONDENCE);
+            }
+        }
+        variable->transform = transform;
+        if (transform == AARCH64_IMPORT_TRANSFORM_REGISTER)
+        {
+            variable->flags &= (u8)~AARCH64_IMPORT_FIELD_IMMEDIATE;
+        }
+        else if (transform == AARCH64_IMPORT_TRANSFORM_IMMEDIATE || transform == AARCH64_IMPORT_TRANSFORM_CONDITION ||
+                 transform == AARCH64_IMPORT_TRANSFORM_SHIFT_EXTEND || transform == AARCH64_IMPORT_TRANSFORM_LANE ||
+                 transform == AARCH64_IMPORT_TRANSFORM_SYSTEM)
+        {
+            variable->flags |= AARCH64_IMPORT_FIELD_IMMEDIATE;
+        }
+    }
+    if (record->address_kind == AARCH64_IMPORT_ADDRESS_UNPROVEN)
+    {
+        aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_MEMORY_FORM);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_is_system(Aarch64ImportRecord* record)
+{
+    String8 name = record->name;
+    String8 mnemonic = aarch64_import_mnemonic(record->assembly);
+    String8 system_prefixes[] = {
+        S8("MRS"), S8("MSR"), S8("SYS"), S8("SYSL"), S8("HINT"), S8("CLREX"), S8("DMB"), S8("DSB"), S8("ISB"),
+        S8("DC"), S8("IC"), S8("AT"), S8("TLBI"), S8("ERET"), S8("DRPS"), S8("WFI"), S8("WFE"), S8("YIELD"),
+        S8("SEV"), S8("SEVL"), S8("SMSTART"), S8("SMSTOP"), S8("SVCR"), S8("PSTATE"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(system_prefixes); index += 1)
+    {
+        if (string_starts_with_sequence(name, system_prefixes[index]) || string_starts_with_sequence(mnemonic, system_prefixes[index]))
+        {
+            return true;
+        }
+    }
+    return string_contains(name, S8("SYSREG")) || string_contains(name, S8("PSTATE"));
+}
+
+BUSTER_GLOBAL_LOCAL Aarch64ImportEncoderFamily aarch64_import_encoder_family(Aarch64ImportRecord* record)
+{
+    String8 name = record->name;
+    String8 mnemonic = aarch64_import_mnemonic(record->assembly);
+    if (aarch64_import_is_system(record))
+    {
+        return AARCH64_IMPORT_ENCODER_SYSTEM;
+    }
+    for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+    {
+        if (string_contains(operand->type, S8("Matrix")) || string_contains(operand->type, S8("Tile")) ||
+            string_contains(operand->type, S8("ZA")))
+        {
+            return AARCH64_IMPORT_ENCODER_SME_SME2;
+        }
+    }
+    if (string_contains(name, S8("SME")) || string_contains(name, S8("ZA")) || string_contains(name, S8("ZT")) ||
+        string_contains(name, S8("MOVA")) || string_contains(name, S8("FMOPA")))
+    {
+        return AARCH64_IMPORT_ENCODER_SME_SME2;
+    }
+    for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+    {
+        if (string_starts_with_sequence(operand->type, S8("ZPR")) || string_starts_with_sequence(operand->type, S8("PPR")))
+        {
+            return AARCH64_IMPORT_ENCODER_SVE_SVE2;
+        }
+    }
+    if (string_contains(name, S8("SVE")) || string_contains(name, S8("SVE2")) || string_contains(name, S8("ZPR")) ||
+        string_contains(name, S8("PPR")) || string_contains(mnemonic, S8("while")) || string_contains(mnemonic, S8("ptrue")))
+    {
+        return AARCH64_IMPORT_ENCODER_SVE_SVE2;
+    }
+    if (string_contains(name, S8("MTE")) || string_contains(name, S8("STG")) || string_contains(name, S8("LDG")) ||
+        string_contains(name, S8("IRG")) || string_contains(name, S8("ADDG")))
+    {
+        return AARCH64_IMPORT_ENCODER_MTE;
+    }
+    if (string_contains(name, S8("ATOMIC")) || string_contains(name, S8("LDADD")) || string_contains(name, S8("CAS")) ||
+        string_contains(name, S8("SWP")) || string_contains(name, S8("STXR")) || string_contains(name, S8("LDXR")))
+    {
+        return AARCH64_IMPORT_ENCODER_ATOMIC_LSE;
+    }
+    if (string_contains(name, S8("AES")) || string_contains(name, S8("SHA")) || string_contains(name, S8("SM3")) ||
+        string_contains(name, S8("SM4")) || string_contains(name, S8("CRC")) || string_contains(name, S8("PMULL")))
+    {
+        return AARCH64_IMPORT_ENCODER_CRYPTO;
+    }
+    if (string_equal(mnemonic, S8("b")) || string_equal(mnemonic, S8("bl")) || string_equal(mnemonic, S8("br")) ||
+        string_equal(mnemonic, S8("blr")) || string_starts_with_sequence(mnemonic, S8("b.")) ||
+        string_starts_with_sequence(mnemonic, S8("cb")) || string_starts_with_sequence(mnemonic, S8("tb")) ||
+        string_starts_with_sequence(mnemonic, S8("adr")))
+    {
+        return AARCH64_IMPORT_ENCODER_BRANCH;
+    }
+    if (string_starts_with_sequence(mnemonic, S8("ldr")) || string_starts_with_sequence(mnemonic, S8("str")) ||
+        string_starts_with_sequence(mnemonic, S8("ld")) || string_starts_with_sequence(mnemonic, S8("st")))
+    {
+        return AARCH64_IMPORT_ENCODER_LOAD_STORE;
+    }
+    for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+    {
+        if (string_starts_with_sequence(operand->type, S8("FPR")) || string_starts_with_sequence(operand->type, S8("V")) ||
+            string_contains(operand->type, S8("VecList")))
+        {
+            return AARCH64_IMPORT_ENCODER_FP_SIMD_NEON;
+        }
+    }
+    if (string_contains(name, S8("NEON")) || string_contains(name, S8("SIMD")) || string_contains(name, S8("V128")) ||
+        string_contains(name, S8("FP")) || string_contains(name, S8("FPR")) || string_contains(name, S8("DOT")) ||
+        string_contains(name, S8("Vd")))
+    {
+        return AARCH64_IMPORT_ENCODER_FP_SIMD_NEON;
+    }
+    return AARCH64_IMPORT_ENCODER_SCALAR_INTEGER;
+}
+
+BUSTER_GLOBAL_LOCAL Aarch64ImportTestClass aarch64_import_test_class(Aarch64ImportRecord* record)
+{
+    String8 mnemonic = aarch64_import_mnemonic(record->assembly);
+    if (record->parse_reason)
+    {
+        return AARCH64_IMPORT_TEST_SCHEMA;
+    }
+    if (record->encoder_family == AARCH64_IMPORT_ENCODER_BRANCH || string_contains(mnemonic, S8("adr")))
+    {
+        return AARCH64_IMPORT_TEST_BRANCH;
+    }
+    if (record->encoder_family == AARCH64_IMPORT_ENCODER_SME_SME2 || aarch64_import_is_system(record))
+    {
+        return AARCH64_IMPORT_TEST_SME_SYSTEM;
+    }
+    if (record->address_kind == AARCH64_IMPORT_ADDRESS_BASE || record->address_kind == AARCH64_IMPORT_ADDRESS_BASE_OFFSET ||
+        record->address_kind == AARCH64_IMPORT_ADDRESS_BASE_INDEX)
+    {
+        return AARCH64_IMPORT_TEST_MEMORY;
+    }
+    for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+    {
+        if (operand->flags & AARCH64_IMPORT_OPERAND_LANE || operand->flags & AARCH64_IMPORT_OPERAND_FLAG_LIST)
+        {
+            return AARCH64_IMPORT_TEST_SIMD_LIST_LANE;
+        }
+        if (operand->type.length && (string_starts_with_sequence(operand->type, S8("PPR")) || string_contains(operand->type, S8("pred"))))
+        {
+            return AARCH64_IMPORT_TEST_SVE_PREDICATE;
+        }
+        if (operand->kind == AARCH64_IMPORT_OPERAND_MEMORY)
+        {
+            return AARCH64_IMPORT_TEST_MEMORY;
+        }
+    }
+    for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+    {
+        if (variable->transform == AARCH64_IMPORT_TRANSFORM_PC_RELATIVE)
+        {
+            return AARCH64_IMPORT_TEST_BRANCH;
+        }
+        if (variable->transform == AARCH64_IMPORT_TRANSFORM_IMMEDIATE || variable->transform == AARCH64_IMPORT_TRANSFORM_CONDITION ||
+            variable->transform == AARCH64_IMPORT_TRANSFORM_SHIFT_EXTEND)
+        {
+            return AARCH64_IMPORT_TEST_IMMEDIATE;
+        }
+    }
+    return AARCH64_IMPORT_TEST_SCALAR;
+}
+
+BUSTER_GLOBAL_LOCAL u64 aarch64_import_hash_mix(u64 hash, u64 value)
+{
+    hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+    hash ^= hash >> 29;
+    hash *= 0x9e3779b185ebca87ULL;
+    hash ^= hash >> 32;
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL u64 aarch64_import_signature_hash(Aarch64ImportRecord* record)
+{
+    u64 hash = 0x6a09e667f3bcc909ULL;
+    hash = aarch64_import_hash_mix(hash, record->fixed_mask);
+    hash = aarch64_import_hash_mix(hash, record->fixed_value);
+    for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+    {
+        hash = aarch64_import_hash_mix(hash, buster_hash_64((u8*)variable->name.pointer, variable->name.length));
+        hash = aarch64_import_hash_mix(hash, variable->source_mask | ((u64)variable->width << 32));
+        hash = aarch64_import_hash_mix(hash, variable->transform | ((u64)variable->relocation << 8) | ((u64)variable->shift << 16));
+        for (Aarch64ImportBit* bit = variable->first_bit; bit; bit = bit->next)
+        {
+            hash = aarch64_import_hash_mix(hash, bit->instruction_bit | ((u64)bit->value_bit << 8));
+        }
+    }
+    for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+    {
+        hash = aarch64_import_hash_mix(hash, buster_hash_64((u8*)operand->type.pointer, operand->type.length));
+        hash = aarch64_import_hash_mix(hash, buster_hash_64((u8*)operand->name.pointer, operand->name.length));
+        hash = aarch64_import_hash_mix(hash, operand->direction | ((u64)operand->kind << 8) | ((u64)operand->flags << 16) |
+                                               ((u64)operand->tied_to << 24));
+        hash = aarch64_import_hash_mix(hash, (u64)(u32)operand->immediate_min | ((u64)(u32)operand->immediate_max << 32));
+        hash = aarch64_import_hash_mix(hash, operand->register_width | ((u64)operand->scale << 16) |
+                                               ((u64)operand->immediate_flags << 24) | ((u64)operand->address_kind << 32) |
+                                               ((u64)operand->address_flags << 40) | ((u64)operand->address_base_index << 48));
+        hash = aarch64_import_hash_mix(hash, operand->address_offset_index);
+    }
+    hash = aarch64_import_hash_mix(hash, record->address_kind | ((u64)record->address_flags << 8) |
+                                             ((u64)record->address_base_index << 16) | ((u64)record->address_offset_index << 32));
+    for (Aarch64ImportPredicate* predicate = record->first_predicate; predicate; predicate = predicate->next)
+    {
+        hash = aarch64_import_hash_mix(hash, buster_hash_64((u8*)predicate->name.pointer, predicate->name.length));
+    }
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_variable_equal(Aarch64ImportVariable* left, Aarch64ImportVariable* right)
+{
+    if (!string_equal(left->name, right->name) || left->source_mask != right->source_mask || left->width != right->width ||
+        left->unmapped != right->unmapped || left->transform != right->transform || left->relocation != right->relocation ||
+        left->relocation_end != right->relocation_end || left->shift != right->shift || left->bit_count != right->bit_count)
+    {
+        return false;
+    }
+    Aarch64ImportBit* left_bit = left->first_bit;
+    Aarch64ImportBit* right_bit = right->first_bit;
+    while (left_bit && right_bit)
+    {
+        if (left_bit->instruction_bit != right_bit->instruction_bit || left_bit->value_bit != right_bit->value_bit)
+        {
+            return false;
+        }
+        left_bit = left_bit->next;
+        right_bit = right_bit->next;
+    }
+    return !left_bit && !right_bit;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_signature_equal(Aarch64ImportRecord* left, Aarch64ImportRecord* right)
+{
+    if (left->fixed_mask != right->fixed_mask || left->fixed_value != right->fixed_value || left->variable_count != right->variable_count ||
+        left->operand_count != right->operand_count)
+    {
+        return false;
+    }
+    Aarch64ImportVariable* left_variable = left->first_variable;
+    Aarch64ImportVariable* right_variable = right->first_variable;
+    while (left_variable && right_variable)
+    {
+        if (!aarch64_import_variable_equal(left_variable, right_variable))
+        {
+            return false;
+        }
+        left_variable = left_variable->next;
+        right_variable = right_variable->next;
+    }
+    Aarch64ImportOperand* left_operand = left->first_operand;
+    Aarch64ImportOperand* right_operand = right->first_operand;
+    while (left_operand && right_operand)
+    {
+        if (!string_equal(left_operand->type, right_operand->type) || !string_equal(left_operand->name, right_operand->name) ||
+            left_operand->direction != right_operand->direction || left_operand->kind != right_operand->kind ||
+            left_operand->flags != right_operand->flags || left_operand->tied_to != right_operand->tied_to ||
+            left_operand->immediate_min != right_operand->immediate_min || left_operand->immediate_max != right_operand->immediate_max ||
+            left_operand->register_width != right_operand->register_width || left_operand->scale != right_operand->scale ||
+            left_operand->immediate_flags != right_operand->immediate_flags || left_operand->address_kind != right_operand->address_kind ||
+            left_operand->address_flags != right_operand->address_flags || left_operand->address_base_index != right_operand->address_base_index ||
+            left_operand->address_offset_index != right_operand->address_offset_index)
+        {
+            return false;
+        }
+        left_operand = left_operand->next;
+        right_operand = right_operand->next;
+    }
+    if (left_variable || right_variable || left_operand || right_operand || left->address_kind != right->address_kind ||
+        left->address_flags != right->address_flags || left->address_base_index != right->address_base_index ||
+        left->address_offset_index != right->address_offset_index || left->predicate_count != right->predicate_count)
+    {
+        return false;
+    }
+    Aarch64ImportPredicate* left_predicate = left->first_predicate;
+    Aarch64ImportPredicate* right_predicate = right->first_predicate;
+    while (left_predicate && right_predicate)
+    {
+        if (!string_equal(left_predicate->name, right_predicate->name))
+        {
+            return false;
+        }
+        left_predicate = left_predicate->next;
+        right_predicate = right_predicate->next;
+    }
+    return !left_predicate && !right_predicate;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_record_object(Arena* arena, String8 object, Aarch64ImportRecord* record)
+{
+    JsonParser parser = {.text = object};
+    bool valid = json_consume(&parser, '{');
+    String8 raw_name = {0};
+    while (valid)
+    {
+        String8 raw_key = {0};
+        String8 value = {0};
+        if (!json_raw_object_next(&parser, &raw_key, &value, &valid))
+        {
+            break;
+        }
+        String8 key = json_raw_key_text(raw_key);
+        if (string_equal(key, S8("name")))
+        {
+            raw_name = value;
+        }
+        else if (string_equal(key, S8("inst")))
+        {
+            record->inst_json = value;
+        }
+        else if (string_equal(key, S8("asm")))
+        {
+            record->asm_json = value;
+        }
+        else if (string_equal(key, S8("out")))
+        {
+            record->out_json = value;
+        }
+        else if (string_equal(key, S8("in")))
+        {
+            record->in_json = value;
+        }
+        else if (string_equal(key, S8("predicates")))
+        {
+            record->predicates_json = value;
+        }
+    }
+    json_skip_whitespace(&parser);
+    valid = valid && parser.index == parser.text.length && raw_name.length && record->inst_json.length && record->asm_json.length &&
+            record->out_json.length && record->in_json.length && record->predicates_json.length;
+    if (!valid || !aarch64_import_decode_json_string(arena, raw_name, &record->name) ||
+        !aarch64_import_decode_json_string(arena, record->asm_json, &record->assembly) ||
+        !aarch64_import_decode_json_string(arena, record->out_json, &record->output_operands) ||
+        !aarch64_import_decode_json_string(arena, record->in_json, &record->input_operands))
+    {
+        return false;
+    }
+    if (!aarch64_import_parse_inst(arena, record) || !aarch64_import_parse_dag(arena, record, record->output_operands, AARCH64_IMPORT_OPERAND_WRITE) ||
+        !aarch64_import_parse_dag(arena, record, record->input_operands, AARCH64_IMPORT_OPERAND_READ) ||
+        !aarch64_import_parse_predicates(arena, record))
+    {
+        return false;
+    }
+    aarch64_import_parse_asm(arena, record);
+    aarch64_import_set_field_semantics(record);
+    record->mnemonic = aarch64_import_mnemonic(record->assembly);
+    record->name_hash = buster_hash_64((u8*)record->name.pointer, record->name.length);
+    record->source_hash = 0x243f6a8885a308d3ULL;
+    String8 raw_values[] = {record->name, record->inst_json, record->asm_json, record->out_json, record->in_json, record->predicates_json};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(raw_values); index += 1)
+    {
+        record->source_hash = aarch64_import_hash_mix(record->source_hash,
+                                                       buster_hash_64((u8*)raw_values[index].pointer, raw_values[index].length));
+        record->source_hash = aarch64_import_hash_mix(record->source_hash, raw_values[index].length);
+    }
+    record->encoder_family = (u8)aarch64_import_encoder_family(record);
+    record->test_class = (u8)aarch64_import_test_class(record);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_import_record_push(Arena* arena, Aarch64ImportRecordList* list, Aarch64ImportRecord record)
+{
+    Aarch64ImportRecord* node = arena_allocate(arena, Aarch64ImportRecord, 1);
+    *node = record;
+    node->source_index = list->count;
+    if (list->last)
+    {
+        list->last->next = node;
+    }
+    else
+    {
+        list->first = node;
+    }
+    list->last = node;
+    list->count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL int aarch64_import_record_compare(const void* left_pointer, const void* right_pointer)
+{
+    Aarch64ImportRecord const* left = *(Aarch64ImportRecord* const*)left_pointer;
+    Aarch64ImportRecord const* right = *(Aarch64ImportRecord* const*)right_pointer;
+    int result = assembly_import_string_compare(&left->name, &right->name);
+    if (!result)
+    {
+        result = (left->source_hash > right->source_hash) - (left->source_hash < right->source_hash);
+    }
+    if (!result)
+    {
+        result = (left->source_index > right->source_index) - (left->source_index < right->source_index);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_import_record_sort(Arena* arena, Aarch64ImportRecordList* records)
+{
+    if (records->count < 2)
+    {
+        return;
+    }
+    Aarch64ImportRecord** sorted = arena_allocate(arena, Aarch64ImportRecord*, records->count);
+    u32 index = 0;
+    for (Aarch64ImportRecord* record = records->first; record; record = record->next)
+    {
+        sorted[index++] = record;
+    }
+    qsort(sorted, records->count, sizeof(sorted[0]), aarch64_import_record_compare);
+    records->first = sorted[0];
+    for (index = 1; index < records->count; index += 1)
+    {
+        sorted[index - 1]->next = sorted[index];
+    }
+    records->last = sorted[records->count - 1];
+    records->last->next = 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_normalized(Arena* arena, String8 jsonl, Aarch64ImportRecordList* records)
+{
+    u64 start = 0;
+    while (start < jsonl.length)
+    {
+        u64 end = start;
+        while (end < jsonl.length && jsonl.pointer[end] != '\n')
+        {
+            end += 1;
+        }
+        String8 line = assembly_import_trim(string_slice(jsonl, start, end));
+        if (line.length)
+        {
+            Aarch64ImportRecord record = {0};
+            if (!aarch64_import_parse_record_object(arena, line, &record))
+            {
+                return false;
+            }
+            aarch64_import_record_push(arena, records, record);
+        }
+        start = end + (end < jsonl.length);
+    }
+    aarch64_import_record_sort(arena, records);
+    return records->count != 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_record_is_valid_for_alias(Aarch64ImportRecord* record)
+{
+    return record->parse_reason == AARCH64_IMPORT_REASON_NONE;
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_import_normalize_records(Aarch64ImportRecordList* records)
+{
+    u32 canonical_count = 0;
+    for (Aarch64ImportRecord* record = records->first; record; record = record->next)
+    {
+        if (record->parse_reason != AARCH64_IMPORT_REASON_NONE)
+        {
+            record->reason_id = record->parse_reason;
+        }
+        if (record->parse_reason == AARCH64_IMPORT_REASON_UNMAPPED_VARIABLE ||
+            record->parse_reason == AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT)
+        {
+            record->coverage_class = AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE;
+        }
+        else if (record->parse_reason != AARCH64_IMPORT_REASON_NONE)
+        {
+            record->coverage_class = AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN;
+        }
+        else if (aarch64_import_is_system(record))
+        {
+            record->coverage_class = AARCH64_IMPORT_COVERAGE_PRIVILEGED_SYSTEM;
+            record->reason_id = AARCH64_IMPORT_REASON_SYSTEM_OR_PRIVILEGED;
+        }
+        else if (!record->variable_count && !record->operand_count)
+        {
+            record->coverage_class = AARCH64_IMPORT_COVERAGE_DIRECT;
+        }
+        else
+        {
+            record->coverage_class = AARCH64_IMPORT_COVERAGE_NORMALIZED;
+        }
+        record->encoder_family = (u8)aarch64_import_encoder_family(record);
+        record->test_class = (u8)aarch64_import_test_class(record);
+        if (aarch64_import_record_is_valid_for_alias(record))
+        {
+            record->signature_hash = aarch64_import_signature_hash(record);
+        }
+        record->normalized_form_id = canonical_count++;
+        if (aarch64_import_record_is_valid_for_alias(record))
+        {
+            for (Aarch64ImportRecord* prior = records->first; prior != record; prior = prior->next)
+            {
+                if (aarch64_import_record_is_valid_for_alias(prior) && prior->coverage_class == record->coverage_class &&
+                    prior->signature_hash == record->signature_hash &&
+                    aarch64_import_signature_equal(prior, record))
+                {
+                    record->coverage_class = AARCH64_IMPORT_COVERAGE_ALIAS;
+                    record->reason_id = AARCH64_IMPORT_REASON_ALIAS_OF_CANONICAL;
+                    record->normalized_form_id = prior->normalized_form_id;
+                    canonical_count -= 1;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+typedef struct Aarch64GeneratedEmitIndex Aarch64GeneratedEmitIndex;
+struct Aarch64GeneratedEmitIndex
+{
+    u32 field_first;
+    u32 field_count;
+    u32 operand_first;
+    u32 operand_count;
+    u32 predicate_first;
+    u32 predicate_count;
+};
+
+typedef struct Aarch64GeneratedLookupRecord Aarch64GeneratedLookupRecord;
+struct Aarch64GeneratedLookupRecord
+{
+    Aarch64ImportRecord* record;
+    u32 coverage_index;
+};
+
+typedef struct Aarch64ImportIdentityKey Aarch64ImportIdentityKey;
+struct Aarch64ImportIdentityKey
+{
+    u64 hash;
+    String8 name;
+};
+
+BUSTER_GLOBAL_LOCAL int aarch64_import_identity_key_compare(const void* left_pointer, const void* right_pointer)
+{
+    Aarch64ImportIdentityKey const* left = (Aarch64ImportIdentityKey const*)left_pointer;
+    Aarch64ImportIdentityKey const* right = (Aarch64ImportIdentityKey const*)right_pointer;
+    int result = (left->hash > right->hash) - (left->hash < right->hash);
+    if (!result)
+    {
+        result = assembly_import_string_compare(&left->name, &right->name);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int aarch64_import_lookup_mnemonic_compare(const void* left_pointer, const void* right_pointer)
+{
+    Aarch64GeneratedLookupRecord const* left = (Aarch64GeneratedLookupRecord const*)left_pointer;
+    Aarch64GeneratedLookupRecord const* right = (Aarch64GeneratedLookupRecord const*)right_pointer;
+    int result = assembly_import_string_compare(&left->record->mnemonic, &right->record->mnemonic);
+    if (!result)
+    {
+        result = assembly_import_string_compare(&left->record->name, &right->record->name);
+    }
+    if (!result)
+    {
+        result = (left->coverage_index > right->coverage_index) - (left->coverage_index < right->coverage_index);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int aarch64_import_lookup_signature_compare(const void* left_pointer, const void* right_pointer)
+{
+    Aarch64GeneratedLookupRecord const* left = (Aarch64GeneratedLookupRecord const*)left_pointer;
+    Aarch64GeneratedLookupRecord const* right = (Aarch64GeneratedLookupRecord const*)right_pointer;
+    int result = (left->record->signature_hash > right->record->signature_hash) -
+                 (left->record->signature_hash < right->record->signature_hash);
+    if (!result)
+    {
+        result = assembly_import_string_compare(&left->record->name, &right->record->name);
+    }
+    if (!result)
+    {
+        result = (left->coverage_index > right->coverage_index) - (left->coverage_index < right->coverage_index);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_validate_identity(Arena* scratch, Aarch64ImportRecordList records)
+{
+    Aarch64ImportIdentityKey* names = arena_allocate(scratch, Aarch64ImportIdentityKey, records.count);
+    Aarch64ImportIdentityKey* sources = arena_allocate(scratch, Aarch64ImportIdentityKey, records.count);
+    u32 index = 0;
+    String8 previous_name = {0};
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next)
+    {
+        if (previous_name.length && string_equal(previous_name, record->name))
+        {
+            return false;
+        }
+        previous_name = record->name;
+        names[index] = (Aarch64ImportIdentityKey){.hash = record->name_hash, .name = record->name};
+        sources[index] = (Aarch64ImportIdentityKey){.hash = record->source_hash, .name = record->name};
+        index += 1;
+    }
+    qsort(names, records.count, sizeof(names[0]), aarch64_import_identity_key_compare);
+    qsort(sources, records.count, sizeof(sources[0]), aarch64_import_identity_key_compare);
+    for (index = 1; index < records.count; index += 1)
+    {
+        if ((names[index - 1].hash == names[index].hash && !string_equal(names[index - 1].name, names[index].name)) ||
+            (sources[index - 1].hash == sources[index].hash && !string_equal(sources[index - 1].name, sources[index].name)))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u32 aarch64_import_variable_segment_count(Aarch64ImportVariable* variable)
+{
+    u32 result = 0;
+    Aarch64ImportBit* previous = 0;
+    for (Aarch64ImportBit* bit = variable->first_bit; bit; bit = bit->next)
+    {
+        if (!previous || bit->instruction_bit != previous->instruction_bit + 1 || bit->value_bit != previous->value_bit + 1)
+        {
+            result += 1;
+        }
+        previous = bit;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 aarch64_import_variable_index(Aarch64ImportRecord* record, String8 name)
+{
+    u32 index = 0;
+    for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next, index += 1)
+    {
+        if (string_equal(variable->name, name))
+        {
+            return index;
+        }
+    }
+    return UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL Aarch64ImportVariable* aarch64_import_operand_variable(Aarch64ImportRecord* record, String8 name)
+{
+    Aarch64ImportVariable* result = aarch64_import_variable_find(record, name);
+    if (!result && name.length && name.pointer[0] == '_')
+    {
+        result = aarch64_import_variable_find(record, string_slice(name, 1, name.length));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_import_apply_operand_metadata(Aarch64ImportRecord* record)
+{
+    for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+    {
+        Aarch64ImportVariable* variable = aarch64_import_operand_variable(record, operand->name);
+        if (variable)
+        {
+            operand->field_index = aarch64_import_variable_index(record, variable->name);
+            if (operand->kind == AARCH64_IMPORT_OPERAND_RELATIVE || variable->relocation != AARCH64_IMPORT_RELOC_NONE)
+            {
+                operand->kind = AARCH64_IMPORT_OPERAND_RELATIVE;
+                // Relocation width and signedness are emitter facts, not a
+                // generic bit-width range. Keep the explicit relocation
+                // field-end and scale only.
+                operand->scale = variable->shift;
+                operand->immediate_flags |= AARCH64_IMPORT_OPERAND_SCALE_EXACT;
+            }
+        }
+        else
+        {
+            operand->field_index = UINT32_MAX;
+        }
+        if (operand->tied_to != UINT32_MAX && operand->tied_to >= record->operand_count)
+        {
+            aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNPROVEN_TIED_OPERAND);
+            operand->tied_to = UINT32_MAX;
+        }
+    }
+    for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+    {
+        for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+        {
+            Aarch64ImportVariable* candidate = aarch64_import_operand_variable(record, operand->name);
+            if (candidate == variable)
+            {
+                if (operand->direction & AARCH64_IMPORT_OPERAND_WRITE)
+                {
+                    variable->flags |= AARCH64_IMPORT_FIELD_DESTINATION;
+                }
+                if (operand->direction & AARCH64_IMPORT_OPERAND_READ)
+                {
+                    variable->flags |= AARCH64_IMPORT_FIELD_SOURCE;
+                }
+            }
+        }
+    }
+}
+
+#define AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE 4092u
+#define AARCH64_GENERATED_BASE64_RAW_CHUNK_SIZE 3069u
+
+BUSTER_GLOBAL_LOCAL void aarch64_generated_append_c_bytes(Arena* output, const u8* pointer, u32 length)
+{
+    arena_append_char8(output, '"');
+    for (u32 index = 0; index < length; index += 1)
+    {
+        u8 byte = pointer[index];
+        if (byte == '"')
+        {
+            arena_append_string8(output, S8("\\\""));
+        }
+        else if (byte == '\\')
+        {
+            arena_append_string8(output, S8("\\\\"));
+        }
+        else if (byte >= 0x20 && byte < 0x7f)
+        {
+            arena_append_char8(output, (char8)byte);
+        }
+        else
+        {
+            arena_append_char8(output, '\\');
+            arena_append_char8(output, (char8)('0' + ((byte >> 6) & 7)));
+            arena_append_char8(output, (char8)('0' + ((byte >> 3) & 7)));
+            arena_append_char8(output, (char8)('0' + (byte & 7)));
+        }
+    }
+    arena_append_char8(output, '"');
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_chunk_accessor(Arena* output, String8 name, u32 chunk_count)
+{
+    arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_char(u64 logical)\n{\n    u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;\n    switch (chunk)\n    {\n"));
+    for (u32 chunk = 0; chunk < chunk_count; chunk += 1)
+    {
+        arena_append_string8(output, S8("        case "));
+        xed_generated_append_decimal(output, chunk);
+        arena_append_string8(output, S8(": return offset < (u64)(sizeof("));
+        arena_append_string8(output, name);
+        arena_append_string8(output, S8("_chunk_"));
+        xed_generated_append_decimal(output, chunk);
+        arena_append_string8(output, S8(") - 1u) ? "));
+        arena_append_string8(output, name);
+        arena_append_string8(output, S8("_chunk_"));
+        xed_generated_append_decimal(output, chunk);
+        arena_append_string8(output, S8("[offset] : 0;\n"));
+    }
+    arena_append_string8(output, S8("        default: return 0;\n    }\n}\n\n"));
+    arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u8_counted(u64 byte_count, u64 offset)\n{\n    u64 encoded_count = 0;\n    if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;\n    u64 encoded_offset = (offset / 3u) * 4u;\n    if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;\n    u32 value = ((u32)buster_aarch64_generated_base64_value("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_char(encoded_offset + 3u));\n    return (u8)(value >> ((2u - (offset % 3u)) * 8u));\n}\n"));
+    arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u8(u64 offset)\n{\n    return "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u8_counted("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_BYTE_COUNT, offset);\n}\n"));
+    arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u16 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u16_counted(u64 byte_count, u64 offset)\n{\n    if (!buster_aarch64_generated_blob_range_valid(byte_count, offset, 2u)) return 0;\n    return (u16)"));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u8_counted(byte_count, offset) | ((u16)"));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u8_counted(byte_count, offset + 1u) << 8);\n}\nBUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u16 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u16(u64 offset)\n{\n    return "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u16_counted("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_BYTE_COUNT, offset);\n}\n"));
+
+    arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u32_counted(u64 byte_count, u64 offset)\n{\n    if (!buster_aarch64_generated_blob_range_valid(byte_count, offset, 4u)) return 0;\n    return (u32)"));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u16_counted(byte_count, offset) | ((u32)"));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u16_counted(byte_count, offset + 2u) << 16);\n}\nBUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u32(u64 offset)\n{\n    return "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u32_counted("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_BYTE_COUNT, offset);\n}\n"));
+
+    arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u64 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u64_counted(u64 byte_count, u64 offset)\n{\n    if (!buster_aarch64_generated_blob_range_valid(byte_count, offset, 8u)) return 0;\n    return (u64)"));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u32_counted(byte_count, offset) | ((u64)"));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u32_counted(byte_count, offset + 4u) << 32);\n}\nBUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u64 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u64(u64 offset)\n{\n    return "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_u64_counted("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_BYTE_COUNT, offset);\n}\n"));
+    arena_append_string8(output, S8("\n"));
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_chunked_c_array(Arena* output, String8 name, const u8* bytes, u32 byte_count,
+                                                                u32 logical_byte_count)
+{
+    u32 chunk_count = (byte_count + AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE - 1) / AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 data_chunk_count = chunk_count;
+    if (!chunk_count)
+    {
+        chunk_count = 1;
+    }
+    for (u32 chunk = 0; chunk < chunk_count; chunk += 1)
+    {
+        arena_append_string8(output, S8("static const char8 "));
+        arena_append_string8(output, name);
+        arena_append_string8(output, S8("_chunk_"));
+        xed_generated_append_decimal(output, chunk);
+        arena_append_string8(output, S8("[] = "));
+        if (chunk < data_chunk_count)
+        {
+            u32 start = chunk * AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+            u32 length = BUSTER_MIN(AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE, byte_count - start);
+            aarch64_generated_append_c_bytes(output, bytes + start, length);
+        }
+        else
+        {
+            arena_append_string8(output, S8("{0}"));
+        }
+        arena_append_string8(output, S8(";\n"));
+    }
+    arena_append_string8(output, S8("#define "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_BYTE_COUNT "));
+    xed_generated_append_decimal(output, logical_byte_count);
+    arena_append_string8(output, S8("\n#define "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_CHUNK_COUNT "));
+    xed_generated_append_decimal(output, chunk_count);
+    arena_append_string8(output, S8("\n"));
+    aarch64_generated_emit_chunk_accessor(output, name, chunk_count);
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_string_pool(Arena* output, Arena* arena, XedGeneratedStringPool* pool,
+                                                             XedGeneratedStringNode** sorted)
+{
+    u8* bytes = arena_allocate(arena, u8, pool->byte_count);
+    memset(bytes, 0, pool->byte_count);
+    u32 offset = 1;
+    for (u32 index = 0; index < pool->count; index += 1)
+    {
+        XedGeneratedStringNode* node = sorted[index];
+        memcpy(bytes + offset, node->string.pointer, node->string.length);
+        offset += (u32)node->string.length + 1;
+    }
+    aarch64_generated_emit_chunked_c_array(output, S8("buster_aarch64_generated_string_pool"), bytes, pool->byte_count, pool->byte_count);
+    arena_append_string8(output, S8("#define buster_aarch64_generated_string_byte(offset) \\\n    ((char8)(((u64)(offset) < (u64)BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE) ? \\\n             buster_aarch64_generated_string_pool_char(offset) : 0))\n\n"));
+    arena_append_string8(output, S8("#define BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE "));
+    xed_generated_append_decimal(output, pool->byte_count);
+    arena_append_string8(output, S8("\n\n"));
+}
+
+typedef struct Aarch64GeneratedBlob Aarch64GeneratedBlob;
+struct Aarch64GeneratedBlob
+{
+    u8* bytes;
+    u32 count;
+    u32 capacity;
+};
+
+BUSTER_GLOBAL_LOCAL Aarch64GeneratedBlob aarch64_generated_blob_make(Arena* arena, u64 capacity)
+{
+    Aarch64GeneratedBlob result = {0};
+    if (capacity <= UINT32_MAX)
+    {
+        result.bytes = capacity ? arena_allocate(arena, u8, capacity) : 0;
+        result.capacity = (u32)capacity;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_generated_blob_append_u8(Aarch64GeneratedBlob* blob, u8 value)
+{
+    if (!blob || blob->count >= blob->capacity)
+    {
+        return false;
+    }
+    blob->bytes[blob->count++] = value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_generated_blob_append_u16(Aarch64GeneratedBlob* blob, u16 value)
+{
+    return aarch64_generated_blob_append_u8(blob, (u8)value) && aarch64_generated_blob_append_u8(blob, (u8)(value >> 8));
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_generated_blob_append_u32(Aarch64GeneratedBlob* blob, u32 value)
+{
+    return aarch64_generated_blob_append_u8(blob, (u8)value) && aarch64_generated_blob_append_u8(blob, (u8)(value >> 8)) &&
+           aarch64_generated_blob_append_u8(blob, (u8)(value >> 16)) && aarch64_generated_blob_append_u8(blob, (u8)(value >> 24));
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_generated_blob_append_u64(Aarch64GeneratedBlob* blob, u64 value)
+{
+    return aarch64_generated_blob_append_u32(blob, (u32)value) && aarch64_generated_blob_append_u32(blob, (u32)(value >> 32));
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_generated_append_base64_blob(Arena* output, String8 name, Aarch64GeneratedBlob blob)
+{
+    static const char8 alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    u64 encoded_byte_count = ((u64)blob.count + 2u) / 3u * 4u;
+    u32 chunk_count = (u32)((encoded_byte_count + AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE - 1) / AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE);
+    if (!chunk_count)
+    {
+        chunk_count = 1;
+    }
+    for (u32 chunk = 0; chunk < chunk_count; chunk += 1)
+    {
+        u32 start = chunk * AARCH64_GENERATED_BASE64_RAW_CHUNK_SIZE;
+        u32 length = start < blob.count ? BUSTER_MIN(AARCH64_GENERATED_BASE64_RAW_CHUNK_SIZE, blob.count - start) : 0;
+        char8 encoded[AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE + 1u];
+        u32 encoded_count = 0;
+        for (u32 index = 0; index < length; index += 3)
+        {
+            u32 remaining = length - index;
+            u32 value = ((u32)blob.bytes[start + index] << 16) | (remaining > 1 ? (u32)blob.bytes[start + index + 1] << 8 : 0) |
+                        (remaining > 2 ? blob.bytes[start + index + 2] : 0);
+            encoded[encoded_count++] = alphabet[(value >> 18) & 63];
+            encoded[encoded_count++] = alphabet[(value >> 12) & 63];
+            encoded[encoded_count++] = remaining > 1 ? alphabet[(value >> 6) & 63] : '=';
+            encoded[encoded_count++] = remaining > 2 ? alphabet[value & 63] : '=';
+        }
+        arena_append_string8(output, S8("static const char8 "));
+        arena_append_string8(output, name);
+        arena_append_string8(output, S8("_chunk_"));
+        xed_generated_append_decimal(output, chunk);
+        arena_append_string8(output, S8("[] = "));
+        if (encoded_count)
+        {
+            aarch64_generated_append_c_bytes(output, (u8*)encoded, encoded_count);
+        }
+        else
+        {
+            arena_append_string8(output, S8("{0}"));
+        }
+        arena_append_string8(output, S8(";\n"));
+    }
+    arena_append_string8(output, S8("#define "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_BYTE_COUNT "));
+    xed_generated_append_decimal(output, blob.count);
+    arena_append_string8(output, S8("\n#define "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_CHUNK_COUNT "));
+    xed_generated_append_decimal(output, chunk_count);
+    arena_append_string8(output, S8("\n"));
+    aarch64_generated_emit_chunk_accessor(output, name, chunk_count);
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_preamble(Arena* output)
+{
+    arena_append_string8(output,
+                         S8("/* Generated by build import_assembly_metadata; do not edit. */\n"
+                            "#ifndef BUSTER_AARCH64_ASSEMBLY_GENERATED_H\n"
+                            "#define BUSTER_AARCH64_ASSEMBLY_GENERATED_H\n"
+                            "#include <buster/lib/base.h>\n\n"
+                            "#define BUSTER_AARCH64_GENERATED_SCHEMA_VERSION 4\n"
+                            "#define BUSTER_AARCH64_GENERATED_AUDIT_ONLY 1\n\n"
+                            "typedef enum BusterAarch64GeneratedCoverageClass {\n"
+                            "    BUSTER_AARCH64_GENERATED_COVERAGE_DIRECT,\n"
+                            "    BUSTER_AARCH64_GENERATED_COVERAGE_NORMALIZED,\n"
+                            "    BUSTER_AARCH64_GENERATED_COVERAGE_ALIAS,\n"
+                            "    BUSTER_AARCH64_GENERATED_COVERAGE_PRIVILEGED_SYSTEM,\n"
+                            "    BUSTER_AARCH64_GENERATED_COVERAGE_RESERVED_UNENCODABLE,\n"
+                            "    BUSTER_AARCH64_GENERATED_COVERAGE_UNSUPPORTED_TOKEN,\n"
+                            "    BUSTER_AARCH64_GENERATED_COVERAGE_UNCLASSIFIED,\n"
+                            "    BUSTER_AARCH64_GENERATED_COVERAGE_CLASS_COUNT,\n"
+                            "} BusterAarch64GeneratedCoverageClass;\n\n"
+                            "typedef enum BusterAarch64GeneratedEncoderFamily {\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_SCALAR_INTEGER,\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_BRANCH,\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_LOAD_STORE,\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_FP_SIMD_NEON,\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_SVE_SVE2,\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_SME_SME2,\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_MTE,\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_ATOMIC_LSE,\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_CRYPTO,\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_SYSTEM,\n"
+                            "    BUSTER_AARCH64_GENERATED_ENCODER_COUNT,\n"
+                            "} BusterAarch64GeneratedEncoderFamily;\n\n"
+                            "typedef enum BusterAarch64GeneratedTestClass {\n"
+                            "    BUSTER_AARCH64_GENERATED_TEST_SCALAR,\n"
+                            "    BUSTER_AARCH64_GENERATED_TEST_BRANCH,\n"
+                            "    BUSTER_AARCH64_GENERATED_TEST_MEMORY,\n"
+                            "    BUSTER_AARCH64_GENERATED_TEST_SIMD_LIST_LANE,\n"
+                            "    BUSTER_AARCH64_GENERATED_TEST_SVE_PREDICATE,\n"
+                            "    BUSTER_AARCH64_GENERATED_TEST_SME_SYSTEM,\n"
+                            "    BUSTER_AARCH64_GENERATED_TEST_IMMEDIATE,\n"
+                            "    BUSTER_AARCH64_GENERATED_TEST_SCHEMA,\n"
+                            "    BUSTER_AARCH64_GENERATED_TEST_COUNT,\n"
+                            "} BusterAarch64GeneratedTestClass;\n\n"
+                            "typedef enum BusterAarch64GeneratedReason {\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_NONE,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_ALIAS_OF_CANONICAL,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_SYSTEM_OR_PRIVILEGED,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_UNMAPPED_VARIABLE,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_CONFLICTING_BIT_ASSIGNMENT,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_MALFORMED_DAG,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_MALFORMED_TEMPLATE,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_UNKNOWN_FIELD,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_UNKNOWN_PREDICATE,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_MISSING_OPERAND,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_INVALID_JSON,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_NULL_FIELD,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_UNPROVEN_FIELD_SEMANTICS,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_UNPROVEN_OPERAND_KIND,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_UNPROVEN_IMMEDIATE_RANGE,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_UNPROVEN_MEMORY_FORM,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_UNPROVEN_TIED_OPERAND,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_UNPROVEN_CORRESPONDENCE,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_UNSUPPORTED_ADDRESS_GRAMMAR,\n"
+                            "    BUSTER_AARCH64_GENERATED_REASON_COUNT,\n"
+                            "} BusterAarch64GeneratedReason;\n\n"
+                            "typedef enum BusterAarch64GeneratedFieldTransform {\n"
+                            "    BUSTER_AARCH64_GENERATED_TRANSFORM_NONE,\n"
+                            "    BUSTER_AARCH64_GENERATED_TRANSFORM_REGISTER,\n"
+                            "    BUSTER_AARCH64_GENERATED_TRANSFORM_IMMEDIATE,\n"
+                            "    BUSTER_AARCH64_GENERATED_TRANSFORM_CONDITION,\n"
+                            "    BUSTER_AARCH64_GENERATED_TRANSFORM_SHIFT_EXTEND,\n"
+                            "    BUSTER_AARCH64_GENERATED_TRANSFORM_LANE,\n"
+                            "    BUSTER_AARCH64_GENERATED_TRANSFORM_PC_RELATIVE,\n"
+                            "    BUSTER_AARCH64_GENERATED_TRANSFORM_SYSTEM,\n"
+                            "} BusterAarch64GeneratedFieldTransform;\n\n"
+                            "typedef enum BusterAarch64GeneratedRelocationKind {\n"
+                            "    BUSTER_AARCH64_GENERATED_RELOC_NONE,\n"
+                            "    BUSTER_AARCH64_GENERATED_RELOC_BRANCH26,\n"
+                            "    BUSTER_AARCH64_GENERATED_RELOC_COND_BRANCH19,\n"
+                            "    BUSTER_AARCH64_GENERATED_RELOC_TEST_BRANCH14,\n"
+                            "    BUSTER_AARCH64_GENERATED_RELOC_LITERAL19,\n"
+                            "    BUSTER_AARCH64_GENERATED_RELOC_ADR21,\n"
+                            "    BUSTER_AARCH64_GENERATED_RELOC_ADRP21,\n"
+                            "} BusterAarch64GeneratedRelocationKind;\n\n"
+                            "typedef enum BusterAarch64GeneratedOperandKind {\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_REGISTER,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_MEMORY,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_IMMEDIATE,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_RELATIVE,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_COMPOUND,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_SYSTEM,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_LIST,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_UNPROVEN,\n"
+                            "} BusterAarch64GeneratedOperandKind;\n\n"
+                            "typedef enum BusterAarch64GeneratedAddressKind {\n"
+                            "    BUSTER_AARCH64_GENERATED_ADDRESS_NONE,\n"
+                            "    BUSTER_AARCH64_GENERATED_ADDRESS_BASE,\n"
+                            "    BUSTER_AARCH64_GENERATED_ADDRESS_BASE_OFFSET,\n"
+                            "    BUSTER_AARCH64_GENERATED_ADDRESS_BASE_INDEX,\n"
+                            "    BUSTER_AARCH64_GENERATED_ADDRESS_LITERAL,\n"
+                            "    BUSTER_AARCH64_GENERATED_ADDRESS_BRANCH,\n"
+                            "    BUSTER_AARCH64_GENERATED_ADDRESS_SYSTEM,\n"
+                            "    BUSTER_AARCH64_GENERATED_ADDRESS_UNPROVEN,\n"
+                            "    BUSTER_AARCH64_GENERATED_ADDRESS_COUNT,\n"
+                            "} BusterAarch64GeneratedAddressKind;\n\n"
+                            "enum {\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_READ = 1u << 0,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_WRITE = 1u << 1,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_TIED = 1u << 2,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_SUPPRESSED = 1u << 3,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_IMPLICIT = 1u << 4,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_OPTIONAL = 1u << 5,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_FLAG_LIST = 1u << 6,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_LANE = 1u << 7,\n"
+                            "};\n"
+                            "enum {\n"
+                            "    BUSTER_AARCH64_GENERATED_FIELD_DESTINATION = 1u << 0,\n"
+                            "    BUSTER_AARCH64_GENERATED_FIELD_SOURCE = 1u << 1,\n"
+                            "    BUSTER_AARCH64_GENERATED_FIELD_IMMEDIATE = 1u << 2,\n"
+                            "    BUSTER_AARCH64_GENERATED_FIELD_PC_RELATIVE = 1u << 3,\n"
+                            "    BUSTER_AARCH64_GENERATED_FIELD_UNMAPPED = 1u << 4,\n"
+                            "};\n\n"
+                            "enum {\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_IMMEDIATE_RANGE_EXACT = 1u << 0,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_IMMEDIATE_SIGNED = 1u << 1,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_SCALE_EXACT = 1u << 2,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_ADDRESS_EXACT = 1u << 3,\n"
+                            "    BUSTER_AARCH64_GENERATED_OPERAND_REGISTER_WIDTH_EXACT = 1u << 4,\n"
+                            "};\n\n"
+                            "typedef struct BusterAarch64GeneratedBitSegment BusterAarch64GeneratedBitSegment;\n"
+                            "struct BusterAarch64GeneratedBitSegment { u8 instruction_lsb; u8 width; u8 value_lsb; u8 reserved; };\n\n"
+                            "typedef struct BusterAarch64GeneratedField BusterAarch64GeneratedField;\n"
+                            "struct BusterAarch64GeneratedField {\n"
+                            "    u32 name_offset; u32 segment_first; u32 source_mask;\n"
+                            "    u8 width; u8 segment_count; u8 transform; u8 relocation;\n"
+                            "    u8 relocation_end; u8 shift; u8 flags; u8 reserved;\n"
+                            "};\n\n"
+                            "typedef struct BusterAarch64GeneratedOperand BusterAarch64GeneratedOperand;\n"
+                            "struct BusterAarch64GeneratedOperand {\n"
+                            "    u32 syntax_offset; u32 type_offset; u32 name_offset; u32 field_index;\n"
+                            "    s32 immediate_min; s32 immediate_max; u16 register_width; u32 tied_to;\n"
+                            "    u16 address_base_index; u16 address_offset_index;\n"
+                            "    u8 direction; u8 kind; u8 flags; u8 scale; u8 immediate_flags; u8 address_kind; u8 address_flags; u8 reserved;\n"
+                            "};\n\n"
+                            "typedef struct BusterAarch64GeneratedForm BusterAarch64GeneratedForm;\n"
+                            "struct BusterAarch64GeneratedForm {\n"
+                            "    u64 source_hash; u64 name_hash; u64 signature_hash; u32 name_offset; u32 mnemonic_offset; u32 asm_offset; u32 out_offset; u32 in_offset;\n"
+                            "    u32 field_first; u32 operand_first; u32 predicate_first; u32 normalized_form_id;\n"
+                            "    u16 field_count; u16 operand_count; u16 predicate_count; u16 reserved0;\n"
+                            "    u32 fixed_mask; u32 fixed_value; u8 coverage_class; u8 encoder_family; u8 test_class; u8 reason_id;\n"
+                            "    u8 asm_flags; u8 address_kind; u8 address_flags; u8 reserved1;\n"
+                            "    u16 address_base_index; u16 address_offset_index;\n"
+                            "};\n\n"
+                            "typedef struct BusterAarch64GeneratedCoverage BusterAarch64GeneratedCoverage;\n"
+                            "struct BusterAarch64GeneratedCoverage {\n"
+                            "    u64 source_hash; u64 name_hash; u32 name_offset; u32 normalized_form_id;\n"
+                            "    u8 coverage_class; u8 encoder_family; u8 test_class; u8 reason_id;\n"
+                            "};\n\n"
+                            "typedef struct BusterAarch64GeneratedMnemonicRange BusterAarch64GeneratedMnemonicRange;\n"
+                            "struct BusterAarch64GeneratedMnemonicRange { u32 key_offset; u32 candidate_first; u32 candidate_count; };\n"
+                            "typedef struct BusterAarch64GeneratedSignatureRange BusterAarch64GeneratedSignatureRange;\n"
+                            "struct BusterAarch64GeneratedSignatureRange { u64 signature_hash; u32 candidate_first; u32 candidate_count; };\n\n"
+                            "#define BUSTER_AARCH64_GENERATED_PACKED_BASE64 1\n"
+                            "#define BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE 4092u\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u8 buster_aarch64_generated_base64_value(char8 character)\n"
+                            "{\n"
+                            "    if (character >= 'A' && character <= 'Z') return (u8)(character - 'A');\n"
+                            "    if (character >= 'a' && character <= 'z') return (u8)(character - 'a' + 26);\n"
+                            "    if (character >= '0' && character <= '9') return (u8)(character - '0' + 52);\n"
+                            "    if (character == '+') return 62;\n"
+                            "    if (character == '/') return 63;\n"
+                            "    return 0;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool buster_aarch64_generated_blob_range_valid(u64 byte_count, u64 offset, u64 length)\n"
+                            "{\n"
+                            "    return offset <= byte_count && length <= byte_count - offset;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool buster_aarch64_generated_base64_encoded_count(u64 byte_count, u64* encoded_count)\n"
+                            "{\n"
+                            "    if (!encoded_count || byte_count > UINT64_MAX - 2u) return false;\n"
+                            "    u64 group_count = (byte_count + 2u) / 3u;\n"
+                            "    if (group_count > UINT64_MAX / 4u) return false;\n"
+                            "    *encoded_count = group_count * 4u;\n"
+                            "    return true;\n"
+                            "}\n"
+                            "#define BUSTER_AARCH64_GENERATED_BLOB_COUNT_(blob) blob##_BYTE_COUNT\n"
+                            "#define BUSTER_AARCH64_GENERATED_BLOB_COUNT(blob) BUSTER_AARCH64_GENERATED_BLOB_COUNT_(blob)\n"
+                            "#define BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT_(blob) blob##_CHUNK_COUNT\n"
+                            "#define BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT(blob) BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT_(blob)\n"
+                            "#define buster_aarch64_generated_blob_char_in_bounds(blob, byte_count, offset) \\\n"
+                            "    ((u64)(byte_count) <= (UINT64_MAX / 4u) * 3u && \\\n"
+                            "     (u64)(offset) < ((((u64)(byte_count) + 2u) / 3u) * 4u) && \\\n"
+                            "     (u64)(offset) < (u64)BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT(blob) * (u64)BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE)\n"
+                            "#define buster_aarch64_generated_blob_char(blob, byte_count, offset) \\\n"
+                            "    ((char8)(buster_aarch64_generated_blob_char_in_bounds(blob, byte_count, offset) ? blob##_char(offset) : 0))\n"
+                            "#define buster_aarch64_generated_blob_u8_counted(blob, byte_count, offset) \\\n"
+                            "    blob##_u8_counted(byte_count, offset)\n"
+                            "#define buster_aarch64_generated_blob_u8(blob, offset) \\\n"
+                            "    blob##_u8(offset)\n"
+                            "#define buster_aarch64_generated_blob_u16_counted(blob, byte_count, offset) \\\n"
+                            "    blob##_u16_counted(byte_count, offset)\n"
+                            "#define buster_aarch64_generated_blob_u16(blob, offset) \\\n"
+                            "    blob##_u16(offset)\n"
+                            "#define buster_aarch64_generated_blob_u32_counted(blob, byte_count, offset) \\\n"
+                            "    blob##_u32_counted(byte_count, offset)\n"
+                            "#define buster_aarch64_generated_blob_u32(blob, offset) \\\n"
+                            "    blob##_u32(offset)\n"
+                            "#define buster_aarch64_generated_blob_u64_counted(blob, byte_count, offset) \\\n"
+                            "    blob##_u64_counted(byte_count, offset)\n"
+                            "#define buster_aarch64_generated_blob_u64(blob, offset) \\\n"
+                            "    blob##_u64(offset)\n\n"));
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_blob_accessors(Arena* output)
+{
+    arena_append_string8(output,
+                         S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE BusterAarch64GeneratedBitSegment buster_aarch64_generated_segment_at(u32 index)\n"
+                            "{\n"
+                            "    if (index >= BUSTER_AARCH64_GENERATED_SEGMENT_COUNT || !buster_aarch64_generated_blob_range_valid(buster_aarch64_generated_segments_blob_BYTE_COUNT, (u64)index * 4u, 4u)) return (BusterAarch64GeneratedBitSegment){0};\n"
+                            "    u64 offset = (u64)index * 4u;\n"
+                            "    return (BusterAarch64GeneratedBitSegment){buster_aarch64_generated_blob_u8(buster_aarch64_generated_segments_blob, offset),\n"
+                            "                                                     buster_aarch64_generated_blob_u8(buster_aarch64_generated_segments_blob, offset + 1),\n"
+                            "                                                     buster_aarch64_generated_blob_u8(buster_aarch64_generated_segments_blob, offset + 2),\n"
+                            "                                                     buster_aarch64_generated_blob_u8(buster_aarch64_generated_segments_blob, offset + 3)};\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE BusterAarch64GeneratedField buster_aarch64_generated_field_at(u32 index)\n"
+                            "{\n"
+                            "    if (index >= BUSTER_AARCH64_GENERATED_FIELD_COUNT || !buster_aarch64_generated_blob_range_valid(buster_aarch64_generated_fields_blob_BYTE_COUNT, (u64)index * 20u, 20u)) return (BusterAarch64GeneratedField){0};\n"
+                            "    u64 offset = (u64)index * 20u;\n"
+                            "    BusterAarch64GeneratedField result = (BusterAarch64GeneratedField){buster_aarch64_generated_blob_u32(buster_aarch64_generated_fields_blob, offset),\n"
+                            "                                             buster_aarch64_generated_blob_u32(buster_aarch64_generated_fields_blob, offset + 4),\n"
+                            "                                             buster_aarch64_generated_blob_u32(buster_aarch64_generated_fields_blob, offset + 8),\n"
+                            "                                             buster_aarch64_generated_blob_u8(buster_aarch64_generated_fields_blob, offset + 12),\n"
+                            "                                             buster_aarch64_generated_blob_u8(buster_aarch64_generated_fields_blob, offset + 13),\n"
+                            "                                             buster_aarch64_generated_blob_u8(buster_aarch64_generated_fields_blob, offset + 14),\n"
+                            "                                             buster_aarch64_generated_blob_u8(buster_aarch64_generated_fields_blob, offset + 15),\n"
+                            "                                             buster_aarch64_generated_blob_u8(buster_aarch64_generated_fields_blob, offset + 16),\n"
+                            "                                             buster_aarch64_generated_blob_u8(buster_aarch64_generated_fields_blob, offset + 17),\n"
+                            "                                             buster_aarch64_generated_blob_u8(buster_aarch64_generated_fields_blob, offset + 18),\n"
+                            "                                             buster_aarch64_generated_blob_u8(buster_aarch64_generated_fields_blob, offset + 19)};\n"
+                            "    if (result.name_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || !buster_aarch64_generated_blob_range_valid(BUSTER_AARCH64_GENERATED_SEGMENT_COUNT, result.segment_first, result.segment_count)) return (BusterAarch64GeneratedField){0};\n"
+                            "    return result;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE BusterAarch64GeneratedOperand buster_aarch64_generated_operand_at(u32 index)\n"
+                            "{\n"
+                            "    if (index >= BUSTER_AARCH64_GENERATED_OPERAND_COUNT || !buster_aarch64_generated_blob_range_valid(buster_aarch64_generated_operands_blob_BYTE_COUNT, (u64)index * 42u, 42u)) return (BusterAarch64GeneratedOperand){0};\n"
+                            "    u64 offset = (u64)index * 42u;\n"
+                            "    BusterAarch64GeneratedOperand result = (BusterAarch64GeneratedOperand){buster_aarch64_generated_blob_u32(buster_aarch64_generated_operands_blob, offset),\n"
+                            "                                               buster_aarch64_generated_blob_u32(buster_aarch64_generated_operands_blob, offset + 4),\n"
+                            "                                               buster_aarch64_generated_blob_u32(buster_aarch64_generated_operands_blob, offset + 8),\n"
+                            "                                               buster_aarch64_generated_blob_u32(buster_aarch64_generated_operands_blob, offset + 12),\n"
+                            "                                               (s32)buster_aarch64_generated_blob_u32(buster_aarch64_generated_operands_blob, offset + 16),\n"
+                            "                                               (s32)buster_aarch64_generated_blob_u32(buster_aarch64_generated_operands_blob, offset + 20),\n"
+                            "                                               buster_aarch64_generated_blob_u16(buster_aarch64_generated_operands_blob, offset + 24),\n"
+                            "                                               buster_aarch64_generated_blob_u32(buster_aarch64_generated_operands_blob, offset + 26),\n"
+                            "                                               buster_aarch64_generated_blob_u16(buster_aarch64_generated_operands_blob, offset + 30),\n"
+                            "                                               buster_aarch64_generated_blob_u16(buster_aarch64_generated_operands_blob, offset + 32),\n"
+                            "                                               buster_aarch64_generated_blob_u8(buster_aarch64_generated_operands_blob, offset + 34),\n"
+                            "                                               buster_aarch64_generated_blob_u8(buster_aarch64_generated_operands_blob, offset + 35),\n"
+                            "                                               buster_aarch64_generated_blob_u8(buster_aarch64_generated_operands_blob, offset + 36),\n"
+                            "                                               buster_aarch64_generated_blob_u8(buster_aarch64_generated_operands_blob, offset + 37),\n"
+                            "                                               buster_aarch64_generated_blob_u8(buster_aarch64_generated_operands_blob, offset + 38),\n"
+                            "                                               buster_aarch64_generated_blob_u8(buster_aarch64_generated_operands_blob, offset + 39),\n"
+                            "                                               buster_aarch64_generated_blob_u8(buster_aarch64_generated_operands_blob, offset + 40),\n"
+                            "                                               buster_aarch64_generated_blob_u8(buster_aarch64_generated_operands_blob, offset + 41)};\n"
+                            "    if (result.syntax_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || result.type_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || result.name_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||\n"
+                            "        (result.field_index != UINT32_MAX && result.field_index >= BUSTER_AARCH64_GENERATED_FIELD_COUNT) ||\n"
+                            "        (result.tied_to != UINT32_MAX && result.tied_to >= BUSTER_AARCH64_GENERATED_OPERAND_COUNT)) return (BusterAarch64GeneratedOperand){0};\n"
+                            "    return result;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u32 buster_aarch64_generated_predicate_at(u32 index)\n"
+                            "{\n"
+                            "    if (index >= BUSTER_AARCH64_GENERATED_PREDICATE_COUNT || !buster_aarch64_generated_blob_range_valid(buster_aarch64_generated_predicates_blob_BYTE_COUNT, (u64)index * 4u, 4u)) return 0;\n"
+                            "    u32 result = buster_aarch64_generated_blob_u32(buster_aarch64_generated_predicates_blob, (u64)index * 4u);\n"
+                            "    return result < BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ? result : 0;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE BusterAarch64GeneratedForm buster_aarch64_generated_form_at(u32 index)\n"
+                            "{\n"
+                            "    if (index >= BUSTER_AARCH64_GENERATED_FORM_COUNT || !buster_aarch64_generated_blob_range_valid(buster_aarch64_generated_forms_blob_BYTE_COUNT, (u64)index * 88u, 88u)) return (BusterAarch64GeneratedForm){0};\n"
+                            "    u64 offset = (u64)index * 88u;\n"
+                            "    BusterAarch64GeneratedForm result = (BusterAarch64GeneratedForm){buster_aarch64_generated_blob_u64(buster_aarch64_generated_forms_blob, offset),\n"
+                            "                                           buster_aarch64_generated_blob_u64(buster_aarch64_generated_forms_blob, offset + 8),\n"
+                            "                                           buster_aarch64_generated_blob_u64(buster_aarch64_generated_forms_blob, offset + 16),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 24),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 28),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 32),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 36),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 40),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 44),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 48),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 52),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 56),\n"
+                            "                                           buster_aarch64_generated_blob_u16(buster_aarch64_generated_forms_blob, offset + 60),\n"
+                            "                                           buster_aarch64_generated_blob_u16(buster_aarch64_generated_forms_blob, offset + 62),\n"
+                            "                                           buster_aarch64_generated_blob_u16(buster_aarch64_generated_forms_blob, offset + 64),\n"
+                            "                                           buster_aarch64_generated_blob_u16(buster_aarch64_generated_forms_blob, offset + 66),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 68),\n"
+                            "                                           buster_aarch64_generated_blob_u32(buster_aarch64_generated_forms_blob, offset + 72),\n"
+                            "                                           buster_aarch64_generated_blob_u8(buster_aarch64_generated_forms_blob, offset + 76),\n"
+                            "                                           buster_aarch64_generated_blob_u8(buster_aarch64_generated_forms_blob, offset + 77),\n"
+                            "                                           buster_aarch64_generated_blob_u8(buster_aarch64_generated_forms_blob, offset + 78),\n"
+                            "                                           buster_aarch64_generated_blob_u8(buster_aarch64_generated_forms_blob, offset + 79),\n"
+                            "                                           buster_aarch64_generated_blob_u8(buster_aarch64_generated_forms_blob, offset + 80),\n"
+                            "                                           buster_aarch64_generated_blob_u8(buster_aarch64_generated_forms_blob, offset + 81),\n"
+                            "                                           buster_aarch64_generated_blob_u8(buster_aarch64_generated_forms_blob, offset + 82),\n"
+                            "                                           buster_aarch64_generated_blob_u8(buster_aarch64_generated_forms_blob, offset + 83),\n"
+                            "                                           buster_aarch64_generated_blob_u16(buster_aarch64_generated_forms_blob, offset + 84),\n"
+                            "                                           buster_aarch64_generated_blob_u16(buster_aarch64_generated_forms_blob, offset + 86)};\n"
+                            "    if (result.name_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || result.mnemonic_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||\n"
+                            "        result.asm_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || result.out_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||\n"
+                            "        result.in_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || result.normalized_form_id >= BUSTER_AARCH64_GENERATED_FORM_COUNT ||\n"
+                            "        !buster_aarch64_generated_blob_range_valid(BUSTER_AARCH64_GENERATED_FIELD_COUNT, result.field_first, result.field_count) ||\n"
+                            "        !buster_aarch64_generated_blob_range_valid(BUSTER_AARCH64_GENERATED_OPERAND_COUNT, result.operand_first, result.operand_count) ||\n"
+                            "        !buster_aarch64_generated_blob_range_valid(BUSTER_AARCH64_GENERATED_PREDICATE_COUNT, result.predicate_first, result.predicate_count)) return (BusterAarch64GeneratedForm){0};\n"
+                            "    return result;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE BusterAarch64GeneratedMnemonicRange buster_aarch64_generated_mnemonic_range_at(u32 index)\n"
+                            "{\n"
+                            "    if (index >= BUSTER_AARCH64_GENERATED_MNEMONIC_RANGE_COUNT || !buster_aarch64_generated_blob_range_valid(buster_aarch64_generated_mnemonic_ranges_blob_BYTE_COUNT, (u64)index * 12u, 12u)) return (BusterAarch64GeneratedMnemonicRange){0};\n"
+                            "    u64 offset = (u64)index * 12u;\n"
+                            "    BusterAarch64GeneratedMnemonicRange result = (BusterAarch64GeneratedMnemonicRange){buster_aarch64_generated_blob_u32(buster_aarch64_generated_mnemonic_ranges_blob, offset),\n"
+                            "                                                     buster_aarch64_generated_blob_u32(buster_aarch64_generated_mnemonic_ranges_blob, offset + 4),\n"
+                            "                                                     buster_aarch64_generated_blob_u32(buster_aarch64_generated_mnemonic_ranges_blob, offset + 8)};\n"
+                            "    if (result.key_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || !buster_aarch64_generated_blob_range_valid(BUSTER_AARCH64_GENERATED_MNEMONIC_CANDIDATE_COUNT, result.candidate_first, result.candidate_count)) return (BusterAarch64GeneratedMnemonicRange){0};\n"
+                            "    return result;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u32 buster_aarch64_generated_mnemonic_candidate_at(u32 index)\n"
+                            "{\n"
+                            "    if (index >= BUSTER_AARCH64_GENERATED_MNEMONIC_CANDIDATE_COUNT || !buster_aarch64_generated_blob_range_valid(buster_aarch64_generated_mnemonic_candidates_blob_BYTE_COUNT, (u64)index * 4u, 4u)) return UINT32_MAX;\n"
+                            "    u32 result = buster_aarch64_generated_blob_u32(buster_aarch64_generated_mnemonic_candidates_blob, (u64)index * 4u);\n"
+                            "    return result < BUSTER_AARCH64_GENERATED_COVERAGE_ROW_COUNT ? result : UINT32_MAX;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE BusterAarch64GeneratedSignatureRange buster_aarch64_generated_signature_range_at(u32 index)\n"
+                            "{\n"
+                            "    if (index >= BUSTER_AARCH64_GENERATED_SIGNATURE_RANGE_COUNT || !buster_aarch64_generated_blob_range_valid(buster_aarch64_generated_signature_ranges_blob_BYTE_COUNT, (u64)index * 16u, 16u)) return (BusterAarch64GeneratedSignatureRange){0};\n"
+                            "    u64 offset = (u64)index * 16u;\n"
+                            "    BusterAarch64GeneratedSignatureRange result = (BusterAarch64GeneratedSignatureRange){buster_aarch64_generated_blob_u64(buster_aarch64_generated_signature_ranges_blob, offset),\n"
+                            "                                                      buster_aarch64_generated_blob_u32(buster_aarch64_generated_signature_ranges_blob, offset + 8),\n"
+                            "                                                      buster_aarch64_generated_blob_u32(buster_aarch64_generated_signature_ranges_blob, offset + 12)};\n"
+                            "    if (!buster_aarch64_generated_blob_range_valid(BUSTER_AARCH64_GENERATED_SIGNATURE_CANDIDATE_COUNT, result.candidate_first, result.candidate_count)) return (BusterAarch64GeneratedSignatureRange){0};\n"
+                            "    return result;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u32 buster_aarch64_generated_signature_candidate_at(u32 index)\n"
+                            "{\n"
+                            "    if (index >= BUSTER_AARCH64_GENERATED_SIGNATURE_CANDIDATE_COUNT || !buster_aarch64_generated_blob_range_valid(buster_aarch64_generated_signature_candidates_blob_BYTE_COUNT, (u64)index * 4u, 4u)) return UINT32_MAX;\n"
+                            "    u32 result = buster_aarch64_generated_blob_u32(buster_aarch64_generated_signature_candidates_blob, (u64)index * 4u);\n"
+                            "    return result < BUSTER_AARCH64_GENERATED_COVERAGE_ROW_COUNT ? result : UINT32_MAX;\n"
+                            "}\n\n"));
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_generated_emit_packed_tables(Arena* output, Arena* coverage_output, Arena* scratch,
+                                                              Aarch64ImportRecordList records, Aarch64ImportRecord** canonical,
+                                                              u32 canonical_count, XedGeneratedStringPool* pool,
+                                                              XedGeneratedStringNode** sorted, Aarch64GeneratedEmitIndex* indexes,
+                                                              u32 field_cursor, u32 segment_cursor, u32 operand_cursor,
+                                                              u32 predicate_cursor, Aarch64GeneratedLookupRecord* mnemonic_order,
+                                                              u32 mnemonic_count, Aarch64GeneratedLookupRecord* signature_order,
+                                                              u32 signature_count, u32 mnemonic_range_count, u32 signature_range_count,
+                                                              Aarch64GeneratedTableStats* stats)
+{
+    if (canonical_count > UINT32_MAX / 88 || field_cursor > UINT32_MAX / 20 || segment_cursor > UINT32_MAX / 4 ||
+        operand_cursor > UINT32_MAX / 42 || predicate_cursor > UINT32_MAX / 4 || records.count > UINT32_MAX / 28 ||
+        mnemonic_range_count > UINT32_MAX / 12 || mnemonic_count > UINT32_MAX / 4 || signature_range_count > UINT32_MAX / 16 ||
+        signature_count > UINT32_MAX / 4)
+    {
+        return false;
+    }
+    Aarch64GeneratedBlob segments = aarch64_generated_blob_make(scratch, (u64)segment_cursor * 4);
+    Aarch64GeneratedBlob fields = aarch64_generated_blob_make(scratch, (u64)field_cursor * 20);
+    Aarch64GeneratedBlob operands = aarch64_generated_blob_make(scratch, (u64)operand_cursor * 42);
+    Aarch64GeneratedBlob predicates = aarch64_generated_blob_make(scratch, (u64)predicate_cursor * 4);
+    Aarch64GeneratedBlob forms = aarch64_generated_blob_make(scratch, (u64)canonical_count * 88);
+    Aarch64GeneratedBlob mnemonic_ranges = aarch64_generated_blob_make(scratch, (u64)mnemonic_range_count * 12);
+    Aarch64GeneratedBlob mnemonic_candidates = aarch64_generated_blob_make(scratch, (u64)mnemonic_count * 4);
+    Aarch64GeneratedBlob signature_ranges = aarch64_generated_blob_make(scratch, (u64)signature_range_count * 16);
+    Aarch64GeneratedBlob signature_candidates = aarch64_generated_blob_make(scratch, (u64)signature_count * 4);
+    Aarch64GeneratedBlob coverage = aarch64_generated_blob_make(scratch, (u64)records.count * 28);
+    bool valid = (segment_cursor == 0 || segments.bytes) && (field_cursor == 0 || fields.bytes) && (operand_cursor == 0 || operands.bytes) &&
+                 (predicate_cursor == 0 || predicates.bytes) && (canonical_count == 0 || forms.bytes) &&
+                 (mnemonic_range_count == 0 || mnemonic_ranges.bytes) && (mnemonic_count == 0 || mnemonic_candidates.bytes) &&
+                 (signature_range_count == 0 || signature_ranges.bytes) && (signature_count == 0 || signature_candidates.bytes) &&
+                 (records.count == 0 || coverage.bytes);
+    for (u32 record_index = 0; valid && record_index < canonical_count; record_index += 1)
+    {
+        Aarch64ImportRecord* record = canonical[record_index];
+        u32 field_first = indexes[record_index].field_first;
+        u32 segment_first = segments.count / 4;
+        for (Aarch64ImportVariable* variable = record->first_variable; valid && variable; variable = variable->next)
+        {
+            u32 variable_segment_first = segments.count / 4;
+            Aarch64ImportBit* previous = 0;
+            for (Aarch64ImportBit* bit = variable->first_bit; valid && bit; bit = bit->next)
+            {
+                if (!previous || bit->instruction_bit != previous->instruction_bit + 1 || bit->value_bit != previous->value_bit + 1)
+                {
+                    u32 width = 1;
+                    Aarch64ImportBit* last = bit;
+                    for (Aarch64ImportBit* end = bit->next; end && end->instruction_bit == last->instruction_bit + 1 &&
+                                                         end->value_bit == last->value_bit + 1; end = end->next)
+                    {
+                        width += 1;
+                        last = end;
+                    }
+                    valid = width <= UINT8_MAX && aarch64_generated_blob_append_u8(&segments, bit->instruction_bit) &&
+                            aarch64_generated_blob_append_u8(&segments, (u8)width) &&
+                            aarch64_generated_blob_append_u8(&segments, bit->value_bit) &&
+                            aarch64_generated_blob_append_u8(&segments, 0);
+                }
+                previous = bit;
+            }
+            u32 variable_segment_count = segments.count / 4 - variable_segment_first;
+            valid = valid && variable_segment_count <= UINT8_MAX && aarch64_generated_blob_append_u32(&fields, xed_generated_string_offset(pool, variable->name)) &&
+                    aarch64_generated_blob_append_u32(&fields, variable_segment_first) &&
+                    aarch64_generated_blob_append_u32(&fields, variable->source_mask) &&
+                    aarch64_generated_blob_append_u8(&fields, variable->width) &&
+                    aarch64_generated_blob_append_u8(&fields, (u8)variable_segment_count) &&
+                    aarch64_generated_blob_append_u8(&fields, variable->transform) &&
+                    aarch64_generated_blob_append_u8(&fields, variable->relocation) &&
+                    aarch64_generated_blob_append_u8(&fields, variable->relocation_end) &&
+                    aarch64_generated_blob_append_u8(&fields, variable->shift) &&
+                    aarch64_generated_blob_append_u8(&fields, variable->flags) && aarch64_generated_blob_append_u8(&fields, 0);
+        }
+        valid = valid && field_first == fields.count / 20 - record->variable_count;
+        for (Aarch64ImportOperand* operand = record->first_operand; valid && operand; operand = operand->next)
+        {
+            u32 field_index = operand->field_index == UINT32_MAX ? UINT32_MAX : field_first + operand->field_index;
+            u32 operand_tied_to = operand->tied_to == UINT32_MAX ? UINT32_MAX : indexes[record_index].operand_first + operand->tied_to;
+            valid = aarch64_generated_blob_append_u32(&operands, xed_generated_string_offset(pool, operand->syntax)) &&
+                    aarch64_generated_blob_append_u32(&operands, xed_generated_string_offset(pool, operand->type)) &&
+                    aarch64_generated_blob_append_u32(&operands, xed_generated_string_offset(pool, operand->name)) &&
+                    aarch64_generated_blob_append_u32(&operands, field_index) &&
+                    aarch64_generated_blob_append_u32(&operands, (u32)operand->immediate_min) &&
+                    aarch64_generated_blob_append_u32(&operands, (u32)operand->immediate_max) &&
+                    aarch64_generated_blob_append_u16(&operands, operand->register_width) &&
+                    aarch64_generated_blob_append_u32(&operands, operand_tied_to) &&
+                    aarch64_generated_blob_append_u16(&operands, operand->address_base_index) &&
+                    aarch64_generated_blob_append_u16(&operands, operand->address_offset_index) &&
+                    aarch64_generated_blob_append_u8(&operands, operand->direction) && aarch64_generated_blob_append_u8(&operands, operand->kind) &&
+                    aarch64_generated_blob_append_u8(&operands, operand->flags) && aarch64_generated_blob_append_u8(&operands, operand->scale) &&
+                    aarch64_generated_blob_append_u8(&operands, operand->immediate_flags) && aarch64_generated_blob_append_u8(&operands, operand->address_kind) &&
+                    aarch64_generated_blob_append_u8(&operands, operand->address_flags) && aarch64_generated_blob_append_u8(&operands, 0);
+        }
+        for (Aarch64ImportPredicate* predicate = record->first_predicate; valid && predicate; predicate = predicate->next)
+        {
+            valid = aarch64_generated_blob_append_u32(&predicates, xed_generated_string_offset(pool, predicate->name));
+        }
+        valid = valid && aarch64_generated_blob_append_u64(&forms, record->source_hash) && aarch64_generated_blob_append_u64(&forms, record->name_hash) &&
+                aarch64_generated_blob_append_u64(&forms, record->signature_hash) && aarch64_generated_blob_append_u32(&forms, xed_generated_string_offset(pool, record->name)) &&
+                aarch64_generated_blob_append_u32(&forms, xed_generated_string_offset(pool, record->mnemonic)) &&
+                aarch64_generated_blob_append_u32(&forms, xed_generated_string_offset(pool, record->assembly)) &&
+                aarch64_generated_blob_append_u32(&forms, xed_generated_string_offset(pool, record->output_operands)) &&
+                aarch64_generated_blob_append_u32(&forms, xed_generated_string_offset(pool, record->input_operands)) &&
+                aarch64_generated_blob_append_u32(&forms, indexes[record_index].field_first) &&
+                aarch64_generated_blob_append_u32(&forms, indexes[record_index].operand_first) &&
+                aarch64_generated_blob_append_u32(&forms, indexes[record_index].predicate_first) &&
+                aarch64_generated_blob_append_u32(&forms, record_index) &&
+                aarch64_generated_blob_append_u16(&forms, (u16)indexes[record_index].field_count) &&
+                aarch64_generated_blob_append_u16(&forms, (u16)indexes[record_index].operand_count) &&
+                aarch64_generated_blob_append_u16(&forms, (u16)indexes[record_index].predicate_count) && aarch64_generated_blob_append_u16(&forms, 0) &&
+                aarch64_generated_blob_append_u32(&forms, record->fixed_mask) && aarch64_generated_blob_append_u32(&forms, record->fixed_value) &&
+                aarch64_generated_blob_append_u8(&forms, record->coverage_class) && aarch64_generated_blob_append_u8(&forms, record->encoder_family) &&
+                aarch64_generated_blob_append_u8(&forms, record->test_class) && aarch64_generated_blob_append_u8(&forms, record->reason_id) &&
+                aarch64_generated_blob_append_u8(&forms, record->has_alternatives) && aarch64_generated_blob_append_u8(&forms, record->address_kind) &&
+                aarch64_generated_blob_append_u8(&forms, record->address_flags) && aarch64_generated_blob_append_u8(&forms, 0) &&
+                aarch64_generated_blob_append_u16(&forms, record->address_base_index) && aarch64_generated_blob_append_u16(&forms, record->address_offset_index);
+    }
+    for (u32 index = 0; valid && index < mnemonic_count; index += 1)
+    {
+        valid = aarch64_generated_blob_append_u32(&mnemonic_candidates, mnemonic_order[index].coverage_index);
+    }
+    for (u32 index = 0; valid && index < signature_count; index += 1)
+    {
+        valid = aarch64_generated_blob_append_u32(&signature_candidates, signature_order[index].coverage_index);
+    }
+    for (u32 index = 0; valid && index < mnemonic_count;)
+    {
+        u32 first = index;
+        String8 mnemonic = mnemonic_order[index].record->mnemonic;
+        while (index < mnemonic_count && string_equal(mnemonic, mnemonic_order[index].record->mnemonic))
+        {
+            index += 1;
+        }
+        valid = aarch64_generated_blob_append_u32(&mnemonic_ranges, xed_generated_string_offset(pool, mnemonic)) &&
+                aarch64_generated_blob_append_u32(&mnemonic_ranges, first) && aarch64_generated_blob_append_u32(&mnemonic_ranges, index - first);
+    }
+    for (u32 index = 0; valid && index < signature_count;)
+    {
+        u32 first = index;
+        u64 signature_hash = signature_order[index].record->signature_hash;
+        while (index < signature_count && signature_hash == signature_order[index].record->signature_hash)
+        {
+            index += 1;
+        }
+        valid = aarch64_generated_blob_append_u64(&signature_ranges, signature_hash) &&
+                aarch64_generated_blob_append_u32(&signature_ranges, first) && aarch64_generated_blob_append_u32(&signature_ranges, index - first);
+    }
+    for (Aarch64ImportRecord* record = records.first; valid && record; record = record->next)
+    {
+        valid = aarch64_generated_blob_append_u64(&coverage, record->source_hash) && aarch64_generated_blob_append_u64(&coverage, record->name_hash) &&
+                aarch64_generated_blob_append_u32(&coverage, xed_generated_string_offset(pool, record->name)) &&
+                aarch64_generated_blob_append_u32(&coverage, record->normalized_form_id) &&
+                aarch64_generated_blob_append_u8(&coverage, record->coverage_class) && aarch64_generated_blob_append_u8(&coverage, record->encoder_family) &&
+                aarch64_generated_blob_append_u8(&coverage, record->test_class) && aarch64_generated_blob_append_u8(&coverage, record->reason_id);
+        if (record->coverage_class >= AARCH64_IMPORT_COVERAGE_COUNT || record->reason_id >= AARCH64_IMPORT_REASON_COUNT)
+        {
+            stats->coverage_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED] += 1;
+        }
+        else
+        {
+            stats->coverage_counts[record->coverage_class] += 1;
+            stats->reason_counts[record->reason_id] += 1;
+            stats->encoder_counts[record->encoder_family] += 1;
+            stats->test_counts[record->test_class] += 1;
+        }
+    }
+    valid = valid && segments.count == segment_cursor * 4 && fields.count == field_cursor * 20 && operands.count == operand_cursor * 42 &&
+            predicates.count == predicate_cursor * 4 && forms.count == canonical_count * 88 && mnemonic_ranges.count == mnemonic_range_count * 12 &&
+            mnemonic_candidates.count == mnemonic_count * 4 && signature_ranges.count == signature_range_count * 16 &&
+            signature_candidates.count == signature_count * 4 && coverage.count == records.count * 28;
+    if (!valid)
+    {
+        return false;
+    }
+
+    aarch64_generated_emit_preamble(output);
+    aarch64_generated_emit_string_pool(output, scratch, pool, sorted);
+    aarch64_generated_append_base64_blob(output, S8("buster_aarch64_generated_segments_blob"), segments);
+    aarch64_generated_append_base64_blob(output, S8("buster_aarch64_generated_fields_blob"), fields);
+    aarch64_generated_append_base64_blob(output, S8("buster_aarch64_generated_operands_blob"), operands);
+    aarch64_generated_append_base64_blob(output, S8("buster_aarch64_generated_predicates_blob"), predicates);
+    aarch64_generated_append_base64_blob(output, S8("buster_aarch64_generated_forms_blob"), forms);
+    arena_append_string8(output, S8("#define BUSTER_AARCH64_GENERATED_FORM_COUNT "));
+    xed_generated_append_decimal(output, canonical_count);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_COVERAGE_ROW_COUNT "));
+    xed_generated_append_decimal(output, records.count);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_FIELD_COUNT "));
+    xed_generated_append_decimal(output, field_cursor);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_SEGMENT_COUNT "));
+    xed_generated_append_decimal(output, segment_cursor);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_OPERAND_COUNT "));
+    xed_generated_append_decimal(output, operand_cursor);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_PREDICATE_COUNT "));
+    xed_generated_append_decimal(output, predicate_cursor);
+    arena_append_string8(output, S8("\n"));
+    aarch64_generated_append_base64_blob(output, S8("buster_aarch64_generated_mnemonic_ranges_blob"), mnemonic_ranges);
+    aarch64_generated_append_base64_blob(output, S8("buster_aarch64_generated_mnemonic_candidates_blob"), mnemonic_candidates);
+    aarch64_generated_append_base64_blob(output, S8("buster_aarch64_generated_signature_ranges_blob"), signature_ranges);
+    aarch64_generated_append_base64_blob(output, S8("buster_aarch64_generated_signature_candidates_blob"), signature_candidates);
+    arena_append_string8(output, S8("#define BUSTER_AARCH64_GENERATED_MNEMONIC_RANGE_COUNT "));
+    xed_generated_append_decimal(output, mnemonic_range_count);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_MNEMONIC_CANDIDATE_COUNT "));
+    xed_generated_append_decimal(output, mnemonic_count);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_SIGNATURE_RANGE_COUNT "));
+    xed_generated_append_decimal(output, signature_range_count);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_SIGNATURE_CANDIDATE_COUNT "));
+    xed_generated_append_decimal(output, signature_count);
+    arena_append_string8(output, S8("\n\n"));
+    aarch64_generated_emit_blob_accessors(output);
+    arena_append_string8(output, S8("#include \"aarch64-coverage.generated.inc\"\n\n#endif\n"));
+
+    arena_append_string8(coverage_output,
+                         S8("/* Generated by build import_assembly_metadata; do not edit. */\n#ifndef BUSTER_AARCH64_GENERATED_COVERAGE_ROW_COUNT\n#define BUSTER_AARCH64_GENERATED_COVERAGE_ROW_COUNT "));
+    xed_generated_append_decimal(coverage_output, records.count);
+    arena_append_string8(coverage_output, S8("\n#endif\n"));
+    aarch64_generated_append_base64_blob(coverage_output, S8("buster_aarch64_generated_coverage_blob"), coverage);
+    arena_append_string8(coverage_output,
+                         S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE BusterAarch64GeneratedCoverage buster_aarch64_generated_coverage_at(u32 index)\n"
+                            "{\n"
+                            "    if (index >= BUSTER_AARCH64_GENERATED_COVERAGE_ROW_COUNT || !buster_aarch64_generated_blob_range_valid(buster_aarch64_generated_coverage_blob_BYTE_COUNT, (u64)index * 28u, 28u)) return (BusterAarch64GeneratedCoverage){0};\n"
+                            "    u64 offset = (u64)index * 28u;\n"
+                            "    BusterAarch64GeneratedCoverage result = (BusterAarch64GeneratedCoverage){buster_aarch64_generated_blob_u64(buster_aarch64_generated_coverage_blob, offset),\n"
+                            "                                                    buster_aarch64_generated_blob_u64(buster_aarch64_generated_coverage_blob, offset + 8),\n"
+                            "                                                    buster_aarch64_generated_blob_u32(buster_aarch64_generated_coverage_blob, offset + 16),\n"
+                            "                                                    buster_aarch64_generated_blob_u32(buster_aarch64_generated_coverage_blob, offset + 20),\n"
+                            "                                                    buster_aarch64_generated_blob_u8(buster_aarch64_generated_coverage_blob, offset + 24),\n"
+                            "                                                    buster_aarch64_generated_blob_u8(buster_aarch64_generated_coverage_blob, offset + 25),\n"
+                            "                                                    buster_aarch64_generated_blob_u8(buster_aarch64_generated_coverage_blob, offset + 26),\n"
+                            "                                                    buster_aarch64_generated_blob_u8(buster_aarch64_generated_coverage_blob, offset + 27)};\n"
+                            "    if (result.name_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || result.normalized_form_id >= BUSTER_AARCH64_GENERATED_FORM_COUNT) return (BusterAarch64GeneratedCoverage){0};\n"
+                            "    return result;\n"
+                            "}\n"));
+    stats->header_bytes = arena_buffer_size(output);
+    stats->coverage_bytes = arena_buffer_size(coverage_output);
+    return stats->coverage_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED] == 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_generated_emit_tables(Arena* output, Arena* coverage_output, Arena* scratch,
+                                                       Aarch64ImportRecordList records, Aarch64GeneratedTableStats* stats)
+{
+    memset(stats, 0, sizeof(*stats));
+    if (!records.count || !aarch64_import_validate_identity(scratch, records))
+    {
+        return false;
+    }
+    Aarch64ImportRecord** canonical = arena_allocate(scratch, Aarch64ImportRecord*, records.count);
+    u32 canonical_count = 0;
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next)
+    {
+        if (record->coverage_class >= AARCH64_IMPORT_COVERAGE_COUNT || record->encoder_family >= AARCH64_IMPORT_ENCODER_COUNT ||
+            record->test_class >= AARCH64_IMPORT_TEST_COUNT || record->reason_id >= AARCH64_IMPORT_REASON_COUNT)
+        {
+            return false;
+        }
+        aarch64_import_apply_operand_metadata(record);
+        if (record->coverage_class != AARCH64_IMPORT_COVERAGE_ALIAS)
+        {
+            canonical[canonical_count++] = record;
+        }
+    }
+
+    XedGeneratedStringPool pool = {0};
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next)
+    {
+        String8 values[] = {record->name, record->mnemonic, record->assembly, record->output_operands, record->input_operands};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(values); index += 1)
+        {
+            xed_generated_string_intern(&pool, scratch, values[index]);
+        }
+        for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+        {
+            xed_generated_string_intern(&pool, scratch, variable->name);
+        }
+        for (Aarch64ImportOperand* operand = record->first_operand; operand; operand = operand->next)
+        {
+            xed_generated_string_intern(&pool, scratch, operand->syntax);
+            xed_generated_string_intern(&pool, scratch, operand->type);
+            xed_generated_string_intern(&pool, scratch, operand->name);
+        }
+        for (Aarch64ImportPredicate* predicate = record->first_predicate; predicate; predicate = predicate->next)
+        {
+            xed_generated_string_intern(&pool, scratch, predicate->name);
+        }
+    }
+    XedGeneratedStringNode** sorted = 0;
+    if (!xed_generated_string_pool_prepare(scratch, &pool, &sorted))
+    {
+        return false;
+    }
+
+    u64 feature_total = 0;
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next)
+    {
+        feature_total += record->predicate_count;
+        if (feature_total > UINT32_MAX)
+        {
+            return false;
+        }
+    }
+    String8* features = feature_total ? arena_allocate(scratch, String8, (u32)feature_total) : 0;
+    u64 feature_index = 0;
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next)
+    {
+        for (Aarch64ImportPredicate* predicate = record->first_predicate; predicate; predicate = predicate->next)
+        {
+            features[feature_index++] = predicate->name;
+        }
+    }
+    if (feature_index > 1)
+    {
+        qsort(features, feature_index, sizeof(features[0]), assembly_import_string_compare);
+    }
+    for (u64 index = 0; index < feature_index; index += 1)
+    {
+        if (!index || !string_equal(features[index - 1], features[index]))
+        {
+            stats->predicate_feature_count += 1;
+        }
+    }
+
+    Aarch64GeneratedEmitIndex* indexes = arena_allocate(scratch, Aarch64GeneratedEmitIndex, canonical_count);
+    u32 field_cursor = 0;
+    u32 operand_cursor = 0;
+    u32 predicate_cursor = 0;
+    u32 segment_cursor = 0;
+    for (u32 record_index = 0; record_index < canonical_count; record_index += 1)
+    {
+        Aarch64ImportRecord* record = canonical[record_index];
+        if (record->variable_count > UINT16_MAX || record->operand_count > UINT16_MAX || record->predicate_count > UINT16_MAX)
+        {
+            return false;
+        }
+        indexes[record_index] = (Aarch64GeneratedEmitIndex){
+            .field_first = field_cursor,
+            .field_count = record->variable_count,
+            .operand_first = operand_cursor,
+            .operand_count = record->operand_count,
+            .predicate_first = predicate_cursor,
+            .predicate_count = record->predicate_count,
+        };
+        if (field_cursor > UINT32_MAX - record->variable_count || operand_cursor > UINT32_MAX - record->operand_count ||
+            predicate_cursor > UINT32_MAX - record->predicate_count)
+        {
+            return false;
+        }
+        field_cursor += record->variable_count;
+        operand_cursor += record->operand_count;
+        predicate_cursor += record->predicate_count;
+        for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+        {
+            u32 segment_count = aarch64_import_variable_segment_count(variable);
+            if (segment_count > UINT8_MAX || segment_cursor > UINT32_MAX - segment_count)
+            {
+                return false;
+            }
+            segment_cursor += segment_count;
+        }
+    }
+    stats->canonical_form_count = canonical_count;
+    stats->field_count = field_cursor;
+    stats->segment_count = segment_cursor;
+    stats->operand_count = operand_cursor;
+    stats->predicate_count = predicate_cursor;
+    stats->string_pool_bytes = pool.byte_count;
+
+    Aarch64GeneratedLookupRecord* mnemonic_order = arena_allocate(scratch, Aarch64GeneratedLookupRecord, records.count);
+    Aarch64GeneratedLookupRecord* signature_order = arena_allocate(scratch, Aarch64GeneratedLookupRecord, records.count);
+    u32 mnemonic_count = 0;
+    u32 signature_count = 0;
+    u32 coverage_index = 0;
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next, coverage_index += 1)
+    {
+        if (!record->mnemonic.length)
+        {
+            return false;
+        }
+        mnemonic_order[mnemonic_count++] = (Aarch64GeneratedLookupRecord){.record = record, .coverage_index = coverage_index};
+        if (record->parse_reason == AARCH64_IMPORT_REASON_NONE && record->signature_hash)
+        {
+            signature_order[signature_count++] = (Aarch64GeneratedLookupRecord){.record = record, .coverage_index = coverage_index};
+        }
+    }
+    qsort(mnemonic_order, mnemonic_count, sizeof(mnemonic_order[0]), aarch64_import_lookup_mnemonic_compare);
+    qsort(signature_order, signature_count, sizeof(signature_order[0]), aarch64_import_lookup_signature_compare);
+    for (u32 index = 0; index < mnemonic_count; index += 1)
+    {
+        if (mnemonic_order[index].coverage_index >= records.count ||
+            (index && aarch64_import_lookup_mnemonic_compare(&mnemonic_order[index - 1], &mnemonic_order[index]) > 0))
+        {
+            return false;
+        }
+    }
+    for (u32 index = 0; index < signature_count; index += 1)
+    {
+        if (signature_order[index].coverage_index >= records.count ||
+            (index && aarch64_import_lookup_signature_compare(&signature_order[index - 1], &signature_order[index]) > 0))
+        {
+            return false;
+        }
+    }
+    u32 mnemonic_range_count = 0;
+    for (u32 index = 0; index < mnemonic_count; index += 1)
+    {
+        if (!index || !string_equal(mnemonic_order[index - 1].record->mnemonic, mnemonic_order[index].record->mnemonic))
+        {
+            mnemonic_range_count += 1;
+        }
+    }
+    u32 signature_range_count = 0;
+    for (u32 index = 0; index < signature_count; index += 1)
+    {
+        if (!index || signature_order[index - 1].record->signature_hash != signature_order[index].record->signature_hash)
+        {
+            signature_range_count += 1;
+        }
+    }
+    stats->mnemonic_range_count = mnemonic_range_count;
+    stats->signature_range_count = signature_range_count;
+    stats->mnemonic_candidate_count = mnemonic_count;
+    stats->signature_candidate_count = signature_count;
+
+    return aarch64_generated_emit_packed_tables(output, coverage_output, scratch, records, canonical, canonical_count, &pool, sorted, indexes,
+                                                field_cursor, segment_cursor, operand_cursor, predicate_cursor, mnemonic_order, mnemonic_count,
+                                                signature_order, signature_count, mnemonic_range_count, signature_range_count, stats);
+
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_generated_emit_missing_inventory(Arena* output, Aarch64ImportRecordList records, u64* row_count)
+{
+    char hash_buffer[32];
+    u64 count = 0;
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next)
+    {
+        if (record->coverage_class != AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE &&
+            record->coverage_class != AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN)
+        {
+            continue;
+        }
+        arena_append_string8(output, S8("{\"name\":"));
+        arena_append_json_string(output, record->name);
+        arena_append_string8(output, S8(",\"source_hash\":"));
+        int hash_length = snprintf(hash_buffer, sizeof(hash_buffer), "\"%016llx\"", (unsigned long long)record->source_hash);
+        if (hash_length > 0)
+        {
+            arena_append_string8(output, (String8){.pointer = (char8*)hash_buffer, .length = (u64)hash_length});
+        }
+        arena_append_string8(output, S8(",\"name_hash\":"));
+        hash_length = snprintf(hash_buffer, sizeof(hash_buffer), "\"%016llx\"", (unsigned long long)record->name_hash);
+        if (hash_length > 0)
+        {
+            arena_append_string8(output, (String8){.pointer = (char8*)hash_buffer, .length = (u64)hash_length});
+        }
+        arena_append_string8(output, S8(",\"normalized_form_id\":"));
+        xed_generated_append_decimal(output, record->normalized_form_id);
+        arena_append_string8(output, S8(",\"classification\":"));
+        xed_generated_append_decimal(output, record->coverage_class);
+        arena_append_string8(output, S8(",\"reason_id\":"));
+        xed_generated_append_decimal(output, record->reason_id);
+        arena_append_string8(output, S8(",\"encoder_family\":"));
+        xed_generated_append_decimal(output, record->encoder_family);
+        arena_append_string8(output, S8(",\"test_class\":"));
+        xed_generated_append_decimal(output, record->test_class);
+        arena_append_string8(output, S8("}\n"));
+        count += 1;
+    }
+    *row_count = count;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_import_self_test_append_record(Arena* output, String8 name, u32 mode, String8 assembly,
+                                                                 String8 out, String8 in, String8 predicates)
+{
+    arena_append_string8(output, S8("{\"name\":"));
+    arena_append_json_string(output, name);
+    arena_append_string8(output, S8(",\"inst\":["));
+    for (u32 bit = 0; bit < 32; bit += 1)
+    {
+        if (bit)
+        {
+            arena_append_char8(output, ',');
+        }
+        bool variable = false;
+        String8 variable_name = {0};
+        if (mode == 1 && bit < 26)
+        {
+            variable = true;
+            variable_name = S8("addr");
+        }
+        else if (mode == 2 && bit < 5)
+        {
+            variable = true;
+            variable_name = S8("Vd");
+        }
+        else if (mode == 2 && bit == 5)
+        {
+            variable = true;
+            variable_name = S8("idx");
+        }
+        else if (mode == 3 && bit < 5)
+        {
+            variable = true;
+            variable_name = S8("Zd");
+        }
+        else if (mode == 3 && bit >= 5 && bit < 8)
+        {
+            variable = true;
+            variable_name = S8("Pg");
+        }
+        else if (mode == 4 && bit == 0)
+        {
+            arena_append_string8(output, S8("{\"kind\":\"var\",\"printable\":\"ZAda\",\"var\":\"ZAda\"}"));
+            continue;
+        }
+        else if (mode == 5 && bit == 0)
+        {
+            arena_append_string8(output, S8("{\"kind\":\"mystery\",\"printable\":\"X\",\"var\":\"X\"}"));
+            continue;
+        }
+        else if (mode == 6 && bit < 2)
+        {
+            variable = true;
+            variable_name = S8("conflict");
+        }
+        if (variable)
+        {
+            arena_append_string8(output, S8("{\"index\":"));
+            xed_generated_append_decimal(output, (mode == 6 && bit == 1) ? 0 : (mode == 2 && bit == 5 ? 0 :
+                                                                                         (mode == 3 && bit >= 5 ? bit - 5 : bit)));
+            arena_append_string8(output, S8(",\"kind\":\"varbit\",\"printable\":"));
+            arena_append_char8(output, '\"');
+            arena_append_string8(output, variable_name);
+            arena_append_string8(output, S8("{0}\",\"var\":"));
+            arena_append_json_string(output, variable_name);
+            arena_append_char8(output, '}');
+        }
+        else
+        {
+            xed_generated_append_decimal(output, (mode == 1 && bit >= 26) ? (bit == 26 || bit == 28) : (mode == 7 && bit == 0));
+        }
+    }
+    arena_append_string8(output, S8("],\"asm\":"));
+    arena_append_json_string(output, assembly);
+    arena_append_string8(output, S8(",\"out\":"));
+    arena_append_json_string(output, out);
+    arena_append_string8(output, S8(",\"in\":"));
+    arena_append_json_string(output, in);
+    arena_append_string8(output, S8(",\"predicates\":"));
+    arena_append_string8(output, predicates);
+    arena_append_string8(output, S8("}\n"));
+}
+
+BUSTER_GLOBAL_LOCAL Aarch64ImportRecord* aarch64_import_self_test_find_record(Aarch64ImportRecordList records, String8 name)
+{
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next)
+    {
+        if (string_equal(record->name, name))
+        {
+            return record;
+        }
+    }
+    return 0;
 }
 
 BUSTER_GLOBAL_LOCAL u64 xed_import_unique_record_value_count(Arena* arena, XedImportRecordList records, bool iform)
@@ -6747,6 +10554,510 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_write(Arena* arena, String8 directory, 
         return false;
     }
     return true;
+}
+
+typedef struct AssemblyImportFullManifestData AssemblyImportFullManifestData;
+struct AssemblyImportFullManifestData
+{
+    String8 generation_mode;
+    String8 acceptance_status;
+    u64 xed_config_file_count;
+    u64 xed_source_file_count;
+    String8 xed_config_checksum;
+    String8 xed_input_kind;
+    String8 xed_source_identity;
+    String8 xed_raw_snapshot_provenance;
+    String8 xed_input_checksum;
+    String8 xed_output_checksum;
+    u64 xed_form_count;
+    u64 xed_iclass_count;
+    u64 xed_iform_count;
+    u64 xed_missing_iform_count;
+    String8 generated_output_checksum;
+    String8 generated_coverage_checksum;
+    XedGeneratedTableStats xed_stats;
+    String8 aarch64_generated_output_checksum;
+    String8 aarch64_generated_coverage_checksum;
+    String8 aarch64_alias_source_identity;
+    String8 aarch64_inventory_checksum;
+    u64 aarch64_inventory_bytes;
+    String8 llvm_input_kind;
+    String8 llvm_source_identity;
+    String8 llvm_raw_snapshot_provenance;
+    String8 llvm_input_checksum;
+    String8 llvm_normalized_input_checksum;
+    String8 llvm_output_checksum;
+    u64 llvm_instruction_count;
+    Aarch64GeneratedTableStats aarch64_stats;
+};
+
+BUSTER_GLOBAL_LOCAL String8 assembly_import_format_full_manifest(Arena* arena, AssemblyImportFullManifestData data)
+{
+    return string_format(
+        arena,
+        S8("{{\n"
+           "  \"schema_version\": 4,\n"
+           "  \"generation_mode\": \"{S8}\",\n"
+           "  \"acceptance_status\": \"{S8}\",\n"
+           "  \"checksum_algorithm\": \"xxh64\",\n"
+           "  \"xed\": {{\n"
+           "    \"source_url\": \"https://github.com/intelxed/xed\",\n"
+           "    \"release\": \"v2026.07.15\",\n"
+           "    \"commit\": \"519c843c86547e2003f5a404a53358a7dcfb82f3\",\n"
+           "    \"license\": \"Apache-2.0\",\n"
+           "    \"config_file_count\": {u64},\n"
+           "    \"source_file_count\": {u64},\n"
+           "    \"config_checksum\": \"{S8}\",\n"
+           "    \"input_kind\": \"{S8}\",\n"
+           "    \"source_identity\": \"{S8}\",\n"
+           "    \"raw_snapshot_provenance\": {S8},\n"
+           "    \"input_checksum\": \"{S8}\",\n"
+           "    \"output_checksum\": \"{S8}\",\n"
+           "    \"form_count\": {u64},\n"
+           "    \"iclass_count\": {u64},\n"
+           "    \"iform_count\": {u64},\n"
+           "    \"missing_iform_count\": {u64}\n"
+           "  }},\n"
+           "  \"generated\": {{\n"
+           "    \"header\": \"x86_64-assembly.generated.h\",\n"
+           "    \"header_checksum\": \"{S8}\",\n"
+           "    \"header_bytes\": {u64},\n"
+           "    \"coverage\": \"x86_64-coverage.generated.inc\",\n"
+           "    \"coverage_checksum\": \"{S8}\",\n"
+           "    \"coverage_bytes\": {u64},\n"
+           "    \"operand_count\": {u64},\n"
+           "    \"token_count\": {u64},\n"
+           "    \"string_pool_bytes\": {u64},\n"
+           "    \"classification_counts\": {{\"DIRECT\": {u64}, \"NORMALIZED\": {u64}, \"NOT64\": {u64}, \"PRIVILEGED\": {u64}, \"RESERVED\": {u64}, \"UNSUPPORTED_TOKEN\": {u64}, \"UNCLASSIFIED\": {u64}}},\n"
+           "    \"reason_counts\": {{\"NONE\": {u64}, \"MODE_NOT64\": {u64}, \"CPL0\": {u64}, \"UNKNOWN_PATTERN_TOKEN\": {u64}, \"UNKNOWN_OPERAND_TOKEN\": {u64}}}\n"
+           "  }},\n"
+           "  \"aarch64_generated\": {{\n"
+           "    \"header\": \"aarch64-assembly.generated.h\",\n"
+           "    \"header_checksum\": \"{S8}\",\n"
+           "    \"header_bytes\": {u64},\n"
+           "    \"coverage\": \"aarch64-coverage.generated.inc\",\n"
+           "    \"coverage_checksum\": \"{S8}\",\n"
+           "    \"coverage_bytes\": {u64},\n"
+           "    \"canonical_form_count\": {u64},\n"
+           "    \"field_count\": {u64},\n"
+           "    \"segment_count\": {u64},\n"
+           "    \"operand_count\": {u64},\n"
+           "    \"predicate_count\": {u64},\n"
+           "    \"string_pool_bytes\": {u64},\n"
+           "    \"mnemonic_range_count\": {u64},\n"
+           "    \"signature_range_count\": {u64},\n"
+           "    \"mnemonic_candidate_count\": {u64},\n"
+           "    \"signature_candidate_count\": {u64},\n"
+           "    \"classification_counts\": {{\"DIRECT\": {u64}, \"NORMALIZED\": {u64}, \"ALIAS\": {u64}, \"PRIVILEGED/SYSTEM\": {u64}, \"RESERVED/UNENCODABLE\": {u64}, \"UNSUPPORTED_TOKEN\": {u64}, \"UNCLASSIFIED\": {u64}}},\n"
+           "    \"reason_counts\": {{\"NONE\": {u64}, \"ALIAS_OF_CANONICAL\": {u64}, \"SYSTEM_OR_PRIVILEGED\": {u64}, \"UNMAPPED_VARIABLE\": {u64}, \"CONFLICTING_BIT_ASSIGNMENT\": {u64}, \"MALFORMED_DAG\": {u64}, \"MALFORMED_TEMPLATE\": {u64}, \"UNKNOWN_FIELD\": {u64}, \"UNKNOWN_PREDICATE\": {u64}, \"MISSING_OPERAND\": {u64}, \"INVALID_JSON\": {u64}, \"NULL_FIELD\": {u64}, \"UNPROVEN_FIELD_SEMANTICS\": {u64}, \"UNPROVEN_OPERAND_KIND\": {u64}, \"UNPROVEN_IMMEDIATE_RANGE\": {u64}, \"UNPROVEN_MEMORY_FORM\": {u64}, \"UNPROVEN_TIED_OPERAND\": {u64}, \"UNPROVEN_CORRESPONDENCE\": {u64}, \"UNSUPPORTED_ADDRESS_GRAMMAR\": {u64}}},\n"
+           "    \"feature_count\": {u64},\n"
+           "    \"encoder_family_counts\": {{\"SCALAR_INTEGER\": {u64}, \"BRANCH\": {u64}, \"LOAD_STORE\": {u64}, \"FP_SIMD_NEON\": {u64}, \"SVE_SVE2\": {u64}, \"SME_SME2\": {u64}, \"MTE\": {u64}, \"ATOMIC_LSE\": {u64}, \"CRYPTO\": {u64}, \"SYSTEM\": {u64}}},\n"
+           "    \"test_class_counts\": {{\"SCALAR\": {u64}, \"BRANCH\": {u64}, \"MEMORY\": {u64}, \"SIMD_LIST_LANE\": {u64}, \"SVE_PREDICATE\": {u64}, \"SME_SYSTEM\": {u64}, \"IMMEDIATE\": {u64}, \"SCHEMA\": {u64}}},\n"
+           "    \"alias_source\": \"{S8}\",\n"
+           "    \"alias_count\": {u64},\n"
+           "    \"missing_field_inventory\": {{\"artifact\": \"aarch64-missing-fields.generated.jsonl\", \"checksum\": \"{S8}\", \"bytes\": {u64}, \"classification_filter\": [\"RESERVED/UNENCODABLE\", \"UNSUPPORTED_TOKEN\"], \"reserved_unencodable_count\": {u64}, \"unsupported_token_count\": {u64}, \"unclassified_count\": {u64}}}\n"
+           "  }},\n"
+           "  \"llvm\": {{\n"
+           "    \"source_url\": \"https://github.com/llvm/llvm-project\",\n"
+           "    \"release\": \"llvmorg-22.1.8\",\n"
+           "    \"commit\": \"ca7933e47d3a3451d81e72ac174dcb5aa28b59d1\",\n"
+           "    \"license\": \"Apache-2.0 WITH LLVM-exception\",\n"
+           "    \"input_kind\": \"{S8}\",\n"
+           "    \"source_identity\": \"{S8}\",\n"
+           "    \"raw_snapshot_provenance\": {S8},\n"
+           "    \"input_checksum\": \"{S8}\",\n"
+           "    \"normalized_input_checksum\": \"{S8}\",\n"
+           "    \"output_checksum\": \"{S8}\",\n"
+           "    \"instruction_count\": {u64}\n"
+           "  }}\n"
+           "}\n"),
+        data.generation_mode, data.acceptance_status, data.xed_config_file_count, data.xed_source_file_count, data.xed_config_checksum,
+        data.xed_input_kind, data.xed_source_identity, data.xed_raw_snapshot_provenance, data.xed_input_checksum, data.xed_output_checksum,
+        data.xed_form_count, data.xed_iclass_count, data.xed_iform_count, data.xed_missing_iform_count, data.generated_output_checksum,
+        data.xed_stats.header_bytes, data.generated_coverage_checksum, data.xed_stats.coverage_bytes, data.xed_stats.operand_count,
+        data.xed_stats.token_count, data.xed_stats.string_pool_bytes, data.xed_stats.coverage_counts[0], data.xed_stats.coverage_counts[1],
+        data.xed_stats.coverage_counts[2],
+        data.xed_stats.coverage_counts[3], data.xed_stats.coverage_counts[4], data.xed_stats.coverage_counts[5], data.xed_stats.coverage_counts[6],
+        data.xed_stats.reason_counts[0], data.xed_stats.reason_counts[1], data.xed_stats.reason_counts[2], data.xed_stats.reason_counts[3],
+        data.xed_stats.reason_counts[4], data.aarch64_generated_output_checksum, data.aarch64_stats.header_bytes,
+        data.aarch64_generated_coverage_checksum, data.aarch64_stats.coverage_bytes, data.aarch64_stats.canonical_form_count,
+        data.aarch64_stats.field_count, data.aarch64_stats.segment_count, data.aarch64_stats.operand_count, data.aarch64_stats.predicate_count,
+        data.aarch64_stats.string_pool_bytes, data.aarch64_stats.mnemonic_range_count, data.aarch64_stats.signature_range_count,
+        data.aarch64_stats.mnemonic_candidate_count, data.aarch64_stats.signature_candidate_count, data.aarch64_stats.coverage_counts[0],
+        data.aarch64_stats.coverage_counts[1], data.aarch64_stats.coverage_counts[2], data.aarch64_stats.coverage_counts[3],
+        data.aarch64_stats.coverage_counts[4], data.aarch64_stats.coverage_counts[5], data.aarch64_stats.coverage_counts[6],
+        data.aarch64_stats.reason_counts[0], data.aarch64_stats.reason_counts[1], data.aarch64_stats.reason_counts[2],
+        data.aarch64_stats.reason_counts[3], data.aarch64_stats.reason_counts[4], data.aarch64_stats.reason_counts[5],
+        data.aarch64_stats.reason_counts[6], data.aarch64_stats.reason_counts[7], data.aarch64_stats.reason_counts[8],
+        data.aarch64_stats.reason_counts[9], data.aarch64_stats.reason_counts[10], data.aarch64_stats.reason_counts[11],
+        data.aarch64_stats.reason_counts[12], data.aarch64_stats.reason_counts[13], data.aarch64_stats.reason_counts[14],
+        data.aarch64_stats.reason_counts[15], data.aarch64_stats.reason_counts[16], data.aarch64_stats.reason_counts[17],
+        data.aarch64_stats.reason_counts[18], data.aarch64_stats.predicate_feature_count, data.aarch64_stats.encoder_counts[0],
+        data.aarch64_stats.encoder_counts[1], data.aarch64_stats.encoder_counts[2], data.aarch64_stats.encoder_counts[3],
+        data.aarch64_stats.encoder_counts[4], data.aarch64_stats.encoder_counts[5], data.aarch64_stats.encoder_counts[6],
+        data.aarch64_stats.encoder_counts[7], data.aarch64_stats.encoder_counts[8], data.aarch64_stats.encoder_counts[9],
+        data.aarch64_stats.test_counts[0], data.aarch64_stats.test_counts[1], data.aarch64_stats.test_counts[2],
+        data.aarch64_stats.test_counts[3], data.aarch64_stats.test_counts[4], data.aarch64_stats.test_counts[5],
+        data.aarch64_stats.test_counts[6], data.aarch64_stats.test_counts[7], data.aarch64_alias_source_identity,
+        data.aarch64_stats.coverage_counts[2], data.aarch64_inventory_checksum, data.aarch64_inventory_bytes,
+        data.aarch64_stats.coverage_counts[4], data.aarch64_stats.coverage_counts[5], data.aarch64_stats.coverage_counts[6],
+        data.llvm_input_kind, data.llvm_source_identity, data.llvm_raw_snapshot_provenance, data.llvm_input_checksum,
+        data.llvm_normalized_input_checksum, data.llvm_output_checksum, data.llvm_instruction_count);
+}
+
+typedef struct AssemblyImportManifestFieldExpectation AssemblyImportManifestFieldExpectation;
+struct AssemblyImportManifestFieldExpectation
+{
+    String8 key;
+    String8 raw_value;
+};
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_manifest_expect_fields(String8 object, AssemblyImportManifestFieldExpectation* expected, u64 expected_count)
+{
+    JsonParser parser = {.text = object};
+    bool valid = json_consume(&parser, '{');
+    u64 actual_count = 0;
+    while (valid)
+    {
+        String8 key = {0};
+        String8 value = {0};
+        if (!json_raw_object_next(&parser, &key, &value, &valid))
+        {
+            break;
+        }
+        actual_count += 1;
+    }
+    json_skip_whitespace(&parser);
+    valid = valid && parser.index == object.length && actual_count == expected_count;
+    for (u64 index = 0; valid && index < expected_count; index += 1)
+    {
+        String8 value = {0};
+        valid = json_raw_object_find(object, expected[index].key, &value) && string_equal(value, expected[index].raw_value);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL String8 assembly_import_manifest_raw_string(Arena* arena, String8 value)
+{
+    return string_format(arena, S8("\"{S8}\""), value);
+}
+
+BUSTER_GLOBAL_LOCAL String8 assembly_import_manifest_raw_u64(Arena* arena, u64 value)
+{
+    return string_format(arena, S8("{u64}"), value);
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_manifest_format_self_test(Arena* arena)
+{
+    AssemblyImportFullManifestData data = {
+        .generation_mode = S8("manifest-regression"),
+        .acceptance_status = S8("blocked"),
+        .xed_config_file_count = 11,
+        .xed_source_file_count = 12,
+        .xed_config_checksum = S8("xed-config-checksum"),
+        .xed_input_kind = S8("xed_enc_instructions"),
+        .xed_source_identity = S8("xed-source-identity"),
+        .xed_raw_snapshot_provenance = S8("false"),
+        .xed_input_checksum = S8("xed-input-checksum"),
+        .xed_output_checksum = S8("xed-output-checksum"),
+        .xed_form_count = 13,
+        .xed_iclass_count = 14,
+        .xed_iform_count = 15,
+        .xed_missing_iform_count = 16,
+        .generated_output_checksum = S8("x86-header-checksum"),
+        .generated_coverage_checksum = S8("xed-coverage-checksum"),
+        .aarch64_generated_output_checksum = S8("a64-header-checksum"),
+        .aarch64_generated_coverage_checksum = S8("a64-coverage-checksum"),
+        .aarch64_alias_source_identity = S8("alias-source-identity"),
+        .aarch64_inventory_checksum = S8("inventory-checksum"),
+        .aarch64_inventory_bytes = 17,
+        .llvm_input_kind = S8("llvm_tblgen_json"),
+        .llvm_source_identity = S8("llvm-source-identity"),
+        .llvm_raw_snapshot_provenance = S8("true"),
+        .llvm_input_checksum = S8("llvm-input-checksum"),
+        .llvm_normalized_input_checksum = S8("llvm-normalized-checksum"),
+        .llvm_output_checksum = S8("llvm-output-checksum"),
+        .llvm_instruction_count = 18,
+    };
+    for (u32 index = 0; index < XED_GENERATED_COVERAGE_COUNT; index += 1)
+    {
+        data.xed_stats.coverage_counts[index] = 100 + index;
+    }
+    for (u32 index = 0; index < XED_GENERATED_REASON_COUNT; index += 1)
+    {
+        data.xed_stats.reason_counts[index] = 200 + index;
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(data.xed_stats.encoder_counts); index += 1)
+    {
+        data.xed_stats.encoder_counts[index] = 300 + index;
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(data.xed_stats.test_counts); index += 1)
+    {
+        data.xed_stats.test_counts[index] = 400 + index;
+    }
+    data.xed_stats.operand_count = 500;
+    data.xed_stats.token_count = 501;
+    data.xed_stats.string_pool_bytes = 502;
+    data.xed_stats.header_bytes = 503;
+    data.xed_stats.coverage_bytes = 504;
+    for (u32 index = 0; index < AARCH64_IMPORT_COVERAGE_COUNT; index += 1)
+    {
+        data.aarch64_stats.coverage_counts[index] = 600 + index;
+    }
+    for (u32 index = 0; index < AARCH64_IMPORT_REASON_COUNT; index += 1)
+    {
+        data.aarch64_stats.reason_counts[index] = 700 + index;
+    }
+    for (u32 index = 0; index < AARCH64_IMPORT_ENCODER_COUNT; index += 1)
+    {
+        data.aarch64_stats.encoder_counts[index] = 800 + index;
+    }
+    for (u32 index = 0; index < AARCH64_IMPORT_TEST_COUNT; index += 1)
+    {
+        data.aarch64_stats.test_counts[index] = 900 + index;
+    }
+    data.aarch64_stats.canonical_form_count = 1000;
+    data.aarch64_stats.field_count = 1001;
+    data.aarch64_stats.segment_count = 1002;
+    data.aarch64_stats.operand_count = 1003;
+    data.aarch64_stats.predicate_count = 1004;
+    data.aarch64_stats.predicate_feature_count = 1005;
+    data.aarch64_stats.mnemonic_range_count = 1006;
+    data.aarch64_stats.signature_range_count = 1007;
+    data.aarch64_stats.mnemonic_candidate_count = 1008;
+    data.aarch64_stats.signature_candidate_count = 1009;
+    data.aarch64_stats.string_pool_bytes = 1010;
+    data.aarch64_stats.header_bytes = 1011;
+    data.aarch64_stats.coverage_bytes = 1012;
+
+    String8 manifest = assembly_import_format_full_manifest(arena, data);
+    String8 root = manifest;
+    String8 xed = {0};
+    String8 generated = {0};
+    String8 aarch64_generated = {0};
+    String8 llvm = {0};
+    bool result = json_raw_object_find(root, S8("xed"), &xed) && json_raw_object_find(root, S8("generated"), &generated) &&
+                  json_raw_object_find(root, S8("aarch64_generated"), &aarch64_generated) && json_raw_object_find(root, S8("llvm"), &llvm);
+    String8 root_values[] = {
+        S8("4"), assembly_import_manifest_raw_string(arena, data.generation_mode), assembly_import_manifest_raw_string(arena, data.acceptance_status),
+        S8("\"xxh64\""), xed, generated, aarch64_generated, llvm,
+    };
+    String8 root_keys[] = {S8("schema_version"), S8("generation_mode"), S8("acceptance_status"), S8("checksum_algorithm"), S8("xed"),
+                           S8("generated"), S8("aarch64_generated"), S8("llvm")};
+    AssemblyImportManifestFieldExpectation root_expected[BUSTER_ARRAY_LENGTH(root_keys)] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(root_expected); index += 1)
+    {
+        root_expected[index] = (AssemblyImportManifestFieldExpectation){.key = root_keys[index], .raw_value = root_values[index]};
+    }
+    result = result && assembly_import_manifest_expect_fields(root, root_expected, BUSTER_ARRAY_LENGTH(root_expected));
+
+    String8 xed_keys[] = {S8("source_url"), S8("release"), S8("commit"), S8("license"), S8("config_file_count"), S8("source_file_count"),
+                          S8("config_checksum"), S8("input_kind"), S8("source_identity"), S8("raw_snapshot_provenance"), S8("input_checksum"),
+                          S8("output_checksum"), S8("form_count"), S8("iclass_count"), S8("iform_count"), S8("missing_iform_count")};
+    AssemblyImportManifestFieldExpectation xed_expected[BUSTER_ARRAY_LENGTH(xed_keys)] = {
+        {.key = xed_keys[0], .raw_value = S8("\"https://github.com/intelxed/xed\"")},
+        {.key = xed_keys[1], .raw_value = S8("\"v2026.07.15\"")},
+        {.key = xed_keys[2], .raw_value = S8("\"519c843c86547e2003f5a404a53358a7dcfb82f3\"")},
+        {.key = xed_keys[3], .raw_value = S8("\"Apache-2.0\"")},
+        {.key = xed_keys[4], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_config_file_count)},
+        {.key = xed_keys[5], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_source_file_count)},
+        {.key = xed_keys[6], .raw_value = assembly_import_manifest_raw_string(arena, data.xed_config_checksum)},
+        {.key = xed_keys[7], .raw_value = assembly_import_manifest_raw_string(arena, data.xed_input_kind)},
+        {.key = xed_keys[8], .raw_value = assembly_import_manifest_raw_string(arena, data.xed_source_identity)},
+        {.key = xed_keys[9], .raw_value = S8("false")},
+        {.key = xed_keys[10], .raw_value = assembly_import_manifest_raw_string(arena, data.xed_input_checksum)},
+        {.key = xed_keys[11], .raw_value = assembly_import_manifest_raw_string(arena, data.xed_output_checksum)},
+        {.key = xed_keys[12], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_form_count)},
+        {.key = xed_keys[13], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_iclass_count)},
+        {.key = xed_keys[14], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_iform_count)},
+        {.key = xed_keys[15], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_missing_iform_count)},
+    };
+    result = result && assembly_import_manifest_expect_fields(xed, xed_expected, BUSTER_ARRAY_LENGTH(xed_expected));
+
+    String8 generated_classification = {0};
+    String8 generated_reasons = {0};
+    result = result && json_raw_object_find(generated, S8("classification_counts"), &generated_classification) &&
+             json_raw_object_find(generated, S8("reason_counts"), &generated_reasons);
+    String8 generated_keys[] = {S8("header"), S8("header_checksum"), S8("header_bytes"), S8("coverage"), S8("coverage_checksum"),
+                               S8("coverage_bytes"), S8("operand_count"), S8("token_count"), S8("string_pool_bytes"), S8("classification_counts"),
+                               S8("reason_counts")};
+    AssemblyImportManifestFieldExpectation generated_expected[BUSTER_ARRAY_LENGTH(generated_keys)] = {
+        {.key = generated_keys[0], .raw_value = S8("\"x86_64-assembly.generated.h\"")},
+        {.key = generated_keys[1], .raw_value = assembly_import_manifest_raw_string(arena, data.generated_output_checksum)},
+        {.key = generated_keys[2], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_stats.header_bytes)},
+        {.key = generated_keys[3], .raw_value = S8("\"x86_64-coverage.generated.inc\"")},
+        {.key = generated_keys[4], .raw_value = assembly_import_manifest_raw_string(arena, data.generated_coverage_checksum)},
+        {.key = generated_keys[5], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_stats.coverage_bytes)},
+        {.key = generated_keys[6], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_stats.operand_count)},
+        {.key = generated_keys[7], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_stats.token_count)},
+        {.key = generated_keys[8], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_stats.string_pool_bytes)},
+        {.key = generated_keys[9], .raw_value = generated_classification},
+        {.key = generated_keys[10], .raw_value = generated_reasons},
+    };
+    result = result && assembly_import_manifest_expect_fields(generated, generated_expected, BUSTER_ARRAY_LENGTH(generated_expected));
+
+    String8 generated_classification_keys[] = {S8("DIRECT"), S8("NORMALIZED"), S8("NOT64"), S8("PRIVILEGED"), S8("RESERVED"),
+                                               S8("UNSUPPORTED_TOKEN"), S8("UNCLASSIFIED")};
+    AssemblyImportManifestFieldExpectation generated_classification_expected[BUSTER_ARRAY_LENGTH(generated_classification_keys)] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(generated_classification_expected); index += 1)
+    {
+        generated_classification_expected[index] = (AssemblyImportManifestFieldExpectation){
+            .key = generated_classification_keys[index], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_stats.coverage_counts[index])};
+    }
+    String8 generated_reason_keys[] = {S8("NONE"), S8("MODE_NOT64"), S8("CPL0"), S8("UNKNOWN_PATTERN_TOKEN"), S8("UNKNOWN_OPERAND_TOKEN")};
+    AssemblyImportManifestFieldExpectation generated_reason_expected[BUSTER_ARRAY_LENGTH(generated_reason_keys)] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(generated_reason_expected); index += 1)
+    {
+        generated_reason_expected[index] = (AssemblyImportManifestFieldExpectation){
+            .key = generated_reason_keys[index], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_stats.reason_counts[index])};
+    }
+    result = result && assembly_import_manifest_expect_fields(generated_classification, generated_classification_expected,
+                                                              BUSTER_ARRAY_LENGTH(generated_classification_expected)) &&
+             assembly_import_manifest_expect_fields(generated_reasons, generated_reason_expected, BUSTER_ARRAY_LENGTH(generated_reason_expected));
+
+    String8 aarch64_classification = {0};
+    String8 aarch64_reasons = {0};
+    String8 aarch64_encoder = {0};
+    String8 aarch64_tests = {0};
+    String8 inventory = {0};
+    result = result && json_raw_object_find(aarch64_generated, S8("classification_counts"), &aarch64_classification) &&
+             json_raw_object_find(aarch64_generated, S8("reason_counts"), &aarch64_reasons) &&
+             json_raw_object_find(aarch64_generated, S8("encoder_family_counts"), &aarch64_encoder) &&
+             json_raw_object_find(aarch64_generated, S8("test_class_counts"), &aarch64_tests) &&
+             json_raw_object_find(aarch64_generated, S8("missing_field_inventory"), &inventory);
+    String8 aarch64_keys[] = {S8("header"), S8("header_checksum"), S8("header_bytes"), S8("coverage"), S8("coverage_checksum"),
+                              S8("coverage_bytes"), S8("canonical_form_count"), S8("field_count"), S8("segment_count"), S8("operand_count"),
+                              S8("predicate_count"), S8("string_pool_bytes"), S8("mnemonic_range_count"), S8("signature_range_count"),
+                              S8("mnemonic_candidate_count"), S8("signature_candidate_count"), S8("classification_counts"), S8("reason_counts"),
+                              S8("feature_count"), S8("encoder_family_counts"), S8("test_class_counts"), S8("alias_source"), S8("alias_count"),
+                              S8("missing_field_inventory")};
+    AssemblyImportManifestFieldExpectation aarch64_expected[BUSTER_ARRAY_LENGTH(aarch64_keys)] = {
+        {.key = aarch64_keys[0], .raw_value = S8("\"aarch64-assembly.generated.h\"")},
+        {.key = aarch64_keys[1], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_generated_output_checksum)},
+        {.key = aarch64_keys[2], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.header_bytes)},
+        {.key = aarch64_keys[3], .raw_value = S8("\"aarch64-coverage.generated.inc\"")},
+        {.key = aarch64_keys[4], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_generated_coverage_checksum)},
+        {.key = aarch64_keys[5], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.coverage_bytes)},
+        {.key = aarch64_keys[6], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.canonical_form_count)},
+        {.key = aarch64_keys[7], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.field_count)},
+        {.key = aarch64_keys[8], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.segment_count)},
+        {.key = aarch64_keys[9], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.operand_count)},
+        {.key = aarch64_keys[10], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.predicate_count)},
+        {.key = aarch64_keys[11], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.string_pool_bytes)},
+        {.key = aarch64_keys[12], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.mnemonic_range_count)},
+        {.key = aarch64_keys[13], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.signature_range_count)},
+        {.key = aarch64_keys[14], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.mnemonic_candidate_count)},
+        {.key = aarch64_keys[15], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.signature_candidate_count)},
+        {.key = aarch64_keys[16], .raw_value = aarch64_classification},
+        {.key = aarch64_keys[17], .raw_value = aarch64_reasons},
+        {.key = aarch64_keys[18], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.predicate_feature_count)},
+        {.key = aarch64_keys[19], .raw_value = aarch64_encoder},
+        {.key = aarch64_keys[20], .raw_value = aarch64_tests},
+        {.key = aarch64_keys[21], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_alias_source_identity)},
+        {.key = aarch64_keys[22], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.coverage_counts[2])},
+        {.key = aarch64_keys[23], .raw_value = inventory},
+    };
+    result = result && assembly_import_manifest_expect_fields(aarch64_generated, aarch64_expected, BUSTER_ARRAY_LENGTH(aarch64_expected));
+
+    String8 aarch64_classification_keys[] = {S8("DIRECT"), S8("NORMALIZED"), S8("ALIAS"), S8("PRIVILEGED/SYSTEM"),
+                                             S8("RESERVED/UNENCODABLE"), S8("UNSUPPORTED_TOKEN"), S8("UNCLASSIFIED")};
+    AssemblyImportManifestFieldExpectation aarch64_classification_expected[BUSTER_ARRAY_LENGTH(aarch64_classification_keys)] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(aarch64_classification_expected); index += 1)
+    {
+        aarch64_classification_expected[index] = (AssemblyImportManifestFieldExpectation){
+            .key = aarch64_classification_keys[index], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.coverage_counts[index])};
+    }
+    String8 aarch64_reason_keys[] = {S8("NONE"), S8("ALIAS_OF_CANONICAL"), S8("SYSTEM_OR_PRIVILEGED"), S8("UNMAPPED_VARIABLE"),
+                                     S8("CONFLICTING_BIT_ASSIGNMENT"), S8("MALFORMED_DAG"), S8("MALFORMED_TEMPLATE"), S8("UNKNOWN_FIELD"),
+                                     S8("UNKNOWN_PREDICATE"), S8("MISSING_OPERAND"), S8("INVALID_JSON"), S8("NULL_FIELD"),
+                                     S8("UNPROVEN_FIELD_SEMANTICS"), S8("UNPROVEN_OPERAND_KIND"), S8("UNPROVEN_IMMEDIATE_RANGE"),
+                                     S8("UNPROVEN_MEMORY_FORM"), S8("UNPROVEN_TIED_OPERAND"), S8("UNPROVEN_CORRESPONDENCE"),
+                                     S8("UNSUPPORTED_ADDRESS_GRAMMAR")};
+    AssemblyImportManifestFieldExpectation aarch64_reason_expected[BUSTER_ARRAY_LENGTH(aarch64_reason_keys)] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(aarch64_reason_expected); index += 1)
+    {
+        aarch64_reason_expected[index] = (AssemblyImportManifestFieldExpectation){
+            .key = aarch64_reason_keys[index], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.reason_counts[index])};
+    }
+    String8 aarch64_encoder_keys[] = {S8("SCALAR_INTEGER"), S8("BRANCH"), S8("LOAD_STORE"), S8("FP_SIMD_NEON"), S8("SVE_SVE2"),
+                                      S8("SME_SME2"), S8("MTE"), S8("ATOMIC_LSE"), S8("CRYPTO"), S8("SYSTEM")};
+    AssemblyImportManifestFieldExpectation aarch64_encoder_expected[BUSTER_ARRAY_LENGTH(aarch64_encoder_keys)] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(aarch64_encoder_expected); index += 1)
+    {
+        aarch64_encoder_expected[index] = (AssemblyImportManifestFieldExpectation){
+            .key = aarch64_encoder_keys[index], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.encoder_counts[index])};
+    }
+    String8 aarch64_test_keys[] = {S8("SCALAR"), S8("BRANCH"), S8("MEMORY"), S8("SIMD_LIST_LANE"), S8("SVE_PREDICATE"), S8("SME_SYSTEM"),
+                                   S8("IMMEDIATE"), S8("SCHEMA")};
+    AssemblyImportManifestFieldExpectation aarch64_test_expected[BUSTER_ARRAY_LENGTH(aarch64_test_keys)] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(aarch64_test_expected); index += 1)
+    {
+        aarch64_test_expected[index] = (AssemblyImportManifestFieldExpectation){
+            .key = aarch64_test_keys[index], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.test_counts[index])};
+    }
+    AssemblyImportManifestFieldExpectation inventory_expected[] = {
+        {.key = S8("artifact"), .raw_value = S8("\"aarch64-missing-fields.generated.jsonl\"")},
+        {.key = S8("checksum"), .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_inventory_checksum)},
+        {.key = S8("bytes"), .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_inventory_bytes)},
+        {.key = S8("classification_filter"), .raw_value = S8("[\"RESERVED/UNENCODABLE\", \"UNSUPPORTED_TOKEN\"]")},
+        {.key = S8("reserved_unencodable_count"), .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.coverage_counts[4])},
+        {.key = S8("unsupported_token_count"), .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.coverage_counts[5])},
+        {.key = S8("unclassified_count"), .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.coverage_counts[6])},
+    };
+    result = result && assembly_import_manifest_expect_fields(aarch64_classification, aarch64_classification_expected,
+                                                              BUSTER_ARRAY_LENGTH(aarch64_classification_expected)) &&
+             assembly_import_manifest_expect_fields(aarch64_reasons, aarch64_reason_expected, BUSTER_ARRAY_LENGTH(aarch64_reason_expected)) &&
+             assembly_import_manifest_expect_fields(aarch64_encoder, aarch64_encoder_expected, BUSTER_ARRAY_LENGTH(aarch64_encoder_expected)) &&
+             assembly_import_manifest_expect_fields(aarch64_tests, aarch64_test_expected, BUSTER_ARRAY_LENGTH(aarch64_test_expected)) &&
+             assembly_import_manifest_expect_fields(inventory, inventory_expected, BUSTER_ARRAY_LENGTH(inventory_expected));
+
+    String8 llvm_keys[] = {S8("source_url"), S8("release"), S8("commit"), S8("license"), S8("input_kind"), S8("source_identity"),
+                           S8("raw_snapshot_provenance"), S8("input_checksum"), S8("normalized_input_checksum"), S8("output_checksum"),
+                           S8("instruction_count")};
+    AssemblyImportManifestFieldExpectation llvm_expected[BUSTER_ARRAY_LENGTH(llvm_keys)] = {
+        {.key = llvm_keys[0], .raw_value = S8("\"https://github.com/llvm/llvm-project\"")},
+        {.key = llvm_keys[1], .raw_value = S8("\"llvmorg-22.1.8\"")},
+        {.key = llvm_keys[2], .raw_value = S8("\"ca7933e47d3a3451d81e72ac174dcb5aa28b59d1\"")},
+        {.key = llvm_keys[3], .raw_value = S8("\"Apache-2.0 WITH LLVM-exception\"")},
+        {.key = llvm_keys[4], .raw_value = assembly_import_manifest_raw_string(arena, data.llvm_input_kind)},
+        {.key = llvm_keys[5], .raw_value = assembly_import_manifest_raw_string(arena, data.llvm_source_identity)},
+        {.key = llvm_keys[6], .raw_value = S8("true")},
+        {.key = llvm_keys[7], .raw_value = assembly_import_manifest_raw_string(arena, data.llvm_input_checksum)},
+        {.key = llvm_keys[8], .raw_value = assembly_import_manifest_raw_string(arena, data.llvm_normalized_input_checksum)},
+        {.key = llvm_keys[9], .raw_value = assembly_import_manifest_raw_string(arena, data.llvm_output_checksum)},
+        {.key = llvm_keys[10], .raw_value = assembly_import_manifest_raw_u64(arena, data.llvm_instruction_count)},
+    };
+    result = result && assembly_import_manifest_expect_fields(llvm, llvm_expected, BUSTER_ARRAY_LENGTH(llvm_expected));
+
+    AssemblyImportFullManifestData reduced_data = data;
+    reduced_data.generation_mode = S8("audit");
+    reduced_data.acceptance_status = S8("blocked");
+    reduced_data.xed_input_kind = S8("checked-in-xed-jsonl");
+    reduced_data.xed_source_identity = S8("checked-in-x86-artifacts");
+    reduced_data.xed_raw_snapshot_provenance = S8("false");
+    reduced_data.llvm_input_kind = S8("reduced_jsonl");
+    reduced_data.llvm_source_identity = S8("unverified-reduced-jsonl");
+    reduced_data.llvm_raw_snapshot_provenance = S8("false");
+    reduced_data.llvm_input_checksum = S8("reduced-input-checksum");
+    reduced_data.llvm_normalized_input_checksum = S8("normalized-input-checksum");
+    reduced_data.llvm_output_checksum = S8("normalized-output-checksum");
+    reduced_data.llvm_instruction_count = 7491;
+    String8 reduced_manifest = assembly_import_format_full_manifest(arena, reduced_data);
+    String8 reduced_llvm = {0};
+    String8 reduced_generation_mode = {0};
+    String8 reduced_input_kind = {0};
+    String8 reduced_input_checksum = {0};
+    String8 reduced_normalized_checksum = {0};
+    result = result && json_raw_object_find(reduced_manifest, S8("generation_mode"), &reduced_generation_mode) &&
+             string_equal(reduced_generation_mode, S8("\"audit\"")) &&
+             json_raw_object_find(reduced_manifest, S8("llvm"), &reduced_llvm) &&
+             json_raw_object_find(reduced_llvm, S8("input_kind"), &reduced_input_kind) &&
+             string_equal(reduced_input_kind, S8("\"reduced_jsonl\"")) &&
+             json_raw_object_find(reduced_llvm, S8("input_checksum"), &reduced_input_checksum) &&
+             string_equal(reduced_input_checksum, S8("\"reduced-input-checksum\"")) &&
+             json_raw_object_find(reduced_llvm, S8("normalized_input_checksum"), &reduced_normalized_checksum) &&
+             string_equal(reduced_normalized_checksum, S8("\"normalized-input-checksum\""));
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
@@ -6938,9 +11249,43 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     result = result && !xed_import_normalize_record(&bad_operand_form, &bad_operand_record, 0, &bad_token, &bad_operand) &&
              bad_operand_form.coverage_class == XED_GENERATED_COVERAGE_UNSUPPORTED_TOKEN &&
              bad_operand_form.reason_id == XED_GENERATED_REASON_UNKNOWN_OPERAND_TOKEN && bad_operand;
+    Aarch64ImportRecord immediate_grammar_record = {0};
+    Aarch64ImportOperand* scaled_immediate = aarch64_import_operand_add(arena, &immediate_grammar_record, S8("simm7s8:$offset"),
+                                                                          S8("simm7s8"), S8("offset"), AARCH64_IMPORT_OPERAND_READ);
+    Aarch64ImportOperand* width_suffixed_immediate =
+        aarch64_import_operand_add(arena, &immediate_grammar_record, S8("imm0_127_64b:$imm"), S8("imm0_127_64b"), S8("imm"),
+                                   AARCH64_IMPORT_OPERAND_READ);
+    Aarch64ImportOperand* explicit_range_immediate =
+        aarch64_import_operand_add(arena, &immediate_grammar_record, S8("imm32_0_15:$imm"), S8("imm32_0_15"), S8("imm2"),
+                                   AARCH64_IMPORT_OPERAND_READ);
+    result = result && scaled_immediate && scaled_immediate->kind == AARCH64_IMPORT_OPERAND_IMMEDIATE &&
+             scaled_immediate->immediate_min == -64 && scaled_immediate->immediate_max == 63 && scaled_immediate->scale == 8 &&
+             (scaled_immediate->immediate_flags & (AARCH64_IMPORT_OPERAND_IMMEDIATE_RANGE_EXACT | AARCH64_IMPORT_OPERAND_SCALE_EXACT)) ==
+                 (AARCH64_IMPORT_OPERAND_IMMEDIATE_RANGE_EXACT | AARCH64_IMPORT_OPERAND_SCALE_EXACT) &&
+             width_suffixed_immediate && width_suffixed_immediate->immediate_max == 127 && width_suffixed_immediate->register_width == 0 &&
+             explicit_range_immediate && explicit_range_immediate->immediate_min == 0 && explicit_range_immediate->immediate_max == 15;
     String8 checksum_a = assembly_import_checksum(arena, S8("deterministic"));
     String8 checksum_b = assembly_import_checksum(arena, S8("deterministic"));
     result = result && string_equal(checksum_a, checksum_b);
+    String8 provenance_fixture = S8("artifact-provenance");
+    String8 provenance_checksum = assembly_import_checksum(arena, provenance_fixture);
+    char8* mutated_bytes = arena_allocate(arena, char8, provenance_fixture.length);
+    memcpy(mutated_bytes, provenance_fixture.pointer, provenance_fixture.length);
+    mutated_bytes[provenance_fixture.length - 1] ^= 1;
+    String8 mutated_fixture = {.pointer = mutated_bytes, .length = provenance_fixture.length};
+    result = result && assembly_import_validate_artifact(arena, provenance_fixture, provenance_fixture.length, provenance_checksum) &&
+             !assembly_import_validate_artifact(arena, mutated_fixture, provenance_fixture.length, provenance_checksum) &&
+             !aarch64_import_reduced_provenance(arena, mutated_fixture, 7491);
+    result = result &&
+             string_equal(aarch64_import_alias_source_diagnostic(true),
+                          S8("audit: AArch64 alias records are present in the raw source but are not imported by this reduced schema path; generated artifacts remain blocked\n")) &&
+             string_equal(aarch64_import_alias_source_diagnostic(false),
+                          S8("error: AArch64 alias records are present in the raw source but are not imported by this reduced schema path\n")) &&
+             !aarch64_import_alias_source_is_fatal(true) && aarch64_import_alias_source_is_fatal(false);
+    result = result && assembly_import_manifest_format_self_test(arena);
+    Aarch64GeneratedTableStats blocked_stats = {0};
+    blocked_stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN] = 1;
+    result = result && !aarch64_import_acceptance_ready(blocked_stats);
     XedGeneratedFormList normalized_forms = {.pointer = &normalized_form, .length = 1};
     XedGeneratedTableStats schema_stats_a = {0};
     XedGeneratedTableStats schema_stats_b = {0};
@@ -6950,7 +11295,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
              string_equal(assembly_import_arena_contents(coverage_a), assembly_import_arena_contents(coverage_b)) &&
              schema_stats_a.header_bytes == schema_stats_b.header_bytes && schema_stats_a.coverage_bytes == schema_stats_b.coverage_bytes &&
              schema_stats_a.coverage_counts[XED_GENERATED_COVERAGE_NORMALIZED] == 1 && schema_stats_a.reason_counts[XED_GENERATED_REASON_NONE] == 1;
-
     arena_reset_to_start(schema_a);
     arena_reset_to_start(coverage_a);
     XedGeneratedFormList unsupported_forms = {.pointer = &bad_pattern_form, .length = 1};
@@ -6974,12 +11318,356 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     result = result && aarch64_import_emit(arena, output, aarch64_json, &aarch64_count) && aarch64_count == 1 &&
              string_equal(assembly_import_arena_contents(output), expected_aarch64);
 
+    arena_reset_to_start(output);
+    String8 unordered_aarch64_json =
+        S8("{\"!instanceof\":{\"AArch64Inst\":[\"Second\",\"First\"]},"
+           "\"Second\":{\"isPseudo\":0,\"Inst\":[1,0],\"AsmString\":\"second\",\"OutOperandList\":{\"printable\":\"(outs)\"},"
+           "\"InOperandList\":{\"printable\":\"(ins)\"},\"Predicates\":[]},"
+           "\"First\":{\"isPseudo\":0,\"Inst\":[0,1],\"AsmString\":\"first\",\"OutOperandList\":{\"printable\":\"(outs)\"},"
+           "\"InOperandList\":{\"printable\":\"(ins)\"},\"Predicates\":[]}}");
+    String8 expected_ordered_aarch64 =
+        S8("{\"name\":\"First\",\"inst\":[0,1],\"asm\":\"first\",\"out\":\"(outs)\",\"in\":\"(ins)\",\"predicates\":[]}\n"
+           "{\"name\":\"Second\",\"inst\":[1,0],\"asm\":\"second\",\"out\":\"(outs)\",\"in\":\"(ins)\",\"predicates\":[]}\n");
+    String8 unordered_input_checksum = assembly_import_checksum(arena, unordered_aarch64_json);
+    result = result && aarch64_import_emit(arena, output, unordered_aarch64_json, &aarch64_count) && aarch64_count == 2 &&
+             string_equal(assembly_import_arena_contents(output), expected_ordered_aarch64);
+    String8 unordered_normalized_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(output));
+    result = result && !string_equal(unordered_input_checksum, unordered_normalized_checksum);
+
+    arena_reset_to_start(output);
+    String8 reduced_noncanonical_jsonl =
+        S8("  {\"name\":\"Second\",\"inst\":[1,0],\"asm\":\"second\",\"out\":\"(outs)\",\"in\":\"(ins)\",\"predicates\":[]}\n"
+           "{\"name\":\"First\",\"inst\":[0,1],\"asm\":\"first\",\"out\":\"(outs)\",\"in\":\"(ins)\",\"predicates\":[]}\n");
+    String8 reduced_input_checksum = assembly_import_checksum(arena, reduced_noncanonical_jsonl);
+    result = result && aarch64_import_emit(arena, output, reduced_noncanonical_jsonl, &aarch64_count) && aarch64_count == 2 &&
+             string_equal(assembly_import_arena_contents(output), expected_ordered_aarch64);
+    String8 reduced_normalized_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(output));
+    result = result && !string_equal(reduced_input_checksum, reduced_normalized_checksum);
+
+    arena_reset_to_start(output);
+    aarch64_import_self_test_append_record(output, S8("Normal"), 0, S8("nop"), S8("(outs)"), S8("(ins)"), S8("[]"));
+    aarch64_import_self_test_append_record(output, S8("Alias"), 0, S8("nop"), S8("(outs)"), S8("(ins)"), S8("[]"));
+    aarch64_import_self_test_append_record(output, S8("Normal2"), 7, S8("nop"), S8("(outs)"), S8("(ins)"), S8("[]"));
+    aarch64_import_self_test_append_record(output, S8("PredicateGuardA"), 0, S8("nop"), S8("(outs)"), S8("(ins)"), S8("[\"FeatureGuardA\"]"));
+    aarch64_import_self_test_append_record(output, S8("PredicateGuardB"), 0, S8("nop"), S8("(outs)"), S8("(ins)"), S8("[\"FeatureGuardB\"]"));
+    aarch64_import_self_test_append_record(output, S8("Branch"), 1, S8("b\t$addr"), S8("(outs)"),
+                                            S8("(ins am_b_target:$addr)"), S8("[]"));
+    aarch64_import_self_test_append_record(output, S8("Memory"), 0, S8("ldr\t$Rt, [$Rn, $offset]"), S8("(outs GPR32:$Rt)"),
+                                            S8("(ins GPR64sp:$Rn, simm7s4:$offset)"), S8("[]"));
+    aarch64_import_self_test_append_record(output, S8("SimdLane"), 2, S8("simd\t$Vd$idx"), S8("(outs VecListFour16b:$Vd)"),
+                                            S8("(ins VecListFour16b:$Vd, VectorIndexS:$idx)"), S8("[\"HasNEON\"]"));
+    aarch64_import_self_test_append_record(output, S8("SvePredicate"), 3, S8("abs\t$Zd, $Pg/m, $Zn"), S8("(outs ZPR8:$Zd)"),
+                                            S8("(ins ZPR8:$_Zd, PPR3bAny:$Pg, ZPR8:$Zn)"), S8("[\"HasSVE_or_SME\"]"));
+    aarch64_import_self_test_append_record(output, S8("SME_SYSTEM"), 7, S8("SMSTART"), S8("(outs)"), S8("(ins)"),
+                                            S8("[\"HasSME\"]"));
+    aarch64_import_self_test_append_record(output, S8("ReservedVariable"), 4, S8("reserved"), S8("(outs)"), S8("(ins)"), S8("[]"));
+    aarch64_import_self_test_append_record(output, S8("UnknownField"), 5, S8("unknown"), S8("(outs)"), S8("(ins)"), S8("[]"));
+    aarch64_import_self_test_append_record(output, S8("Conflict"), 6, S8("conflict\t$conflict"), S8("(outs X:$conflict)"),
+                                            S8("(ins)"), S8("[]"));
+    aarch64_import_self_test_append_record(output, S8("Malformed"), 0, S8("bad { $missing"), S8("(outs BAD)"), S8("(ins)"), S8("[]"));
+    aarch64_import_self_test_append_record(output, S8("MalformedTemplate"), 0, S8("bad {"), S8("(outs)"), S8("(ins)"), S8("[]"));
+    String8 synthetic_jsonl = assembly_import_arena_contents(output);
+    Aarch64ImportRecordList synthetic_records = {0};
+    result = result && aarch64_import_parse_normalized(arena, synthetic_jsonl, &synthetic_records) && synthetic_records.count == 15;
+    aarch64_import_normalize_records(&synthetic_records);
+    Aarch64ImportRecord* normal = aarch64_import_self_test_find_record(synthetic_records, S8("Normal"));
+    Aarch64ImportRecord* alias = aarch64_import_self_test_find_record(synthetic_records, S8("Alias"));
+    Aarch64ImportRecord* normal2 = aarch64_import_self_test_find_record(synthetic_records, S8("Normal2"));
+    Aarch64ImportRecord* predicate_guard_a = aarch64_import_self_test_find_record(synthetic_records, S8("PredicateGuardA"));
+    Aarch64ImportRecord* predicate_guard_b = aarch64_import_self_test_find_record(synthetic_records, S8("PredicateGuardB"));
+    Aarch64ImportRecord* branch = aarch64_import_self_test_find_record(synthetic_records, S8("Branch"));
+    Aarch64ImportRecord* memory = aarch64_import_self_test_find_record(synthetic_records, S8("Memory"));
+    Aarch64ImportRecord* simd_lane = aarch64_import_self_test_find_record(synthetic_records, S8("SimdLane"));
+    Aarch64ImportRecord* sve_predicate = aarch64_import_self_test_find_record(synthetic_records, S8("SvePredicate"));
+    Aarch64ImportRecord* sme_system = aarch64_import_self_test_find_record(synthetic_records, S8("SME_SYSTEM"));
+    Aarch64ImportRecord* reserved_variable = aarch64_import_self_test_find_record(synthetic_records, S8("ReservedVariable"));
+    Aarch64ImportRecord* unknown_field = aarch64_import_self_test_find_record(synthetic_records, S8("UnknownField"));
+    Aarch64ImportRecord* conflict = aarch64_import_self_test_find_record(synthetic_records, S8("Conflict"));
+    Aarch64ImportRecord* malformed_record = aarch64_import_self_test_find_record(synthetic_records, S8("Malformed"));
+    Aarch64ImportRecord* malformed_template = aarch64_import_self_test_find_record(synthetic_records, S8("MalformedTemplate"));
+    Aarch64ImportVariable* branch_field = branch ? aarch64_import_variable_find(branch, S8("addr")) : 0;
+    result = result && normal && alias && normal2 && predicate_guard_a && predicate_guard_b && branch && memory && simd_lane && sve_predicate && sme_system && reserved_variable && unknown_field && conflict && malformed_record &&
+             malformed_template &&
+             ((normal->coverage_class == AARCH64_IMPORT_COVERAGE_DIRECT && alias->coverage_class == AARCH64_IMPORT_COVERAGE_ALIAS) ||
+              (normal->coverage_class == AARCH64_IMPORT_COVERAGE_ALIAS && alias->coverage_class == AARCH64_IMPORT_COVERAGE_DIRECT)) &&
+             alias->normalized_form_id == normal->normalized_form_id && branch_field &&
+             predicate_guard_a->coverage_class == AARCH64_IMPORT_COVERAGE_DIRECT && predicate_guard_b->coverage_class == AARCH64_IMPORT_COVERAGE_DIRECT &&
+             predicate_guard_a->signature_hash != predicate_guard_b->signature_hash && predicate_guard_a->normalized_form_id != predicate_guard_b->normalized_form_id &&
+             predicate_guard_a->first_predicate && predicate_guard_b->first_predicate &&
+             string_equal(predicate_guard_a->first_predicate->name, S8("FeatureGuardA")) &&
+             string_equal(predicate_guard_b->first_predicate->name, S8("FeatureGuardB")) &&
+             branch_field->relocation == AARCH64_IMPORT_RELOC_BRANCH26 && branch_field->shift == 2 &&
+             memory->address_kind == AARCH64_IMPORT_ADDRESS_BASE_OFFSET && memory->test_class == AARCH64_IMPORT_TEST_MEMORY &&
+             (simd_lane->first_operand && (simd_lane->first_operand->flags & AARCH64_IMPORT_OPERAND_FLAG_LIST)) &&
+             sve_predicate->test_class == AARCH64_IMPORT_TEST_SVE_PREDICATE &&
+             sme_system->coverage_class == AARCH64_IMPORT_COVERAGE_PRIVILEGED_SYSTEM &&
+             sme_system->encoder_family == AARCH64_IMPORT_ENCODER_SYSTEM && sme_system->test_class == AARCH64_IMPORT_TEST_SME_SYSTEM &&
+             reserved_variable->coverage_class == AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE &&
+             reserved_variable->reason_id == AARCH64_IMPORT_REASON_UNMAPPED_VARIABLE &&
+             unknown_field->coverage_class == AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN &&
+             unknown_field->reason_id == AARCH64_IMPORT_REASON_UNKNOWN_FIELD &&
+             conflict->reason_id == AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT &&
+             malformed_record->reason_id == AARCH64_IMPORT_REASON_MALFORMED_DAG &&
+             malformed_template->reason_id == AARCH64_IMPORT_REASON_MALFORMED_TEMPLATE;
+
+    arena_reset_to_start(schema_a);
+    arena_reset_to_start(schema_b);
+    arena_reset_to_start(coverage_a);
+    arena_reset_to_start(coverage_b);
+    Aarch64GeneratedTableStats aarch64_stats_a = {0};
+    Aarch64GeneratedTableStats aarch64_stats_b = {0};
+    bool generated_a = aarch64_generated_emit_tables(schema_a, coverage_a, arena, synthetic_records, &aarch64_stats_a);
+    bool generated_b = aarch64_generated_emit_tables(schema_b, coverage_b, arena, synthetic_records, &aarch64_stats_b);
+    result = result && generated_a && generated_b && string_equal(assembly_import_arena_contents(schema_a), assembly_import_arena_contents(schema_b)) &&
+             string_equal(assembly_import_arena_contents(coverage_a), assembly_import_arena_contents(coverage_b)) &&
+             aarch64_stats_a.coverage_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED] == 0 &&
+             aarch64_stats_a.coverage_counts[AARCH64_IMPORT_COVERAGE_ALIAS] == 1 &&
+             aarch64_stats_a.reason_counts[AARCH64_IMPORT_REASON_UNKNOWN_FIELD] == 1 &&
+             aarch64_stats_a.mnemonic_candidate_count == synthetic_records.count && aarch64_stats_a.mnemonic_range_count < aarch64_stats_a.mnemonic_candidate_count &&
+             aarch64_stats_a.signature_candidate_count >= 2 && aarch64_stats_a.signature_range_count < aarch64_stats_a.signature_candidate_count &&
+             string_contains(assembly_import_arena_contents(schema_a), S8("FeatureGuardA")) &&
+             string_contains(assembly_import_arena_contents(schema_a), S8("FeatureGuardB")) &&
+             string_contains(assembly_import_arena_contents(schema_a), S8("buster_aarch64_generated_mnemonic_ranges")) &&
+             string_contains(assembly_import_arena_contents(schema_a), S8("buster_aarch64_generated_signature_ranges")) &&
+             string_contains(assembly_import_arena_contents(schema_a), S8("buster_aarch64_generated_blob_range_valid")) &&
+             string_contains(assembly_import_arena_contents(schema_a), S8("BUSTER_AARCH64_GENERATED_COVERAGE_CLASS_COUNT")) &&
+             string_contains(assembly_import_arena_contents(schema_a), S8("BUSTER_AARCH64_GENERATED_COVERAGE_ROW_COUNT")) &&
+             string_contains(assembly_import_arena_contents(schema_a), S8("buster_aarch64_generated_string_pool_chunk_0[]")) &&
+             string_contains(assembly_import_arena_contents(schema_a), S8("BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE 4092u")) &&
+             !string_contains(assembly_import_arena_contents(schema_a), S8("sizeof(blob)")) &&
+             !string_contains(assembly_import_arena_contents(schema_a), S8("(blob)[")) &&
+             string_contains(assembly_import_arena_contents(schema_a), S8("UINT32_MAX"));
+
     arena_destroy(coverage_b, 1);
     arena_destroy(coverage_a, 1);
     arena_destroy(schema_b, 1);
     arena_destroy(schema_a, 1);
     arena_destroy(output, 1);
     arena_destroy(arena, 1);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* arena, AssemblyImportOptions options)
+{
+    FileMapRead aarch64_map = file_map_read(arena, options.aarch64_json, (FileReadOptions){0});
+    if (!aarch64_map.bytes.pointer)
+    {
+        string_print(S8("error: failed to read AArch64 metadata {S8}\n"), options.aarch64_json);
+        return PROCESS_RESULT_FAILED;
+    }
+    Arena* aarch64_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+    Arena* generated_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+    Arena* coverage_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+    Arena* inventory_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
+    Arena* scratch = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+    if (!aarch64_output || !generated_output || !coverage_output || !inventory_output || !scratch)
+    {
+        if (scratch)
+        {
+            arena_destroy(scratch, 1);
+        }
+        if (coverage_output)
+        {
+            arena_destroy(coverage_output, 1);
+        }
+        if (inventory_output)
+        {
+            arena_destroy(inventory_output, 1);
+        }
+        if (generated_output)
+        {
+            arena_destroy(generated_output, 1);
+        }
+        if (aarch64_output)
+        {
+            arena_destroy(aarch64_output, 1);
+        }
+        file_map_unmap(aarch64_map);
+        string_print(S8("error: failed to reserve AArch64 importer arenas\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 input = BYTE_SLICE_TO_STRING(8, aarch64_map.bytes);
+    u64 count = 0;
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
+    if (!aarch64_import_emit(arena, aarch64_output, input, &count))
+    {
+        string_print(S8("error: malformed AArch64 metadata {S8}\n"), options.aarch64_json);
+        result = PROCESS_RESULT_FAILED;
+    }
+    Aarch64ImportRecordList records = {0};
+    Aarch64GeneratedTableStats stats = {0};
+    bool reduced_provenance_valid = false;
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        String8 content = assembly_import_arena_contents(aarch64_output);
+        if (!aarch64_import_parse_normalized(arena, content, &records))
+        {
+            string_print(S8("error: malformed normalized AArch64 metadata {S8}\n"), options.aarch64_json);
+            result = PROCESS_RESULT_FAILED;
+        }
+        else
+        {
+            aarch64_import_normalize_records(&records);
+            if (!aarch64_generated_emit_tables(generated_output, coverage_output, scratch, records, &stats))
+            {
+                string_print(S8("error: failed to generate AArch64 metadata tables or coverage contains UNCLASSIFIED rows\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+            else if (!aarch64_import_acceptance_ready(stats))
+            {
+                string_print(options.audit ? S8("audit: AArch64 metadata acceptance blocked: RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; inventory output was generated\n") :
+                             S8("error: AArch64 metadata acceptance blocked: RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; use --audit only for inventory output\n"),
+                             stats.coverage_counts[AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE],
+                             stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN],
+                             stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED]);
+                if (!options.audit)
+                {
+                    result = PROCESS_RESULT_FAILED;
+                }
+            }
+            if (result == PROCESS_RESULT_SUCCESS)
+            {
+                u64 inventory_count = 0;
+                if (!aarch64_generated_emit_missing_inventory(inventory_output, records, &inventory_count))
+                {
+                    result = PROCESS_RESULT_FAILED;
+                }
+            }
+    }
+    }
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        reduced_provenance_valid = aarch64_import_reduced_provenance(arena, input, count);
+        if (!reduced_provenance_valid)
+        {
+            string_print(options.audit ? S8("audit: AArch64 reduced JSONL provenance is not the checked-in reduced corpus; reduced-input provenance is recorded without a raw snapshot claim\n") :
+                         S8("error: AArch64 reduced JSONL provenance is not the checked-in reduced corpus; use --audit only for inventory output\n"));
+            if (!options.audit)
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+    }
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        ByteSlice xed_bytes[3] = {0};
+        String8 xed_names[] = {S8("x86_64-xed.jsonl"), S8("x86_64-assembly.generated.h"), S8("x86_64-coverage.generated.inc")};
+        String8 xed_content[3] = {0};
+        for (u32 index = 0; index < 3; index += 1)
+        {
+            String8 path = path_join(arena, S8("src/buster/lib/compiler/assembly/generated"), xed_names[index]);
+            xed_bytes[index] = file_read(arena, path, (FileReadOptions){0});
+            xed_content[index] = BYTE_SLICE_TO_STRING(8, xed_bytes[index]);
+            if (!xed_content[index].pointer)
+            {
+                string_print(S8("error: failed to read checked-in XED artifact {S8}\n"), path);
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
+        }
+        if (result == PROCESS_RESULT_SUCCESS)
+        {
+            if (!assembly_import_validate_checked_in_x86(arena, xed_content))
+            {
+                string_print(S8("error: checked-in XED artifact provenance/checksum/count validation failed\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        if (result == PROCESS_RESULT_SUCCESS)
+        {
+            make_directory_recursive(arena, options.output_directory);
+            String8 aarch64_content = assembly_import_arena_contents(aarch64_output);
+            String8 generated_content = assembly_import_arena_contents(generated_output);
+            String8 coverage_content = assembly_import_arena_contents(coverage_output);
+            String8 inventory_content = assembly_import_arena_contents(inventory_output);
+            String8 reduced_input_checksum = assembly_import_checksum(arena, input);
+            String8 normalized_input_checksum = assembly_import_checksum(arena, aarch64_content);
+            String8 output_checksum = assembly_import_checksum(arena, aarch64_content);
+            String8 generated_checksum = assembly_import_checksum(arena, generated_content);
+            String8 coverage_checksum = assembly_import_checksum(arena, coverage_content);
+            String8 xed_input_checksum = assembly_import_checksum(arena, xed_content[0]);
+            String8 xed_header_checksum = assembly_import_checksum(arena, xed_content[1]);
+            String8 xed_coverage_checksum = assembly_import_checksum(arena, xed_content[2]);
+            u64 xed_form_count = assembly_import_line_count(xed_content[0]);
+            u64 xed_iclass_count = 0;
+            u64 xed_iform_count = 0;
+            u64 xed_missing_iform_count = 0;
+            bool xed_counts_valid = assembly_import_jsonl_unique_field(arena, xed_content[0], S8("iclass"), &xed_iclass_count, 0) &&
+                                     assembly_import_jsonl_unique_field(arena, xed_content[0], S8("iform"), &xed_iform_count,
+                                                                        &xed_missing_iform_count);
+            String8 generation_mode = options.audit ? S8("audit") : S8("acceptance");
+            String8 acceptance_status = aarch64_import_acceptance_ready(stats) && reduced_provenance_valid ? S8("ready") : S8("blocked");
+            String8 reduced_source_identity = reduced_provenance_valid ? S8("checked-in-reduced-jsonl") : S8("unverified-reduced-jsonl");
+            String8 raw_snapshot_provenance = S8("false");
+            if (!xed_counts_valid)
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+            String8 inventory_checksum = assembly_import_checksum(arena, inventory_content);
+            XedGeneratedTableStats xed_stats = {0};
+            xed_stats.header_bytes = xed_content[1].length;
+            xed_stats.coverage_bytes = xed_content[2].length;
+            AssemblyImportFullManifestData manifest_data = {
+                .generation_mode = generation_mode,
+                .acceptance_status = acceptance_status,
+                .xed_config_file_count = 0,
+                .xed_source_file_count = 0,
+                .xed_config_checksum = S8("not-applicable-aarch64-only"),
+                .xed_input_kind = S8("checked-in-xed-jsonl"),
+                .xed_source_identity = S8("checked-in-x86-artifacts"),
+                .xed_raw_snapshot_provenance = S8("false"),
+                .xed_input_checksum = xed_input_checksum,
+                .xed_output_checksum = xed_input_checksum,
+                .xed_form_count = xed_form_count,
+                .xed_iclass_count = xed_iclass_count,
+                .xed_iform_count = xed_iform_count,
+                .xed_missing_iform_count = xed_missing_iform_count,
+                .generated_output_checksum = xed_header_checksum,
+                .generated_coverage_checksum = xed_coverage_checksum,
+                .xed_stats = xed_stats,
+                .aarch64_generated_output_checksum = generated_checksum,
+                .aarch64_generated_coverage_checksum = coverage_checksum,
+                .aarch64_alias_source_identity = S8("not-present-in-reduced-jsonl"),
+                .aarch64_inventory_checksum = inventory_checksum,
+                .aarch64_inventory_bytes = inventory_content.length,
+                .llvm_input_kind = S8("reduced_jsonl"),
+                .llvm_source_identity = reduced_source_identity,
+                .llvm_raw_snapshot_provenance = raw_snapshot_provenance,
+                .llvm_input_checksum = reduced_input_checksum,
+                .llvm_normalized_input_checksum = normalized_input_checksum,
+                .llvm_output_checksum = output_checksum,
+                .llvm_instruction_count = count,
+                .aarch64_stats = stats,
+            };
+            String8 manifest = assembly_import_format_full_manifest(arena, manifest_data);
+            if (!assembly_import_write(arena, options.output_directory, xed_names[0], xed_content[0]) ||
+                !assembly_import_write(arena, options.output_directory, xed_names[1], xed_content[1]) ||
+                !assembly_import_write(arena, options.output_directory, xed_names[2], xed_content[2]) ||
+                !assembly_import_write(arena, options.output_directory, S8("aarch64-llvm.jsonl"), aarch64_content) ||
+                !assembly_import_write(arena, options.output_directory, S8("aarch64-assembly.generated.h"), generated_content) ||
+                !assembly_import_write(arena, options.output_directory, S8("aarch64-coverage.generated.inc"), coverage_content) ||
+                !assembly_import_write(arena, options.output_directory, S8("aarch64-missing-fields.generated.jsonl"), inventory_content) ||
+                !assembly_import_write(arena, options.output_directory, S8("manifest.json"), manifest))
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+            if (result == PROCESS_RESULT_SUCCESS)
+            {
+                string_print(S8("AArch64 tables: forms={u64} fields={u64} segments={u64} operands={u64} predicates={u64} header={u64} bytes coverage={u64} bytes strings={u64} bytes.\n"),
+                             stats.canonical_form_count, stats.field_count, stats.segment_count, stats.operand_count, stats.predicate_count,
+                             stats.header_bytes, stats.coverage_bytes, stats.string_pool_bytes);
+                string_print(S8("AArch64 coverage: DIRECT={u64} NORMALIZED={u64} ALIAS={u64} PRIVILEGED/SYSTEM={u64} RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}.\n"),
+                             stats.coverage_counts[0], stats.coverage_counts[1], stats.coverage_counts[2], stats.coverage_counts[3],
+                             stats.coverage_counts[4], stats.coverage_counts[5], stats.coverage_counts[6]);
+            }
+        }
+    }
+    file_map_unmap(aarch64_map);
+    arena_destroy(scratch, 1);
+    arena_destroy(inventory_output, 1);
+    arena_destroy(coverage_output, 1);
+    arena_destroy(generated_output, 1);
+    arena_destroy(aarch64_output, 1);
     return result;
 }
 
@@ -6990,6 +11678,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     {
         string_print(S8("error: assembly metadata importer self-test failed\n"));
         return PROCESS_RESULT_FAILED;
+    }
+    if (string_equal(options.xed_datafiles, S8("-")))
+    {
+        return assembly_import_action_aarch64_only(arena, options);
     }
     AssemblyImportPathList config_paths = {0};
     if (!assembly_import_collect_xed_config_paths(arena, options.xed_datafiles, &config_paths) || !config_paths.count)
@@ -7012,9 +11704,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     Arena* generated_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
     Arena* coverage_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32)});
     Arena* aarch64_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+    Arena* aarch64_generated_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+    Arena* aarch64_generated_coverage_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+    Arena* aarch64_inventory_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
+    Arena* aarch64_generated_scratch = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
     Arena* xed_config_checksum_input = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32)});
     Arena* xed_checksum_input = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
-    if (!xed_output || !generated_output || !coverage_output || !aarch64_output || !xed_config_checksum_input || !xed_checksum_input)
+    if (!xed_output || !generated_output || !coverage_output || !aarch64_output || !aarch64_generated_output ||
+        !aarch64_generated_coverage_output || !aarch64_inventory_output || !aarch64_generated_scratch || !xed_config_checksum_input ||
+        !xed_checksum_input)
     {
         string_print(S8("error: failed to reserve assembly importer arenas\n"));
         if (xed_output)
@@ -7032,6 +11730,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         if (aarch64_output)
         {
             arena_destroy(aarch64_output, 1);
+        }
+        if (aarch64_generated_output)
+        {
+            arena_destroy(aarch64_generated_output, 1);
+        }
+        if (aarch64_generated_coverage_output)
+        {
+            arena_destroy(aarch64_generated_coverage_output, 1);
+        }
+        if (aarch64_inventory_output)
+        {
+            arena_destroy(aarch64_inventory_output, 1);
+        }
+        if (aarch64_generated_scratch)
+        {
+            arena_destroy(aarch64_generated_scratch, 1);
         }
         if (xed_config_checksum_input)
         {
@@ -7147,6 +11861,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     FileMapRead aarch64_map = {0};
     u64 aarch64_count = 0;
     String8 aarch64_json = {0};
+    Aarch64ImportRecordList aarch64_records = {0};
+    Aarch64GeneratedTableStats aarch64_generated_stats = {0};
+    bool aarch64_raw_provenance_valid = false;
+    bool aarch64_alias_source = false;
     if (result == PROCESS_RESULT_SUCCESS)
     {
         aarch64_map = file_map_read(arena, options.aarch64_json, (FileReadOptions){0});
@@ -7158,10 +11876,68 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         else
         {
             aarch64_json = BYTE_SLICE_TO_STRING(8, aarch64_map.bytes);
+            aarch64_alias_source = aarch64_import_alias_source_present(aarch64_json);
+            if (aarch64_alias_source)
+            {
+                string_print(aarch64_import_alias_source_diagnostic(options.audit));
+                if (aarch64_import_alias_source_is_fatal(options.audit))
+                {
+                    result = PROCESS_RESULT_FAILED;
+                }
+            }
             if (!aarch64_import_emit(arena, aarch64_output, aarch64_json, &aarch64_count))
             {
                 string_print(S8("error: malformed or incomplete AArch64 llvm-tblgen JSON in {S8}\n"), options.aarch64_json);
                 result = PROCESS_RESULT_FAILED;
+            }
+            else
+            {
+                aarch64_raw_provenance_valid = aarch64_import_full_provenance(arena, aarch64_json, aarch64_count);
+                if (!aarch64_raw_provenance_valid)
+                {
+                    string_print(options.audit ? S8("audit: AArch64 raw LLVM provenance is not the pinned llvmorg-22.1.8 snapshot or emitted count; raw snapshot provenance is not claimed\n") :
+                                 S8("error: AArch64 raw LLVM provenance is not the pinned llvmorg-22.1.8 snapshot or emitted count; use --audit only for inventory output\n"));
+                    if (!options.audit)
+                    {
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                }
+                String8 aarch64_content = assembly_import_arena_contents(aarch64_output);
+                if (!aarch64_import_parse_normalized(arena, aarch64_content, &aarch64_records))
+                {
+                    string_print(S8("error: malformed normalized AArch64 metadata in {S8}\n"), options.aarch64_json);
+                    result = PROCESS_RESULT_FAILED;
+                }
+                else
+                {
+                    aarch64_import_normalize_records(&aarch64_records);
+                    if (!aarch64_generated_emit_tables(aarch64_generated_output, aarch64_generated_coverage_output,
+                                                       aarch64_generated_scratch, aarch64_records, &aarch64_generated_stats))
+                    {
+                        string_print(S8("error: failed to generate AArch64 metadata tables or coverage contains UNCLASSIFIED rows\n"));
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                    else if (!aarch64_import_acceptance_ready(aarch64_generated_stats))
+                    {
+                        string_print(options.audit ? S8("audit: AArch64 metadata acceptance blocked: RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; inventory output was generated\n") :
+                                     S8("error: AArch64 metadata acceptance blocked: RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; use --audit only for inventory output\n"),
+                                     aarch64_generated_stats.coverage_counts[AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE],
+                                     aarch64_generated_stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN],
+                                     aarch64_generated_stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED]);
+                        if (!options.audit)
+                        {
+                            result = PROCESS_RESULT_FAILED;
+                        }
+                    }
+                    if (result == PROCESS_RESULT_SUCCESS)
+                    {
+                        u64 inventory_count = 0;
+                        if (!aarch64_generated_emit_missing_inventory(aarch64_inventory_output, aarch64_records, &inventory_count))
+                        {
+                            result = PROCESS_RESULT_FAILED;
+                        }
+                    }
+                }
             }
         }
     }
@@ -7173,6 +11949,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         String8 generated_content = assembly_import_arena_contents(generated_output);
         String8 coverage_content = assembly_import_arena_contents(coverage_output);
         String8 aarch64_content = assembly_import_arena_contents(aarch64_output);
+        String8 aarch64_generated_content = assembly_import_arena_contents(aarch64_generated_output);
+        String8 aarch64_generated_coverage_content = assembly_import_arena_contents(aarch64_generated_coverage_output);
+        String8 aarch64_inventory_content = assembly_import_arena_contents(aarch64_inventory_output);
         String8 xed_config_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(xed_config_checksum_input));
         String8 xed_input_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(xed_checksum_input));
         String8 aarch64_input_checksum = assembly_import_checksum(arena, aarch64_json);
@@ -7180,6 +11959,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         String8 generated_output_checksum = assembly_import_checksum(arena, generated_content);
         String8 coverage_output_checksum = assembly_import_checksum(arena, coverage_content);
         String8 aarch64_output_checksum = assembly_import_checksum(arena, aarch64_content);
+        String8 aarch64_normalized_input_checksum = assembly_import_checksum(arena, aarch64_content);
+        String8 aarch64_generated_output_checksum = assembly_import_checksum(arena, aarch64_generated_content);
+        String8 aarch64_generated_coverage_checksum = assembly_import_checksum(arena, aarch64_generated_coverage_content);
+        String8 aarch64_inventory_checksum = assembly_import_checksum(arena, aarch64_inventory_content);
+        String8 generation_mode = options.audit ? S8("audit") : S8("acceptance");
+        String8 acceptance_status = aarch64_import_acceptance_ready(aarch64_generated_stats) && aarch64_raw_provenance_valid && !aarch64_alias_source
+                                        ? S8("ready")
+                                        : S8("blocked");
+        String8 aarch64_source_identity = aarch64_raw_provenance_valid ? S8("llvmorg-22.1.8-pinned-raw-json") : S8("unverified-full-json");
+        String8 raw_snapshot_provenance = aarch64_raw_provenance_valid ? S8("true") : S8("false");
+        String8 alias_source_identity = aarch64_alias_source ? S8("raw-alias-records-not-imported") : S8("raw-alias-records-not-present-in-selected-source");
         u64 iclass_count = xed_import_unique_record_value_count(arena, xed_records, false);
         u64 iform_count = xed_import_unique_record_value_count(arena, xed_records, true);
         u64 missing_iform_count = 0;
@@ -7187,62 +11977,51 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         {
             missing_iform_count += !record->iform.length;
         }
-        String8 manifest = string_format(
-            arena,
-            S8("{{\n"
-               "  \"schema_version\": 2,\n"
-               "  \"checksum_algorithm\": \"xxh64\",\n"
-               "  \"xed\": {{\n"
-               "    \"source_url\": \"https://github.com/intelxed/xed\",\n"
-               "    \"release\": \"v2026.07.15\",\n"
-               "    \"commit\": \"519c843c86547e2003f5a404a53358a7dcfb82f3\",\n"
-               "    \"license\": \"Apache-2.0\",\n"
-               "    \"config_file_count\": {u64},\n"
-               "    \"source_file_count\": {u64},\n"
-               "    \"config_checksum\": \"{S8}\",\n"
-               "    \"input_checksum\": \"{S8}\",\n"
-               "    \"output_checksum\": \"{S8}\",\n"
-               "    \"form_count\": {u64},\n"
-               "    \"iclass_count\": {u64},\n"
-               "    \"iform_count\": {u64},\n"
-               "    \"missing_iform_count\": {u64}\n"
-               "  },\n"
-               "  \"generated\": {{\n"
-               "    \"header\": \"x86_64-assembly.generated.h\",\n"
-               "    \"header_checksum\": \"{S8}\",\n"
-               "    \"header_bytes\": {u64},\n"
-               "    \"coverage\": \"x86_64-coverage.generated.inc\",\n"
-               "    \"coverage_checksum\": \"{S8}\",\n"
-               "    \"coverage_bytes\": {u64},\n"
-               "    \"operand_count\": {u64},\n"
-               "    \"token_count\": {u64},\n"
-               "    \"string_pool_bytes\": {u64},\n"
-               "    \"classification_counts\": {{\"DIRECT\": {u64}, \"NORMALIZED\": {u64}, \"NOT64\": {u64}, \"PRIVILEGED\": {u64}, \"RESERVED\": {u64}, \"UNSUPPORTED_TOKEN\": {u64}, \"UNCLASSIFIED\": {u64}}},\n"
-               "    \"reason_counts\": {{\"NONE\": {u64}, \"MODE_NOT64\": {u64}, \"CPL0\": {u64}, \"UNKNOWN_PATTERN_TOKEN\": {u64}, \"UNKNOWN_OPERAND_TOKEN\": {u64}}}\n"
-               "  },\n"
-               "  \"llvm\": {{\n"
-               "    \"source_url\": \"https://github.com/llvm/llvm-project\",\n"
-               "    \"release\": \"llvmorg-22.1.8\",\n"
-               "    \"commit\": \"ca7933e47d3a3451d81e72ac174dcb5aa28b59d1\",\n"
-               "    \"license\": \"Apache-2.0 WITH LLVM-exception\",\n"
-               "    \"input_checksum\": \"{S8}\",\n"
-               "    \"output_checksum\": \"{S8}\",\n"
-               "    \"instruction_count\": {u64}\n"
-               "  }\n"
-               "}\n"),
-            config_paths.count, source_paths.count, xed_config_checksum, xed_input_checksum, xed_output_checksum, xed_records.count,
-            iclass_count, iform_count, missing_iform_count, generated_output_checksum, generated_stats.header_bytes,
-            coverage_output_checksum, generated_stats.coverage_bytes, generated_stats.operand_count, generated_stats.token_count,
-            generated_stats.string_pool_bytes, generated_stats.coverage_counts[0], generated_stats.coverage_counts[1],
-            generated_stats.coverage_counts[2], generated_stats.coverage_counts[3], generated_stats.coverage_counts[4],
-            generated_stats.coverage_counts[5], generated_stats.coverage_counts[6], generated_stats.reason_counts[0],
-            generated_stats.reason_counts[1], generated_stats.reason_counts[2], generated_stats.reason_counts[3], generated_stats.reason_counts[4],
-            aarch64_input_checksum, aarch64_output_checksum, aarch64_count);
+        String8 xed_input_kind = S8("xed_enc_instructions");
+        String8 xed_source_identity = S8("unverified-xed-datafiles");
+        String8 xed_raw_snapshot_provenance = S8("false");
+        String8 llvm_input_kind = S8("llvm_tblgen_json");
+        AssemblyImportFullManifestData manifest_data = {
+            .generation_mode = generation_mode,
+            .acceptance_status = acceptance_status,
+            .xed_config_file_count = config_paths.count,
+            .xed_source_file_count = source_paths.count,
+            .xed_config_checksum = xed_config_checksum,
+            .xed_input_kind = xed_input_kind,
+            .xed_source_identity = xed_source_identity,
+            .xed_raw_snapshot_provenance = xed_raw_snapshot_provenance,
+            .xed_input_checksum = xed_input_checksum,
+            .xed_output_checksum = xed_output_checksum,
+            .xed_form_count = xed_records.count,
+            .xed_iclass_count = iclass_count,
+            .xed_iform_count = iform_count,
+            .xed_missing_iform_count = missing_iform_count,
+            .generated_output_checksum = generated_output_checksum,
+            .generated_coverage_checksum = coverage_output_checksum,
+            .xed_stats = generated_stats,
+            .aarch64_generated_output_checksum = aarch64_generated_output_checksum,
+            .aarch64_generated_coverage_checksum = aarch64_generated_coverage_checksum,
+            .aarch64_alias_source_identity = alias_source_identity,
+            .aarch64_inventory_checksum = aarch64_inventory_checksum,
+            .aarch64_inventory_bytes = aarch64_inventory_content.length,
+            .llvm_input_kind = llvm_input_kind,
+            .llvm_source_identity = aarch64_source_identity,
+            .llvm_raw_snapshot_provenance = raw_snapshot_provenance,
+            .llvm_input_checksum = aarch64_input_checksum,
+            .llvm_normalized_input_checksum = aarch64_normalized_input_checksum,
+            .llvm_output_checksum = aarch64_output_checksum,
+            .llvm_instruction_count = aarch64_count,
+            .aarch64_stats = aarch64_generated_stats,
+        };
+        String8 manifest = assembly_import_format_full_manifest(arena, manifest_data);
 
         if (!assembly_import_write(arena, options.output_directory, S8("x86_64-xed.jsonl"), xed_content) ||
             !assembly_import_write(arena, options.output_directory, S8("x86_64-assembly.generated.h"), generated_content) ||
             !assembly_import_write(arena, options.output_directory, S8("x86_64-coverage.generated.inc"), coverage_content) ||
             !assembly_import_write(arena, options.output_directory, S8("aarch64-llvm.jsonl"), aarch64_content) ||
+            !assembly_import_write(arena, options.output_directory, S8("aarch64-assembly.generated.h"), aarch64_generated_content) ||
+            !assembly_import_write(arena, options.output_directory, S8("aarch64-coverage.generated.inc"), aarch64_generated_coverage_content) ||
+            !assembly_import_write(arena, options.output_directory, S8("aarch64-missing-fields.generated.jsonl"), aarch64_inventory_content) ||
             !assembly_import_write(arena, options.output_directory, S8("manifest.json"), manifest))
         {
             result = PROCESS_RESULT_FAILED;
@@ -7256,10 +12035,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
             string_print(S8("Generated tables: header={u64} bytes coverage={u64} bytes operands={u64} strings={u64} bytes.\n"),
                          generated_stats.header_bytes, generated_stats.coverage_bytes, generated_stats.operand_count,
                          generated_stats.string_pool_bytes);
-            string_print(S8("Coverage: DIRECT={u64} NORMALIZED={u64} NOT64={u64} PRIVILEGED={u64} RESERVED={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}.\n"),
+            string_print(S8("AArch64 tables: forms={u64} fields={u64} segments={u64} operands={u64} predicates={u64} header={u64} bytes coverage={u64} bytes strings={u64} bytes.\n"),
+                         aarch64_generated_stats.canonical_form_count, aarch64_generated_stats.field_count, aarch64_generated_stats.segment_count,
+                         aarch64_generated_stats.operand_count, aarch64_generated_stats.predicate_count, aarch64_generated_stats.header_bytes,
+                         aarch64_generated_stats.coverage_bytes, aarch64_generated_stats.string_pool_bytes);
+            string_print(S8("XED coverage: DIRECT={u64} NORMALIZED={u64} NOT64={u64} PRIVILEGED={u64} RESERVED={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}.\n"),
                          generated_stats.coverage_counts[0], generated_stats.coverage_counts[1], generated_stats.coverage_counts[2],
                          generated_stats.coverage_counts[3], generated_stats.coverage_counts[4], generated_stats.coverage_counts[5],
                          generated_stats.coverage_counts[6]);
+            string_print(S8("AArch64 coverage: DIRECT={u64} NORMALIZED={u64} ALIAS={u64} PRIVILEGED/SYSTEM={u64} RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}.\n"),
+                         aarch64_generated_stats.coverage_counts[0], aarch64_generated_stats.coverage_counts[1], aarch64_generated_stats.coverage_counts[2],
+                         aarch64_generated_stats.coverage_counts[3], aarch64_generated_stats.coverage_counts[4], aarch64_generated_stats.coverage_counts[5],
+                         aarch64_generated_stats.coverage_counts[6]);
         }
     }
 
@@ -7270,6 +12057,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     arena_destroy(xed_checksum_input, 1);
     arena_destroy(xed_config_checksum_input, 1);
     arena_destroy(aarch64_output, 1);
+    arena_destroy(aarch64_generated_scratch, 1);
+    arena_destroy(aarch64_inventory_output, 1);
+    arena_destroy(aarch64_generated_coverage_output, 1);
+    arena_destroy(aarch64_generated_output, 1);
     arena_destroy(coverage_output, 1);
     arena_destroy(generated_output, 1);
     arena_destroy(xed_output, 1);
@@ -7487,6 +12278,19 @@ ProcessResult process_arguments(void)
                     // argument for every failure path.
                     result = generic_argument_result;
                 }
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_AUDIT:
+        {
+            if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !argument_has_value)
+            {
+                assembly_import_options.audit = 1;
+                argument_i += 1;
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
             }
         }
         break;
