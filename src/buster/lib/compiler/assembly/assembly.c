@@ -595,6 +595,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_numbered_register_parse(String8 text, String8 
     {
         return false;
     }
+    if (text.length - prefix.length > 1 && text.pointer[prefix.length] == '0')
+    {
+        return false;
+    }
     u32 value = 0;
     for (u64 index = prefix.length; index < text.length; index += 1)
     {
@@ -629,6 +633,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_extended_gpr_parse(String8 text, AssemblyRegis
         suffix = assembly_ascii_lower(text.pointer[text.length - 1]);
     }
     if (suffix_start <= 1)
+    {
+        return false;
+    }
+    if (suffix_start - 1 > 1 && text.pointer[1] == '0')
     {
         return false;
     }
@@ -1487,6 +1495,10 @@ typedef enum AssemblyVectorFormFlags
     ASSEMBLY_VECTOR_FORM_SOURCE_RM = 1u << 5,
     ASSEMBLY_VECTOR_FORM_AVX512BW = 1u << 6,
     ASSEMBLY_VECTOR_FORM_ROUNDING = 1u << 7,
+    ASSEMBLY_VECTOR_FORM_VEX_ONLY = 1u << 8,
+    ASSEMBLY_VECTOR_FORM_BROADCAST = 1u << 9,
+    ASSEMBLY_VECTOR_FORM_SAE = 1u << 10,
+    ASSEMBLY_VECTOR_FORM_AVX512DQ = 1u << 11,
 } AssemblyVectorFormFlags;
 
 typedef struct AssemblyVectorForm AssemblyVectorForm;
@@ -1497,7 +1509,7 @@ struct AssemblyVectorForm
     u8 mandatory_prefix;
     u8 opcode_byte;
     u8 element_width;
-    u8 flags;
+    u16 flags;
     bool wide;
 };
 
@@ -1508,59 +1520,79 @@ BUSTER_GLOBAL_LOCAL AssemblyVectorForm const* assembly_x86_vector_form(AssemblyO
         {ASSEMBLY_OPCODE_X86_VMOVUPS, 1, 0, 0x10, 4, ASSEMBLY_VECTOR_FORM_MOVE, true},
         {ASSEMBLY_OPCODE_X86_VMOVAPD, 1, 1, 0x28, 8, ASSEMBLY_VECTOR_FORM_MOVE, true},
         {ASSEMBLY_OPCODE_X86_VMOVUPD, 1, 1, 0x10, 8, ASSEMBLY_VECTOR_FORM_MOVE, true},
-        {ASSEMBLY_OPCODE_X86_VXORPS, 1, 0, 0x57, 4, 0, true},
-        {ASSEMBLY_OPCODE_X86_VXORPD, 1, 1, 0x57, 8, 0, true},
-        {ASSEMBLY_OPCODE_X86_VADDPS, 1, 0, 0x58, 4, ASSEMBLY_VECTOR_FORM_ROUNDING, true},
-        {ASSEMBLY_OPCODE_X86_VADDPD, 1, 1, 0x58, 8, ASSEMBLY_VECTOR_FORM_ROUNDING, true},
+        {ASSEMBLY_OPCODE_X86_VXORPS, 1, 0, 0x57, 4, ASSEMBLY_VECTOR_FORM_BROADCAST | ASSEMBLY_VECTOR_FORM_AVX512DQ, true},
+        {ASSEMBLY_OPCODE_X86_VXORPD, 1, 1, 0x57, 8, ASSEMBLY_VECTOR_FORM_BROADCAST | ASSEMBLY_VECTOR_FORM_AVX512DQ, true},
+        {ASSEMBLY_OPCODE_X86_VADDPS, 1, 0, 0x58, 4, ASSEMBLY_VECTOR_FORM_ROUNDING | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VADDPD, 1, 1, 0x58, 8, ASSEMBLY_VECTOR_FORM_ROUNDING | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
         {ASSEMBLY_OPCODE_X86_VADDSS, 1, 2, 0x58, 4, ASSEMBLY_VECTOR_FORM_SCALAR | ASSEMBLY_VECTOR_FORM_ROUNDING, false},
         {ASSEMBLY_OPCODE_X86_VADDSD, 1, 3, 0x58, 8, ASSEMBLY_VECTOR_FORM_SCALAR | ASSEMBLY_VECTOR_FORM_ROUNDING, false},
-        {ASSEMBLY_OPCODE_X86_VSUBPS, 1, 0, 0x5c, 4, ASSEMBLY_VECTOR_FORM_ROUNDING, true},
-        {ASSEMBLY_OPCODE_X86_VSUBPD, 1, 1, 0x5c, 8, ASSEMBLY_VECTOR_FORM_ROUNDING, true},
-        {ASSEMBLY_OPCODE_X86_VMULPS, 1, 0, 0x59, 4, ASSEMBLY_VECTOR_FORM_ROUNDING, true},
-        {ASSEMBLY_OPCODE_X86_VMULPD, 1, 1, 0x59, 8, ASSEMBLY_VECTOR_FORM_ROUNDING, true},
-        {ASSEMBLY_OPCODE_X86_VDIVPS, 1, 0, 0x5e, 4, ASSEMBLY_VECTOR_FORM_ROUNDING, true},
-        {ASSEMBLY_OPCODE_X86_VDIVPD, 1, 1, 0x5e, 8, ASSEMBLY_VECTOR_FORM_ROUNDING, true},
-        {ASSEMBLY_OPCODE_X86_VMOVDQA, 1, 1, 0x6f, 4, ASSEMBLY_VECTOR_FORM_MOVE | ASSEMBLY_VECTOR_FORM_INTEGER, true},
-        {ASSEMBLY_OPCODE_X86_VMOVDQU, 1, 2, 0x6f, 4, ASSEMBLY_VECTOR_FORM_MOVE | ASSEMBLY_VECTOR_FORM_INTEGER, true},
+        {ASSEMBLY_OPCODE_X86_VSUBPS, 1, 0, 0x5c, 4, ASSEMBLY_VECTOR_FORM_ROUNDING | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VSUBPD, 1, 1, 0x5c, 8, ASSEMBLY_VECTOR_FORM_ROUNDING | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VMULPS, 1, 0, 0x59, 4, ASSEMBLY_VECTOR_FORM_ROUNDING | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VMULPD, 1, 1, 0x59, 8, ASSEMBLY_VECTOR_FORM_ROUNDING | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VDIVPS, 1, 0, 0x5e, 4, ASSEMBLY_VECTOR_FORM_ROUNDING | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VDIVPD, 1, 1, 0x5e, 8, ASSEMBLY_VECTOR_FORM_ROUNDING | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VMOVDQA, 1, 1, 0x6f, 4,
+         ASSEMBLY_VECTOR_FORM_MOVE | ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_VEX_ONLY, true},
+        {ASSEMBLY_OPCODE_X86_VMOVDQU, 1, 2, 0x6f, 4,
+         ASSEMBLY_VECTOR_FORM_MOVE | ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_VEX_ONLY, true},
         {ASSEMBLY_OPCODE_X86_VPADDB, 1, 1, 0xfc, 1, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
         {ASSEMBLY_OPCODE_X86_VPADDW, 1, 1, 0xfd, 2, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
-        {ASSEMBLY_OPCODE_X86_VPADDD, 1, 1, 0xfe, 4, ASSEMBLY_VECTOR_FORM_INTEGER, true},
-        {ASSEMBLY_OPCODE_X86_VPADDQ, 1, 1, 0xd4, 8, ASSEMBLY_VECTOR_FORM_INTEGER, true},
+        {ASSEMBLY_OPCODE_X86_VPADDD, 1, 1, 0xfe, 4, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VPADDQ, 1, 1, 0xd4, 8, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
         {ASSEMBLY_OPCODE_X86_VPSUBB, 1, 1, 0xf8, 1, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
         {ASSEMBLY_OPCODE_X86_VPSUBW, 1, 1, 0xf9, 2, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
-        {ASSEMBLY_OPCODE_X86_VPSUBD, 1, 1, 0xfa, 4, ASSEMBLY_VECTOR_FORM_INTEGER, true},
-        {ASSEMBLY_OPCODE_X86_VPSUBQ, 1, 1, 0xfb, 8, ASSEMBLY_VECTOR_FORM_INTEGER, true},
-        {ASSEMBLY_OPCODE_X86_VPAND, 1, 1, 0xdb, 8, ASSEMBLY_VECTOR_FORM_INTEGER, true},
-        {ASSEMBLY_OPCODE_X86_VPOR, 1, 1, 0xeb, 8, ASSEMBLY_VECTOR_FORM_INTEGER, true},
-        {ASSEMBLY_OPCODE_X86_VPXOR, 1, 1, 0xef, 8, ASSEMBLY_VECTOR_FORM_INTEGER, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPEQB, 1, 1, 0x74, 1, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPEQW, 1, 1, 0x75, 2, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPEQD, 1, 1, 0x76, 4, ASSEMBLY_VECTOR_FORM_INTEGER, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPEQQ, 2, 1, 0x29, 8, ASSEMBLY_VECTOR_FORM_INTEGER, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPGTB, 1, 1, 0x64, 1, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPGTW, 1, 1, 0x65, 2, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPGTD, 1, 1, 0x66, 4, ASSEMBLY_VECTOR_FORM_INTEGER, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPGTQ, 2, 1, 0x37, 8, ASSEMBLY_VECTOR_FORM_INTEGER, true},
+        {ASSEMBLY_OPCODE_X86_VPSUBD, 1, 1, 0xfa, 4, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VPSUBQ, 1, 1, 0xfb, 8, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VPAND, 1, 1, 0xdb, 8, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_VEX_ONLY, true},
+        {ASSEMBLY_OPCODE_X86_VPOR, 1, 1, 0xeb, 8, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_VEX_ONLY, true},
+        {ASSEMBLY_OPCODE_X86_VPXOR, 1, 1, 0xef, 8, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_VEX_ONLY, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPEQB, 1, 1, 0x74, 1,
+         ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPEQW, 1, 1, 0x75, 2,
+         ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPEQD, 1, 1, 0x76, 4, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPEQQ, 2, 1, 0x29, 8, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPGTB, 1, 1, 0x64, 1,
+         ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPGTW, 1, 1, 0x65, 2,
+         ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPGTD, 1, 1, 0x66, 4, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPGTQ, 2, 1, 0x37, 8, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
         {ASSEMBLY_OPCODE_X86_VPMULLW, 1, 1, 0xd5, 2, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
-        {ASSEMBLY_OPCODE_X86_VPMULLD, 2, 1, 0x40, 4, ASSEMBLY_VECTOR_FORM_INTEGER, true},
+        {ASSEMBLY_OPCODE_X86_VPMULLD, 2, 1, 0x40, 4, ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
         {ASSEMBLY_OPCODE_X86_VMOVDQA32, 1, 1, 0x6f, 4, ASSEMBLY_VECTOR_FORM_MOVE | ASSEMBLY_VECTOR_FORM_INTEGER, true},
         {ASSEMBLY_OPCODE_X86_VMOVDQU32, 1, 2, 0x6f, 4, ASSEMBLY_VECTOR_FORM_MOVE | ASSEMBLY_VECTOR_FORM_INTEGER, true},
         {ASSEMBLY_OPCODE_X86_VMOVDQA64, 1, 1, 0x6f, 8, ASSEMBLY_VECTOR_FORM_MOVE | ASSEMBLY_VECTOR_FORM_INTEGER, true},
         {ASSEMBLY_OPCODE_X86_VMOVDQU64, 1, 2, 0x6f, 8, ASSEMBLY_VECTOR_FORM_MOVE | ASSEMBLY_VECTOR_FORM_INTEGER, true},
         {ASSEMBLY_OPCODE_X86_VMOVDQU8, 1, 3, 0x6f, 1, ASSEMBLY_VECTOR_FORM_MOVE | ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
         {ASSEMBLY_OPCODE_X86_VMOVDQU16, 1, 3, 0x6f, 2, ASSEMBLY_VECTOR_FORM_MOVE | ASSEMBLY_VECTOR_FORM_INTEGER | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
-        {ASSEMBLY_OPCODE_X86_VCMPPS, 1, 0, 0xc2, 4, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE, true},
-        {ASSEMBLY_OPCODE_X86_VCMPPD, 1, 1, 0xc2, 8, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPD, 3, 1, 0x1f, 4, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPQ, 3, 1, 0x1f, 8, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE, true},
+        {ASSEMBLY_OPCODE_X86_VCMPPS, 1, 0, 0xc2, 4,
+         ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_BROADCAST |
+             ASSEMBLY_VECTOR_FORM_SAE,
+         true},
+        {ASSEMBLY_OPCODE_X86_VCMPPD, 1, 1, 0xc2, 8,
+         ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_BROADCAST |
+             ASSEMBLY_VECTOR_FORM_SAE,
+         true},
+        {ASSEMBLY_OPCODE_X86_VPCMPD, 3, 1, 0x1f, 4,
+         ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPQ, 3, 1, 0x1f, 8,
+         ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
         {ASSEMBLY_OPCODE_X86_VPCMPB, 3, 1, 0x3f, 1, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
         {ASSEMBLY_OPCODE_X86_VPCMPW, 3, 1, 0x3f, 2, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_AVX512BW, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPUD, 3, 1, 0x1e, 4, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE, true},
-        {ASSEMBLY_OPCODE_X86_VPCMPUQ, 3, 1, 0x1e, 8, ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPUD, 3, 1, 0x1e, 4,
+         ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
+        {ASSEMBLY_OPCODE_X86_VPCMPUQ, 3, 1, 0x1e, 8,
+         ASSEMBLY_VECTOR_FORM_MASK_DESTINATION | ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_BROADCAST, true},
         {ASSEMBLY_OPCODE_X86_VRNDSCALEPS, 3, 1, 0x08, 4,
-         ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_SOURCE_RM, true},
+         ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_SOURCE_RM | ASSEMBLY_VECTOR_FORM_BROADCAST |
+             ASSEMBLY_VECTOR_FORM_SAE,
+         true},
         {ASSEMBLY_OPCODE_X86_VRNDSCALEPD, 3, 1, 0x09, 8,
-         ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_SOURCE_RM, true},
+         ASSEMBLY_VECTOR_FORM_IMMEDIATE | ASSEMBLY_VECTOR_FORM_SOURCE_RM | ASSEMBLY_VECTOR_FORM_BROADCAST |
+             ASSEMBLY_VECTOR_FORM_SAE,
+         true},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(forms); index += 1)
     {
@@ -1583,7 +1615,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_vector_form_w(AssemblyOpcode opcode)
            opcode == ASSEMBLY_OPCODE_X86_VPADDQ || opcode == ASSEMBLY_OPCODE_X86_VPSUBQ ||
            opcode == ASSEMBLY_OPCODE_X86_VPCMPEQQ || opcode == ASSEMBLY_OPCODE_X86_VPCMPGTQ ||
            opcode == ASSEMBLY_OPCODE_X86_VCMPPD || opcode == ASSEMBLY_OPCODE_X86_VPCMPQ ||
-           opcode == ASSEMBLY_OPCODE_X86_VPCMPUQ || opcode == ASSEMBLY_OPCODE_X86_VRNDSCALEPD;
+           opcode == ASSEMBLY_OPCODE_X86_VPCMPUQ || opcode == ASSEMBLY_OPCODE_X86_VPCMPW ||
+           opcode == ASSEMBLY_OPCODE_X86_VRNDSCALEPD;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_vector_register(AssemblyRegister reg)
@@ -1591,10 +1624,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_vector_register(AssemblyRegister reg)
     return reg.class == ASSEMBLY_REGISTER_XMM || reg.class == ASSEMBLY_REGISTER_YMM || reg.class == ASSEMBLY_REGISTER_ZMM;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_target_has_evex(Target target, u16 width)
+BUSTER_GLOBAL_LOCAL bool assembly_x86_target_has_evex(Target target, u16 width, u8 scalar)
 {
     u8 avx10 = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_1) ||
                target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_2);
+    if (scalar)
+    {
+        return avx10 || target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F);
+    }
     if (width == 512)
     {
         return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) ||
@@ -1617,7 +1654,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_uses_evex(AssemblyInstruction 
     {
         AssemblyOperand operand = instruction.operands[index];
         if ((operand.kind == ASSEMBLY_OPERAND_REGISTER &&
-             (operand.reg.class == ASSEMBLY_REGISTER_ZMM || operand.reg.index >= 16)) || operand.has_mask || operand.zeroing ||
+             (operand.reg.class == ASSEMBLY_REGISTER_ZMM || operand.reg.class == ASSEMBLY_REGISTER_OPMASK || operand.reg.index >= 16)) || operand.has_mask || operand.zeroing ||
             operand.broadcast || operand.rounding || operand.sae ||
             (operand.kind == ASSEMBLY_OPERAND_MEMORY &&
              ((operand.memory.has_base && operand.memory.base.index >= 16) ||
@@ -2545,7 +2582,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_instruction_size(AssemblyInstruction*
     if (mask_destination)
     {
         if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_OPMASK ||
-            first->has_mask || first->zeroing || second->kind != ASSEMBLY_OPERAND_REGISTER ||
+            (first->has_mask && first->mask == 0) || first->zeroing || second->kind != ASSEMBLY_OPERAND_REGISTER ||
             !assembly_x86_vector_register(second->reg) ||
             (third->kind != ASSEMBLY_OPERAND_REGISTER && third->kind != ASSEMBLY_OPERAND_MEMORY))
         {
@@ -2557,13 +2594,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_instruction_size(AssemblyInstruction*
         {
             return false;
         }
-        if (instruction->operands[3].kind != ASSEMBLY_OPERAND_EXPRESSION || instruction->operands[3].expression.has_symbol ||
-            instruction->operands[3].expression.addend < 0 || instruction->operands[3].expression.addend > UINT8_MAX)
+        if (immediate &&
+            (instruction->operands[3].kind != ASSEMBLY_OPERAND_EXPRESSION || instruction->operands[3].expression.has_symbol ||
+             instruction->operands[3].expression.addend < 0 || instruction->operands[3].expression.addend > UINT8_MAX))
         {
             return false;
         }
         u64 immediate_limit = instruction->opcode == ASSEMBLY_OPCODE_X86_VCMPPS || instruction->opcode == ASSEMBLY_OPCODE_X86_VCMPPD ? 31 : 7;
-        if ((u64)instruction->operands[3].expression.addend > immediate_limit)
+        if (immediate && (u64)instruction->operands[3].expression.addend > immediate_limit)
         {
             return false;
         }
@@ -2630,13 +2668,20 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_instruction_size(AssemblyInstruction*
     }
     if (!mask_destination && (first->has_mask || first->zeroing))
     {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_vector_register(first->reg) ||
-            (first->has_mask && first->mask == 0) || (first->zeroing && !first->has_mask))
+        if (first->kind == ASSEMBLY_OPERAND_MEMORY)
+        {
+            if (!move || !first->has_mask || first->mask == 0 || first->zeroing)
+            {
+                return false;
+            }
+        }
+        else if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_vector_register(first->reg) ||
+                 (first->has_mask && first->mask == 0) || (first->zeroing && !first->has_mask))
         {
             return false;
         }
     }
-    for (u32 operand_index = mask_destination ? 0 : 1; operand_index < instruction->operand_count; operand_index += 1)
+    for (u32 operand_index = 1; operand_index < instruction->operand_count; operand_index += 1)
     {
         AssemblyOperand operand = instruction->operands[operand_index];
         if (operand.has_mask || operand.zeroing || operand.rounding || operand.sae ||
@@ -2647,7 +2692,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_instruction_size(AssemblyInstruction*
     }
     if (first->rounding || first->sae)
     {
-        if (!(form->flags & ASSEMBLY_VECTOR_FORM_ROUNDING) || (first->sae && !first->rounding) || move || mask_destination || memory)
+        u8 supports_rounding = (form->flags & ASSEMBLY_VECTOR_FORM_ROUNDING) != 0;
+        u8 supports_sae = (form->flags & ASSEMBLY_VECTOR_FORM_SAE) != 0;
+        if ((first->rounding &&
+             (!supports_rounding || move || memory || (!(form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) && vector.width != 512))) ||
+            (first->sae && !first->rounding && (!supports_sae || move || memory || vector.width != 512)) ||
+            (first->sae && first->rounding && !supports_rounding))
         {
             return false;
         }
@@ -2658,7 +2708,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_instruction_size(AssemblyInstruction*
         u16 expected_width = (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) ? element_width : vector.width;
         if (memory->broadcast)
         {
-            if (move || (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) ||
+            if (!(form->flags & ASSEMBLY_VECTOR_FORM_BROADCAST) || move || (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) ||
                 memory->broadcast != vector.width / element_width)
             {
                 return false;
@@ -2699,6 +2749,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_instruction_size(AssemblyInstruction*
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_amx_memory_size(AssemblyMemory memory, bool forced_sib, u32* result)
 {
+    if (forced_sib && memory.rip_relative)
+    {
+        return false;
+    }
     u32 address_size = 0;
     if (!assembly_x86_memory_encoding_size(memory, &address_size))
     {
@@ -2776,7 +2830,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_amx_instruction_size(AssemblyInstruction* 
     if (instruction->operand_count != 3 || first->kind != ASSEMBLY_OPERAND_REGISTER ||
         second->kind != ASSEMBLY_OPERAND_REGISTER || instruction->operands[2].kind != ASSEMBLY_OPERAND_REGISTER ||
         first->reg.class != ASSEMBLY_REGISTER_TILE || second->reg.class != ASSEMBLY_REGISTER_TILE ||
-        instruction->operands[2].reg.class != ASSEMBLY_REGISTER_TILE)
+        instruction->operands[2].reg.class != ASSEMBLY_REGISTER_TILE || first->reg.index == second->reg.index ||
+        first->reg.index == instruction->operands[2].reg.index || second->reg.index == instruction->operands[2].reg.index)
     {
         return false;
     }
@@ -2886,7 +2941,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_legacy_instruction_size(AssemblyInstru
     {
         return false;
     }
-    instruction->size = 2u + (instruction->width == 16) + 1u + address_size;
+    u32 lock_size = instruction->lock_prefix ? 1 : 0;
+    instruction->size = lock_size + 2u + (instruction->width == 16) + 1u + address_size;
     return true;
 }
 
@@ -2898,6 +2954,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_ndd_instruction_size(AssemblyInstructi
             instruction->operands[1].kind != ASSEMBLY_OPERAND_REGISTER || instruction->operands[0].reg.class != ASSEMBLY_REGISTER_GPR ||
             instruction->operands[1].reg.class != ASSEMBLY_REGISTER_GPR || instruction->operands[0].reg.width != 64 ||
             instruction->operands[1].reg.width != 64 || instruction->operands[0].reg.index == 4 || instruction->operands[1].reg.index == 4)
+        {
+            return false;
+        }
+        if (instruction->opcode == ASSEMBLY_OPCODE_X86_APX_POP2 &&
+            instruction->operands[0].reg.index == instruction->operands[1].reg.index)
         {
             return false;
         }
@@ -2923,7 +2984,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_ndd_instruction_size(AssemblyInstructi
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_nf_instruction_size(AssemblyInstruction* instruction)
 {
-    if (!assembly_x86_opcode_is_apx_binary(instruction->opcode) || instruction->operand_count != 2)
+    if (instruction->lock_prefix || !assembly_x86_opcode_is_apx_binary(instruction->opcode) || instruction->operand_count != 2)
     {
         return false;
     }
@@ -2974,7 +3035,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_nf_instruction_size(AssemblyInstructio
         return false;
     }
     instruction->width = width;
-    instruction->size = 4u + 1u + address_size;
+    instruction->size = (instruction->lock_prefix ? 1u : 0u) + 4u + 1u + address_size;
     return true;
 }
 
@@ -4014,11 +4075,38 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
             operand_end += 1;
         }
         String8 text = assembly_trim(string_slice(operands, operand_start, operand_end));
-        AssemblyOperand* operand = instruction.operands + parsed_operand_count;
         if (!text.length)
         {
             break;
         }
+        if (text.length >= 3 && text.pointer[0] == '{' && text.pointer[text.length - 1] == '}')
+        {
+            String8 decorator = assembly_trim(string_slice(text, 1, text.length - 1));
+            u8 pseudo_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? 1
+                               : assembly_word_equal(decorator, S8("rd-sae")) ? 2
+                               : assembly_word_equal(decorator, S8("ru-sae")) ? 3
+                               : assembly_word_equal(decorator, S8("rz-sae")) ? 4
+                                                                              : 0;
+            u8 pseudo_sae = assembly_word_equal(decorator, S8("sae")) || pseudo_rounding != 0;
+            if (pseudo_sae)
+            {
+                AssemblyVectorForm const* pseudo_form = assembly_x86_vector_form(info.opcode);
+                u8 immediate_form = pseudo_form && (pseudo_form->flags & ASSEMBLY_VECTOR_FORM_IMMEDIATE);
+                u8 canonical_position = syntax == ASSEMBLY_SYNTAX_INTEL
+                                             ? (immediate_form ? parsed_operand_count + 1 == info.operand_count
+                                                               : parsed_operand_count == info.operand_count)
+                                             : (immediate_form && parsed_operand_count == 1);
+                if (!canonical_position || leading_sae)
+                {
+                    break;
+                }
+                leading_rounding = pseudo_rounding;
+                leading_sae = true;
+                operand_start = operand_end == operands.length ? operand_end : operand_end + 1;
+                continue;
+            }
+        }
+        AssemblyOperand* operand = instruction.operands + parsed_operand_count;
         u8 branch = info.opcode == ASSEMBLY_OPCODE_X86_CALL || info.opcode == ASSEMBLY_OPCODE_X86_JMP || info.opcode == ASSEMBLY_OPCODE_X86_JCC;
         u8 indirect = syntax == ASSEMBLY_SYNTAX_ATT && branch && text.length && text.pointer[0] == '*';
         if (indirect)
@@ -4026,7 +4114,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
             text.pointer += 1;
             text.length -= 1;
         }
-        if (!assembly_x86_operand_decorators_parse(&text, syntax, operand, &instruction.no_flags))
+        if (!assembly_x86_operand_decorators_parse(&text, syntax, operand, 0))
         {
             break;
         }
@@ -4175,9 +4263,12 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         }
         if (leading_sae)
         {
-            if (!instruction.operand_count || instruction.operands[0].kind != ASSEMBLY_OPERAND_REGISTER ||
-                !assembly_x86_vector_register(instruction.operands[0].reg) || instruction.operands[0].rounding ||
-                instruction.operands[0].sae)
+            AssemblyVectorForm const* leading_form = assembly_x86_vector_form(instruction.opcode);
+            u8 leading_mask_destination = leading_form && (leading_form->flags & ASSEMBLY_VECTOR_FORM_MASK_DESTINATION);
+            u8 leading_register_valid = instruction.operand_count && instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER &&
+                                        ((leading_mask_destination && instruction.operands[0].reg.class == ASSEMBLY_REGISTER_OPMASK) ||
+                                         (!leading_mask_destination && assembly_x86_vector_register(instruction.operands[0].reg)));
+            if (!leading_register_valid || instruction.operands[0].rounding || instruction.operands[0].sae)
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
                                     (u32)operands.length, S8("invalid instruction decorators"));
@@ -4257,10 +4348,16 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     {
         instruction.evex = assembly_x86_instruction_uses_evex(instruction, target);
         AssemblyVectorForm const* vector_form = assembly_x86_vector_form(instruction.opcode);
+        if (vector_form && instruction.evex && (vector_form->flags & ASSEMBLY_VECTOR_FORM_VEX_ONLY))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("the mnemonic has no EVEX form"));
+            return;
+        }
         if (vector_form && instruction.evex)
         {
             u16 vector_width = assembly_x86_instruction_vector_width(instruction, vector_form);
-            if (!assembly_x86_target_has_evex(target, vector_width))
+            if (!assembly_x86_target_has_evex(target, vector_width, (u8)((vector_form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) != 0)))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
                                     vector_width == 512 ? S8("512-bit EVEX instruction requires avx512f or avx10.512")
@@ -4274,6 +4371,15 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
                                     S8("instruction requires avx512bw or avx10"));
+                return;
+            }
+            if ((vector_form->flags & ASSEMBLY_VECTOR_FORM_AVX512DQ) &&
+                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512DQ) &&
+                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_1) &&
+                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_2))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                    S8("instruction requires avx512dq or avx10"));
                 return;
             }
         }
@@ -4824,6 +4930,10 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_emit_evex_prefix(AssemblyBuilder* builder,
     {
         p2 = (u8)((p2 & (u8)~0x60) | ((rounding - 1) << 5));
     }
+    else if (sae)
+    {
+        p2 &= (u8)~0x60;
+    }
     assembly_emit_byte(builder, 0x62);
     assembly_emit_byte(builder, p0);
     assembly_emit_byte(builder, p1);
@@ -4881,10 +4991,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_evex_vector(AssemblyBuilder* builder,
         source = second->reg.index;
     }
     u8 broadcast = rm.kind == ASSEMBLY_OPERAND_MEMORY && rm.broadcast;
-    u8 mask = !mask_destination && first->has_mask ? first->mask : 0;
+    u8 mask = first->has_mask ? first->mask : 0;
     u8 zeroing = !mask_destination && first->zeroing;
-    u8 rounding = !mask_destination ? first->rounding : 0;
-    u8 sae = !mask_destination && first->sae;
+    u8 rounding = first->rounding;
+    u8 sae = first->sae;
     u32 tuple_scale = rm.kind == ASSEMBLY_OPERAND_MEMORY
                           ? (broadcast ? form->element_width
                                        : (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR ? form->element_width : vector.width / 8u))
@@ -5031,6 +5141,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_apx_legacy(AssemblyBuilder* builder, 
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_apx_nf(AssemblyBuilder* builder, AssemblyInstruction* instruction)
 {
+    if (instruction->lock_prefix)
+    {
+        return false;
+    }
     AssemblyOperand first = instruction->operands[0];
     AssemblyOperand second = instruction->operands[1];
     u8 load = second.kind == ASSEMBLY_OPERAND_MEMORY;
@@ -5173,6 +5287,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_apx_ndd(AssemblyBuilder* builder, Ass
 BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_amx_memory(AssemblyBuilder* builder, AssemblyInstruction* instruction, u8 reg,
                                                        AssemblyMemory memory, bool forced_sib)
 {
+    if (forced_sib && memory.rip_relative)
+    {
+        return false;
+    }
     if (forced_sib && !memory.has_index && memory.has_base && (memory.base.index & 7) != 4)
     {
         memory.has_index = true;
