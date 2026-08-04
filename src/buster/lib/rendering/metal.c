@@ -711,7 +711,7 @@ TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory 
 
 BUSTER_GLOBAL_LOCAL WindowFrame* rendering_window_frame(RenderingWindowHandle* window)
 {
-    return &window->frames[window->frame_index % window->frame_count];
+    return &window->frames[window->frame_index % BUSTER_METAL_FRAME_COUNT];
 }
 
 RenderingCommandStream* rendering_window_command_stream(RenderingWindowHandle* window)
@@ -1186,7 +1186,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
     frame->command_buffer = command_buffer;
     rendering_frame_error_commit(&window->last_frame_error, error_frame);
     frame->commands->frame_active = false;
-    window->frame_index = (window->frame_index + 1) % window->frame_count;
+    window->frame_index = (window->frame_index + 1) % BUSTER_METAL_FRAME_COUNT;
     if (log_frame_end)
     {
         string_print(S8("Metal frame end {u32}: present+commit complete, next_frame_index={u32}\n"), log_index, window->frame_index);
