@@ -167,29 +167,60 @@ trap 'rm -rf "$work_dir"' EXIT
 git -C "$work_dir" init -q
 git -C "$work_dir" remote add origin "$REPO_PUSH_URL"
 
-if git -C "$work_dir" fetch -q origin "$HISTORY_BRANCH" 2>/dev/null; then
-    git -C "$work_dir" checkout -q -B "$HISTORY_BRANCH" FETCH_HEAD
-else
-    # A missing branch is the only fetch failure that can be recovered from.
-    # Do not turn authentication, network, or remote failures into a false
-    # empty baseline.
-    if git -C "$work_dir" ls-remote --exit-code -q origin "refs/heads/$HISTORY_BRANCH" >/dev/null 2>&1; then
-        echo "record_perf.sh: failed to fetch existing $HISTORY_BRANCH branch" >&2
-        exit 1
+history_path=""
+history_ref=""
+
+if [[ "$PUSH_HISTORY" == "1" ]]; then
+    if git -C "$work_dir" fetch -q origin "$HISTORY_BRANCH" 2>/dev/null; then
+        git -C "$work_dir" checkout -q -B "$HISTORY_BRANCH" FETCH_HEAD
     else
-        remote_status=$?
-        if [[ "$remote_status" -ne 2 ]]; then
-            echo "record_perf.sh: could not query $HISTORY_BRANCH on the perf-history remote" >&2
+        # A missing branch is the only fetch failure that can be recovered from.
+        # Do not turn authentication, network, or remote failures into a false
+        # empty baseline.
+        if git -C "$work_dir" ls-remote --exit-code -q origin "refs/heads/$HISTORY_BRANCH" >/dev/null 2>&1; then
+            echo "record_perf.sh: failed to fetch existing $HISTORY_BRANCH branch" >&2
             exit 1
+        else
+            remote_status=$?
+            if [[ "$remote_status" -ne 2 ]]; then
+                echo "record_perf.sh: could not query $HISTORY_BRANCH on the perf-history remote" >&2
+                exit 1
+            fi
         fi
+
+        echo "record_perf.sh: no existing $HISTORY_BRANCH branch, starting one"
+        git -C "$work_dir" checkout -q --orphan "$HISTORY_BRANCH"
     fi
 
-    echo "record_perf.sh: no existing $HISTORY_BRANCH branch, starting one"
-    git -C "$work_dir" checkout -q --orphan "$HISTORY_BRANCH"
-fi
+    history_path="$work_dir/$HISTORY_FILE"
+    touch "$history_path"
+else
+    # Compare-only needs neither a worktree copy of the growing tip blob nor the
+    # full branch history. A depth-1 fetch plus git show of the fetched tip
+    # provides the baseline without checking anything out.
+    if git -C "$work_dir" fetch -q --depth=1 origin "$HISTORY_BRANCH" 2>/dev/null; then
+        if ! history_ref=$(git -C "$work_dir" rev-parse FETCH_HEAD); then
+            echo "record_perf.sh: failed to resolve fetched $HISTORY_BRANCH branch" >&2
+            exit 1
+        fi
+    else
+        # A missing branch is the only fetch failure that can be recovered from.
+        # Do not turn authentication, network, or remote failures into a false
+        # empty baseline.
+        if git -C "$work_dir" ls-remote --exit-code -q origin "refs/heads/$HISTORY_BRANCH" >/dev/null 2>&1; then
+            echo "record_perf.sh: failed to fetch existing $HISTORY_BRANCH branch" >&2
+            exit 1
+        else
+            remote_status=$?
+            if [[ "$remote_status" -ne 2 ]]; then
+                echo "record_perf.sh: could not query $HISTORY_BRANCH on the perf-history remote" >&2
+                exit 1
+            fi
+        fi
 
-history_path="$work_dir/$HISTORY_FILE"
-touch "$history_path"
+        echo "record_perf.sh: no existing $HISTORY_BRANCH branch, starting one"
+    fi
+fi
 
 # Prints the value's median for a given metric across this (runner, config)'s
 # last HISTORY_LOOKBACK samples. Integer-division upper-middle index for
@@ -200,15 +231,36 @@ median_of() {
     local metric="$1"
     local values=()
     local line val
+    local history_lines
+
+    if [[ -n "$history_ref" ]]; then
+        if ! history_lines=$(git -C "$work_dir" show "$history_ref:$HISTORY_FILE" \
+            | awk -v runner="$RUNNER_NAME" -v config="$CONFIG" -v metric="$metric" \
+                'index($0, "runner=" runner " ") &&
+                 index($0, "config=" config " ") &&
+                 index($0, "metric=" metric " value=") { print }' \
+            | tail -n "$HISTORY_LOOKBACK"); then
+            echo "record_perf.sh: failed to read $HISTORY_FILE from $HISTORY_BRANCH history" >&2
+            return 2
+        fi
+    elif [[ -n "$history_path" ]]; then
+        if ! history_lines=$(awk -v runner="$RUNNER_NAME" -v config="$CONFIG" -v metric="$metric" \
+            'index($0, "runner=" runner " ") &&
+             index($0, "config=" config " ") &&
+             index($0, "metric=" metric " value=") { print }' \
+            "$history_path" | tail -n "$HISTORY_LOOKBACK"); then
+            echo "record_perf.sh: failed to read $HISTORY_FILE from $HISTORY_BRANCH history" >&2
+            return 2
+        fi
+    else
+        return 1
+    fi
 
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         val=$(field_of "$line" "value")
         [[ -n "$val" ]] && values+=("$val")
-    done < <(grep -F "runner=$RUNNER_NAME " "$history_path" 2>/dev/null \
-        | grep -F "config=$CONFIG " \
-        | grep -F "metric=$metric value=" \
-        | tail -n "$HISTORY_LOOKBACK")
+    done <<< "$history_lines"
 
     local count=${#values[@]}
     if [[ "$count" -eq 0 ]]; then
@@ -242,6 +294,10 @@ for gated_metric in compile_milliseconds bench_parse_median_ns_per_file; do
     if baseline=$(median_of "$gated_metric"); then
         check_regression "$gated_metric" "$gated_value" "$baseline"
     else
+        median_status=$?
+        if [[ "$median_status" -ne 1 ]]; then
+            exit "$median_status"
+        fi
         echo "record_perf.sh: no prior $gated_metric history for runner '$RUNNER_NAME' config '$CONFIG' yet; skipping regression check"
     fi
 done
