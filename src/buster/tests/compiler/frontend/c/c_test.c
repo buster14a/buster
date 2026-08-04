@@ -68,6 +68,31 @@ BUSTER_GLOBAL_LOCAL void c_test_auto_type_diagnostic(UnitTestArguments* argument
     scratch_end(temporary);
 }
 
+BUSTER_GLOBAL_LOCAL void c_test_cleanup_diagnostic(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
+                                                   CPreprocessDialect dialect, String8 message)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                    .dialect = dialect,
+                                                });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 1);
+    if (parse.diagnostic_count == 1)
+    {
+        BUSTER_TEST(arguments, parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_CLEANUP_ATTRIBUTE);
+        BUSTER_STRING_TEST(arguments, parse.diagnostics[0].message, message);
+    }
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+    scratch_end(temporary);
+}
+
 BUSTER_GLOBAL_LOCAL void c_test_case_range_lower_diagnostic(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source, String8 message)
 {
     UnitTestResult result = {0};
@@ -1112,6 +1137,221 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, inner_pointer && inner_pointer->kind == C_TYPE_POINTER);
             BUSTER_TEST(arguments, character && character->kind == C_TYPE_CHAR);
         }
+    }
+
+    CPreprocessResult block_extern_cleanup_tokens = c_preprocess(arguments->arena,
+                                                                 S8("extern int cleanup_file_callback(int *);\n"
+                                                                    "int cleanup_callback(int *value) { return *value; }\n"
+                                                                    "int main(void) {\n"
+                                                                    "    extern int cleanup_callback(int *);\n"
+                                                                    "    int value __attribute__((__cleanup__(cleanup_callback))) = 1;\n"
+                                                                    "    int file_value __attribute__((cleanup(cleanup_file_callback))) = 2;\n"
+                                                                    "    return value + file_value;\n"
+                                                                    "}\n"),
+                                                                 (CPreprocessOptions){
+                                                                     .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                     .target = target_native,
+                                                                     .data_layout = target_data_layout(target_native),
+                                                                 });
+    CParseResult block_extern_cleanup_parse = c_parse(arguments->arena, block_extern_cleanup_tokens);
+    BUSTER_TEST(arguments, block_extern_cleanup_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, block_extern_cleanup_parse.diagnostic_count == 0);
+    CEntityId block_extern_callback = c_test_find_local_entity(&block_extern_cleanup_parse, S8("cleanup_callback"), C_SCOPE_ID_INVALID);
+    BUSTER_TEST(arguments, block_extern_callback.value != C_ID_UNDERLYING_INVALID);
+    if (block_extern_callback.value != C_ID_UNDERLYING_INVALID)
+    {
+        CEntity* callback_entity = &block_extern_cleanup_parse.entities[block_extern_callback.value];
+        CType* callback_type = c_type_from_id(&block_extern_cleanup_parse, callback_entity->type);
+        BUSTER_TEST(arguments, callback_entity->scope.value != 0);
+        BUSTER_TEST(arguments, callback_type && callback_type->kind == C_TYPE_FUNCTION);
+    }
+    CEntityId block_extern_value = c_test_find_local_entity(&block_extern_cleanup_parse, S8("value"), C_SCOPE_ID_INVALID);
+    BUSTER_TEST(arguments, block_extern_value.value != C_ID_UNDERLYING_INVALID);
+    if (block_extern_value.value != C_ID_UNDERLYING_INVALID && block_extern_callback.value != C_ID_UNDERLYING_INVALID)
+    {
+        CEntity* value_entity = &block_extern_cleanup_parse.entities[block_extern_value.value];
+        BUSTER_TEST(arguments, value_entity->has_cleanup);
+        BUSTER_TEST(arguments, value_entity->cleanup_function.value == block_extern_callback.value);
+    }
+    CEntityId file_value = c_test_find_local_entity(&block_extern_cleanup_parse, S8("file_value"), C_SCOPE_ID_INVALID);
+    CEntityId file_callback = c_parse_lookup_entity(&block_extern_cleanup_parse, (CScopeId){.value = 0}, S8("cleanup_file_callback"));
+    BUSTER_TEST(arguments, file_value.value != C_ID_UNDERLYING_INVALID);
+    BUSTER_TEST(arguments, file_callback.value != C_ID_UNDERLYING_INVALID);
+    if (file_value.value != C_ID_UNDERLYING_INVALID && file_callback.value != C_ID_UNDERLYING_INVALID)
+    {
+        CEntity* file_value_entity = &block_extern_cleanup_parse.entities[file_value.value];
+        BUSTER_TEST(arguments, file_value_entity->has_cleanup);
+        BUSTER_TEST(arguments, file_value_entity->cleanup_function.value == file_callback.value);
+    }
+    CIRLowerResult block_extern_cleanup_ir = c_lower_to_ir(arguments->arena, S8("block-extern-cleanup.c"), block_extern_cleanup_tokens,
+                                                            block_extern_cleanup_parse, target_native);
+    BUSTER_TEST(arguments, block_extern_cleanup_ir.diagnostic_count == 0);
+    if (block_extern_cleanup_ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(block_extern_cleanup_ir.program, &block_extern_cleanup_ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    CPreprocessResult external_cleanup_tokens = c_preprocess(arguments->arena,
+                                                             S8("int main(void) {\n"
+                                                                "    extern int cleanup_external(int *);\n"
+                                                                "    int value __attribute__((cleanup(cleanup_external))) = 1;\n"
+                                                                "    return value;\n"
+                                                                "}\n"),
+                                                             (CPreprocessOptions){
+                                                                 .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                 .target = target_native,
+                                                                 .data_layout = target_data_layout(target_native),
+                                                             });
+    CParseResult external_cleanup_parse = c_parse(arguments->arena, external_cleanup_tokens);
+    BUSTER_TEST(arguments, external_cleanup_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, external_cleanup_parse.diagnostic_count == 0);
+    CIRLowerResult external_cleanup_ir = c_lower_to_ir(arguments->arena, S8("external-cleanup.c"), external_cleanup_tokens, external_cleanup_parse, target_native);
+    BUSTER_TEST(arguments, external_cleanup_ir.diagnostic_count == 0);
+    if (external_cleanup_ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(external_cleanup_ir.program, &external_cleanup_ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+
+    CPreprocessResult cleanup_conversion_tokens = c_preprocess(arguments->arena,
+                                                               S8("int cleanup_nonvoid(int *value) { return *value; }\n"
+                                                                  "void cleanup_const_accept(const int *value) { (void)value; }\n"
+                                                                  "void cleanup_void_accept(void *value) { (void)value; }\n"
+                                                                  "void cleanup_variadic_accept(int *value, ...) { (void)value; }\n"
+                                                                  "void cleanup_array_accept(int value[1]) { (void)value; }\n"
+                                                                  "int main(void) {\n"
+                                                                  "    int first __attribute__((cleanup(cleanup_nonvoid))) = 1;\n"
+                                                                  "    int second __attribute__((cleanup(cleanup_const_accept))) = 2;\n"
+                                                                  "    int third __attribute__((cleanup(cleanup_void_accept))) = 3;\n"
+                                                                  "    int fourth __attribute__((cleanup(cleanup_variadic_accept))) = 4;\n"
+                                                                  "    int fifth __attribute__((cleanup(cleanup_array_accept))) = 5;\n"
+                                                                  "    return first + second + third + fourth;\n"
+                                                                  "}\n"),
+                                                               (CPreprocessOptions){
+                                                                   .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                   .target = target_native,
+                                                                   .data_layout = target_data_layout(target_native),
+                                                               });
+    CParseResult cleanup_conversion_parse = c_parse(arguments->arena, cleanup_conversion_tokens);
+    BUSTER_TEST(arguments, cleanup_conversion_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, cleanup_conversion_parse.diagnostic_count == 0);
+    CIRLowerResult cleanup_conversion_ir = c_lower_to_ir(arguments->arena, S8("cleanup-conversions.c"), cleanup_conversion_tokens,
+                                                         cleanup_conversion_parse, target_native);
+    BUSTER_TEST(arguments, cleanup_conversion_ir.diagnostic_count == 0);
+    if (cleanup_conversion_ir.program)
+    {
+        IrFunction* main_function = 0;
+        for (u32 function_index = 0; function_index < cleanup_conversion_ir.program->modules[0].function_count; function_index += 1)
+        {
+            IrFunction* candidate = &cleanup_conversion_ir.program->modules[0].functions[function_index];
+            if (string_equal(candidate->name, S8("main")))
+            {
+                main_function = candidate;
+                break;
+            }
+        }
+        u32 cleanup_call_count = 0;
+        if (main_function)
+        {
+            for (u32 instruction_index = 0; instruction_index < main_function->instruction_count; instruction_index += 1)
+            {
+                cleanup_call_count += main_function->instructions[instruction_index].opcode == IR_OPCODE_CALL;
+            }
+        }
+        BUSTER_TEST(arguments, main_function != 0);
+        BUSTER_TEST(arguments, cleanup_call_count == 5);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(cleanup_conversion_ir.program, &cleanup_conversion_ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+
+    CPreprocessResult dead_cleanup_tokens = c_preprocess(arguments->arena,
+                                                         S8("static void dead_cleanup(int *value) { (void)value; }\n"
+                                                            "static int dead_owner(void) {\n"
+                                                            "    int value __attribute__((cleanup(dead_cleanup))) = 1;\n"
+                                                            "    return value;\n"
+                                                            "}\n"
+                                                            "int main(void) { return 0; }\n"),
+                                                         (CPreprocessOptions){
+                                                             .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                             .target = target_native,
+                                                             .data_layout = target_data_layout(target_native),
+                                                         });
+    CParseResult dead_cleanup_parse = c_parse(arguments->arena, dead_cleanup_tokens);
+    BUSTER_TEST(arguments, dead_cleanup_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, dead_cleanup_parse.diagnostic_count == 0);
+    CIRLowerResult dead_cleanup_ir = c_lower_to_ir(arguments->arena, S8("dead-cleanup.c"), dead_cleanup_tokens, dead_cleanup_parse, target_native);
+    BUSTER_TEST(arguments, dead_cleanup_ir.diagnostic_count == 0);
+    if (dead_cleanup_ir.program)
+    {
+        bool dead_owner_emitted = false;
+        bool dead_callback_emitted = false;
+        IrModule* dead_module = &dead_cleanup_ir.program->modules[0];
+        for (u32 function_index = 0; function_index < dead_module->function_count; function_index += 1)
+        {
+            IrFunction* function = &dead_module->functions[function_index];
+            dead_owner_emitted |= string_equal(function->name, S8("dead_owner"));
+            dead_callback_emitted |= string_equal(function->name, S8("dead_cleanup"));
+        }
+        BUSTER_TEST(arguments, !dead_owner_emitted);
+        BUSTER_TEST(arguments, !dead_callback_emitted);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(dead_cleanup_ir.program, dead_module).error == IR_VALIDATION_NONE);
+    }
+
+    c_test_cleanup_diagnostic(arguments, &result,
+                              S8("void cleanup_strict(int *value) { (void)value; }\n"
+                                 "int main(void) { int value __attribute__((cleanup(cleanup_strict))) = 1; return value; }\n"),
+                              C_PREPROCESS_DIALECT_C17, S8("GNU cleanup attribute is only available in GNU dialects"));
+    c_test_cleanup_diagnostic(arguments, &result,
+                              S8("void cleanup_placement(int *value) { (void)value; }\n"
+                                 "int value __attribute__((cleanup(cleanup_placement)));\n"),
+                              C_PREPROCESS_DIALECT_GNU23, S8("GNU cleanup attribute may only be applied to an automatic block-scope object"));
+    c_test_cleanup_diagnostic(arguments, &result,
+                              S8("void cleanup_arity(int *value, int extra) { (void)value; (void)extra; }\n"
+                                 "int main(void) { int value __attribute__((cleanup(cleanup_arity))) = 1; return value; }\n"),
+                              C_PREPROCESS_DIALECT_GNU23, S8("cleanup function must take exactly one parameter"));
+    c_test_cleanup_diagnostic(arguments,
+                              &result,
+                              S8("void cleanup_pointer(float *value) { (void)value; }\n"
+                                 "int main(void) { int value __attribute__((cleanup(cleanup_pointer))) = 1; return value; }\n"),
+                              C_PREPROCESS_DIALECT_GNU23, S8("cleanup function parameter must be a pointer to the declared variable type"));
+    c_test_cleanup_diagnostic(arguments,
+                              &result,
+                              S8("void cleanup_malformed(int *value) { (void)value; }\n"
+                                 "int main(void) { int value __attribute__((cleanup())) = 1; return value; }\n"),
+                              C_PREPROCESS_DIALECT_GNU23, S8("cleanup attribute requires exactly one function argument"));
+    c_test_cleanup_diagnostic(arguments,
+                              &result,
+                              S8("void cleanup_multiple(int *value) { (void)value; }\n"
+                                 "int main(void) { int value __attribute__((cleanup(cleanup_multiple))) __attribute__((cleanup(cleanup_multiple))) = 1; return value; }\n"),
+                              C_PREPROCESS_DIALECT_GNU23, S8("cleanup attribute requires exactly one function argument"));
+    c_test_cleanup_diagnostic(arguments,
+                              &result,
+                              S8("int main(void) {\n"
+                                 "    int value __attribute__((cleanup(cleanup_late))) = 1;\n"
+                                 "    void cleanup_late(int *);\n"
+                                 "    return value;\n"
+                                 "}\n"),
+                              C_PREPROCESS_DIALECT_GNU23, S8("cleanup attribute argument must name a function"));
+    CPreprocessResult shadow_cleanup_tokens = c_preprocess(arguments->arena,
+                                                            S8("extern void cleanup_shadow(int *);\n"
+                                                               "int main(void) {\n"
+                                                               "    int value __attribute__((cleanup(cleanup_shadow))) = 1;\n"
+                                                               "    extern void cleanup_shadow(int *);\n"
+                                                               "    return value;\n"
+                                                               "}\n"),
+                                                            (CPreprocessOptions){
+                                                                .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                .target = target_native,
+                                                                .data_layout = target_data_layout(target_native),
+                                                            });
+    CParseResult shadow_cleanup_parse = c_parse(arguments->arena, shadow_cleanup_tokens);
+    CEntityId shadow_value = c_test_find_local_entity(&shadow_cleanup_parse, S8("value"), C_SCOPE_ID_INVALID);
+    CEntityId shadow_callback = c_parse_lookup_entity(&shadow_cleanup_parse, (CScopeId){.value = 0}, S8("cleanup_shadow"));
+    BUSTER_TEST(arguments, shadow_cleanup_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, shadow_cleanup_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, shadow_value.value != C_ID_UNDERLYING_INVALID);
+    BUSTER_TEST(arguments, shadow_callback.value != C_ID_UNDERLYING_INVALID);
+    if (shadow_value.value != C_ID_UNDERLYING_INVALID && shadow_callback.value != C_ID_UNDERLYING_INVALID)
+    {
+        BUSTER_TEST(arguments, shadow_cleanup_parse.entities[shadow_value.value].has_cleanup);
+        BUSTER_TEST(arguments, shadow_cleanup_parse.entities[shadow_value.value].cleanup_function.value == shadow_callback.value);
     }
 
     CPreprocessResult array_declaration_tokens = c_preprocess(arguments->arena,

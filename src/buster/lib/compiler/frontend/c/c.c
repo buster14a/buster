@@ -4689,6 +4689,7 @@ requested_resolved:
 }
 
 BUSTER_TEST_F_DECL CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
+BUSTER_TEST_F_DECL CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, String8 name, u32 token_index);
 
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_add_type(CParseResult* result, CType type);
 
@@ -6503,6 +6504,213 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_skip_attributes(CPreprocessResult preprocess, u3
         } while (index < end && depth);
     }
     return index;
+}
+
+typedef struct CCleanupAttributeInfo CCleanupAttributeInfo;
+struct CCleanupAttributeInfo
+{
+    u32 count;
+    u32 first_start;
+    u32 first_end;
+    u32 last_end;
+    u32 function_token;
+    bool malformed;
+};
+
+BUSTER_GLOBAL_LOCAL bool c_parse_cleanup_attribute_at(CPreprocessResult preprocess, u32 index, u32 end, CCleanupAttributeInfo* result)
+{
+    *result = (CCleanupAttributeInfo){
+        .first_start = UINT32_MAX,
+        .first_end = UINT32_MAX,
+        .last_end = UINT32_MAX,
+        .function_token = UINT32_MAX,
+    };
+    if (index + 1 >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
+        (!string_equal(preprocess.tokens[index].spelling, S8("__attribute__")) &&
+         !string_equal(preprocess.tokens[index].spelling, S8("__attribute"))) ||
+        !c_token_is_punctuator(preprocess.tokens[index + 1], S8("(")))
+    {
+        return false;
+    }
+    u32 group_open = index + 1;
+    u32 group_close = UINT32_MAX;
+    u32 depth = 0;
+    for (u32 cursor = group_open; cursor < end; cursor += 1)
+    {
+        if (c_token_is_punctuator(preprocess.tokens[cursor], S8("(")))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(preprocess.tokens[cursor], S8(")")))
+        {
+            if (!depth)
+            {
+                break;
+            }
+            depth -= 1;
+            if (!depth)
+            {
+                group_close = cursor;
+                break;
+            }
+        }
+    }
+    u32 payload_start = group_open + 1;
+    u32 payload_end = group_close < end ? group_close : end;
+    if (payload_start < payload_end && c_token_is_punctuator(preprocess.tokens[payload_start], S8("(")))
+    {
+        u32 nested_depth = 0;
+        u32 nested_close = UINT32_MAX;
+        for (u32 cursor = payload_start; cursor < payload_end; cursor += 1)
+        {
+            if (c_token_is_punctuator(preprocess.tokens[cursor], S8("(")))
+            {
+                nested_depth += 1;
+            }
+            else if (c_token_is_punctuator(preprocess.tokens[cursor], S8(")")))
+            {
+                if (!nested_depth)
+                {
+                    break;
+                }
+                nested_depth -= 1;
+                if (!nested_depth)
+                {
+                    nested_close = cursor;
+                    break;
+                }
+            }
+        }
+        if (nested_close != UINT32_MAX && nested_close + 1 == payload_end)
+        {
+            payload_start += 1;
+            payload_end = nested_close;
+        }
+    }
+    u32 segment_start = payload_start;
+    depth = 0;
+    for (u32 cursor = payload_start; cursor <= payload_end; cursor += 1)
+    {
+        bool separator = cursor == payload_end || (!depth && c_token_is_punctuator(preprocess.tokens[cursor], S8(",")));
+        if (separator)
+        {
+            if (segment_start < cursor && preprocess.tokens[segment_start].kind == C_TOKEN_IDENTIFIER &&
+                (string_equal(preprocess.tokens[segment_start].spelling, S8("cleanup")) ||
+                 string_equal(preprocess.tokens[segment_start].spelling, S8("__cleanup__"))))
+            {
+                result->count += 1;
+                if (result->count == 1)
+                {
+                    result->first_start = index;
+                    result->first_end = group_close < end ? group_close + 1 : end;
+                }
+                else
+                {
+                    result->malformed = true;
+                }
+                result->last_end = group_close < end ? group_close + 1 : end;
+                bool valid = segment_start + 1 < cursor && c_token_is_punctuator(preprocess.tokens[segment_start + 1], S8("("));
+                u32 cleanup_close = UINT32_MAX;
+                if (valid)
+                {
+                    u32 cleanup_depth = 0;
+                    for (u32 cleanup_index = segment_start + 1; cleanup_index < cursor; cleanup_index += 1)
+                    {
+                        if (c_token_is_punctuator(preprocess.tokens[cleanup_index], S8("(")))
+                        {
+                            cleanup_depth += 1;
+                        }
+                        else if (c_token_is_punctuator(preprocess.tokens[cleanup_index], S8(")")))
+                        {
+                            if (!cleanup_depth)
+                            {
+                                valid = false;
+                                break;
+                            }
+                            cleanup_depth -= 1;
+                            if (!cleanup_depth)
+                            {
+                                cleanup_close = cleanup_index;
+                                break;
+                            }
+                        }
+                    }
+                    valid = valid && cleanup_close == cursor - 1 && cleanup_close == segment_start + 3 &&
+                            preprocess.tokens[segment_start + 2].kind == C_TOKEN_IDENTIFIER;
+                }
+                if (!valid)
+                {
+                    result->malformed = true;
+                }
+                else if (result->count == 1)
+                {
+                    result->function_token = segment_start + 2;
+                }
+            }
+            segment_start = cursor + 1;
+            continue;
+        }
+        if (c_token_is_punctuator(preprocess.tokens[cursor], S8("(")) || c_token_is_punctuator(preprocess.tokens[cursor], S8("[")))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(preprocess.tokens[cursor], S8(")")) || c_token_is_punctuator(preprocess.tokens[cursor], S8("]")))
+        {
+            depth -= depth != 0;
+        }
+    }
+    return result->count != 0;
+}
+
+BUSTER_GLOBAL_LOCAL void c_parse_cleanup_attribute_scan(CPreprocessResult preprocess, u32 start, u32 end, bool skip_braces,
+                                                         CCleanupAttributeInfo* result)
+{
+    *result = (CCleanupAttributeInfo){
+        .first_start = UINT32_MAX,
+        .first_end = UINT32_MAX,
+        .last_end = UINT32_MAX,
+        .function_token = UINT32_MAX,
+    };
+    u32 braces = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(token.spelling, S8("__attribute__")) || string_equal(token.spelling, S8("__attribute"))) &&
+            (!skip_braces || !braces))
+        {
+            CCleanupAttributeInfo attribute = {0};
+            if (c_parse_cleanup_attribute_at(preprocess, index, end, &attribute))
+            {
+                if (!result->count)
+                {
+                    result->first_start = attribute.first_start;
+                    result->first_end = attribute.first_end;
+                    result->function_token = attribute.function_token;
+                }
+                result->last_end = attribute.last_end;
+                result->count += attribute.count;
+                result->malformed |= attribute.malformed;
+                if (result->count > 1)
+                {
+                    result->malformed = true;
+                }
+            }
+            u32 attribute_end = attribute.first_end;
+            if (attribute_end > index && attribute_end <= end)
+            {
+                index = attribute_end - 1;
+                continue;
+            }
+        }
+        if (skip_braces && c_token_is_punctuator(token, S8("{")))
+        {
+            braces += 1;
+        }
+        else if (skip_braces && c_token_is_punctuator(token, S8("}")))
+        {
+            braces -= braces != 0;
+        }
+    }
 }
 
 BUSTER_GLOBAL_LOCAL CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start)
@@ -9145,6 +9353,187 @@ BUSTER_GLOBAL_LOCAL bool c_parse_types_compatible(Arena* result_arena, CParseRes
     return compatible;
 }
 
+BUSTER_GLOBAL_LOCAL CSourceLocation c_parse_cleanup_attribute_location(CPreprocessResult preprocess, CCleanupAttributeInfo attribute)
+{
+    if (attribute.first_start < preprocess.token_count)
+    {
+        return preprocess.tokens[attribute.first_start].location;
+    }
+    return (CSourceLocation){0};
+}
+
+BUSTER_GLOBAL_LOCAL void c_parse_cleanup_diagnostic(CParseResult* result, CPreprocessResult preprocess, CCleanupAttributeInfo attribute, String8 message)
+{
+    c_parse_diagnostic(result, c_parse_cleanup_attribute_location(preprocess, attribute), C_DIAGNOSTIC_INVALID_CLEANUP_ATTRIBUTE, message);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_cleanup_pointer_conversion(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId source_id,
+                                                            CTypeId target_id)
+{
+    if (source_id.value >= result->type_count || target_id.value >= result->type_count)
+    {
+        return false;
+    }
+    CType source = result->types[source_id.value];
+    CType target = result->types[target_id.value];
+    if ((source.is_const && !target.is_const) || (source.is_volatile && !target.is_volatile) || (source.is_restrict && !target.is_restrict))
+    {
+        return false;
+    }
+    if (target.kind == C_TYPE_VOID)
+    {
+        return true;
+    }
+    CTypeId source_unqualified = c_parse_unqualified_type(result, source_id);
+    CTypeId target_unqualified = c_parse_unqualified_type(result, target_id);
+    return source_unqualified.value < result->type_count && target_unqualified.value < result->type_count &&
+           c_parse_types_compatible(arena, result, preprocess, source_unqualified, target_unqualified);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_cleanup_function_matches(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId declared_type,
+                                                           CEntity* function)
+{
+    if (!function || function->type.value >= result->type_count)
+    {
+        return false;
+    }
+    CType* function_type = &result->types[function->type.value];
+    if (function_type->kind != C_TYPE_FUNCTION || function_type->parameter_count != 1 || function_type->parameter_start >= result->parameter_count)
+    {
+        return false;
+    }
+    CTypeId parameter_id = result->parameters[function_type->parameter_start].type;
+    if (parameter_id.value >= result->type_count)
+    {
+        return false;
+    }
+    CType* parameter_type = &result->types[parameter_id.value];
+    if (parameter_type->kind == C_TYPE_ARRAY || parameter_type->kind == C_TYPE_FUNCTION)
+    {
+        parameter_id = c_parse_add_type(result, (CType){
+                                                   .element_type = parameter_type->kind == C_TYPE_ARRAY ? parameter_type->element_type : parameter_id,
+                                                   .return_type = C_TYPE_ID_INVALID,
+                                                   .array_bound = C_ARRAY_BOUND_INVALID,
+                                                   .kind = C_TYPE_POINTER,
+                                               });
+    }
+    if (parameter_id.value >= result->type_count || result->types[parameter_id.value].kind != C_TYPE_POINTER)
+    {
+        return false;
+    }
+    return c_parse_cleanup_pointer_conversion(arena, result, preprocess, declared_type, result->types[parameter_id.value].element_type);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_validate_cleanup_attribute(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CEntityId entity_id,
+                                                             CCleanupAttributeInfo attribute, bool is_typedef, bool is_register, bool is_extern,
+                                                             bool is_thread_local)
+{
+    if (!attribute.count)
+    {
+        return false;
+    }
+    if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
+    {
+        c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("GNU cleanup attribute is only available in GNU dialects"));
+        return false;
+    }
+    if (attribute.malformed || attribute.count != 1 || attribute.function_token >= preprocess.token_count)
+    {
+        c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup attribute requires exactly one function argument"));
+        return false;
+    }
+    if (entity_id.value >= result->entity_count)
+    {
+        c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("GNU cleanup attribute may only be applied to an automatic block-scope object"));
+        return false;
+    }
+    CEntity* entity = &result->entities[entity_id.value];
+    if (entity->kind != C_ENTITY_LOCAL || entity->scope.value == C_ID_UNDERLYING_INVALID || entity->scope.value == 0 || entity->is_static_storage ||
+        is_typedef || is_register || is_extern || is_thread_local || entity->type.value >= result->type_count ||
+        result->types[entity->type.value].kind == C_TYPE_FUNCTION)
+    {
+        c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("GNU cleanup attribute may only be applied to an automatic block-scope object"));
+        return false;
+    }
+    String8 function_name = preprocess.tokens[attribute.function_token].spelling;
+    CEntityId cleanup_function_id = c_parse_lookup_entity_at(result, preprocess, entity->scope, function_name, attribute.function_token);
+    CEntity* cleanup_function = cleanup_function_id.value < result->entity_count ? &result->entities[cleanup_function_id.value] : 0;
+    if (!cleanup_function || cleanup_function->type.value >= result->type_count || result->types[cleanup_function->type.value].kind != C_TYPE_FUNCTION)
+    {
+        c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup attribute argument must name a function"));
+        return false;
+    }
+    CType* cleanup_type = &result->types[cleanup_function->type.value];
+    if (cleanup_type->parameter_count != 1)
+    {
+        c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup function must take exactly one parameter"));
+        return false;
+    }
+    if (cleanup_type->parameter_start >= result->parameter_count)
+    {
+        c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup function must take exactly one parameter"));
+        return false;
+    }
+    if (!c_parse_cleanup_function_matches(arena, result, preprocess, entity->type, cleanup_function))
+    {
+        c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup function parameter must be a pointer to the declared variable type"));
+        return false;
+    }
+    entity->has_cleanup = true;
+    entity->cleanup_function = cleanup_function_id;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_cleanup_attribute_was_checked(CParseResult* result, u32 token)
+{
+    for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
+    {
+        CEntity* entity = &result->entities[entity_index];
+        if (entity->cleanup_attribute_checked && entity->cleanup_attribute_token <= token && token < entity->cleanup_attribute_end)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL void c_parse_validate_unattached_cleanup_attributes(CParseResult* result, CPreprocessResult preprocess)
+{
+    for (u32 index = 0; index < preprocess.token_count; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER || (!string_equal(token.spelling, S8("__attribute__")) && !string_equal(token.spelling, S8("__attribute"))))
+        {
+            continue;
+        }
+        CCleanupAttributeInfo attribute = {0};
+        if (!c_parse_cleanup_attribute_at(preprocess, index, (u32)preprocess.token_count, &attribute))
+        {
+            continue;
+        }
+        if (!c_parse_cleanup_attribute_was_checked(result, attribute.first_start))
+        {
+            if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
+            {
+                c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("GNU cleanup attribute is only available in GNU dialects"));
+            }
+            else if (attribute.malformed || attribute.count != 1 || attribute.function_token >= preprocess.token_count)
+            {
+                c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup attribute requires exactly one function argument"));
+            }
+            else
+            {
+                c_parse_cleanup_diagnostic(result, preprocess, attribute,
+                                           S8("GNU cleanup attribute may only be applied to an automatic block-scope object"));
+            }
+        }
+        if (attribute.first_end > index && attribute.first_end <= preprocess.token_count)
+        {
+            index = attribute.first_end - 1;
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId left,
                                                                 CTypeId right)
 {
@@ -9266,6 +9655,44 @@ BUSTER_TEST_F_DECL CEntityId c_parse_lookup_entity(CParseResult* result, CScopeI
         {
             CEntity* candidate = &result->entities[entity.value];
             if (candidate->scope.value == scope.value && string_equal(candidate->name, name))
+            {
+                return entity;
+            }
+            entity = candidate->next_in_lookup;
+        }
+        scope = result->scopes[scope.value].parent;
+    }
+    return C_ENTITY_ID_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_entity_visible_at(CPreprocessResult preprocess, CEntity* entity, u32 token_index)
+{
+    if (entity->declaration_token_plus_one)
+    {
+        return entity->declaration_token_plus_one - 1 <= token_index;
+    }
+    if (token_index >= preprocess.token_count)
+    {
+        return true;
+    }
+    CSourceLocation reference = preprocess.tokens[token_index].location;
+    return entity->location.file != reference.file || entity->location.offset <= reference.offset;
+}
+
+BUSTER_TEST_F_DECL CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, String8 name,
+                                                       u32 token_index)
+{
+    while (scope.value != C_ID_UNDERLYING_INVALID)
+    {
+        u64 hash = c_macro_name_hash(name);
+        hash ^= (u64)scope.value + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) + (hash >> 2);
+        u32 bucket = (u32)hash & (result->entity_lookup_bucket_count - 1);
+        CEntityId entity = result->entity_lookup_buckets[bucket];
+        while (entity.value != C_ID_UNDERLYING_INVALID)
+        {
+            CEntity* candidate = &result->entities[entity.value];
+            if (candidate->scope.value == scope.value && string_equal(candidate->name, name) &&
+                c_parse_entity_visible_at(preprocess, candidate, token_index))
             {
                 return entity;
             }
@@ -9894,6 +10321,96 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_auto_initializer_identifiers(Arena* arena,
     }
 }
 
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                          CTypeId return_type, u32 open, u32 end, u32* index_out)
+{
+    u32 close = open + 1;
+    u32 depth = 1;
+    while (close < end && depth)
+    {
+        if (c_token_is_punctuator(preprocess.tokens[close], S8("(")))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(preprocess.tokens[close], S8(")")))
+        {
+            depth -= 1;
+        }
+        close += 1;
+    }
+    if (depth)
+    {
+        return C_TYPE_ID_INVALID;
+    }
+    close -= 1;
+    u32 parameter_start = result->parameter_count;
+    u32 parameter_count = 0;
+    bool variadic = false;
+    bool valid = true;
+    u32 segment_start = open + 1;
+    u32 nested_depth = 0;
+    for (u32 index = open + 1; index <= close; index += 1)
+    {
+        bool separator = index == close || (!nested_depth && c_token_is_punctuator(preprocess.tokens[index], S8(",")));
+        if (separator)
+        {
+            if (segment_start == index)
+            {
+                valid = index == close && parameter_count == 0 && !variadic;
+            }
+            else if (index == segment_start + 1 && string_equal(preprocess.tokens[segment_start].spelling, S8("void")) && parameter_count == 0 && !variadic)
+            {
+                /* An unnamed void parameter list has no parameters. */
+            }
+            else if (index == segment_start + 1 && c_token_is_punctuator(preprocess.tokens[segment_start], S8("...")))
+            {
+                valid = !variadic;
+                variadic = true;
+            }
+            else if (!variadic)
+            {
+                valid = c_parse_parameter_segment(machine, result, preprocess, (CDeclaration){0}, segment_start, index);
+                if (valid)
+                {
+                    parameter_count += 1;
+                }
+            }
+            else
+            {
+                valid = false;
+            }
+            segment_start = index + 1;
+            continue;
+        }
+        if (c_token_is_punctuator(preprocess.tokens[index], S8("(")) || c_token_is_punctuator(preprocess.tokens[index], S8("[")) ||
+            c_token_is_punctuator(preprocess.tokens[index], S8("{")))
+        {
+            nested_depth += 1;
+        }
+        else if ((c_token_is_punctuator(preprocess.tokens[index], S8(")")) || c_token_is_punctuator(preprocess.tokens[index], S8("]")) ||
+                  c_token_is_punctuator(preprocess.tokens[index], S8("}"))) &&
+                 nested_depth)
+        {
+            nested_depth -= 1;
+        }
+    }
+    if (!valid || nested_depth)
+    {
+        result->parameter_count = parameter_start;
+        return C_TYPE_ID_INVALID;
+    }
+    *index_out = close + 1;
+    return c_parse_add_type(result, (CType){
+                                               .element_type = C_TYPE_ID_INVALID,
+                                               .return_type = return_type,
+                                               .array_bound = C_ARRAY_BOUND_INVALID,
+                                               .parameter_start = parameter_start,
+                                               .parameter_count = parameter_count,
+                                               .kind = C_TYPE_FUNCTION,
+                                               .is_variadic = variadic,
+                                           });
+}
+
 BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                     CScopeId scope, u32 declaration_index, u32 start, u32 end)
 {
@@ -10011,6 +10528,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
                                       : S8("alignment specifier cannot be applied to a register object"));
         alignment_count = 0;
     }
+    CCleanupAttributeInfo declaration_cleanup = {0};
+    c_parse_cleanup_attribute_scan(preprocess, start, declarator_start, true, &declaration_cleanup);
     for (u32 member_index = enum_member_start; member_index < result->enum_member_count; member_index += 1)
     {
         CEnumMember* member = &result->enum_members[member_index];
@@ -10078,6 +10597,22 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
                 break;
             }
         }
+        CCleanupAttributeInfo cleanup = declaration_cleanup;
+        CCleanupAttributeInfo segment_cleanup = {0};
+        c_parse_cleanup_attribute_scan(preprocess, segment_start, suffix_end, true, &segment_cleanup);
+        if (segment_cleanup.count)
+        {
+            if (!cleanup.count)
+            {
+                cleanup = segment_cleanup;
+            }
+            else
+            {
+                cleanup.count += segment_cleanup.count;
+                cleanup.malformed = true;
+                cleanup.last_end = segment_cleanup.last_end;
+            }
+        }
         u32 index = segment_start;
         CTypeId type = is_auto_type ? auto_type : c_parse_pointer_chain(result, preprocess, base, &index, suffix_end);
         CToken name = {0};
@@ -10121,6 +10656,14 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
             name_index = index;
             name = preprocess.tokens[index++];
             index = c_parse_skip_attributes(preprocess, index, suffix_end);
+            if (index < suffix_end && c_token_is_punctuator(preprocess.tokens[index], S8("(")))
+            {
+                type = c_parse_local_function_suffix(machine, result, preprocess, type, index, suffix_end, &index);
+                if (type.value == C_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+            }
             type = c_parse_array_suffixes(result, preprocess, type, &index, suffix_end);
             index = c_parse_skip_attributes(preprocess, index, suffix_end);
         }
@@ -10179,6 +10722,14 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
             .is_static_storage = is_static_storage,
             .is_constexpr = is_constexpr,
         };
+        CEntity* local_entity = &result->entities[entity.value];
+        if (cleanup.count)
+        {
+            local_entity->cleanup_attribute_checked = true;
+            local_entity->cleanup_attribute_token = cleanup.first_start;
+            local_entity->cleanup_attribute_end = cleanup.last_end;
+            c_parse_validate_cleanup_attribute(arena, result, preprocess, entity, cleanup, is_typedef, is_register, is_extern, is_thread_local);
+        }
         c_parse_scope_add_entity(result, scope, entity);
         c_parse_bind_array_bound_identifiers(arena, result, preprocess, scope, segment_start, suffix_end);
         u32 initializer_start = suffix_end < segment_end ? suffix_end + 1 : segment_end;
@@ -11444,6 +11995,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         CEntityId entity = {
             .value = result.entity_count,
         };
+        u32 declaration_name_token = kind == C_DECLARATION_FUNCTION ? syntax_declaration->function_name_token : syntax_declaration->name_token;
         declaration->entity = entity;
         BUSTER_CHECK(result.entity_count < result.entity_capacity);
         result.entities[result.entity_count++] = (CEntity){
@@ -11456,6 +12008,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
                 },
             .next_in_scope = C_ENTITY_ID_INVALID,
             .declaration_index = result.declaration_count - 1,
+            .declaration_token_plus_one = declaration_name_token < token_count ? declaration_name_token + 1 : 0,
             .alignment_start = declaration->alignment_start,
             .alignment_count = declaration->alignment_count,
             .kind = kind == C_DECLARATION_FUNCTION  ? C_ENTITY_FUNCTION
@@ -11715,6 +12268,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         }
         c_parse_bind_function_body(&machine, arena, &result, preprocess, declaration_index);
     }
+    c_parse_validate_unattached_cleanup_attributes(&result, preprocess);
     scratch_end(machine_temporary);
     BUSTER_CHECK(arena_destroy(machine_buffer_arena, 1));
     return result;
@@ -12639,6 +13193,13 @@ struct CIntegerIrBuilder
     CIntegerIrLocal* locals;
     u32 local_count;
     u32 local_capacity;
+    IrValueId* cleanup_flags;
+    CEntityId* cleanup_entities;
+    u32* cleanup_entity_entries;
+    u32 cleanup_flag_base;
+    u32 cleanup_flag_count;
+    IrFunction** cleanup_functions;
+    CIrSignature* cleanup_signatures;
     bool returns_void;
     bool preparing_calls;
     bool va_list_builtin_operand;
@@ -15621,6 +16182,7 @@ struct CIrLowerBodyState
     u32 label_count;
     u32 index;
     u32 switch_case_count;
+    u32 switch_body_start;
     u32 switch_body_close;
     u32 vla_alignment;
     CIrLowerBodyContinuation continuation;
@@ -16757,14 +17319,13 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constexpr_initializer_valid(IrType* type, IrGlobal
            initializer->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT;
 }
 
-BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_call_values(CIntegerIrBuilder* builder, CToken token, u32 declaration_index, IrValueId* arguments, u32 argument_count)
+BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CToken token, IrFunction* target, CIrSignature signature,
+                                                     IrValueId* arguments, u32 argument_count)
 {
-    if (declaration_index == UINT32_MAX || !builder->declaration_functions[declaration_index])
+    if (!target)
     {
         return IR_VALUE_ID_INVALID;
     }
-    IrFunction* target = builder->declaration_functions[declaration_index];
-    CIrSignature signature = builder->signatures[declaration_index];
     if ((!signature.is_variadic && argument_count != signature.parameter_count) || (signature.is_variadic && argument_count < signature.parameter_count))
     {
         return IR_VALUE_ID_INVALID;
@@ -16796,6 +17357,16 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_call_values(CIntegerIrBuilder* builder, 
         return result;
     }
     return c_ir_emit_integer_value(builder, 0, false, token);
+}
+
+BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_call_values(CIntegerIrBuilder* builder, CToken token, u32 declaration_index, IrValueId* arguments, u32 argument_count)
+{
+    if (declaration_index == UINT32_MAX || !builder->declaration_functions[declaration_index])
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    return c_ir_emit_call_target(builder, token, builder->declaration_functions[declaration_index], builder->signatures[declaration_index], arguments,
+                                 argument_count);
 }
 
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CToken token, String8 link_name, IrValueId* arguments, u32 argument_count)
@@ -24229,6 +24800,7 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
 BUSTER_GLOBAL_LOCAL void c_ir_lower_automatic_declaration_step(CIntegerIrBuilder* builder);
 BUSTER_GLOBAL_LOCAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIrBuilder* builder);
 BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builder);
+BUSTER_GLOBAL_LOCAL bool c_ir_activate_cleanup(CIntegerIrBuilder* builder, CEntityId entity_id, IrSourceRange source);
 
 BUSTER_GLOBAL_LOCAL void c_ir_lower_assignment_statement_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
                                                                               CIrLowerAssignmentStatementState* state,
@@ -26483,6 +27055,10 @@ struct CIrBodyTask
     IrValueId stack_checkpoint;
     IrValueId break_checkpoint;
     IrValueId continue_checkpoint;
+    CScopeId break_scope;
+    CScopeId continue_scope;
+    u32 break_token;
+    u32 continue_token;
     bool allow_trailing_expression;
     bool save_stack_at_entry;
     bool restore_before_continuation;
@@ -26499,6 +27075,10 @@ BUSTER_GLOBAL_LOCAL void c_ir_body_task_inherit_control(CIrBodyTask* child, CIrB
     child->continue_checkpoint = parent.continue_checkpoint;
     child->has_break_checkpoint = parent.has_break_checkpoint;
     child->has_continue_checkpoint = parent.has_continue_checkpoint;
+    child->break_scope = parent.break_scope;
+    child->continue_scope = parent.continue_scope;
+    child->break_token = parent.break_token;
+    child->continue_token = parent.continue_token;
 }
 
 BUSTER_GLOBAL_LOCAL void c_ir_body_task_inherit_scope(CIrBodyTask* child, CIrBodyTask parent)
@@ -26507,6 +27087,393 @@ BUSTER_GLOBAL_LOCAL void c_ir_body_task_inherit_scope(CIrBodyTask* child, CIrBod
     child->stack_checkpoint = parent.stack_checkpoint;
     child->has_stack_checkpoint = parent.has_stack_checkpoint;
     child->restore_before_continuation = parent.restore_before_continuation;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_ir_function_declaration_for_entity(CParseResult* parse, CEntityId entity)
+{
+    u32 first = UINT32_MAX;
+    for (u32 declaration_index = 0; declaration_index < parse->declaration_count; declaration_index += 1)
+    {
+        CDeclaration declaration = parse->declarations[declaration_index];
+        if (declaration.kind != C_DECLARATION_FUNCTION || declaration.entity.value != entity.value)
+        {
+            continue;
+        }
+        if (first == UINT32_MAX)
+        {
+            first = declaration_index;
+        }
+        if (declaration.is_definition)
+        {
+            return declaration_index;
+        }
+    }
+    if (first != UINT32_MAX || entity.value >= parse->entity_count)
+    {
+        return first;
+    }
+    CEntity* referenced = &parse->entities[entity.value];
+    if (referenced->type.value >= parse->type_count || parse->types[referenced->type.value].kind != C_TYPE_FUNCTION)
+    {
+        return UINT32_MAX;
+    }
+    for (u32 candidate_index = 0; candidate_index < parse->entity_count; candidate_index += 1)
+    {
+        CEntity* candidate = &parse->entities[candidate_index];
+        if (candidate->scope.value != 0 || candidate->kind != C_ENTITY_FUNCTION || !string_equal(candidate->name, referenced->name))
+        {
+            continue;
+        }
+        u32 candidate_first = UINT32_MAX;
+        for (u32 declaration_index = 0; declaration_index < parse->declaration_count; declaration_index += 1)
+        {
+            CDeclaration declaration = parse->declarations[declaration_index];
+            if (declaration.kind != C_DECLARATION_FUNCTION || declaration.entity.value != candidate_index)
+            {
+                continue;
+            }
+            if (candidate_first == UINT32_MAX)
+            {
+                candidate_first = declaration_index;
+            }
+            if (declaration.is_definition)
+            {
+                return declaration_index;
+            }
+        }
+        if (candidate_first != UINT32_MAX)
+        {
+            return candidate_first;
+        }
+    }
+    return UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_cleanup_function_target(CIntegerIrBuilder* builder, CEntityId entity_id, IrFunction** target_out,
+                                                       CIrSignature* signature_out)
+{
+    *target_out = 0;
+    *signature_out = (CIrSignature){0};
+    if (entity_id.value >= builder->parse.entity_count)
+    {
+        return false;
+    }
+    if (builder->cleanup_functions && builder->cleanup_functions[entity_id.value])
+    {
+        *target_out = builder->cleanup_functions[entity_id.value];
+        *signature_out = builder->cleanup_signatures[entity_id.value];
+        return signature_out->valid;
+    }
+    u32 declaration_index = c_ir_function_declaration_for_entity(&builder->parse, entity_id);
+    if (declaration_index != UINT32_MAX && builder->declaration_functions[declaration_index] && builder->signatures[declaration_index].valid)
+    {
+        *target_out = builder->declaration_functions[declaration_index];
+        *signature_out = builder->signatures[declaration_index];
+        return true;
+    }
+    CEntity* entity = &builder->parse.entities[entity_id.value];
+    CType* function_type = c_type_from_id(&builder->parse, entity->type);
+    IrTypeId canonical_type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
+    if (!function_type || function_type->kind != C_TYPE_FUNCTION || canonical_type.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
+    CDeclaration synthetic = {
+        .name = entity->name,
+        .location = entity->location,
+        .type = entity->type,
+        .parameter_start = function_type->parameter_start,
+        .parameter_count = function_type->parameter_count,
+        .entity = entity_id,
+        .kind = C_DECLARATION_FUNCTION,
+    };
+    CIrSignature signature = c_ir_function_signature(builder->arena, builder->program, builder->pointer_types, &builder->parse, synthetic,
+                                                      builder->c_type_ir_map, builder->target);
+    if (!signature.valid)
+    {
+        return false;
+    }
+    IrSourceRange source = c_ir_source_range(entity->location, entity->name.length);
+    IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
+    for (u32 symbol_index = 0; symbol_index < builder->program->symbols.count; symbol_index += 1)
+    {
+        IrSymbol* candidate = &builder->program->symbols.symbols[symbol_index];
+        if (candidate->kind == IR_SYMBOL_FUNCTION && candidate->type.value == canonical_type.value && string_equal(candidate->link_name, entity->name))
+        {
+            symbol = candidate->id;
+            break;
+        }
+    }
+    if (symbol.value == IR_ID_UNDERLYING_INVALID)
+    {
+        symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+                                                               .name = entity->name,
+                                                               .link_name = entity->name,
+                                                               .source = source,
+                                                               .type = canonical_type,
+                                                               .kind = IR_SYMBOL_FUNCTION,
+                                                               .linkage = IR_LINKAGE_EXTERNAL,
+                                                           });
+    }
+    if (symbol.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
+    IrFunction* target = 0;
+    for (u32 function_index = 0; function_index < builder->module->function_count; function_index += 1)
+    {
+        IrFunction* candidate = &builder->module->functions[function_index];
+        if (candidate->symbol.value == symbol.value && candidate->canonical_type.value == canonical_type.value)
+        {
+            target = candidate;
+            break;
+        }
+    }
+    if (!target)
+    {
+        target = ir_module_add_function(builder->arena, builder->module,
+                                        (IrFunction){
+                                            .name = entity->name,
+                                            .symbol = symbol,
+                                            .source = source,
+                                            .entity = ANALYSIS_ENTITY_ID_INVALID,
+                                            .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
+                                            .type = ANALYSIS_TYPE_ID_INVALID,
+                                            .canonical_type = canonical_type,
+                                            .entry = IR_BLOCK_ID_INVALID,
+                                            .state = IR_FUNCTION_DECLARATION,
+                                        });
+    }
+    if (!target)
+    {
+        return false;
+    }
+    if (builder->cleanup_functions)
+    {
+        builder->cleanup_functions[entity_id.value] = target;
+        builder->cleanup_signatures[entity_id.value] = signature;
+    }
+    *target_out = target;
+    *signature_out = signature;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_cleanup_is_outside_target(CParseResult* parse, CEntity* entity, CScopeId target_scope, u32 target_token)
+{
+    if (target_scope.value == C_ID_UNDERLYING_INVALID || target_scope.value >= parse->scope_count)
+    {
+        return true;
+    }
+    CScopeId scope = target_scope;
+    while (scope.value != C_ID_UNDERLYING_INVALID && scope.value < parse->scope_count)
+    {
+        if (scope.value == entity->scope.value)
+        {
+            return target_token == UINT32_MAX || !entity->declaration_token_plus_one || target_token < entity->declaration_token_plus_one;
+        }
+        scope = parse->scopes[scope.value].parent;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_cleanup_target_for_block(CIntegerIrBuilder* builder, CIrBodyTask* tasks, u32 task_count, IrBlockId block,
+                                                        CScopeId* scope_out, u32* token_out)
+{
+    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+                                                                                      : C_SCOPE_ID_INVALID;
+    for (u32 task_index = 0; task_index < task_count; task_index += 1)
+    {
+        CIrBodyTask task = tasks[task_index];
+        if (task.break_block.value == block.value || task.continue_block.value == block.value)
+        {
+            *token_out = task.start;
+            *scope_out = c_parse_scope_for_token(&builder->parse, root, task.start);
+            return true;
+        }
+        if (task.continuation.value != block.value && task.block.value != block.value)
+        {
+            continue;
+        }
+        *token_out = task.end;
+        *scope_out = c_parse_scope_for_token(&builder->parse, root, task.end);
+        return true;
+    }
+    *scope_out = C_SCOPE_ID_INVALID;
+    *token_out = UINT32_MAX;
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_body_task_set_loop_cleanup_targets(CIntegerIrBuilder* builder, CIrBodyTask* task, u32 break_token, u32 continue_token)
+{
+    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+                                                                                     : C_SCOPE_ID_INVALID;
+    task->break_scope = c_parse_scope_for_token(&builder->parse, root, break_token);
+    task->continue_scope = c_parse_scope_for_token(&builder->parse, root, continue_token);
+    task->break_token = break_token;
+    task->continue_token = continue_token;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_cleanup_target_for_task(CIntegerIrBuilder* builder, CIrBodyTask task, CIrBodyTask* tasks, u32 task_count,
+                                                       IrBlockId block, CScopeId* scope_out, u32* token_out)
+{
+    if (block.value == task.break_block.value && task.break_block.value != IR_ID_UNDERLYING_INVALID)
+    {
+        *scope_out = task.break_scope;
+        *token_out = task.break_token;
+        return true;
+    }
+    if (block.value == task.continue_block.value && task.continue_block.value != IR_ID_UNDERLYING_INVALID)
+    {
+        *scope_out = task.continue_scope;
+        *token_out = task.continue_token;
+        return true;
+    }
+    if (block.value == task.continuation.value && task.continuation.value != IR_ID_UNDERLYING_INVALID)
+    {
+        CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+                                                                                          : C_SCOPE_ID_INVALID;
+        *token_out = task.end;
+        *scope_out = c_parse_scope_for_token(&builder->parse, root, task.end);
+        return true;
+    }
+    return c_ir_cleanup_target_for_block(builder, tasks, task_count, block, scope_out, token_out);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_activate_cleanup(CIntegerIrBuilder* builder, CEntityId entity_id, IrSourceRange source)
+{
+    if (entity_id.value >= builder->parse.entity_count || !builder->cleanup_flags || !builder->cleanup_entity_entries ||
+        !builder->parse.entities[entity_id.value].has_cleanup)
+    {
+        return true;
+    }
+    u32 cleanup_entry = builder->cleanup_entity_entries[entity_id.value];
+    if (cleanup_entry < builder->cleanup_flag_base || cleanup_entry - builder->cleanup_flag_base >= builder->cleanup_flag_count)
+    {
+        return true;
+    }
+    IrValueId flag = builder->cleanup_flags[cleanup_entry - builder->cleanup_flag_base];
+    if (flag.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
+    CToken token = {
+        .spelling = builder->parse.entities[entity_id.value].name,
+        .location = builder->parse.entities[entity_id.value].location,
+        .kind = C_TOKEN_IDENTIFIER,
+    };
+    IrValueId value = c_ir_emit_integer_value_typed(builder, 1, false, token, builder->bool_type);
+    return value.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, flag, builder->bool_type, value, source);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_has_cleanup_state(CIntegerIrBuilder* builder)
+{
+    return builder->cleanup_flag_count != 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_emit_cleanup_calls(CIntegerIrBuilder* builder, CIrBodyTask* tasks, u32 task_count, CScopeId target_scope,
+                                                  u32 target_token, IrSourceRange source)
+{
+    for (u32 cleanup_index = builder->cleanup_flag_count; cleanup_index != 0; cleanup_index -= 1)
+    {
+        u32 entry_index = builder->cleanup_flag_base + cleanup_index - 1;
+        CEntityId entity_id = builder->cleanup_entities[entry_index];
+        CEntity* entity = entity_id.value < builder->parse.entity_count ? &builder->parse.entities[entity_id.value] : 0;
+        if (!entity || !entity->has_cleanup || builder->cleanup_flags[cleanup_index - 1].value == IR_ID_UNDERLYING_INVALID ||
+            !c_ir_cleanup_is_outside_target(&builder->parse, entity, target_scope, target_token))
+        {
+            continue;
+        }
+        CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity_id);
+        if (!local)
+        {
+            continue;
+        }
+        IrValueId flag = builder->cleanup_flags[cleanup_index - 1];
+        IrValueId active = c_ir_emit_load_place_raw(builder, flag, builder->bool_type, source);
+        active = active.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_truth_value(builder, active, source);
+        IrBlockId call_block = c_ir_block_create(builder);
+        IrBlockId next_block = c_ir_block_create(builder);
+        if (active.value == IR_ID_UNDERLYING_INVALID || call_block.value == IR_ID_UNDERLYING_INVALID || next_block.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        IrBlockId targets[2] = {call_block, next_block};
+        if (!c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &active, 1, targets, 2, source) || !c_ir_switch_block(builder, call_block))
+        {
+            return false;
+        }
+        IrFunction* callback_function = 0;
+        CIrSignature callback_signature = {0};
+        bool callback_resolved = c_ir_cleanup_function_target(builder, entity->cleanup_function, &callback_function, &callback_signature);
+        IrTypeId variable_type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
+        if (variable_type.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        if (!callback_resolved)
+        {
+            return false;
+        }
+        if (callback_signature.parameter_count != 1)
+        {
+            return false;
+        }
+        IrValueId address = c_ir_emit_address_of_place(builder, local->place, variable_type, source);
+        IrValueId arguments[1] = {address};
+        arguments[0] = c_ir_emit_cast(builder, arguments[0], callback_signature.parameter_types[0], source);
+        CToken callback_token = {
+            .spelling = entity->name,
+            .location = entity->location,
+            .kind = C_TOKEN_IDENTIFIER,
+        };
+        if (address.value == IR_ID_UNDERLYING_INVALID || arguments[0].value == IR_ID_UNDERLYING_INVALID ||
+            c_ir_emit_call_target(builder, callback_token, callback_function, callback_signature, arguments, BUSTER_ARRAY_LENGTH(arguments)).value ==
+                IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        IrValueId inactive = c_ir_emit_integer_value_typed(builder, 0, false, callback_token, builder->bool_type);
+        if (inactive.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_store_place(builder, flag, builder->bool_type, inactive, source) ||
+            !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &next_block, 1, source) || !c_ir_switch_block(builder, next_block))
+        {
+            return false;
+        }
+    }
+    BUSTER_UNUSED(tasks);
+    BUSTER_UNUSED(task_count);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_initialize_cleanup_flags(CIntegerIrBuilder* builder, CDeclaration declaration)
+{
+    if (!builder->cleanup_flag_count)
+    {
+        return true;
+    }
+    CToken token = {
+        .spelling = declaration.name,
+        .location = declaration.location,
+        .kind = C_TOKEN_IDENTIFIER,
+    };
+    IrSourceRange source = c_ir_source_range(declaration.location, declaration.name.length);
+    for (u32 cleanup_index = 0; cleanup_index < builder->cleanup_flag_count; cleanup_index += 1)
+    {
+        u32 entry_index = builder->cleanup_flag_base + cleanup_index;
+        CEntityId entity_id = builder->cleanup_entities[entry_index];
+        if (entity_id.value >= builder->parse.entity_count)
+        {
+            return false;
+        }
+        IrValueId flag = c_ir_emit_temporary(builder, builder->bool_type, source);
+        IrValueId inactive = c_ir_emit_integer_value_typed(builder, 0, false, token, builder->bool_type);
+        if (flag.value == IR_ID_UNDERLYING_INVALID || inactive.value == IR_ID_UNDERLYING_INVALID ||
+            !c_ir_emit_store_place(builder, flag, builder->bool_type, inactive, source))
+        {
+            return false;
+        }
+        builder->cleanup_flags[cleanup_index] = flag;
+    }
+    return true;
 }
 
 typedef struct CIrSwitchCase CIrSwitchCase;
@@ -27041,6 +28008,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* b
     }
     if (local_extern && !local_static)
     {
+        if (local_type_value && local_type_value->kind == IR_TYPE_FUNCTION)
+        {
+            return true;
+        }
         if (c_ir_declaration_initializer_range(builder->preprocess,
                                                (CDeclaration){
                                                    .token_start = start,
@@ -27142,7 +28113,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* b
     if (initializer_index >= end)
     {
         c_ir_mark_local_read_only(builder, local);
-        return true;
+        return c_ir_activate_cleanup(builder, entity, c_ir_source_range(name.location, name.spelling.length));
     }
     u32 value_start = initializer_index + 1;
     if (value_start >= end)
@@ -27208,6 +28179,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* b
     if (stored)
     {
         c_ir_mark_local_read_only(builder, local);
+        stored = c_ir_activate_cleanup(builder, entity, c_ir_source_range(assignment.location, assignment.spelling.length));
     }
     return stored;
 }
@@ -27224,6 +28196,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_finish_automatic_declaration(CIntegerIrBuilder* bu
     if (stored)
     {
         c_ir_mark_local_read_only(builder, state->local);
+        stored = c_ir_activate_cleanup(builder, state->local_entity ? (CEntityId){.value = (u32)(state->local_entity - builder->parse.entities)} : C_ENTITY_ID_INVALID,
+                                        c_ir_source_range(state->name.location, state->name.spelling.length));
     }
     return stored;
 }
@@ -27697,23 +28671,6 @@ BUSTER_GLOBAL_LOCAL String8 c_ir_unsupported_gnu_construct(CPreprocessResult pre
             *token_index_out = index;
             return S8("GNU computed goto is not supported");
         }
-        if (token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("cleanup")))
-        {
-            bool attribute = false;
-            u32 lookback = index;
-            while (lookback > start && index - lookback <= 8)
-            {
-                lookback -= 1;
-                CToken prior = preprocess.tokens[lookback];
-                attribute |= prior.kind == C_TOKEN_IDENTIFIER &&
-                             (string_equal(prior.spelling, S8("__attribute__")) || string_equal(prior.spelling, S8("__attribute")));
-            }
-            if (attribute)
-            {
-                *token_index_out = index;
-                return S8("GNU cleanup attributes are not supported");
-            }
-        }
         if (token.kind != C_TOKEN_IDENTIFIER || !string_equal(token.spelling, S8("case")))
         {
             continue;
@@ -27933,7 +28890,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilde
         return false;
     }
     c_ir_mark_local_read_only(builder, local);
-    return true;
+    return c_ir_activate_cleanup(builder, state->vla_entity, source);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
@@ -27978,7 +28935,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
             IrValueId value = builder->lower_machine.child_result.value;
             value = c_ir_decay_array(builder, value, builder->return_type, state->child_source);
             value = c_ir_emit_cast(builder, value, builder->return_type, state->child_source);
-            if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_terminate(builder, IR_OPCODE_RETURN, &value, 1, 0, 0, state->child_source))
+            if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_cleanup_calls(builder, tasks, task_count, C_SCOPE_ID_INVALID, UINT32_MAX, state->child_source) ||
+                !c_ir_terminate(builder, IR_OPCODE_RETURN, &value, 1, 0, 0, state->child_source))
             {
                 return false;
             }
@@ -28128,6 +29086,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                 .continue_block = task.continue_block,
             };
             c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
+            CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+                                                                                           : C_SCOPE_ID_INVALID;
+            CScopeId switch_scope = c_parse_scope_for_token(&builder->parse, root, state->switch_body_start);
+            CScopeId switch_break_scope = switch_scope.value < builder->parse.scope_count ? builder->parse.scopes[switch_scope.value].parent
+                                                                                             : C_SCOPE_ID_INVALID;
+            u32 switch_break_token = state->switch_body_close + 1;
+            if (switch_break_scope.value == C_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
             for (u32 case_index = state->switch_case_count; case_index != 0; case_index -= 1)
             {
                 u32 current = case_index - 1;
@@ -28140,6 +29108,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                     .break_block = merge,
                     .continue_block = task.continue_block,
                 };
+                tasks[task_count - 1].break_scope = switch_break_scope;
+                tasks[task_count - 1].continue_scope = task.continue_scope;
+                tasks[task_count - 1].break_token = switch_break_token;
+                tasks[task_count - 1].continue_token = task.continue_token;
                 tasks[task_count - 1].continue_checkpoint = task.continue_checkpoint;
                 tasks[task_count - 1].has_continue_checkpoint = task.has_continue_checkpoint;
             }
@@ -28165,6 +29137,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                 return false;
             }
             c_ir_mark_local_read_only(builder, state->child_local);
+            if (!c_ir_activate_cleanup(builder, state->child_local ? state->child_local->entity : C_ENTITY_ID_INVALID, state->child_source))
+            {
+                return false;
+            }
         }
     }
     while (task_count || state->has_current_task)
@@ -28511,6 +29487,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                     cases[case_count - 1].content_end = body_close;
                 }
                 state->switch_case_count = case_count;
+                state->switch_body_start = body_open + 1;
                 state->switch_body_close = body_close;
                 state->child_source = c_ir_source_range(first.location, first.spelling.length);
                 c_ir_lower_body_yield(builder, state, task, body_close + 1, C_IR_LOWER_BODY_CONTINUE_SWITCH,
@@ -28668,6 +29645,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                     .checkpoint_is_break = true,
                     .checkpoint_is_continue = true,
                 };
+                c_ir_body_task_set_loop_cleanup_targets(builder, &tasks[task_count - 1], index, index);
                 split = true;
                 break;
             }
@@ -28766,6 +29744,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                     .checkpoint_is_break = true,
                     .checkpoint_is_continue = true,
                 };
+                c_ir_body_task_set_loop_cleanup_targets(builder, &tasks[task_count - 1], index, separators[1] + 1);
                 tasks[task_count++] = (CIrBodyTask){
                     .kind = C_IR_BODY_TASK_CONDITION,
                     .start = separators[0] + 1,
@@ -28845,6 +29824,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                     .checkpoint_is_break = true,
                     .checkpoint_is_continue = true,
                 };
+                c_ir_body_task_set_loop_cleanup_targets(builder, &tasks[task_count - 1], index, index);
                 state->task_count = task_count;
                 state->continuation = C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK;
                 state->temporary_mark = builder->temporary_arena->position;
@@ -29032,7 +30012,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                     state->task_count = task_count;
                     return false;
                 }
-                if (!c_ir_terminate(builder, IR_OPCODE_RETURN, 0, 0, 0, 0, return_source))
+                if (!c_ir_emit_cleanup_calls(builder, tasks, task_count, C_SCOPE_ID_INVALID, UINT32_MAX, return_source) ||
+                    !c_ir_terminate(builder, IR_OPCODE_RETURN, 0, 0, 0, 0, return_source))
                 {
                     return false;
                 }
@@ -29046,8 +30027,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                     return false;
                 }
                 CIrLabel* label = c_ir_label_find(labels, label_count, builder->preprocess.tokens[index + 1].spelling);
-                if (!label || !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &label->block, 1,
-                                              c_ir_source_range(first.location, first.spelling.length)))
+                CScopeId label_scope = c_parse_scope_for_token(
+                    &builder->parse,
+                    builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+                                                                                   : C_SCOPE_ID_INVALID,
+                    label ? label->token_index : UINT32_MAX);
+                IrSourceRange goto_source = c_ir_source_range(first.location, first.spelling.length);
+                if (!label || !c_ir_emit_cleanup_calls(builder, tasks, task_count, label_scope, label->token_index, goto_source) ||
+                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &label->block, 1, goto_source))
                 {
                     return false;
                 }
@@ -29060,10 +30047,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                 IrBlockId target = is_break ? task.break_block : task.continue_block;
                 bool has_checkpoint = is_break ? task.has_break_checkpoint : task.has_continue_checkpoint;
                 IrValueId checkpoint = is_break ? task.break_checkpoint : task.continue_checkpoint;
+                IrSourceRange exit_source = c_ir_source_range(first.location, first.spelling.length);
+                CScopeId target_scope = C_SCOPE_ID_INVALID;
+                u32 target_token = UINT32_MAX;
+                bool cleanup_target_valid = !c_ir_has_cleanup_state(builder) ||
+                                            (c_ir_cleanup_target_for_task(builder, task, tasks, task_count, target, &target_scope, &target_token) &&
+                                             c_ir_emit_cleanup_calls(builder, tasks, task_count, target_scope, target_token, exit_source));
                 if (index + 1 != end || target.value == IR_ID_UNDERLYING_INVALID ||
-                    (has_checkpoint &&
-                     !c_ir_emit_stack_restore(builder, checkpoint, c_ir_source_range(first.location, first.spelling.length))) ||
-                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, c_ir_source_range(first.location, first.spelling.length)))
+                    !cleanup_target_valid ||
+                    (has_checkpoint && !c_ir_emit_stack_restore(builder, checkpoint, exit_source)) ||
+                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, exit_source))
                 {
                     return false;
                 }
@@ -29310,6 +30303,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                 }
                 if (local_extern && !static_storage)
                 {
+                    if (local_c_type->kind == C_TYPE_FUNCTION)
+                    {
+                        index = end == task.end ? task.end : end + 1;
+                        continue;
+                    }
                     u32 initializer_start = 0;
                     u32 initializer_end = 0;
                     if (c_ir_declaration_initializer_range(builder->preprocess,
@@ -29583,6 +30581,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                     }
                 }
                 c_ir_mark_local_read_only(builder, local);
+                if (!c_ir_activate_cleanup(builder, entity, c_ir_source_range(name.location, name.spelling.length)))
+                {
+                    return false;
+                }
                 index = end == task.end ? task.end : end + 1;
                 continue;
             }
@@ -29614,6 +30616,28 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
         {
             continue;
         }
+        CScopeId cleanup_scope = C_SCOPE_ID_INVALID;
+        u32 cleanup_token = UINT32_MAX;
+        bool cleanup_state = c_ir_has_cleanup_state(builder);
+        if (cleanup_state && task.continuation.value != IR_ID_UNDERLYING_INVALID)
+        {
+            if (!c_ir_cleanup_target_for_task(builder, task, tasks, task_count, task.continuation, &cleanup_scope, &cleanup_token))
+            {
+                return false;
+            }
+        }
+        else if (cleanup_state && statement_expression_mode)
+        {
+            CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+                                                                                            : C_SCOPE_ID_INVALID;
+            cleanup_token = task.end;
+            cleanup_scope = c_parse_scope_for_token(&builder->parse, root, cleanup_token);
+        }
+        if (cleanup_state && !c_ir_emit_cleanup_calls(builder, tasks, task_count, cleanup_scope, cleanup_token, declaration_source))
+        {
+            return false;
+        }
+        block = &builder->function->blocks[builder->current_block.value];
         if (task.restore_before_continuation && task.has_stack_checkpoint && !c_ir_emit_stack_restore(builder, task.stack_checkpoint, declaration_source))
         {
             return false;
@@ -32241,6 +33265,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     }
     u64 type_capacity = (u64)parse.type_count * 2 + parse.declaration_count + string_literal_count + C_TYPE_COUNT + 4;
     u64 symbol_capacity = (u64)parse.entity_count + parse.declaration_count + identifier_token_count + string_literal_count + 1;
+    u64 function_capacity = parse.declaration_count;
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        function_capacity += parse.entities[entity_index].kind == C_ENTITY_LOCAL && parse.entities[entity_index].has_cleanup;
+    }
     u64 query_frame_capacity = 16;
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
@@ -32252,7 +33281,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     {
         query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)parse.array_bounds[bound_index].token_count + 16);
     }
-    if (type_capacity > UINT32_MAX || symbol_capacity > UINT32_MAX || query_frame_capacity > UINT32_MAX)
+    if (type_capacity > UINT32_MAX || symbol_capacity > UINT32_MAX || function_capacity > UINT32_MAX || query_frame_capacity > UINT32_MAX)
     {
         return result;
     }
@@ -32281,6 +33310,44 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         program->data_layout = target_data_layout(target);
     }
     result.program = program;
+    u32 cleanup_offset_count = parse.declaration_count + 1;
+    u32* cleanup_counts = arena_allocate(arena, u32, cleanup_offset_count);
+    memset(cleanup_counts, 0, sizeof(*cleanup_counts) * cleanup_offset_count);
+    u32 cleanup_entity_count = 0;
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = &parse.entities[entity_index];
+        if (entity->kind == C_ENTITY_LOCAL && entity->has_cleanup && entity->declaration_index < parse.declaration_count)
+        {
+            cleanup_counts[entity->declaration_index] += 1;
+            cleanup_entity_count += 1;
+        }
+    }
+    u32* cleanup_offsets = arena_allocate(arena, u32, cleanup_offset_count);
+    cleanup_offsets[0] = 0;
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        cleanup_offsets[declaration_index + 1] = cleanup_offsets[declaration_index] + cleanup_counts[declaration_index];
+    }
+    u32* cleanup_positions = arena_allocate(arena, u32, cleanup_offset_count);
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        cleanup_positions[declaration_index] = cleanup_offsets[declaration_index];
+    }
+    CEntityId* cleanup_entities = arena_allocate(arena, CEntityId, cleanup_entity_count ? cleanup_entity_count : 1);
+    u32* cleanup_entity_entries = arena_allocate(arena, u32, parse.entity_count ? parse.entity_count : 1);
+    memset(cleanup_entity_entries, 0xff, sizeof(*cleanup_entity_entries) * (parse.entity_count ? parse.entity_count : 1));
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = &parse.entities[entity_index];
+        if (entity->kind != C_ENTITY_LOCAL || !entity->has_cleanup || entity->declaration_index >= parse.declaration_count)
+        {
+            continue;
+        }
+        u32 cleanup_index = cleanup_positions[entity->declaration_index]++;
+        cleanup_entities[cleanup_index] = (CEntityId){.value = entity_index};
+        cleanup_entity_entries[entity_index] = cleanup_index;
+    }
     CIrPointerTypeCache pointer_types = {
         .by_element = arena_allocate(arena, IrTypeId, program->types.capacity),
         .capacity = program->types.capacity,
@@ -32299,8 +33366,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     }
     IrModule* module = &program->modules[0];
     module->name = source_path;
-    module->functions = arena_allocate(arena, IrFunction, parse.declaration_count);
-    module->function_capacity = parse.declaration_count;
+    module->functions = arena_allocate(arena, IrFunction, function_capacity ? (u32)function_capacity : 1);
+    module->function_capacity = (u32)function_capacity;
     module->globals = arena_allocate(arena, IrGlobal, parse.declaration_count);
     module->global_capacity = parse.declaration_count;
     module->assemblies = arena_allocate(arena, IrModuleAssembly, parse.declaration_count);
@@ -32433,6 +33500,10 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     }
     IrFunction** declaration_functions = arena_allocate(arena, IrFunction*, parse.declaration_count);
     memset(declaration_functions, 0, sizeof(*declaration_functions) * parse.declaration_count);
+    IrFunction** cleanup_functions = arena_allocate(arena, IrFunction*, parse.entity_count ? parse.entity_count : 1);
+    memset(cleanup_functions, 0, sizeof(*cleanup_functions) * (parse.entity_count ? parse.entity_count : 1));
+    CIrSignature* cleanup_signatures = arena_allocate(arena, CIrSignature, parse.entity_count ? parse.entity_count : 1);
+    memset(cleanup_signatures, 0, sizeof(*cleanup_signatures) * (parse.entity_count ? parse.entity_count : 1));
     CIrFunctionNameIndex function_names = {0};
     if (!c_ir_build_function_name_index(arena, &parse, &function_names))
     {
@@ -32455,6 +33526,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         .token_entities = token_entities,
         .declaration_functions = declaration_functions,
         .entity_symbols = entity_symbols,
+        .cleanup_functions = cleanup_functions,
+        .cleanup_signatures = cleanup_signatures,
         .queries = &queries,
         .function_names = &function_names,
         .pointer_types = &pointer_types,
@@ -33341,8 +34414,15 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     memset(entity_function_declarations, 0xff, sizeof(*entity_function_declarations) * parse.entity_count);
     u32* function_dependency_heads = arena_allocate(arena, u32, parse.declaration_count);
     memset(function_dependency_heads, 0xff, sizeof(*function_dependency_heads) * parse.declaration_count);
-    u32* function_dependency_next = arena_allocate(arena, u32, parse.identifier_use_count);
-    u32* function_dependency_targets = arena_allocate(arena, u32, parse.identifier_use_count);
+    u64 function_dependency_capacity64 = (u64)parse.identifier_use_count + cleanup_entity_count;
+    if (function_dependency_capacity64 > UINT32_MAX)
+    {
+        scratch_end(temporary);
+        return result;
+    }
+    u32 function_dependency_capacity = (u32)function_dependency_capacity64;
+    u32* function_dependency_next = arena_allocate(arena, u32, function_dependency_capacity ? function_dependency_capacity : 1);
+    u32* function_dependency_targets = arena_allocate(arena, u32, function_dependency_capacity ? function_dependency_capacity : 1);
     u32 function_dependency_count = 0;
     u32* function_worklist = arena_allocate(arena, u32, parse.declaration_count);
     u32 function_worklist_count = 0;
@@ -33413,6 +34493,24 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             continue;
         }
         function_dependency_targets[function_dependency_count] = candidate_index;
+        function_dependency_next[function_dependency_count] = function_dependency_heads[owner_index];
+        function_dependency_heads[owner_index] = function_dependency_count++;
+    }
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        CEntity entity = parse.entities[entity_index];
+        if (entity.kind != C_ENTITY_LOCAL || !entity.has_cleanup || entity.declaration_index >= parse.declaration_count ||
+            parse.declarations[entity.declaration_index].kind != C_DECLARATION_FUNCTION)
+        {
+            continue;
+        }
+        u32 cleanup_declaration = c_ir_function_declaration_for_entity(&parse, entity.cleanup_function);
+        if (cleanup_declaration == UINT32_MAX || !parse.declarations[cleanup_declaration].is_definition)
+        {
+            continue;
+        }
+        u32 owner_index = entity.declaration_index;
+        function_dependency_targets[function_dependency_count] = cleanup_declaration;
         function_dependency_next[function_dependency_count] = function_dependency_heads[owner_index];
         function_dependency_heads[owner_index] = function_dependency_count++;
     }
@@ -33626,6 +34724,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .token_entities = token_entities,
             .declaration_functions = declaration_functions,
             .entity_symbols = entity_symbols,
+            .cleanup_functions = cleanup_functions,
+            .cleanup_signatures = cleanup_signatures,
             .queries = &queries,
             .lower_machine =
                 {
@@ -33655,6 +34755,13 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .declaration_index = declaration_index,
             .locals = arena_allocate(lowering_temporary.arena, CIntegerIrLocal, local_capacity ? (u32)local_capacity : 1),
             .local_capacity = local_capacity ? (u32)local_capacity : 1,
+            .cleanup_flags = cleanup_offsets[declaration_index + 1] != cleanup_offsets[declaration_index]
+                                 ? arena_allocate(lowering_temporary.arena, IrValueId, cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index])
+                                 : 0,
+            .cleanup_entities = cleanup_entities,
+            .cleanup_entity_entries = cleanup_entity_entries,
+            .cleanup_flag_base = cleanup_offsets[declaration_index],
+            .cleanup_flag_count = cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index],
             .prepared_calls = arena_allocate(lowering_temporary.arena, CIrPreparedCall, prepared_call_capacity ? (u32)prepared_call_capacity : 1),
             .prepared_call_indices = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
             .matching_delimiters = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
@@ -33724,7 +34831,12 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 }
             }
         }
-        if (!parameters_lowered || !delimiters_valid || !c_ir_lower_body(&builder, declaration, false, 0))
+        bool cleanup_flags_initialized = parameters_lowered && c_ir_initialize_cleanup_flags(&builder, declaration);
+        if (!cleanup_flags_initialized && !builder.failure_message.length)
+        {
+            builder.failure_message = S8("could not initialize cleanup state");
+        }
+        if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || !c_ir_lower_body(&builder, declaration, false, 0))
         {
             CSourceLocation failure_location = declaration.location;
             String8 failure_token = {0};

@@ -68,6 +68,7 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
     C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
     C_DIAGNOSTIC_INVALID_CONSTEXPR,
+    C_DIAGNOSTIC_INVALID_CLEANUP_ATTRIBUTE,
     C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
     C_DIAGNOSTIC_PREPROCESSOR_ERROR,
     C_DIAGNOSTIC_PREPROCESSOR_WARNING,
@@ -343,7 +344,12 @@ struct CEntity
     bool is_constexpr;
     bool has_constant_value;
     bool constant_is_negative;
+    bool has_cleanup;
+    bool cleanup_attribute_checked;
     u8 reserved[3];
+    CEntityId cleanup_function;
+    u32 cleanup_attribute_token;
+    u32 cleanup_attribute_end;
     u64 constant_value;
 };
 
