@@ -3291,8 +3291,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 {
                     assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, first.reg);
                 }
-                bool byte = instruction->width == 8;
-                bool increment = instruction->opcode == ASSEMBLY_OPCODE_X86_INC || instruction->opcode == ASSEMBLY_OPCODE_X86_DEC;
+                u8 byte = instruction->width == 8;
+                u8 increment = instruction->opcode == ASSEMBLY_OPCODE_X86_INC || instruction->opcode == ASSEMBLY_OPCODE_X86_DEC;
                 assembly_emit_byte(builder, increment ? (byte ? 0xfe : 0xff) : (byte ? 0xf6 : 0xf7));
                 u8 extension = instruction->opcode == ASSEMBLY_OPCODE_X86_INC   ? 0
                                : instruction->opcode == ASSEMBLY_OPCODE_X86_DEC ? 1
