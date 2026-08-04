@@ -3608,7 +3608,7 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
 
 // --- import_assembly_metadata -------------------------------------------
 // Explicit developer workflow. Normal builds consume only the checked-in
-// reduced metadata and never need an XED checkout or llvm-tblgen.
+// generated C metadata and never need an XED checkout or llvm-tblgen.
 
 typedef struct AssemblyImportPathNode AssemblyImportPathNode;
 struct AssemblyImportPathNode
@@ -3636,8 +3636,20 @@ struct XedImportRecord
     String8 category;
     String8 extension;
     String8 attributes;
+    String8 cpl;
+    String8 exceptions;
+    String8 flags;
+    String8 disasm;
+    String8 disasm_intel;
+    String8 disasm_attsv;
+    String8 real_opcode;
+    String8 uname;
+    String8 comment;
+    String8 version;
     String8 pattern;
     String8 operands;
+    String8 operand_annotation;
+    bool operands_present;
     XedImportRecord* next;
 };
 
@@ -3683,8 +3695,23 @@ BUSTER_GLOBAL_LOCAL void assembly_import_path_list_push(Arena* arena, AssemblyIm
     list->count += 1;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_import_collect_xed_paths(Arena* arena, String8 root, AssemblyImportPathList* files)
+BUSTER_GLOBAL_LOCAL bool assembly_import_collect_xed_config_paths(Arena* arena, String8 root, AssemblyImportPathList* files)
 {
+    bool root_valid = false;
+#if BUSTER_WINDOWS
+    String16 root_w = string16_from_string8(arena, root, true);
+    DWORD root_attributes = GetFileAttributesW(root_w.pointer);
+    root_valid = root_attributes != INVALID_FILE_ATTRIBUTES && (root_attributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                 !(root_attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+    struct stat root_status;
+    root_valid = lstat((const char*)root.pointer, &root_status) == 0 && S_ISDIR(root_status.st_mode) && !S_ISLNK(root_status.st_mode);
+#endif
+    if (!root_valid)
+    {
+        return false;
+    }
+
     AssemblyImportPathNode* pending = arena_allocate(arena, AssemblyImportPathNode, 1);
     *pending = (AssemblyImportPathNode){.full = string_duplicate_arena(arena, root, true), .relative = S8("")};
     bool result = true;
@@ -3716,16 +3743,18 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_collect_xed_paths(Arena* arena, String8
                 }
                 String8 full = path_join(arena, directory, name);
                 String8 relative = directory_node->relative.length ? path_join(arena, directory_node->relative, name) : string_duplicate_arena(arena, name, true);
+                if (find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+                {
+                    result = false;
+                    break;
+                }
                 if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
                 {
-                    if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-                    {
-                        AssemblyImportPathNode* node = arena_allocate(arena, AssemblyImportPathNode, 1);
-                        *node = (AssemblyImportPathNode){.full = full, .relative = relative, .next = pending};
-                        pending = node;
-                    }
+                    AssemblyImportPathNode* node = arena_allocate(arena, AssemblyImportPathNode, 1);
+                    *node = (AssemblyImportPathNode){.full = full, .relative = relative, .next = pending};
+                    pending = node;
                 }
-                else if (string_ends_with_sequence_insensitive(name, S8(".txt")))
+                else if (string_starts_with_sequence(name, S8("files")) && string_ends_with_sequence_insensitive(name, S8(".cfg")))
                 {
                     assembly_import_path_list_push(arena, files, full, relative);
                 }
@@ -3757,13 +3786,19 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_collect_xed_paths(Arena* arena, String8
                     result = false;
                     break;
                 }
-                if (S_ISDIR(status.st_mode) && !S_ISLNK(status.st_mode))
+                if (S_ISLNK(status.st_mode))
+                {
+                    result = false;
+                    break;
+                }
+                if (S_ISDIR(status.st_mode))
                 {
                     AssemblyImportPathNode* node = arena_allocate(arena, AssemblyImportPathNode, 1);
                     *node = (AssemblyImportPathNode){.full = full, .relative = relative, .next = pending};
                     pending = node;
                 }
-                else if (S_ISREG(status.st_mode) && string_ends_with_sequence_insensitive(name, S8(".txt")))
+                else if (S_ISREG(status.st_mode) && string_starts_with_sequence(name, S8("files")) &&
+                         string_ends_with_sequence_insensitive(name, S8(".cfg")))
                 {
                     assembly_import_path_list_push(arena, files, full, relative);
                 }
@@ -3788,6 +3823,176 @@ BUSTER_GLOBAL_LOCAL int assembly_import_path_compare(const void* left_pointer, c
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_import_path_list_contains(AssemblyImportPathList list, String8 relative)
+{
+    for (AssemblyImportPathNode* node = list.first; node; node = node->next)
+    {
+        if (string_equal(node->relative, relative))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_relative_path_is_safe(String8 path)
+{
+    if (!path.length || path_is_absolute(path) || path.pointer[0] == '/' || path.pointer[0] == '\\' ||
+        (path.length >= 2 && path.pointer[1] == ':'))
+    {
+        return false;
+    }
+    u64 start = 0;
+    for (u64 index = 0; index <= path.length; index += 1)
+    {
+        if (index == path.length || path_is_separator(path.pointer[index]) || path.pointer[index] == '/' || path.pointer[index] == '\\')
+        {
+            String8 component = string_slice(path, start, index);
+            if (string_equal(component, S8("..")) || string_equal(component, S8(".")))
+            {
+                return false;
+            }
+            start = index + 1;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_regular_file(Arena* arena, String8 path)
+{
+#if BUSTER_WINDOWS
+    String16 path_w = string16_from_string8(arena, path, true);
+    DWORD attributes = GetFileAttributesW(path_w.pointer);
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY) &&
+           !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+    struct stat status;
+    return lstat((const char*)path.pointer, &status) == 0 && S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode);
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_config_key_is_known(String8 key)
+{
+    static String8 const keys[] = {
+        S8_INITIALIZER("add"),
+        S8_INITIALIZER("add-source"),
+        S8_INITIALIZER("add-tests"),
+        S8_INITIALIZER("chip-models"),
+        S8_INITIALIZER("clear"),
+        S8_INITIALIZER("conversion-table"),
+        S8_INITIALIZER("cpuid"),
+        S8_INITIALIZER("dec-instructions"),
+        S8_INITIALIZER("dec-patterns"),
+        S8_INITIALIZER("dec-spine"),
+        S8_INITIALIZER("define"),
+        S8_INITIALIZER("element-type-base"),
+        S8_INITIALIZER("element-types"),
+        S8_INITIALIZER("enc-dec-patterns"),
+        S8_INITIALIZER("enc-instructions"),
+        S8_INITIALIZER("enc-patterns"),
+        S8_INITIALIZER("enc2-instructions"),
+        S8_INITIALIZER("errors"),
+        S8_INITIALIZER("extra-widths"),
+        S8_INITIALIZER("fields"),
+        S8_INITIALIZER("map-descriptions"),
+        S8_INITIALIZER("no-enc2-instructions"),
+        S8_INITIALIZER("pointer-names"),
+        S8_INITIALIZER("registers"),
+        S8_INITIALIZER("remove"),
+        S8_INITIALIZER("remove-source"),
+        S8_INITIALIZER("replace-source"),
+        S8_INITIALIZER("state"),
+        S8_INITIALIZER("widths"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(keys); index += 1)
+    {
+        if (string_equal(key, keys[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_config_parse(Arena* arena, String8 root, AssemblyImportPathNode* config,
+                                                       String8 text, AssemblyImportPathList* source_files, bool diagnostics)
+{
+    while (text.length)
+    {
+        u64 newline = string_first_code_unit(text, '\n');
+        u64 line_end = newline == BUSTER_STRING_NO_MATCH ? text.length : newline;
+        String8 line = assembly_import_trim(string_slice(text, 0, line_end));
+        text = newline == BUSTER_STRING_NO_MATCH ? (String8){0} : string_slice(text, line_end + 1, text.length);
+        if (!line.length || line.pointer[0] == '#')
+        {
+            continue;
+        }
+        u64 comment = string_first_code_unit(line, '#');
+        if (comment != BUSTER_STRING_NO_MATCH)
+        {
+            line = assembly_import_trim(string_slice(line, 0, comment));
+        }
+        if (!line.length)
+        {
+            continue;
+        }
+        u64 colon = string_first_code_unit(line, ':');
+        if (colon == BUSTER_STRING_NO_MATCH)
+        {
+            if (diagnostics)
+            {
+                string_print(S8("error: malformed XED config line in {S8}: {S8}\n"), config->relative, line);
+            }
+            return false;
+        }
+        String8 key = assembly_import_trim(string_slice(line, 0, colon));
+        String8 value = assembly_import_trim(string_slice(line, colon + 1, line.length));
+        if (!assembly_import_config_key_is_known(key) || !value.length)
+        {
+            if (diagnostics)
+            {
+                string_print(S8("error: unknown or empty XED config entry in {S8}: {S8}\n"), config->relative, line);
+            }
+            return false;
+        }
+        if (string_equal(key, S8("enc-instructions")))
+        {
+            if (string_first_code_unit(value, ':') != BUSTER_STRING_NO_MATCH || !assembly_import_relative_path_is_safe(value))
+            {
+                if (diagnostics)
+                {
+                    string_print(S8("error: unsafe XED enc-instructions path in {S8}: {S8}\n"), config->relative, value);
+                }
+                return false;
+            }
+            String8 parent = path_parent(arena, config->relative);
+            String8 relative = parent.length ? path_join(arena, parent, value) : string_duplicate_arena(arena, value, true);
+            String8 full = path_join(arena, root, relative);
+            if (!assembly_import_regular_file(arena, full))
+            {
+                if (diagnostics)
+                {
+                    string_print(S8("error: XED enc-instructions file is missing, non-regular, or linked: {S8}\n"), full);
+                }
+                return false;
+            }
+            if (assembly_import_path_list_contains(*source_files, relative))
+            {
+                if (diagnostics)
+                {
+                    string_print(S8("error: duplicate XED enc-instructions source in {S8}: {S8}\n"), config->relative, relative);
+                }
+                return false;
+            }
+            else
+            {
+                assembly_import_path_list_push(arena, source_files, full, relative);
+            }
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL void xed_import_record_push(Arena* arena, XedImportRecordList* list, XedImportRecord record)
 {
     XedImportRecord* node = arena_allocate(arena, XedImportRecord, 1);
@@ -3804,79 +4009,288 @@ BUSTER_GLOBAL_LOCAL void xed_import_record_push(Arena* arena, XedImportRecordLis
     list->count += 1;
 }
 
-BUSTER_GLOBAL_LOCAL void xed_import_record_field(XedImportRecord* record, String8 key, String8 value)
+BUSTER_GLOBAL_LOCAL bool xed_import_record_assign(String8* field, String8 value)
+{
+    if (field->length && !string_equal(*field, value))
+    {
+        return false;
+    }
+    *field = value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_record_field(XedImportRecord* record, String8 key, String8 value)
 {
     if (string_equal(key, S8("ICLASS")))
     {
-        record->iclass = value;
+        return xed_import_record_assign(&record->iclass, value);
     }
     else if (string_equal(key, S8("IFORM")))
     {
-        record->iform = value;
+        return xed_import_record_assign(&record->iform, value);
     }
     else if (string_equal(key, S8("ISA_SET")))
     {
-        record->isa_set = value;
+        return xed_import_record_assign(&record->isa_set, value);
     }
     else if (string_equal(key, S8("CATEGORY")))
     {
-        record->category = value;
+        return xed_import_record_assign(&record->category, value);
     }
     else if (string_equal(key, S8("EXTENSION")))
     {
-        record->extension = value;
+        return xed_import_record_assign(&record->extension, value);
     }
     else if (string_equal(key, S8("ATTRIBUTES")))
     {
-        record->attributes = value;
+        return xed_import_record_assign(&record->attributes, value);
+    }
+    else if (string_equal(key, S8("CPL")))
+    {
+        return xed_import_record_assign(&record->cpl, value);
+    }
+    else if (string_equal(key, S8("EXCEPTIONS")))
+    {
+        return xed_import_record_assign(&record->exceptions, value);
+    }
+    else if (string_equal(key, S8("FLAGS")))
+    {
+        return xed_import_record_assign(&record->flags, value);
+    }
+    else if (string_equal(key, S8("DISASM")))
+    {
+        return xed_import_record_assign(&record->disasm, value);
+    }
+    else if (string_equal(key, S8("DISASM_INTEL")))
+    {
+        return xed_import_record_assign(&record->disasm_intel, value);
+    }
+    else if (string_equal(key, S8("DISASM_ATTSV")))
+    {
+        return xed_import_record_assign(&record->disasm_attsv, value);
+    }
+    else if (string_equal(key, S8("REAL_OPCODE")))
+    {
+        return xed_import_record_assign(&record->real_opcode, value);
+    }
+    else if (string_equal(key, S8("UNAME")))
+    {
+        return xed_import_record_assign(&record->uname, value);
+    }
+    else if (string_equal(key, S8("COMMENT")))
+    {
+        return xed_import_record_assign(&record->comment, value);
+    }
+    else if (string_equal(key, S8("VERSION")))
+    {
+        return xed_import_record_assign(&record->version, value);
     }
     else if (string_equal(key, S8("PATTERN")))
     {
-        record->pattern = value;
+        return xed_import_record_assign(&record->pattern, value);
     }
     else if (string_equal(key, S8("OPERANDS")))
     {
+        if (record->operands_present && !string_equal(record->operands, value))
+        {
+            return false;
+        }
         record->operands = value;
+        record->operands_present = true;
     }
+    else
+    {
+        return false;
+    }
+    return true;
 }
 
-BUSTER_GLOBAL_LOCAL void xed_import_parse_file(Arena* arena, XedImportRecordList* records, String8 source, String8 text)
+BUSTER_GLOBAL_LOCAL bool xed_import_read_logical_line(Arena* arena, String8* text, String8* result)
+{
+    if (!text->length)
+    {
+        return false;
+    }
+    u64 newline = string_first_code_unit(*text, '\n');
+    u64 line_end = newline == BUSTER_STRING_NO_MATCH ? text->length : newline;
+    String8 line = assembly_import_trim(string_slice(*text, 0, line_end));
+    *text = newline == BUSTER_STRING_NO_MATCH ? (String8){0} : string_slice(*text, line_end + 1, text->length);
+    if (!line.length || line.pointer[line.length - 1] != '\\')
+    {
+        *result = line;
+        return true;
+    }
+
+    u64 output_start = arena_buffer_size(arena);
+    for (;;)
+    {
+        line = assembly_import_trim(string_slice(line, 0, line.length - 1));
+        arena_append_string8(arena, line);
+        if (!text->length)
+        {
+            return false;
+        }
+        arena_append_char8(arena, ' ');
+        newline = string_first_code_unit(*text, '\n');
+        line_end = newline == BUSTER_STRING_NO_MATCH ? text->length : newline;
+        line = assembly_import_trim(string_slice(*text, 0, line_end));
+        *text = newline == BUSTER_STRING_NO_MATCH ? (String8){0} : string_slice(*text, line_end + 1, text->length);
+        if (!line.length || line.pointer[line.length - 1] != '\\')
+        {
+            arena_append_string8(arena, line);
+            break;
+        }
+    }
+    *result = (String8){.pointer = (char8*)arena_buffer_start(arena) + output_start,
+                        .length = arena_buffer_size(arena) - output_start};
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_emit_pending(Arena* arena, XedImportRecordList* records, XedImportRecord record)
+{
+    if (!record.iclass.length || !record.pattern.length || !record.operands_present)
+    {
+        return false;
+    }
+    xed_import_record_push(arena, records, record);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_source_directive_known(String8 line)
+{
+    static String8 const directives[] = {
+        S8_INITIALIZER("INSTRUCTIONS()::"), S8_INITIALIZER("AVX_INSTRUCTIONS()::"),
+        S8_INITIALIZER("EVEX_INSTRUCTIONS()::"), S8_INITIALIZER("XOP_INSTRUCTIONS()::"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(directives); index += 1)
+    {
+        if (string_equal(line, directives[index]))
+        {
+            return true;
+        }
+    }
+    u64 colon = string_first_code_unit(line, ':');
+    if (colon == BUSTER_STRING_NO_MATCH || !string_equal(assembly_import_trim(string_slice(line, 0, colon)), S8("UDELETE")))
+    {
+        return false;
+    }
+    String8 value = assembly_import_trim(string_slice(line, colon + 1, line.length));
+    if (!value.length)
+    {
+        return false;
+    }
+    for (u64 index = 0; index < value.length; index += 1)
+    {
+        char8 c = value.pointer[index];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_parse_file(Arena* arena, XedImportRecordList* records, String8 source, String8 text)
 {
     XedImportRecord record = {.source = source};
     bool in_record = false;
     while (text.length)
     {
-        u64 newline = string_first_code_unit(text, '\n');
-        u64 line_end = newline == BUSTER_STRING_NO_MATCH ? text.length : newline;
-        String8 line = assembly_import_trim(string_slice(text, 0, line_end));
-        text = newline == BUSTER_STRING_NO_MATCH ? (String8){0} : string_slice(text, line_end + 1, text.length);
+        String8 line = {0};
+        if (!xed_import_read_logical_line(arena, &text, &line))
+        {
+            return false;
+        }
+        if (!line.length || line.pointer[0] == '#')
+        {
+            continue;
+        }
         if (string_equal(line, S8("{")))
         {
+            if (in_record)
+            {
+                return false;
+            }
             record = (XedImportRecord){.source = source};
             in_record = true;
             continue;
         }
         if (string_equal(line, S8("}")))
         {
-            if (in_record && record.iclass.length && record.pattern.length && record.operands.length)
+            if (!in_record || !record.iclass.length || !record.pattern.length || !record.operands_present)
             {
-                xed_import_record_push(arena, records, record);
+                return false;
             }
+            if (!xed_import_emit_pending(arena, records, record))
+            {
+                return false;
+            }
+            record.pattern = (String8){0};
+            record.operands = (String8){0};
+            record.operand_annotation = (String8){0};
+            record.operands_present = false;
+            record.iform = (String8){0};
             in_record = false;
             continue;
         }
-        if (!in_record || !line.length || line.pointer[0] == '#')
+        if (!in_record)
         {
-            continue;
+            if (xed_import_source_directive_known(line))
+            {
+                continue;
+            }
+            return false;
         }
         u64 colon = string_first_code_unit(line, ':');
-        if (colon != BUSTER_STRING_NO_MATCH)
+        if (colon == BUSTER_STRING_NO_MATCH)
         {
-            String8 key = assembly_import_trim(string_slice(line, 0, colon));
-            String8 value = assembly_import_trim(string_slice(line, colon + 1, line.length));
-            xed_import_record_field(&record, key, value);
+            return false;
+        }
+        String8 key = assembly_import_trim(string_slice(line, 0, colon));
+        String8 value = assembly_import_trim(string_slice(line, colon + 1, line.length));
+        if (string_equal(key, S8("PATTERN")) || string_equal(key, S8("OPERANDS")))
+        {
+            u64 comment = string_first_code_unit(value, '#');
+            if (comment != BUSTER_STRING_NO_MATCH)
+            {
+                String8 annotation = assembly_import_trim(string_slice(value, comment + 1, value.length));
+                if (string_equal(key, S8("OPERANDS")))
+                {
+                    record.operand_annotation = annotation;
+                }
+                value = assembly_import_trim(string_slice(value, 0, comment));
+            }
+        }
+        if (string_equal(key, S8("PATTERN")) && record.pattern.length)
+        {
+            if (!record.operands_present || !xed_import_emit_pending(arena, records, record))
+            {
+                return false;
+            }
+            record.pattern = (String8){0};
+            record.operands = (String8){0};
+            record.operand_annotation = (String8){0};
+            record.operands_present = false;
+            record.iform = (String8){0};
+        }
+        else if (string_equal(key, S8("IFORM")) && record.pattern.length && record.operands_present && record.iform.length)
+        {
+            if (!xed_import_emit_pending(arena, records, record))
+            {
+                return false;
+            }
+            record.pattern = (String8){0};
+            record.operands = (String8){0};
+            record.operand_annotation = (String8){0};
+            record.operands_present = false;
+            record.iform = (String8){0};
+        }
+        if (!xed_import_record_field(&record, key, value))
+        {
+            return false;
         }
     }
+    return !in_record;
 }
 
 BUSTER_GLOBAL_LOCAL void xed_import_emit_field(Arena* output, String8 key, String8 value, bool* first)
@@ -3885,6 +4299,18 @@ BUSTER_GLOBAL_LOCAL void xed_import_emit_field(Arena* output, String8 key, Strin
     {
         return;
     }
+    if (!*first)
+    {
+        arena_append_char8(output, ',');
+    }
+    *first = false;
+    arena_append_json_string(output, key);
+    arena_append_char8(output, ':');
+    arena_append_json_string(output, value);
+}
+
+BUSTER_GLOBAL_LOCAL void xed_import_emit_field_present(Arena* output, String8 key, String8 value, bool* first)
+{
     if (!*first)
     {
         arena_append_char8(output, ',');
@@ -3908,10 +4334,2141 @@ BUSTER_GLOBAL_LOCAL void xed_import_emit(Arena* output, XedImportRecordList reco
         xed_import_emit_field(output, S8("category"), record->category, &first);
         xed_import_emit_field(output, S8("extension"), record->extension, &first);
         xed_import_emit_field(output, S8("attributes"), record->attributes, &first);
+        xed_import_emit_field(output, S8("cpl"), record->cpl, &first);
+        xed_import_emit_field(output, S8("exceptions"), record->exceptions, &first);
+        xed_import_emit_field(output, S8("flags"), record->flags, &first);
+        xed_import_emit_field(output, S8("disasm"), record->disasm, &first);
+        xed_import_emit_field(output, S8("disasm_intel"), record->disasm_intel, &first);
+        xed_import_emit_field(output, S8("disasm_attsv"), record->disasm_attsv, &first);
+        xed_import_emit_field(output, S8("real_opcode"), record->real_opcode, &first);
+        xed_import_emit_field(output, S8("uname"), record->uname, &first);
+        xed_import_emit_field(output, S8("comment"), record->comment, &first);
+        xed_import_emit_field(output, S8("version"), record->version, &first);
         xed_import_emit_field(output, S8("pattern"), record->pattern, &first);
-        xed_import_emit_field(output, S8("operands"), record->operands, &first);
+        if (record->operands_present)
+        {
+            xed_import_emit_field_present(output, S8("operands"), record->operands, &first);
+            xed_import_emit_field(output, S8("operand_annotation"), record->operand_annotation, &first);
+        }
         arena_append_string8(output, S8("}\n"));
     }
+}
+
+typedef enum XedGeneratedCoverageClass
+{
+    XED_GENERATED_COVERAGE_DIRECT,
+    XED_GENERATED_COVERAGE_NORMALIZED,
+    XED_GENERATED_COVERAGE_NOT64,
+    XED_GENERATED_COVERAGE_PRIVILEGED,
+    XED_GENERATED_COVERAGE_RESERVED,
+    XED_GENERATED_COVERAGE_UNSUPPORTED_TOKEN,
+    XED_GENERATED_COVERAGE_UNCLASSIFIED,
+    XED_GENERATED_COVERAGE_COUNT,
+} XedGeneratedCoverageClass;
+
+typedef enum XedGeneratedPrefixKind
+{
+    XED_GENERATED_PREFIX_LEGACY,
+    XED_GENERATED_PREFIX_REX,
+    XED_GENERATED_PREFIX_REX2,
+    XED_GENERATED_PREFIX_VEX,
+    XED_GENERATED_PREFIX_XOP,
+    XED_GENERATED_PREFIX_EVEX,
+    XED_GENERATED_PREFIX_COUNT,
+} XedGeneratedPrefixKind;
+
+typedef enum XedGeneratedMap
+{
+    XED_GENERATED_MAP_LEGACY,
+    XED_GENERATED_MAP_0F,
+    XED_GENERATED_MAP_0F38,
+    XED_GENERATED_MAP_0F3A,
+    XED_GENERATED_MAP_4,
+    XED_GENERATED_MAP_5,
+    XED_GENERATED_MAP_6,
+    XED_GENERATED_MAP_7,
+    XED_GENERATED_MAP_X8,
+    XED_GENERATED_MAP_X9,
+    XED_GENERATED_MAP_XA,
+    XED_GENERATED_MAP_COUNT,
+} XedGeneratedMap;
+
+enum
+{
+    XED_GENERATED_FIELD_MODRM = 1u << 0,
+    XED_GENERATED_FIELD_SIB = 1u << 1,
+    XED_GENERATED_FIELD_VSIB = 1u << 2,
+    XED_GENERATED_FIELD_MEMORY = 1u << 3,
+    XED_GENERATED_FIELD_REGISTER = 1u << 4,
+    XED_GENERATED_FIELD_DISPLACEMENT = 1u << 5,
+    XED_GENERATED_FIELD_IMMEDIATE = 1u << 6,
+    XED_GENERATED_FIELD_RELATIVE = 1u << 7,
+    XED_GENERATED_FIELD_FIELD_END = 1u << 8,
+};
+
+enum
+{
+    XED_GENERATED_DECORATOR_MASK = 1u << 0,
+    XED_GENERATED_DECORATOR_ZEROING = 1u << 1,
+    XED_GENERATED_DECORATOR_BROADCAST = 1u << 2,
+    XED_GENERATED_DECORATOR_ROUNDING = 1u << 3,
+    XED_GENERATED_DECORATOR_SAE = 1u << 4,
+};
+
+enum
+{
+    XED_GENERATED_APX = 1u << 0,
+    XED_GENERATED_APX_ND = 1u << 1,
+    XED_GENERATED_APX_NF = 1u << 2,
+    XED_GENERATED_APX_NDD = 1u << 3,
+    XED_GENERATED_APX_SCC = 1u << 4,
+    XED_GENERATED_APX_EGPR = 1u << 5,
+};
+
+enum
+{
+    XED_GENERATED_MODE_16 = 1u << 0,
+    XED_GENERATED_MODE_32 = 1u << 1,
+    XED_GENERATED_MODE_64 = 1u << 2,
+    XED_GENERATED_MODE_NOT64 = 1u << 3,
+    XED_GENERATED_MODE_EA16 = 1u << 4,
+    XED_GENERATED_MODE_EA32 = 1u << 5,
+    XED_GENERATED_MODE_EA64 = 1u << 6,
+    XED_GENERATED_MODE_EANOT16 = 1u << 7,
+};
+
+enum
+{
+    XED_GENERATED_OPERAND_NONE,
+    XED_GENERATED_OPERAND_REGISTER,
+    XED_GENERATED_OPERAND_MEMORY,
+    XED_GENERATED_OPERAND_IMMEDIATE,
+    XED_GENERATED_OPERAND_RELATIVE,
+    XED_GENERATED_OPERAND_ABSOLUTE,
+    XED_GENERATED_OPERAND_BASE,
+    XED_GENERATED_OPERAND_SEGMENT,
+    XED_GENERATED_OPERAND_ADDRESS_GENERATOR,
+    XED_GENERATED_OPERAND_PSEUDO,
+};
+
+enum
+{
+    XED_GENERATED_ACCESS_READ = 1u << 0,
+    XED_GENERATED_ACCESS_WRITE = 1u << 1,
+    XED_GENERATED_ACCESS_COND = 1u << 2,
+    XED_GENERATED_ACCESS_SUPPRESSED = 1u << 3,
+    XED_GENERATED_ACCESS_IMPLICIT = 1u << 4,
+};
+
+enum
+{
+    XED_GENERATED_FIELD_SOURCE_NONE,
+    XED_GENERATED_FIELD_SOURCE_REG,
+    XED_GENERATED_FIELD_SOURCE_RM,
+    XED_GENERATED_FIELD_SOURCE_VVVV,
+    XED_GENERATED_FIELD_SOURCE_MASK,
+    XED_GENERATED_FIELD_SOURCE_FIXED,
+    XED_GENERATED_FIELD_SOURCE_IMMEDIATE,
+    XED_GENERATED_FIELD_SOURCE_RELATIVE,
+};
+
+enum
+{
+    XED_GENERATED_REASON_NONE,
+    XED_GENERATED_REASON_MODE_NOT64,
+    XED_GENERATED_REASON_CPL0,
+    XED_GENERATED_REASON_UNKNOWN_PATTERN_TOKEN,
+    XED_GENERATED_REASON_UNKNOWN_OPERAND_TOKEN,
+    XED_GENERATED_REASON_COUNT,
+};
+
+enum
+{
+    XED_GENERATED_TUPLE_NONE,
+    XED_GENERATED_TUPLE_FULL,
+    XED_GENERATED_TUPLE_HALF,
+    XED_GENERATED_TUPLE_QUARTER,
+    XED_GENERATED_TUPLE_EIGHTH,
+    XED_GENERATED_TUPLE_SCALAR,
+    XED_GENERATED_TUPLE_TUPLE1,
+    XED_GENERATED_TUPLE_TUPLE1_4X,
+    XED_GENERATED_TUPLE_TUPLE1_BYTE,
+    XED_GENERATED_TUPLE_TUPLE1_WORD,
+    XED_GENERATED_TUPLE_TUPLE2,
+    XED_GENERATED_TUPLE_TUPLE4,
+    XED_GENERATED_TUPLE_TUPLE8,
+};
+
+enum
+{
+    XED_GENERATED_AMX_TILE_REGISTER = 1u << 0,
+    XED_GENERATED_AMX_TILE_MEMORY = 1u << 1,
+    XED_GENERATED_AMX_TILE_ROW = 1u << 2,
+    XED_GENERATED_AMX_TILE_COLUMN = 1u << 3,
+};
+
+enum
+{
+    XED_GENERATED_TEST_SCHEMA,
+    XED_GENERATED_TEST_PRIVILEGED_SCHEMA,
+    XED_GENERATED_TEST_NOT64_SCHEMA,
+};
+
+#define XED_GENERATED_MAX_OPERANDS 16
+#define XED_GENERATED_MAX_FIXED_BYTES 16
+
+typedef struct XedGeneratedOperand XedGeneratedOperand;
+struct XedGeneratedOperand
+{
+    String8 atom;
+    String8 width;
+    u8 slot;
+    u8 visible;
+    u8 kind;
+    u8 access;
+    u8 field_source;
+    u8 reserved[3];
+};
+
+typedef struct XedGeneratedForm XedGeneratedForm;
+struct XedGeneratedForm
+{
+    XedImportRecord* record;
+    u64 stable_hash;
+    u32 operand_count;
+    XedGeneratedOperand operands[XED_GENERATED_MAX_OPERANDS];
+    u8 coverage_class;
+    u8 encoder_family;
+    u8 test_class;
+    u8 prefix_kind;
+    u8 map;
+    u8 fixed_byte_count;
+    u8 fixed_bytes[XED_GENERATED_MAX_FIXED_BYTES];
+    u8 mandatory_prefix;
+    u8 reserved0;
+    u16 field_flags;
+    u16 decorator_flags;
+    u16 apx_flags;
+    u16 amx_flags;
+    u16 mode_flags;
+    u8 displacement_width;
+    u8 displacement_scale;
+    u8 immediate_width;
+    u8 immediate_signed;
+    u8 relocation_base;
+    u8 reserved1[3];
+    u8 tuple_kind;
+    String8 tuple_rule;
+    String8 element_size;
+    String8 unsupported_token;
+    u32 token_count;
+    u16 reason_id;
+    u16 reserved2;
+};
+
+typedef struct XedGeneratedFormList XedGeneratedFormList;
+struct XedGeneratedFormList
+{
+    XedGeneratedForm* pointer;
+    u64 length;
+};
+
+BUSTER_GLOBAL_LOCAL bool xed_import_string_in_array(String8 value, String8 const* values, u32 count)
+{
+    for (u32 index = 0; index < count; index += 1)
+    {
+        if (string_equal(value, values[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_parse_integer(String8 string, u64* result)
+{
+    if (!string.length)
+    {
+        return false;
+    }
+    u64 base = 10;
+    u64 index = 0;
+    if (string.length >= 2 && string.pointer[0] == '0' && (string.pointer[1] == 'x' || string.pointer[1] == 'X'))
+    {
+        base = 16;
+        index = 2;
+    }
+    else if (string.length >= 2 && string.pointer[0] == '0' && (string.pointer[1] == 'b' || string.pointer[1] == 'B'))
+    {
+        base = 2;
+        index = 2;
+    }
+    if (index == string.length)
+    {
+        return false;
+    }
+    u64 value = 0;
+    bool digit_seen = false;
+    for (; index < string.length; index += 1)
+    {
+        char8 c = string.pointer[index];
+        if (c == '_')
+        {
+            continue;
+        }
+        u64 digit = UINT64_MAX;
+        if (c >= '0' && c <= '9')
+        {
+            digit = (u64)(c - '0');
+        }
+        else if (c >= 'a' && c <= 'f')
+        {
+            digit = (u64)(c - 'a' + 10);
+        }
+        else if (c >= 'A' && c <= 'F')
+        {
+            digit = (u64)(c - 'A' + 10);
+        }
+        if (digit >= base)
+        {
+            return false;
+        }
+        if (value > (UINT64_MAX - digit) / base)
+        {
+            return false;
+        }
+        value = value * base + digit;
+        digit_seen = true;
+    }
+    *result = value;
+    return digit_seen;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_token_name_is_identifier(String8 token, String8 wanted)
+{
+    return string_equal(token, wanted);
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_pattern_bracket_token_known(String8 token)
+{
+    u64 open = string_first_code_unit(token, '[');
+    if (open == BUSTER_STRING_NO_MATCH || token.length < open + 3 || token.pointer[token.length - 1] != ']')
+    {
+        return false;
+    }
+    String8 base = string_slice(token, 0, open);
+    String8 value = string_slice(token, open + 1, token.length - 1);
+    static String8 const bases[] = {S8_INITIALIZER("MOD"), S8_INITIALIZER("REG"), S8_INITIALIZER("RM"), S8_INITIALIZER("SRM")};
+    if (!xed_import_string_in_array(base, bases, BUSTER_ARRAY_LENGTH(bases)))
+    {
+        return false;
+    }
+    if (string_equal(value, S8("mm")) || string_equal(value, S8("rrr")) || string_equal(value, S8("nnn")) ||
+        string_equal(value, S8("1-7")))
+    {
+        return true;
+    }
+    u64 numeric = 0;
+    return xed_import_parse_integer(value, &numeric) && numeric < 8;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_pattern_function_known(String8 token)
+{
+    if (token.length < 3 || token.pointer[token.length - 1] != ')')
+    {
+        return false;
+    }
+    u64 open = string_first_code_unit(token, '(');
+    if (open == BUSTER_STRING_NO_MATCH || open + 1 != token.length - 1)
+    {
+        return false;
+    }
+    String8 name = string_slice(token, 0, open);
+    static String8 const exact[] = {
+        S8_INITIALIZER("AVX512_ROUND"), S8_INITIALIZER("BRANCH_HINT"), S8_INITIALIZER("BRDISP32"),
+        S8_INITIALIZER("BRDISP64"), S8_INITIALIZER("BRDISP8"), S8_INITIALIZER("BRDISPz"),
+        S8_INITIALIZER("CET_NO_TRACK"), S8_INITIALIZER("CR_WIDTH"), S8_INITIALIZER("DF64"),
+        S8_INITIALIZER("EVAPX"), S8_INITIALIZER("EVAPX_SCC"), S8_INITIALIZER("EVEXR4_ONE"),
+        S8_INITIALIZER("FIX_ROUND_LEN128"), S8_INITIALIZER("FIX_ROUND_LEN512"), S8_INITIALIZER("FORCE64"),
+        S8_INITIALIZER("IGNORE66"), S8_INITIALIZER("IMMUNE66"), S8_INITIALIZER("IMMUNE66_LOOP64"),
+        S8_INITIALIZER("IMMUNE_REXW"), S8_INITIALIZER("MEMDISPv"), S8_INITIALIZER("MODRM"),
+        S8_INITIALIZER("NELEM_EIGHTHMEM"), S8_INITIALIZER("NELEM_FULL"), S8_INITIALIZER("NELEM_FULLMEM"),
+        S8_INITIALIZER("NELEM_HALF"), S8_INITIALIZER("NELEM_HALFMEM"), S8_INITIALIZER("NELEM_MEM128"),
+        S8_INITIALIZER("NELEM_MOVDDUP"), S8_INITIALIZER("NELEM_ONE"), S8_INITIALIZER("NELEM_QUARTER"),
+        S8_INITIALIZER("NELEM_QUARTERMEM"), S8_INITIALIZER("NELEM_TUPLE1_4X"), S8_INITIALIZER("NELEM_TUPLE2"),
+        S8_INITIALIZER("NELEM_TUPLE4"), S8_INITIALIZER("NELEM_TUPLE8"), S8_INITIALIZER("ONE"),
+        S8_INITIALIZER("OVERRIDE_SEG0"), S8_INITIALIZER("OVERRIDE_SEG1"), S8_INITIALIZER("REMOVE_SEGMENT"),
+        S8_INITIALIZER("REFINING66"), S8_INITIALIZER("SAE"), S8_INITIALIZER("SE_IMM8"), S8_INITIALIZER("SIMM8"), S8_INITIALIZER("SIMMz"),
+        S8_INITIALIZER("UIMM16"), S8_INITIALIZER("UIMM32"), S8_INITIALIZER("UIMM8"), S8_INITIALIZER("UIMM8_1"),
+        S8_INITIALIZER("UIMMv"), S8_INITIALIZER("ZEROING"),
+    };
+    if (xed_import_string_in_array(name, exact, BUSTER_ARRAY_LENGTH(exact)))
+    {
+        return true;
+    }
+    if (string_starts_with_sequence(name, S8("ESIZE_")) || string_starts_with_sequence(name, S8("UISA_VMODRM_")) ||
+        string_starts_with_sequence(name, S8("VMODRM_")))
+    {
+        return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_pattern_assignment_known(String8 token)
+{
+    u64 equals = string_first_code_unit(token, '=');
+    if (equals == BUSTER_STRING_NO_MATCH || equals == 0 || equals + 1 == token.length)
+    {
+        return false;
+    }
+    bool not_equal = equals && token.pointer[equals - 1] == '!';
+    String8 key = string_slice(token, 0, not_equal ? equals - 1 : equals);
+    static String8 const keys[] = {
+        S8_INITIALIZER("BCRC"), S8_INITIALIZER("CET"), S8_INITIALIZER("CLDEMOTE"), S8_INITIALIZER("IBHF"), S8_INITIALIZER("LZCNT"),
+        S8_INITIALIZER("MASK"), S8_INITIALIZER("MOD"), S8_INITIALIZER("MODEP5"), S8_INITIALIZER("MODE_SHORT_UD0"), S8_INITIALIZER("MPXMODE"),
+        S8_INITIALIZER("ND"), S8_INITIALIZER("NF"), S8_INITIALIZER("P4"), S8_INITIALIZER("PREFETCHIT"), S8_INITIALIZER("PREFETCHRST"),
+        S8_INITIALIZER("REP"), S8_INITIALIZER("RM"), S8_INITIALIZER("SRM"), S8_INITIALIZER("TZCNT"),
+        S8_INITIALIZER("UBIT"), S8_INITIALIZER("WBNOINVD"), S8_INITIALIZER("ZEROING"),
+    };
+    if (!xed_import_string_in_array(key, keys, BUSTER_ARRAY_LENGTH(keys)))
+    {
+        return false;
+    }
+    u64 value = 0;
+    return xed_import_parse_integer(string_slice(token, equals + 1, token.length), &value);
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_pattern_word_known(String8 token)
+{
+    static String8 const words[] = {
+        S8_INITIALIZER("66_prefix"), S8_INITIALIZER("ENCDELETE"), S8_INITIALIZER("EVV"), S8_INITIALIZER("VNP"),
+        S8_INITIALIZER("VV1"), S8_INITIALIZER("XOPV"), S8_INITIALIZER("V0F"), S8_INITIALIZER("V0F38"),
+        S8_INITIALIZER("V0F3A"), S8_INITIALIZER("MAP4"), S8_INITIALIZER("MAP5"), S8_INITIALIZER("MAP6"),
+        S8_INITIALIZER("MAP7"), S8_INITIALIZER("XMAP8"), S8_INITIALIZER("XMAP9"), S8_INITIALIZER("XMAPA"),
+        S8_INITIALIZER("V66"), S8_INITIALIZER("VF2"), S8_INITIALIZER("VF3"), S8_INITIALIZER("NOEVSR"),
+        S8_INITIALIZER("NOVSR"), S8_INITIALIZER("NO_SCC_NF0"), S8_INITIALIZER("NO_SCC_NF1"),
+        S8_INITIALIZER("SCC0"), S8_INITIALIZER("SCC1"), S8_INITIALIZER("SCC2"), S8_INITIALIZER("SCC3"),
+        S8_INITIALIZER("SCC4"), S8_INITIALIZER("SCC5"), S8_INITIALIZER("SCC6"), S8_INITIALIZER("SCC7"),
+        S8_INITIALIZER("SCC8"), S8_INITIALIZER("SCC9"), S8_INITIALIZER("SCC10"), S8_INITIALIZER("SCC11"),
+        S8_INITIALIZER("SCC12"), S8_INITIALIZER("SCC13"), S8_INITIALIZER("SCC14"), S8_INITIALIZER("SCC15"),
+        S8_INITIALIZER("SIB"), S8_INITIALIZER("SE_IMM8"), S8_INITIALIZER("VL128"), S8_INITIALIZER("VL256"),
+        S8_INITIALIZER("VL512"), S8_INITIALIZER("W0"), S8_INITIALIZER("W1"), S8_INITIALIZER("eamode16"),
+        S8_INITIALIZER("eamode32"), S8_INITIALIZER("eamode64"), S8_INITIALIZER("eanot16"), S8_INITIALIZER("mode16"),
+        S8_INITIALIZER("mode32"), S8_INITIALIZER("mode64"), S8_INITIALIZER("lock_prefix"),
+        S8_INITIALIZER("no66_prefix"), S8_INITIALIZER("no67_prefix"), S8_INITIALIZER("not16"),
+        S8_INITIALIZER("no_refining_prefix"), S8_INITIALIZER("nolock_prefix"), S8_INITIALIZER("norep"),
+        S8_INITIALIZER("norex2_prefix"), S8_INITIALIZER("norexb_prefix"), S8_INITIALIZER("norexb4_prefix"), S8_INITIALIZER("norexr_prefix"),
+        S8_INITIALIZER("norexr_r4"), S8_INITIALIZER("norexw_prefix"), S8_INITIALIZER("not64"),
+        S8_INITIALIZER("not_refining"), S8_INITIALIZER("not_refining_f3"), S8_INITIALIZER("osz_refining_prefix"),
+        S8_INITIALIZER("repeating_prefix"), S8_INITIALIZER("refining_f3"), S8_INITIALIZER("repe"), S8_INITIALIZER("rexb_prefix"),
+        S8_INITIALIZER("repne"), S8_INITIALIZER("rexb4_prefix"), S8_INITIALIZER("rex2_refining_prefix"),
+        S8_INITIALIZER("rexw_prefix"), S8_INITIALIZER("f2_refining_prefix"), S8_INITIALIZER("f3_refining_prefix"),
+        S8_INITIALIZER("not_refining_f3"),
+    };
+    if (xed_import_string_in_array(token, words, BUSTER_ARRAY_LENGTH(words)))
+    {
+        return true;
+    }
+    if ((string_starts_with_sequence(token, S8("SCC")) && token.length > 3) ||
+        (string_starts_with_sequence(token, S8("VL")) && token.length > 2))
+    {
+        u64 value = 0;
+        return xed_import_parse_integer(string_slice(token, string_starts_with_sequence(token, S8("SCC")) ? 3 : 2, token.length), &value);
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_pattern_token_known(String8 token)
+{
+    u64 numeric = 0;
+    if (xed_import_parse_integer(token, &numeric))
+    {
+        return true;
+    }
+    return xed_import_pattern_bracket_token_known(token) || xed_import_pattern_function_known(token) ||
+           xed_import_pattern_assignment_known(token) || xed_import_pattern_word_known(token);
+}
+
+BUSTER_GLOBAL_LOCAL u8 xed_import_tuple_kind(String8 name)
+{
+    if (string_equal(name, S8("NELEM_FULL")) || string_equal(name, S8("NELEM_FULLMEM")) ||
+        string_equal(name, S8("NELEM_MEM128")))
+    {
+        return XED_GENERATED_TUPLE_FULL;
+    }
+    if (string_equal(name, S8("NELEM_HALF")) || string_equal(name, S8("NELEM_HALFMEM")))
+    {
+        return XED_GENERATED_TUPLE_HALF;
+    }
+    if (string_equal(name, S8("NELEM_QUARTER")) || string_equal(name, S8("NELEM_QUARTERMEM")))
+    {
+        return XED_GENERATED_TUPLE_QUARTER;
+    }
+    if (string_equal(name, S8("NELEM_EIGHTHMEM")))
+    {
+        return XED_GENERATED_TUPLE_EIGHTH;
+    }
+    if (string_equal(name, S8("NELEM_ONE")) || string_equal(name, S8("NELEM_MOVDDUP")))
+    {
+        return XED_GENERATED_TUPLE_SCALAR;
+    }
+    if (string_equal(name, S8("NELEM_TUPLE1_4X")))
+    {
+        return XED_GENERATED_TUPLE_TUPLE1_4X;
+    }
+    if (string_equal(name, S8("NELEM_TUPLE1")))
+    {
+        return XED_GENERATED_TUPLE_TUPLE1;
+    }
+    if (string_equal(name, S8("NELEM_TUPLE1_BYTE")))
+    {
+        return XED_GENERATED_TUPLE_TUPLE1_BYTE;
+    }
+    if (string_equal(name, S8("NELEM_TUPLE1_WORD")))
+    {
+        return XED_GENERATED_TUPLE_TUPLE1_WORD;
+    }
+    if (string_equal(name, S8("NELEM_TUPLE2")))
+    {
+        return XED_GENERATED_TUPLE_TUPLE2;
+    }
+    if (string_equal(name, S8("NELEM_TUPLE4")))
+    {
+        return XED_GENERATED_TUPLE_TUPLE4;
+    }
+    if (string_equal(name, S8("NELEM_TUPLE8")))
+    {
+        return XED_GENERATED_TUPLE_TUPLE8;
+    }
+    return XED_GENERATED_TUPLE_NONE;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_attribute_contains(String8 attributes, String8 wanted);
+
+BUSTER_GLOBAL_LOCAL u8 xed_import_attribute_tuple_kind(String8 attributes)
+{
+    static String8 const names[] = {
+        S8_INITIALIZER("DISP8_FULL"), S8_INITIALIZER("DISP8_FULLMEM"), S8_INITIALIZER("DISP8_HALF"),
+        S8_INITIALIZER("DISP8_HALFMEM"), S8_INITIALIZER("DISP8_QUARTER"), S8_INITIALIZER("DISP8_QUARTERMEM"),
+        S8_INITIALIZER("DISP8_EIGHTHMEM"), S8_INITIALIZER("DISP8_SCALAR"), S8_INITIALIZER("DISP8_MOVDDUP"),
+        S8_INITIALIZER("DISP8_TUPLE1"), S8_INITIALIZER("DISP8_TUPLE1_4X"), S8_INITIALIZER("DISP8_TUPLE1_BYTE"),
+        S8_INITIALIZER("DISP8_TUPLE1_WORD"), S8_INITIALIZER("DISP8_TUPLE2"), S8_INITIALIZER("DISP8_TUPLE4"),
+        S8_INITIALIZER("DISP8_TUPLE8"),
+    };
+    static u8 const kinds[] = {
+        XED_GENERATED_TUPLE_FULL, XED_GENERATED_TUPLE_FULL, XED_GENERATED_TUPLE_HALF, XED_GENERATED_TUPLE_HALF,
+        XED_GENERATED_TUPLE_QUARTER, XED_GENERATED_TUPLE_QUARTER, XED_GENERATED_TUPLE_EIGHTH,
+        XED_GENERATED_TUPLE_SCALAR, XED_GENERATED_TUPLE_SCALAR, XED_GENERATED_TUPLE_TUPLE1,
+        XED_GENERATED_TUPLE_TUPLE1_4X, XED_GENERATED_TUPLE_TUPLE1_BYTE, XED_GENERATED_TUPLE_TUPLE1_WORD,
+        XED_GENERATED_TUPLE_TUPLE2, XED_GENERATED_TUPLE_TUPLE4, XED_GENERATED_TUPLE_TUPLE8,
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        if (xed_import_attribute_contains(attributes, names[index]))
+        {
+            return kinds[index];
+        }
+    }
+    return XED_GENERATED_TUPLE_NONE;
+}
+
+BUSTER_GLOBAL_LOCAL void xed_import_pattern_summary_token(XedGeneratedForm* form, String8 token)
+{
+    u64 numeric = 0;
+    if (xed_import_parse_integer(token, &numeric))
+    {
+        if (token.length >= 2 && token.pointer[0] == '0' && (token.pointer[1] == 'x' || token.pointer[1] == 'X') &&
+            form->fixed_byte_count < XED_GENERATED_MAX_FIXED_BYTES && numeric <= 0xff)
+        {
+            form->fixed_bytes[form->fixed_byte_count++] = (u8)numeric;
+        }
+        return;
+    }
+
+    if (xed_import_pattern_bracket_token_known(token))
+    {
+        form->field_flags |= XED_GENERATED_FIELD_MODRM;
+        u64 open = string_first_code_unit(token, '[');
+        String8 base = string_slice(token, 0, open);
+        String8 value = string_slice(token, open + 1, token.length - 1);
+        if (string_equal(base, S8("MOD")) && string_equal(value, S8("mm")))
+        {
+            form->field_flags |= XED_GENERATED_FIELD_MEMORY;
+        }
+        if (string_equal(base, S8("MOD")) && string_equal(value, S8("0b11")))
+        {
+            form->field_flags |= XED_GENERATED_FIELD_REGISTER;
+        }
+        return;
+    }
+
+    if (xed_import_pattern_assignment_known(token))
+    {
+        u64 equals = string_first_code_unit(token, '=');
+        String8 key = string_slice(token, 0, equals);
+        if (key.length && key.pointer[key.length - 1] == '!')
+        {
+            key = string_slice(key, 0, key.length - 1);
+        }
+        if (string_equal(key, S8("ND")))
+        {
+            form->apx_flags |= XED_GENERATED_APX_ND;
+        }
+        else if (string_equal(key, S8("NF")))
+        {
+            form->apx_flags |= XED_GENERATED_APX_NF;
+        }
+        if (string_equal(key, S8("MOD")) || string_equal(key, S8("RM")) || string_equal(key, S8("REG")) ||
+            string_equal(key, S8("SRM")))
+        {
+            form->field_flags |= XED_GENERATED_FIELD_MODRM;
+        }
+        return;
+    }
+
+    if (xed_import_pattern_function_known(token))
+    {
+        u64 open = string_first_code_unit(token, '(');
+        String8 name = string_slice(token, 0, open);
+        form->field_flags |= string_starts_with_sequence(name, S8("MODRM")) ? XED_GENERATED_FIELD_MODRM : 0;
+        form->field_flags |= string_starts_with_sequence(name, S8("BRDISP")) ? XED_GENERATED_FIELD_RELATIVE | XED_GENERATED_FIELD_FIELD_END : 0;
+        form->field_flags |= string_starts_with_sequence(name, S8("SIMM")) || string_starts_with_sequence(name, S8("UIMM")) ||
+                                     string_starts_with_sequence(name, S8("SE_IMM"))
+                                 ? XED_GENERATED_FIELD_IMMEDIATE
+                                 : 0;
+        form->field_flags |= string_starts_with_sequence(name, S8("MEMDISP")) ? XED_GENERATED_FIELD_DISPLACEMENT : 0;
+        if (string_starts_with_sequence(name, S8("NELEM_")))
+        {
+            form->tuple_rule = name;
+            form->tuple_kind = xed_import_tuple_kind(name);
+            form->field_flags |= XED_GENERATED_FIELD_DISPLACEMENT;
+        }
+        if (string_starts_with_sequence(name, S8("ESIZE_")))
+        {
+            form->element_size = name;
+        }
+        if (string_equal(name, S8("SAE")))
+        {
+            form->decorator_flags |= XED_GENERATED_DECORATOR_SAE;
+        }
+        if (string_equal(name, S8("AVX512_ROUND")))
+        {
+            form->decorator_flags |= XED_GENERATED_DECORATOR_ROUNDING;
+        }
+        if (string_starts_with_sequence(name, S8("EVAPX")))
+        {
+            form->prefix_kind = XED_GENERATED_PREFIX_EVEX;
+            form->apx_flags |= XED_GENERATED_APX;
+            if (string_equal(name, S8("EVAPX_SCC")))
+            {
+                form->apx_flags |= XED_GENERATED_APX_SCC;
+            }
+        }
+        return;
+    }
+
+    if (string_equal(token, S8("EVV")))
+    {
+        form->prefix_kind = XED_GENERATED_PREFIX_EVEX;
+    }
+    else if (string_equal(token, S8("VV1")) || string_equal(token, S8("VNP")))
+    {
+        form->prefix_kind = XED_GENERATED_PREFIX_VEX;
+    }
+    else if (string_equal(token, S8("XOPV")))
+    {
+        form->prefix_kind = XED_GENERATED_PREFIX_XOP;
+    }
+    else if (string_equal(token, S8("rex2_refining_prefix")) || string_equal(token, S8("norex2_prefix")))
+    {
+        form->prefix_kind = XED_GENERATED_PREFIX_REX2;
+    }
+    else if (string_contains(token, S8("rex")))
+    {
+        form->prefix_kind = XED_GENERATED_PREFIX_REX;
+    }
+
+    if (string_equal(token, S8("V0F")))
+    {
+        form->map = XED_GENERATED_MAP_0F;
+    }
+    else if (string_equal(token, S8("V0F38")))
+    {
+        form->map = XED_GENERATED_MAP_0F38;
+    }
+    else if (string_equal(token, S8("V0F3A")))
+    {
+        form->map = XED_GENERATED_MAP_0F3A;
+    }
+    else if (string_equal(token, S8("MAP4")))
+    {
+        form->map = XED_GENERATED_MAP_4;
+    }
+    else if (string_equal(token, S8("MAP5")))
+    {
+        form->map = XED_GENERATED_MAP_5;
+    }
+    else if (string_equal(token, S8("MAP6")))
+    {
+        form->map = XED_GENERATED_MAP_6;
+    }
+    else if (string_equal(token, S8("MAP7")))
+    {
+        form->map = XED_GENERATED_MAP_7;
+    }
+    else if (string_equal(token, S8("XMAP8")))
+    {
+        form->map = XED_GENERATED_MAP_X8;
+    }
+    else if (string_equal(token, S8("XMAP9")))
+    {
+        form->map = XED_GENERATED_MAP_X9;
+    }
+    else if (string_equal(token, S8("XMAPA")))
+    {
+        form->map = XED_GENERATED_MAP_XA;
+    }
+
+    if (string_equal(token, S8("66_prefix")) || string_equal(token, S8("V66")))
+    {
+        form->mandatory_prefix = 0x66;
+    }
+    else if (string_equal(token, S8("f2_refining_prefix")) || string_equal(token, S8("VF2")))
+    {
+        form->mandatory_prefix = 0xf2;
+    }
+    else if (string_equal(token, S8("f3_refining_prefix")) || string_equal(token, S8("VF3")))
+    {
+        form->mandatory_prefix = 0xf3;
+    }
+
+    if (string_starts_with_sequence(token, S8("VL")))
+    {
+        form->field_flags |= XED_GENERATED_FIELD_MODRM;
+    }
+    if (string_equal(token, S8("MODRM()")))
+    {
+        form->field_flags |= XED_GENERATED_FIELD_MODRM;
+    }
+    if (string_equal(token, S8("SIB")))
+    {
+        form->field_flags |= XED_GENERATED_FIELD_SIB;
+    }
+    if (string_starts_with_sequence(token, S8("UISA_VMODRM_")) || string_starts_with_sequence(token, S8("VMODRM_")))
+    {
+        form->field_flags |= XED_GENERATED_FIELD_VSIB;
+    }
+    if (string_equal(token, S8("mode16")))
+    {
+        form->mode_flags |= XED_GENERATED_MODE_16;
+    }
+    else if (string_equal(token, S8("mode32")))
+    {
+        form->mode_flags |= XED_GENERATED_MODE_32;
+    }
+    else if (string_equal(token, S8("mode64")))
+    {
+        form->mode_flags |= XED_GENERATED_MODE_64;
+    }
+    else if (string_equal(token, S8("not64")))
+    {
+        form->mode_flags |= XED_GENERATED_MODE_NOT64;
+    }
+    else if (string_equal(token, S8("eamode16")))
+    {
+        form->mode_flags |= XED_GENERATED_MODE_EA16;
+    }
+    else if (string_equal(token, S8("eamode32")))
+    {
+        form->mode_flags |= XED_GENERATED_MODE_EA32;
+    }
+    else if (string_equal(token, S8("eamode64")))
+    {
+        form->mode_flags |= XED_GENERATED_MODE_EA64;
+    }
+    else if (string_equal(token, S8("eanot16")))
+    {
+        form->mode_flags |= XED_GENERATED_MODE_EANOT16;
+    }
+    if (string_equal(token, S8("MASK=0")))
+    {
+        form->decorator_flags |= XED_GENERATED_DECORATOR_MASK;
+    }
+    if (string_equal(token, S8("ZEROING=0")))
+    {
+        form->decorator_flags |= XED_GENERATED_DECORATOR_ZEROING;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_normalize_pattern(XedGeneratedForm* form, String8 pattern, String8* bad_token)
+{
+    u64 start = 0;
+    while (start < pattern.length)
+    {
+        while (start < pattern.length && character_is_space(pattern.pointer[start]))
+        {
+            start += 1;
+        }
+        if (start == pattern.length)
+        {
+            break;
+        }
+        u64 end = start;
+        while (end < pattern.length && !character_is_space(pattern.pointer[end]))
+        {
+            end += 1;
+        }
+        String8 token = string_slice(pattern, start, end);
+        if (!xed_import_pattern_token_known(token))
+        {
+            *bad_token = token;
+            return false;
+        }
+        xed_import_pattern_summary_token(form, token);
+        form->token_count += 1;
+        start = end;
+    }
+    return form->token_count != 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_identifier_has_numeric_suffix(String8 token, String8 prefix)
+{
+    if (!string_starts_with_sequence(token, prefix) || token.length == prefix.length)
+    {
+        return false;
+    }
+    u64 value = 0;
+    return xed_import_parse_integer(string_slice(token, prefix.length, token.length), &value);
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_operand_identifier_known(String8 token)
+{
+    u64 numeric = 0;
+    if (xed_import_parse_integer(token, &numeric))
+    {
+        return true;
+    }
+    static String8 const exact[] = {
+        S8_INITIALIZER("2bf16"), S8_INITIALIZER("2f16"), S8_INITIALIZER("2i16"), S8_INITIALIZER("2i8"), S8_INITIALIZER("2u16"),
+        S8_INITIALIZER("4bf8"), S8_INITIALIZER("4hf8"), S8_INITIALIZER("4i8"), S8_INITIALIZER("4u8"),
+        S8_INITIALIZER("A_GPR_B"), S8_INITIALIZER("A_GPR_R"), S8_INITIALIZER("AGEN"), S8_INITIALIZER("ABSBR"),
+        S8_INITIALIZER("ArAX"), S8_INITIALIZER("ArBP"), S8_INITIALIZER("ArBX"), S8_INITIALIZER("ArCX"),
+        S8_INITIALIZER("ArDI"), S8_INITIALIZER("ArDX"), S8_INITIALIZER("ArSI"), S8_INITIALIZER("ArSP"), S8_INITIALIZER("BCASTSTR"),
+        S8_INITIALIZER("BND_B"), S8_INITIALIZER("BND_R"), S8_INITIALIZER("OeAX"),
+        S8_INITIALIZER("CR_R"), S8_INITIALIZER("DR_R"), S8_INITIALIZER("ECOND"), S8_INITIALIZER("FINAL_DSEG"),
+        S8_INITIALIZER("FINAL_DSEG1"), S8_INITIALIZER("FINAL_ESEG"), S8_INITIALIZER("FINAL_ESEG1"),
+        S8_INITIALIZER("FINAL_SSEG0"), S8_INITIALIZER("IMPL"), S8_INITIALIZER("INDEX"), S8_INITIALIZER("MASK1"),
+        S8_INITIALIZER("MASKNOT0"), S8_INITIALIZER("MASK_B"), S8_INITIALIZER("MASK_N"), S8_INITIALIZER("MASK_R"),
+        S8_INITIALIZER("MEM0"), S8_INITIALIZER("MEM1"), S8_INITIALIZER("MULTIDEST2"), S8_INITIALIZER("MULTISOURCE4"),
+        S8_INITIALIZER("NDD"), S8_INITIALIZER("OrAX"), S8_INITIALIZER("OrBP"), S8_INITIALIZER("OrBX"),
+        S8_INITIALIZER("OrCX"), S8_INITIALIZER("OrDX"), S8_INITIALIZER("OrSP"), S8_INITIALIZER("PTR"),
+        S8_INITIALIZER("RELBR"), S8_INITIALIZER("ROUNDC"), S8_INITIALIZER("SAESTR"), S8_INITIALIZER("SCALE"),
+        S8_INITIALIZER("SEG"), S8_INITIALIZER("SEG_MOV"), S8_INITIALIZER("SUPP"), S8_INITIALIZER("TMM_B"), S8_INITIALIZER("TMM_B3"),
+        S8_INITIALIZER("TMM_N"), S8_INITIALIZER("TMM_N3"), S8_INITIALIZER("TMM_R"), S8_INITIALIZER("TMM_R3"),
+        S8_INITIALIZER("TXT"), S8_INITIALIZER("VGPR32_B"), S8_INITIALIZER("VGPR32_N"), S8_INITIALIZER("VGPR32_R"),
+        S8_INITIALIZER("VGPR64_B"), S8_INITIALIZER("VGPR64_N"), S8_INITIALIZER("VGPR64_R"),
+        S8_INITIALIZER("VGPRy_B"), S8_INITIALIZER("VGPRy_N"), S8_INITIALIZER("VGPRy_R"), S8_INITIALIZER("X87"),
+        S8_INITIALIZER("XMM_B"), S8_INITIALIZER("XMM_B3"), S8_INITIALIZER("XMM_N"), S8_INITIALIZER("XMM_N3"),
+        S8_INITIALIZER("XMM_R"), S8_INITIALIZER("XMM_R3"), S8_INITIALIZER("XMM_SE"), S8_INITIALIZER("YMM_B"),
+        S8_INITIALIZER("YMM_B3"), S8_INITIALIZER("YMM_N"), S8_INITIALIZER("YMM_N3"), S8_INITIALIZER("YMM_R"),
+        S8_INITIALIZER("YMM_R3"), S8_INITIALIZER("YMM_SE"), S8_INITIALIZER("ZMM_B3"), S8_INITIALIZER("ZMM_N3"),
+        S8_INITIALIZER("ZMM_R3"), S8_INITIALIZER("ZEROSTR"), S8_INITIALIZER("a16"), S8_INITIALIZER("a32"), S8_INITIALIZER("b"),
+        S8_INITIALIZER("bf16"), S8_INITIALIZER("bf4"), S8_INITIALIZER("bf6"), S8_INITIALIZER("bf8"),
+        S8_INITIALIZER("bnd32"), S8_INITIALIZER("bnd64"), S8_INITIALIZER("cr"), S8_INITIALIZER("crw"), S8_INITIALIZER("cw"),
+        S8_INITIALIZER("d"), S8_INITIALIZER("dq"), S8_INITIALIZER("f16"), S8_INITIALIZER("f32"),
+        S8_INITIALIZER("f64"), S8_INITIALIZER("f80"), S8_INITIALIZER("hf6"), S8_INITIALIZER("hf8"),
+        S8_INITIALIZER("i1"), S8_INITIALIZER("i128"), S8_INITIALIZER("i16"), S8_INITIALIZER("i32"), S8_INITIALIZER("i64"),
+        S8_INITIALIZER("i8"), S8_INITIALIZER("m384"), S8_INITIALIZER("m512"), S8_INITIALIZER("m64int"),
+        S8_INITIALIZER("m64real"), S8_INITIALIZER("mem14"), S8_INITIALIZER("mem94"), S8_INITIALIZER("mem108"), S8_INITIALIZER("mem16"), S8_INITIALIZER("mem16int"),
+        S8_INITIALIZER("mem28"), S8_INITIALIZER("mem32int"), S8_INITIALIZER("mem32real"), S8_INITIALIZER("mem80dec"),
+        S8_INITIALIZER("mem80real"), S8_INITIALIZER("mfpxenv"), S8_INITIALIZER("mprefetch"), S8_INITIALIZER("mskw"),
+        S8_INITIALIZER("mxsave"), S8_INITIALIZER("oo"), S8_INITIALIZER("p"), S8_INITIALIZER("p2"), S8_INITIALIZER("pmmsz16"),
+        S8_INITIALIZER("pmmsz32"), S8_INITIALIZER("pmmsz64"), S8_INITIALIZER("ptr"),
+        S8_INITIALIZER("pd"), S8_INITIALIZER("ps"), S8_INITIALIZER("q"), S8_INITIALIZER("qq"),
+        S8_INITIALIZER("r"), S8_INITIALIZER("rIP"), S8_INITIALIZER("rcw"), S8_INITIALIZER("rw"),
+        S8_INITIALIZER("s"), S8_INITIALIZER("s64"), S8_INITIALIZER("sd"), S8_INITIALIZER("spw"),
+        S8_INITIALIZER("spw2"), S8_INITIALIZER("spw5"), S8_INITIALIZER("spw8"), S8_INITIALIZER("ss"),
+        S8_INITIALIZER("tv"), S8_INITIALIZER("u128"), S8_INITIALIZER("u16"), S8_INITIALIZER("u256"),
+        S8_INITIALIZER("u32"), S8_INITIALIZER("u64"), S8_INITIALIZER("u8"), S8_INITIALIZER("v"),
+        S8_INITIALIZER("vv"), S8_INITIALIZER("w"), S8_INITIALIZER("wrd"), S8_INITIALIZER("xub"),
+        S8_INITIALIZER("xud"), S8_INITIALIZER("xuq"), S8_INITIALIZER("y"), S8_INITIALIZER("yu"),
+        S8_INITIALIZER("z"), S8_INITIALIZER("z2f16"), S8_INITIALIZER("z2i16"), S8_INITIALIZER("z2i8"),
+        S8_INITIALIZER("z2u16"), S8_INITIALIZER("z4i8"), S8_INITIALIZER("z4u8"), S8_INITIALIZER("zbf16"),
+        S8_INITIALIZER("zbf6"), S8_INITIALIZER("zbf8"), S8_INITIALIZER("zd"), S8_INITIALIZER("zf16"),
+        S8_INITIALIZER("zf32"), S8_INITIALIZER("zf64"), S8_INITIALIZER("zhf6"), S8_INITIALIZER("zhf8"),
+        S8_INITIALIZER("zi16"), S8_INITIALIZER("zi32"), S8_INITIALIZER("zi64"), S8_INITIALIZER("zi8"),
+        S8_INITIALIZER("zu128"), S8_INITIALIZER("zu16"), S8_INITIALIZER("zu32"), S8_INITIALIZER("zu64"),
+        S8_INITIALIZER("zu8"),
+    };
+    if (xed_import_string_in_array(token, exact, BUSTER_ARRAY_LENGTH(exact)))
+    {
+        return true;
+    }
+    if (xed_import_identifier_has_numeric_suffix(token, S8("Ar")))
+    {
+        u64 value = 0;
+        return xed_import_parse_integer(string_slice(token, 2, token.length), &value) && value >= 8 && value <= 31;
+    }
+    if (xed_import_identifier_has_numeric_suffix(token, S8("REG")) || xed_import_identifier_has_numeric_suffix(token, S8("MEM")) ||
+        xed_import_identifier_has_numeric_suffix(token, S8("IMM")) || xed_import_identifier_has_numeric_suffix(token, S8("BASE")) ||
+        xed_import_identifier_has_numeric_suffix(token, S8("SEG")))
+    {
+        return true;
+    }
+    if (string_starts_with_sequence(token, S8("EMX_BROADCAST_")))
+    {
+        for (u64 index = 14; index < token.length; index += 1)
+        {
+            char8 c = token.pointer[index];
+            if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || c == '_'))
+            {
+                return false;
+            }
+        }
+        return token.length > 14;
+    }
+    if (string_starts_with_sequence(token, S8("GPR")) || string_starts_with_sequence(token, S8("VGPR")) ||
+        string_starts_with_sequence(token, S8("XMM")) || string_starts_with_sequence(token, S8("YMM")) ||
+        string_starts_with_sequence(token, S8("ZMM")) || string_starts_with_sequence(token, S8("MMX")))
+    {
+        static String8 const suffixes[] = {
+            S8_INITIALIZER("_B"), S8_INITIALIZER("_B3"), S8_INITIALIZER("_N"), S8_INITIALIZER("_N3"),
+            S8_INITIALIZER("_R"), S8_INITIALIZER("_R3"), S8_INITIALIZER("_SB"), S8_INITIALIZER("_SE"),
+            S8_INITIALIZER("_B_NORSP"), S8_INITIALIZER("_N_NORSP"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(suffixes); index += 1)
+        {
+            if (string_ends_with_sequence_insensitive(token, suffixes[index]))
+            {
+                return true;
+            }
+        }
+    }
+    if (string_starts_with_sequence(token, S8("XED_REG_")))
+    {
+        static String8 const registers[] = {
+            S8_INITIALIZER("XED_REG_AH"), S8_INITIALIZER("XED_REG_AL"), S8_INITIALIZER("XED_REG_AX"),
+            S8_INITIALIZER("XED_REG_BP"), S8_INITIALIZER("XED_REG_BSR0"), S8_INITIALIZER("XED_REG_BX"),
+            S8_INITIALIZER("XED_REG_CL"), S8_INITIALIZER("XED_REG_CR0"), S8_INITIALIZER("XED_REG_CS"),
+            S8_INITIALIZER("XED_REG_CX"), S8_INITIALIZER("XED_REG_DI"), S8_INITIALIZER("XED_REG_DS"),
+            S8_INITIALIZER("XED_REG_DX"), S8_INITIALIZER("XED_REG_EAX"), S8_INITIALIZER("XED_REG_EBP"),
+            S8_INITIALIZER("XED_REG_EBX"), S8_INITIALIZER("XED_REG_ECX"), S8_INITIALIZER("XED_REG_EDI"),
+            S8_INITIALIZER("XED_REG_EDX"), S8_INITIALIZER("XED_REG_EFLAGS"), S8_INITIALIZER("XED_REG_FLAGS"),
+            S8_INITIALIZER("XED_REG_EIP"),
+            S8_INITIALIZER("XED_REG_ES"), S8_INITIALIZER("XED_REG_ESI"), S8_INITIALIZER("XED_REG_ESP"),
+            S8_INITIALIZER("XED_REG_FS"), S8_INITIALIZER("XED_REG_FSBASE"), S8_INITIALIZER("XED_REG_GDTR"),
+            S8_INITIALIZER("XED_REG_GS"), S8_INITIALIZER("XED_REG_GSBASE"), S8_INITIALIZER("XED_REG_IA32_KERNEL_GS_BASE"),
+            S8_INITIALIZER("XED_REG_IDTR"), S8_INITIALIZER("XED_REG_INVALID"), S8_INITIALIZER("XED_REG_IP"),
+            S8_INITIALIZER("XED_REG_LDTR"), S8_INITIALIZER("XED_REG_MSRS"), S8_INITIALIZER("XED_REG_MXCSR"),
+            S8_INITIALIZER("XED_REG_R11"), S8_INITIALIZER("XED_REG_RAX"), S8_INITIALIZER("XED_REG_RBX"),
+            S8_INITIALIZER("XED_REG_RCX"), S8_INITIALIZER("XED_REG_RDI"), S8_INITIALIZER("XED_REG_RDX"),
+            S8_INITIALIZER("XED_REG_RFLAGS"), S8_INITIALIZER("XED_REG_RIP"), S8_INITIALIZER("XED_REG_RSI"),
+            S8_INITIALIZER("XED_REG_RSP"), S8_INITIALIZER("XED_REG_SI"), S8_INITIALIZER("XED_REG_SP"),
+            S8_INITIALIZER("XED_REG_SS"), S8_INITIALIZER("XED_REG_SSP"), S8_INITIALIZER("XED_REG_ST0"),
+            S8_INITIALIZER("XED_REG_ST1"), S8_INITIALIZER("XED_REG_STACKPOP"), S8_INITIALIZER("XED_REG_STACKPUSH"),
+            S8_INITIALIZER("XED_REG_TR"), S8_INITIALIZER("XED_REG_TSC"), S8_INITIALIZER("XED_REG_TSCAUX"),
+            S8_INITIALIZER("XED_REG_UIF"), S8_INITIALIZER("XED_REG_X87CONTROL"), S8_INITIALIZER("XED_REG_X87POP"),
+            S8_INITIALIZER("XED_REG_X87POP2"), S8_INITIALIZER("XED_REG_X87PUSH"), S8_INITIALIZER("XED_REG_X87STATUS"),
+            S8_INITIALIZER("XED_REG_X87TAG"), S8_INITIALIZER("XED_REG_XCR0"), S8_INITIALIZER("XED_REG_XMM0"),
+            S8_INITIALIZER("XED_REG_XMM1"), S8_INITIALIZER("XED_REG_XMM2"), S8_INITIALIZER("XED_REG_XMM3"),
+            S8_INITIALIZER("XED_REG_XMM4"), S8_INITIALIZER("XED_REG_XMM5"), S8_INITIALIZER("XED_REG_XMM6"),
+            S8_INITIALIZER("XED_REG_XMM7"),
+        };
+        return xed_import_string_in_array(token, registers, BUSTER_ARRAY_LENGTH(registers));
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_operand_token_known(String8 token)
+{
+    if (!token.length || string_equal(token, S8("\\")))
+    {
+        return false;
+    }
+    bool identifier_seen = false;
+    u64 start = 0;
+    for (u64 index = 0; index <= token.length; index += 1)
+    {
+        bool identifier_character = index < token.length &&
+                                     ((token.pointer[index] >= 'a' && token.pointer[index] <= 'z') ||
+                                      (token.pointer[index] >= 'A' && token.pointer[index] <= 'Z') ||
+                                      (token.pointer[index] >= '0' && token.pointer[index] <= '9') || token.pointer[index] == '_');
+        if (!identifier_character)
+        {
+            if (index > start)
+            {
+                String8 atom = string_slice(token, start, index);
+                if (!xed_import_operand_identifier_known(atom))
+                {
+                    return false;
+                }
+                identifier_seen = true;
+            }
+            start = index + 1;
+        }
+    }
+    return identifier_seen;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_operand_access_part(String8 part, u8* access)
+{
+    if (string_equal(part, S8("r")) || string_equal(part, S8("rw")) || string_equal(part, S8("rcw")) ||
+        string_equal(part, S8("cr")))
+    {
+        *access |= XED_GENERATED_ACCESS_READ;
+    }
+    if (string_equal(part, S8("w")) || string_equal(part, S8("rw")) || string_equal(part, S8("rcw")) ||
+        string_equal(part, S8("cw")))
+    {
+        *access |= XED_GENERATED_ACCESS_WRITE;
+    }
+    if (string_equal(part, S8("rcw")) || string_equal(part, S8("cr")) || string_equal(part, S8("cw")))
+    {
+        *access |= XED_GENERATED_ACCESS_COND;
+    }
+    if (string_equal(part, S8("SUPP")))
+    {
+        *access |= XED_GENERATED_ACCESS_SUPPRESSED;
+    }
+    if (string_equal(part, S8("IMPL")))
+    {
+        *access |= XED_GENERATED_ACCESS_IMPLICIT;
+    }
+    return string_equal(part, S8("r")) || string_equal(part, S8("w")) || string_equal(part, S8("rw")) ||
+           string_equal(part, S8("rcw")) || string_equal(part, S8("cr")) || string_equal(part, S8("cw")) ||
+           string_equal(part, S8("SUPP")) || string_equal(part, S8("IMPL"));
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_operand_key_slot(String8 key, u8* slot)
+{
+    static String8 const prefixes[] = {
+        S8_INITIALIZER("REG"), S8_INITIALIZER("MEM"), S8_INITIALIZER("IMM"), S8_INITIALIZER("BASE"),
+        S8_INITIALIZER("SEG"), S8_INITIALIZER("MASK"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(prefixes); index += 1)
+    {
+        if (string_starts_with_sequence(key, prefixes[index]))
+        {
+            String8 suffix = string_slice(key, prefixes[index].length, key.length);
+            u64 value = 0;
+            if (xed_import_parse_integer(suffix, &value) && value < 255)
+            {
+                *slot = (u8)value;
+                return true;
+            }
+        }
+    }
+    *slot = UINT8_MAX;
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_normalize_operands(XedGeneratedForm* form, String8 operands, String8* bad_token)
+{
+    u64 start = 0;
+    while (start < operands.length)
+    {
+        while (start < operands.length && character_is_space(operands.pointer[start]))
+        {
+            start += 1;
+        }
+        if (start == operands.length)
+        {
+            break;
+        }
+        u64 end = start;
+        while (end < operands.length && !character_is_space(operands.pointer[end]))
+        {
+            end += 1;
+        }
+        String8 token = string_slice(operands, start, end);
+        if (!xed_import_operand_token_known(token))
+        {
+            *bad_token = token;
+            return false;
+        }
+        if (form->operand_count >= XED_GENERATED_MAX_OPERANDS)
+        {
+            *bad_token = token;
+            return false;
+        }
+
+        XedGeneratedOperand* operand = form->operands + form->operand_count++;
+        *operand = (XedGeneratedOperand){0};
+        u64 colon = string_first_code_unit(token, ':');
+        u64 equals = string_first_code_unit(token, '=');
+        u64 head_end = colon == BUSTER_STRING_NO_MATCH ? token.length : colon;
+        String8 head = string_slice(token, 0, head_end);
+        u64 key_end = equals != BUSTER_STRING_NO_MATCH && equals < head_end ? equals : head_end;
+        String8 key = string_slice(token, 0, key_end);
+        xed_import_operand_key_slot(key, &operand->slot);
+        if (string_starts_with_sequence(key, S8("REG")) || string_starts_with_sequence(key, S8("MASK")))
+        {
+            operand->kind = XED_GENERATED_OPERAND_REGISTER;
+        }
+        else if (string_starts_with_sequence(key, S8("MEM")))
+        {
+            operand->kind = XED_GENERATED_OPERAND_MEMORY;
+        }
+        else if (string_starts_with_sequence(key, S8("IMM")))
+        {
+            operand->kind = XED_GENERATED_OPERAND_IMMEDIATE;
+        }
+        else if (string_starts_with_sequence(key, S8("RELBR")))
+        {
+            operand->kind = XED_GENERATED_OPERAND_RELATIVE;
+            operand->field_source = XED_GENERATED_FIELD_SOURCE_RELATIVE;
+            form->field_flags |= XED_GENERATED_FIELD_RELATIVE | XED_GENERATED_FIELD_FIELD_END;
+            form->relocation_base = 1;
+        }
+        else if (string_starts_with_sequence(key, S8("ABSBR")))
+        {
+            operand->kind = XED_GENERATED_OPERAND_ABSOLUTE;
+        }
+        else if (string_starts_with_sequence(key, S8("BASE")))
+        {
+            operand->kind = XED_GENERATED_OPERAND_BASE;
+        }
+        else if (string_starts_with_sequence(key, S8("SEG")))
+        {
+            operand->kind = XED_GENERATED_OPERAND_SEGMENT;
+        }
+        else if (string_starts_with_sequence(key, S8("AGEN")))
+        {
+            operand->kind = XED_GENERATED_OPERAND_ADDRESS_GENERATOR;
+        }
+        else
+        {
+            operand->kind = XED_GENERATED_OPERAND_PSEUDO;
+            operand->slot = UINT8_MAX;
+        }
+
+        if (operand->kind == XED_GENERATED_OPERAND_MEMORY)
+        {
+            form->field_flags |= XED_GENERATED_FIELD_MEMORY;
+        }
+        else if (operand->kind == XED_GENERATED_OPERAND_REGISTER)
+        {
+            form->field_flags |= XED_GENERATED_FIELD_REGISTER;
+        }
+        if (string_starts_with_sequence(key, S8("RELBR")))
+        {
+            form->field_flags |= XED_GENERATED_FIELD_RELATIVE | XED_GENERATED_FIELD_FIELD_END;
+        }
+        if (string_starts_with_sequence(operand->atom, S8("TMM")))
+        {
+            form->amx_flags |= XED_GENERATED_AMX_TILE_REGISTER;
+            if (operand->kind == XED_GENERATED_OPERAND_MEMORY)
+            {
+                form->amx_flags |= XED_GENERATED_AMX_TILE_MEMORY;
+            }
+        }
+
+        if (equals != BUSTER_STRING_NO_MATCH && equals + 1 < head_end)
+        {
+            operand->atom = string_slice(token, equals + 1, head_end);
+        }
+        else
+        {
+            operand->atom = key;
+        }
+        if (string_starts_with_sequence(operand->atom, S8("XED_REG_")))
+        {
+            operand->field_source = XED_GENERATED_FIELD_SOURCE_FIXED;
+        }
+        else if (string_ends_with_sequence_insensitive(operand->atom, S8("_R")) ||
+                 string_ends_with_sequence_insensitive(operand->atom, S8("_R3")))
+        {
+            operand->field_source = XED_GENERATED_FIELD_SOURCE_REG;
+        }
+        else if (string_ends_with_sequence_insensitive(operand->atom, S8("_B")) ||
+                 string_ends_with_sequence_insensitive(operand->atom, S8("_B3")))
+        {
+            operand->field_source = XED_GENERATED_FIELD_SOURCE_RM;
+        }
+        else if (string_ends_with_sequence_insensitive(operand->atom, S8("_N")) ||
+                 string_ends_with_sequence_insensitive(operand->atom, S8("_N3")))
+        {
+            operand->field_source = XED_GENERATED_FIELD_SOURCE_VVVV;
+        }
+        else if (string_starts_with_sequence(key, S8("MASK")))
+        {
+            operand->field_source = XED_GENERATED_FIELD_SOURCE_MASK;
+        }
+        else if (operand->kind == XED_GENERATED_OPERAND_IMMEDIATE)
+        {
+            operand->field_source = XED_GENERATED_FIELD_SOURCE_IMMEDIATE;
+        }
+        else if (operand->field_source == XED_GENERATED_FIELD_SOURCE_NONE)
+        {
+            if (string_starts_with_sequence(key, S8("REG")))
+            {
+                operand->field_source = XED_GENERATED_FIELD_SOURCE_REG;
+            }
+            else if (string_starts_with_sequence(key, S8("MEM")))
+            {
+                operand->field_source = XED_GENERATED_FIELD_SOURCE_RM;
+            }
+        }
+
+        u64 part_start = head_end < token.length ? head_end + 1 : token.length;
+        while (part_start < token.length)
+        {
+            u64 part_end = part_start;
+            while (part_end < token.length && token.pointer[part_end] != ':')
+            {
+                part_end += 1;
+            }
+            String8 part = string_slice(token, part_start, part_end);
+            if (xed_import_operand_access_part(part, &operand->access))
+            {
+                if (operand->access & XED_GENERATED_ACCESS_SUPPRESSED)
+                {
+                    operand->visible = 0;
+                }
+            }
+            else if (part.length && xed_import_operand_identifier_known(part))
+            {
+                operand->width = part;
+            }
+            part_start = part_end < token.length ? part_end + 1 : token.length;
+        }
+        operand->visible = (operand->access & (XED_GENERATED_ACCESS_SUPPRESSED | XED_GENERATED_ACCESS_IMPLICIT)) == 0;
+        if (string_contains(token, S8("BCASTSTR")) || string_contains(token, S8("EMX_BROADCAST_")))
+        {
+            form->decorator_flags |= XED_GENERATED_DECORATOR_BROADCAST;
+        }
+        if (string_contains(token, S8("ZEROSTR")))
+        {
+            form->decorator_flags |= XED_GENERATED_DECORATOR_ZEROING;
+        }
+        if (string_contains(token, S8("MASK")))
+        {
+            form->decorator_flags |= XED_GENERATED_DECORATOR_MASK;
+        }
+        if (string_contains(token, S8("SAESTR")) || string_contains(token, S8("ROUNDC")))
+        {
+            form->decorator_flags |= XED_GENERATED_DECORATOR_SAE | XED_GENERATED_DECORATOR_ROUNDING;
+        }
+        if (string_equal(token, S8("NDD")))
+        {
+            form->apx_flags |= XED_GENERATED_APX_NDD;
+        }
+        start = end;
+    }
+    return true;
+}
+
+enum
+{
+    XED_GENERATED_ENCODER_LEGACY,
+    XED_GENERATED_ENCODER_REX,
+    XED_GENERATED_ENCODER_REX2,
+    XED_GENERATED_ENCODER_VEX,
+    XED_GENERATED_ENCODER_XOP,
+    XED_GENERATED_ENCODER_EVEX,
+    XED_GENERATED_ENCODER_AMX,
+    XED_GENERATED_ENCODER_SYSTEM,
+};
+
+BUSTER_GLOBAL_LOCAL bool xed_import_attribute_contains(String8 attributes, String8 wanted)
+{
+    u64 start = 0;
+    while (start < attributes.length)
+    {
+        while (start < attributes.length && character_is_space(attributes.pointer[start]))
+        {
+            start += 1;
+        }
+        u64 end = start;
+        while (end < attributes.length && !character_is_space(attributes.pointer[end]))
+        {
+            end += 1;
+        }
+        if (string_equal(string_slice(attributes, start, end), wanted))
+        {
+            return true;
+        }
+        start = end;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL u64 xed_import_record_hash(XedImportRecord* record)
+{
+    String8 values[] = {
+        record->source, record->iclass, record->iform, record->isa_set, record->category, record->extension,
+        record->attributes, record->cpl, record->exceptions, record->flags, record->disasm, record->disasm_intel,
+        record->disasm_attsv, record->real_opcode, record->uname, record->comment, record->version, record->pattern,
+        record->operands, record->operand_annotation,
+    };
+    u64 result = UINT64_C(0x9e3779b97f4a7c15);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(values); index += 1)
+    {
+        u64 hash = buster_hash_64(values[index].pointer ? (u8*)values[index].pointer : (u8*)"", values[index].length);
+        result ^= hash + UINT64_C(0x9e3779b97f4a7c15) + (result << 6) + (result >> 2);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_normalize_record(XedGeneratedForm* form, XedImportRecord* record, u64 raw_index,
+                                                      String8* bad_token, bool* bad_operand)
+{
+    *form = (XedGeneratedForm){
+        .record = record,
+        .stable_hash = xed_import_record_hash(record),
+        .coverage_class = XED_GENERATED_COVERAGE_UNCLASSIFIED,
+        .encoder_family = XED_GENERATED_ENCODER_LEGACY,
+        .test_class = XED_GENERATED_TEST_SCHEMA,
+        .prefix_kind = XED_GENERATED_PREFIX_LEGACY,
+        .map = XED_GENERATED_MAP_LEGACY,
+    };
+    if (!xed_import_normalize_pattern(form, record->pattern, bad_token))
+    {
+        *bad_operand = false;
+        form->coverage_class = XED_GENERATED_COVERAGE_UNSUPPORTED_TOKEN;
+        form->reason_id = XED_GENERATED_REASON_UNKNOWN_PATTERN_TOKEN;
+        form->unsupported_token = *bad_token;
+        return false;
+    }
+    *bad_operand = false;
+    if (!xed_import_normalize_operands(form, record->operands, bad_token))
+    {
+        *bad_operand = true;
+        form->coverage_class = XED_GENERATED_COVERAGE_UNSUPPORTED_TOKEN;
+        form->reason_id = XED_GENERATED_REASON_UNKNOWN_OPERAND_TOKEN;
+        form->unsupported_token = *bad_token;
+        return false;
+    }
+    if (string_contains(record->iclass, S8("TILEMOVROW")))
+    {
+        form->amx_flags |= XED_GENERATED_AMX_TILE_ROW;
+    }
+    if (string_contains(record->iclass, S8("TILEMOVCOL")))
+    {
+        form->amx_flags |= XED_GENERATED_AMX_TILE_COLUMN;
+    }
+    if (!form->tuple_kind)
+    {
+        form->tuple_kind = xed_import_attribute_tuple_kind(record->attributes);
+    }
+    if (string_contains(record->operand_annotation, S8("NDD")))
+    {
+        form->apx_flags |= XED_GENERATED_APX | XED_GENERATED_APX_NDD;
+    }
+
+    if (form->fixed_byte_count >= 2 && form->map == XED_GENERATED_MAP_LEGACY && form->fixed_bytes[0] == 0x0f)
+    {
+        form->map = form->fixed_bytes[1] == 0x38 ? XED_GENERATED_MAP_0F38
+                    : form->fixed_bytes[1] == 0x3a ? XED_GENERATED_MAP_0F3A
+                                                   : XED_GENERATED_MAP_0F;
+    }
+    if (form->prefix_kind == XED_GENERATED_PREFIX_LEGACY &&
+        (form->mandatory_prefix || form->fixed_byte_count > 1 || form->field_flags & XED_GENERATED_FIELD_MODRM))
+    {
+        form->encoder_family = XED_GENERATED_ENCODER_LEGACY;
+    }
+    else
+    {
+        form->encoder_family = form->prefix_kind;
+    }
+    if (form->prefix_kind == XED_GENERATED_PREFIX_REX)
+    {
+        form->encoder_family = XED_GENERATED_ENCODER_REX;
+    }
+    else if (form->prefix_kind == XED_GENERATED_PREFIX_REX2)
+    {
+        form->encoder_family = XED_GENERATED_ENCODER_REX2;
+    }
+    else if (form->prefix_kind == XED_GENERATED_PREFIX_VEX)
+    {
+        form->encoder_family = XED_GENERATED_ENCODER_VEX;
+    }
+    else if (form->prefix_kind == XED_GENERATED_PREFIX_XOP)
+    {
+        form->encoder_family = XED_GENERATED_ENCODER_XOP;
+    }
+    else if (form->prefix_kind == XED_GENERATED_PREFIX_EVEX)
+    {
+        form->encoder_family = XED_GENERATED_ENCODER_EVEX;
+    }
+
+    if (xed_import_attribute_contains(record->attributes, S8("GATHER")) ||
+        xed_import_attribute_contains(record->attributes, S8("SCATTER")))
+    {
+        form->field_flags |= XED_GENERATED_FIELD_VSIB;
+    }
+    if (xed_import_attribute_contains(record->attributes, S8("MASKOP_EVEX")) ||
+        xed_import_attribute_contains(record->attributes, S8("KMASK")))
+    {
+        form->decorator_flags |= XED_GENERATED_DECORATOR_MASK;
+    }
+    if (xed_import_attribute_contains(record->attributes, S8("BROADCAST_ENABLED")))
+    {
+        form->decorator_flags |= XED_GENERATED_DECORATOR_BROADCAST;
+    }
+    if (xed_import_attribute_contains(record->attributes, S8("DISP8_NO_SCALE")) ||
+        xed_import_attribute_contains(record->attributes, S8("DISP8_FULL")) ||
+        xed_import_attribute_contains(record->attributes, S8("DISP8_FULLMEM")) ||
+        xed_import_attribute_contains(record->attributes, S8("DISP8_SCALAR")) ||
+        xed_import_attribute_contains(record->attributes, S8("DISP8_HALFMEM")))
+    {
+        form->field_flags |= XED_GENERATED_FIELD_DISPLACEMENT;
+    }
+    if (xed_import_attribute_contains(record->attributes, S8("APX_NDD")))
+    {
+        form->apx_flags |= XED_GENERATED_APX_NDD;
+    }
+    if (xed_import_attribute_contains(record->attributes, S8("APX_NF")))
+    {
+        form->apx_flags |= XED_GENERATED_APX_NF;
+    }
+    if (string_contains(record->extension, S8("APX")) || xed_import_attribute_contains(record->attributes, S8("APX_NDD")) ||
+        xed_import_attribute_contains(record->attributes, S8("APX_NF")))
+    {
+        form->apx_flags |= XED_GENERATED_APX;
+    }
+    for (u32 index = 0; index < form->operand_count; index += 1)
+    {
+        if (string_starts_with_sequence(form->operands[index].atom, S8("TMM")))
+        {
+            form->encoder_family = XED_GENERATED_ENCODER_AMX;
+        }
+        if (string_starts_with_sequence(form->operands[index].atom, S8("GPR16")) ||
+            (string_starts_with_sequence(form->operands[index].atom, S8("GPR64")) &&
+             string_contains(form->operands[index].atom, S8("_N"))))
+        {
+            form->apx_flags |= XED_GENERATED_APX_EGPR;
+        }
+    }
+    if (string_starts_with_sequence(record->category, S8("SYSTEM")) || xed_import_attribute_contains(record->attributes, S8("RING0")))
+    {
+        form->encoder_family = XED_GENERATED_ENCODER_SYSTEM;
+    }
+    if (string_equal(record->cpl, S8("0")) || xed_import_attribute_contains(record->attributes, S8("RING0")))
+    {
+        form->coverage_class = XED_GENERATED_COVERAGE_PRIVILEGED;
+        form->test_class = XED_GENERATED_TEST_PRIVILEGED_SCHEMA;
+        form->reason_id = XED_GENERATED_REASON_CPL0;
+    }
+    else if (form->mode_flags & XED_GENERATED_MODE_NOT64)
+    {
+        form->coverage_class = XED_GENERATED_COVERAGE_NOT64;
+        form->test_class = XED_GENERATED_TEST_NOT64_SCHEMA;
+        form->reason_id = XED_GENERATED_REASON_MODE_NOT64;
+    }
+    else
+    {
+        form->coverage_class = XED_GENERATED_COVERAGE_NORMALIZED;
+        form->reason_id = XED_GENERATED_REASON_NONE;
+    }
+
+    if (string_contains(record->pattern, S8("BRDISP8")))
+    {
+        form->displacement_width = 1;
+    }
+    else if (string_contains(record->pattern, S8("BRDISP64")))
+    {
+        form->displacement_width = 8;
+    }
+    else if (string_contains(record->pattern, S8("BRDISP32")) || string_contains(record->pattern, S8("BRDISPz")))
+    {
+        form->displacement_width = 4;
+    }
+    if (string_contains(record->pattern, S8("SIMM8")) || string_contains(record->pattern, S8("UIMM8")) ||
+        string_contains(record->pattern, S8("SE_IMM8")))
+    {
+        form->immediate_width = 1;
+    }
+    else if (string_contains(record->pattern, S8("UIMM16")))
+    {
+        form->immediate_width = 2;
+    }
+    else if (string_contains(record->pattern, S8("UIMM32")) || string_contains(record->pattern, S8("SIMMz")))
+    {
+        form->immediate_width = 4;
+    }
+    form->immediate_signed = string_contains(record->pattern, S8("SIMM")) || string_contains(record->pattern, S8("SE_IMM"));
+    form->displacement_scale = form->tuple_kind != XED_GENERATED_TUPLE_NONE;
+    if (form->field_flags & XED_GENERATED_FIELD_RELATIVE)
+    {
+        form->relocation_base = 1;
+    }
+    BUSTER_UNUSED(raw_index);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL XedGeneratedFormList xed_import_normalize_records(Arena* arena, XedImportRecordList records, bool* valid,
+                                                                        u64* failed_index, String8* bad_token, bool* bad_operand)
+{
+    XedGeneratedFormList result = {
+        .pointer = arena_allocate(arena, XedGeneratedForm, records.count),
+        .length = records.count,
+    };
+    u64 index = 0;
+    for (XedImportRecord* record = records.first; record; record = record->next, index += 1)
+    {
+        if (!xed_import_normalize_record(result.pointer + index, record, index, bad_token, bad_operand))
+        {
+            XedGeneratedForm* form = result.pointer + index;
+            if ((form->coverage_class == XED_GENERATED_COVERAGE_RESERVED && form->reason_id != XED_GENERATED_REASON_NONE) ||
+                (form->coverage_class == XED_GENERATED_COVERAGE_UNSUPPORTED_TOKEN && form->reason_id != XED_GENERATED_REASON_NONE &&
+                 form->unsupported_token.length))
+            {
+                continue;
+            }
+            *valid = false;
+            *failed_index = index;
+            return result;
+        }
+    }
+    return result;
+}
+
+typedef struct XedGeneratedStringNode XedGeneratedStringNode;
+struct XedGeneratedStringNode
+{
+    String8 string;
+    u32 offset;
+    XedGeneratedStringNode* next;
+};
+
+typedef struct XedGeneratedStringPool XedGeneratedStringPool;
+struct XedGeneratedStringPool
+{
+    XedGeneratedStringNode* first;
+    XedGeneratedStringNode* last;
+    u32 count;
+    u32 byte_count;
+};
+
+typedef struct XedGeneratedTableStats XedGeneratedTableStats;
+struct XedGeneratedTableStats
+{
+    u64 coverage_counts[XED_GENERATED_COVERAGE_COUNT];
+    u64 reason_counts[XED_GENERATED_REASON_COUNT];
+    u64 encoder_counts[8];
+    u64 test_counts[3];
+    u64 operand_count;
+    u64 token_count;
+    u64 string_pool_bytes;
+    u64 header_bytes;
+    u64 coverage_bytes;
+};
+
+BUSTER_GLOBAL_LOCAL u32 xed_generated_string_intern(XedGeneratedStringPool* pool, Arena* arena, String8 string)
+{
+    if (!string.length)
+    {
+        return 0;
+    }
+    for (XedGeneratedStringNode* node = pool->first; node; node = node->next)
+    {
+        if (string_equal(node->string, string))
+        {
+            return node->offset;
+        }
+    }
+    XedGeneratedStringNode* node = arena_allocate(arena, XedGeneratedStringNode, 1);
+    *node = (XedGeneratedStringNode){.string = string_duplicate_arena(arena, string, false)};
+    if (pool->last)
+    {
+        pool->last->next = node;
+    }
+    else
+    {
+        pool->first = node;
+    }
+    pool->last = node;
+    pool->count += 1;
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL int xed_generated_string_node_compare(const void* left_pointer, const void* right_pointer)
+{
+    XedGeneratedStringNode* const* left = (XedGeneratedStringNode* const*)left_pointer;
+    XedGeneratedStringNode* const* right = (XedGeneratedStringNode* const*)right_pointer;
+    u64 count = BUSTER_MIN((*left)->string.length, (*right)->string.length);
+    int result = count ? memcmp((*left)->string.pointer, (*right)->string.pointer, count) : 0;
+    if (!result)
+    {
+        result = ((*left)->string.length > (*right)->string.length) - ((*left)->string.length < (*right)->string.length);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 xed_generated_string_pool_prepare(Arena* arena, XedGeneratedStringPool* pool,
+                                                          XedGeneratedStringNode*** sorted_result)
+{
+    XedGeneratedStringNode** sorted = arena_allocate(arena, XedGeneratedStringNode*, pool->count);
+    u32 count = 0;
+    for (XedGeneratedStringNode* node = pool->first; node; node = node->next)
+    {
+        sorted[count++] = node;
+    }
+    qsort(sorted, count, sizeof(sorted[0]), xed_generated_string_node_compare);
+    u32 offset = 1;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        sorted[index]->offset = offset;
+        if (sorted[index]->string.length > UINT32_MAX - offset - 1)
+        {
+            return 0;
+        }
+        offset += (u32)sorted[index]->string.length + 1;
+    }
+    pool->byte_count = offset;
+    *sorted_result = sorted;
+    return offset;
+}
+
+BUSTER_GLOBAL_LOCAL u32 xed_generated_string_offset(XedGeneratedStringPool* pool, String8 string)
+{
+    if (!string.length)
+    {
+        return 0;
+    }
+    for (XedGeneratedStringNode* node = pool->first; node; node = node->next)
+    {
+        if (string_equal(node->string, string))
+        {
+            return node->offset;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_intern_record(XedGeneratedStringPool* pool, Arena* arena, XedImportRecord* record)
+{
+    String8 values[] = {
+        record->source, record->iclass, record->iform, record->isa_set, record->category, record->extension,
+        record->attributes, record->cpl, record->exceptions, record->flags, record->disasm, record->disasm_intel,
+        record->disasm_attsv, record->real_opcode, record->uname, record->comment, record->version, record->pattern,
+        record->operands, record->operand_annotation,
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(values); index += 1)
+    {
+        xed_generated_string_intern(pool, arena, values[index]);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_intern_forms(XedGeneratedStringPool* pool, Arena* arena, XedGeneratedFormList forms)
+{
+    for (u64 index = 0; index < forms.length; index += 1)
+    {
+        XedGeneratedForm* form = forms.pointer + index;
+        xed_generated_intern_record(pool, arena, form->record);
+        xed_generated_string_intern(pool, arena, form->tuple_rule);
+        xed_generated_string_intern(pool, arena, form->element_size);
+        xed_generated_string_intern(pool, arena, form->unsupported_token);
+        for (u32 operand_index = 0; operand_index < form->operand_count; operand_index += 1)
+        {
+            xed_generated_string_intern(pool, arena, form->operands[operand_index].atom);
+            xed_generated_string_intern(pool, arena, form->operands[operand_index].width);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_append_bytes(Arena* output, const char8* pointer, u64 length)
+{
+    arena_append_char8(output, '"');
+    for (u64 index = 0; index < length; index += 1)
+    {
+        u8 byte = (u8)pointer[index];
+        if (byte == '"')
+        {
+            arena_append_string8(output, S8("\\\""));
+        }
+        else if (byte == '\\')
+        {
+            arena_append_string8(output, S8("\\\\"));
+        }
+        else if (byte >= 0x20 && byte < 0x7f)
+        {
+            arena_append_char8(output, (char8)byte);
+        }
+        else
+        {
+            arena_append_char8(output, '\\');
+            arena_append_char8(output, (char8)('0' + ((byte >> 6) & 7)));
+            arena_append_char8(output, (char8)('0' + ((byte >> 3) & 7)));
+            arena_append_char8(output, (char8)('0' + (byte & 7)));
+        }
+    }
+    arena_append_char8(output, '"');
+    arena_append_char8(output, '\n');
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_append_decimal(Arena* output, u64 value)
+{
+    char buffer[32];
+    int length = snprintf(buffer, sizeof(buffer), "%llu", (unsigned long long)value);
+    if (length > 0)
+    {
+        arena_append_string8(output, (String8){.pointer = (char8*)buffer, .length = (u64)length});
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_append_hex(Arena* output, u64 value, bool wide)
+{
+    char buffer[32];
+    int length = snprintf(buffer, sizeof(buffer), wide ? "0x%016llxULL" : "0x%llxU", (unsigned long long)value);
+    if (length > 0)
+    {
+        arena_append_string8(output, (String8){.pointer = (char8*)buffer, .length = (u64)length});
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_append_offset(Arena* output, XedGeneratedStringPool* pool, String8 string)
+{
+    xed_generated_append_decimal(output, xed_generated_string_offset(pool, string));
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_append_separator(Arena* output, bool* first)
+{
+    if (!*first)
+    {
+        arena_append_string8(output, S8(", "));
+    }
+    *first = false;
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_append_form(Arena* output, XedGeneratedStringPool* pool, XedGeneratedForm* form,
+                                                    u32 operand_first)
+{
+    XedImportRecord* record = form->record;
+    String8 record_values[] = {
+        record->source, record->iclass, record->iform, record->isa_set, record->category, record->extension,
+        record->attributes, record->cpl, record->exceptions, record->flags, record->disasm, record->disasm_intel,
+        record->disasm_attsv, record->real_opcode, record->uname, record->comment, record->version, record->pattern,
+        record->operands, record->operand_annotation,
+    };
+    bool first = true;
+    arena_append_string8(output, S8("    {"));
+    xed_generated_append_hex(output, form->stable_hash, true);
+    first = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(record_values); index += 1)
+    {
+        xed_generated_append_separator(output, &first);
+        xed_generated_append_offset(output, pool, record_values[index]);
+    }
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, operand_first);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->operand_count);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->coverage_class);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->encoder_family);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->test_class);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->prefix_kind);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->map);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->fixed_byte_count);
+    xed_generated_append_separator(output, &first);
+    arena_append_string8(output, S8("{"));
+    for (u32 index = 0; index < XED_GENERATED_MAX_FIXED_BYTES; index += 1)
+    {
+        if (index)
+        {
+            arena_append_string8(output, S8(", "));
+        }
+        xed_generated_append_decimal(output, form->fixed_bytes[index]);
+    }
+    arena_append_string8(output, S8("}"));
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->mandatory_prefix);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->field_flags);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->decorator_flags);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->apx_flags);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->amx_flags);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->mode_flags);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->displacement_width);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->displacement_scale);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->immediate_width);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->immediate_signed);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->relocation_base);
+    xed_generated_append_separator(output, &first);
+    arena_append_string8(output, S8("{0, 0, 0}"));
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->tuple_kind);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_offset(output, pool, form->tuple_rule);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_offset(output, pool, form->element_size);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->token_count);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, form->reason_id);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_offset(output, pool, form->unsupported_token);
+    xed_generated_append_separator(output, &first);
+    xed_generated_append_decimal(output, 0);
+    arena_append_string8(output, S8("},\n"));
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_append_operand(Arena* output, XedGeneratedStringPool* pool, XedGeneratedOperand* operand)
+{
+    arena_append_string8(output, S8("    {"));
+    xed_generated_append_offset(output, pool, operand->atom);
+    arena_append_string8(output, S8(", "));
+    xed_generated_append_offset(output, pool, operand->width);
+    arena_append_string8(output, S8(", "));
+    xed_generated_append_decimal(output, operand->slot);
+    arena_append_string8(output, S8(", "));
+    xed_generated_append_decimal(output, operand->visible);
+    arena_append_string8(output, S8(", "));
+    xed_generated_append_decimal(output, operand->kind);
+    arena_append_string8(output, S8(", "));
+    xed_generated_append_decimal(output, operand->access);
+    arena_append_string8(output, S8(", "));
+    xed_generated_append_decimal(output, operand->field_source);
+    arena_append_string8(output, S8(", {0, 0, 0}},\n"));
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_emit_string_pool(Arena* output, Arena* arena, XedGeneratedStringPool* pool,
+                                                         XedGeneratedStringNode** sorted)
+{
+    u8* bytes = arena_allocate(arena, u8, pool->byte_count);
+    memset(bytes, 0, pool->byte_count);
+    u32 offset = 1;
+    for (u32 index = 0; index < pool->count; index += 1)
+    {
+        XedGeneratedStringNode* node = sorted[index];
+        memcpy(bytes + offset, node->string.pointer, node->string.length);
+        offset += (u32)node->string.length + 1;
+    }
+    arena_append_string8(output, S8("static const char8 buster_x86_generated_string_pool[] =\n"));
+    for (u32 start = 0; start < pool->byte_count; start += 64)
+    {
+        u32 length = BUSTER_MIN(64u, pool->byte_count - start);
+        arena_append_string8(output, S8("    "));
+        xed_generated_append_bytes(output, (char8*)bytes + start, length);
+    }
+    arena_append_string8(output, S8(";\n\n"));
+}
+
+BUSTER_GLOBAL_LOCAL void xed_generated_emit_preamble(Arena* output)
+{
+    arena_append_string8(output,
+                         S8("/* Generated by build import_assembly_metadata; do not edit. */\n"
+                            "#ifndef BUSTER_X86_64_ASSEMBLY_GENERATED_H\n"
+                            "#define BUSTER_X86_64_ASSEMBLY_GENERATED_H\n"
+                            "#include <buster/lib/base.h>\n\n"
+                            "typedef enum BusterX86GeneratedCoverageClass {\n"
+                            "    BUSTER_X86_GENERATED_COVERAGE_DIRECT,\n"
+                            "    BUSTER_X86_GENERATED_COVERAGE_NORMALIZED,\n"
+                            "    BUSTER_X86_GENERATED_COVERAGE_NOT64,\n"
+                            "    BUSTER_X86_GENERATED_COVERAGE_PRIVILEGED,\n"
+                            "    BUSTER_X86_GENERATED_COVERAGE_RESERVED,\n"
+                            "    BUSTER_X86_GENERATED_COVERAGE_UNSUPPORTED_TOKEN,\n"
+                            "    BUSTER_X86_GENERATED_COVERAGE_UNCLASSIFIED,\n"
+                            "    BUSTER_X86_GENERATED_COVERAGE_COUNT,\n"
+                            "} BusterX86GeneratedCoverageClass;\n\n"
+                            "typedef enum BusterX86GeneratedPrefixKind {\n"
+                            "    BUSTER_X86_GENERATED_PREFIX_LEGACY,\n"
+                            "    BUSTER_X86_GENERATED_PREFIX_REX,\n"
+                            "    BUSTER_X86_GENERATED_PREFIX_REX2,\n"
+                            "    BUSTER_X86_GENERATED_PREFIX_VEX,\n"
+                            "    BUSTER_X86_GENERATED_PREFIX_XOP,\n"
+                            "    BUSTER_X86_GENERATED_PREFIX_EVEX,\n"
+                            "} BusterX86GeneratedPrefixKind;\n\n"
+                            "typedef enum BusterX86GeneratedMap {\n"
+                            "    BUSTER_X86_GENERATED_MAP_LEGACY,\n"
+                            "    BUSTER_X86_GENERATED_MAP_0F,\n"
+                            "    BUSTER_X86_GENERATED_MAP_0F38,\n"
+                            "    BUSTER_X86_GENERATED_MAP_0F3A,\n"
+                            "    BUSTER_X86_GENERATED_MAP_4,\n"
+                            "    BUSTER_X86_GENERATED_MAP_5,\n"
+                            "    BUSTER_X86_GENERATED_MAP_6,\n"
+                            "    BUSTER_X86_GENERATED_MAP_7,\n"
+                            "    BUSTER_X86_GENERATED_MAP_X8,\n"
+                            "    BUSTER_X86_GENERATED_MAP_X9,\n"
+                            "    BUSTER_X86_GENERATED_MAP_XA,\n"
+                            "} BusterX86GeneratedMap;\n\n"
+                            "enum {\n"
+                            "    BUSTER_X86_GENERATED_FIELD_MODRM = 1u << 0,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_SIB = 1u << 1,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_VSIB = 1u << 2,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_MEMORY = 1u << 3,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_REGISTER = 1u << 4,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_DISPLACEMENT = 1u << 5,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_IMMEDIATE = 1u << 6,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_RELATIVE = 1u << 7,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_FIELD_END = 1u << 8,\n"
+                            "    BUSTER_X86_GENERATED_DECORATOR_MASK = 1u << 0,\n"
+                            "    BUSTER_X86_GENERATED_DECORATOR_ZEROING = 1u << 1,\n"
+                            "    BUSTER_X86_GENERATED_DECORATOR_BROADCAST = 1u << 2,\n"
+                            "    BUSTER_X86_GENERATED_DECORATOR_ROUNDING = 1u << 3,\n"
+                            "    BUSTER_X86_GENERATED_DECORATOR_SAE = 1u << 4,\n"
+                            "    BUSTER_X86_GENERATED_APX = 1u << 0,\n"
+                            "    BUSTER_X86_GENERATED_APX_ND = 1u << 1,\n"
+                            "    BUSTER_X86_GENERATED_APX_NF = 1u << 2,\n"
+                            "    BUSTER_X86_GENERATED_APX_NDD = 1u << 3,\n"
+                            "    BUSTER_X86_GENERATED_APX_SCC = 1u << 4,\n"
+                            "    BUSTER_X86_GENERATED_APX_EGPR = 1u << 5,\n"
+                            "    BUSTER_X86_GENERATED_AMX_TILE_REGISTER = 1u << 0,\n"
+                            "    BUSTER_X86_GENERATED_AMX_TILE_MEMORY = 1u << 1,\n"
+                            "    BUSTER_X86_GENERATED_AMX_TILE_ROW = 1u << 2,\n"
+                            "    BUSTER_X86_GENERATED_AMX_TILE_COLUMN = 1u << 3,\n"
+                            "};\n\n"
+                            "typedef enum BusterX86GeneratedTupleKind {\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_NONE,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_FULL,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_HALF,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_QUARTER,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_EIGHTH,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_SCALAR,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_TUPLE1,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_TUPLE1_4X,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_TUPLE1_BYTE,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_TUPLE1_WORD,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_TUPLE2,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_TUPLE4,\n"
+                            "    BUSTER_X86_GENERATED_TUPLE_TUPLE8,\n"
+                            "} BusterX86GeneratedTupleKind;\n\n"
+                            "enum {\n"
+                            "    BUSTER_X86_GENERATED_MODE_16 = 1u << 0,\n"
+                            "    BUSTER_X86_GENERATED_MODE_32 = 1u << 1,\n"
+                            "    BUSTER_X86_GENERATED_MODE_64 = 1u << 2,\n"
+                            "    BUSTER_X86_GENERATED_MODE_NOT64 = 1u << 3,\n"
+                            "    BUSTER_X86_GENERATED_MODE_EA16 = 1u << 4,\n"
+                            "    BUSTER_X86_GENERATED_MODE_EA32 = 1u << 5,\n"
+                            "    BUSTER_X86_GENERATED_MODE_EA64 = 1u << 6,\n"
+                            "    BUSTER_X86_GENERATED_MODE_EANOT16 = 1u << 7,\n"
+                            "};\n\n"
+                            "enum {\n"
+                            "    BUSTER_X86_GENERATED_ENCODER_LEGACY,\n"
+                            "    BUSTER_X86_GENERATED_ENCODER_REX,\n"
+                            "    BUSTER_X86_GENERATED_ENCODER_REX2,\n"
+                            "    BUSTER_X86_GENERATED_ENCODER_VEX,\n"
+                            "    BUSTER_X86_GENERATED_ENCODER_XOP,\n"
+                            "    BUSTER_X86_GENERATED_ENCODER_EVEX,\n"
+                            "    BUSTER_X86_GENERATED_ENCODER_AMX,\n"
+                            "    BUSTER_X86_GENERATED_ENCODER_SYSTEM,\n"
+                            "};\n\n"
+                            "enum {\n"
+                            "    BUSTER_X86_GENERATED_REASON_NONE,\n"
+                            "    BUSTER_X86_GENERATED_REASON_MODE_NOT64,\n"
+                            "    BUSTER_X86_GENERATED_REASON_CPL0,\n"
+                            "    BUSTER_X86_GENERATED_REASON_UNKNOWN_PATTERN_TOKEN,\n"
+                            "    BUSTER_X86_GENERATED_REASON_UNKNOWN_OPERAND_TOKEN,\n"
+                            "};\n\n"
+                            "enum {\n"
+                            "    BUSTER_X86_GENERATED_OPERAND_NONE,\n"
+                            "    BUSTER_X86_GENERATED_OPERAND_REGISTER,\n"
+                            "    BUSTER_X86_GENERATED_OPERAND_MEMORY,\n"
+                            "    BUSTER_X86_GENERATED_OPERAND_IMMEDIATE,\n"
+                            "    BUSTER_X86_GENERATED_OPERAND_RELATIVE,\n"
+                            "    BUSTER_X86_GENERATED_OPERAND_ABSOLUTE,\n"
+                            "    BUSTER_X86_GENERATED_OPERAND_BASE,\n"
+                            "    BUSTER_X86_GENERATED_OPERAND_SEGMENT,\n"
+                            "    BUSTER_X86_GENERATED_OPERAND_ADDRESS_GENERATOR,\n"
+                            "    BUSTER_X86_GENERATED_OPERAND_PSEUDO,\n"
+                            "};\n"
+                            "enum {\n"
+                            "    BUSTER_X86_GENERATED_ACCESS_READ = 1u << 0,\n"
+                            "    BUSTER_X86_GENERATED_ACCESS_WRITE = 1u << 1,\n"
+                            "    BUSTER_X86_GENERATED_ACCESS_COND = 1u << 2,\n"
+                            "    BUSTER_X86_GENERATED_ACCESS_SUPPRESSED = 1u << 3,\n"
+                            "    BUSTER_X86_GENERATED_ACCESS_IMPLICIT = 1u << 4,\n"
+                            "};\n"
+                            "typedef enum BusterX86GeneratedFieldSource {\n"
+                            "    BUSTER_X86_GENERATED_FIELD_SOURCE_NONE,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_SOURCE_REG,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_SOURCE_RM,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_SOURCE_VVVV,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_SOURCE_MASK,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_SOURCE_FIXED,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_SOURCE_IMMEDIATE,\n"
+                            "    BUSTER_X86_GENERATED_FIELD_SOURCE_RELATIVE,\n"
+                            "} BusterX86GeneratedFieldSource;\n"
+                            "enum {\n"
+                            "    BUSTER_X86_GENERATED_TEST_SCHEMA,\n"
+                            "    BUSTER_X86_GENERATED_TEST_PRIVILEGED_SCHEMA,\n"
+                            "    BUSTER_X86_GENERATED_TEST_NOT64_SCHEMA,\n"
+                            "};\n\n"
+                            "typedef struct BusterX86GeneratedOperand BusterX86GeneratedOperand;\n"
+                            "struct BusterX86GeneratedOperand {\n"
+                            "    u32 atom_offset;\n"
+                            "    u32 width_offset;\n"
+                            "    u8 slot;\n"
+                            "    u8 visible;\n"
+                            "    u8 kind;\n"
+                            "    u8 access;\n"
+                            "    u8 field_source;\n"
+                            "    u8 reserved[3];\n"
+                            "};\n\n"
+                            "typedef struct BusterX86GeneratedForm BusterX86GeneratedForm;\n"
+                            "struct BusterX86GeneratedForm {\n"
+                            "    u64 stable_hash;\n"
+                            "    u32 source_offset;\n"
+                            "    u32 iclass_offset;\n"
+                            "    u32 iform_offset;\n"
+                            "    u32 isa_set_offset;\n"
+                            "    u32 category_offset;\n"
+                            "    u32 extension_offset;\n"
+                            "    u32 attributes_offset;\n"
+                            "    u32 cpl_offset;\n"
+                            "    u32 exceptions_offset;\n"
+                            "    u32 flags_offset;\n"
+                            "    u32 disasm_offset;\n"
+                            "    u32 disasm_intel_offset;\n"
+                            "    u32 disasm_attsv_offset;\n"
+                            "    u32 real_opcode_offset;\n"
+                            "    u32 uname_offset;\n"
+                            "    u32 comment_offset;\n"
+                            "    u32 version_offset;\n"
+                            "    u32 pattern_offset;\n"
+                            "    u32 operands_offset;\n"
+                            "    u32 operand_annotation_offset;\n"
+                            "    u32 operand_first;\n"
+                            "    u16 operand_count;\n"
+                            "    u8 coverage_class;\n"
+                            "    u8 encoder_family;\n"
+                            "    u8 test_class;\n"
+                            "    u8 prefix_kind;\n"
+                            "    u8 map;\n"
+                            "    u8 fixed_byte_count;\n"
+                            "    u8 fixed_bytes[16];\n"
+                            "    u8 mandatory_prefix;\n"
+                            "    u16 field_flags;\n"
+                            "    u16 decorator_flags;\n"
+                            "    u16 apx_flags;\n"
+                            "    u16 amx_flags;\n"
+                            "    u16 mode_flags;\n"
+                            "    u8 displacement_width;\n"
+                            "    u8 displacement_scale;\n"
+                            "    u8 immediate_width;\n"
+                            "    u8 immediate_signed;\n"
+                            "    u8 relocation_base;\n"
+                            "    u8 reserved[3];\n"
+                            "    u8 tuple_kind;\n"
+                            "    u32 tuple_offset;\n"
+                            "    u32 element_size_offset;\n"
+                            "    u32 token_count;\n"
+                            "    u16 reason_id;\n"
+                            "    u32 reason_offset;\n"
+                            "    u16 reserved2;\n"
+                            "};\n\n"
+                            "typedef struct BusterX86GeneratedCoverage BusterX86GeneratedCoverage;\n"
+                            "struct BusterX86GeneratedCoverage {\n"
+                            "    u64 source_hash;\n"
+                            "    u32 source_offset;\n"
+                            "    u32 normalized_form_id;\n"
+                            "    u8 coverage_class;\n"
+                            "    u8 encoder_family;\n"
+                            "    u8 test_class;\n"
+                            "    u16 reason_id;\n"
+                            "    u32 reason_offset;\n"
+                            "};\n\n"
+                            "#define BUSTER_X86_GENERATED_SCHEMA_VERSION 1\n\n"));
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_emit_generated_tables(Arena* output, Arena* coverage_output, Arena* arena,
+                                                           XedGeneratedFormList forms, XedGeneratedTableStats* stats)
+{
+    XedGeneratedStringPool pool = {0};
+    xed_generated_intern_forms(&pool, arena, forms);
+    XedGeneratedStringNode** sorted = 0;
+    if (!xed_generated_string_pool_prepare(arena, &pool, &sorted))
+    {
+        return false;
+    }
+
+    u32* operand_offsets = arena_allocate(arena, u32, forms.length);
+    u32 operand_count = 0;
+    for (u64 index = 0; index < forms.length; index += 1)
+    {
+        operand_offsets[index] = operand_count;
+        if (forms.pointer[index].operand_count > UINT32_MAX - operand_count)
+        {
+            return false;
+        }
+        operand_count += forms.pointer[index].operand_count;
+    }
+    stats->operand_count = operand_count;
+    stats->string_pool_bytes = pool.byte_count;
+
+    xed_generated_emit_preamble(output);
+    xed_generated_emit_string_pool(output, arena, &pool, sorted);
+    arena_append_string8(output, S8("static const BusterX86GeneratedOperand buster_x86_generated_operands[] = {\n"));
+    for (u64 index = 0; index < forms.length; index += 1)
+    {
+        for (u32 operand_index = 0; operand_index < forms.pointer[index].operand_count; operand_index += 1)
+        {
+            xed_generated_append_operand(output, &pool, forms.pointer[index].operands + operand_index);
+        }
+    }
+    arena_append_string8(output, S8("};\n\nstatic const BusterX86GeneratedForm buster_x86_generated_forms[] = {\n"));
+    for (u64 index = 0; index < forms.length; index += 1)
+    {
+        XedGeneratedForm* form = forms.pointer + index;
+        if (form->coverage_class == XED_GENERATED_COVERAGE_UNCLASSIFIED ||
+            ((form->coverage_class == XED_GENERATED_COVERAGE_UNSUPPORTED_TOKEN ||
+              form->coverage_class == XED_GENERATED_COVERAGE_RESERVED) &&
+             form->reason_id == XED_GENERATED_REASON_NONE))
+        {
+            return false;
+        }
+        xed_generated_append_form(output, &pool, form, operand_offsets[index]);
+        stats->coverage_counts[form->coverage_class] += 1;
+        stats->reason_counts[form->reason_id] += 1;
+        stats->encoder_counts[form->encoder_family] += 1;
+        stats->test_counts[form->test_class] += 1;
+        stats->token_count += form->token_count;
+    }
+    arena_append_string8(output, S8("};\n\n"));
+    arena_append_string8(output, S8("#define BUSTER_X86_GENERATED_FORM_COUNT "));
+    xed_generated_append_decimal(output, forms.length);
+    arena_append_string8(output, S8("\n#define BUSTER_X86_GENERATED_OPERAND_COUNT "));
+    xed_generated_append_decimal(output, operand_count);
+    arena_append_string8(output, S8("\n#define BUSTER_X86_GENERATED_STRING_POOL_SIZE "));
+    xed_generated_append_decimal(output, pool.byte_count);
+    arena_append_string8(output, S8("\n\n#include \"x86_64-coverage.generated.inc\"\n\n#endif\n"));
+
+    arena_append_string8(coverage_output,
+                         S8("/* Generated by build import_assembly_metadata; do not edit. */\n"
+                            "#define BUSTER_X86_GENERATED_COVERAGE_COUNT "));
+    xed_generated_append_decimal(coverage_output, forms.length);
+    arena_append_string8(coverage_output, S8("\nstatic const struct BusterX86GeneratedCoverage buster_x86_generated_coverage[] = {\n"));
+    for (u64 index = 0; index < forms.length; index += 1)
+    {
+        XedGeneratedForm* form = forms.pointer + index;
+        arena_append_string8(coverage_output, S8("    {"));
+        xed_generated_append_hex(coverage_output, form->stable_hash, true);
+        arena_append_string8(coverage_output, S8(", "));
+        xed_generated_append_decimal(coverage_output, xed_generated_string_offset(&pool, form->record->source));
+        arena_append_string8(coverage_output, S8(", "));
+        xed_generated_append_decimal(coverage_output, index);
+        arena_append_string8(coverage_output, S8(", "));
+        xed_generated_append_decimal(coverage_output, form->coverage_class);
+        arena_append_string8(coverage_output, S8(", "));
+        xed_generated_append_decimal(coverage_output, form->encoder_family);
+        arena_append_string8(coverage_output, S8(", "));
+        xed_generated_append_decimal(coverage_output, form->test_class);
+        arena_append_string8(coverage_output, S8(", "));
+        xed_generated_append_decimal(coverage_output, form->reason_id);
+        arena_append_string8(coverage_output, S8(", "));
+        xed_generated_append_offset(coverage_output, &pool, form->unsupported_token);
+        arena_append_string8(coverage_output, S8("},\n"));
+    }
+    arena_append_string8(coverage_output, S8("};\n"));
+    stats->header_bytes = arena_buffer_size(output);
+    stats->coverage_bytes = arena_buffer_size(coverage_output);
+    return stats->coverage_counts[XED_GENERATED_COVERAGE_UNCLASSIFIED] == 0;
 }
 
 BUSTER_GLOBAL_LOCAL bool json_raw_array_next(JsonParser* parser, String8* value, bool* valid)
@@ -4162,6 +6719,30 @@ BUSTER_GLOBAL_LOCAL String8 assembly_import_checksum(Arena* arena, String8 bytes
     return string_format(arena, S8("{u64:x,width=[0,16],no_prefix}"), checksum);
 }
 
+BUSTER_GLOBAL_LOCAL u64 xed_import_unique_record_value_count(Arena* arena, XedImportRecordList records, bool iform)
+{
+    String8* values = arena_allocate(arena, String8, records.count);
+    u64 value_count = 0;
+    for (XedImportRecord* record = records.first; record; record = record->next)
+    {
+        String8 value = iform ? record->iform : record->iclass;
+        if (value.length)
+        {
+            values[value_count++] = value;
+        }
+    }
+    qsort(values, value_count, sizeof(values[0]), assembly_import_string_compare);
+    u64 unique_count = 0;
+    for (u64 index = 0; index < value_count; index += 1)
+    {
+        if (!index || !string_equal(values[index - 1], values[index]))
+        {
+            unique_count += 1;
+        }
+    }
+    return unique_count;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_import_write(Arena* arena, String8 directory, String8 name, String8 content)
 {
     String8 path = path_join(arena, directory, name);
@@ -4177,7 +6758,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
 {
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
     Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
-    if (!arena || !output)
+    Arena* schema_a = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
+    Arena* schema_b = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
+    Arena* coverage_a = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(2)});
+    Arena* coverage_b = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(2)});
+    if (!arena || !output || !schema_a || !schema_b || !coverage_a || !coverage_b)
     {
         if (arena)
         {
@@ -4187,18 +6772,123 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
         {
             arena_destroy(output, 1);
         }
+        if (schema_a)
+        {
+            arena_destroy(schema_a, 1);
+        }
+        if (schema_b)
+        {
+            arena_destroy(schema_b, 1);
+        }
+        if (coverage_a)
+        {
+            arena_destroy(coverage_a, 1);
+        }
+        if (coverage_b)
+        {
+            arena_destroy(coverage_b, 1);
+        }
         return false;
     }
 
     XedImportRecordList xed = {0};
-    xed_import_parse_file(arena, &xed, S8("fixture.xed.txt"),
-                          S8("{\nICLASS: ADD\nIFORM: ADD_GPRv_GPRv\nISA_SET: BASE\nPATTERN: 0x01 MODRM()\nOPERANDS: REG0=GPRv:r REG1=GPRv:r\n}\n"
-                             "{\nICLASS: INCOMPLETE\nPATTERN: 0x02\n}\n"));
+    bool result = xed_import_parse_file(arena, &xed, S8("fixture.xed.txt"),
+                                        S8("INSTRUCTIONS()::\n{\nICLASS: ADD\nIFORM: ADD_GPRv_GPRv\nISA_SET: BASE\nPATTERN: 0x01 MODRM()\nOPERANDS: REG0=GPRv:r REG1=GPRv:r\n}\n"
+                                           "{\nICLASS: INCOMPLETE\nPATTERN: 0x02\n}\n"));
     xed_import_emit(output, xed);
     String8 expected_xed =
         S8("{\"source\":\"fixture.xed.txt\",\"iclass\":\"ADD\",\"iform\":\"ADD_GPRv_GPRv\",\"isa_set\":\"BASE\","
            "\"pattern\":\"0x01 MODRM()\",\"operands\":\"REG0=GPRv:r REG1=GPRv:r\"}\n");
-    bool result = xed.count == 1 && string_equal(assembly_import_arena_contents(output), expected_xed);
+    result = !result && xed.count == 1 && string_equal(assembly_import_arena_contents(output), expected_xed);
+
+    XedImportRecordList multiline = {0};
+    result = result && xed_import_parse_file(
+                            arena, &multiline, S8("multiline.xed.txt"),
+                            S8("INSTRUCTIONS()::\n{\nICLASS: MULTI\nPATTERN: 0x10 MODRM() \\\n+  VL128\nOPERANDS: REG0=GPRv:r \\\n+  REG1=GPRv:w # NDD\nPATTERN: 0x11\nOPERANDS:\n}\n")) &&
+             multiline.count == 2 && multiline.first->operands_present && string_equal(multiline.first->operand_annotation, S8("NDD")) &&
+             multiline.last->operands_present && !multiline.last->operands.length;
+
+    XedImportRecordList malformed = {0};
+    result = result && !xed_import_parse_file(arena, &malformed, S8("bad.xed.txt"), S8("{\nUNKNOWN: value\n}"));
+    XedImportRecordList unknown_directive = {0};
+    result = result && !xed_import_parse_file(arena, &unknown_directive, S8("directive.xed.txt"),
+                                              S8("BOGUS()::\n{\nICLASS: BAD\nPATTERN: 0x01\nOPERANDS:\n}\n"));
+    result = result && assembly_import_relative_path_is_safe(S8("amd/isa.txt")) &&
+             !assembly_import_relative_path_is_safe(S8("../isa.txt")) && !assembly_import_relative_path_is_safe(S8("a/../isa.txt")) &&
+             !assembly_import_relative_path_is_safe(S8("/absolute.txt")) && !assembly_import_relative_path_is_safe(S8("a\\..\\isa.txt")) &&
+             !assembly_import_relative_path_is_safe(S8("\\absolute.txt")) && assembly_import_config_key_is_known(S8("enc-instructions")) &&
+             !assembly_import_config_key_is_known(S8("unknown-key"));
+    AssemblyImportPathNode fixture_config = {.relative = S8("files.cfg")};
+    AssemblyImportPathList fixture_sources = {0};
+    AssemblyImportPathList duplicate_sources = {.first = &fixture_config, .last = &fixture_config, .count = 1};
+    result = result && !assembly_import_config_parse(arena, S8("/tmp"), &fixture_config, S8("unknown-key: value\n"), &fixture_sources, false) &&
+             !assembly_import_config_parse(arena, S8("/tmp"), &fixture_config, S8("enc-instructions: ../escape.xed.txt\n"), &fixture_sources, false) &&
+             !assembly_import_config_parse(arena, S8("/tmp"), &fixture_config, S8("malformed\n"), &fixture_sources, false) &&
+             assembly_import_path_list_contains(duplicate_sources, S8("files.cfg"));
+
+    XedImportRecord normalized_record = {
+        .source = S8("fixture.xed.txt"),
+        .iclass = S8("VADD"),
+        .iform = S8("VADD_XMM"),
+        .isa_set = S8("AVX512"),
+        .category = S8("AVX512"),
+        .extension = S8("AVX512EVEX"),
+        .attributes = S8("BROADCAST_ENABLED"),
+        .pattern = S8("EVV 0x62 V0F38 MOD[mm] MOD!=3 REG[rrr] RM[nnn] MODRM() VL128 mode64 NELEM_FULL() SAE()"),
+        .operands = S8("REG0=XMM_R():rw:f32 REG1=MASK1():r:mskw:TXT=ZEROSTR MEM0:r:vv:f32:TXT=BCASTSTR"),
+        .operands_present = true,
+    };
+    XedGeneratedForm normalized_form = {0};
+    String8 bad_token = {0};
+    bool bad_operand = false;
+    result = result && xed_import_normalize_record(&normalized_form, &normalized_record, 0, &bad_token, &bad_operand) &&
+             normalized_form.coverage_class == XED_GENERATED_COVERAGE_NORMALIZED &&
+             normalized_form.prefix_kind == XED_GENERATED_PREFIX_EVEX && normalized_form.map == XED_GENERATED_MAP_0F38 &&
+             (normalized_form.field_flags & (XED_GENERATED_FIELD_MODRM | XED_GENERATED_FIELD_MEMORY)) ==
+                 (XED_GENERATED_FIELD_MODRM | XED_GENERATED_FIELD_MEMORY) &&
+             (normalized_form.decorator_flags & (XED_GENERATED_DECORATOR_MASK | XED_GENERATED_DECORATOR_ZEROING |
+                                                  XED_GENERATED_DECORATOR_BROADCAST | XED_GENERATED_DECORATOR_SAE)) ==
+                 (XED_GENERATED_DECORATOR_MASK | XED_GENERATED_DECORATOR_ZEROING | XED_GENERATED_DECORATOR_BROADCAST |
+                  XED_GENERATED_DECORATOR_SAE) &&
+             normalized_form.tuple_kind == XED_GENERATED_TUPLE_FULL && normalized_form.operands[0].field_source == XED_GENERATED_FIELD_SOURCE_REG &&
+             normalized_form.operands[2].field_source == XED_GENERATED_FIELD_SOURCE_RM;
+    XedImportRecord bad_pattern_record = normalized_record;
+    bad_pattern_record.pattern = S8("BOGUS_PATTERN_TOKEN");
+    XedGeneratedForm bad_pattern_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && !xed_import_normalize_record(&bad_pattern_form, &bad_pattern_record, 0, &bad_token, &bad_operand) &&
+             bad_pattern_form.coverage_class == XED_GENERATED_COVERAGE_UNSUPPORTED_TOKEN &&
+             bad_pattern_form.reason_id == XED_GENERATED_REASON_UNKNOWN_PATTERN_TOKEN && !bad_operand &&
+             string_equal(bad_token, S8("BOGUS_PATTERN_TOKEN"));
+    XedImportRecord bad_operand_record = normalized_record;
+    bad_operand_record.operands = S8("REG0=BOGUS_OPERAND:r");
+    XedGeneratedForm bad_operand_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && !xed_import_normalize_record(&bad_operand_form, &bad_operand_record, 0, &bad_token, &bad_operand) &&
+             bad_operand_form.coverage_class == XED_GENERATED_COVERAGE_UNSUPPORTED_TOKEN &&
+             bad_operand_form.reason_id == XED_GENERATED_REASON_UNKNOWN_OPERAND_TOKEN && bad_operand;
+    String8 checksum_a = assembly_import_checksum(arena, S8("deterministic"));
+    String8 checksum_b = assembly_import_checksum(arena, S8("deterministic"));
+    result = result && string_equal(checksum_a, checksum_b);
+    XedGeneratedFormList normalized_forms = {.pointer = &normalized_form, .length = 1};
+    XedGeneratedTableStats schema_stats_a = {0};
+    XedGeneratedTableStats schema_stats_b = {0};
+    result = result && xed_import_emit_generated_tables(schema_a, coverage_a, arena, normalized_forms, &schema_stats_a) &&
+             xed_import_emit_generated_tables(schema_b, coverage_b, arena, normalized_forms, &schema_stats_b) &&
+             string_equal(assembly_import_arena_contents(schema_a), assembly_import_arena_contents(schema_b)) &&
+             string_equal(assembly_import_arena_contents(coverage_a), assembly_import_arena_contents(coverage_b)) &&
+             schema_stats_a.header_bytes == schema_stats_b.header_bytes && schema_stats_a.coverage_bytes == schema_stats_b.coverage_bytes &&
+             schema_stats_a.coverage_counts[XED_GENERATED_COVERAGE_NORMALIZED] == 1 && schema_stats_a.reason_counts[XED_GENERATED_REASON_NONE] == 1;
+
+    arena_reset_to_start(schema_a);
+    arena_reset_to_start(coverage_a);
+    XedGeneratedFormList unsupported_forms = {.pointer = &bad_pattern_form, .length = 1};
+    XedGeneratedTableStats unsupported_stats = {0};
+    result = result && xed_import_emit_generated_tables(schema_a, coverage_a, arena, unsupported_forms, &unsupported_stats) &&
+             unsupported_stats.coverage_counts[XED_GENERATED_COVERAGE_UNSUPPORTED_TOKEN] == 1 &&
+             unsupported_stats.reason_counts[XED_GENERATED_REASON_UNKNOWN_PATTERN_TOKEN] == 1;
 
     arena_reset_to_start(output);
     String8 aarch64_json =
@@ -4215,6 +6905,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     result = result && aarch64_import_emit(arena, output, aarch64_json, &aarch64_count) && aarch64_count == 1 &&
              string_equal(assembly_import_arena_contents(output), expected_aarch64);
 
+    arena_destroy(coverage_b, 1);
+    arena_destroy(coverage_a, 1);
+    arena_destroy(schema_b, 1);
+    arena_destroy(schema_a, 1);
     arena_destroy(output, 1);
     arena_destroy(arena, 1);
     return result;
@@ -4228,34 +6922,51 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         string_print(S8("error: assembly metadata importer self-test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
-    AssemblyImportPathList paths = {0};
-    if (!assembly_import_collect_xed_paths(arena, options.xed_datafiles, &paths) || !paths.count)
+    AssemblyImportPathList config_paths = {0};
+    if (!assembly_import_collect_xed_config_paths(arena, options.xed_datafiles, &config_paths) || !config_paths.count)
     {
-        string_print(S8("error: failed to enumerate XED data files under {S8}\n"), options.xed_datafiles);
+        string_print(S8("error: failed to enumerate XED files*.cfg configuration under {S8}\n"), options.xed_datafiles);
         return PROCESS_RESULT_FAILED;
     }
 
-    AssemblyImportPathNode** sorted_paths = arena_allocate(arena, AssemblyImportPathNode*, paths.count);
+    AssemblyImportPathNode** sorted_config_paths = arena_allocate(arena, AssemblyImportPathNode*, config_paths.count);
     u64 path_index = 0;
-    for (AssemblyImportPathNode* node = paths.first; node; node = node->next)
+    for (AssemblyImportPathNode* node = config_paths.first; node; node = node->next)
     {
-        sorted_paths[path_index++] = node;
+        sorted_config_paths[path_index++] = node;
     }
-    qsort(sorted_paths, paths.count, sizeof(sorted_paths[0]), assembly_import_path_compare);
+    qsort(sorted_config_paths, config_paths.count, sizeof(sorted_config_paths[0]), assembly_import_path_compare);
+
+    AssemblyImportPathList source_paths = {0};
 
     Arena* xed_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+    Arena* generated_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+    Arena* coverage_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32)});
     Arena* aarch64_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+    Arena* xed_config_checksum_input = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32)});
     Arena* xed_checksum_input = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
-    if (!xed_output || !aarch64_output || !xed_checksum_input)
+    if (!xed_output || !generated_output || !coverage_output || !aarch64_output || !xed_config_checksum_input || !xed_checksum_input)
     {
         string_print(S8("error: failed to reserve assembly importer arenas\n"));
         if (xed_output)
         {
             arena_destroy(xed_output, 1);
         }
+        if (generated_output)
+        {
+            arena_destroy(generated_output, 1);
+        }
+        if (coverage_output)
+        {
+            arena_destroy(coverage_output, 1);
+        }
         if (aarch64_output)
         {
             arena_destroy(aarch64_output, 1);
+        }
+        if (xed_config_checksum_input)
+        {
+            arena_destroy(xed_config_checksum_input, 1);
         }
         if (xed_checksum_input)
         {
@@ -4265,10 +6976,49 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     }
 
     ProcessResult result = PROCESS_RESULT_SUCCESS;
-    XedImportRecordList xed_records = {0};
-    for (u64 i = 0; i < paths.count; i += 1)
+    for (u64 i = 0; i < config_paths.count; i += 1)
     {
-        AssemblyImportPathNode* path = sorted_paths[i];
+        AssemblyImportPathNode* config = sorted_config_paths[i];
+        ByteSlice bytes = file_read(arena, config->full, (FileReadOptions){0});
+        if (!bytes.pointer && bytes.length == 0)
+        {
+            string_print(S8("error: failed to read XED configuration {S8}\n"), config->full);
+            result = PROCESS_RESULT_FAILED;
+            break;
+        }
+        String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+        arena_append_string8(xed_config_checksum_input, config->relative);
+        arena_append_char8(xed_config_checksum_input, 0);
+        arena_append_string8(xed_config_checksum_input, text);
+        arena_append_char8(xed_config_checksum_input, 0);
+        if (!assembly_import_config_parse(arena, options.xed_datafiles, config, text, &source_paths, true))
+        {
+            result = PROCESS_RESULT_FAILED;
+            break;
+        }
+    }
+    if (result == PROCESS_RESULT_SUCCESS && !source_paths.count)
+    {
+        string_print(S8("error: XED configuration selected no enc-instructions sources\n"));
+        result = PROCESS_RESULT_FAILED;
+    }
+
+    AssemblyImportPathNode** sorted_source_paths = 0;
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        sorted_source_paths = arena_allocate(arena, AssemblyImportPathNode*, source_paths.count);
+        path_index = 0;
+        for (AssemblyImportPathNode* node = source_paths.first; node; node = node->next)
+        {
+            sorted_source_paths[path_index++] = node;
+        }
+        qsort(sorted_source_paths, source_paths.count, sizeof(sorted_source_paths[0]), assembly_import_path_compare);
+    }
+
+    XedImportRecordList xed_records = {0};
+    for (u64 i = 0; result == PROCESS_RESULT_SUCCESS && i < source_paths.count; i += 1)
+    {
+        AssemblyImportPathNode* path = sorted_source_paths[i];
         ByteSlice bytes = file_read(arena, path->full, (FileReadOptions){0});
         if (!bytes.pointer && bytes.length == 0)
         {
@@ -4281,9 +7031,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         arena_append_char8(xed_checksum_input, 0);
         arena_append_string8(xed_checksum_input, text);
         arena_append_char8(xed_checksum_input, 0);
-        if (string_contains(text, S8("ICLASS:")))
+        if (!xed_import_parse_file(arena, &xed_records, path->relative, text))
         {
-            xed_import_parse_file(arena, &xed_records, path->relative, text);
+            string_print(S8("error: malformed XED enc-instructions source {S8}\n"), path->relative);
+            result = PROCESS_RESULT_FAILED;
         }
     }
     if (result == PROCESS_RESULT_SUCCESS && !xed_records.count)
@@ -4294,6 +7045,34 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     if (result == PROCESS_RESULT_SUCCESS)
     {
         xed_import_emit(xed_output, xed_records);
+    }
+
+    XedGeneratedFormList generated_forms = {0};
+    XedGeneratedTableStats generated_stats = {0};
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        bool valid = true;
+        u64 failed_index = 0;
+        String8 bad_token = {0};
+        bool bad_operand = false;
+        generated_forms = xed_import_normalize_records(arena, xed_records, &valid, &failed_index, &bad_token, &bad_operand);
+        if (!valid)
+        {
+            XedImportRecord* record = xed_records.first;
+            for (u64 index = 0; record && index < failed_index; index += 1)
+            {
+                record = record->next;
+            }
+            string_print(S8("error: unsupported XED {S8} token in {S8} iclass={S8}: {S8}\n"),
+                         bad_operand ? S8("operand") : S8("pattern"), record ? record->source : S8("<unknown>"),
+                         record ? record->iclass : S8("<unknown>"), bad_token);
+            result = PROCESS_RESULT_FAILED;
+        }
+        else if (!xed_import_emit_generated_tables(generated_output, coverage_output, arena, generated_forms, &generated_stats))
+        {
+            string_print(S8("error: generated XED coverage contains UNCLASSIFIED rows\n"));
+            result = PROCESS_RESULT_FAILED;
+        }
     }
 
     FileMapRead aarch64_map = {0};
@@ -4322,24 +7101,55 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     {
         make_directory_recursive(arena, options.output_directory);
         String8 xed_content = assembly_import_arena_contents(xed_output);
+        String8 generated_content = assembly_import_arena_contents(generated_output);
+        String8 coverage_content = assembly_import_arena_contents(coverage_output);
         String8 aarch64_content = assembly_import_arena_contents(aarch64_output);
+        String8 xed_config_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(xed_config_checksum_input));
         String8 xed_input_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(xed_checksum_input));
         String8 aarch64_input_checksum = assembly_import_checksum(arena, aarch64_json);
         String8 xed_output_checksum = assembly_import_checksum(arena, xed_content);
+        String8 generated_output_checksum = assembly_import_checksum(arena, generated_content);
+        String8 coverage_output_checksum = assembly_import_checksum(arena, coverage_content);
         String8 aarch64_output_checksum = assembly_import_checksum(arena, aarch64_content);
+        u64 iclass_count = xed_import_unique_record_value_count(arena, xed_records, false);
+        u64 iform_count = xed_import_unique_record_value_count(arena, xed_records, true);
+        u64 missing_iform_count = 0;
+        for (XedImportRecord* record = xed_records.first; record; record = record->next)
+        {
+            missing_iform_count += !record->iform.length;
+        }
         String8 manifest = string_format(
             arena,
             S8("{{\n"
-               "  \"schema_version\": 1,\n"
+               "  \"schema_version\": 2,\n"
                "  \"checksum_algorithm\": \"xxh64\",\n"
                "  \"xed\": {{\n"
                "    \"source_url\": \"https://github.com/intelxed/xed\",\n"
                "    \"release\": \"v2026.07.15\",\n"
                "    \"commit\": \"519c843c86547e2003f5a404a53358a7dcfb82f3\",\n"
                "    \"license\": \"Apache-2.0\",\n"
+               "    \"config_file_count\": {u64},\n"
+               "    \"source_file_count\": {u64},\n"
+               "    \"config_checksum\": \"{S8}\",\n"
                "    \"input_checksum\": \"{S8}\",\n"
                "    \"output_checksum\": \"{S8}\",\n"
-               "    \"form_count\": {u64}\n"
+               "    \"form_count\": {u64},\n"
+               "    \"iclass_count\": {u64},\n"
+               "    \"iform_count\": {u64},\n"
+               "    \"missing_iform_count\": {u64}\n"
+               "  },\n"
+               "  \"generated\": {{\n"
+               "    \"header\": \"x86_64-assembly.generated.h\",\n"
+               "    \"header_checksum\": \"{S8}\",\n"
+               "    \"header_bytes\": {u64},\n"
+               "    \"coverage\": \"x86_64-coverage.generated.inc\",\n"
+               "    \"coverage_checksum\": \"{S8}\",\n"
+               "    \"coverage_bytes\": {u64},\n"
+               "    \"operand_count\": {u64},\n"
+               "    \"token_count\": {u64},\n"
+               "    \"string_pool_bytes\": {u64},\n"
+               "    \"classification_counts\": {{\"DIRECT\": {u64}, \"NORMALIZED\": {u64}, \"NOT64\": {u64}, \"PRIVILEGED\": {u64}, \"RESERVED\": {u64}, \"UNSUPPORTED_TOKEN\": {u64}, \"UNCLASSIFIED\": {u64}}},\n"
+               "    \"reason_counts\": {{\"NONE\": {u64}, \"MODE_NOT64\": {u64}, \"CPL0\": {u64}, \"UNKNOWN_PATTERN_TOKEN\": {u64}, \"UNKNOWN_OPERAND_TOKEN\": {u64}}}\n"
                "  },\n"
                "  \"llvm\": {{\n"
                "    \"source_url\": \"https://github.com/llvm/llvm-project\",\n"
@@ -4351,9 +7161,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
                "    \"instruction_count\": {u64}\n"
                "  }\n"
                "}\n"),
-            xed_input_checksum, xed_output_checksum, xed_records.count, aarch64_input_checksum, aarch64_output_checksum, aarch64_count);
+            config_paths.count, source_paths.count, xed_config_checksum, xed_input_checksum, xed_output_checksum, xed_records.count,
+            iclass_count, iform_count, missing_iform_count, generated_output_checksum, generated_stats.header_bytes,
+            coverage_output_checksum, generated_stats.coverage_bytes, generated_stats.operand_count, generated_stats.token_count,
+            generated_stats.string_pool_bytes, generated_stats.coverage_counts[0], generated_stats.coverage_counts[1],
+            generated_stats.coverage_counts[2], generated_stats.coverage_counts[3], generated_stats.coverage_counts[4],
+            generated_stats.coverage_counts[5], generated_stats.coverage_counts[6], generated_stats.reason_counts[0],
+            generated_stats.reason_counts[1], generated_stats.reason_counts[2], generated_stats.reason_counts[3], generated_stats.reason_counts[4],
+            aarch64_input_checksum, aarch64_output_checksum, aarch64_count);
 
         if (!assembly_import_write(arena, options.output_directory, S8("x86_64-xed.jsonl"), xed_content) ||
+            !assembly_import_write(arena, options.output_directory, S8("x86_64-assembly.generated.h"), generated_content) ||
+            !assembly_import_write(arena, options.output_directory, S8("x86_64-coverage.generated.inc"), coverage_content) ||
             !assembly_import_write(arena, options.output_directory, S8("aarch64-llvm.jsonl"), aarch64_content) ||
             !assembly_import_write(arena, options.output_directory, S8("manifest.json"), manifest))
         {
@@ -4363,6 +7182,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         {
             string_print(S8("Imported {u64} XED forms and {u64} AArch64 instructions into {S8}.\n"), xed_records.count, aarch64_count,
                          options.output_directory);
+            string_print(S8("XED configuration: {u64} files, {u64} enc-instruction sources, {u64} iclasses, {u64} iforms ({u64} missing).\n"),
+                         config_paths.count, source_paths.count, iclass_count, iform_count, missing_iform_count);
+            string_print(S8("Generated tables: header={u64} bytes coverage={u64} bytes operands={u64} strings={u64} bytes.\n"),
+                         generated_stats.header_bytes, generated_stats.coverage_bytes, generated_stats.operand_count,
+                         generated_stats.string_pool_bytes);
+            string_print(S8("Coverage: DIRECT={u64} NORMALIZED={u64} NOT64={u64} PRIVILEGED={u64} RESERVED={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}.\n"),
+                         generated_stats.coverage_counts[0], generated_stats.coverage_counts[1], generated_stats.coverage_counts[2],
+                         generated_stats.coverage_counts[3], generated_stats.coverage_counts[4], generated_stats.coverage_counts[5],
+                         generated_stats.coverage_counts[6]);
         }
     }
 
@@ -4371,7 +7199,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         file_map_unmap(aarch64_map);
     }
     arena_destroy(xed_checksum_input, 1);
+    arena_destroy(xed_config_checksum_input, 1);
     arena_destroy(aarch64_output, 1);
+    arena_destroy(coverage_output, 1);
+    arena_destroy(generated_output, 1);
     arena_destroy(xed_output, 1);
     return result;
 }

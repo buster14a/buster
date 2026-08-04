@@ -1,14 +1,33 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "checksum_algorithm": "xxh64",
   "xed": {
     "source_url": "https://github.com/intelxed/xed",
     "release": "v2026.07.15",
     "commit": "519c843c86547e2003f5a404a53358a7dcfb82f3",
     "license": "Apache-2.0",
-    "input_checksum": "5bd8fbd61c056b14",
-    "output_checksum": "bd98f28238002d16",
-    "form_count": 7260
+    "config_file_count": 118,
+    "source_file_count": 126,
+    "config_checksum": "01f10b9ebb746608",
+    "input_checksum": "e17a507452470194",
+    "output_checksum": "ba80aa3be0eb2e6f",
+    "form_count": 11013,
+    "iclass_count": 1995,
+    "iform_count": 5855,
+    "missing_iform_count": 3488
+  },
+  "generated": {
+    "header": "x86_64-assembly.generated.h",
+    "header_checksum": "3dd56100deee1cd5",
+    "header_bytes": 6616876,
+    "coverage": "x86_64-coverage.generated.inc",
+    "coverage_checksum": "b0a467045a94e220",
+    "coverage_bytes": 649864,
+    "operand_count": 32813,
+    "token_count": 136913,
+    "string_pool_bytes": 1484605,
+    "classification_counts": {"DIRECT": 0, "NORMALIZED": 10636, "NOT64": 268, "PRIVILEGED": 109, "RESERVED": 0, "UNSUPPORTED_TOKEN": 0, "UNCLASSIFIED": 0},
+    "reason_counts": {"NONE": 10636, "MODE_NOT64": 268, "CPL0": 109, "UNKNOWN_PATTERN_TOKEN": 0, "UNKNOWN_OPERAND_TOKEN": 0}
   },
   "llvm": {
     "source_url": "https://github.com/llvm/llvm-project",
