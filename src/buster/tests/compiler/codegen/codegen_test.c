@@ -2592,6 +2592,11 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "    padding[0] = 4;\n"
         "    mutate_big(original);\n"
         "    return original.first + padding[0];\n"
+        "}\n"
+        "int dynamic_layout(int count) {\n"
+        "    unsigned char values[count];\n"
+        "    values[32] = 0x5a;\n"
+        "    return sum_five(1, 2, 3, 4, 5) + values[32];\n"
         "}\n");
     CPreprocessResult canonical_windows_tokens = c_preprocess(arguments->arena, canonical_windows_c_source, (CPreprocessOptions){0});
     CParseResult canonical_windows_parse = c_parse(arguments->arena, canonical_windows_tokens);
@@ -2612,17 +2617,22 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
         IrFunction* layout_mix_function = codegen_test_c_function_find(canonical_module, S8("layout_mix"));
         IrFunction* leaf_layout_function = codegen_test_c_function_find(canonical_module, S8("leaf_layout"));
         IrFunction* large_layout_function = codegen_test_c_function_find(canonical_module, S8("large_layout"));
+        IrFunction* dynamic_layout_function = codegen_test_c_function_find(canonical_module, S8("dynamic_layout"));
         BUSTER_TEST(arguments, layout_mix_function != 0);
         BUSTER_TEST(arguments, leaf_layout_function != 0);
         BUSTER_TEST(arguments, large_layout_function != 0);
-        if (layout_mix_function && leaf_layout_function && large_layout_function && canonical_windows_module.error == CODEGEN_ERROR_NONE)
+        BUSTER_TEST(arguments, dynamic_layout_function != 0);
+        if (layout_mix_function && leaf_layout_function && large_layout_function && dynamic_layout_function &&
+            canonical_windows_module.error == CODEGEN_ERROR_NONE)
         {
             CodegenFunctionDescriptor* layout_mix_descriptor = codegen_test_c_descriptor_find(&canonical_windows_module, layout_mix_function->symbol);
             CodegenFunctionDescriptor* leaf_layout_descriptor = codegen_test_c_descriptor_find(&canonical_windows_module, leaf_layout_function->symbol);
             CodegenFunctionDescriptor* large_layout_descriptor = codegen_test_c_descriptor_find(&canonical_windows_module, large_layout_function->symbol);
+            CodegenFunctionDescriptor* dynamic_layout_descriptor = codegen_test_c_descriptor_find(&canonical_windows_module, dynamic_layout_function->symbol);
             BUSTER_TEST(arguments, layout_mix_descriptor != 0);
             BUSTER_TEST(arguments, leaf_layout_descriptor != 0);
             BUSTER_TEST(arguments, large_layout_descriptor != 0);
+            BUSTER_TEST(arguments, dynamic_layout_descriptor != 0);
             u32 maximum_layout_stack_size = 0;
             u32 layout_stack_size_count = 0;
             bool found_register_indirect_copy = false;
@@ -2739,6 +2749,35 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, large_allocated > 4096);
                 BUSTER_TEST(arguments, large_allocation_count == 1);
             }
+            bool dynamic_body_decode_valid = true;
+            bool dynamic_outgoing_allocation_valid = false;
+            bool dynamic_outgoing_cleanup_valid = false;
+            bool dynamic_call_scanned = false;
+            bool dynamic_has_stack_allocate = false;
+            u32 dynamic_call_count = 0;
+            u32 dynamic_call_stack_size = 0;
+            for (u32 instruction_index = 0; instruction_index < dynamic_layout_function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = dynamic_layout_function->instructions + instruction_index;
+                dynamic_has_stack_allocate |= instruction->opcode == IR_OPCODE_STACK_ALLOCATE;
+                if (instruction->opcode != IR_OPCODE_CALL)
+                {
+                    continue;
+                }
+                CodegenCanonicalCallLayout call_layout = {0};
+                CodegenError call_error = codegen_canonical_x64_call_layout(arguments->arena, canonical_program, dynamic_layout_function, instruction,
+                                                                             CODEGEN_ABI_X86_64_WINDOWS, &call_layout);
+                BUSTER_TEST(arguments, call_error == CODEGEN_ERROR_NONE);
+                if (call_error == CODEGEN_ERROR_NONE)
+                {
+                    dynamic_call_count += 1;
+                    dynamic_call_stack_size = BUSTER_MAX(dynamic_call_stack_size, call_layout.windows_stack_size);
+                }
+                else
+                {
+                    dynamic_body_decode_valid = false;
+                }
+            }
             bool full_body_decode_valid = true;
             bool full_body_stack_adjust_valid = true;
             bool full_body_stack_store_bounds_valid = true;
@@ -2749,6 +2788,10 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
             for (u32 function_index = 0; function_index < canonical_windows_module.function_count; function_index += 1)
             {
                 CodegenFunctionDescriptor* descriptor = canonical_windows_module.functions + function_index;
+                if (descriptor == dynamic_layout_descriptor)
+                {
+                    continue;
+                }
                 if ((u64)descriptor->code_offset + descriptor->code_size > canonical_windows_module.code.length || descriptor->prolog_size > descriptor->code_size)
                 {
                     full_body_decode_valid = false;
@@ -2788,6 +2831,61 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 found_scanned_indirect_call |= scan.has_indirect_call;
                 found_scanned_stack_store |= scan.has_stack_store && (descriptor == layout_mix_descriptor || descriptor == large_layout_descriptor);
             }
+            bool dynamic_all_calls_have_outgoing_allocation = true;
+            bool dynamic_all_calls_have_outgoing_cleanup = true;
+            u32 dynamic_relocation_call_count = 0;
+            if (dynamic_layout_descriptor && dynamic_call_count && dynamic_call_stack_size <= INT32_MAX &&
+                (u64)dynamic_layout_descriptor->code_offset + dynamic_layout_descriptor->code_size <= canonical_windows_module.code.length &&
+                dynamic_layout_descriptor->prolog_size <= dynamic_layout_descriptor->code_size)
+            {
+                u64 dynamic_body_start = dynamic_layout_descriptor->code_offset + dynamic_layout_descriptor->prolog_size;
+                u64 dynamic_function_end = dynamic_layout_descriptor->code_offset + dynamic_layout_descriptor->code_size;
+                for (u32 relocation_index = 0; relocation_index < canonical_windows_module.relocation_count; relocation_index += 1)
+                {
+                    CodegenModuleRelocation* relocation = canonical_windows_module.relocations + relocation_index;
+                    if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->aarch64 || relocation->absolute || relocation->offset == 0 ||
+                        relocation->offset <= dynamic_layout_descriptor->code_offset || relocation->offset + 4 > dynamic_function_end ||
+                        canonical_windows_module.code.pointer[relocation->offset - 1] != 0xe8)
+                    {
+                        continue;
+                    }
+                    dynamic_relocation_call_count += 1;
+                    dynamic_call_scanned = true;
+                    u64 call_start = relocation->offset - 1;
+                    u64 call_end = relocation->offset + 4;
+                    bool before_valid = true;
+                    bool after_valid = true;
+                    bool found_allocation = false;
+                    bool found_cleanup = false;
+                    for (u64 offset = dynamic_body_start; offset < call_start;)
+                    {
+                        CodegenTestX64Instruction instruction = {0};
+                        if (!codegen_test_x64_decode_instruction(canonical_windows_module.code, offset, call_start, &instruction))
+                        {
+                            before_valid = false;
+                            break;
+                        }
+                        found_allocation |= instruction.rsp_change && !instruction.call && instruction.rsp_adjust == -(s32)dynamic_call_stack_size;
+                        offset += instruction.length;
+                    }
+                    for (u64 offset = call_end; offset < dynamic_function_end;)
+                    {
+                        CodegenTestX64Instruction instruction = {0};
+                        if (!codegen_test_x64_decode_instruction(canonical_windows_module.code, offset, dynamic_function_end, &instruction))
+                        {
+                            after_valid = false;
+                            break;
+                        }
+                        found_cleanup |= instruction.rsp_change && !instruction.call && instruction.rsp_adjust == (s32)dynamic_call_stack_size;
+                        offset += instruction.length;
+                    }
+                    dynamic_body_decode_valid &= before_valid && after_valid;
+                    dynamic_all_calls_have_outgoing_allocation &= before_valid && found_allocation;
+                    dynamic_all_calls_have_outgoing_cleanup &= after_valid && found_cleanup;
+                }
+            }
+            dynamic_outgoing_allocation_valid = dynamic_relocation_call_count != 0 && dynamic_all_calls_have_outgoing_allocation;
+            dynamic_outgoing_cleanup_valid = dynamic_relocation_call_count != 0 && dynamic_all_calls_have_outgoing_cleanup;
             bool found_layout_call = false;
             bool found_layout_stack_store = false;
             bool layout_body_stack_adjust_valid = true;
@@ -2810,6 +2908,10 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
                     }
                 }
                 if (!descriptor)
+                {
+                    continue;
+                }
+                if (descriptor == dynamic_layout_descriptor)
                 {
                     continue;
                 }
@@ -2857,6 +2959,13 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, full_body_stack_store_bounds_valid);
             BUSTER_TEST(arguments, found_scanned_indirect_call);
             BUSTER_TEST(arguments, layout_body_stack_adjust_valid);
+            BUSTER_TEST(arguments, dynamic_has_stack_allocate);
+            BUSTER_TEST(arguments, dynamic_call_count == 1);
+            BUSTER_TEST(arguments, dynamic_call_stack_size >= 32);
+            BUSTER_TEST(arguments, dynamic_call_scanned);
+            BUSTER_TEST(arguments, dynamic_body_decode_valid);
+            BUSTER_TEST(arguments, dynamic_outgoing_allocation_valid);
+            BUSTER_TEST(arguments, dynamic_outgoing_cleanup_valid);
         }
     }
     BUSTER_CHECK(arena_destroy(expression_arena, 1));

@@ -10885,6 +10885,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             codegen_emit_u8(&buffer, 0xec);
                             codegen_emit_u8(&buffer, 8);
                         }
+                        bool windows_dynamic_call = windows_dynamic_stack && result.abi == CODEGEN_ABI_X86_64_WINDOWS;
+                        if (windows_dynamic_call)
+                        {
+                            codegen_canonical_x64_adjust_stack(&buffer, call_layout.windows_stack_size, true);
+                            if (buffer.error != CODEGEN_ERROR_NONE)
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                        }
                         if (result.abi == CODEGEN_ABI_X86_64_WINDOWS)
                         {
                             for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
@@ -11110,6 +11120,15 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 .symbol = instruction->symbol,
                                 .offset = offset,
                             };
+                        }
+                        if (windows_dynamic_call)
+                        {
+                            codegen_canonical_x64_adjust_stack(&buffer, call_layout.windows_stack_size, false);
+                            if (buffer.error != CODEGEN_ERROR_NONE)
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                         if (result.abi != CODEGEN_ABI_X86_64_WINDOWS && (call_layout.stack_part_count || stack_padding))
                         {
