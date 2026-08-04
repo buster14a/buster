@@ -3752,34 +3752,222 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnostic(CParseResult* result, CSourceLocatio
 }
 
 
-BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start);
+typedef struct CTypeParseFrame CTypeParseFrame;
+typedef struct CTypeParseMachine CTypeParseMachine;
+typedef struct CTypeMutation CTypeMutation;
+typedef struct CParseExpressionTypeTask CParseExpressionTypeTask;
 
-BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_in_scope(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+                                                u32* declarator_start);
+
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_in_scope(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                         u32 start, u32 end,
                                                          u32* declarator_start);
 
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
 
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
 
-typedef struct CTypeParseFrame CTypeParseFrame;
-typedef struct CTypeParseMachine CTypeParseMachine;
+typedef enum CTypeParseFrameKind
+{
+    C_TYPE_PARSE_FRAME_SCALAR,
+    C_TYPE_PARSE_FRAME_CORE,
+    C_TYPE_PARSE_FRAME_SIZEOF,
+    C_TYPE_PARSE_FRAME_EXPRESSION_LEAF,
+    C_TYPE_PARSE_FRAME_ALIGNMENT,
+    C_TYPE_PARSE_FRAME_AGGREGATE_SEGMENT,
+    C_TYPE_PARSE_FRAME_AGGREGATE_RANGE,
+    C_TYPE_PARSE_FRAME_PARENTHESIZED,
+    C_TYPE_PARSE_FRAME_PARAMETER,
+} CTypeParseFrameKind;
+
+typedef enum CTypeParseFrameStage
+{
+    C_TYPE_PARSE_STAGE_BEGIN,
+    C_TYPE_PARSE_STAGE_CHILD,
+    C_TYPE_PARSE_STAGE_FALLBACK,
+    C_TYPE_PARSE_STAGE_PARAMETERS,
+    C_TYPE_PARSE_STAGE_PARAMETER_RESULT,
+    C_TYPE_PARSE_STAGE_FINISH,
+} CTypeParseFrameStage;
+
+struct CTypeMutation
+{
+    CTypeId id;
+    CType previous;
+};
+
+struct CTypeParseFrame
+{
+    CParseResult* result;
+    CParseResult checkpoint;
+    CPreprocessResult preprocess;
+    Arena* arena;
+    CParseExpressionTypeTask* expression_tasks;
+    CType qualifiers;
+    CType original_type;
+    CTypeId type;
+    CTypeId base_type;
+    CTypeId original_type_id;
+    CToken name;
+    CToken first;
+    CScopeId scope;
+    u32 start;
+    u32 end;
+    u32 index;
+    u32 close;
+    u32 specifier_index;
+    u32 declarator_start;
+    u32 declarator_end;
+    u32 name_index;
+    u32 close_index;
+    u32 pointer_start;
+    u32 parameter_start;
+    u32 segment_start;
+    u32 scan_index;
+    u32 depth;
+    u32 task_count;
+    u32 task_capacity;
+    u32 task_mark;
+    u32 alignment_start;
+    u32 alignment_count;
+    u32 mutation_mark;
+    u32 definition_type_start;
+    u32 pending_index;
+    u64 arena_mark;
+    CTypeParseFrameKind kind;
+    CTypeParseFrameStage stage;
+    bool unqualified;
+    bool has_name;
+    bool variadic;
+    bool has_function_suffix;
+    bool original_type_valid;
+    bool is_bit_field;
+    u8 reserved[2];
+};
+
 struct CTypeParseMachine
 {
     CTypeParseFrame* frames;
-    CTypeId (*scalar)(CParseResult*, CPreprocessResult, u32, u32, u32*);
-    CTypeId (*scalar_in_scope)(CParseResult*, CPreprocessResult, CScopeId, u32, u32, u32*);
-    CTypeId (*scalar_core)(CParseResult*, CPreprocessResult, u32, u32, u32*);
-    bool (*sizeof_expression)(Arena*, CPreprocessResult, CParseResult*, CScopeId, u32, u32, CTypeId*);
-    CTypeId (*expression_leaf)(Arena*, CPreprocessResult, CParseResult*, CScopeId, u32, u32);
-    bool (*alignment)(CParseResult*, CPreprocessResult, u32, u32, u32*, u32*);
-    bool (*aggregate_segment)(CParseResult*, CPreprocessResult, u32, u32);
-    bool (*aggregate_range)(CParseResult*, CPreprocessResult, u32, u32);
-    CTypeId (*parenthesized)(CParseResult*, CPreprocessResult, CTypeId, u32, u32, u32, bool);
+    CTypeMutation* mutations;
+    CParseExpressionTypeTask* expression_tasks;
+    Arena* scratch_arena;
+    CTypeId result_type;
+    u32 result_index;
     u32 frame_count;
     u32 frame_capacity;
+    u32 mutation_count;
+    u32 mutation_capacity;
+    u32 mutation_type_limit;
+    u32 expression_task_count;
+    u32 expression_task_capacity;
+    bool result_valid;
+    bool failed;
+    u8 reserved[2];
 };
 
-BUSTER_THREAD_LOCAL_DECL CTypeParseMachine* c_type_parse_machine_active;
+BUSTER_GLOBAL_LOCAL bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 element_size, u64 alignment)
+{
+    if (*size > UINT64_MAX - (alignment - 1) || (count && element_size > UINT64_MAX / count))
+    {
+        return false;
+    }
+    u64 aligned_size = (*size + alignment - 1) & ~(alignment - 1);
+    u64 byte_count = count * element_size;
+    if (aligned_size > UINT64_MAX - byte_count)
+    {
+        return false;
+    }
+    *size = aligned_size + byte_count;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_type_parse_frame_push(CTypeParseMachine* machine, CTypeParseFrame frame)
+{
+    if (machine->frame_count >= machine->frame_capacity)
+    {
+        machine->failed = true;
+        return false;
+    }
+    machine->frames[machine->frame_count++] = frame;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void c_type_parse_frame_complete(CTypeParseMachine* machine, CTypeId type, u32 index, bool valid)
+{
+    BUSTER_CHECK(machine->frame_count);
+    CTypeParseFrame* frame = machine->frames + machine->frame_count - 1;
+    if (frame->kind == C_TYPE_PARSE_FRAME_SIZEOF)
+    {
+        machine->expression_task_count = frame->task_mark;
+        arena_set_position(machine->scratch_arena, frame->arena_mark);
+    }
+    machine->frame_count -= 1;
+    machine->result_type = type;
+    machine->result_index = index;
+    machine->result_valid = valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_type_parse_record_mutation(CTypeParseMachine* machine, CParseResult* result, CTypeId id)
+{
+    if (id.value >= result->type_count)
+    {
+        machine->failed = true;
+        return false;
+    }
+    if (id.value >= machine->mutation_type_limit)
+    {
+        return true;
+    }
+    if (machine->mutation_count >= machine->mutation_capacity)
+    {
+        machine->failed = true;
+        return false;
+    }
+    machine->mutations[machine->mutation_count++] = (CTypeMutation){
+        .id = id,
+        .previous = result->types[id.value],
+    };
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result, CParseResult checkpoint, u32 mutation_mark)
+{
+    while (machine->mutation_count > mutation_mark)
+    {
+        CTypeMutation mutation = machine->mutations[--machine->mutation_count];
+        if (mutation.id.value < checkpoint.type_count)
+        {
+            result->types[mutation.id.value] = mutation.previous;
+        }
+    }
+    *result = checkpoint;
+}
+
+BUSTER_GLOBAL_LOCAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 frame_start);
+
+BUSTER_GLOBAL_LOCAL bool c_type_parse_root_finish(CTypeParseMachine* machine, CParseResult* result, CParseResult checkpoint, u32 mutation_mark,
+                                                  CSourceLocation location)
+{
+    bool valid = machine->result_valid && !machine->failed;
+    if (!valid)
+    {
+        u32 diagnostic_count = result->diagnostic_count;
+        c_type_parse_rollback(machine, result, checkpoint, mutation_mark);
+        result->diagnostic_count = diagnostic_count;
+    }
+    else
+    {
+        machine->mutation_count = mutation_mark;
+    }
+    if (machine->failed)
+    {
+        machine->failed = false;
+        c_parse_diagnostic(result, location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("C type parsing exceeded its explicit-machine capacity"));
+        valid = false;
+    }
+    return valid;
+}
 
 BUSTER_GLOBAL_LOCAL bool c_parse_alignment_word(String8 spelling)
 {
@@ -3792,90 +3980,39 @@ BUSTER_GLOBAL_LOCAL bool c_parse_alignof_word(String8 spelling)
     return string_equal(spelling, S8("_Alignof")) || string_equal(spelling, S8("__alignof")) || string_equal(spelling, S8("__alignof__"));
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_alignment_specifiers(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* alignment_start,
-                                                      u32* alignment_count);
-BUSTER_GLOBAL_LOCAL bool c_parse_alignment_specifiers(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* alignment_start,
-                                                      u32* alignment_count)
+BUSTER_GLOBAL_LOCAL bool c_parse_alignment_specifiers(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+                                                      u32* alignment_start, u32* alignment_count);
+BUSTER_GLOBAL_LOCAL bool c_parse_alignment_specifiers(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+                                                      u32* alignment_start, u32* alignment_count)
 {
-    *alignment_start = result->alignment_count;
-    *alignment_count = 0;
-    u32 brace_depth = 0;
-    for (u32 index = start; index < end; index += 1)
+    u32 frame_start = machine->frame_count;
+    CParseResult checkpoint = *result;
+    u32 mutation_mark = machine->mutation_count;
+    machine->mutation_type_limit = checkpoint.type_count;
+    machine->result_valid = false;
+    bool pushed = c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                              .result = result,
+                                              .preprocess = preprocess,
+                                              .start = start,
+                                              .end = end,
+                                              .kind = C_TYPE_PARSE_FRAME_ALIGNMENT,
+                                          });
+    if (pushed)
     {
-        if (c_token_is_punctuator(preprocess.tokens[index], S8("{")))
-        {
-            brace_depth += 1;
-            continue;
-        }
-        if (c_token_is_punctuator(preprocess.tokens[index], S8("}")))
-        {
-            if (brace_depth)
-            {
-                brace_depth -= 1;
-            }
-            continue;
-        }
-        if (brace_depth)
-        {
-            continue;
-        }
-        if (preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER || !c_parse_alignment_word(preprocess.tokens[index].spelling))
-        {
-            continue;
-        }
-        if (index + 2 >= end || !c_token_is_punctuator(preprocess.tokens[index + 1], S8("(")))
-        {
-            return false;
-        }
-        u32 close = index + 2;
-        u32 depth = 1;
-        while (close < end && depth)
-        {
-            if (c_token_is_punctuator(preprocess.tokens[close], S8("(")))
-            {
-                depth += 1;
-            }
-            else if (c_token_is_punctuator(preprocess.tokens[close], S8(")")))
-            {
-                depth -= 1;
-                if (!depth)
-                {
-                    break;
-                }
-            }
-            close += 1;
-        }
-        if (depth || close == index + 2 || result->alignment_count >= result->alignment_capacity)
-        {
-            return false;
-        }
-        u32 type_index = index + 2;
-        CTypeId type = c_type_parse_machine_active->scalar(result, preprocess, type_index, close, &type_index);
-        if (type.value != C_ID_UNDERLYING_INVALID)
-        {
-            type = c_parse_pointer_chain(result, preprocess, type, &type_index, close);
-            type = c_parse_array_suffixes(result, preprocess, type, &type_index, close);
-        }
-        if (type_index != close)
-        {
-            type = C_TYPE_ID_INVALID;
-        }
-        result->alignments[result->alignment_count++] = (CAlignmentSpecifier){
-            .type = type,
-            .token_start = index + 2,
-            .token_count = close - (index + 2),
-        };
-        *alignment_count += 1;
-        index = close;
+        c_type_parse_machine_run(machine, frame_start);
     }
-    return true;
+    bool valid = c_type_parse_root_finish(machine, result, checkpoint, mutation_mark,
+                                          start < preprocess.token_count ? preprocess.tokens[start].location : (CSourceLocation){0});
+    *alignment_start = machine->result_index;
+    *alignment_count = machine->result_type.value;
+    return valid;
 }
 
 
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
-BUSTER_GLOBAL_LOCAL CTypeId c_parse_parenthesized_declaration_type(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32 declarator_start,
-                                                                   u32 name_index, u32 suffix_end, bool has_name);
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                   CTypeId base, u32 declarator_start, u32 name_index, u32 suffix_end, bool has_name);
 BUSTER_GLOBAL_LOCAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index);
 
 BUSTER_GLOBAL_LOCAL bool c_parse_type_word(String8 spelling);
@@ -4059,8 +4196,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_builtin_type_layout(Target target, CTypeKind ki
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId requested, u64* size_out,
-                                             u32* alignment_out)
+BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                             CTypeId requested, u64* size_out, u32* alignment_out)
 {
     u64* sizes = arena_allocate(arena, u64, result->type_count);
     u32* alignments = arena_allocate(arena, u32, result->type_count);
@@ -4173,7 +4310,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(Arena* arena, CPreprocessResult pre
                         u32 operand_type_index = operand_start;
                         CParseResult operand_parse = *result;
                         CTypeId operand_type = !depth && close > operand_start
-                                                   ? c_parse_scalar_type(&operand_parse, preprocess, operand_start, close, &operand_type_index)
+                                                   ? c_parse_scalar_type(machine, &operand_parse, preprocess, operand_start, close, &operand_type_index)
                                                    : C_TYPE_ID_INVALID;
                         bool pointer_type = false;
                         while (operand_type.value != C_ID_UNDERLYING_INVALID && operand_type_index < close)
@@ -4409,7 +4546,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(Arena* arena, CPreprocessResult pre
                             u32 type_start = specifier.token_start + 2;
                             u32 type_end = specifier_end - 1;
                             u32 aligned_type_index = type_start;
-                            CTypeId aligned_type = c_parse_scalar_type(result, preprocess, type_start, type_end, &aligned_type_index);
+                            CTypeId aligned_type = c_parse_scalar_type(machine, result, preprocess, type_start, type_end, &aligned_type_index);
                             if (aligned_type.value != C_ID_UNDERLYING_INVALID)
                             {
                                 aligned_type = c_parse_pointer_chain(result, preprocess, aligned_type, &aligned_type_index, type_end);
@@ -5055,7 +5192,8 @@ struct CParseExpressionTypeTask
     u8 reserved[3];
 };
 
-BUSTER_GLOBAL_LOCAL CTypeId c_parse_expression_leaf_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, u32 start, u32 end)
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, u32 start,
+                                                                 u32 end)
 {
     if (start >= end)
     {
@@ -5162,38 +5300,58 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_expression_leaf_type(Arena* arena, CPreproce
             }
         }
     }
-    if (c_token_is_punctuator(first, S8("(")))
-    {
-        u32 close = c_parse_matching_delimiter(preprocess, start, end, S8("("), S8(")"));
-        if (close < end - 1)
-        {
-            u32 type_index = start + 1;
-            CTypeId cast_type = c_type_parse_machine_active->scalar_in_scope(result, preprocess, scope, start + 1, close, &type_index);
-            if (cast_type.value != C_ID_UNDERLYING_INVALID && type_index == close)
-            {
-                return cast_type;
-            }
-        }
-    }
     CTypeId type = C_TYPE_ID_INVALID;
     return c_parse_direct_expression_type(arena, preprocess, result, scope, start, end, &type) ? type : C_TYPE_ID_INVALID;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_sizeof_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, u32 start, u32 end,
-                                                        CTypeId* type_out)
+
+BUSTER_GLOBAL_LOCAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
+    Arena* arena = frame->arena;
+    CPreprocessResult preprocess = frame->preprocess;
+    CParseResult* result = frame->result;
+    CScopeId scope = frame->scope;
+    u32 start = frame->start;
+    u32 end = frame->end;
     if (start >= end)
     {
-        return false;
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
+        return;
     }
-    u32 capacity = end - start + 1;
-    CParseExpressionTypeTask* tasks = arena_allocate(arena, CParseExpressionTypeTask, capacity);
-    u32 task_count = 1;
-    tasks[0] = (CParseExpressionTypeTask){
-        .start = start,
-        .end = end,
-    };
-    CTypeId last = C_TYPE_ID_INVALID;
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+    {
+        u32 task_range = end - start;
+        u32 task_required = task_range + 1;
+        if (task_range == UINT32_MAX || machine->expression_task_count > machine->expression_task_capacity ||
+            task_required > machine->expression_task_capacity - machine->expression_task_count)
+        {
+            machine->failed = true;
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
+            return;
+        }
+        frame->task_capacity = task_required;
+        frame->task_mark = machine->expression_task_count;
+        frame->arena_mark = machine->scratch_arena->position;
+        frame->expression_tasks = machine->expression_tasks + machine->expression_task_count;
+        machine->expression_task_count += frame->task_capacity;
+        frame->task_count = 1;
+        frame->expression_tasks[0] = (CParseExpressionTypeTask){
+            .start = start,
+            .end = end,
+        };
+        frame->type = C_TYPE_ID_INVALID;
+        frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+    }
+    else if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
+    {
+        frame->type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
+        frame->task_count -= 1;
+        frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+    }
+    CParseExpressionTypeTask* tasks = frame->expression_tasks;
+    u32 task_count = frame->task_count;
+    u32 capacity = frame->task_capacity;
+    CTypeId last = frame->type;
     while (task_count)
     {
         CParseExpressionTypeTask* task = tasks + task_count - 1;
@@ -5341,9 +5499,22 @@ BUSTER_GLOBAL_LOCAL bool c_parse_sizeof_expression_type(Arena* arena, CPreproces
                 };
                 continue;
             }
-            last = c_type_parse_machine_active->expression_leaf(arena, preprocess, result, scope, task->start, task->end);
-            task_count -= 1;
-            continue;
+            frame->task_count = task_count;
+            frame->type = last;
+            frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+            if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                      .result = result,
+                                                      .preprocess = preprocess,
+                                                      .arena = arena,
+                                                      .scope = scope,
+                                                      .start = task->start,
+                                                      .end = task->end,
+                                                      .kind = C_TYPE_PARSE_FRAME_EXPRESSION_LEAF,
+                                                  }))
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
+            }
+            return;
         }
         if (task->operation == C_PARSE_EXPRESSION_TYPE_UNARY || task->operation == C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT)
         {
@@ -5470,15 +5641,45 @@ BUSTER_GLOBAL_LOCAL bool c_parse_sizeof_expression_type(Arena* arena, CPreproces
     }
     if (last.value >= result->type_count)
     {
-        return false;
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
+        return;
     }
-    *type_out = last;
-    return true;
+    c_type_parse_frame_complete(machine, last, end, true);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_sizeof_expression_type(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
+{
+    u32 frame_start = machine->frame_count;
+    CParseResult checkpoint = *result;
+    u32 mutation_mark = machine->mutation_count;
+    machine->mutation_type_limit = checkpoint.type_count;
+    machine->result_valid = false;
+    bool pushed = c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                              .result = result,
+                                              .preprocess = preprocess,
+                                              .arena = arena,
+                                              .scope = scope,
+                                              .start = start,
+                                              .end = end,
+                                              .kind = C_TYPE_PARSE_FRAME_SIZEOF,
+                                          });
+    if (pushed)
+    {
+        c_type_parse_machine_run(machine, frame_start);
+    }
+    bool valid = c_type_parse_root_finish(machine, result, checkpoint, mutation_mark,
+                                          start < preprocess.token_count ? preprocess.tokens[start].location : (CSourceLocation){0});
+    if (valid)
+    {
+        *type_out = machine->result_type;
+    }
+    return valid;
 }
 
 
-BUSTER_GLOBAL_LOCAL bool c_parse_static_assert_evaluate(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CDeclaration declaration,
-                                                        CScopeId scope, u64* value_out, String8* message_out)
+BUSTER_GLOBAL_LOCAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                        CDeclaration declaration, CScopeId scope, u64* value_out, String8* message_out)
 {
     u32 start = declaration.token_start;
     u32 end = start + declaration.token_count;
@@ -5555,7 +5756,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_static_assert_evaluate(Arena* arena, CPreproces
                 u32 type_start = start + 3 + expression_index;
                 u32 type_end = start + 2 + cast_close;
                 u32 type_index = type_start;
-                CTypeId cast_type = c_parse_scalar_type(result, preprocess, type_start, type_end, &type_index);
+                CTypeId cast_type = c_parse_scalar_type(machine, result, preprocess, type_start, type_end, &type_index);
                 if (cast_type.value == C_ID_UNDERLYING_INVALID && type_start + 1 == type_end && preprocess.tokens[type_start].kind == C_TOKEN_IDENTIFIER)
                 {
                     for (u32 entity_index = result->entity_count; entity_index; entity_index -= 1)
@@ -5608,7 +5809,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_static_assert_evaluate(Arena* arena, CPreproces
                 return false;
             }
             u32 type_index = type_start;
-            CTypeId type = c_parse_scalar_type(result, preprocess, type_start, type_end, &type_index);
+            CTypeId type = c_parse_scalar_type(machine, result, preprocess, type_start, type_end, &type_index);
             if (type.value != C_ID_UNDERLYING_INVALID)
             {
                 type = c_parse_pointer_chain(result, preprocess, type, &type_index, type_end);
@@ -5617,12 +5818,13 @@ BUSTER_GLOBAL_LOCAL bool c_parse_static_assert_evaluate(Arena* arena, CPreproces
             if ((type.value == C_ID_UNDERLYING_INVALID || type_index != type_end) && string_equal(token.spelling, S8("sizeof")))
             {
                 type = C_TYPE_ID_INVALID;
-                c_parse_sizeof_expression_type(arena, preprocess, result, scope, type_start, type_end, &type);
+                c_parse_sizeof_expression_type(machine, arena, preprocess, result, scope, type_start, type_end, &type);
                 type_index = type_end;
             }
             u64 size = 0;
             u32 alignment = 0;
-            if (type.value == C_ID_UNDERLYING_INVALID || type_index != type_end || !c_parse_type_layout(arena, preprocess, result, type, &size, &alignment))
+            if (type.value == C_ID_UNDERLYING_INVALID || type_index != type_end ||
+                !c_parse_type_layout(machine, arena, preprocess, result, type, &size, &alignment))
             {
                 return false;
             }
@@ -5662,8 +5864,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_static_assert_evaluate(Arena* arena, CPreproces
     return c_integer_expression_evaluate(arena, 0, tokens, token_count, 65536, &evaluation, value_out) && !evaluation.diagnostic_count;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_integer_constant_range(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, u32 start, u32 end,
-                                                        u64* value_out)
+BUSTER_GLOBAL_LOCAL bool c_parse_integer_constant_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                        CScopeId scope, u32 start, u32 end, u64* value_out)
 {
     if (start >= end)
     {
@@ -5697,14 +5899,15 @@ BUSTER_GLOBAL_LOCAL bool c_parse_integer_constant_range(Arena* arena, CPreproces
     synthetic.tokens = tokens;
     synthetic.token_count = expression_count + 4;
     String8 ignored_message = {0};
-    return c_parse_static_assert_evaluate(arena, synthetic, result,
+    return c_parse_static_assert_evaluate(machine, arena, synthetic, result,
                                           (CDeclaration){
                                               .token_count = expression_count + 4,
                                           },
                                           scope, value_out, &ignored_message);
 }
 
-BUSTER_GLOBAL_LOCAL void c_parse_static_assert_check(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CDeclaration declaration, CScopeId scope)
+BUSTER_GLOBAL_LOCAL void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                     CDeclaration declaration, CScopeId scope)
 {
     for (u32 token_offset = 0; token_offset < declaration.token_count; token_offset += 1)
     {
@@ -5717,7 +5920,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_static_assert_check(Arena* arena, CPreprocessRe
     CToken first = preprocess.tokens[declaration.token_start];
     u64 value = 0;
     String8 message = {0};
-    if (!c_parse_static_assert_evaluate(arena, preprocess, result, declaration, scope, &value, &message))
+    if (!c_parse_static_assert_evaluate(machine, arena, preprocess, result, declaration, scope, &value, &message))
     {
         String8* parts = arena_allocate(arena, String8, declaration.token_count * 2);
         u32 part_count = 0;
@@ -6588,320 +6791,8 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_qualified_typedef_type(CParseResult* result,
     return type;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_aggregate_member_segment(CParseResult* result, CPreprocessResult preprocess, u32 member_start, u32 member_end)
-{
-    u32 alignment_start = 0;
-    u32 alignment_count = 0;
-    if (!c_type_parse_machine_active->alignment(result, preprocess, member_start, member_end, &alignment_start, &alignment_count))
-    {
-        return false;
-    }
-    u32 member_type_start = c_parse_skip_attributes(preprocess, member_start, member_end);
-    if (member_type_start >= member_end)
-    {
-        return false;
-    }
-    u32 member_declarator = member_type_start;
-    CTypeId member_type = C_TYPE_ID_INVALID;
-    CToken member_first = preprocess.tokens[member_type_start];
-    if (member_first.kind == C_TOKEN_IDENTIFIER && (string_equal(member_first.spelling, S8("struct")) || string_equal(member_first.spelling, S8("union")) ||
-                                                    string_equal(member_first.spelling, S8("enum"))))
-    {
-        CTypeKind member_kind = string_equal(member_first.spelling, S8("struct"))  ? C_TYPE_STRUCT
-                                : string_equal(member_first.spelling, S8("union")) ? C_TYPE_UNION
-                                                                                   : C_TYPE_ENUM;
-        u32 aggregate_index = member_type_start + 1;
-        String8 tag = {0};
-        if (aggregate_index < member_end && preprocess.tokens[aggregate_index].kind == C_TOKEN_IDENTIFIER)
-        {
-            tag = preprocess.tokens[aggregate_index].spelling;
-            aggregate_index += 1;
-        }
-        if (aggregate_index < member_end && c_token_is_punctuator(preprocess.tokens[aggregate_index], S8("{")))
-        {
-            u32 nested_open = aggregate_index;
-            u32 nested_close = nested_open + 1;
-            u32 nested_depth = 1;
-            while (nested_close < member_end && nested_depth)
-            {
-                if (c_token_is_punctuator(preprocess.tokens[nested_close], S8("{")))
-                {
-                    nested_depth += 1;
-                }
-                else if (c_token_is_punctuator(preprocess.tokens[nested_close], S8("}")))
-                {
-                    nested_depth -= 1;
-                }
-                nested_close += 1;
-            }
-            if (nested_depth || member_kind == C_TYPE_ENUM)
-            {
-                return false;
-            }
-            member_type = c_parse_aggregate_lookup(result, member_kind, tag);
-            if (member_type.value == C_ID_UNDERLYING_INVALID)
-            {
-                member_type = c_parse_add_type(result, (CType){
-                                                           .tag = tag,
-                                                           .element_type = C_TYPE_ID_INVALID,
-                                                           .return_type = C_TYPE_ID_INVALID,
-                                                           .array_bound = C_ARRAY_BOUND_INVALID,
-                                                           .kind = member_kind,
-                                                       });
-            }
-            CType* nested = &result->types[member_type.value];
-            if (nested->is_complete || nested->definition_start)
-            {
-                return false;
-            }
-            nested->definition_start = nested_open + 1;
-            nested->definition_token_count = nested_close - nested_open - 2;
-            member_declarator = nested_close;
-        }
-        else
-        {
-            if (!tag.length)
-            {
-                return false;
-            }
-            member_type = c_parse_aggregate_lookup(result, member_kind, tag);
-            if (member_type.value == C_ID_UNDERLYING_INVALID)
-            {
-                member_type = c_parse_add_type(result, (CType){
-                                                           .tag = tag,
-                                                           .element_type = C_TYPE_ID_INVALID,
-                                                           .return_type = C_TYPE_ID_INVALID,
-                                                           .array_bound = C_ARRAY_BOUND_INVALID,
-                                                           .kind = member_kind,
-                                                       });
-            }
-            member_declarator = aggregate_index;
-        }
-    }
-    else
-    {
-        u32 typedef_index = member_type_start;
-        CType qualifiers = {
-            .element_type = C_TYPE_ID_INVALID,
-            .return_type = C_TYPE_ID_INVALID,
-            .array_bound = C_ARRAY_BOUND_INVALID,
-        };
-        bool has_qualifier = false;
-        while (typedef_index < member_end && preprocess.tokens[typedef_index].kind == C_TOKEN_IDENTIFIER &&
-               c_parse_type_qualifier_word(preprocess.tokens[typedef_index].spelling, &qualifiers))
-        {
-            has_qualifier = true;
-            typedef_index += 1;
-        }
-        for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
-        {
-            CEntity* entity = &result->entities[entity_index];
-            if (entity->kind == C_ENTITY_TYPEDEF && typedef_index < member_end && string_equal(entity->name, preprocess.tokens[typedef_index].spelling))
-            {
-                member_type = entity->type;
-                member_declarator = typedef_index + 1;
-                if (has_qualifier)
-                {
-                    member_type = c_parse_add_qualified_type(result, member_type, qualifiers);
-                }
-                break;
-            }
-        }
-        if (member_type.value == C_ID_UNDERLYING_INVALID && typedef_index < member_end)
-        {
-            for (u32 declaration_index = result->declaration_count; declaration_index != 0; declaration_index -= 1)
-            {
-                CDeclaration* declaration = &result->declarations[declaration_index - 1];
-                if (declaration->kind != C_DECLARATION_TYPEDEF || declaration->type.value >= result->type_count ||
-                    !string_equal(declaration->name, preprocess.tokens[typedef_index].spelling))
-                {
-                    continue;
-                }
-                member_type = declaration->type;
-                member_declarator = typedef_index + 1;
-                if (has_qualifier)
-                {
-                    member_type = c_parse_add_qualified_type(result, member_type, qualifiers);
-                }
-                break;
-            }
-        }
-        if (member_type.value == C_ID_UNDERLYING_INVALID)
-        {
-            member_type = c_parse_primitive_type(result, preprocess, member_type_start, member_end, &member_declarator);
-        }
-    }
-    if (member_type.value == C_ID_UNDERLYING_INVALID)
-    {
-        return false;
-    }
-    if (member_declarator == member_end && member_type.value < result->type_count &&
-        (result->types[member_type.value].kind == C_TYPE_STRUCT || result->types[member_type.value].kind == C_TYPE_UNION))
-    {
-        BUSTER_CHECK(result->member_count < result->member_capacity);
-        result->members[result->member_count++] = (CMember){
-            .location = member_first.location,
-            .type = member_type,
-            .alignment_start = alignment_start,
-            .alignment_count = alignment_count,
-        };
-        return true;
-    }
-    u32 declarator_start = member_declarator;
-    while (declarator_start < member_end)
-    {
-        u32 declarator_end = declarator_start;
-        u32 declarator_depth = 0;
-        while (declarator_end < member_end)
-        {
-            CToken token = preprocess.tokens[declarator_end];
-            if (c_token_is_punctuator(token, S8("(")) || c_token_is_punctuator(token, S8("[")))
-            {
-                declarator_depth += 1;
-            }
-            else if (c_token_is_punctuator(token, S8(")")) || c_token_is_punctuator(token, S8("]")))
-            {
-                if (!declarator_depth)
-                {
-                    return false;
-                }
-                declarator_depth -= 1;
-            }
-            else if (!declarator_depth && c_token_is_punctuator(token, S8(",")))
-            {
-                break;
-            }
-            declarator_end += 1;
-        }
-        if (declarator_start == declarator_end)
-        {
-            return false;
-        }
-        u32 declarator = declarator_start;
-        CToken name = {
-            .location = member_first.location,
-        };
-        CTypeId declarator_type = c_parse_pointer_chain(result, preprocess, member_type, &declarator, declarator_end);
-        if (declarator < declarator_end && c_token_is_punctuator(preprocess.tokens[declarator], S8("(")))
-        {
-            u32 name_index = 0;
-            if (!c_parse_parenthesized_declarator_name(preprocess, declarator, declarator_end, &name_index))
-            {
-                return false;
-            }
-            name = preprocess.tokens[name_index];
-            declarator_type = c_type_parse_machine_active->parenthesized(result, preprocess, declarator_type, declarator, name_index, declarator_end, true);
-            declarator = declarator_end;
-        }
-        if (!name.spelling.length && declarator < declarator_end && preprocess.tokens[declarator].kind == C_TOKEN_IDENTIFIER)
-        {
-            name = preprocess.tokens[declarator++];
-        }
-        else if (!name.spelling.length && (declarator >= declarator_end || !c_token_is_punctuator(preprocess.tokens[declarator], S8(":"))))
-        {
-            return false;
-        }
-        bool is_bit_field = false;
-        u32 bit_width = 0;
-        u32 bit_width_token_start = 0;
-        u32 bit_width_token_count = 0;
-        if (declarator < declarator_end && c_token_is_punctuator(preprocess.tokens[declarator], S8(":")))
-        {
-            declarator += 1;
-            bit_width_token_start = declarator;
-            bit_width_token_count = declarator_end - declarator;
-            if (!bit_width_token_count)
-            {
-                return false;
-            }
-            if (bit_width_token_count == 1 && preprocess.tokens[declarator].kind == C_TOKEN_PREPROCESSING_NUMBER)
-            {
-                String8 width_spelling = preprocess.tokens[declarator].spelling;
-                u64 width_value = 0;
-                if (!width_spelling.length)
-                {
-                    return false;
-                }
-                for (u64 width_index = 0; width_index < width_spelling.length; width_index += 1)
-                {
-                    char8 digit = width_spelling.pointer[width_index];
-                    if (digit < '0' || digit > '9' || width_value > (UINT32_MAX - (u32)(digit - '0')) / 10)
-                    {
-                        return false;
-                    }
-                    width_value = width_value * 10 + (u32)(digit - '0');
-                }
-                bit_width = (u32)width_value;
-            }
-            is_bit_field = true;
-            declarator = declarator_end;
-        }
-        if (is_bit_field && alignment_count)
-        {
-            c_parse_diagnostic(result, member_first.location, C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("alignment specifier cannot be applied to a bit-field"));
-            alignment_count = 0;
-        }
-        declarator_type = c_parse_apply_vector_attribute(result, preprocess, declarator_type, declarator_start, declarator_end);
-        declarator = c_parse_skip_attributes(preprocess, declarator, declarator_end);
-        declarator_type = c_parse_array_suffixes(result, preprocess, declarator_type, &declarator, declarator_end);
-        declarator = c_parse_skip_attributes(preprocess, declarator, declarator_end);
-        if (declarator_type.value == C_ID_UNDERLYING_INVALID || declarator != declarator_end)
-        {
-            return false;
-        }
-        BUSTER_CHECK(result->member_count < result->member_capacity);
-        result->members[result->member_count++] = (CMember){
-            .name = name.spelling,
-            .location = name.location,
-            .type = declarator_type,
-            .alignment_start = alignment_start,
-            .alignment_count = alignment_count,
-            .bit_width = bit_width,
-            .bit_width_token_start = bit_width_token_start,
-            .bit_width_token_count = bit_width_token_count,
-            .is_bit_field = is_bit_field,
-        };
-        declarator_start = declarator_end < member_end ? declarator_end + 1 : member_end;
-    }
-    return true;
-}
 
-BUSTER_GLOBAL_LOCAL bool c_parse_aggregate_member_range(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
-{
-    u32 member_start = start;
-    u32 member_depth = 0;
-    for (u32 token_index = start; token_index <= end; token_index += 1)
-    {
-        CToken token = preprocess.tokens[token_index];
-        if (token_index < end && (c_token_is_punctuator(token, S8("(")) || c_token_is_punctuator(token, S8("[")) || c_token_is_punctuator(token, S8("{"))))
-        {
-            member_depth += 1;
-            continue;
-        }
-        if (token_index < end && (c_token_is_punctuator(token, S8(")")) || c_token_is_punctuator(token, S8("]")) || c_token_is_punctuator(token, S8("}"))))
-        {
-            if (!member_depth)
-            {
-                return false;
-            }
-            member_depth -= 1;
-            continue;
-        }
-        bool member_end = token_index == end || (!member_depth && c_token_is_punctuator(token, S8(";")));
-        if (!member_end)
-        {
-            continue;
-        }
-        if (member_start != token_index && !c_type_parse_machine_active->aggregate_segment(result, preprocess, member_start, token_index))
-        {
-            return false;
-        }
-        member_start = token_index + 1;
-    }
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_core(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start);
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* machine, CTypeParseFrame* frame, u32* declarator_start);
 
 BUSTER_GLOBAL_LOCAL bool c_parse_atomic_declaration_prefix(String8 spelling, CPreprocessDialect dialect, CType* qualifiers)
 {
@@ -6916,102 +6807,515 @@ BUSTER_GLOBAL_LOCAL bool c_parse_atomic_declaration_prefix(String8 spelling, CPr
            (c_preprocess_dialect_is_c23(dialect) && string_equal(spelling, S8("constexpr")));
 }
 
-typedef enum CTypeParseFrameKind
+BUSTER_GLOBAL_LOCAL void c_type_parse_alignment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
-    C_TYPE_PARSE_FRAME_TYPEOF,
-    C_TYPE_PARSE_FRAME_ATOMIC,
-    C_TYPE_PARSE_FRAME_PARENTHESIZED,
-    C_TYPE_PARSE_FRAME_PARAMETER,
-} CTypeParseFrameKind;
-
-typedef enum CTypeParseFrameStage
-{
-    C_TYPE_PARSE_STAGE_BEGIN,
-    C_TYPE_PARSE_STAGE_PARAMETERS,
-    C_TYPE_PARSE_STAGE_PARAMETER_RESULT,
-    C_TYPE_PARSE_STAGE_FINISH,
-} CTypeParseFrameStage;
-
-struct CTypeParseFrame
-{
-    CParseResult checkpoint;
-    CType qualifiers;
-    CTypeId type;
-    CToken name;
-    u32 specifier_index;
-    u32 close;
-    u32 end;
-    u32 start;
-    u32 declarator_start;
-    u32 name_index;
-    u32 close_index;
-    u32 pointer_start;
-    u32 index;
-    u32 parameter_start;
-    u32 segment_start;
-    u32 scan_index;
-    u32 depth;
-    CTypeParseFrameKind kind;
-    CTypeParseFrameStage stage;
-    bool unqualified;
-    bool has_name;
-    bool variadic;
-    bool has_function_suffix;
-    u8 reserved[3];
-};
-
-BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_in_scope(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
-                                                         u32* declarator_start)
-{
-    if (start >= end)
+    CParseResult* result = frame->result;
+    CPreprocessResult preprocess = frame->preprocess;
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
-        return C_TYPE_ID_INVALID;
+        frame->alignment_start = result->alignment_count;
+        frame->alignment_count = 0;
+        frame->index = frame->start;
+        frame->depth = 0;
+        frame->stage = C_TYPE_PARSE_STAGE_FINISH;
     }
-    CTypeParseMachine* machine = c_type_parse_machine_active;
-    BUSTER_CHECK(machine);
-    u32 frame_start = machine->frame_count;
-    u32 current_start = start;
-    u32 current_end = end;
-    CTypeId type = C_TYPE_ID_INVALID;
-    u32 type_index = current_start;
-    while (true)
+    else if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
     {
-        current_start = c_parse_skip_attributes(preprocess, current_start, current_end);
-        u32 specifier_index = current_start;
-        CType outer_qualifiers = {
+        CTypeId type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
+        u32 type_index = machine->result_index;
+        if (type.value != C_ID_UNDERLYING_INVALID)
+        {
+            type = c_parse_pointer_chain(result, preprocess, type, &type_index, frame->close);
+            type = c_parse_array_suffixes(result, preprocess, type, &type_index, frame->close);
+        }
+        if (type_index != frame->close)
+        {
+            type = C_TYPE_ID_INVALID;
+        }
+        result->alignments[result->alignment_count++] = (CAlignmentSpecifier){
+            .type = type,
+            .token_start = frame->specifier_index + 2,
+            .token_count = frame->close - (frame->specifier_index + 2),
+        };
+        frame->alignment_count += 1;
+        frame->index = frame->close + 1;
+        frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+    }
+    while (frame->index < frame->end)
+    {
+        u32 index = frame->index;
+        if (c_token_is_punctuator(preprocess.tokens[index], S8("{")))
+        {
+            frame->depth += 1;
+            frame->index += 1;
+            continue;
+        }
+        if (c_token_is_punctuator(preprocess.tokens[index], S8("}")))
+        {
+            frame->depth -= frame->depth != 0;
+            frame->index += 1;
+            continue;
+        }
+        if (frame->depth || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER || !c_parse_alignment_word(preprocess.tokens[index].spelling))
+        {
+            frame->index += 1;
+            continue;
+        }
+        if (index + 2 >= frame->end || !c_token_is_punctuator(preprocess.tokens[index + 1], S8("(")))
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->alignment_start, false);
+            return;
+        }
+        u32 close = index + 2;
+        u32 depth = 1;
+        while (close < frame->end && depth)
+        {
+            if (c_token_is_punctuator(preprocess.tokens[close], S8("(")))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(preprocess.tokens[close], S8(")")))
+            {
+                depth -= 1;
+                if (!depth)
+                {
+                    break;
+                }
+            }
+            close += 1;
+        }
+        if (depth || close == index + 2 || result->alignment_count >= result->alignment_capacity)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->alignment_start, false);
+            return;
+        }
+        frame->specifier_index = index;
+        frame->close = close;
+        frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+        if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                  .result = result,
+                                                  .preprocess = preprocess,
+                                                  .scope = result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
+                                                  .start = index + 2,
+                                                  .end = close,
+                                                  .kind = C_TYPE_PARSE_FRAME_SCALAR,
+                                              }))
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->alignment_start, false);
+        }
+        return;
+    }
+    c_type_parse_frame_complete(machine, (CTypeId){.value = frame->alignment_count}, frame->alignment_start, true);
+}
+
+BUSTER_GLOBAL_LOCAL void c_type_parse_expression_leaf_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
+{
+    if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
+    {
+        CTypeId type = machine->result_valid && machine->result_index == frame->close ? machine->result_type : C_TYPE_ID_INVALID;
+        if (type.value != C_ID_UNDERLYING_INVALID)
+        {
+            c_type_parse_frame_complete(machine, type, frame->end, true);
+            return;
+        }
+    }
+    else if (frame->start < frame->end && c_token_is_punctuator(frame->preprocess.tokens[frame->start], S8("(")))
+    {
+        u32 close = c_parse_matching_delimiter(frame->preprocess, frame->start, frame->end, S8("("), S8(")"));
+        if (close < frame->end - 1)
+        {
+            frame->close = close;
+            frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+            if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                      .result = frame->result,
+                                                      .preprocess = frame->preprocess,
+                                                      .scope = frame->scope,
+                                                      .start = frame->start + 1,
+                                                      .end = close,
+                                                      .kind = C_TYPE_PARSE_FRAME_SCALAR,
+                                                  }))
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            }
+            return;
+        }
+    }
+    CTypeId type = c_parse_expression_leaf_without_cast(frame->arena, frame->preprocess, frame->result, frame->scope, frame->start, frame->end);
+    c_type_parse_frame_complete(machine, type, frame->end, type.value != C_ID_UNDERLYING_INVALID);
+}
+
+BUSTER_GLOBAL_LOCAL void c_type_parse_aggregate_range_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
+{
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+    {
+        frame->segment_start = frame->start;
+        frame->index = frame->start;
+        frame->depth = 0;
+        frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+    }
+    else if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
+    {
+        if (!machine->result_valid)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        frame->segment_start = frame->index + 1;
+        frame->index += 1;
+        frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+    }
+    while (frame->index <= frame->end)
+    {
+        CToken token = frame->preprocess.tokens[frame->index];
+        if (frame->index < frame->end &&
+            (c_token_is_punctuator(token, S8("(")) || c_token_is_punctuator(token, S8("[")) || c_token_is_punctuator(token, S8("{"))))
+        {
+            frame->depth += 1;
+            frame->index += 1;
+            continue;
+        }
+        if (frame->index < frame->end &&
+            (c_token_is_punctuator(token, S8(")")) || c_token_is_punctuator(token, S8("]")) || c_token_is_punctuator(token, S8("}"))))
+        {
+            if (!frame->depth)
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                return;
+            }
+            frame->depth -= 1;
+            frame->index += 1;
+            continue;
+        }
+        bool member_end = frame->index == frame->end || (!frame->depth && c_token_is_punctuator(token, S8(";")));
+        if (!member_end)
+        {
+            frame->index += 1;
+            continue;
+        }
+        if (frame->segment_start != frame->index)
+        {
+            frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+            if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                      .result = frame->result,
+                                                      .preprocess = frame->preprocess,
+                                                      .start = frame->segment_start,
+                                                      .end = frame->index,
+                                                      .kind = C_TYPE_PARSE_FRAME_AGGREGATE_SEGMENT,
+                                                  }))
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            }
+            return;
+        }
+        frame->segment_start = frame->index + 1;
+        frame->index += 1;
+    }
+    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
+}
+
+BUSTER_GLOBAL_LOCAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
+{
+    CParseResult* result = frame->result;
+    CPreprocessResult preprocess = frame->preprocess;
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+    {
+        frame->checkpoint = *result;
+        frame->mutation_mark = machine->mutation_count;
+        frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+        if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                  .result = result,
+                                                  .preprocess = preprocess,
+                                                  .start = frame->start,
+                                                  .end = frame->end,
+                                                  .kind = C_TYPE_PARSE_FRAME_ALIGNMENT,
+                                              }))
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        }
+        return;
+    }
+    if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
+    {
+        if (!machine->result_valid)
+        {
+            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        frame->alignment_start = machine->result_index;
+        frame->alignment_count = machine->result_type.value;
+        u32 type_start = c_parse_skip_attributes(preprocess, frame->start, frame->end);
+        if (type_start >= frame->end)
+        {
+            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        frame->first = preprocess.tokens[type_start];
+        frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
+        if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                  .result = result,
+                                                  .preprocess = preprocess,
+                                                  .scope = result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
+                                                  .start = type_start,
+                                                  .end = frame->end,
+                                                  .mutation_mark = machine->mutation_count,
+                                                  .kind = C_TYPE_PARSE_FRAME_SCALAR,
+                                              }))
+        {
+            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        }
+        return;
+    }
+    if (frame->stage == C_TYPE_PARSE_STAGE_FALLBACK)
+    {
+        if (!machine->result_valid)
+        {
+            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        frame->base_type = machine->result_type;
+        frame->declarator_start = machine->result_index;
+        if (frame->declarator_start == frame->end && frame->base_type.value < result->type_count &&
+            (result->types[frame->base_type.value].kind == C_TYPE_STRUCT || result->types[frame->base_type.value].kind == C_TYPE_UNION))
+        {
+            BUSTER_CHECK(result->member_count < result->member_capacity);
+            result->members[result->member_count++] = (CMember){
+                .location = frame->first.location,
+                .type = frame->base_type,
+                .alignment_start = frame->alignment_start,
+                .alignment_count = frame->alignment_count,
+            };
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
+            return;
+        }
+        frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+    }
+    u32 declarator = 0;
+    CTypeId declarator_type = C_TYPE_ID_INVALID;
+    CToken name = {
+        .location = frame->first.location,
+    };
+    if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETER_RESULT)
+    {
+        if (!machine->result_valid)
+        {
+            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        declarator_type = machine->result_type;
+        declarator = frame->declarator_end;
+        name = frame->name;
+        frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+    }
+    else
+    {
+        while (frame->declarator_start < frame->end)
+        {
+            frame->declarator_end = frame->declarator_start;
+            u32 depth = 0;
+            while (frame->declarator_end < frame->end)
+            {
+                CToken token = preprocess.tokens[frame->declarator_end];
+                if (c_token_is_punctuator(token, S8("(")) || c_token_is_punctuator(token, S8("[")))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(token, S8(")")) || c_token_is_punctuator(token, S8("]")))
+                {
+                    if (!depth)
+                    {
+                        c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+                        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                        return;
+                    }
+                    depth -= 1;
+                }
+                else if (!depth && c_token_is_punctuator(token, S8(",")))
+                {
+                    break;
+                }
+                frame->declarator_end += 1;
+            }
+            if (frame->declarator_start == frame->declarator_end)
+            {
+                c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                return;
+            }
+            declarator = frame->declarator_start;
+            declarator_type = c_parse_pointer_chain(result, preprocess, frame->base_type, &declarator, frame->declarator_end);
+            if (declarator < frame->declarator_end && c_token_is_punctuator(preprocess.tokens[declarator], S8("(")))
+            {
+                u32 name_index = 0;
+                if (!c_parse_parenthesized_declarator_name(preprocess, declarator, frame->declarator_end, &name_index))
+                {
+                    c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                    return;
+                }
+                frame->name = preprocess.tokens[name_index];
+                frame->stage = C_TYPE_PARSE_STAGE_PARAMETER_RESULT;
+                if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                          .result = result,
+                                                          .preprocess = preprocess,
+                                                          .type = declarator_type,
+                                                          .start = declarator,
+                                                          .end = frame->declarator_end,
+                                                          .declarator_start = declarator,
+                                                          .name_index = name_index,
+                                                          .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+                                                          .has_name = true,
+                                                      }))
+                {
+                    c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                }
+                return;
+            }
+            break;
+        }
+    }
+    if (!name.spelling.length && declarator < frame->declarator_end && preprocess.tokens[declarator].kind == C_TOKEN_IDENTIFIER)
+    {
+        name = preprocess.tokens[declarator++];
+    }
+    else if (!name.spelling.length && (declarator >= frame->declarator_end || !c_token_is_punctuator(preprocess.tokens[declarator], S8(":"))))
+    {
+        c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        return;
+    }
+    bool is_bit_field = false;
+    u32 bit_width = 0;
+    u32 bit_width_token_start = 0;
+    u32 bit_width_token_count = 0;
+    if (declarator < frame->declarator_end && c_token_is_punctuator(preprocess.tokens[declarator], S8(":")))
+    {
+        declarator += 1;
+        bit_width_token_start = declarator;
+        bit_width_token_count = frame->declarator_end - declarator;
+        if (!bit_width_token_count)
+        {
+            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        if (bit_width_token_count == 1 && preprocess.tokens[declarator].kind == C_TOKEN_PREPROCESSING_NUMBER)
+        {
+            String8 spelling = preprocess.tokens[declarator].spelling;
+            u64 width = 0;
+            for (u64 index = 0; index < spelling.length; index += 1)
+            {
+                char8 digit = spelling.pointer[index];
+                if (digit < '0' || digit > '9' || width > (UINT32_MAX - (u32)(digit - '0')) / 10)
+                {
+                    c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                    return;
+                }
+                width = width * 10 + (u32)(digit - '0');
+            }
+            bit_width = (u32)width;
+        }
+        is_bit_field = true;
+        declarator = frame->declarator_end;
+    }
+    if (is_bit_field && frame->alignment_count)
+    {
+        c_parse_diagnostic(result, frame->first.location, C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("alignment specifier cannot be applied to a bit-field"));
+        frame->alignment_count = 0;
+    }
+    declarator_type = c_parse_apply_vector_attribute(result, preprocess, declarator_type, frame->declarator_start, frame->declarator_end);
+    declarator = c_parse_skip_attributes(preprocess, declarator, frame->declarator_end);
+    declarator_type = c_parse_array_suffixes(result, preprocess, declarator_type, &declarator, frame->declarator_end);
+    declarator = c_parse_skip_attributes(preprocess, declarator, frame->declarator_end);
+    if (declarator_type.value == C_ID_UNDERLYING_INVALID || declarator != frame->declarator_end)
+    {
+        c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        return;
+    }
+    BUSTER_CHECK(result->member_count < result->member_capacity);
+    result->members[result->member_count++] = (CMember){
+        .name = name.spelling,
+        .location = name.location,
+        .type = declarator_type,
+        .alignment_start = frame->alignment_start,
+        .alignment_count = frame->alignment_count,
+        .bit_width = bit_width,
+        .bit_width_token_start = bit_width_token_start,
+        .bit_width_token_count = bit_width_token_count,
+        .is_bit_field = is_bit_field,
+    };
+    frame->declarator_start = frame->declarator_end < frame->end ? frame->declarator_end + 1 : frame->end;
+    frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+    if (frame->declarator_start == frame->end)
+    {
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
+{
+    CParseResult* result = frame->result;
+    CPreprocessResult preprocess = frame->preprocess;
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+    {
+        if (frame->start >= frame->end)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        u32 start = c_parse_skip_attributes(preprocess, frame->start, frame->end);
+        u32 specifier_index = start;
+        frame->qualifiers = (CType){
             .element_type = C_TYPE_ID_INVALID,
             .return_type = C_TYPE_ID_INVALID,
             .array_bound = C_ARRAY_BOUND_INVALID,
         };
-        while (specifier_index < current_end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
+        while (specifier_index < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
                !string_equal(preprocess.tokens[specifier_index].spelling, S8("_Atomic")))
         {
-            if (!c_parse_atomic_declaration_prefix(preprocess.tokens[specifier_index].spelling, preprocess.dialect, &outer_qualifiers))
+            if (!c_parse_atomic_declaration_prefix(preprocess.tokens[specifier_index].spelling, preprocess.dialect, &frame->qualifiers))
             {
                 break;
             }
             specifier_index += 1;
-            specifier_index = c_parse_skip_attributes(preprocess, specifier_index, current_end);
+            specifier_index = c_parse_skip_attributes(preprocess, specifier_index, frame->end);
         }
-        bool typeof_specifier =
-            specifier_index + 2 < current_end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
+        bool is_typeof =
+            specifier_index + 2 < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
             (string_equal(preprocess.tokens[specifier_index].spelling, S8("__typeof__")) ||
              ((c_preprocess_dialect_is_gnu(preprocess.dialect) || c_preprocess_dialect_is_c23(preprocess.dialect)) &&
               string_equal(preprocess.tokens[specifier_index].spelling, S8("typeof"))) ||
              (c_preprocess_dialect_is_c23(preprocess.dialect) && string_equal(preprocess.tokens[specifier_index].spelling, S8("typeof_unqual")))) &&
             c_token_is_punctuator(preprocess.tokens[specifier_index + 1], S8("("));
-        bool atomic_specifier = specifier_index + 1 < current_end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
-                                string_equal(preprocess.tokens[specifier_index].spelling, S8("_Atomic")) &&
-                                c_token_is_punctuator(preprocess.tokens[specifier_index + 1], S8("("));
-        if (!typeof_specifier && !atomic_specifier)
+        bool is_atomic = specifier_index + 1 < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
+                         string_equal(preprocess.tokens[specifier_index].spelling, S8("_Atomic")) &&
+                         c_token_is_punctuator(preprocess.tokens[specifier_index + 1], S8("("));
+        if (!is_typeof && !is_atomic)
         {
-            type_index = current_start;
-            type = c_type_parse_machine_active->scalar_core(result, preprocess, current_start, current_end, &type_index);
-            break;
+            frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+            if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                      .result = result,
+                                                      .preprocess = preprocess,
+                                                      .start = start,
+                                                      .end = frame->end,
+                                                      .mutation_mark = machine->mutation_count,
+                                                      .kind = C_TYPE_PARSE_FRAME_CORE,
+                                                  }))
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
+            }
+            return;
         }
         u32 close = specifier_index + 2;
         u32 depth = 1;
-        while (close < current_end && depth)
+        while (close < frame->end && depth)
         {
             if (c_token_is_punctuator(preprocess.tokens[close], S8("(")))
             {
@@ -7023,129 +7327,662 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_in_scope(CParseResult* result, C
             }
             close += 1;
         }
-        if (depth || close == specifier_index + 3 || machine->frame_count >= machine->frame_capacity)
+        if (depth || close == specifier_index + 3)
         {
-            if (atomic_specifier)
+            if (is_atomic)
             {
                 c_parse_diagnostic(result, preprocess.tokens[specifier_index].location, C_DIAGNOSTIC_INVALID_ATOMIC_TYPE,
                                    S8("_Atomic requires a type name"));
             }
-            type = C_TYPE_ID_INVALID;
-            type_index = current_start;
-            break;
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
+            return;
         }
-        machine->frames[machine->frame_count++] = (CTypeParseFrame){
-            .checkpoint = *result,
-            .qualifiers = outer_qualifiers,
-            .specifier_index = specifier_index,
-            .close = close,
-            .end = current_end,
-            .kind = typeof_specifier ? C_TYPE_PARSE_FRAME_TYPEOF : C_TYPE_PARSE_FRAME_ATOMIC,
-            .unqualified = typeof_specifier && string_equal(preprocess.tokens[specifier_index].spelling, S8("typeof_unqual")),
-        };
-        current_start = specifier_index + 2;
-        current_end = close - 1;
-        bool nullptr_operand = typeof_specifier && c_preprocess_dialect_is_c23(preprocess.dialect) && current_end == current_start + 1 &&
-                               preprocess.tokens[current_start].kind == C_TOKEN_IDENTIFIER &&
-                               string_equal(preprocess.tokens[current_start].spelling, S8("nullptr"));
+        frame->checkpoint = *result;
+        frame->mutation_mark = machine->mutation_count;
+        frame->specifier_index = specifier_index;
+        frame->close = close;
+        frame->unqualified = is_typeof && string_equal(preprocess.tokens[specifier_index].spelling, S8("typeof_unqual"));
+        frame->is_bit_field = is_atomic;
+        frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+        u32 operand_start = specifier_index + 2;
+        u32 operand_end = close - 1;
+        bool nullptr_operand = is_typeof && c_preprocess_dialect_is_c23(preprocess.dialect) && operand_end == operand_start + 1 &&
+                               preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER &&
+                               string_equal(preprocess.tokens[operand_start].spelling, S8("nullptr"));
         if (nullptr_operand)
         {
-            type = c_parse_add_type(result, (CType){
-                                                .element_type = C_TYPE_ID_INVALID,
-                                                .return_type = C_TYPE_ID_INVALID,
-                                                .array_bound = C_ARRAY_BOUND_INVALID,
-                                                .kind = C_TYPE_NULLPTR,
-                                                .is_complete = true,
-                                            });
-            type_index = current_end;
-            break;
+            machine->result_type = c_parse_add_type(result, (CType){
+                                                                  .element_type = C_TYPE_ID_INVALID,
+                                                                  .return_type = C_TYPE_ID_INVALID,
+                                                                  .array_bound = C_ARRAY_BOUND_INVALID,
+                                                                  .kind = C_TYPE_NULLPTR,
+                                                                  .is_complete = true,
+                                                              });
+            machine->result_index = operand_end;
+            machine->result_valid = true;
+        }
+        else if (c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                       .result = result,
+                                                       .preprocess = preprocess,
+                                                       .scope = frame->scope,
+                                                       .start = operand_start,
+                                                       .end = operand_end,
+                                                       .mutation_mark = machine->mutation_count,
+                                                       .kind = C_TYPE_PARSE_FRAME_SCALAR,
+                                                   }))
+        {
+            return;
+        }
+        else
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
+            return;
         }
     }
-    while (machine->frame_count > frame_start)
+    if (frame->stage == C_TYPE_PARSE_STAGE_FINISH)
     {
-        CTypeParseFrame frame = machine->frames[--machine->frame_count];
-        u32 operand_start = frame.specifier_index + 2;
-        u32 operand_end = frame.close - 1;
-        if (frame.kind == C_TYPE_PARSE_FRAME_TYPEOF)
+        c_type_parse_frame_complete(machine, machine->result_type, machine->result_index, machine->result_valid);
+        return;
+    }
+    u32 operand_start = frame->specifier_index + 2;
+    u32 operand_end = frame->close - 1;
+    CTypeId type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
+    u32 type_index = machine->result_index;
+    if (frame->stage == C_TYPE_PARSE_STAGE_CHILD && type.value != C_ID_UNDERLYING_INVALID && type_index < operand_end)
+    {
+        type = c_parse_pointer_chain(result, preprocess, type, &type_index, operand_end);
+        type = c_parse_array_suffixes(result, preprocess, type, &type_index, operand_end);
+    }
+    if (!frame->is_bit_field)
+    {
+        if (frame->stage == C_TYPE_PARSE_STAGE_CHILD && (type.value == C_ID_UNDERLYING_INVALID || type_index != operand_end))
         {
-            if (type.value != C_ID_UNDERLYING_INVALID && type_index < operand_end)
+            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
+            if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                      .result = result,
+                                                      .preprocess = preprocess,
+                                                      .arena = machine->scratch_arena,
+                                                      .scope = frame->scope,
+                                                      .start = operand_start,
+                                                      .end = operand_end,
+                                                      .kind = C_TYPE_PARSE_FRAME_SIZEOF,
+                                                  }))
             {
-                type = c_parse_pointer_chain(result, preprocess, type, &type_index, operand_end);
-                type = c_parse_array_suffixes(result, preprocess, type, &type_index, operand_end);
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->specifier_index, false);
             }
-            if (type.value == C_ID_UNDERLYING_INVALID || type_index != operand_end)
-            {
-                *result = frame.checkpoint;
-                TemporalArena expression_temporary = scratch_begin(0, 0);
-                bool resolved = c_type_parse_machine_active->sizeof_expression(expression_temporary.arena, preprocess, result, scope, operand_start, operand_end, &type);
-                scratch_end(expression_temporary);
-                if (!resolved)
-                {
-                    type = C_TYPE_ID_INVALID;
-                    type_index = frame.specifier_index;
-                    continue;
-                }
-            }
-            if (frame.unqualified)
-            {
-                type = c_parse_unqualified_type(result, type);
-            }
-            u32 suffix = frame.close;
-            while (suffix < frame.end && preprocess.tokens[suffix].kind == C_TOKEN_IDENTIFIER &&
-                   c_parse_type_qualifier_word(preprocess.tokens[suffix].spelling, &frame.qualifiers))
-            {
-                suffix += 1;
-            }
-            if (frame.qualifiers.is_const || frame.qualifiers.is_volatile || frame.qualifiers.is_restrict || frame.qualifiers.is_atomic)
-            {
-                type = c_parse_add_qualified_type(result, type, frame.qualifiers);
-            }
-            type_index = suffix;
-            continue;
-        }
-        if (type.value != C_ID_UNDERLYING_INVALID && type_index < operand_end)
-        {
-            type = c_parse_pointer_chain(result, preprocess, type, &type_index, operand_end);
-            type = c_parse_array_suffixes(result, preprocess, type, &type_index, operand_end);
+            return;
         }
         if (type.value == C_ID_UNDERLYING_INVALID)
         {
-            type_index = frame.specifier_index;
-            continue;
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->specifier_index, false);
+            return;
         }
-        CType* inner_type = type.value < result->type_count ? result->types + type.value : 0;
-        if (!inner_type || type_index != operand_end || inner_type->kind == C_TYPE_ARRAY || inner_type->kind == C_TYPE_FUNCTION ||
-            inner_type->kind == C_TYPE_VOID || inner_type->kind == C_TYPE_NULLPTR || inner_type->is_const || inner_type->is_volatile ||
-            inner_type->is_restrict || inner_type->is_atomic)
+        if (frame->unqualified)
         {
-            c_parse_diagnostic(result, preprocess.tokens[frame.specifier_index].location, C_DIAGNOSTIC_INVALID_ATOMIC_TYPE,
-                               S8("_Atomic type name must specify an unqualified non-array object type"));
-            type = C_TYPE_ID_INVALID;
-            type_index = frame.specifier_index;
-            continue;
+            type = c_parse_unqualified_type(result, type);
         }
-        frame.qualifiers.is_atomic = true;
-        u32 suffix = frame.close;
-        while (suffix < frame.end && preprocess.tokens[suffix].kind == C_TOKEN_IDENTIFIER &&
-               c_parse_atomic_declaration_prefix(preprocess.tokens[suffix].spelling, preprocess.dialect, &frame.qualifiers))
+        u32 suffix = frame->close;
+        while (suffix < frame->end && preprocess.tokens[suffix].kind == C_TOKEN_IDENTIFIER &&
+               c_parse_type_qualifier_word(preprocess.tokens[suffix].spelling, &frame->qualifiers))
         {
             suffix += 1;
         }
-        type = c_parse_add_qualified_type(result, type, frame.qualifiers);
-        type_index = suffix;
+        if (frame->qualifiers.is_const || frame->qualifiers.is_volatile || frame->qualifiers.is_restrict || frame->qualifiers.is_atomic)
+        {
+            type = c_parse_add_qualified_type(result, type, frame->qualifiers);
+        }
+        c_type_parse_frame_complete(machine, type, suffix, true);
+        return;
     }
-    *declarator_start = type_index;
-    return type;
+    if (type.value == C_ID_UNDERLYING_INVALID)
+    {
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->specifier_index, false);
+        return;
+    }
+    CType* inner_type = type.value < result->type_count ? result->types + type.value : 0;
+    if (!inner_type || type_index != operand_end || inner_type->kind == C_TYPE_ARRAY || inner_type->kind == C_TYPE_FUNCTION ||
+        inner_type->kind == C_TYPE_VOID || inner_type->kind == C_TYPE_NULLPTR || inner_type->is_const || inner_type->is_volatile ||
+        inner_type->is_restrict || inner_type->is_atomic)
+    {
+        c_parse_diagnostic(result, preprocess.tokens[frame->specifier_index].location, C_DIAGNOSTIC_INVALID_ATOMIC_TYPE,
+                           S8("_Atomic type name must specify an unqualified non-array object type"));
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->specifier_index, false);
+        return;
+    }
+    frame->qualifiers.is_atomic = true;
+    u32 suffix = frame->close;
+    while (suffix < frame->end && preprocess.tokens[suffix].kind == C_TOKEN_IDENTIFIER &&
+           c_parse_atomic_declaration_prefix(preprocess.tokens[suffix].spelling, preprocess.dialect, &frame->qualifiers))
+    {
+        suffix += 1;
+    }
+    type = c_parse_add_qualified_type(result, type, frame->qualifiers);
+    c_type_parse_frame_complete(machine, type, suffix, true);
 }
 
-BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start)
+BUSTER_GLOBAL_LOCAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
-    return c_type_parse_machine_active->scalar_in_scope(result, preprocess, result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID, start, end,
-                                                declarator_start);
+    CParseResult* result = frame->result;
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+    {
+        u32 declarator_start = frame->start;
+        CTypeId type = c_parse_scalar_type_core_begin(machine, frame, &declarator_start);
+        if (type.value == C_ID_UNDERLYING_INVALID || machine->failed)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, declarator_start, false);
+            return;
+        }
+        if (!frame->has_function_suffix)
+        {
+            c_type_parse_frame_complete(machine, type, declarator_start, true);
+            return;
+        }
+        bool nested_aggregate = false;
+        for (u32 index = 0; index + 1 < machine->frame_count; index += 1)
+        {
+            nested_aggregate |= machine->frames[index].kind == C_TYPE_PARSE_FRAME_AGGREGATE_SEGMENT;
+        }
+        if (nested_aggregate)
+        {
+            c_type_parse_frame_complete(machine, type, declarator_start, true);
+            return;
+        }
+        CType* root = type.value < result->type_count ? result->types + type.value : 0;
+        if (!root || root->kind == C_TYPE_ENUM)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, declarator_start, false);
+            return;
+        }
+        if (!c_type_parse_record_mutation(machine, result, type))
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, declarator_start, false);
+            return;
+        }
+        root->member_start = result->member_count;
+        frame->pending_index = frame->definition_type_start;
+        frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+        if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                  .result = result,
+                                                  .preprocess = frame->preprocess,
+                                                  .start = root->definition_start,
+                                                  .end = root->definition_start + root->definition_token_count,
+                                                  .kind = C_TYPE_PARSE_FRAME_AGGREGATE_RANGE,
+                                              }))
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, declarator_start, false);
+        }
+        return;
+    }
+    if (!machine->result_valid)
+    {
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        return;
+    }
+    CTypeId completed_id = frame->original_type_valid ? frame->original_type_id : (CTypeId){.value = frame->pending_index - 1};
+    frame->original_type_valid = false;
+    if (completed_id.value >= result->type_count)
+    {
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        return;
+    }
+    CType* completed = result->types + completed_id.value;
+    if (!c_type_parse_record_mutation(machine, result, completed_id))
+    {
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        return;
+    }
+    completed->member_count = result->member_count - completed->member_start;
+    completed->is_complete = true;
+    c_parse_validate_flexible_array_members(result, completed);
+    while (frame->pending_index < result->type_count)
+    {
+        CTypeId pending_id = {.value = frame->pending_index++};
+        CType* pending = result->types + pending_id.value;
+        if (pending->is_complete || !pending->definition_start)
+        {
+            continue;
+        }
+        if (pending->kind != C_TYPE_STRUCT && pending->kind != C_TYPE_UNION)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        if (!c_type_parse_record_mutation(machine, result, pending_id))
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        pending->member_start = result->member_count;
+        frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+        if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                  .result = result,
+                                                  .preprocess = frame->preprocess,
+                                                  .start = pending->definition_start,
+                                                  .end = pending->definition_start + pending->definition_token_count,
+                                                  .kind = C_TYPE_PARSE_FRAME_AGGREGATE_RANGE,
+                                              }))
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        }
+        return;
+    }
+    c_type_parse_frame_complete(machine, frame->type, frame->close + 1, true);
 }
 
-BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_core(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start)
+BUSTER_GLOBAL_LOCAL void c_type_parse_parameter_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
+    CParseResult* result = frame->result;
+    CPreprocessResult preprocess = frame->preprocess;
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+    {
+        for (u32 index = frame->start; index < frame->end; index += 1)
+        {
+            if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && string_equal(preprocess.tokens[index].spelling, S8("_Alignas")))
+            {
+                c_parse_diagnostic(result, preprocess.tokens[index].location, C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                                   S8("alignment specifier cannot be applied to a parameter"));
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                return;
+            }
+        }
+        frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+        if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                  .result = result,
+                                                  .preprocess = preprocess,
+                                                  .scope = result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
+                                                  .start = frame->start,
+                                                  .end = frame->end,
+                                                  .mutation_mark = machine->mutation_count,
+                                                  .kind = C_TYPE_PARSE_FRAME_SCALAR,
+                                              }))
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        }
+        return;
+    }
+    if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
+    {
+        if (!machine->result_valid)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        frame->type = machine->result_type;
+        frame->declarator_start = machine->result_index;
+        frame->type = c_parse_pointer_chain(result, preprocess, frame->type, &frame->declarator_start, frame->end);
+        frame->type = c_parse_apply_vector_attribute(result, preprocess, frame->type, frame->start, frame->end);
+        frame->name = (CToken){0};
+        if (frame->declarator_start < frame->end && c_token_is_punctuator(preprocess.tokens[frame->declarator_start], S8("(")))
+        {
+            u32 nested_name_index = 0;
+            bool nested_has_name = c_parse_parenthesized_declarator_name(preprocess, frame->declarator_start, frame->end, &nested_name_index);
+            if (!nested_has_name)
+            {
+                u32 close_index = frame->declarator_start + 1;
+                CType ignored = {0};
+                while (close_index < frame->end && c_token_is_punctuator(preprocess.tokens[close_index], S8("*")))
+                {
+                    close_index += 1;
+                    while (close_index < frame->end && preprocess.tokens[close_index].kind == C_TOKEN_IDENTIFIER &&
+                           c_parse_type_qualifier_word(preprocess.tokens[close_index].spelling, &ignored))
+                    {
+                        close_index += 1;
+                    }
+                }
+                if (close_index == frame->declarator_start + 1 || close_index >= frame->end ||
+                    !c_token_is_punctuator(preprocess.tokens[close_index], S8(")")))
+                {
+                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                    return;
+                }
+                nested_name_index = close_index;
+            }
+            if (nested_has_name)
+            {
+                frame->name = preprocess.tokens[nested_name_index];
+            }
+            frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
+            if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                      .result = result,
+                                                      .preprocess = preprocess,
+                                                      .type = frame->type,
+                                                      .start = frame->declarator_start,
+                                                      .end = frame->end,
+                                                      .declarator_start = frame->declarator_start,
+                                                      .name_index = nested_name_index,
+                                                      .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+                                                      .has_name = nested_has_name,
+                                                  }))
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            }
+            return;
+        }
+    }
+    else if (frame->stage == C_TYPE_PARSE_STAGE_FALLBACK)
+    {
+        if (!machine->result_valid)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        frame->type = machine->result_type;
+        frame->declarator_start = frame->end;
+    }
+    if (frame->declarator_start < frame->end && preprocess.tokens[frame->declarator_start].kind == C_TOKEN_IDENTIFIER)
+    {
+        frame->name = preprocess.tokens[frame->declarator_start++];
+    }
+    frame->declarator_start = c_parse_skip_attributes(preprocess, frame->declarator_start, frame->end);
+    frame->type = c_parse_array_suffixes(result, preprocess, frame->type, &frame->declarator_start, frame->end);
+    frame->declarator_start = c_parse_skip_attributes(preprocess, frame->declarator_start, frame->end);
+    if (frame->declarator_start != frame->end || frame->type.value == C_ID_UNDERLYING_INVALID || result->parameter_count >= result->parameter_capacity)
+    {
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        return;
+    }
+    result->parameters[result->parameter_count++] = (CParameter){
+        .name = frame->name.spelling,
+        .location = frame->name.location,
+        .type = frame->type,
+        .entity = C_ENTITY_ID_INVALID,
+    };
+    c_type_parse_frame_complete(machine, frame->type, frame->end, true);
+}
+
+BUSTER_GLOBAL_LOCAL void c_type_parse_parenthesized_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
+{
+    CParseResult* result = frame->result;
+    CPreprocessResult preprocess = frame->preprocess;
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+    {
+        if (frame->declarator_start >= frame->end || !c_token_is_punctuator(preprocess.tokens[frame->declarator_start], S8("(")) ||
+            frame->name_index >= frame->end)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        frame->close_index = frame->has_name ? frame->name_index + 1 : frame->name_index;
+        u32 bracket_depth = 0;
+        while (frame->has_name && frame->close_index < frame->end)
+        {
+            CToken token = preprocess.tokens[frame->close_index];
+            if (c_token_is_punctuator(token, S8("[")))
+            {
+                bracket_depth += 1;
+            }
+            else if (c_token_is_punctuator(token, S8("]")) && bracket_depth)
+            {
+                bracket_depth -= 1;
+            }
+            else if (!bracket_depth && c_token_is_punctuator(token, S8(")")))
+            {
+                break;
+            }
+            frame->close_index += 1;
+        }
+        frame->pointer_start = frame->declarator_start + 1;
+        if (frame->close_index >= frame->end || !c_token_is_punctuator(preprocess.tokens[frame->close_index], S8(")")) ||
+            frame->pointer_start >= frame->name_index || !c_token_is_punctuator(preprocess.tokens[frame->pointer_start], S8("*")))
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        frame->index = frame->close_index + 1;
+        if (frame->index < frame->end && c_token_is_punctuator(preprocess.tokens[frame->index], S8("(")))
+        {
+            frame->parameter_start = result->parameter_count;
+            frame->segment_start = frame->index + 1;
+            frame->scan_index = frame->segment_start;
+            frame->depth = 1;
+            frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
+        }
+        else
+        {
+            frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+        }
+    }
+    if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETER_RESULT)
+    {
+        if (!machine->result_valid)
+        {
+            result->parameter_count = frame->parameter_start;
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        frame->segment_start = frame->scan_index + 1;
+        if (c_token_is_punctuator(preprocess.tokens[frame->scan_index], S8(")")))
+        {
+            frame->index = frame->scan_index + 1;
+            frame->type = c_parse_add_type(result, (CType){
+                                                     .element_type = C_TYPE_ID_INVALID,
+                                                     .return_type = frame->type,
+                                                     .array_bound = C_ARRAY_BOUND_INVALID,
+                                                     .parameter_start = frame->parameter_start,
+                                                     .parameter_count = result->parameter_count - frame->parameter_start,
+                                                     .kind = C_TYPE_FUNCTION,
+                                                     .is_variadic = frame->variadic,
+                                                 });
+            frame->has_function_suffix = true;
+            frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+        }
+        else
+        {
+            frame->scan_index += 1;
+            frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
+        }
+    }
+    if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETERS)
+    {
+        while (frame->scan_index < frame->end)
+        {
+            CToken token = preprocess.tokens[frame->scan_index];
+            if (c_token_is_punctuator(token, S8("(")))
+            {
+                frame->depth += 1;
+                frame->scan_index += 1;
+                continue;
+            }
+            if (c_token_is_punctuator(token, S8(")")) && frame->depth > 1)
+            {
+                frame->depth -= 1;
+                frame->scan_index += 1;
+                continue;
+            }
+            bool segment_end = frame->depth == 1 && c_token_is_punctuator(token, S8(","));
+            bool list_end = frame->depth == 1 && c_token_is_punctuator(token, S8(")"));
+            if (!segment_end && !list_end)
+            {
+                frame->scan_index += 1;
+                continue;
+            }
+            u32 segment_count = frame->scan_index - frame->segment_start;
+            if (list_end && !segment_count && result->parameter_count == frame->parameter_start)
+            {
+                frame->index = frame->scan_index + 1;
+                frame->type = c_parse_add_type(result, (CType){
+                                                         .element_type = C_TYPE_ID_INVALID,
+                                                         .return_type = frame->type,
+                                                         .array_bound = C_ARRAY_BOUND_INVALID,
+                                                         .parameter_start = frame->parameter_start,
+                                                         .kind = C_TYPE_FUNCTION,
+                                                         .is_variadic = frame->variadic,
+                                                     });
+                frame->has_function_suffix = true;
+                frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+                break;
+            }
+            if (segment_count == 1 && c_token_is_punctuator(preprocess.tokens[frame->segment_start], S8("...")))
+            {
+                frame->variadic = true;
+            }
+            else if (!(list_end && result->parameter_count == frame->parameter_start && segment_count == 1 &&
+                       string_equal(preprocess.tokens[frame->segment_start].spelling, S8("void"))))
+            {
+                if (!segment_count)
+                {
+                    result->parameter_count = frame->parameter_start;
+                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                    return;
+                }
+                frame->stage = C_TYPE_PARSE_STAGE_PARAMETER_RESULT;
+                if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                          .result = result,
+                                                          .preprocess = preprocess,
+                                                          .start = frame->segment_start,
+                                                          .end = frame->scan_index,
+                                                          .kind = C_TYPE_PARSE_FRAME_PARAMETER,
+                                                      }))
+                {
+                    result->parameter_count = frame->parameter_start;
+                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                }
+                return;
+            }
+            frame->segment_start = frame->scan_index + 1;
+            if (list_end)
+            {
+                frame->index = frame->scan_index + 1;
+                frame->type = c_parse_add_type(result, (CType){
+                                                         .element_type = C_TYPE_ID_INVALID,
+                                                         .return_type = frame->type,
+                                                         .array_bound = C_ARRAY_BOUND_INVALID,
+                                                         .parameter_start = frame->parameter_start,
+                                                         .parameter_count = result->parameter_count - frame->parameter_start,
+                                                         .kind = C_TYPE_FUNCTION,
+                                                         .is_variadic = frame->variadic,
+                                                     });
+                frame->has_function_suffix = true;
+                frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+                break;
+            }
+            frame->scan_index += 1;
+        }
+        if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETERS)
+        {
+            result->parameter_count = frame->parameter_start;
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+    }
+    if (frame->stage == C_TYPE_PARSE_STAGE_FINISH)
+    {
+        if (!frame->has_function_suffix)
+        {
+            frame->type = c_parse_array_suffixes(result, preprocess, frame->type, &frame->index, frame->end);
+            if (frame->index != frame->end)
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                return;
+            }
+        }
+        frame->type = c_parse_pointer_chain(result, preprocess, frame->type, &frame->pointer_start, frame->name_index);
+        if (frame->pointer_start != frame->name_index)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        if (frame->has_name)
+        {
+            u32 array_index = frame->name_index + 1;
+            frame->type = c_parse_array_suffixes(result, preprocess, frame->type, &array_index, frame->close_index);
+            if (array_index != frame->close_index)
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                return;
+            }
+        }
+        bool valid = frame->type.value != C_ID_UNDERLYING_INVALID && (!frame->has_function_suffix || frame->index == frame->end);
+        c_type_parse_frame_complete(machine, frame->type, frame->end, valid);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 frame_start)
+{
+    while (machine->frame_count > frame_start && !machine->failed)
+    {
+        CTypeParseFrame* frame = machine->frames + machine->frame_count - 1;
+        switch (frame->kind)
+        {
+        case C_TYPE_PARSE_FRAME_SCALAR:
+            c_type_parse_scalar_step(machine, frame);
+            break;
+        case C_TYPE_PARSE_FRAME_CORE:
+            c_type_parse_core_step(machine, frame);
+            break;
+        case C_TYPE_PARSE_FRAME_SIZEOF:
+            c_type_parse_sizeof_step(machine, frame);
+            break;
+        case C_TYPE_PARSE_FRAME_EXPRESSION_LEAF:
+            c_type_parse_expression_leaf_step(machine, frame);
+            break;
+        case C_TYPE_PARSE_FRAME_ALIGNMENT:
+            c_type_parse_alignment_step(machine, frame);
+            break;
+        case C_TYPE_PARSE_FRAME_AGGREGATE_SEGMENT:
+            c_type_parse_aggregate_segment_step(machine, frame);
+            break;
+        case C_TYPE_PARSE_FRAME_AGGREGATE_RANGE:
+            c_type_parse_aggregate_range_step(machine, frame);
+            break;
+        case C_TYPE_PARSE_FRAME_PARENTHESIZED:
+            c_type_parse_parenthesized_step(machine, frame);
+            break;
+        case C_TYPE_PARSE_FRAME_PARAMETER:
+            c_type_parse_parameter_step(machine, frame);
+            break;
+        }
+    }
+    if (machine->failed)
+    {
+        machine->frame_count = frame_start;
+        machine->result_type = C_TYPE_ID_INVALID;
+        machine->result_valid = false;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_in_scope(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                         u32 start, u32 end,
+                                                         u32* declarator_start)
+{
+    u32 frame_start = machine->frame_count;
+    CParseResult checkpoint = *result;
+    u32 mutation_mark = machine->mutation_count;
+    machine->mutation_type_limit = checkpoint.type_count;
+    machine->result_valid = false;
+    bool pushed = c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                              .result = result,
+                                              .preprocess = preprocess,
+                                              .scope = scope,
+                                              .start = start,
+                                              .end = end,
+                                              .mutation_mark = mutation_mark,
+                                              .kind = C_TYPE_PARSE_FRAME_SCALAR,
+                                          });
+    if (pushed)
+    {
+        c_type_parse_machine_run(machine, frame_start);
+    }
+    bool valid = c_type_parse_root_finish(machine, result, checkpoint, mutation_mark,
+                                          start < preprocess.token_count ? preprocess.tokens[start].location : (CSourceLocation){0});
+    *declarator_start = machine->result_index;
+    return valid ? machine->result_type : C_TYPE_ID_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+                                                u32* declarator_start)
+{
+    return c_parse_scalar_type_in_scope(machine, result, preprocess, result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID, start, end,
+                                        declarator_start);
+}
+
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* machine, CTypeParseFrame* frame, u32* declarator_start)
+{
+    CParseResult* result = frame->result;
+    CPreprocessResult preprocess = frame->preprocess;
+    u32 start = frame->start;
+    u32 end = frame->end;
     CTypeId qualified_typedef = c_parse_qualified_typedef_type(result, preprocess, start, end, declarator_start);
     if (qualified_typedef.value != C_ID_UNDERLYING_INVALID)
     {
@@ -7344,6 +8181,10 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_core(CParseResult* result, CPrep
     {
         return C_TYPE_ID_INVALID;
     }
+    if (type.value < definition_type_start && !c_type_parse_record_mutation(machine, result, type))
+    {
+        return C_TYPE_ID_INVALID;
+    }
     CType* aggregate = &result->types[type.value];
     if (kind == C_TYPE_ENUM && enum_underlying_type.value != C_ID_UNDERLYING_INVALID)
     {
@@ -7489,265 +8330,23 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_core(CParseResult* result, CPrep
             enum_start = token_index + 1;
         }
     }
-    else
+    if (kind != C_TYPE_ENUM)
     {
-        u32 member_start = open + 1;
-        u32 member_depth = 0;
-        for (u32 token_index = member_start; token_index <= close; token_index += 1)
-        {
-            CToken token = preprocess.tokens[token_index];
-            if (token_index < close &&
-                (c_token_is_punctuator(token, S8("(")) || c_token_is_punctuator(token, S8("[")) || c_token_is_punctuator(token, S8("{"))))
-            {
-                member_depth += 1;
-                continue;
-            }
-            if (token_index < close &&
-                (c_token_is_punctuator(token, S8(")")) || c_token_is_punctuator(token, S8("]")) || c_token_is_punctuator(token, S8("}"))))
-            {
-                if (!member_depth)
-                {
-                    return C_TYPE_ID_INVALID;
-                }
-                member_depth -= 1;
-                continue;
-            }
-            bool member_end = token_index == close || (!member_depth && c_token_is_punctuator(token, S8(";")));
-            if (!member_end)
-            {
-                continue;
-            }
-            if (member_start == token_index)
-            {
-                member_start = token_index + 1;
-                continue;
-            }
-            bool multiple_declarators = false;
-            bool has_bit_field = false;
-            bool has_inline_aggregate = false;
-            bool has_alignment = false;
-            u32 declarator_depth = 0;
-            for (u32 declarator_index = member_start; declarator_index < token_index; declarator_index += 1)
-            {
-                CToken declarator_token = preprocess.tokens[declarator_index];
-                has_alignment |= declarator_token.kind == C_TOKEN_IDENTIFIER && c_parse_alignment_word(declarator_token.spelling);
-                if (c_token_is_punctuator(declarator_token, S8("(")) || c_token_is_punctuator(declarator_token, S8("[")) ||
-                    c_token_is_punctuator(declarator_token, S8("{")))
-                {
-                    has_inline_aggregate |= !declarator_depth && declarator_index != member_start;
-                    declarator_depth += 1;
-                }
-                else if (c_token_is_punctuator(declarator_token, S8(")")) || c_token_is_punctuator(declarator_token, S8("]")) ||
-                         c_token_is_punctuator(declarator_token, S8("}")))
-                {
-                    if (declarator_depth)
-                    {
-                        declarator_depth -= 1;
-                    }
-                }
-                else if (!declarator_depth && c_token_is_punctuator(declarator_token, S8(",")))
-                {
-                    multiple_declarators = true;
-                    break;
-                }
-                else if (!declarator_depth && c_token_is_punctuator(declarator_token, S8(":")))
-                {
-                    has_bit_field = true;
-                }
-            }
-            if (multiple_declarators || has_inline_aggregate || has_bit_field || has_alignment)
-            {
-                if (!c_type_parse_machine_active->aggregate_segment(result, preprocess, member_start, token_index))
-                {
-                    return C_TYPE_ID_INVALID;
-                }
-                member_start = token_index + 1;
-                continue;
-            }
-            u32 member_declarator = member_start;
-            CTypeId member_type = C_TYPE_ID_INVALID;
-            CToken member_first = preprocess.tokens[member_start];
-            if (member_first.kind == C_TOKEN_IDENTIFIER &&
-                (string_equal(member_first.spelling, S8("struct")) || string_equal(member_first.spelling, S8("union")) ||
-                 string_equal(member_first.spelling, S8("enum"))))
-            {
-                CTypeKind member_kind = string_equal(member_first.spelling, S8("struct"))  ? C_TYPE_STRUCT
-                                        : string_equal(member_first.spelling, S8("union")) ? C_TYPE_UNION
-                                                                                           : C_TYPE_ENUM;
-                if (member_start + 1 >= token_index)
-                {
-                    return C_TYPE_ID_INVALID;
-                }
-                if (preprocess.tokens[member_start + 1].kind == C_TOKEN_IDENTIFIER)
-                {
-                    member_type = c_parse_aggregate_lookup(result, member_kind, preprocess.tokens[member_start + 1].spelling);
-                    if (member_type.value == C_ID_UNDERLYING_INVALID)
-                    {
-                        member_type = c_parse_add_type(result, (CType){
-                                                                   .tag = preprocess.tokens[member_start + 1].spelling,
-                                                                   .element_type = C_TYPE_ID_INVALID,
-                                                                   .return_type = C_TYPE_ID_INVALID,
-                                                                   .array_bound = C_ARRAY_BOUND_INVALID,
-                                                                   .kind = member_kind,
-                                                               });
-                    }
-                    member_declarator = member_start + 2;
-                }
-                else if (c_token_is_punctuator(preprocess.tokens[member_start + 1], S8("{")))
-                {
-                    u32 nested_close = member_start + 2;
-                    u32 nested_depth = 1;
-                    while (nested_close < token_index && nested_depth)
-                    {
-                        if (c_token_is_punctuator(preprocess.tokens[nested_close], S8("{")))
-                        {
-                            nested_depth += 1;
-                        }
-                        else if (c_token_is_punctuator(preprocess.tokens[nested_close], S8("}")))
-                        {
-                            nested_depth -= 1;
-                        }
-                        nested_close += 1;
-                    }
-                    if (nested_depth)
-                    {
-                        return C_TYPE_ID_INVALID;
-                    }
-                    member_type = c_parse_add_type(result, (CType){
-                                                               .element_type = C_TYPE_ID_INVALID,
-                                                               .return_type = C_TYPE_ID_INVALID,
-                                                               .array_bound = C_ARRAY_BOUND_INVALID,
-                                                               .definition_start = member_start + 2,
-                                                               .definition_token_count = nested_close - member_start - 3,
-                                                               .kind = member_kind,
-                                                           });
-                    member_declarator = nested_close;
-                }
-                else
-                {
-                    return C_TYPE_ID_INVALID;
-                }
-            }
-            else
-            {
-                member_type = c_parse_qualified_typedef_type(result, preprocess, member_start, token_index, &member_declarator);
-                if (member_type.value == C_ID_UNDERLYING_INVALID)
-                {
-                    member_type = c_parse_primitive_type(result, preprocess, member_start, token_index, &member_declarator);
-                }
-            }
-            if (member_type.value == C_ID_UNDERLYING_INVALID)
-            {
-                return C_TYPE_ID_INVALID;
-            }
-            CToken name = {
-                .location = member_first.location,
-            };
-            member_type = c_parse_pointer_chain(result, preprocess, member_type, &member_declarator, token_index);
-            if (member_declarator < token_index && c_token_is_punctuator(preprocess.tokens[member_declarator], S8("(")))
-            {
-                u32 name_index = 0;
-                if (!c_parse_parenthesized_declarator_name(preprocess, member_declarator, token_index, &name_index))
-                {
-                    return C_TYPE_ID_INVALID;
-                }
-                name = preprocess.tokens[name_index];
-                member_type = c_type_parse_machine_active->parenthesized(result, preprocess, member_type, member_declarator, name_index, token_index, true);
-                member_declarator = token_index;
-            }
-            if (member_declarator == token_index && member_type.value < result->type_count &&
-                (result->types[member_type.value].kind == C_TYPE_STRUCT || result->types[member_type.value].kind == C_TYPE_UNION))
-            {
-                BUSTER_CHECK(result->member_count < result->member_capacity);
-                result->members[result->member_count++] = (CMember){
-                    .location = member_first.location,
-                    .type = member_type,
-                };
-                member_start = token_index + 1;
-                continue;
-            }
-            if (!name.spelling.length && member_declarator < token_index && preprocess.tokens[member_declarator].kind == C_TOKEN_IDENTIFIER)
-            {
-                name = preprocess.tokens[member_declarator++];
-            }
-            else if (!name.spelling.length && (member_declarator >= token_index || !c_token_is_punctuator(preprocess.tokens[member_declarator], S8(":"))))
-            {
-                return C_TYPE_ID_INVALID;
-            }
-            member_type = c_parse_apply_vector_attribute(result, preprocess, member_type, member_start, token_index);
-            member_declarator = c_parse_skip_attributes(preprocess, member_declarator, token_index);
-            bool is_bit_field = false;
-            u32 bit_width = 0;
-            if (member_declarator < token_index && c_token_is_punctuator(preprocess.tokens[member_declarator], S8(":")))
-            {
-                member_declarator += 1;
-                if (member_declarator + 1 != token_index || preprocess.tokens[member_declarator].kind != C_TOKEN_PREPROCESSING_NUMBER)
-                {
-                    return C_TYPE_ID_INVALID;
-                }
-                String8 width_spelling = preprocess.tokens[member_declarator].spelling;
-                u64 width_value = 0;
-                if (!width_spelling.length)
-                {
-                    return C_TYPE_ID_INVALID;
-                }
-                for (u64 width_index = 0; width_index < width_spelling.length; width_index += 1)
-                {
-                    char8 digit = width_spelling.pointer[width_index];
-                    if (digit < '0' || digit > '9' || width_value > (UINT32_MAX - (u32)(digit - '0')) / 10)
-                    {
-                        return C_TYPE_ID_INVALID;
-                    }
-                    width_value = width_value * 10 + (u32)(digit - '0');
-                }
-                bit_width = (u32)width_value;
-                is_bit_field = true;
-                member_declarator += 1;
-            }
-            member_type = c_parse_array_suffixes(result, preprocess, member_type, &member_declarator, token_index);
-            member_declarator = c_parse_skip_attributes(preprocess, member_declarator, token_index);
-            if (member_type.value == C_ID_UNDERLYING_INVALID || member_declarator != token_index)
-            {
-                return C_TYPE_ID_INVALID;
-            }
-            BUSTER_CHECK(result->member_count < result->member_capacity);
-            result->members[result->member_count++] = (CMember){
-                .name = name.spelling,
-                .location = name.location,
-                .type = member_type,
-                .bit_width = bit_width,
-                .is_bit_field = is_bit_field,
-            };
-            member_start = token_index + 1;
-        }
+        frame->type = type;
+        frame->original_type_id = type;
+        frame->original_type_valid = true;
+        frame->definition_type_start = definition_type_start;
+        frame->pending_index = definition_type_start;
+        frame->close = close;
+        frame->has_function_suffix = true;
+        *declarator_start = close + 1;
+        return type;
     }
     aggregate = &result->types[type.value];
     aggregate->member_count = result->member_count - aggregate->member_start;
     aggregate->enum_member_count = result->enum_member_count - aggregate->enum_member_start;
     aggregate->is_complete = true;
     c_parse_validate_flexible_array_members(result, aggregate);
-    for (u32 pending_index = definition_type_start; pending_index < result->type_count; pending_index += 1)
-    {
-        CType* pending = &result->types[pending_index];
-        if (pending->is_complete || !pending->definition_start)
-        {
-            continue;
-        }
-        if (pending->kind != C_TYPE_STRUCT && pending->kind != C_TYPE_UNION)
-        {
-            return C_TYPE_ID_INVALID;
-        }
-        pending->member_start = result->member_count;
-        if (!c_type_parse_machine_active->aggregate_range(result, preprocess, pending->definition_start,
-                                                  pending->definition_start + pending->definition_token_count))
-        {
-            return C_TYPE_ID_INVALID;
-        }
-        pending = &result->types[pending_index];
-        pending->member_count = result->member_count - pending->member_start;
-        pending->is_complete = true;
-        c_parse_validate_flexible_array_members(result, pending);
-    }
     *declarator_start = close + 1;
     return type;
 }
@@ -7872,7 +8471,8 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_array_suffixes(CParseResult* result, CPrepro
     return element_type;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_parameter_segment(CParseResult* result, CPreprocessResult preprocess, CDeclaration declaration, u32 start, u32 end)
+BUSTER_GLOBAL_LOCAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                    CDeclaration declaration, u32 start, u32 end)
 {
     BUSTER_UNUSED(declaration);
     for (u32 token_index = start; token_index < end; token_index += 1)
@@ -7885,7 +8485,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_parameter_segment(CParseResult* result, CPrepro
         }
     }
     u32 declarator_start = start;
-    CTypeId type = c_parse_scalar_type(result, preprocess, start, end, &declarator_start);
+    CTypeId type = c_parse_scalar_type(machine, result, preprocess, start, end, &declarator_start);
     if (type.value == C_ID_UNDERLYING_INVALID)
     {
         return false;
@@ -7920,7 +8520,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_parameter_segment(CParseResult* result, CPrepro
         {
             name = preprocess.tokens[name_index];
         }
-        type = c_parse_parenthesized_declaration_type(result, preprocess, type, declarator_start, name_index, end, has_name);
+        type = c_parse_parenthesized_declaration_type(machine, result, preprocess, type, declarator_start, name_index, end, has_name);
         if (type.value == C_ID_UNDERLYING_INVALID)
         {
             return false;
@@ -7949,382 +8549,33 @@ BUSTER_GLOBAL_LOCAL bool c_parse_parameter_segment(CParseResult* result, CPrepro
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_declarator_frame_push(CTypeParseFrame* frames, u32* frame_count, u32 frame_capacity, CTypeParseFrame frame)
+BUSTER_GLOBAL_LOCAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                   CTypeId base, u32 declarator_start, u32 name_index, u32 suffix_end,
+                                                                   bool has_name)
 {
-    if (*frame_count >= frame_capacity)
-    {
-        return false;
-    }
-    frames[(*frame_count)++] = frame;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL CTypeId c_parse_parenthesized_declaration_type(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32 declarator_start,
-                                                                   u32 name_index, u32 suffix_end, bool has_name)
-{
-    if (declarator_start >= suffix_end)
-    {
-        return C_TYPE_ID_INVALID;
-    }
-    CTypeParseMachine* machine = c_type_parse_machine_active;
-    BUSTER_CHECK(machine);
     u32 frame_start = machine->frame_count;
-    CTypeParseFrame* frames = machine->frames;
-    u32 frame_capacity = machine->frame_capacity;
-    if (machine->frame_count >= machine->frame_capacity)
+    CParseResult checkpoint = *result;
+    u32 mutation_mark = machine->mutation_count;
+    machine->mutation_type_limit = checkpoint.type_count;
+    machine->result_valid = false;
+    bool pushed = c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                              .result = result,
+                                              .preprocess = preprocess,
+                                              .type = base,
+                                              .start = declarator_start,
+                                              .end = suffix_end,
+                                              .declarator_start = declarator_start,
+                                              .name_index = name_index,
+                                              .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+                                              .has_name = has_name,
+                                          });
+    if (pushed)
     {
-        return C_TYPE_ID_INVALID;
+        c_type_parse_machine_run(machine, frame_start);
     }
-    machine->frames[machine->frame_count++] = (CTypeParseFrame){
-        .type = base,
-        .start = declarator_start,
-        .end = suffix_end,
-        .declarator_start = declarator_start,
-        .name_index = name_index,
-        .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
-        .stage = C_TYPE_PARSE_STAGE_BEGIN,
-        .has_name = has_name,
-    };
-    CTypeId last_type = C_TYPE_ID_INVALID;
-    bool last_valid = false;
-    while (machine->frame_count > frame_start)
-    {
-        CTypeParseFrame* frame = frames + machine->frame_count - 1;
-        if (frame->kind == C_TYPE_PARSE_FRAME_PARAMETER)
-        {
-            if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
-            {
-                for (u32 token_index = frame->start; token_index < frame->end; token_index += 1)
-                {
-                    if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
-                        string_equal(preprocess.tokens[token_index].spelling, S8("_Alignas")))
-                    {
-                        c_parse_diagnostic(result, preprocess.tokens[token_index].location, C_DIAGNOSTIC_INVALID_ALIGNMENT,
-                                           S8("alignment specifier cannot be applied to a parameter"));
-                        last_valid = false;
-                        machine->frame_count -= 1;
-                        goto c_type_declarator_next;
-                    }
-                }
-                frame->declarator_start = frame->start;
-                frame->type = c_type_parse_machine_active->scalar(result, preprocess, frame->start, frame->end, &frame->declarator_start);
-                if (frame->type.value == C_ID_UNDERLYING_INVALID)
-                {
-                    last_valid = false;
-                    machine->frame_count -= 1;
-                    goto c_type_declarator_next;
-                }
-                frame->type = c_parse_pointer_chain(result, preprocess, frame->type, &frame->declarator_start, frame->end);
-                frame->type = c_parse_apply_vector_attribute(result, preprocess, frame->type, frame->start, frame->end);
-                frame->name = (CToken){0};
-                if (frame->declarator_start < frame->end && c_token_is_punctuator(preprocess.tokens[frame->declarator_start], S8("(")))
-                {
-                    u32 nested_name_index = 0;
-                    bool nested_has_name =
-                        c_parse_parenthesized_declarator_name(preprocess, frame->declarator_start, frame->end, &nested_name_index);
-                    if (!nested_has_name)
-                    {
-                        u32 close_index = frame->declarator_start + 1;
-                        CType ignored = {0};
-                        while (close_index < frame->end && c_token_is_punctuator(preprocess.tokens[close_index], S8("*")))
-                        {
-                            close_index += 1;
-                            while (close_index < frame->end && preprocess.tokens[close_index].kind == C_TOKEN_IDENTIFIER &&
-                                   c_parse_type_qualifier_word(preprocess.tokens[close_index].spelling, &ignored))
-                            {
-                                close_index += 1;
-                            }
-                        }
-                        if (close_index == frame->declarator_start + 1 || close_index >= frame->end ||
-                            !c_token_is_punctuator(preprocess.tokens[close_index], S8(")")))
-                        {
-                            last_valid = false;
-                            machine->frame_count -= 1;
-                            goto c_type_declarator_next;
-                        }
-                        nested_name_index = close_index;
-                    }
-                    if (nested_has_name)
-                    {
-                        frame->name = preprocess.tokens[nested_name_index];
-                    }
-                    frame->stage = C_TYPE_PARSE_STAGE_PARAMETER_RESULT;
-                    if (!c_parse_declarator_frame_push(frames, &machine->frame_count, frame_capacity,
-                                                       (CTypeParseFrame){
-                                                           .type = frame->type,
-                                                           .start = frame->declarator_start,
-                                                           .end = frame->end,
-                                                           .declarator_start = frame->declarator_start,
-                                                           .name_index = nested_name_index,
-                                                           .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
-                                                           .stage = C_TYPE_PARSE_STAGE_BEGIN,
-                                                           .has_name = nested_has_name,
-                                                       }))
-                    {
-                        last_valid = false;
-                        machine->frame_count -= 1;
-                    }
-                    goto c_type_declarator_next;
-                }
-            }
-            else if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETER_RESULT)
-            {
-                if (!last_valid)
-                {
-                    machine->frame_count -= 1;
-                    goto c_type_declarator_next;
-                }
-                frame->type = last_type;
-                frame->declarator_start = frame->end;
-            }
-            if (frame->declarator_start < frame->end && preprocess.tokens[frame->declarator_start].kind == C_TOKEN_IDENTIFIER)
-            {
-                frame->name = preprocess.tokens[frame->declarator_start++];
-            }
-            frame->declarator_start = c_parse_skip_attributes(preprocess, frame->declarator_start, frame->end);
-            frame->type = c_parse_array_suffixes(result, preprocess, frame->type, &frame->declarator_start, frame->end);
-            frame->declarator_start = c_parse_skip_attributes(preprocess, frame->declarator_start, frame->end);
-            if (frame->declarator_start != frame->end || frame->type.value == C_ID_UNDERLYING_INVALID ||
-                result->parameter_count >= result->parameter_capacity)
-            {
-                last_valid = false;
-                machine->frame_count -= 1;
-                goto c_type_declarator_next;
-            }
-            result->parameters[result->parameter_count++] = (CParameter){
-                .name = frame->name.spelling,
-                .location = frame->name.location,
-                .type = frame->type,
-                .entity = C_ENTITY_ID_INVALID,
-            };
-            last_type = frame->type;
-            last_valid = true;
-            machine->frame_count -= 1;
-            goto c_type_declarator_next;
-        }
-
-        if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
-        {
-            if (!c_token_is_punctuator(preprocess.tokens[frame->declarator_start], S8("(")) || frame->name_index >= frame->end)
-            {
-                last_valid = false;
-                machine->frame_count -= 1;
-                goto c_type_declarator_next;
-            }
-            frame->close_index = frame->has_name ? frame->name_index + 1 : frame->name_index;
-            u32 bracket_depth = 0;
-            while (frame->has_name && frame->close_index < frame->end)
-            {
-                CToken token = preprocess.tokens[frame->close_index];
-                if (c_token_is_punctuator(token, S8("[")))
-                {
-                    bracket_depth += 1;
-                }
-                else if (c_token_is_punctuator(token, S8("]")) && bracket_depth)
-                {
-                    bracket_depth -= 1;
-                }
-                else if (!bracket_depth && c_token_is_punctuator(token, S8(")")))
-                {
-                    break;
-                }
-                frame->close_index += 1;
-            }
-            frame->pointer_start = frame->declarator_start + 1;
-            if (frame->close_index >= frame->end || !c_token_is_punctuator(preprocess.tokens[frame->close_index], S8(")")) ||
-                frame->pointer_start >= frame->name_index || !c_token_is_punctuator(preprocess.tokens[frame->pointer_start], S8("*")))
-            {
-                last_valid = false;
-                machine->frame_count -= 1;
-                goto c_type_declarator_next;
-            }
-            frame->index = frame->close_index + 1;
-            if (frame->index < frame->end && c_token_is_punctuator(preprocess.tokens[frame->index], S8("(")))
-            {
-                frame->parameter_start = result->parameter_count;
-                frame->segment_start = frame->index + 1;
-                frame->scan_index = frame->segment_start;
-                frame->depth = 1;
-                frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
-                continue;
-            }
-            frame->stage = C_TYPE_PARSE_STAGE_FINISH;
-        }
-        if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETER_RESULT)
-        {
-            if (!last_valid)
-            {
-                result->parameter_count = frame->parameter_start;
-                machine->frame_count -= 1;
-                goto c_type_declarator_next;
-            }
-            frame->segment_start = frame->scan_index + 1;
-            if (c_token_is_punctuator(preprocess.tokens[frame->scan_index], S8(")")))
-            {
-                frame->index = frame->scan_index + 1;
-                frame->type = c_parse_add_type(result, (CType){
-                                                         .element_type = C_TYPE_ID_INVALID,
-                                                         .return_type = frame->type,
-                                                         .array_bound = C_ARRAY_BOUND_INVALID,
-                                                         .parameter_start = frame->parameter_start,
-                                                         .parameter_count = result->parameter_count - frame->parameter_start,
-                                                         .kind = C_TYPE_FUNCTION,
-                                                         .is_variadic = frame->variadic,
-                                                     });
-                frame->has_function_suffix = true;
-                frame->stage = C_TYPE_PARSE_STAGE_FINISH;
-            }
-            else
-            {
-                frame->scan_index += 1;
-                frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
-            }
-        }
-        if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETERS)
-        {
-            bool child_pushed = false;
-            while (frame->scan_index < frame->end)
-            {
-                CToken token = preprocess.tokens[frame->scan_index];
-                if (c_token_is_punctuator(token, S8("(")))
-                {
-                    frame->depth += 1;
-                    frame->scan_index += 1;
-                    continue;
-                }
-                if (c_token_is_punctuator(token, S8(")")) && frame->depth > 1)
-                {
-                    frame->depth -= 1;
-                    frame->scan_index += 1;
-                    continue;
-                }
-                bool segment_end = frame->depth == 1 && c_token_is_punctuator(token, S8(","));
-                bool list_end = frame->depth == 1 && c_token_is_punctuator(token, S8(")"));
-                if (!segment_end && !list_end)
-                {
-                    frame->scan_index += 1;
-                    continue;
-                }
-                u32 segment_count = frame->scan_index - frame->segment_start;
-                if (list_end && !segment_count && result->parameter_count == frame->parameter_start)
-                {
-                    frame->index = frame->scan_index + 1;
-                    frame->type = c_parse_add_type(result, (CType){
-                                                             .element_type = C_TYPE_ID_INVALID,
-                                                             .return_type = frame->type,
-                                                             .array_bound = C_ARRAY_BOUND_INVALID,
-                                                             .parameter_start = frame->parameter_start,
-                                                             .parameter_count = result->parameter_count - frame->parameter_start,
-                                                             .kind = C_TYPE_FUNCTION,
-                                                             .is_variadic = frame->variadic,
-                                                         });
-                    frame->has_function_suffix = true;
-                    frame->stage = C_TYPE_PARSE_STAGE_FINISH;
-                    break;
-                }
-                if (segment_count == 1 && c_token_is_punctuator(preprocess.tokens[frame->segment_start], S8("...")))
-                {
-                    frame->variadic = true;
-                }
-                else if (list_end && result->parameter_count == frame->parameter_start && segment_count == 1 &&
-                         string_equal(preprocess.tokens[frame->segment_start].spelling, S8("void")))
-                {
-                }
-                else
-                {
-                    if (!segment_count)
-                    {
-                        result->parameter_count = frame->parameter_start;
-                        last_valid = false;
-                        machine->frame_count -= 1;
-                        goto c_type_declarator_next;
-                    }
-                    frame->stage = C_TYPE_PARSE_STAGE_PARAMETER_RESULT;
-                    if (!c_parse_declarator_frame_push(frames, &machine->frame_count, frame_capacity,
-                                                       (CTypeParseFrame){
-                                                           .start = frame->segment_start,
-                                                           .end = frame->scan_index,
-                                                           .kind = C_TYPE_PARSE_FRAME_PARAMETER,
-                                                           .stage = C_TYPE_PARSE_STAGE_BEGIN,
-                                                       }))
-                    {
-                        result->parameter_count = frame->parameter_start;
-                        last_valid = false;
-                        machine->frame_count -= 1;
-                    }
-                    child_pushed = true;
-                    break;
-                }
-                frame->segment_start = frame->scan_index + 1;
-                if (list_end)
-                {
-                    frame->index = frame->scan_index + 1;
-                    frame->type = c_parse_add_type(result, (CType){
-                                                             .element_type = C_TYPE_ID_INVALID,
-                                                             .return_type = frame->type,
-                                                             .array_bound = C_ARRAY_BOUND_INVALID,
-                                                             .parameter_start = frame->parameter_start,
-                                                             .parameter_count = result->parameter_count - frame->parameter_start,
-                                                             .kind = C_TYPE_FUNCTION,
-                                                             .is_variadic = frame->variadic,
-                                                         });
-                    frame->has_function_suffix = true;
-                    frame->stage = C_TYPE_PARSE_STAGE_FINISH;
-                    break;
-                }
-                frame->scan_index += 1;
-            }
-            if (child_pushed)
-            {
-                continue;
-            }
-            if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETERS)
-            {
-                result->parameter_count = frame->parameter_start;
-                last_valid = false;
-                machine->frame_count -= 1;
-                goto c_type_declarator_next;
-            }
-        }
-        if (frame->stage == C_TYPE_PARSE_STAGE_FINISH)
-        {
-            if (!frame->has_function_suffix)
-            {
-                frame->type = c_parse_array_suffixes(result, preprocess, frame->type, &frame->index, frame->end);
-                if (frame->index != frame->end)
-                {
-                    last_valid = false;
-                    machine->frame_count -= 1;
-                    goto c_type_declarator_next;
-                }
-            }
-            frame->type = c_parse_pointer_chain(result, preprocess, frame->type, &frame->pointer_start, frame->name_index);
-            if (frame->pointer_start != frame->name_index)
-            {
-                last_valid = false;
-                machine->frame_count -= 1;
-                goto c_type_declarator_next;
-            }
-            if (frame->has_name)
-            {
-                u32 array_index = frame->name_index + 1;
-                frame->type = c_parse_array_suffixes(result, preprocess, frame->type, &array_index, frame->close_index);
-                if (array_index != frame->close_index)
-                {
-                    last_valid = false;
-                    machine->frame_count -= 1;
-                    goto c_type_declarator_next;
-                }
-            }
-            last_type = frame->type;
-            last_valid = frame->type.value != C_ID_UNDERLYING_INVALID && (!frame->has_function_suffix || frame->index == frame->end);
-            machine->frame_count -= 1;
-        }
-c_type_declarator_next:
-        continue;
-    }
-    machine->frame_count = frame_start;
-    return last_valid ? last_type : C_TYPE_ID_INVALID;
+    bool valid = c_type_parse_root_finish(machine, result, checkpoint, mutation_mark,
+                                          declarator_start < preprocess.token_count ? preprocess.tokens[declarator_start].location : (CSourceLocation){0});
+    return valid ? machine->result_type : C_TYPE_ID_INVALID;
 }
 
 BUSTER_GLOBAL_LOCAL u32 c_parse_declarator_segment_end(CPreprocessResult preprocess, u32 start, u32 end)
@@ -8350,13 +8601,14 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_declarator_segment_end(CPreprocessResult preproc
     return end;
 }
 
-BUSTER_GLOBAL_LOCAL void c_parse_declaration_type(CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration)
+BUSTER_GLOBAL_LOCAL void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                  CDeclaration* declaration)
 {
     u32 end = declaration->token_start + declaration->token_count;
     if (declaration->kind == C_DECLARATION_TYPE)
     {
         u32 declarator_start = declaration->token_start;
-        declaration->type = c_parse_scalar_type(result, preprocess, declaration->token_start, end, &declarator_start);
+        declaration->type = c_parse_scalar_type(machine, result, preprocess, declaration->token_start, end, &declarator_start);
         return;
     }
     u32 declarator_end = declaration->body_start ? declaration->body_start - 1 : end;
@@ -8375,7 +8627,8 @@ BUSTER_GLOBAL_LOCAL void c_parse_declaration_type(CParseResult* result, CPreproc
     {
         return;
     }
-    if (!c_parse_alignment_specifiers(result, preprocess, declaration->token_start, name_index, &declaration->alignment_start, &declaration->alignment_count))
+    if (!c_parse_alignment_specifiers(machine, result, preprocess, declaration->token_start, name_index, &declaration->alignment_start,
+                                      &declaration->alignment_count))
     {
         c_parse_diagnostic(result, preprocess.tokens[declaration->token_start].location, C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("invalid alignment specifier"));
         return;
@@ -8388,7 +8641,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_declaration_type(CParseResult* result, CPreproc
         declaration->alignment_count = 0;
     }
     u32 declarator_start = declaration->token_start;
-    CTypeId base = c_parse_scalar_type(result, preprocess, declaration->token_start, name_index, &declarator_start);
+    CTypeId base = c_parse_scalar_type(machine, result, preprocess, declaration->token_start, name_index, &declarator_start);
     base = c_parse_apply_vector_attribute(result, preprocess, base, declaration->token_start, name_index);
     if (base.value == C_ID_UNDERLYING_INVALID)
     {
@@ -8404,7 +8657,8 @@ BUSTER_GLOBAL_LOCAL void c_parse_declaration_type(CParseResult* result, CPreproc
     if (parenthesized && declaration->kind != C_DECLARATION_FUNCTION)
     {
         u32 suffix_end = c_parse_declarator_segment_end(preprocess, declarator_start, end);
-        declaration->type = c_parse_parenthesized_declaration_type(result, preprocess, base, declarator_start, name_index, suffix_end, true);
+        declaration->type =
+            c_parse_parenthesized_declaration_type(machine, result, preprocess, base, declarator_start, name_index, suffix_end, true);
         return;
     }
     if (declarator_start != name_index)
@@ -8516,7 +8770,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_declaration_type(CParseResult* result, CPreproc
         }
         else
         {
-            if (!c_parse_parameter_segment(result, preprocess, *declaration, segment_start, index))
+            if (!c_parse_parameter_segment(machine, result, preprocess, *declaration, segment_start, index))
             {
                 valid = false;
                 break;
@@ -8553,10 +8807,11 @@ BUSTER_GLOBAL_LOCAL void c_parse_declaration_type(CParseResult* result, CPreproc
                                                  });
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_integer_constant_range(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, u32 start, u32 end,
-                                                        u64* value_out);
+BUSTER_GLOBAL_LOCAL bool c_parse_integer_constant_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                        CScopeId scope, u32 start, u32 end, u64* value_out);
 
-BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_declaration(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration)
+BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_declaration(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
+                                                                CPreprocessResult preprocess, CDeclaration* declaration)
 {
     if (!declaration->is_constexpr)
     {
@@ -8639,8 +8894,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_declaration(Arena* arena, CP
             u64 count = 0;
             bool inferred_later = !bound.token_count && !bound.is_star;
             if (bound.is_star || (!inferred_later && !bound.has_inferred_count &&
-                                  (!c_parse_integer_constant_range(temporary.arena, preprocess, result, declaration->scope, bound.token_start,
-                                                                   bound.token_start + bound.token_count, &count) ||
+                                  (!c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, declaration->scope, bound.token_start,
+                                                                  bound.token_start + bound.token_count, &count) ||
                                    !count)))
             {
                 valid = false;
@@ -9050,8 +9305,9 @@ BUSTER_GLOBAL_LOCAL bool c_parse_integer_expression_is_unsigned(CParseResult* re
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_record_constexpr_integer(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, CEntityId entity_id,
-                                                          u32 initializer_start, u32 initializer_end)
+BUSTER_GLOBAL_LOCAL bool c_parse_record_constexpr_integer(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
+                                                          CPreprocessResult preprocess, CScopeId scope, CEntityId entity_id, u32 initializer_start,
+                                                          u32 initializer_end)
 {
     if (entity_id.value >= result->entity_count)
     {
@@ -9072,7 +9328,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_record_constexpr_integer(Arena* arena, CParseRe
     };
     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
     u64 value = 0;
-    bool evaluated = c_parse_integer_constant_range(temporary.arena, preprocess, result, scope, initializer_start, initializer_end, &value);
+    bool evaluated =
+        c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, scope, initializer_start, initializer_end, &value);
     scratch_end(temporary);
     if (!evaluated)
     {
@@ -9115,8 +9372,9 @@ BUSTER_GLOBAL_LOCAL bool c_parse_record_constexpr_integer(Arena* arena, CParseRe
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_initializer(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
-                                                                CEntityId entity_id, u32 initializer_start, u32 initializer_end)
+BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_initializer(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
+                                                                CPreprocessResult preprocess, CScopeId scope, CEntityId entity_id,
+                                                                u32 initializer_start, u32 initializer_end)
 {
     if (entity_id.value >= result->entity_count)
     {
@@ -9130,7 +9388,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_initializer(Arena* arena, CP
     CType* type = result->types + entity->type.value;
     if (c_type_kind_is_integer(type->kind))
     {
-        return c_parse_record_constexpr_integer(arena, result, preprocess, scope, entity_id, initializer_start, initializer_end);
+        return c_parse_record_constexpr_integer(machine, arena, result, preprocess, scope, entity_id, initializer_start, initializer_end);
     }
     if (type->kind != C_TYPE_POINTER && type->kind != C_TYPE_NULLPTR)
     {
@@ -9171,8 +9429,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_initializer(Arena* arena, CP
                          preprocess.tokens[initializer_start].kind == C_TOKEN_IDENTIFIER &&
                          string_equal(preprocess.tokens[initializer_start].spelling, S8("nullptr"));
     u64 integer_value = UINT64_MAX;
-    bool integer_null =
-        c_parse_integer_constant_range(arena, preprocess, result, scope, initializer_start, initializer_end, &integer_value) && integer_value == 0;
+    bool integer_null = c_parse_integer_constant_range(machine, arena, preprocess, result, scope, initializer_start, initializer_end, &integer_value) &&
+                        integer_value == 0;
     if (!nullptr_value && !integer_null)
     {
         c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("pointer constexpr initializer must have a null pointer value"));
@@ -9181,8 +9439,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_initializer(Arena* arena, CP
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 declaration_index,
-                                                    u32 start, u32 end)
+BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                                    CScopeId scope, u32 declaration_index, u32 start, u32 end)
 {
     bool is_typedef = false;
     bool is_static_storage = false;
@@ -9198,14 +9456,14 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(Arena* arena, CParseResult* 
     }
     u32 enum_member_start = result->enum_member_count;
     u32 declarator_start = start;
-    CTypeId base = c_parse_scalar_type_in_scope(result, preprocess, scope, start, end, &declarator_start);
+    CTypeId base = c_parse_scalar_type_in_scope(machine, result, preprocess, scope, start, end, &declarator_start);
     if (base.value == C_ID_UNDERLYING_INVALID)
     {
         return false;
     }
     u32 alignment_start = 0;
     u32 alignment_count = 0;
-    if (!c_parse_alignment_specifiers(result, preprocess, start, declarator_start, &alignment_start, &alignment_count))
+    if (!c_parse_alignment_specifiers(machine, result, preprocess, start, declarator_start, &alignment_start, &alignment_count))
     {
         return false;
     }
@@ -9314,7 +9572,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(Arena* arena, CParseResult* 
             }
             name_index = close - 1;
             name = preprocess.tokens[name_index];
-            type = c_parse_parenthesized_declaration_type(result, preprocess, type, index, name_index, suffix_end, true);
+            type = c_parse_parenthesized_declaration_type(machine, result, preprocess, type, index, name_index, suffix_end, true);
             index = suffix_end;
         }
         else
@@ -9393,10 +9651,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(Arena* arena, CParseResult* 
                 .is_definition = initializer_start < segment_end,
                 .is_constexpr = true,
             };
-            c_parse_validate_constexpr_declaration(arena, result, preprocess, &local_declaration);
+            c_parse_validate_constexpr_declaration(machine, arena, result, preprocess, &local_declaration);
             if (initializer_start < segment_end)
             {
-                c_parse_validate_constexpr_initializer(arena, result, preprocess, scope, entity, initializer_start, segment_end);
+                c_parse_validate_constexpr_initializer(machine, arena, result, preprocess, scope, entity, initializer_start, segment_end);
             }
         }
         if (initializer_start < segment_end && type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY)
@@ -9498,10 +9756,11 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(Arena* arena, CParseResult* 
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL void c_parse_bind_function_static_asserts(Arena* scratch_arena, Arena* result_arena, CParseResult* result,
-                                                              CPreprocessResult preprocess, CDeclaration* declaration);
+BUSTER_GLOBAL_LOCAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* scratch_arena, Arena* result_arena,
+                                                              CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration);
 
-BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess, u32 declaration_index)
+BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
+                                                    CPreprocessResult preprocess, u32 declaration_index)
 {
     CDeclaration* declaration = &result->declarations[declaration_index];
     if (!declaration->is_definition || !declaration->body_token_count)
@@ -9677,7 +9936,8 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(Arena* result_arena, CParseR
                     scope_end_stack[scope_count] = body_close + 1;
                     scope_count += 1;
                     if (index + 2 < first_separator &&
-                        c_parse_local_declarations(result_arena, result, preprocess, loop_scope, declaration_index, index + 2, first_separator))
+                        c_parse_local_declarations(machine, result_arena, result, preprocess, loop_scope, declaration_index, index + 2,
+                                                   first_separator))
                     {
                         index = first_separator + 1;
                         statement_start = false;
@@ -9716,7 +9976,8 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(Arena* result_arena, CParseR
                 }
                 end += 1;
             }
-            if (end < body_end && c_parse_local_declarations(result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index, index, end))
+            if (end < body_end &&
+                c_parse_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index, index, end))
             {
                 index = end + 1;
                 statement_start = true;
@@ -9745,7 +10006,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(Arena* result_arena, CParseR
         statement_start = c_token_is_punctuator(token, S8(";"));
         index += 1;
     }
-    c_parse_bind_function_static_asserts(temporary.arena, result_arena, result, preprocess, declaration);
+    c_parse_bind_function_static_asserts(machine, temporary.arena, result_arena, result, preprocess, declaration);
     scratch_end(temporary);
 }
 
@@ -9839,8 +10100,8 @@ BUSTER_GLOBAL_LOCAL CScopeId c_parse_scope_for_token(CParseResult* result, CScop
     return best;
 }
 
-BUSTER_GLOBAL_LOCAL void c_parse_bind_function_static_asserts(Arena* scratch_arena, Arena* result_arena, CParseResult* result,
-                                                              CPreprocessResult preprocess, CDeclaration* declaration)
+BUSTER_GLOBAL_LOCAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* scratch_arena, Arena* result_arena,
+                                                              CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration)
 {
     if (!declaration->syntax_body)
     {
@@ -9863,7 +10124,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_function_static_asserts(Arena* scratch_are
         if (statement->kind == C_PARSER_STATEMENT_STATIC_ASSERT)
         {
             CScopeId scope = c_parse_scope_for_token(result, declaration->scope, statement->token_start);
-            c_parse_static_assert_check(result_arena, preprocess, result,
+            c_parse_static_assert_check(machine, result_arena, preprocess, result,
                                         (CDeclaration){
                                             .token_start = statement->token_start,
                                             .token_count = statement->token_count,
@@ -10402,30 +10663,45 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
             type_delimiter_depth -= type_delimiter_depth != 0;
         }
     }
-    if (maximum_delimiter_depth > (UINT32_MAX - 16) / 2)
+    if (maximum_delimiter_depth > (UINT32_MAX - 64) / 8 || token_count == UINT32_MAX)
     {
         return result;
     }
-    u32 type_frame_capacity = maximum_delimiter_depth * 2 + 16;
+    u32 type_frame_capacity = maximum_delimiter_depth * 4 + 32;
+    u32 type_mutation_capacity = maximum_delimiter_depth * 8 + 64;
+    u32 expression_task_capacity = token_count + 1;
+    u64 machine_buffer_size = arena_minimum_position;
+    if (!c_type_parse_buffer_size_add(&machine_buffer_size, type_frame_capacity, sizeof(CTypeParseFrame), BUSTER_ALIGN_OF(CTypeParseFrame)) ||
+        !c_type_parse_buffer_size_add(&machine_buffer_size, type_mutation_capacity, sizeof(CTypeMutation), BUSTER_ALIGN_OF(CTypeMutation)) ||
+        !c_type_parse_buffer_size_add(&machine_buffer_size, expression_task_capacity, sizeof(CParseExpressionTypeTask),
+                                      BUSTER_ALIGN_OF(CParseExpressionTypeTask)) ||
+        machine_buffer_size > UINT64_MAX - (BUSTER_KB(64) - 1))
+    {
+        return result;
+    }
+    machine_buffer_size = (machine_buffer_size + BUSTER_KB(64) - 1) & ~(BUSTER_KB(64) - 1);
+    Arena* machine_buffer_arena = arena_create((ArenaCreation){
+        .reserved_size = machine_buffer_size,
+        .granularity = BUSTER_KB(64),
+        .initial_size = BUSTER_MIN(machine_buffer_size, BUSTER_KB(256)),
+    });
+    if (!machine_buffer_arena)
+    {
+        return result;
+    }
     Arena* machine_conflicts[] = {
         arena,
     };
     TemporalArena machine_temporary = scratch_begin(machine_conflicts, BUSTER_ARRAY_LENGTH(machine_conflicts));
     CTypeParseMachine machine = {
-        .frames = arena_allocate(machine_temporary.arena, CTypeParseFrame, type_frame_capacity),
-        .scalar = c_parse_scalar_type,
-        .scalar_in_scope = c_parse_scalar_type_in_scope,
-        .scalar_core = c_parse_scalar_type_core,
-        .sizeof_expression = c_parse_sizeof_expression_type,
-        .expression_leaf = c_parse_expression_leaf_type,
-        .alignment = c_parse_alignment_specifiers,
-        .aggregate_segment = c_parse_aggregate_member_segment,
-        .aggregate_range = c_parse_aggregate_member_range,
-        .parenthesized = c_parse_parenthesized_declaration_type,
+        .frames = arena_allocate(machine_buffer_arena, CTypeParseFrame, type_frame_capacity),
+        .mutations = arena_allocate(machine_buffer_arena, CTypeMutation, type_mutation_capacity),
+        .expression_tasks = arena_allocate(machine_buffer_arena, CParseExpressionTypeTask, expression_task_capacity),
+        .scratch_arena = machine_temporary.arena,
         .frame_capacity = type_frame_capacity,
+        .mutation_capacity = type_mutation_capacity,
+        .expression_task_capacity = expression_task_capacity,
     };
-    CTypeParseMachine* previous_machine = c_type_parse_machine_active;
-    c_type_parse_machine_active = &machine;
     result.declaration_capacity = semicolon_count + open_brace_count + 1;
     result.type_capacity = token_count * 2 + 1;
     result.parameter_capacity = comma_count + open_parenthesis_count + 1;
@@ -10518,7 +10794,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         };
         if (!static_assertion && !global_assembly)
         {
-            c_parse_declaration_type(&result, preprocess, declaration);
+            c_parse_declaration_type(&machine, &result, preprocess, declaration);
             if (declaration->is_constexpr && declaration->kind == C_DECLARATION_OBJECT && declaration->type.value < result.type_count)
             {
                 declaration->type = c_parse_add_qualified_type(&result, declaration->type,
@@ -10526,7 +10802,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
                                                                    .is_const = true,
                                                                });
             }
-            c_parse_validate_constexpr_declaration(arena, &result, preprocess, declaration);
+            c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, declaration);
             if (kind == C_DECLARATION_TYPEDEF && (string_equal(declaration->name, S8("va_list")) || string_equal(declaration->name, S8("__gnuc_va_list")) ||
                                                   string_equal(declaration->name, S8("__builtin_va_list"))))
             {
@@ -10803,7 +11079,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         }
         if (initializer_start < initializer_end)
         {
-            c_parse_validate_constexpr_initializer(arena, &result, preprocess,
+            c_parse_validate_constexpr_initializer(&machine, arena, &result, preprocess,
                                                    (CScopeId){
                                                        .value = 0,
                                                    },
@@ -10817,7 +11093,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         {
             continue;
         }
-        c_parse_static_assert_check(arena, preprocess, &result,
+        c_parse_static_assert_check(&machine, arena, preprocess, &result,
                                     (CDeclaration){
                                         .token_start = syntax_declaration->token_start,
                                         .token_count = syntax_declaration->token_count,
@@ -10883,10 +11159,10 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
                                string_format(arena, S8("in function '{S8}': {S8}"), declaration->name, unsupported_construct));
             continue;
         }
-        c_parse_bind_function_body(arena, &result, preprocess, declaration_index);
+        c_parse_bind_function_body(&machine, arena, &result, preprocess, declaration_index);
     }
-    c_type_parse_machine_active = previous_machine;
     scratch_end(machine_temporary);
+    BUSTER_CHECK(arena_destroy(machine_buffer_arena, 1));
     return result;
 }
 
@@ -11733,6 +12009,29 @@ struct CIrPreparedControlExpression
 
 typedef struct CIrLowerFrame CIrLowerFrame;
 
+typedef struct CIrLowerMachine CIrLowerMachine;
+typedef struct CIrLowerFrameResult CIrLowerFrameResult;
+struct CIrLowerFrameResult
+{
+    IrValueId value;
+    u32 index;
+    bool success;
+    u8 reserved[3];
+};
+
+struct CIrLowerMachine
+{
+    CIrLowerFrame* frames;
+    CIrLowerFrameResult child_result;
+    u32 frame_count;
+    u32 frame_capacity;
+    u32 root_frame_mark;
+    u32 run_depth;
+    u64 scratch_mark;
+    bool failed;
+    u8 reserved[7];
+};
+
 struct CIntegerIrBuilder
 {
     Arena* arena;
@@ -11747,10 +12046,7 @@ struct CIntegerIrBuilder
     CEntityId* token_entities;
     IrFunction** declaration_functions;
     IrSymbolId* entity_symbols;
-    bool (*lower_expression_dispatch)(CIntegerIrBuilder*, u32, u32, IrValueId*);
-    bool (*lower_condition_dispatch)(CIntegerIrBuilder*, u32, u32, IrBlockId, IrBlockId, IrSourceRange);
-    bool (*lower_body_dispatch)(CIntegerIrBuilder*, CDeclaration, bool, IrValueId*);
-    CIrLowerFrame* lower_frames;
+    CIrLowerMachine lower_machine;
     CIrQueryMachine* queries;
     CIrPreparedCall* prepared_calls;
     CIrFunctionNameIndex* function_names;
@@ -11759,8 +12055,6 @@ struct CIntegerIrBuilder
     u32* matching_delimiters;
     u32 prepared_call_count;
     u32 prepared_call_capacity;
-    u32 lower_frame_count;
-    u32 lower_frame_capacity;
     u32 body_token_start;
     u32 body_token_count;
     CIrPreparedControlExpression* prepared_control_expressions;
@@ -12948,260 +13242,9 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_field_place(CIntegerIrBuilder* builder, 
 
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_dereference_place(CIntegerIrBuilder* builder, IrValueId pointer, IrSourceRange source);
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression(CIntegerIrBuilder* builder, u32 start, u32 end, IrValueId* value_out);
-
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_va_list_expression(CIntegerIrBuilder* builder, u32 start, u32 end, IrValueId* value_out)
-{
-    bool previous = builder->va_list_builtin_operand;
-    builder->va_list_builtin_operand = true;
-    bool result = c_ir_lower_expression(builder, start, end, value_out);
-    builder->va_list_builtin_operand = previous;
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, IrValueId base, IrValueId index, IrSourceRange source);
 
 BUSTER_GLOBAL_LOCAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, String8 opening, String8 closing);
-
-BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_vla_index_place(CIntegerIrBuilder* builder, CIntegerIrLocal* local, u32* index, u32 end, IrSourceRange source)
-{
-    if (!local || !local->is_variable_length_array || !local->vla_dimension_count || !local->vla_dimension_counts ||
-        local->vla_element_type.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    IrValueId linear_index = IR_VALUE_ID_INVALID;
-    u32 dimension = 0;
-    while (dimension < local->vla_dimension_count && *index < end && c_token_is_punctuator(builder->preprocess.tokens[*index], S8("[")))
-    {
-        u32 close = c_ir_matching_delimiter_cached(builder, *index, end, S8("["), S8("]"));
-        IrValueId subscript = IR_VALUE_ID_INVALID;
-        if (close >= end || close == *index + 1 || !c_ir_lower_expression(builder, *index + 1, close, &subscript))
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        subscript = c_ir_emit_cast(builder, subscript, builder->size_type, source);
-        if (subscript.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        if (linear_index.value == IR_ID_UNDERLYING_INVALID)
-        {
-            linear_index = subscript;
-        }
-        else
-        {
-            IrValueId count = local->vla_dimension_counts[dimension];
-            if (count.value == IR_ID_UNDERLYING_INVALID)
-            {
-                return IR_VALUE_ID_INVALID;
-            }
-            linear_index = c_ir_emit_binary_value(builder, linear_index, count, builder->size_type, IR_BINARY_INTEGER_MULTIPLY, source);
-            linear_index = c_ir_emit_binary_value(builder, linear_index, subscript, builder->size_type, IR_BINARY_INTEGER_ADD, source);
-        }
-        dimension += 1;
-        *index = close + 1;
-    }
-    if (!dimension || linear_index.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    while (dimension < local->vla_dimension_count)
-    {
-        IrValueId count = local->vla_dimension_counts[dimension++];
-        if (count.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        linear_index = c_ir_emit_binary_value(builder, linear_index, count, builder->size_type, IR_BINARY_INTEGER_MULTIPLY, source);
-    }
-    IrValueId pointer = c_ir_emit_load_place(builder, local->place, local->type, source);
-    if (pointer.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    return c_ir_emit_index_place(builder, pointer, linear_index, source);
-}
-
-BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_simple_place_expression(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    while (start < end && c_token_is_punctuator(builder->preprocess.tokens[start], S8("(")))
-    {
-        u32 depth = 0;
-        u32 close = start;
-        for (; close < end; close += 1)
-        {
-            CToken token = builder->preprocess.tokens[close];
-            if (c_token_is_punctuator(token, S8("(")))
-            {
-                depth += 1;
-            }
-            else if (c_token_is_punctuator(token, S8(")")))
-            {
-                if (!depth)
-                {
-                    return IR_VALUE_ID_INVALID;
-                }
-                depth -= 1;
-                if (!depth)
-                {
-                    break;
-                }
-            }
-        }
-        if (close == end - 1)
-        {
-            start += 1;
-            end -= 1;
-            continue;
-        }
-        break;
-    }
-    u32 dereference_count = 0;
-    while (start < end && c_token_is_punctuator(builder->preprocess.tokens[start], S8("*")))
-    {
-        dereference_count += 1;
-        start += 1;
-    }
-    u32 index = start;
-    u32 base_index = index;
-    if (index < end && c_token_is_punctuator(builder->preprocess.tokens[index], S8("(")))
-    {
-        u32 depth = 1;
-        u32 close = index + 1;
-        while (close < end && depth)
-        {
-            if (c_token_is_punctuator(builder->preprocess.tokens[close], S8("(")))
-            {
-                depth += 1;
-            }
-            else if (c_token_is_punctuator(builder->preprocess.tokens[close], S8(")")))
-            {
-                depth -= 1;
-            }
-            close += 1;
-        }
-        u32 nested_start = index + 1;
-        u32 nested_end = depth ? nested_start : close - 1;
-        while (nested_start < nested_end && c_token_is_punctuator(builder->preprocess.tokens[nested_start], S8("(")) &&
-               c_token_is_punctuator(builder->preprocess.tokens[nested_end - 1], S8(")")))
-        {
-            nested_start += 1;
-            nested_end -= 1;
-        }
-        while (nested_start < nested_end && c_token_is_punctuator(builder->preprocess.tokens[nested_start], S8("*")))
-        {
-            dereference_count += 1;
-            nested_start += 1;
-        }
-        if (depth || nested_end != nested_start + 1)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        base_index = nested_start;
-        index = close;
-    }
-    else
-    {
-        index += 1;
-    }
-    if (base_index >= end || builder->preprocess.tokens[base_index].kind != C_TOKEN_IDENTIFIER)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    CEntityId entity = c_ir_identifier_entity(builder, base_index);
-    CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-    if (!local)
-    {
-        for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
-        {
-            CIntegerIrLocal* candidate = builder->locals + local_index - 1;
-            if (string_equal(candidate->name, builder->preprocess.tokens[base_index].spelling))
-            {
-                local = candidate;
-                break;
-            }
-        }
-    }
-    IrSourceRange source =
-        c_ir_source_range(builder->preprocess.tokens[base_index].location, builder->preprocess.tokens[base_index].spelling.length);
-    IrValueId place = local ? local->place : c_ir_emit_global_place(builder, entity, source);
-    if (place.value == IR_ID_UNDERLYING_INVALID)
-    {
-        builder->failure_token_index = base_index;
-    }
-    while (place.value != IR_ID_UNDERLYING_INVALID && dereference_count)
-    {
-        IrTypeId pointer_type = builder->function->values[place.value].canonical_type;
-        IrValueId pointer = c_ir_emit_load_place(builder, place, pointer_type, source);
-        place = c_ir_emit_dereference_place(builder, pointer, source);
-        dereference_count -= 1;
-    }
-    if (place.value != IR_ID_UNDERLYING_INVALID && local && local->is_variable_length_array && index < end &&
-        c_token_is_punctuator(builder->preprocess.tokens[index], S8("[")))
-    {
-        place = c_ir_emit_vla_index_place(builder, local, &index, end, source);
-    }
-    while (place.value != IR_ID_UNDERLYING_INVALID && index < end)
-    {
-        CToken access = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(access, S8("[")))
-        {
-            u32 depth = 1;
-            u32 close = index + 1;
-            while (close < end && depth)
-            {
-                CToken token = builder->preprocess.tokens[close];
-                if (c_token_is_punctuator(token, S8("[")))
-                {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(token, S8("]")))
-                {
-                    depth -= 1;
-                }
-                close += 1;
-            }
-            if (depth || close == index + 2)
-            {
-                return IR_VALUE_ID_INVALID;
-            }
-            IrValueId subscript = IR_VALUE_ID_INVALID;
-            if (!c_ir_lower_expression(builder, index + 1, close - 1, &subscript))
-            {
-                return IR_VALUE_ID_INVALID;
-            }
-            IrTypeId base_type_id = builder->function->values[place.value].canonical_type;
-            IrType* base_type = ir_type_from_id(&builder->program->types, base_type_id);
-            IrValueId base = place;
-            if (base_type && base_type->kind == IR_TYPE_POINTER && builder->function->values[place.value].category == IR_VALUE_PLACE)
-            {
-                base = c_ir_emit_load_place(builder, place, base_type_id, source);
-            }
-            place = c_ir_emit_index_place(builder, base, subscript, source);
-            index = close;
-            continue;
-        }
-        if (index + 1 >= end || (c_token_is_punctuator(access, S8(".")) == false && c_token_is_punctuator(access, S8("->")) == false) ||
-            builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        IrValueId operand = place;
-        if (c_token_is_punctuator(access, S8("->")))
-        {
-            IrTypeId pointer_type = builder->function->values[place.value].canonical_type;
-            operand = c_ir_emit_load_place(builder, place, pointer_type, source);
-        }
-        place = c_ir_emit_field_place_from_value(builder, operand, access, builder->preprocess.tokens[index + 1]);
-        if (place.value == IR_ID_UNDERLYING_INVALID)
-        {
-            builder->failure_token_index = index + 1;
-        }
-        index += 2;
-    }
-    return index == end ? place : IR_VALUE_ID_INVALID;
-}
 
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, IrValueId base, IrValueId index, IrSourceRange source)
 {
@@ -13391,86 +13434,7 @@ BUSTER_GLOBAL_LOCAL CArrayBound c_ir_vla_bound_expression(CPreprocessResult prep
     return bound;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, CIrVlaLayout* result)
-{
-    memset(result, 0, sizeof(*result));
-    result->runtime_size = IR_VALUE_ID_INVALID;
-    result->element_type = IR_TYPE_ID_INVALID;
-    if (array_type.value >= builder->parse.type_count)
-    {
-        return false;
-    }
-    u32 capacity = builder->parse.type_count;
-    CArrayBound* bounds = arena_allocate(builder->scratch_arena, CArrayBound, capacity);
-    CTypeId type_id = array_type;
-    while (type_id.value < builder->parse.type_count && builder->parse.types[type_id.value].kind == C_TYPE_ARRAY)
-    {
-        CType* type = &builder->parse.types[type_id.value];
-        if (result->dimension_count >= capacity || type->array_bound >= builder->parse.array_bound_count)
-        {
-            return false;
-        }
-        bounds[result->dimension_count++] = builder->parse.array_bounds[type->array_bound];
-        type_id = type->element_type;
-    }
-    if (!result->dimension_count || type_id.value >= builder->parse.type_count)
-    {
-        return false;
-    }
-    result->element_type = builder->c_type_ir_map[type_id.value];
-    IrType* element = ir_type_from_id(&builder->program->types, result->element_type);
-    if (!element || !element->layout.resolved || !element->layout.size)
-    {
-        return false;
-    }
-    result->dimension_counts = arena_allocate(builder->scratch_arena, IrValueId, result->dimension_count);
-    result->suffix_sizes = arena_allocate(builder->scratch_arena, IrValueId, result->dimension_count + 1);
-    memset(result->dimension_counts, 0xff, sizeof(*result->dimension_counts) * result->dimension_count);
-    memset(result->suffix_sizes, 0xff, sizeof(*result->suffix_sizes) * (result->dimension_count + 1));
-    IrSourceRange source = c_ir_source_range(token.location, token.spelling.length);
-    for (u32 dimension = 0; dimension < result->dimension_count; dimension += 1)
-    {
-        CArrayBound bound = c_ir_vla_bound_expression(builder->preprocess, bounds[dimension]);
-        u64 constant_count = 0;
-        if (c_ir_array_bound_evaluate(builder, bound, &constant_count))
-        {
-            result->dimension_counts[dimension] = c_ir_emit_integer_value_typed(builder, constant_count, false, token, builder->size_type);
-            continue;
-        }
-        if (!bound.token_count || bound.is_star)
-        {
-            if (parameter && dimension == 0)
-            {
-                continue;
-            }
-            return false;
-        }
-        IrValueId count = IR_VALUE_ID_INVALID;
-        if (!c_ir_lower_expression(builder, bound.token_start, bound.token_start + bound.token_count, &count))
-        {
-            return false;
-        }
-        result->dimension_counts[dimension] = c_ir_emit_cast(builder, count, builder->size_type, source);
-        if (result->dimension_counts[dimension].value == IR_ID_UNDERLYING_INVALID)
-        {
-            return false;
-        }
-    }
-    result->suffix_sizes[result->dimension_count] = c_ir_emit_integer_value_typed(builder, element->layout.size, false, token, builder->size_type);
-    for (u32 dimension = result->dimension_count; dimension != 0; dimension -= 1)
-    {
-        u32 index = dimension - 1;
-        IrValueId count = result->dimension_counts[index];
-        IrValueId suffix = result->suffix_sizes[index + 1];
-        if (count.value == IR_ID_UNDERLYING_INVALID || suffix.value == IR_ID_UNDERLYING_INVALID)
-        {
-            continue;
-        }
-        result->suffix_sizes[index] = c_ir_emit_binary_value(builder, count, suffix, builder->size_type, IR_BINARY_INTEGER_MULTIPLY, source);
-    }
-    result->runtime_size = result->suffix_sizes[0];
-    return parameter || result->runtime_size.value != IR_ID_UNDERLYING_INVALID;
-}
+BUSTER_GLOBAL_LOCAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, CIrVlaLayout* result);
 
 BUSTER_GLOBAL_LOCAL bool c_ir_integer_literal_fits(CIntegerIrBuilder* builder, CTypeKind kind, u64 value)
 {
@@ -14868,34 +14832,338 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_function_pointer(CIntegerIrBuilder* buil
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_impl(CIntegerIrBuilder* builder, u32 start, u32 end, IrValueId* value_out);
-
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, u32 start, u32 end, IrValueId* value_out);
-
 BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaration declaration, bool statement_expression_mode,
                                          IrValueId* statement_expression_result);
+
+typedef struct CIrLowerBodyState CIrLowerBodyState;
+BUSTER_GLOBAL_LOCAL void c_ir_lower_body_step(CIntegerIrBuilder* builder);
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder);
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder);
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* builder);
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder);
+
+typedef struct CIrConditionTask CIrConditionTask;
+
+typedef struct CIrExpressionCoreState CIrExpressionCoreState;
+struct CIrExpressionCoreState
+{
+    IrValueId* values;
+    CConditionalOperator* operations;
+    IrSourceRange* operation_sources;
+    IrTypeId* operation_cast_types;
+    u32 index;
+    u32 value_count;
+    u32 operation_count;
+    u32 pending_start;
+    u32 pending_end;
+    IrTypeId pending_type;
+    IrSourceRange pending_source;
+    bool expect_operand;
+    bool pending_prefix;
+    u8 reserved[2];
+};
+
+typedef struct CIrLowerBodyState CIrLowerBodyState;
 
 typedef enum CIrLowerFrameKind
 {
     C_IR_LOWER_FRAME_ASSIGNMENT_COMPLETION,
+    C_IR_LOWER_FRAME_COMMA_COMPLETION,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_LEFT,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_COMPLETION,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_FALSE_COMPLETION,
     C_IR_LOWER_FRAME_COMPOUND_LITERAL_COMPLETION,
     C_IR_LOWER_FRAME_BODY,
     C_IR_LOWER_FRAME_EXPRESSION,
+    C_IR_LOWER_FRAME_EXPRESSION_CORE = 32,
+    C_IR_LOWER_FRAME_LOGICAL_VALUE,
     C_IR_LOWER_FRAME_CONDITION,
+    C_IR_LOWER_FRAME_CONDITION_LEAF,
+    C_IR_LOWER_FRAME_CONDITIONAL_VALUE,
     C_IR_LOWER_FRAME_CALL,
     C_IR_LOWER_FRAME_INITIALIZER,
-    C_IR_LOWER_FRAME_PLACE,
     C_IR_LOWER_FRAME_STATEMENT_EXPRESSION,
     C_IR_LOWER_FRAME_SELECTION_EXPRESSION,
     C_IR_LOWER_FRAME_SELECTION_CONTINUE,
+    C_IR_LOWER_FRAME_PLACE = 64,
+    C_IR_LOWER_FRAME_VLA_INDEX_PLACE = 65,
+    C_IR_LOWER_FRAME_ATOMIC_PLACE = 66,
+    C_IR_LOWER_FRAME_VA_LIST_EXPRESSION = 67,
+    C_IR_LOWER_FRAME_COMPOUND_LITERAL = 68,
+    C_IR_LOWER_FRAME_NESTED_COMPOUND_LITERAL = 69,
+    C_IR_LOWER_FRAME_PREPARE_CONTROL_EXPRESSIONS = 128,
+    C_IR_LOWER_FRAME_PREPARE_CALLS = 129,
+    C_IR_LOWER_FRAME_PREPARED_CALL = 130,
+    C_IR_LOWER_FRAME_BODY_VLA_LAYOUT = 96,
+    C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION = 97,
+    C_IR_LOWER_FRAME_BODY_INLINE_ASSEMBLY = 98,
+    C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION_LIST = 99,
+    C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT = 100,
 } CIrLowerFrameKind;
+
+typedef enum CIrLowerFrameStage
+{
+    C_IR_LOWER_STAGE_BEGIN,
+    C_IR_LOWER_STAGE_CHILD,
+    C_IR_LOWER_STAGE_FINISH,
+    C_IR_LOWER_STAGE_LOGICAL_CORE,
+    C_IR_LOWER_STAGE_LOGICAL_CONDITION,
+    C_IR_LOWER_STAGE_CONDITION_LEAF_CORE,
+    C_IR_LOWER_STAGE_CONDITION_LEAF_ASSIGNMENT,
+    C_IR_LOWER_STAGE_CONDITION_CHILD,
+    C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_ROOT,
+    C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_TASK,
+    C_IR_LOWER_STAGE_CONDITIONAL_CONDITION,
+    C_IR_LOWER_STAGE_EXPRESSION_VALUE,
+    C_IR_LOWER_STAGE_EXPRESSION_CONDITION,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS,
+    C_IR_LOWER_STAGE_CONDITION_LEAF_PLACE,
+    C_IR_LOWER_STAGE_EXPRESSION_PLACE,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_ROOT_UPDATE,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_POSTFIX_UPDATE,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_IDENTIFIER_PLACE,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_COMPOUND_LITERAL,
+} CIrLowerFrameStage;
+
+typedef struct CIrNestedInitializerTask CIrNestedInitializerTask;
+struct CIrNestedInitializerTask
+{
+    IrValueId place;
+    IrTypeId type;
+    u32 open;
+    u32 close;
+};
+
+typedef struct CIrNestedCompoundLiteralState CIrNestedCompoundLiteralState;
+struct CIrNestedCompoundLiteralState
+{
+    CIrNestedInitializerTask* tasks;
+    CIrNestedInitializerTask task;
+    IrValueId root_place;
+    IrValueId child_place;
+    IrTypeId root_type;
+    IrTypeId child_type;
+    IrSourceRange source;
+    u32 root_open;
+    u32 root_close;
+    u32 capacity;
+    u32 task_count;
+    u32 item_start;
+    u32 index;
+    u32 next_index;
+    u32 selected_index;
+    bool task_active;
+    bool promoted_designator;
+    u8 reserved[2];
+};
+
+typedef enum CIrPreparedCallContinuation
+{
+    C_IR_PREPARED_CALL_CONTINUATION_NONE,
+    C_IR_PREPARED_CALL_CONTINUATION_CHOOSE,
+    C_IR_PREPARED_CALL_CONTINUATION_ASSUME_ALIGNED,
+    C_IR_PREPARED_CALL_CONTINUATION_GENERIC,
+    C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE,
+    C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE,
+    C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED,
+    C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_VALUE,
+    C_IR_PREPARED_CALL_CONTINUATION_UNARY,
+    C_IR_PREPARED_CALL_CONTINUATION_STRLEN,
+    C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST,
+    C_IR_PREPARED_CALL_CONTINUATION_CLEAR_SECOND,
+    C_IR_PREPARED_CALL_CONTINUATION_PREFETCH,
+    C_IR_PREPARED_CALL_CONTINUATION_VA_END,
+    C_IR_PREPARED_CALL_CONTINUATION_VA_COPY,
+    C_IR_PREPARED_CALL_CONTINUATION_VA_ARG,
+    C_IR_PREPARED_CALL_CONTINUATION_IDENTITY,
+    C_IR_PREPARED_CALL_CONTINUATION_MATH_ARGUMENT,
+    C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE,
+    C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT,
+} CIrPreparedCallContinuation;
+
+typedef enum CIrPreparedCallStepResult
+{
+    C_IR_PREPARED_CALL_STEP_FAILED,
+    C_IR_PREPARED_CALL_STEP_FINISHED,
+    C_IR_PREPARED_CALL_STEP_SUSPENDED,
+} CIrPreparedCallStepResult;
+
+typedef struct CIrPreparedCallState CIrPreparedCallState;
+struct CIrPreparedCallState
+{
+    CIrSignature signature;
+    IrValueId first;
+    IrValueId place;
+    IrValueId expected_place;
+    IrValueId indirect_callee;
+    u32 continuation;
+    u32 argument_count;
+    u32 argument_index;
+    u32 separator;
+    u32 declaration_index;
+    bool previous_va_list_operand;
+    u8 reserved[3];
+};
+
+typedef struct CIrLowerVlaLayoutState CIrLowerVlaLayoutState;
+struct CIrLowerVlaLayoutState
+{
+    CIrVlaLayout* result;
+    CArrayBound* bounds;
+    CTypeId array_type;
+    CToken token;
+    IrSourceRange source;
+    u32 dimension;
+    u64 temporary_mark;
+    bool parameter;
+    u8 reserved[3];
+};
+
+typedef struct CIrBodyTask CIrBodyTask;
+typedef struct CIrSwitchCase CIrSwitchCase;
+typedef struct CIrLabel CIrLabel;
+
+typedef enum CIrLowerBodyContinuation
+{
+    C_IR_LOWER_BODY_CONTINUE_NONE,
+    C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK,
+    C_IR_LOWER_BODY_CONTINUE_STATEMENT,
+    C_IR_LOWER_BODY_CONTINUE_TRAILING_EXPRESSION,
+    C_IR_LOWER_BODY_CONTINUE_RETURN,
+    C_IR_LOWER_BODY_CONTINUE_INLINE_ASSEMBLY,
+    C_IR_LOWER_BODY_CONTINUE_AUTOMATIC_DECLARATION,
+    C_IR_LOWER_BODY_CONTINUE_SWITCH,
+    C_IR_LOWER_BODY_CONTINUE_VLA_DECLARATION,
+    C_IR_LOWER_BODY_CONTINUE_DECLARATION_INITIALIZER,
+} CIrLowerBodyContinuation;
+
+struct CIrLowerBodyState
+{
+    CDeclaration declaration;
+    CIrBodyTask* tasks;
+    CIrBodyTask* current_task;
+    CIrSwitchCase* switch_cases;
+    CIrLabel* labels;
+    IrSourceRange declaration_source;
+    IrSourceRange child_source;
+    IrValueId result;
+    CIrVlaLayout* vla_layout;
+    CIntegerIrLocal* child_local;
+    IrTypeId vla_pointer_type;
+    IrTypeId vla_element_type;
+    CEntityId vla_entity;
+    CToken vla_name;
+    CToken child_name;
+    u32 task_count;
+    u32 task_capacity;
+    u32 switch_case_capacity;
+    u32 label_count;
+    u32 index;
+    u32 switch_case_count;
+    u32 switch_body_close;
+    u32 vla_alignment;
+    CIrLowerBodyContinuation continuation;
+    u64 temporary_mark;
+    bool statement_expression_mode;
+    bool initialized;
+    bool yielded;
+    bool has_current_task;
+    u8 reserved[4];
+};
+
+typedef struct CIrLowerAutomaticDeclarationState CIrLowerAutomaticDeclarationState;
+struct CIrLowerAutomaticDeclarationState
+{
+    CIntegerIrLocal* local;
+    CEntity* local_entity;
+    IrType* local_type_value;
+    IrTypeId local_type;
+    CToken name;
+    u32 start;
+    u32 end;
+    u32 initializer_index;
+    u64 temporary_mark;
+    u8 child_kind;
+    u8 reserved[7];
+};
+
+typedef struct CIrLowerInlineAssemblyState CIrLowerInlineAssemblyState;
+struct CIrLowerInlineAssemblyState
+{
+    IrValueId* operands;
+    u64* constraints;
+    u32 separators[4];
+    u32 start;
+    u32 end;
+    u32 open;
+    u32 close;
+    u32 template_end;
+    u32 separator_count;
+    u32 operand_count;
+    u32 segment_index;
+    u32 segment_end;
+    u32 constraint_index;
+    u32 operand_close;
+    u64 temporary_mark;
+    bool output;
+    u8 reserved[7];
+};
+
+typedef struct CIrLowerAutomaticDeclarationListState CIrLowerAutomaticDeclarationListState;
+struct CIrLowerAutomaticDeclarationListState
+{
+    u32 start;
+    u32 end;
+    u32 scan;
+    u32 segment_start;
+    u32 parentheses;
+    u32 brackets;
+    u32 braces;
+    u64 temporary_mark;
+};
+
+typedef enum CIrLowerAssignmentStatementContinuation
+{
+    C_IR_LOWER_ASSIGNMENT_STATEMENT_BEGIN,
+    C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_LEFT,
+    C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_RIGHT,
+    C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT,
+    C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_RIGHT,
+    C_IR_LOWER_ASSIGNMENT_STATEMENT_FIELD_RIGHT,
+    C_IR_LOWER_ASSIGNMENT_STATEMENT_IDENTIFIER_RIGHT,
+    C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION,
+} CIrLowerAssignmentStatementContinuation;
+
+typedef struct CIrLowerAssignmentStatementState CIrLowerAssignmentStatementState;
+struct CIrLowerAssignmentStatementState
+{
+    IrValueId place;
+    IrValueId base;
+    IrTypeId type;
+    u32 start;
+    u32 end;
+    u32 assignment;
+    u32 close;
+    u32 left_value_start;
+    CConditionalOperator operation;
+    u64 temporary_mark;
+    CIrLowerAssignmentStatementContinuation continuation;
+    bool simple;
+    u8 reserved[3];
+};
 
 struct CIrLowerFrame
 {
     CIrLowerFrameKind kind;
+    u8 stage;
+    u8 reserved[3];
     union
     {
         struct
@@ -14914,6 +15182,11 @@ struct CIrLowerFrame
         } compound_literal;
         struct
         {
+            u32 start;
+            u32 end;
+        } range;
+        struct
+        {
             IrValueId place;
             IrValueId left;
             IrTypeId type;
@@ -14929,9 +15202,15 @@ struct CIrLowerFrame
         } arithmetic_conditional;
         struct
         {
+            u32* tail_starts;
+            u32* tail_ends;
+            u32* tail_opens;
+            IrValueId value;
             u32 open;
             u32 close;
-            u32 tail_start;
+            u32 tail_count;
+            u32 tail_index;
+            u32 leaf_open;
         } statement_expression;
         struct
         {
@@ -14943,15 +15222,876 @@ struct CIrLowerFrame
             IrTypeId type;
             IrSourceRange source;
         } selection;
+        struct
+        {
+            CIrLowerFrame* tasks;
+            IrValueId value;
+            u32 start;
+            u32 end;
+            u32 task_count;
+            u32 task_capacity;
+            u32 pending_assignment;
+            CConditionalOperator pending_operation;
+            IrBlockId pending_true_block;
+        } expression;
+        struct
+        {
+            CIrExpressionCoreState* state;
+            u32 start;
+            u32 end;
+        } expression_core;
+        struct
+        {
+            u32 start;
+            u32 end;
+            u32 index;
+            u32 close;
+            u32 expression_index;
+        } prepare_control;
+        struct
+        {
+            u32* emission_order;
+            u32 start;
+            u32 end;
+            u32 emission_count;
+            u32 emission_index;
+            u32 first_new;
+            bool previous_preparing_calls;
+            u8 reserved[3];
+        } prepare_calls;
+        struct
+        {
+            CIrPreparedCallState* state;
+            u32 call_index;
+        } prepared_call;
+        struct
+        {
+            IrValueId place;
+            IrTypeId type;
+            IrBlockId true_block;
+            IrBlockId false_block;
+            IrBlockId merge_block;
+            IrSourceRange source;
+            u32 start;
+            u32 end;
+        } logical;
+        struct
+        {
+            CIrConditionTask* tasks;
+            IrBlockId true_block;
+            IrBlockId false_block;
+            IrBlockId leaf_true_block;
+            IrBlockId leaf_false_block;
+            IrSourceRange source;
+            u32 start;
+            u32 end;
+            u32 task_count;
+            u32 task_capacity;
+        } condition;
+        /* Place/compound family: frame kinds 64 through 95. */
+        struct
+        {
+            CIntegerIrLocal* local;
+            IrValueId place;
+            IrSourceRange source;
+            u32 start;
+            u32 end;
+            u32 index;
+            u32 close;
+            u32 dereference_count;
+            u8 continuation;
+            u8 reserved[3];
+        } place;
+        struct
+        {
+            CIntegerIrLocal* local;
+            IrValueId linear_index;
+            IrSourceRange source;
+            u32 index;
+            u32 end;
+            u32 close;
+            u32 dimension;
+        } vla_index_place;
+        struct
+        {
+            IrSourceRange source;
+            u32 start;
+            u32 end;
+        } atomic_place;
+        struct
+        {
+            u32 start;
+            u32 end;
+            bool previous_builtin_operand;
+            u8 reserved[3];
+        } va_list_expression;
+        struct
+        {
+            IrValueId* operands;
+            u64* fields;
+            bool* initialized;
+            IrTypeId type;
+            IrTypeId child_type;
+            IrSourceRange source;
+            u32 open;
+            u32 close;
+            u32 index;
+            u32 item_end;
+            u32 field_index;
+            u32 slot_count;
+            u32 operand_count;
+            u32 next_field;
+            u8 continuation;
+            u8 reserved[3];
+        } compound_literal_machine;
+        struct
+        {
+            CIrNestedCompoundLiteralState* state;
+        } nested_compound_literal;
+        struct
+        {
+            IrValueId place;
+            IrTypeId type;
+            IrSourceRange source;
+            CConditionalOperator operation;
+            u32 start;
+            u32 end;
+            bool simple;
+            u8 reserved[3];
+        } condition_leaf;
+        struct
+        {
+            CIrLowerFrame* tasks;
+            IrValueId place;
+            IrTypeId type;
+            IrBlockId final_block;
+            IrBlockId leaf_continuation;
+            IrSourceRange source;
+            u32 start;
+            u32 end;
+            u32 leaf_start;
+            u32 leaf_end;
+            u32 task_count;
+            u32 task_capacity;
+        } conditional;
+        struct
+        {
+            CIrLowerBodyState* state;
+        } body;
+        CIrLowerVlaLayoutState* vla_layout;
+        CIrLowerAutomaticDeclarationState* automatic_declaration;
+        CIrLowerInlineAssemblyState* inline_assembly;
+        CIrLowerAutomaticDeclarationListState* automatic_declaration_list;
+        CIrLowerAssignmentStatementState* assignment_statement;
     } as;
 };
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_statement_expression(CIntegerIrBuilder* builder, u32 open, u32 close, IrValueId* value_out)
+BUSTER_GLOBAL_LOCAL CIrLowerFrameResult c_ir_lower_dispatch(CIntegerIrBuilder* builder, CIrLowerFrame root);
+
+BUSTER_CT_CHECK(sizeof(CIrLowerFrame) <= 112);
+
+BUSTER_GLOBAL_LOCAL u32 c_ir_lower_frame_token_index(CIrLowerFrame frame)
 {
+    switch (frame.kind)
+    {
+        case C_IR_LOWER_FRAME_EXPRESSION:
+            return frame.as.expression.start;
+        case C_IR_LOWER_FRAME_EXPRESSION_CORE:
+            return frame.as.expression_core.start;
+        case C_IR_LOWER_FRAME_LOGICAL_VALUE:
+            return frame.as.logical.start;
+        case C_IR_LOWER_FRAME_CONDITION:
+            return frame.as.condition.start;
+        case C_IR_LOWER_FRAME_CONDITION_LEAF:
+            return frame.as.condition_leaf.start;
+        case C_IR_LOWER_FRAME_CONDITIONAL_VALUE:
+            return frame.as.conditional.start;
+        case C_IR_LOWER_FRAME_PLACE:
+            return frame.as.place.start;
+        case C_IR_LOWER_FRAME_COMPOUND_LITERAL:
+            return frame.as.compound_literal_machine.open;
+        case C_IR_LOWER_FRAME_BODY:
+            return frame.as.body.state ? frame.as.body.state->declaration.body_start : UINT32_MAX;
+        case C_IR_LOWER_FRAME_VLA_INDEX_PLACE:
+            return frame.as.vla_index_place.index;
+        case C_IR_LOWER_FRAME_ATOMIC_PLACE:
+            return frame.as.atomic_place.start;
+        case C_IR_LOWER_FRAME_VA_LIST_EXPRESSION:
+            return frame.as.va_list_expression.start;
+        case C_IR_LOWER_FRAME_NESTED_COMPOUND_LITERAL:
+            return frame.as.nested_compound_literal.state->root_open;
+        case C_IR_LOWER_FRAME_PREPARE_CONTROL_EXPRESSIONS:
+            return frame.as.prepare_control.start;
+        case C_IR_LOWER_FRAME_PREPARE_CALLS:
+            return frame.as.prepare_calls.start;
+        case C_IR_LOWER_FRAME_PREPARED_CALL:
+            return UINT32_MAX;
+        case C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION:
+            return frame.as.automatic_declaration ? frame.as.automatic_declaration->start : UINT32_MAX;
+        case C_IR_LOWER_FRAME_BODY_INLINE_ASSEMBLY:
+            return frame.as.inline_assembly ? frame.as.inline_assembly->start : UINT32_MAX;
+        case C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION_LIST:
+            return frame.as.automatic_declaration_list ? frame.as.automatic_declaration_list->start : UINT32_MAX;
+        case C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT:
+            return frame.as.assignment_statement ? frame.as.assignment_statement->start : UINT32_MAX;
+        default:
+            return UINT32_MAX;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_frame_push(CIntegerIrBuilder* builder, CIrLowerFrame frame)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    if (machine->failed || machine->frame_count >= machine->frame_capacity)
+    {
+        machine->failed = true;
+        builder->failure_message = S8("C lowering machine frame capacity exceeded");
+        builder->failure_token_index = c_ir_lower_frame_token_index(frame);
+        return false;
+    }
+    frame.stage = (u8)C_IR_LOWER_STAGE_BEGIN;
+    machine->frames[machine->frame_count++] = frame;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_frame_finish(CIntegerIrBuilder* builder, bool success, IrValueId value)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+    machine->frame_count -= 1;
+    machine->child_result = (CIrLowerFrameResult){
+        .value = value,
+        .index = UINT32_MAX,
+        .success = success,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_frame_finish_index(CIntegerIrBuilder* builder, bool success, IrValueId value, u32 index)
+{
+    c_ir_lower_frame_finish(builder, success, value);
+    builder->lower_machine.child_result.index = index;
+}
+
+typedef enum CIrPlaceContinuation
+{
+    C_IR_PLACE_CONTINUATION_NONE,
+    C_IR_PLACE_CONTINUATION_VLA,
+    C_IR_PLACE_CONTINUATION_SUBSCRIPT,
+} CIrPlaceContinuation;
+
+typedef enum CIrCompoundContinuation
+{
+    C_IR_COMPOUND_CONTINUATION_NONE,
+    C_IR_COMPOUND_CONTINUATION_NESTED,
+    C_IR_COMPOUND_CONTINUATION_SCALAR,
+    C_IR_COMPOUND_CONTINUATION_ITEM,
+} CIrCompoundContinuation;
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    CIntegerIrLocal* local = frame->as.vla_index_place.local;
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    {
+        if (!local || !local->is_variable_length_array || !local->vla_dimension_count || !local->vla_dimension_counts ||
+            local->vla_element_type.value == IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_lower_frame_finish_index(builder, false, IR_VALUE_ID_INVALID, frame->as.vla_index_place.index);
+            return;
+        }
+        frame->as.vla_index_place.linear_index = IR_VALUE_ID_INVALID;
+        frame->as.vla_index_place.dimension = 0;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        IrValueId subscript = machine->child_result.value;
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish_index(builder, false, IR_VALUE_ID_INVALID, frame->as.vla_index_place.index);
+            return;
+        }
+        subscript = c_ir_emit_cast(builder, subscript, builder->size_type, frame->as.vla_index_place.source);
+        if (subscript.value == IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_lower_frame_finish_index(builder, false, IR_VALUE_ID_INVALID, frame->as.vla_index_place.index);
+            return;
+        }
+        if (frame->as.vla_index_place.linear_index.value == IR_ID_UNDERLYING_INVALID)
+        {
+            frame->as.vla_index_place.linear_index = subscript;
+        }
+        else
+        {
+            IrValueId count = local->vla_dimension_counts[frame->as.vla_index_place.dimension];
+            if (count.value == IR_ID_UNDERLYING_INVALID)
+            {
+                c_ir_lower_frame_finish_index(builder, false, IR_VALUE_ID_INVALID, frame->as.vla_index_place.index);
+                return;
+            }
+            frame->as.vla_index_place.linear_index =
+                c_ir_emit_binary_value(builder, frame->as.vla_index_place.linear_index, count, builder->size_type, IR_BINARY_INTEGER_MULTIPLY,
+                                       frame->as.vla_index_place.source);
+            frame->as.vla_index_place.linear_index =
+                c_ir_emit_binary_value(builder, frame->as.vla_index_place.linear_index, subscript, builder->size_type, IR_BINARY_INTEGER_ADD,
+                                       frame->as.vla_index_place.source);
+        }
+        frame->as.vla_index_place.dimension += 1;
+        frame->as.vla_index_place.index = frame->as.vla_index_place.close + 1;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    while (frame->as.vla_index_place.dimension < local->vla_dimension_count && frame->as.vla_index_place.index < frame->as.vla_index_place.end &&
+           c_token_is_punctuator(builder->preprocess.tokens[frame->as.vla_index_place.index], S8("[")))
+    {
+        u32 index = frame->as.vla_index_place.index;
+        u32 close = c_ir_matching_delimiter_cached(builder, index, frame->as.vla_index_place.end, S8("["), S8("]"));
+        if (close >= frame->as.vla_index_place.end || close == index + 1)
+        {
+            c_ir_lower_frame_finish_index(builder, false, IR_VALUE_ID_INVALID, index);
+            return;
+        }
+        frame->as.vla_index_place.close = close;
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                .as.expression =
+                                                    {
+                                                        .start = index + 1,
+                                                        .end = close,
+                                                    },
+                                            }))
+        {
+            c_ir_lower_frame_finish_index(builder, false, IR_VALUE_ID_INVALID, index);
+        }
+        return;
+    }
+    if (!frame->as.vla_index_place.dimension || frame->as.vla_index_place.linear_index.value == IR_ID_UNDERLYING_INVALID)
+    {
+        c_ir_lower_frame_finish_index(builder, false, IR_VALUE_ID_INVALID, frame->as.vla_index_place.index);
+        return;
+    }
+    while (frame->as.vla_index_place.dimension < local->vla_dimension_count)
+    {
+        IrValueId count = local->vla_dimension_counts[frame->as.vla_index_place.dimension++];
+        if (count.value == IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_lower_frame_finish_index(builder, false, IR_VALUE_ID_INVALID, frame->as.vla_index_place.index);
+            return;
+        }
+        frame->as.vla_index_place.linear_index =
+            c_ir_emit_binary_value(builder, frame->as.vla_index_place.linear_index, count, builder->size_type, IR_BINARY_INTEGER_MULTIPLY,
+                                   frame->as.vla_index_place.source);
+    }
+    IrValueId pointer = c_ir_emit_load_place(builder, local->place, local->type, frame->as.vla_index_place.source);
+    IrValueId place = pointer.value == IR_ID_UNDERLYING_INVALID
+                          ? IR_VALUE_ID_INVALID
+                          : c_ir_emit_index_place(builder, pointer, frame->as.vla_index_place.linear_index, frame->as.vla_index_place.source);
+    c_ir_lower_frame_finish_index(builder, place.value != IR_ID_UNDERLYING_INVALID, place, frame->as.vla_index_place.index);
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    {
+        u32 start = frame->as.place.start;
+        u32 end = frame->as.place.end;
+        while (start < end && c_token_is_punctuator(builder->preprocess.tokens[start], S8("(")))
+        {
+            u32 depth = 0;
+            u32 close = start;
+            for (; close < end; close += 1)
+            {
+                CToken token = builder->preprocess.tokens[close];
+                if (c_token_is_punctuator(token, S8("(")))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(token, S8(")")))
+                {
+                    if (!depth)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    depth -= 1;
+                    if (!depth)
+                    {
+                        break;
+                    }
+                }
+            }
+            if (close != end - 1)
+            {
+                break;
+            }
+            start += 1;
+            end -= 1;
+        }
+        u32 dereference_count = 0;
+        while (start < end && c_token_is_punctuator(builder->preprocess.tokens[start], S8("*")))
+        {
+            dereference_count += 1;
+            start += 1;
+        }
+        u32 index = start;
+        u32 base_index = index;
+        if (index < end && c_token_is_punctuator(builder->preprocess.tokens[index], S8("(")))
+        {
+            u32 depth = 1;
+            u32 close = index + 1;
+            while (close < end && depth)
+            {
+                if (c_token_is_punctuator(builder->preprocess.tokens[close], S8("(")))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(builder->preprocess.tokens[close], S8(")")))
+                {
+                    depth -= 1;
+                }
+                close += 1;
+            }
+            u32 nested_start = index + 1;
+            u32 nested_end = depth ? nested_start : close - 1;
+            while (nested_start < nested_end && c_token_is_punctuator(builder->preprocess.tokens[nested_start], S8("(")) &&
+                   c_token_is_punctuator(builder->preprocess.tokens[nested_end - 1], S8(")")))
+            {
+                nested_start += 1;
+                nested_end -= 1;
+            }
+            while (nested_start < nested_end && c_token_is_punctuator(builder->preprocess.tokens[nested_start], S8("*")))
+            {
+                dereference_count += 1;
+                nested_start += 1;
+            }
+            if (depth || nested_end != nested_start + 1)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            base_index = nested_start;
+            index = close;
+        }
+        else
+        {
+            index += 1;
+        }
+        if (base_index >= end || builder->preprocess.tokens[base_index].kind != C_TOKEN_IDENTIFIER)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        CEntityId entity = c_ir_identifier_entity(builder, base_index);
+        CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+        if (!local)
+        {
+            for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
+            {
+                CIntegerIrLocal* candidate = builder->locals + local_index - 1;
+                if (string_equal(candidate->name, builder->preprocess.tokens[base_index].spelling))
+                {
+                    local = candidate;
+                    break;
+                }
+            }
+        }
+        IrSourceRange source =
+            c_ir_source_range(builder->preprocess.tokens[base_index].location, builder->preprocess.tokens[base_index].spelling.length);
+        IrValueId place = local ? local->place : c_ir_emit_global_place(builder, entity, source);
+        if (place.value == IR_ID_UNDERLYING_INVALID)
+        {
+            builder->failure_token_index = base_index;
+        }
+        while (place.value != IR_ID_UNDERLYING_INVALID && dereference_count)
+        {
+            IrTypeId pointer_type = builder->function->values[place.value].canonical_type;
+            IrValueId pointer = c_ir_emit_load_place(builder, place, pointer_type, source);
+            place = c_ir_emit_dereference_place(builder, pointer, source);
+            dereference_count -= 1;
+        }
+        frame->as.place.local = local;
+        frame->as.place.place = place;
+        frame->as.place.source = source;
+        frame->as.place.start = start;
+        frame->as.place.end = end;
+        frame->as.place.index = index;
+        frame->as.place.dereference_count = dereference_count;
+        frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_VLA)
+        {
+            frame->as.place.place = machine->child_result.value;
+            frame->as.place.index = machine->child_result.index;
+        }
+        else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_SUBSCRIPT)
+        {
+            IrValueId place = frame->as.place.place;
+            IrTypeId base_type_id = builder->function->values[place.value].canonical_type;
+            IrType* base_type = ir_type_from_id(&builder->program->types, base_type_id);
+            IrValueId base = place;
+            if (base_type && base_type->kind == IR_TYPE_POINTER && builder->function->values[place.value].category == IR_VALUE_PLACE)
+            {
+                base = c_ir_emit_load_place(builder, place, base_type_id, frame->as.place.source);
+            }
+            frame->as.place.place = c_ir_emit_index_place(builder, base, machine->child_result.value, frame->as.place.source);
+            frame->as.place.index = frame->as.place.close;
+        }
+        else
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    if (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.local && frame->as.place.local->is_variable_length_array &&
+        frame->as.place.index < frame->as.place.end && c_token_is_punctuator(builder->preprocess.tokens[frame->as.place.index], S8("[")))
+    {
+        frame->as.place.continuation = C_IR_PLACE_CONTINUATION_VLA;
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                .kind = C_IR_LOWER_FRAME_VLA_INDEX_PLACE,
+                                                .as.vla_index_place =
+                                                    {
+                                                        .local = frame->as.place.local,
+                                                        .source = frame->as.place.source,
+                                                        .index = frame->as.place.index,
+                                                        .end = frame->as.place.end,
+                                                    },
+                                            }))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
+    }
+    while (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.index < frame->as.place.end)
+    {
+        u32 index = frame->as.place.index;
+        CToken access = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(access, S8("[")))
+        {
+            u32 depth = 1;
+            u32 close = index + 1;
+            while (close < frame->as.place.end && depth)
+            {
+                CToken token = builder->preprocess.tokens[close];
+                if (c_token_is_punctuator(token, S8("[")))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(token, S8("]")))
+                {
+                    depth -= 1;
+                }
+                close += 1;
+            }
+            if (depth || close == index + 2)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            frame->as.place.close = close;
+            frame->as.place.continuation = C_IR_PLACE_CONTINUATION_SUBSCRIPT;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                    .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                    .as.expression =
+                                                        {
+                                                            .start = index + 1,
+                                                            .end = close - 1,
+                                                        },
+                                                }))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
+        if (index + 1 >= frame->as.place.end ||
+            (!c_token_is_punctuator(access, S8(".")) && !c_token_is_punctuator(access, S8("->"))) ||
+            builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        IrValueId operand = frame->as.place.place;
+        if (c_token_is_punctuator(access, S8("->")))
+        {
+            IrTypeId pointer_type = builder->function->values[frame->as.place.place.value].canonical_type;
+            operand = c_ir_emit_load_place(builder, frame->as.place.place, pointer_type, frame->as.place.source);
+        }
+        frame->as.place.place =
+            c_ir_emit_field_place_from_value(builder, operand, access, builder->preprocess.tokens[index + 1]);
+        if (frame->as.place.place.value == IR_ID_UNDERLYING_INVALID)
+        {
+            builder->failure_token_index = index + 1;
+        }
+        frame->as.place.index += 2;
+    }
+    bool success = frame->as.place.index == frame->as.place.end && frame->as.place.place.value != IR_ID_UNDERLYING_INVALID;
+    c_ir_lower_frame_finish(builder, success, success ? frame->as.place.place : IR_VALUE_ID_INVALID);
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_atomic_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    {
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                .as.expression =
+                                                    {
+                                                        .start = frame->as.atomic_place.start,
+                                                        .end = frame->as.atomic_place.end,
+                                                    },
+                                            }))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
+    }
+    IrValueId place = machine->child_result.success
+                          ? c_ir_emit_dereference_place(builder, machine->child_result.value, frame->as.atomic_place.source)
+                          : IR_VALUE_ID_INVALID;
+    c_ir_lower_frame_finish(builder, place.value != IR_ID_UNDERLYING_INVALID, place);
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_va_list_expression_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    {
+        frame->as.va_list_expression.previous_builtin_operand = builder->va_list_builtin_operand;
+        builder->va_list_builtin_operand = true;
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                .as.expression =
+                                                    {
+                                                        .start = frame->as.va_list_expression.start,
+                                                        .end = frame->as.va_list_expression.end,
+                                                    },
+                                            }))
+        {
+            builder->va_list_builtin_operand = frame->as.va_list_expression.previous_builtin_operand;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
+    }
+    builder->va_list_builtin_operand = frame->as.va_list_expression.previous_builtin_operand;
+    c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
+}
+
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_machine_unwind(CIntegerIrBuilder* builder)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    machine->frame_count = machine->root_frame_mark;
+    if (builder->scratch_arena->position >= machine->scratch_mark)
+    {
+        arena_set_position(builder->scratch_arena, machine->scratch_mark);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL CIrLowerFrameResult c_ir_lower_dispatch(CIntegerIrBuilder* builder, CIrLowerFrame root);
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_frame_push(CIntegerIrBuilder* builder, CDeclaration declaration, bool statement_expression_mode)
+{
+    CIrLowerBodyState* state = arena_allocate(builder->temporary_arena, CIrLowerBodyState, 1);
+    *state = (CIrLowerBodyState){
+        .declaration = declaration,
+        .result = IR_VALUE_ID_INVALID,
+        .statement_expression_mode = statement_expression_mode,
+    };
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_BODY,
+                                              .as.body =
+                                                  {
+                                                      .state = state,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_EXPRESSION_CORE,
+                                              .as.expression_core =
+                                                  {
+                                                      .start = start,
+                                                      .end = end,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_leaf_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_CONDITION_LEAF,
+                                              .as.condition_leaf =
+                                                  {
+                                                      .start = start,
+                                                      .end = end,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end, IrBlockId true_block,
+                                                         IrBlockId false_block, IrSourceRange source)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_CONDITION,
+                                              .as.condition =
+                                                  {
+                                                      .true_block = true_block,
+                                                      .false_block = false_block,
+                                                      .source = source,
+                                                      .start = start,
+                                                      .end = end,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_logical_value_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_LOGICAL_VALUE,
+                                              .as.logical =
+                                                  {
+                                                      .start = start,
+                                                      .end = end,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_conditional_value_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_CONDITIONAL_VALUE,
+                                              .as.conditional =
+                                                  {
+                                                      .start = start,
+                                                      .end = end,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_statement_expression_frame_push(CIntegerIrBuilder* builder, u32 open, u32 close)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_STATEMENT_EXPRESSION,
+                                              .as.statement_expression =
+                                                  {
+                                                      .open = open,
+                                                      .close = close,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_prepare_control_expressions_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_PREPARE_CONTROL_EXPRESSIONS,
+                                              .as.prepare_control =
+                                                  {
+                                                      .start = start,
+                                                      .end = end,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_PREPARE_CALLS,
+                                              .as.prepare_calls =
+                                                  {
+                                                      .start = start,
+                                                      .end = end,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_place_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_PLACE,
+                                              .as.place =
+                                                  {
+                                                      .start = start,
+                                                      .end = end,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_compound_literal_frame_push(CIntegerIrBuilder* builder, IrTypeId type, u32 open, u32 close)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_COMPOUND_LITERAL,
+                                              .as.compound_literal_machine =
+                                                  {
+                                                      .type = type,
+                                                      .open = open,
+                                                      .close = close,
+                                                  },
+                                          });
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* builder)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+    CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
+    BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_STATEMENT_EXPRESSION);
+    if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.statement_expression.value = machine->child_result.value;
+        if (frame->as.statement_expression.tail_index)
+        {
+            frame->as.statement_expression.tail_index -= 1;
+            u32 tail_index = frame->as.statement_expression.tail_index;
+            CDeclaration declaration = {
+                .name = S8("statement expression"),
+                .location = builder->preprocess.tokens[frame->as.statement_expression.tail_opens[tail_index]].location,
+                .body_start = frame->as.statement_expression.tail_starts[tail_index],
+                .body_token_count = frame->as.statement_expression.tail_ends[tail_index] - frame->as.statement_expression.tail_starts[tail_index],
+                .kind = C_DECLARATION_FUNCTION,
+            };
+            if (!c_ir_lower_body_frame_push(builder, declaration, true))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
+        IrValueId value = frame->as.statement_expression.value;
+        if (value.value == IR_ID_UNDERLYING_INVALID)
+        {
+            value = c_ir_emit_integer_value(builder, 0, false, builder->preprocess.tokens[frame->as.statement_expression.leaf_open]);
+        }
+        c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+        return;
+    }
+    u32 open = frame->as.statement_expression.open;
+    u32 close = frame->as.statement_expression.close;
     if (open >= close || !c_token_is_punctuator(builder->preprocess.tokens[open], S8("{")) ||
         !c_token_is_punctuator(builder->preprocess.tokens[close], S8("}")))
     {
-        return false;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
     }
     // Empty statement-expression wrappers do not introduce declarations or
     // control-flow state. Descend through them iteratively so generated GNU C
@@ -14980,7 +16120,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_statement_expression(CIntegerIrBuilder* buil
         open = nested_start + 1;
         close = nested_close;
     }
-    u32 frame_start = builder->lower_frame_count;
+    u32 tail_capacity = (close - open) / 4 + 1;
+    frame->as.statement_expression.tail_starts = arena_allocate(builder->scratch_arena, u32, tail_capacity);
+    frame->as.statement_expression.tail_ends = arena_allocate(builder->scratch_arena, u32, tail_capacity);
+    frame->as.statement_expression.tail_opens = arena_allocate(builder->scratch_arena, u32, tail_capacity);
+    frame->as.statement_expression.tail_count = 0;
     while (open + 4 < close && c_token_is_punctuator(builder->preprocess.tokens[open + 1], S8("(")) &&
            c_token_is_punctuator(builder->preprocess.tokens[open + 2], S8("{")))
     {
@@ -15000,25 +16144,22 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_statement_expression(CIntegerIrBuilder* buil
         {
             break;
         }
-        if (builder->lower_frame_count >= builder->lower_frame_capacity)
+        if (frame->as.statement_expression.tail_count >= tail_capacity)
         {
             builder->failure_message = S8("C statement-expression nesting exceeds the lowering frame capacity");
             builder->failure_token_index = open;
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
-        builder->lower_frames[builder->lower_frame_count++] = (CIrLowerFrame){
-            .kind = C_IR_LOWER_FRAME_STATEMENT_EXPRESSION,
-            .as.statement_expression =
-                {
-                    .open = open,
-                    .close = close,
-                    .tail_start = tail_start,
-                },
-        };
+        u32 tail_index = frame->as.statement_expression.tail_count++;
+        frame->as.statement_expression.tail_starts[tail_index] = tail_start;
+        frame->as.statement_expression.tail_ends[tail_index] = close;
+        frame->as.statement_expression.tail_opens[tail_index] = open;
         open += 2;
         close = nested_close;
     }
-    IrValueId value = IR_VALUE_ID_INVALID;
+    frame->as.statement_expression.tail_index = frame->as.statement_expression.tail_count;
+    frame->as.statement_expression.leaf_open = open;
     CDeclaration declaration = {
         .name = S8("statement expression"),
         .location = builder->preprocess.tokens[open].location,
@@ -15026,29 +16167,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_statement_expression(CIntegerIrBuilder* buil
         .body_token_count = close - open - 1,
         .kind = C_DECLARATION_FUNCTION,
     };
-    bool result = c_ir_lower_body(builder, declaration, true, &value);
-    if (!result)
+    frame->stage = (u8)C_IR_LOWER_STAGE_CHILD;
+    if (!c_ir_lower_body_frame_push(builder, declaration, true))
     {
-        return false;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
     }
-    while (builder->lower_frame_count > frame_start)
-    {
-        CIrLowerFrame frame = builder->lower_frames[--builder->lower_frame_count];
-        BUSTER_CHECK(frame.kind == C_IR_LOWER_FRAME_STATEMENT_EXPRESSION);
-        declaration.location = builder->preprocess.tokens[frame.as.statement_expression.open].location;
-        declaration.body_start = frame.as.statement_expression.tail_start;
-        declaration.body_token_count = frame.as.statement_expression.close - frame.as.statement_expression.tail_start;
-        if (!c_ir_lower_body(builder, declaration, true, &value))
-        {
-            return false;
-        }
-    }
-    if (value.value == IR_ID_UNDERLYING_INVALID)
-    {
-        value = c_ir_emit_integer_value(builder, 0, false, builder->preprocess.tokens[open]);
-    }
-    *value_out = value;
-    return value.value != IR_ID_UNDERLYING_INVALID;
 }
 
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source);
@@ -15656,34 +16779,61 @@ BUSTER_GLOBAL_LOCAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u3
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_prepare_control_expressions(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_GLOBAL_LOCAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
-    for (u32 index = start; index < end; index += 1)
+    CIrLowerMachine* machine = &builder->lower_machine;
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        if (index + 1 < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
-            string_equal(builder->preprocess.tokens[index].spelling, S8("_Generic")) && c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("(")))
+        frame->as.prepare_control.index = frame->as.prepare_control.start;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        if (!machine->child_result.success || frame->as.prepare_control.expression_index >= builder->prepared_control_expression_count)
         {
-            u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, S8("("), S8(")"));
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        CIrPreparedControlExpression* expression =
+            builder->prepared_control_expressions + frame->as.prepare_control.expression_index;
+        expression->result = machine->child_result.value;
+        expression->lowering = false;
+        expression->emitted = true;
+        frame->as.prepare_control.index = frame->as.prepare_control.close + 1;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    while (frame->as.prepare_control.index < frame->as.prepare_control.end)
+    {
+        u32 index = frame->as.prepare_control.index++;
+        if (index + 1 < frame->as.prepare_control.end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+            string_equal(builder->preprocess.tokens[index].spelling, S8("_Generic")) &&
+            c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("(")))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, index + 1, frame->as.prepare_control.end, S8("("), S8(")"));
             if (close == UINT32_MAX)
             {
                 builder->failure_token_index = index;
                 builder->failure_message = S8("unterminated _Generic selection");
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
-            index = close;
+            frame->as.prepare_control.index = close + 1;
             continue;
         }
         bool parentheses = c_token_is_punctuator(builder->preprocess.tokens[index], S8("("));
         bool brackets = c_token_is_punctuator(builder->preprocess.tokens[index], S8("["));
-        if ((!parentheses && !brackets) || (parentheses && index > start && builder->preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER) ||
+        if ((!parentheses && !brackets) ||
+            (parentheses && index > frame->as.prepare_control.start && builder->preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER) ||
             c_ir_prepared_control_expression_find(builder, index))
         {
             continue;
         }
-        u32 close = c_ir_matching_delimiter_cached(builder, index, end, parentheses ? S8("(") : S8("["), parentheses ? S8(")") : S8("]"));
+        u32 close = c_ir_matching_delimiter_cached(builder, index, frame->as.prepare_control.end, parentheses ? S8("(") : S8("["),
+                                                   parentheses ? S8(")") : S8("]"));
         if (close == UINT32_MAX)
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
         if (brackets && (close == index + 1 || (!c_ir_has_root_control_operator(builder, index + 1, close) &&
                                                 !c_ir_has_root_assignment(builder, index + 1, close))))
@@ -15696,24 +16846,33 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_control_expressions(CIntegerIrBuilder* bui
         }
         if (builder->prepared_control_expression_count >= builder->prepared_control_expression_capacity)
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
-        CIrPreparedControlExpression* expression = builder->prepared_control_expressions + builder->prepared_control_expression_count++;
-        *expression = (CIrPreparedControlExpression){
+        u32 expression_index = builder->prepared_control_expression_count++;
+        builder->prepared_control_expressions[expression_index] = (CIrPreparedControlExpression){
             .result = IR_VALUE_ID_INVALID,
             .open_index = index,
             .close_index = close,
             .lowering = true,
         };
-        if (!c_ir_lower_expression(builder, index + 1, close, &expression->result))
+        frame->as.prepare_control.close = close;
+        frame->as.prepare_control.expression_index = expression_index;
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                .as.expression =
+                                                    {
+                                                        .start = index + 1,
+                                                        .end = close,
+                                                    },
+                                            }))
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         }
-        expression->lowering = false;
-        expression->emitted = true;
-        index = close;
+        return;
     }
-    return true;
+    c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
 }
 
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token_index)
@@ -15966,16 +17125,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_condition_evaluate(CIntegerIrBuilder* bui
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL IrValueId c_ir_atomic_builtin_place(CIntegerIrBuilder* builder, u32 start, u32 end, IrSourceRange source)
-{
-    IrValueId pointer = IR_VALUE_ID_INVALID;
-    if (!c_ir_lower_expression(builder, start, end, &pointer))
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    return c_ir_emit_dereference_place(builder, pointer, source);
-}
-
 BUSTER_GLOBAL_LOCAL bool c_ir_atomic_memory_order(CIntegerIrBuilder* builder, u32 start, u32 end, IrMemoryOrder* order_out)
 {
     u64 value = 0;
@@ -16013,7 +17162,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_atomic_compare_orders_valid(IrMemoryOrder success,
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
+                                                     u32* emission_count_out)
 {
     u32 first_new = builder->prepared_call_count;
     u32 active_capacity = end > start ? end - start : 1;
@@ -16279,9 +17429,76 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
         }
     }
     BUSTER_CHECK(emission_count == remaining);
-    for (u32 emission_index = 0; emission_index < emission_count; emission_index += 1)
+    *emission_order_out = emission_order;
+    *emission_count_out = emission_count;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_prepared_call_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+                                                                                    CIrPreparedCallContinuation continuation, u32 start, u32 end,
+                                                                                    bool va_list_operand)
+{
+    frame->as.prepared_call.state->continuation = (u32)continuation;
+    frame->stage = C_IR_LOWER_STAGE_CHILD;
+    if (va_list_operand)
     {
-        CIrPreparedCall* selected = builder->prepared_calls + emission_order[emission_index];
+        frame->as.prepared_call.state->previous_va_list_operand = builder->va_list_builtin_operand;
+        builder->va_list_builtin_operand = true;
+    }
+    if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                            .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                            .as.expression =
+                                                {
+                                                    .start = start,
+                                                    .end = end,
+                                                },
+                                        }))
+    {
+        if (va_list_operand)
+        {
+            builder->va_list_builtin_operand = frame->as.prepared_call.state->previous_va_list_operand;
+        }
+        return C_IR_PREPARED_CALL_STEP_FAILED;
+    }
+    return C_IR_PREPARED_CALL_STEP_SUSPENDED;
+}
+
+BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_prepared_call_request_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+                                                                               CIrPreparedCallContinuation continuation, u32 start, u32 end)
+{
+    frame->as.prepared_call.state->continuation = (u32)continuation;
+    frame->stage = C_IR_LOWER_STAGE_CHILD;
+    if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                            .kind = C_IR_LOWER_FRAME_PLACE,
+                                            .as.place =
+                                                {
+                                                    .start = start,
+                                                    .end = end,
+                                                },
+                                        }))
+    {
+        return C_IR_PREPARED_CALL_STEP_FAILED;
+    }
+    return C_IR_PREPARED_CALL_STEP_SUSPENDED;
+}
+
+BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    u32 call_index = frame->as.prepared_call.call_index;
+    bool child_success = frame->stage == C_IR_LOWER_STAGE_CHILD && machine->child_result.success;
+    IrValueId child_value = machine->child_result.value;
+    CIrPreparedCallContinuation continuation = (CIrPreparedCallContinuation)frame->as.prepared_call.state->continuation;
+    if (frame->stage == C_IR_LOWER_STAGE_CHILD &&
+        (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_END || continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_COPY ||
+         continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_ARG))
+    {
+        builder->va_list_builtin_operand = frame->as.prepared_call.state->previous_va_list_operand;
+    }
+    u32 remaining = 1;
+    do
+    {
+        CIrPreparedCall* selected = builder->prepared_calls + call_index;
         CToken token = builder->preprocess.tokens[selected->token_index];
         if (selected->builtin_constant_p || selected->builtin_choose_expr || selected->builtin_types_compatible_p || selected->builtin_object_size ||
             selected->builtin_assume_aligned)
@@ -16309,9 +17526,17 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                     return false;
                 }
                 u32 branch = condition ? 1 : 2;
-                if (!c_ir_lower_expression(builder, starts[branch], ends[branch], &selected->result))
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_CHOOSE)
                 {
-                    return false;
+                    if (!child_success)
+                    {
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    selected->result = child_value;
+                }
+                else
+                {
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CHOOSE, starts[branch], ends[branch], false);
                 }
             }
             else if (selected->builtin_types_compatible_p)
@@ -16387,9 +17612,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 {
                     return false;
                 }
-                if (!c_ir_lower_expression(builder, starts[0], ends[0], &selected->result) || selected->result.value >= builder->function->value_count)
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ASSUME_ALIGNED)
                 {
-                    return false;
+                    if (!child_success)
+                    {
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    selected->result = child_value;
+                }
+                else
+                {
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ASSUME_ALIGNED, starts[0], ends[0], false);
+                }
+                if (selected->result.value >= builder->function->value_count)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
                 }
                 IrType* aligned_type = ir_type_from_id(&builder->program->types, builder->function->values[selected->result.value].canonical_type);
                 if (aligned_type && aligned_type->kind == IR_TYPE_ARRAY)
@@ -16419,12 +17656,29 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             IrTypeId association_type = IR_TYPE_ID_INVALID;
             bool selection_valid =
                 c_ir_generic_selection(builder, selected->token_index, selected->close_index + 1, &association_start, &association_end, &association_type);
-            builder->preparing_calls = false;
-            bool association_lowered = selection_valid && c_ir_lower_expression(builder, association_start, association_end, &selected->result);
-            builder->preparing_calls = true;
-            if (!association_lowered)
+            if (!selection_valid)
             {
                 return false;
+            }
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_GENERIC)
+            {
+                builder->preparing_calls = true;
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                selected->result = child_value;
+            }
+            else
+            {
+                builder->preparing_calls = false;
+                CIrPreparedCallStepResult requested =
+                    c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_GENERIC, association_start, association_end, false);
+                if (requested != C_IR_PREPARED_CALL_STEP_SUSPENDED)
+                {
+                    builder->preparing_calls = true;
+                }
+                return requested;
             }
             (void)association_type;
             selected->argument_count = 1;
@@ -16483,7 +17737,25 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 remaining -= 1;
                 continue;
             }
-            IrValueId place = c_ir_atomic_builtin_place(builder, starts[0], ends[0], source);
+            IrValueId place = IR_VALUE_ID_INVALID;
+            if (continuation >= C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE &&
+                continuation <= C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_VALUE)
+            {
+                place = frame->as.prepared_call.state->place;
+            }
+            else
+            {
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE, starts[0], ends[0], false);
+            }
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE)
+            {
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                place = c_ir_emit_dereference_place(builder, child_value, source);
+                frame->as.prepared_call.state->place = place;
+            }
             IrTypeId atomic_type = place.value < builder->function->value_count ? builder->function->values[place.value].canonical_type : IR_TYPE_ID_INVALID;
             IrType* atomic = ir_type_from_id(&builder->program->types, atomic_type);
             IrType* unqualified = atomic && atomic->is_atomic ? ir_type_from_id(&builder->program->types, atomic->unqualified_type) : 0;
@@ -16501,7 +17773,26 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK)
             {
                 IrMemoryOrder failure_order = IR_MEMORY_ORDER_COUNT;
-                IrValueId expected_place = c_ir_atomic_builtin_place(builder, starts[1], ends[1], source);
+                IrValueId expected_place = IR_VALUE_ID_INVALID;
+                if (continuation >= C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE &&
+                    continuation <= C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED)
+                {
+                    expected_place = frame->as.prepared_call.state->expected_place;
+                }
+                else
+                {
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE, starts[1], ends[1],
+                                                                 false);
+                }
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE)
+                {
+                    if (!child_success)
+                    {
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    expected_place = c_ir_emit_dereference_place(builder, child_value, source);
+                    frame->as.prepared_call.state->expected_place = expected_place;
+                }
                 IrTypeId expected_type =
                     expected_place.value < builder->function->value_count ? builder->function->values[expected_place.value].canonical_type : IR_TYPE_ID_INVALID;
                 if (expected_type.value != atomic->unqualified_type.value || !c_ir_atomic_memory_order(builder, starts[4], ends[4], &failure_order) ||
@@ -16509,11 +17800,26 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 {
                     return false;
                 }
-                IrValueId expected = c_ir_emit_load_place_raw(builder, expected_place, expected_type, source);
-                IrValueId desired = IR_VALUE_ID_INVALID;
-                if (expected.value == IR_ID_UNDERLYING_INVALID || !c_ir_lower_expression(builder, starts[2], ends[2], &desired))
+                IrValueId expected = continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED
+                                         ? frame->as.prepared_call.state->first
+                                         : c_ir_emit_load_place_raw(builder, expected_place, expected_type, source);
+                if (expected.value == IR_ID_UNDERLYING_INVALID)
                 {
                     return false;
+                }
+                IrValueId desired = IR_VALUE_ID_INVALID;
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED)
+                {
+                    if (!child_success)
+                    {
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    desired = child_value;
+                }
+                else
+                {
+                    frame->as.prepared_call.state->first = expected;
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED, starts[2], ends[2], false);
                 }
                 desired = c_ir_emit_cast(builder, desired, atomic->unqualified_type, source);
                 if (desired.value == IR_ID_UNDERLYING_INVALID)
@@ -16566,9 +17872,17 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             else
             {
                 IrValueId value = IR_VALUE_ID_INVALID;
-                if (!c_ir_lower_expression(builder, starts[1], ends[1], &value))
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_VALUE)
                 {
-                    return false;
+                    if (!child_success)
+                    {
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    value = child_value;
+                }
+                else
+                {
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_VALUE, starts[1], ends[1], false);
                 }
                 bool pointer_arithmetic = unqualified->kind == IR_TYPE_POINTER && (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_ADD ||
                                                                                    selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT);
@@ -16637,8 +17951,23 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             u32 argument_start = selected->open_index + 1;
             u32 argument_end = selected->close_index;
             IrValueId operand = IR_VALUE_ID_INVALID;
-            if (argument_start >= argument_end || !c_ir_lower_expression(builder, argument_start, argument_end, &operand) ||
-                operand.value >= builder->function->value_count)
+            if (argument_start >= argument_end)
+            {
+                return false;
+            }
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_UNARY)
+            {
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                operand = child_value;
+            }
+            else
+            {
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_UNARY, argument_start, argument_end, false);
+            }
+            if (operand.value >= builder->function->value_count)
             {
                 return false;
             }
@@ -16697,9 +18026,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             {
                 IrValueId argument = IR_VALUE_ID_INVALID;
                 u32 declaration_index = c_ir_find_function(builder, S8("strlen"));
-                if (argument_start >= argument_end || !c_ir_lower_expression(builder, argument_start, argument_end, &argument))
+                if (argument_start >= argument_end)
                 {
                     return false;
+                }
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_STRLEN)
+                {
+                    if (!child_success)
+                    {
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    argument = child_value;
+                }
+                else
+                {
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_STRLEN, argument_start, argument_end, false);
                 }
                 selected->result = c_ir_emit_call_values(builder, token, declaration_index, &argument, 1);
                 if (selected->result.value == IR_ID_UNDERLYING_INVALID)
@@ -16754,10 +18095,32 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             }
             IrValueId first = IR_VALUE_ID_INVALID;
             IrValueId second = IR_VALUE_ID_INVALID;
-            if (separator == argument_start || separator + 1 >= selected->close_index || !c_ir_lower_expression(builder, argument_start, separator, &first) ||
-                !c_ir_lower_expression(builder, separator + 1, selected->close_index, &second))
+            if (separator == argument_start || separator + 1 >= selected->close_index)
             {
                 return false;
+            }
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_CLEAR_SECOND)
+            {
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                first = frame->as.prepared_call.state->first;
+                second = child_value;
+            }
+            else if (continuation == C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST)
+            {
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                frame->as.prepared_call.state->first = child_value;
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CLEAR_SECOND, separator + 1,
+                                                             selected->close_index, false);
+            }
+            else
+            {
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST, argument_start, separator, false);
             }
             IrInstruction clear = c_ir_instruction_initialize(IR_OPCODE_CLEAR_INSTRUCTION_CACHE, builder->void_type,
                                                               c_ir_source_range(token.location, token.spelling.length));
@@ -16795,10 +18158,23 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 }
             }
             IrValueId address = IR_VALUE_ID_INVALID;
-            if (first_end == argument_start || !c_ir_lower_expression(builder, argument_start, first_end, &address))
+            if (first_end == argument_start)
             {
                 return false;
             }
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_PREFETCH)
+            {
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                address = child_value;
+            }
+            else
+            {
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_PREFETCH, argument_start, first_end, false);
+            }
+            (void)address;
             // The read/write and locality arguments are required to be integer
             // constants, so discarding them cannot lose a side effect.
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
@@ -16857,10 +18233,22 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             if (selected->builtin_va_end)
             {
                 IrValueId list = IR_VALUE_ID_INVALID;
-                if (argument_start >= selected->close_index || separator != selected->close_index ||
-                    !c_ir_lower_va_list_expression(builder, argument_start, selected->close_index, &list))
+                if (argument_start >= selected->close_index || separator != selected->close_index)
                 {
                     return false;
+                }
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_END)
+                {
+                    if (!child_success)
+                    {
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    list = child_value;
+                }
+                else
+                {
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_END, argument_start,
+                                                                 selected->close_index, true);
                 }
                 IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_VA_END, builder->void_type, source);
                 instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
@@ -16887,17 +18275,32 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 {
                     return false;
                 }
+                IrValueId source_list = IR_VALUE_ID_INVALID;
+                if (selected->builtin_va_copy)
+                {
+                    if (separator + 1 >= selected->close_index)
+                    {
+                        return false;
+                    }
+                    if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_COPY)
+                    {
+                        if (!child_success)
+                        {
+                            return C_IR_PREPARED_CALL_STEP_FAILED;
+                        }
+                        source_list = child_value;
+                    }
+                    else
+                    {
+                        return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_COPY, separator + 1,
+                                                                     selected->close_index, true);
+                    }
+                }
                 IrValueId result = c_ir_add_result(builder, local->type);
                 IrInstruction instruction =
                     c_ir_instruction_initialize(selected->builtin_va_start ? IR_OPCODE_VA_START : IR_OPCODE_VA_COPY, local->type, source);
                 if (selected->builtin_va_copy)
                 {
-                    IrValueId source_list = IR_VALUE_ID_INVALID;
-                    if (separator + 1 >= selected->close_index ||
-                        !c_ir_lower_va_list_expression(builder, separator + 1, selected->close_index, &source_list))
-                    {
-                        return false;
-                    }
                     instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
                     instruction.operands[0] = source_list;
                     instruction.operand_count = 1;
@@ -16948,10 +18351,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
             }
             IrValueId list = IR_VALUE_ID_INVALID;
             IrTypeId result_type = separator < selected->close_index ? c_ir_type_name(builder, separator + 1, selected->close_index) : IR_TYPE_ID_INVALID;
-            if (separator == argument_start || separator >= selected->close_index || result_type.value == IR_ID_UNDERLYING_INVALID ||
-                !c_ir_lower_va_list_expression(builder, argument_start, separator, &list))
+            if (separator == argument_start || separator >= selected->close_index || result_type.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
+            }
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_ARG)
+            {
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                list = child_value;
+            }
+            else
+            {
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_ARG, argument_start, separator, true);
             }
             selected->result = c_ir_add_result(builder, result_type);
             IrInstruction instruction =
@@ -17007,10 +18421,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                     break;
                 }
             }
-            if (first_end == argument_start || first_end == selected->close_index ||
-                !c_ir_lower_expression(builder, argument_start, first_end, &selected->result))
+            if (first_end == argument_start || first_end == selected->close_index)
             {
                 return false;
+            }
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_IDENTITY)
+            {
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                selected->result = child_value;
+            }
+            else
+            {
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_IDENTITY, argument_start, first_end, false);
             }
             selected->argument_count = 1;
             selected->emitted = true;
@@ -17019,11 +18444,23 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
         }
         if (selected->builtin_math_link_name.length)
         {
-            selected->arguments = arena_allocate(builder->arena, IrValueId, selected->close_index - selected->token_index);
-            u32 argument_count = 0;
-            u32 argument_start = selected->open_index + 1;
+            u32 argument_count = frame->as.prepared_call.state->argument_count;
             u32 argument_end = selected->close_index;
-            u32 argument_index = argument_start;
+            u32 argument_index = selected->open_index + 1;
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_MATH_ARGUMENT)
+            {
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                selected->arguments[argument_count++] = child_value;
+                argument_index = frame->as.prepared_call.state->separator + 1;
+            }
+            else
+            {
+                selected->arguments = arena_allocate(builder->arena, IrValueId, selected->close_index - selected->token_index);
+                argument_count = 0;
+            }
             while (argument_index < argument_end)
             {
                 u32 separator = argument_index;
@@ -17063,12 +18500,13 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                     }
                     separator += 1;
                 }
-                if (separator == argument_index || !c_ir_lower_expression(builder, argument_index, separator, &selected->arguments[argument_count]))
+                if (separator == argument_index)
                 {
                     return false;
                 }
-                argument_count += 1;
-                argument_index = separator + 1;
+                frame->as.prepared_call.state->argument_count = argument_count;
+                frame->as.prepared_call.state->separator = separator;
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_MATH_ARGUMENT, argument_index, separator, false);
             }
             selected->argument_count = argument_count;
             selected->result = c_ir_emit_math_call(builder, token, selected->builtin_math_link_name, selected->arguments, argument_count);
@@ -17139,47 +18577,62 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
         if (selected->indirect)
         {
             IrValueId callee = IR_VALUE_ID_INVALID;
-            if (selected->parenthesized_callee)
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT)
             {
-                if (!c_ir_lower_expression(builder, selected->token_index + 1, selected->open_index - 1, &callee))
+                indirect_callee = frame->as.prepared_call.state->indirect_callee;
+                signature = frame->as.prepared_call.state->signature;
+            }
+            else
+            {
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE)
+                {
+                    if (!child_success)
+                    {
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    callee = child_value;
+                }
+                else
+                {
+                    u32 callee_start = selected->parenthesized_callee ? selected->token_index + 1 : selected->token_index;
+                    u32 callee_end = selected->parenthesized_callee ? selected->open_index - 1 : selected->open_index;
+                    if (selected->parenthesized_callee)
+                    {
+                        return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start,
+                                                                     callee_end, false);
+                    }
+                    return c_ir_prepared_call_request_place(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start, callee_end);
+                }
+                if (callee.value >= builder->function->value_count)
                 {
                     builder->failure_token_index = selected->open_index;
                     return false;
                 }
+                IrTypeId pointer_type_id = builder->function->values[callee.value].canonical_type;
+                IrType* pointer_type = ir_type_from_id(&builder->program->types, pointer_type_id);
+                IrType* function_type =
+                    pointer_type && pointer_type->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, pointer_type->element_type) : 0;
+                IrType* return_type =
+                    function_type && function_type->kind == IR_TYPE_FUNCTION ? ir_type_from_id(&builder->program->types, function_type->return_type) : 0;
+                if (!function_type || !return_type)
+                {
+                    builder->failure_token_index = selected->open_index - 1;
+                    return false;
+                }
+                indirect_callee = builder->function->values[callee.value].category == IR_VALUE_PLACE
+                                      ? c_ir_emit_load_place(builder, callee, pointer_type_id,
+                                                             c_ir_source_range(token.location, token.spelling.length))
+                                      : callee;
+                signature = (CIrSignature){
+                    .parameter_types = function_type->parameter_types,
+                    .return_type = function_type->return_type,
+                    .parameter_count = function_type->parameter_count,
+                    .valid = true,
+                    .body_supported = true,
+                    .returns_void = return_type->kind == IR_TYPE_VOID,
+                    .is_variadic = function_type->is_variadic,
+                };
             }
-            else
-            {
-                callee = c_ir_emit_simple_place_expression(builder, selected->token_index, selected->open_index);
-            }
-            if (callee.value >= builder->function->value_count)
-            {
-                builder->failure_token_index = selected->open_index;
-                return false;
-            }
-            IrTypeId pointer_type_id = builder->function->values[callee.value].canonical_type;
-            IrType* pointer_type = ir_type_from_id(&builder->program->types, pointer_type_id);
-            IrType* function_type =
-                pointer_type && pointer_type->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, pointer_type->element_type) : 0;
-            IrType* return_type =
-                function_type && function_type->kind == IR_TYPE_FUNCTION ? ir_type_from_id(&builder->program->types, function_type->return_type) : 0;
-            if (!function_type || !return_type)
-            {
-                builder->failure_token_index = selected->open_index - 1;
-                return false;
-            }
-            indirect_callee = builder->function->values[callee.value].category == IR_VALUE_PLACE
-                                  ? c_ir_emit_load_place(builder, callee, pointer_type_id,
-                                                         c_ir_source_range(token.location, token.spelling.length))
-                                  : callee;
-            signature = (CIrSignature){
-                .parameter_types = function_type->parameter_types,
-                .return_type = function_type->return_type,
-                .parameter_count = function_type->parameter_count,
-                .valid = true,
-                .body_supported = true,
-                .returns_void = return_type->kind == IR_TYPE_VOID,
-                .is_variadic = function_type->is_variadic,
-            };
         }
         else
         {
@@ -17195,11 +18648,68 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
         {
             return false;
         }
-        selected->arguments = arena_allocate(builder->arena, IrValueId, selected->close_index - selected->token_index);
-        u32 argument_start = selected->open_index + 1;
+        if (continuation != C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT)
+        {
+            selected->arguments = arena_allocate(builder->arena, IrValueId, selected->close_index - selected->token_index);
+            frame->as.prepared_call.state->argument_count = 0;
+            frame->as.prepared_call.state->argument_index = selected->open_index + 1;
+            frame->as.prepared_call.state->declaration_index = declaration_index;
+            frame->as.prepared_call.state->indirect_callee = indirect_callee;
+            frame->as.prepared_call.state->signature = signature;
+        }
+        else
+        {
+            declaration_index = frame->as.prepared_call.state->declaration_index;
+            indirect_callee = frame->as.prepared_call.state->indirect_callee;
+            signature = frame->as.prepared_call.state->signature;
+        }
         u32 argument_end = selected->close_index;
-        u32 argument_count = 0;
-        u32 index = argument_start;
+        u32 argument_count = frame->as.prepared_call.state->argument_count;
+        u32 index = frame->as.prepared_call.state->argument_index;
+        if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT)
+        {
+            if (!child_success)
+            {
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            }
+            IrValueId value = child_value;
+            IrSourceRange source =
+                c_ir_source_range(builder->preprocess.tokens[index].location, builder->preprocess.tokens[index].spelling.length);
+            if (argument_count < signature.parameter_count)
+            {
+                value = c_ir_decay_array(builder, value, signature.parameter_types[argument_count], source);
+                value = c_ir_emit_cast(builder, value, signature.parameter_types[argument_count], source);
+            }
+            else
+            {
+                IrTypeId value_type_id = builder->function->values[value.value].canonical_type;
+                IrType* value_type = ir_type_from_id(&builder->program->types, value_type_id);
+                if (!value_type)
+                {
+                    return false;
+                }
+                if (value_type->kind == IR_TYPE_ARRAY)
+                {
+                    IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, value_type->element_type);
+                    value = c_ir_decay_array(builder, value, pointer_type, source);
+                }
+                else if (value_type->kind == IR_TYPE_FLOAT && value_type->bit_width < 64)
+                {
+                    value = c_ir_emit_cast(builder, value, builder->f64_type, source);
+                }
+                else if (value_type->kind == IR_TYPE_BOOLEAN || value_type->kind == IR_TYPE_ENUM ||
+                         (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width < 32))
+                {
+                    value = c_ir_emit_cast(builder, value, builder->s32_type, source);
+                }
+            }
+            if (value.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+            selected->arguments[argument_count++] = value;
+            index = frame->as.prepared_call.state->separator + 1;
+        }
         while (index < argument_end)
         {
             u32 separator = index;
@@ -17244,47 +18754,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
                 builder->failure_token_index = separator < argument_end ? separator : selected->open_index;
                 return false;
             }
-            IrValueId value = IR_VALUE_ID_INVALID;
-            if (!c_ir_lower_expression(builder, index, separator, &value))
-            {
-                return false;
-            }
-            IrSourceRange source =
-                c_ir_source_range(builder->preprocess.tokens[index].location, builder->preprocess.tokens[index].spelling.length);
-            if (argument_count < signature.parameter_count)
-            {
-                value = c_ir_decay_array(builder, value, signature.parameter_types[argument_count], source);
-                value = c_ir_emit_cast(builder, value, signature.parameter_types[argument_count], source);
-            }
-            else
-            {
-                IrTypeId value_type_id = builder->function->values[value.value].canonical_type;
-                IrType* value_type = ir_type_from_id(&builder->program->types, value_type_id);
-                if (!value_type)
-                {
-                    return false;
-                }
-                if (value_type->kind == IR_TYPE_ARRAY)
-                {
-                    IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, value_type->element_type);
-                    value = c_ir_decay_array(builder, value, pointer_type, source);
-                }
-                else if (value_type->kind == IR_TYPE_FLOAT && value_type->bit_width < 64)
-                {
-                    value = c_ir_emit_cast(builder, value, builder->f64_type, source);
-                }
-                else if (value_type->kind == IR_TYPE_BOOLEAN || value_type->kind == IR_TYPE_ENUM ||
-                         (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width < 32))
-                {
-                    value = c_ir_emit_cast(builder, value, builder->s32_type, source);
-                }
-            }
-            if (value.value == IR_ID_UNDERLYING_INVALID)
-            {
-                return false;
-            }
-            selected->arguments[argument_count++] = value;
-            index = separator + 1;
+            frame->as.prepared_call.state->argument_count = argument_count;
+            frame->as.prepared_call.state->argument_index = index;
+            frame->as.prepared_call.state->separator = separator;
+            return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT, index, separator, false);
         }
         selected->argument_count = argument_count;
         if (selected->indirect)
@@ -17322,21 +18795,65 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_impl(CIntegerIrBuilder* builder, u32
         }
         selected->emitted = true;
         remaining -= 1;
-    }
+    } while (false);
     BUSTER_CHECK(!remaining);
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_GLOBAL_LOCAL void c_ir_prepare_calls_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
-    if (builder->preparing_calls)
+    CIrLowerMachine* machine = &builder->lower_machine;
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        return true;
+        frame->as.prepare_calls.previous_preparing_calls = builder->preparing_calls;
+        if (builder->preparing_calls)
+        {
+            c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
+            return;
+        }
+        builder->preparing_calls = true;
+        if (!c_ir_prepare_calls_discover(builder, frame->as.prepare_calls.start, frame->as.prepare_calls.end,
+                                         &frame->as.prepare_calls.emission_order, &frame->as.prepare_calls.emission_count))
+        {
+            builder->preparing_calls = frame->as.prepare_calls.previous_preparing_calls;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.prepare_calls.emission_index = 0;
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
     }
-    builder->preparing_calls = true;
-    bool result = c_ir_prepare_calls_impl(builder, start, end);
-    builder->preparing_calls = false;
-    return result;
+    else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        if (!machine->child_result.success)
+        {
+            builder->preparing_calls = frame->as.prepare_calls.previous_preparing_calls;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.prepare_calls.emission_index += 1;
+    }
+    if (frame->as.prepare_calls.emission_index >= frame->as.prepare_calls.emission_count)
+    {
+        builder->preparing_calls = frame->as.prepare_calls.previous_preparing_calls;
+        c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
+        return;
+    }
+    u32 call_index = frame->as.prepare_calls.emission_order[frame->as.prepare_calls.emission_index];
+    CIrPreparedCallState* state = arena_allocate(builder->temporary_arena, CIrPreparedCallState, 1);
+    *state = (CIrPreparedCallState){0};
+    frame->stage = C_IR_LOWER_STAGE_CHILD;
+    if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                            .kind = C_IR_LOWER_FRAME_PREPARED_CALL,
+                                            .as.prepared_call =
+                                                {
+                                                    .state = state,
+                                                    .call_index = call_index,
+                                                },
+                                        }))
+    {
+        builder->preparing_calls = frame->as.prepare_calls.previous_preparing_calls;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_operation(CConditionalOperator operation, IrUnaryOperation* unary, IrBinaryOperation* binary)
@@ -18434,16 +19951,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CCondi
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_emit_place_update(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, CConditionalOperator operation, IrValueId right,
-                                                IrSourceRange source);
-
-BUSTER_GLOBAL_LOCAL bool c_ir_emit_local_update(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CToken name, CConditionalOperator operation,
-                                                IrValueId right, IrSourceRange source)
-{
-    (void)name;
-    return c_ir_emit_place_update(builder, local->place, local->type, operation, right, source);
-}
-
 BUSTER_GLOBAL_LOCAL bool c_ir_atomic_operation(CConditionalOperator operation, IrAtomicOperation* atomic_operation)
 {
     switch (operation)
@@ -18542,12 +20049,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builde
         *result_out = values[0];
     }
     return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool c_ir_emit_place_update(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, CConditionalOperator operation, IrValueId right,
-                                                IrSourceRange source)
-{
-    return c_ir_emit_compound_assignment(builder, place, type, operation, right, source, 0, 0);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_compound_assignment_operator(CToken token, CConditionalOperator* operation)
@@ -19221,50 +20722,84 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, I
 
 BUSTER_GLOBAL_LOCAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
-BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilder* builder, IrTypeId root_type, u32 root_open, u32 root_close)
+BUSTER_GLOBAL_LOCAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
-    typedef struct CIrInitializerTask CIrInitializerTask;
-    struct CIrInitializerTask
+    CIrLowerMachine* machine = &builder->lower_machine;
+    if (frame->stage == C_IR_LOWER_STAGE_CHILD)
     {
-        IrValueId place;
-        IrTypeId type;
-        u32 open;
-        u32 close;
-    };
-    CToken root_token = builder->preprocess.tokens[root_open];
-    IrValueId initial = c_ir_emit_zero_value(builder, root_type, root_token);
-    IrValueId root_place = c_ir_emit_temporary(builder, root_type, c_ir_source_range(root_token.location, root_token.spelling.length));
-    if (initial.value == IR_ID_UNDERLYING_INVALID || root_place.value == IR_ID_UNDERLYING_INVALID ||
-        !c_ir_emit_store_place(builder, root_place, root_type, initial, c_ir_source_range(root_token.location, root_token.spelling.length)))
-    {
-        if (!builder->failure_message.length)
+        bool stored = machine->child_result.success &&
+                      c_ir_emit_store_place(builder, frame->as.nested_compound_literal.state->child_place,
+                                            frame->as.nested_compound_literal.state->child_type, machine->child_result.value,
+                                            frame->as.nested_compound_literal.state->source);
+        if (!stored)
         {
-            builder->failure_message = initial.value == IR_ID_UNDERLYING_INVALID      ? S8("could not construct zero aggregate initializer")
-                                       : root_place.value == IR_ID_UNDERLYING_INVALID ? S8("could not allocate aggregate initializer storage")
-                                                                                      : S8("could not store the zero aggregate initializer");
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
-        return IR_VALUE_ID_INVALID;
+        if (!frame->as.nested_compound_literal.state->promoted_designator)
+        {
+            frame->as.nested_compound_literal.state->next_index = frame->as.nested_compound_literal.state->selected_index + 1;
+        }
+        frame->as.nested_compound_literal.state->item_start = frame->as.nested_compound_literal.state->index + 1;
+        frame->as.nested_compound_literal.state->index += 1;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
-    u32 capacity = root_close - root_open + 1;
-    CIrInitializerTask* tasks = arena_allocate(builder->temporary_arena, CIrInitializerTask, capacity);
-    u32 task_count = 1;
-    tasks[0] = (CIrInitializerTask){
-        .place = root_place,
-        .type = root_type,
-        .open = root_open,
-        .close = root_close,
-    };
-    while (task_count)
+    else if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        CIrInitializerTask task = tasks[--task_count];
+        u32 root_open = frame->as.nested_compound_literal.state->root_open;
+        u32 root_close = frame->as.nested_compound_literal.state->root_close;
+        IrTypeId root_type = frame->as.nested_compound_literal.state->root_type;
+        CToken root_token = builder->preprocess.tokens[root_open];
+        IrSourceRange root_source = c_ir_source_range(root_token.location, root_token.spelling.length);
+        IrValueId initial = c_ir_emit_zero_value(builder, root_type, root_token);
+        IrValueId root_place = c_ir_emit_temporary(builder, root_type, root_source);
+        if (initial.value == IR_ID_UNDERLYING_INVALID || root_place.value == IR_ID_UNDERLYING_INVALID ||
+            !c_ir_emit_store_place(builder, root_place, root_type, initial, root_source))
+        {
+            if (!builder->failure_message.length)
+            {
+                builder->failure_message = initial.value == IR_ID_UNDERLYING_INVALID      ? S8("could not construct zero aggregate initializer")
+                                           : root_place.value == IR_ID_UNDERLYING_INVALID ? S8("could not allocate aggregate initializer storage")
+                                                                                          : S8("could not store the zero aggregate initializer");
+            }
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        u32 capacity = root_close - root_open + 1;
+        frame->as.nested_compound_literal.state->tasks = arena_allocate(builder->temporary_arena, CIrNestedInitializerTask, capacity);
+        frame->as.nested_compound_literal.state->tasks[0] = (CIrNestedInitializerTask){
+            .place = root_place,
+            .type = root_type,
+            .open = root_open,
+            .close = root_close,
+        };
+        frame->as.nested_compound_literal.state->root_place = root_place;
+        frame->as.nested_compound_literal.state->capacity = capacity;
+        frame->as.nested_compound_literal.state->task_count = 1;
+        frame->as.nested_compound_literal.state->task_active = false;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    while (frame->as.nested_compound_literal.state->task_active || frame->as.nested_compound_literal.state->task_count)
+    {
+        if (!frame->as.nested_compound_literal.state->task_active)
+        {
+            frame->as.nested_compound_literal.state->task =
+                frame->as.nested_compound_literal.state->tasks[--frame->as.nested_compound_literal.state->task_count];
+            frame->as.nested_compound_literal.state->next_index = 0;
+            frame->as.nested_compound_literal.state->item_start = frame->as.nested_compound_literal.state->task.open + 1;
+            frame->as.nested_compound_literal.state->index = frame->as.nested_compound_literal.state->item_start;
+            frame->as.nested_compound_literal.state->task_active = true;
+        }
+        CIrNestedInitializerTask task = frame->as.nested_compound_literal.state->task;
         IrType* type = ir_type_from_id(&builder->program->types, task.type);
         if (!type || (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION) || task.open >= task.close)
         {
-            return IR_VALUE_ID_INVALID;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
-        u32 next_index = 0;
-        u32 item_start = task.open + 1;
-        u32 index = item_start;
+        u32 next_index = frame->as.nested_compound_literal.state->next_index;
+        u32 item_start = frame->as.nested_compound_literal.state->item_start;
+        u32 index = frame->as.nested_compound_literal.state->index;
         u32 parentheses = 0;
         u32 brackets = 0;
         u32 braces = 0;
@@ -19308,7 +20843,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
                 {
                     break;
                 }
-                return IR_VALUE_ID_INVALID;
+                goto c_ir_nested_compound_failed;
             }
             u32 selected_index = next_index;
             u32 value_start = item_start;
@@ -19322,14 +20857,14 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
                 u64 designated = UINT64_MAX;
                 if (close >= index || close + 1 >= index || !c_token_is_punctuator(builder->preprocess.tokens[close + 1], S8("=")) || close != item_start + 2)
                 {
-                    return IR_VALUE_ID_INVALID;
+                    goto c_ir_nested_compound_failed;
                 }
                 CToken designator = builder->preprocess.tokens[item_start + 1];
                 if (designator.kind == C_TOKEN_PREPROCESSING_NUMBER)
                 {
                     if (!c_conditional_number(designator.spelling, &designated))
                     {
-                        return IR_VALUE_ID_INVALID;
+                        goto c_ir_nested_compound_failed;
                     }
                 }
                 else if (designator.kind == C_TOKEN_IDENTIFIER)
@@ -19338,13 +20873,13 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
                     if (entity.value >= builder->parse.entity_count || builder->parse.entities[entity.value].kind != C_ENTITY_ENUMERATOR ||
                         builder->parse.entities[entity.value].constant_is_negative)
                     {
-                        return IR_VALUE_ID_INVALID;
+                        goto c_ir_nested_compound_failed;
                     }
                     designated = builder->parse.entities[entity.value].constant_value;
                 }
                 if (designated > UINT32_MAX)
                 {
-                    return IR_VALUE_ID_INVALID;
+                    goto c_ir_nested_compound_failed;
                 }
                 selected_index = (u32)designated;
                 value_start = close + 2;
@@ -19353,7 +20888,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
             {
                 if (item_start + 2 >= index || builder->preprocess.tokens[item_start + 1].kind != C_TOKEN_IDENTIFIER)
                 {
-                    return IR_VALUE_ID_INVALID;
+                    goto c_ir_nested_compound_failed;
                 }
                 selected_index = type->field_count;
                 for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
@@ -19379,14 +20914,14 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
                 }
                 if (designator_equals >= index || !c_token_is_punctuator(builder->preprocess.tokens[designator_equals], S8("=")))
                 {
-                    return IR_VALUE_ID_INVALID;
+                    goto c_ir_nested_compound_failed;
                 }
                 value_start = designator_equals + 1;
             }
             u64 child_count = type->kind == IR_TYPE_ARRAY ? type->element_count : type->field_count;
             if ((!promoted_designator && selected_index >= child_count) || value_start >= index)
             {
-                return IR_VALUE_ID_INVALID;
+                goto c_ir_nested_compound_failed;
             }
             IrTypeId child_type = promoted_designator           ? IR_TYPE_ID_INVALID
                                   : type->kind == IR_TYPE_ARRAY ? type->element_type
@@ -19429,7 +20964,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
             }
             if (child_place.value == IR_ID_UNDERLYING_INVALID)
             {
-                return child_place;
+                goto c_ir_nested_compound_failed;
             }
             for (u32 designator = nested_designator_start; designator < designator_equals; designator += 2)
             {
@@ -19437,7 +20972,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
                     c_ir_emit_field_place_from_value(builder, child_place, builder->preprocess.tokens[designator], builder->preprocess.tokens[designator + 1]);
                 if (child_place.value >= builder->function->value_count)
                 {
-                    return IR_VALUE_ID_INVALID;
+                    goto c_ir_nested_compound_failed;
                 }
                 child_type = builder->function->values[child_place.value].canonical_type;
             }
@@ -19448,11 +20983,11 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
                           c_ir_matching_delimiter_cached(builder, value_start, index, S8("{"), S8("}")) == index - 1;
             if (nested)
             {
-                if (task_count >= capacity)
+                if (frame->as.nested_compound_literal.state->task_count >= frame->as.nested_compound_literal.state->capacity)
                 {
-                    return IR_VALUE_ID_INVALID;
+                    goto c_ir_nested_compound_failed;
                 }
-                tasks[task_count++] = (CIrInitializerTask){
+                frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = (CIrNestedInitializerTask){
                     .place = child_place,
                     .type = child_type,
                     .open = value_start,
@@ -19470,12 +21005,27 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
                     scalar_start += 1;
                     scalar_end -= 1;
                 }
-                IrValueId value = IR_VALUE_ID_INVALID;
-                if (!c_ir_lower_expression(builder, scalar_start, scalar_end, &value) ||
-                    !c_ir_emit_store_place(builder, child_place, child_type, value, source))
+                frame->as.nested_compound_literal.state->child_place = child_place;
+                frame->as.nested_compound_literal.state->child_type = child_type;
+                frame->as.nested_compound_literal.state->source = source;
+                frame->as.nested_compound_literal.state->item_start = item_start;
+                frame->as.nested_compound_literal.state->index = index;
+                frame->as.nested_compound_literal.state->next_index = next_index;
+                frame->as.nested_compound_literal.state->selected_index = selected_index;
+                frame->as.nested_compound_literal.state->promoted_designator = promoted_designator;
+                frame->stage = C_IR_LOWER_STAGE_CHILD;
+                if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                        .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                        .as.expression =
+                                                            {
+                                                                .start = scalar_start,
+                                                                .end = scalar_end,
+                                                            },
+                                                    }))
                 {
-                    return IR_VALUE_ID_INVALID;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 }
+                return;
             }
             if (!promoted_designator)
             {
@@ -19484,79 +21034,201 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_nested_compound_literal(CIntegerIrBuilde
             item_start = index + 1;
             index += 1;
         }
+        frame->as.nested_compound_literal.state->task_active = false;
     }
-    return c_ir_emit_load_place(builder, root_place, root_type, c_ir_source_range(root_token.location, root_token.spelling.length));
+    {
+        CToken root_token = builder->preprocess.tokens[frame->as.nested_compound_literal.state->root_open];
+        IrValueId result = c_ir_emit_load_place(builder, frame->as.nested_compound_literal.state->root_place,
+                                                frame->as.nested_compound_literal.state->root_type,
+                                                c_ir_source_range(root_token.location, root_token.spelling.length));
+        c_ir_lower_frame_finish(builder, result.value != IR_ID_UNDERLYING_INVALID, result);
+        return;
+    }
+c_ir_nested_compound_failed:
+    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
 }
 
-BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* builder, IrTypeId type_id, u32 open, u32 close)
+BUSTER_GLOBAL_LOCAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
+    CIrLowerMachine* machine = &builder->lower_machine;
+    IrTypeId type_id = frame->as.compound_literal_machine.type;
+    u32 open = frame->as.compound_literal_machine.open;
+    u32 close = frame->as.compound_literal_machine.close;
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
-    if (!type || open >= close)
+    if (frame->stage == C_IR_LOWER_STAGE_CHILD)
     {
-        return IR_VALUE_ID_INVALID;
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (frame->as.compound_literal_machine.continuation == C_IR_COMPOUND_CONTINUATION_NESTED)
+        {
+            c_ir_lower_frame_finish(builder, true, machine->child_result.value);
+            return;
+        }
+        if (frame->as.compound_literal_machine.continuation == C_IR_COMPOUND_CONTINUATION_SCALAR)
+        {
+            IrValueId value = c_ir_emit_cast(builder, machine->child_result.value, type_id, frame->as.compound_literal_machine.source);
+            c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+            return;
+        }
+        if (frame->as.compound_literal_machine.continuation != C_IR_COMPOUND_CONTINUATION_ITEM)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        IrValueId value = c_ir_decay_array(builder, machine->child_result.value, frame->as.compound_literal_machine.child_type,
+                                           frame->as.compound_literal_machine.source);
+        value = c_ir_emit_cast(builder, value, frame->as.compound_literal_machine.child_type, frame->as.compound_literal_machine.source);
+        if (value.value == IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        u32 field_index = frame->as.compound_literal_machine.field_index;
+        if (type && type->kind == IR_TYPE_ARRAY)
+        {
+            frame->as.compound_literal_machine.operands[field_index] = value;
+        }
+        else
+        {
+            frame->as.compound_literal_machine.operands[frame->as.compound_literal_machine.operand_count] = value;
+            frame->as.compound_literal_machine.fields[frame->as.compound_literal_machine.operand_count] = field_index;
+        }
+        frame->as.compound_literal_machine.initialized[field_index] = true;
+        frame->as.compound_literal_machine.operand_count += 1;
+        frame->as.compound_literal_machine.next_field = field_index + 1;
+        frame->as.compound_literal_machine.index = frame->as.compound_literal_machine.item_end + 1;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
-    if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION)
+    else if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        IrValueId value = IR_VALUE_ID_INVALID;
+        if (!type || open >= close)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
         IrSourceRange source = c_ir_source_range(builder->preprocess.tokens[open].location, builder->preprocess.tokens[open].spelling.length);
-        if (open + 1 >= close || !c_ir_lower_expression(builder, open + 1, close, &value))
+        frame->as.compound_literal_machine.source = source;
+        if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION)
         {
-            return IR_VALUE_ID_INVALID;
-        }
-        return c_ir_emit_cast(builder, value, type_id, source);
-    }
-    for (u32 token_index = open + 1; token_index < close; token_index += 1)
-    {
-        if (c_token_is_punctuator(builder->preprocess.tokens[token_index], S8("{")) &&
-            (token_index == open + 1 || !c_token_is_punctuator(builder->preprocess.tokens[token_index - 1], S8(")"))))
-        {
-            return c_ir_emit_nested_compound_literal(builder, type_id, open, close);
-        }
-        if (token_index + 2 < close && c_token_is_punctuator(builder->preprocess.tokens[token_index], S8(".")) &&
-            builder->preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER &&
-            c_token_is_punctuator(builder->preprocess.tokens[token_index + 2], S8(".")))
-        {
-            return c_ir_emit_nested_compound_literal(builder, type_id, open, close);
-        }
-        if (token_index + 1 < close && type->kind != IR_TYPE_ARRAY && c_token_is_punctuator(builder->preprocess.tokens[token_index], S8(".")) &&
-            builder->preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER)
-        {
-            bool direct = false;
-            for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+            if (open + 1 >= close)
             {
-                if (string_equal(type->fields[field_index].name, builder->preprocess.tokens[token_index + 1].spelling))
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            frame->as.compound_literal_machine.continuation = C_IR_COMPOUND_CONTINUATION_SCALAR;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                    .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                    .as.expression =
+                                                        {
+                                                            .start = open + 1,
+                                                            .end = close,
+                                                        },
+                                                }))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
+        bool nested = false;
+        for (u32 token_index = open + 1; token_index < close; token_index += 1)
+        {
+            if (c_token_is_punctuator(builder->preprocess.tokens[token_index], S8("{")) &&
+                (token_index == open + 1 || !c_token_is_punctuator(builder->preprocess.tokens[token_index - 1], S8(")"))))
+            {
+                nested = true;
+                break;
+            }
+            if (token_index + 2 < close && c_token_is_punctuator(builder->preprocess.tokens[token_index], S8(".")) &&
+                builder->preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER &&
+                c_token_is_punctuator(builder->preprocess.tokens[token_index + 2], S8(".")))
+            {
+                nested = true;
+                break;
+            }
+            if (token_index + 1 < close && type->kind != IR_TYPE_ARRAY && c_token_is_punctuator(builder->preprocess.tokens[token_index], S8(".")) &&
+                builder->preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER)
+            {
+                bool direct = false;
+                for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
                 {
-                    direct = true;
+                    if (string_equal(type->fields[field_index].name, builder->preprocess.tokens[token_index + 1].spelling))
+                    {
+                        direct = true;
+                        break;
+                    }
+                }
+                if (!direct)
+                {
+                    nested = true;
                     break;
                 }
             }
-            if (!direct)
+        }
+        if (nested)
+        {
+            CIrNestedCompoundLiteralState* nested_state = arena_allocate(builder->temporary_arena, CIrNestedCompoundLiteralState, 1);
+            *nested_state = (CIrNestedCompoundLiteralState){
+                .root_type = type_id,
+                .root_open = open,
+                .root_close = close,
+            };
+            frame->as.compound_literal_machine.continuation = C_IR_COMPOUND_CONTINUATION_NESTED;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                    .kind = C_IR_LOWER_FRAME_NESTED_COMPOUND_LITERAL,
+                                                    .as.nested_compound_literal =
+                                                        {
+                                                            .state = nested_state,
+                                                        },
+                                                }))
             {
-                return c_ir_emit_nested_compound_literal(builder, type_id, open, close);
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
+        if (close == open + 2)
+        {
+            CToken token = builder->preprocess.tokens[open + 1];
+            u64 zero = 1;
+            if (token.kind == C_TOKEN_PREPROCESSING_NUMBER && c_conditional_number(token.spelling, &zero) && zero == 0)
+            {
+                IrValueId value = c_ir_emit_zero_value(builder, type_id, token);
+                c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+                return;
             }
         }
-    }
-    if (close == open + 2)
-    {
-        CToken token = builder->preprocess.tokens[open + 1];
-        u64 zero = 1;
-        if (token.kind == C_TOKEN_PREPROCESSING_NUMBER && c_conditional_number(token.spelling, &zero) && zero == 0)
+        if (type->kind == IR_TYPE_ARRAY && type->element_count > UINT32_MAX)
         {
-            return c_ir_emit_zero_value(builder, type_id, token);
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
+        u32 slot_count = type->kind == IR_TYPE_ARRAY ? (u32)type->element_count : type->field_count;
+        frame->as.compound_literal_machine.operands = arena_allocate(builder->arena, IrValueId, slot_count);
+        frame->as.compound_literal_machine.fields = arena_allocate(builder->arena, u64, slot_count);
+        frame->as.compound_literal_machine.initialized = arena_allocate(builder->arena, bool, slot_count);
+        memset(frame->as.compound_literal_machine.initialized, 0, sizeof(bool) * slot_count);
+        frame->as.compound_literal_machine.slot_count = slot_count;
+        frame->as.compound_literal_machine.operand_count = 0;
+        frame->as.compound_literal_machine.next_field = 0;
+        frame->as.compound_literal_machine.index = open + 1;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
-    if (type->kind == IR_TYPE_ARRAY && type->element_count > UINT32_MAX)
+    if (!type)
     {
-        return IR_VALUE_ID_INVALID;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
     }
-    u32 slot_count = type->kind == IR_TYPE_ARRAY ? (u32)type->element_count : type->field_count;
-    IrValueId* operands = arena_allocate(builder->arena, IrValueId, slot_count);
-    u64* fields = arena_allocate(builder->arena, u64, slot_count);
-    bool* initialized = arena_allocate(builder->arena, bool, slot_count);
-    memset(initialized, 0, sizeof(*initialized) * slot_count);
-    u32 operand_count = 0;
-    u32 next_field = 0;
-    u32 index = open + 1;
+    IrValueId* operands = frame->as.compound_literal_machine.operands;
+    u64* fields = frame->as.compound_literal_machine.fields;
+    bool* initialized = frame->as.compound_literal_machine.initialized;
+    u32 slot_count = frame->as.compound_literal_machine.slot_count;
+    u32 operand_count = frame->as.compound_literal_machine.operand_count;
+    u32 next_field = frame->as.compound_literal_machine.next_field;
+    u32 index = frame->as.compound_literal_machine.index;
     while (index < close)
     {
         u32 field_index = next_field;
@@ -19566,13 +21238,13 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* buil
             if (designator_close >= close || designator_close == index + 1 || designator_close + 1 >= close ||
                 !c_token_is_punctuator(builder->preprocess.tokens[designator_close + 1], S8("=")))
             {
-                return IR_VALUE_ID_INVALID;
+                goto c_ir_compound_literal_failed;
             }
             u64 designated_index = UINT64_MAX;
             if (!c_ir_integer_constant_evaluate(builder->arena, builder, index + 1, designator_close, &designated_index) ||
                 designated_index > UINT32_MAX)
             {
-                return IR_VALUE_ID_INVALID;
+                goto c_ir_compound_literal_failed;
             }
             field_index = (u32)designated_index;
             index = designator_close + 2;
@@ -19581,12 +21253,12 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* buil
         {
             if (type->kind == IR_TYPE_ARRAY)
             {
-                return IR_VALUE_ID_INVALID;
+                goto c_ir_compound_literal_failed;
             }
             if (index + 2 >= close || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER ||
                 !c_token_is_punctuator(builder->preprocess.tokens[index + 2], S8("=")))
             {
-                return IR_VALUE_ID_INVALID;
+                goto c_ir_compound_literal_failed;
             }
             field_index = type->field_count;
             for (u32 candidate = 0; candidate < type->field_count; candidate += 1)
@@ -19601,7 +21273,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* buil
         }
         if (field_index >= slot_count || initialized[field_index])
         {
-            return IR_VALUE_ID_INVALID;
+            goto c_ir_compound_literal_failed;
         }
         u32 end = index;
         u32 parentheses = 0;
@@ -19640,33 +21312,34 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* buil
             }
             end += 1;
         }
-        IrValueId value = IR_VALUE_ID_INVALID;
-        if (index == end || !c_ir_lower_expression(builder, index, end, &value))
+        if (index == end)
         {
-            return IR_VALUE_ID_INVALID;
+            goto c_ir_compound_literal_failed;
         }
         IrSourceRange source =
             c_ir_source_range(builder->preprocess.tokens[index].location, builder->preprocess.tokens[index].spelling.length);
         IrTypeId field_type = type->kind == IR_TYPE_ARRAY ? type->element_type : type->fields[field_index].type;
-        value = c_ir_decay_array(builder, value, field_type, source);
-        value = c_ir_emit_cast(builder, value, field_type, source);
-        if (value.value == IR_ID_UNDERLYING_INVALID)
+        frame->as.compound_literal_machine.index = index;
+        frame->as.compound_literal_machine.item_end = end;
+        frame->as.compound_literal_machine.field_index = field_index;
+        frame->as.compound_literal_machine.child_type = field_type;
+        frame->as.compound_literal_machine.source = source;
+        frame->as.compound_literal_machine.operand_count = operand_count;
+        frame->as.compound_literal_machine.next_field = next_field;
+        frame->as.compound_literal_machine.continuation = C_IR_COMPOUND_CONTINUATION_ITEM;
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                .as.expression =
+                                                    {
+                                                        .start = index,
+                                                        .end = end,
+                                                    },
+                                            }))
         {
-            return value;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         }
-        if (type->kind == IR_TYPE_ARRAY)
-        {
-            operands[field_index] = value;
-        }
-        else
-        {
-            operands[operand_count] = value;
-            fields[operand_count] = field_index;
-        }
-        initialized[field_index] = true;
-        operand_count += 1;
-        next_field = field_index + 1;
-        index = end + 1;
+        return;
     }
     if (type->kind == IR_TYPE_ARRAY)
     {
@@ -19677,7 +21350,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* buil
                 operands[element_index] = c_ir_emit_zero_value(builder, type->element_type, builder->preprocess.tokens[open]);
                 if (operands[element_index].value == IR_ID_UNDERLYING_INVALID)
                 {
-                    return IR_VALUE_ID_INVALID;
+                    goto c_ir_compound_literal_failed;
                 }
             }
         }
@@ -19694,14 +21367,14 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* buil
             operands[operand_count] = c_ir_emit_zero_value(builder, type->fields[field_index].type, builder->preprocess.tokens[open]);
             if (operands[operand_count].value == IR_ID_UNDERLYING_INVALID)
             {
-                return IR_VALUE_ID_INVALID;
+                goto c_ir_compound_literal_failed;
             }
             fields[operand_count++] = field_index;
         }
     }
     if (type->kind == IR_TYPE_UNION && operand_count > 1)
     {
-        return IR_VALUE_ID_INVALID;
+        goto c_ir_compound_literal_failed;
     }
     IrValueId result = c_ir_add_result(builder, type_id);
     IrInstruction instruction = c_ir_instruction_initialize(
@@ -19717,7 +21390,10 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_compound_literal(CIntegerIrBuilder* buil
     instruction.result = result;
     IrInstructionId instruction_id = c_ir_append_instruction(builder, instruction);
     builder->function->values[result.value].definition = instruction_id;
-    return result;
+    c_ir_lower_frame_finish(builder, true, result);
+    return;
+c_ir_compound_literal_failed:
+    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_promoted_member_type(CIntegerIrBuilder* builder, IrTypeId root, String8 member, IrTypeId* result)
@@ -20188,16 +21864,203 @@ BUSTER_GLOBAL_LOCAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u3
     return index;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, u32 start, u32 end, IrValueId* value_out)
+BUSTER_GLOBAL_LOCAL void c_ir_expression_core_save(CIrLowerFrame* frame, IrValueId* values, CConditionalOperator* operations,
+                                                    IrSourceRange* operation_sources, IrTypeId* operation_cast_types, u32 value_count,
+                                                    u32 operation_count, u32 index, bool expect_operand)
 {
-    if (start >= end || end > builder->preprocess.token_count)
+    CIrExpressionCoreState* state = frame->as.expression_core.state;
+    state->values = values;
+    state->operations = operations;
+    state->operation_sources = operation_sources;
+    state->operation_cast_types = operation_cast_types;
+    state->value_count = value_count;
+    state->operation_count = operation_count;
+    state->index = index;
+    state->expect_operand = expect_operand;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builder)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+    CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
+    BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_EXPRESSION_CORE);
+    CIrExpressionCoreState* state = frame->as.expression_core.state;
+    u32 start = frame->as.expression_core.start;
+    u32 end = frame->as.expression_core.end;
+    IrValueId* values = 0;
+    CConditionalOperator* operations = 0;
+    IrSourceRange* operation_sources = 0;
+    IrTypeId* operation_cast_types = 0;
+    u32 value_count = 0;
+    u32 operation_count = 0;
+    u32 index;
+    bool expect_operand;
+    if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_ROOT_UPDATE)
     {
-        return false;
+        IrValueId place = machine->child_result.value;
+        CToken update = builder->preprocess.tokens[state->pending_start];
+        if (!machine->child_result.success || place.value >= builder->function->value_count)
+        {
+            if (!builder->failure_message.length)
+            {
+                builder->failure_message = S8("increment or decrement operand is not a modifiable place");
+            }
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        IrTypeId type = builder->function->values[place.value].canonical_type;
+        IrSourceRange source = c_ir_source_range(update.location, update.spelling.length);
+        IrType* place_type = ir_type_from_id(&builder->program->types, type);
+        IrValueId previous = place_type && place_type->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
+        IrValueId value = previous.value < builder->function->value_count
+                              ? c_ir_emit_increment(builder, place, type, previous, update, state->pending_prefix)
+                              : IR_VALUE_ID_INVALID;
+        if (value.value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
+        {
+            builder->failure_message = S8("could not apply increment or decrement");
+        }
+        c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+        return;
     }
-    if (!c_ir_prepare_control_expressions(builder, start, end) || !c_ir_prepare_calls(builder, start, end))
+    if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE ||
+        frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_POSTFIX_UPDATE ||
+        frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_IDENTIFIER_PLACE ||
+        frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_COMPOUND_LITERAL)
     {
-        return false;
+        values = state->values;
+        operations = state->operations;
+        operation_sources = state->operation_sources;
+        operation_cast_types = state->operation_cast_types;
+        value_count = state->value_count;
+        operation_count = state->operation_count;
+        index = state->index;
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_COMPOUND_LITERAL)
+        {
+            IrValueId literal = machine->child_result.value;
+            IrValueId literal_place = c_ir_emit_temporary(builder, state->pending_type, state->pending_source);
+            if (literal.value == IR_ID_UNDERLYING_INVALID || literal_place.value == IR_ID_UNDERLYING_INVALID ||
+                !c_ir_emit_store_place(builder, literal_place, state->pending_type, literal, state->pending_source))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            literal = c_ir_emit_load_place(builder, literal_place, state->pending_type, state->pending_source);
+            if (literal.value == IR_ID_UNDERLYING_INVALID)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            values[value_count++] = literal;
+            expect_operand = false;
+            frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+            goto c_ir_expression_core_loop;
+        }
+        IrValueId place = machine->child_result.value;
+        if (place.value >= builder->function->value_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        IrTypeId type = builder->function->values[place.value].canonical_type;
+        IrType* place_type = ir_type_from_id(&builder->program->types, type);
+        CToken token = builder->preprocess.tokens[state->pending_start];
+        IrSourceRange source = c_ir_source_range(token.location, token.spelling.length);
+        IrValueId value = IR_VALUE_ID_INVALID;
+        if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE || frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_POSTFIX_UPDATE)
+        {
+            value = place_type && place_type->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
+            value = c_ir_emit_increment(builder, place, type, value, token,
+                                        frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE);
+        }
+        else
+        {
+            u32 consumed = state->pending_end - 1;
+            bool postfix = consumed + 1 < end &&
+                           (c_token_is_punctuator(builder->preprocess.tokens[consumed + 1], S8("++")) ||
+                            c_token_is_punctuator(builder->preprocess.tokens[consumed + 1], S8("--")));
+            value = place_type && (place_type->kind == IR_TYPE_ARRAY || (place_type->is_atomic && postfix))
+                        ? place
+                        : c_ir_emit_load_place(builder, place, type, source);
+            if (value.value != IR_ID_UNDERLYING_INVALID && postfix)
+            {
+                value = c_ir_emit_increment(builder, place, type, value, builder->preprocess.tokens[consumed + 1], false);
+                consumed += 1;
+                index = consumed + 1;
+            }
+        }
+        if (value.value == IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        values[value_count++] = value;
+        expect_operand = false;
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+        goto c_ir_expression_core_loop;
     }
+    if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT)
+    {
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        values = state->values;
+        operations = state->operations;
+        operation_sources = state->operation_sources;
+        operation_cast_types = state->operation_cast_types;
+        value_count = state->value_count;
+        operation_count = state->operation_count;
+        index = state->index;
+        values[value_count++] = machine->child_result.value;
+        expect_operand = false;
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+        goto c_ir_expression_core_loop;
+    }
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    {
+        if (start >= end || end > builder->preprocess.token_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL;
+        if (!c_ir_prepare_control_expressions_frame_push(builder, start, end))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
+    }
+    if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL)
+    {
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS;
+        if (!c_ir_prepare_calls_frame_push(builder, start, end))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
+    }
+    BUSTER_CHECK(frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS);
+    if (!machine->child_result.success)
+    {
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
+    }
+    state = arena_allocate(builder->temporary_arena, CIrExpressionCoreState, 1);
+    *state = (CIrExpressionCoreState){0};
+    frame->as.expression_core.state = state;
+    frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     bool prefix_place_update = start + 1 < end && (c_token_is_punctuator(builder->preprocess.tokens[start], S8("++")) ||
                                                    c_token_is_punctuator(builder->preprocess.tokens[start], S8("--")));
     bool postfix_place_update = start + 1 < end && (c_token_is_punctuator(builder->preprocess.tokens[end - 1], S8("++")) ||
@@ -20222,9 +22085,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
     }
     u32 update_operand_depth = 0;
     bool update_operand_expects_operand = true;
-    for (u32 index = update_operand_start; (prefix_place_update || postfix_place_update) && index < update_operand_end; index += 1)
+    for (u32 update_index = update_operand_start; (prefix_place_update || postfix_place_update) && update_index < update_operand_end; update_index += 1)
     {
-        CToken token = builder->preprocess.tokens[index];
+        CToken token = builder->preprocess.tokens[update_index];
         if (c_token_is_punctuator(token, S8("(")) || c_token_is_punctuator(token, S8("[")))
         {
             update_operand_depth += 1;
@@ -20265,43 +22128,28 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
     }
     if ((prefix_place_update || postfix_place_update) && !update_operand_has_binary && !postfix_update_has_outer_prefix)
     {
-        CToken update = builder->preprocess.tokens[prefix_place_update ? start : end - 1];
-        IrValueId place = c_ir_emit_simple_place_expression(builder, update_operand_start, update_operand_end);
-        if (place.value >= builder->function->value_count)
+        state->pending_start = prefix_place_update ? start : end - 1;
+        state->pending_prefix = prefix_place_update;
+        frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_ROOT_UPDATE;
+        if (!c_ir_lower_place_frame_push(builder, update_operand_start, update_operand_end))
         {
-            if (!builder->failure_message.length)
-            {
-                builder->failure_message = S8("increment or decrement operand is not a modifiable place");
-            }
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         }
-        IrTypeId type = builder->function->values[place.value].canonical_type;
-        IrSourceRange source = c_ir_source_range(update.location, update.spelling.length);
-        IrValueId previous = ir_type_from_id(&builder->program->types, type)->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
-        if (previous.value >= builder->function->value_count)
-        {
-            if (!builder->failure_message.length)
-            {
-                builder->failure_message = S8("could not load increment or decrement operand");
-            }
-            return false;
-        }
-        *value_out = c_ir_emit_increment(builder, place, type, previous, update, prefix_place_update);
-        if (value_out->value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
-        {
-            builder->failure_message = S8("could not apply increment or decrement");
-        }
-        return value_out->value != IR_ID_UNDERLYING_INVALID;
+        return;
     }
     u32 capacity = end - start + 1;
-    IrValueId* values = arena_allocate(builder->temporary_arena, IrValueId, capacity);
-    CConditionalOperator* operations = arena_allocate(builder->temporary_arena, CConditionalOperator, capacity);
-    IrSourceRange* operation_sources = arena_allocate(builder->temporary_arena, IrSourceRange, capacity);
-    IrTypeId* operation_cast_types = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
-    u32 value_count = 0;
-    u32 operation_count = 0;
-    bool expect_operand = true;
-    for (u32 index = start; index < end; index += 1)
+    values = arena_allocate(builder->temporary_arena, IrValueId, capacity);
+    operations = arena_allocate(builder->temporary_arena, CConditionalOperator, capacity);
+    operation_sources = arena_allocate(builder->temporary_arena, IrSourceRange, capacity);
+    operation_cast_types = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
+    state->values = values;
+    state->operations = operations;
+    state->operation_sources = operation_sources;
+    state->operation_cast_types = operation_cast_types;
+    index = start;
+    expect_operand = true;
+c_ir_expression_core_loop:
+    for (; index < end; index += 1)
     {
         builder->failure_token_index = index;
         CToken token = builder->preprocess.tokens[index];
@@ -20309,24 +22157,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
         if (expect_operand && (c_token_is_punctuator(token, S8("++")) || c_token_is_punctuator(token, S8("--"))))
         {
             u32 operand_end = c_ir_unary_expression_end(builder, index + 1, end);
-            IrValueId place = c_ir_emit_simple_place_expression(builder, index + 1, operand_end);
-            if (operand_end <= index + 1 || place.value >= builder->function->value_count)
+            if (operand_end <= index + 1)
             {
                 builder->failure_message = S8("prefix increment or decrement operand is not a modifiable place");
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
-            IrTypeId type = builder->function->values[place.value].canonical_type;
-            IrType* place_type = ir_type_from_id(&builder->program->types, type);
-            IrValueId previous = place_type && place_type->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
-            IrValueId updated = c_ir_emit_increment(builder, place, type, previous, token, true);
-            if (updated.value >= builder->function->value_count)
+            c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
+                                      operand_end, expect_operand);
+            state->pending_start = index;
+            frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE;
+            if (!c_ir_lower_place_frame_push(builder, index + 1, operand_end))
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
-            values[value_count++] = updated;
-            expect_operand = false;
-            index = operand_end - 1;
-            continue;
+            return;
         }
         if (expect_operand)
         {
@@ -20343,24 +22188,15 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             }
             if (postfix && !outer_prefix)
             {
-                IrValueId place = c_ir_emit_simple_place_expression(builder, index, operand_end - 1);
-                if (place.value >= builder->function->value_count)
+                c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count,
+                                          operation_count, operand_end, expect_operand);
+                state->pending_start = operand_end - 1;
+                frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_POSTFIX_UPDATE;
+                if (!c_ir_lower_place_frame_push(builder, index, operand_end - 1))
                 {
-                    builder->failure_message = S8("postfix increment or decrement operand is not a modifiable place");
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 }
-                IrTypeId type = builder->function->values[place.value].canonical_type;
-                IrType* place_type = ir_type_from_id(&builder->program->types, type);
-                IrValueId previous = place_type && place_type->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
-                IrValueId updated = c_ir_emit_increment(builder, place, type, previous, builder->preprocess.tokens[operand_end - 1], false);
-                if (updated.value >= builder->function->value_count)
-                {
-                    return false;
-                }
-                values[value_count++] = updated;
-                expect_operand = false;
-                index = operand_end - 1;
-                continue;
+                return;
             }
         }
         if (expect_operand && token.kind == C_TOKEN_IDENTIFIER && string_equal(token.spelling, S8("__builtin_offsetof")) && index + 4 < end &&
@@ -20449,7 +22285,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             if (!valid)
             {
                 builder->failure_message = S8("invalid __builtin_offsetof type or member designator");
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             values[value_count++] = c_ir_emit_integer_value_typed(builder, offset, false, token, builder->size_type);
             expect_operand = false;
@@ -20463,14 +22300,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             bool parenthesized = c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("("));
             if (!is_sizeof && !parenthesized)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             u32 operand_start = index + (parenthesized ? 2 : 1);
             u32 operand_end = parenthesized ? c_ir_matching_delimiter_cached(builder, index + 1, end, S8("("), S8(")"))
                                             : c_ir_unary_expression_end(builder, operand_start, end);
             if (operand_end > end || operand_start >= operand_end)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             u32 consumed_index = parenthesized ? operand_end : operand_end - 1;
             if (is_sizeof && builder->preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER)
@@ -20522,13 +22361,15 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
                 IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
                 if (!expression || !expression->layout.resolved)
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
                 value = expression->layout.size;
             }
             else
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             values[value_count++] = c_ir_emit_integer_value_typed(builder, value, false, token, builder->size_type);
             expect_operand = false;
@@ -20553,7 +22394,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             }
             if (place.value >= builder->function->value_count)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             IrTypeId type = builder->function->values[place.value].canonical_type;
             IrType* place_type = ir_type_from_id(&builder->program->types, type);
@@ -20561,7 +22403,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             IrValueId value = c_ir_emit_increment(builder, place, type, previous, token, true);
             if (value.value == IR_ID_UNDERLYING_INVALID)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             values[value_count++] = value;
             expect_operand = false;
@@ -20573,13 +22416,15 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
         {
             if (!expect_operand)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             builder->failure_token_index = prepared_call->open_index;
             IrValueId value = prepared_call->emitted ? prepared_call->result : IR_VALUE_ID_INVALID;
             if (value.value == IR_ID_UNDERLYING_INVALID)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             values[value_count++] = value;
             expect_operand = false;
@@ -20590,12 +22435,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
         {
             if (!expect_operand)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             IrValueId value = c_ir_number_is_float(token.spelling) ? c_ir_emit_float(builder, token) : c_ir_emit_integer(builder, token);
             if (value.value == IR_ID_UNDERLYING_INVALID)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             values[value_count++] = value;
             expect_operand = false;
@@ -20605,7 +22452,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
         {
             if (!expect_operand)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             u32 literal_end = index + 1;
             if (token.kind == C_TOKEN_STRING_LITERAL)
@@ -20619,7 +22467,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
                                                                       : c_ir_emit_string_range_typed(builder, index, literal_end, IR_TYPE_ID_INVALID);
             if (value.value == IR_ID_UNDERLYING_INVALID)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             values[value_count++] = value;
             expect_operand = false;
@@ -20630,7 +22479,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
         {
             if (!expect_operand)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             IrValueId value = IR_VALUE_ID_INVALID;
             IrValueId value_place = IR_VALUE_ID_INVALID;
@@ -20666,7 +22516,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
                 }
                 if (depth)
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
                 value = c_ir_emit_call(builder, index);
                 index = close - 1;
@@ -20711,18 +22562,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
                 }
                 if (place_end > index + 1)
                 {
-                    IrValueId place = c_ir_emit_simple_place_expression(builder, index, place_end);
-                    if (place.value != IR_ID_UNDERLYING_INVALID)
+                    c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count,
+                                              operation_count, place_end, expect_operand);
+                    state->pending_start = index;
+                    state->pending_end = place_end;
+                    frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_IDENTIFIER_PLACE;
+                    if (!c_ir_lower_place_frame_push(builder, index, place_end))
                     {
-                        value_place = place;
-                        IrTypeId place_type = builder->function->values[place.value].canonical_type;
-                        IrType* place_type_value = ir_type_from_id(&builder->program->types, place_type);
-                        value = place_type_value && (place_type_value->kind == IR_TYPE_ARRAY ||
-                                                     (place_type_value->is_atomic && c_ir_postfix_update_at(builder, place_end - 1, end)))
-                                    ? place
-                                    : c_ir_emit_load_place(builder, place, place_type, source);
-                        index = place_end - 1;
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     }
+                    return;
                 }
                 else if (local)
                 {
@@ -20817,7 +22666,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
                                             failed_entity.value, (u32)builder->parse.entities[failed_entity.value].kind)
                             : string_format(builder->arena, S8("could not lower unbound identifier '{S8}'"), token.spelling);
                 }
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             values[value_count++] = value;
             expect_operand = false;
@@ -20829,22 +22679,22 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             if (close < end && close > index + 2 && c_token_is_punctuator(builder->preprocess.tokens[close - 1], S8("}")) &&
                 c_ir_matching_delimiter_cached(builder, index + 1, close, S8("{"), S8("}")) == close - 1)
             {
-                IrValueId statement_value = IR_VALUE_ID_INVALID;
-                if (!c_ir_lower_statement_expression(builder, index + 1, close - 1, &statement_value))
+                c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
+                                          close + 1, expect_operand);
+                frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT;
+                if (!c_ir_lower_statement_expression_frame_push(builder, index + 1, close - 1))
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 }
-                values[value_count++] = statement_value;
-                expect_operand = false;
-                index = close;
-                continue;
+                return;
             }
         }
         if (c_token_is_punctuator(token, S8("(")))
         {
             if (!expect_operand)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             u32 close = c_ir_matching_delimiter_cached(builder, index, end, S8("("), S8(")"));
             IrTypeId cast_type = close < end ? c_ir_type_name(builder, index + 1, close) : IR_TYPE_ID_INVALID;
@@ -20855,7 +22705,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
                 initializer_close = c_ir_matching_delimiter_cached(builder, close + 1, end, S8("{"), S8("}"));
                 if (initializer_close >= end)
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
                 cast_type = c_ir_compound_literal_type(builder, index + 1, close, close + 1, initializer_close);
             }
@@ -20863,25 +22714,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             {
                 if (compound_literal)
                 {
-                    IrValueId literal = c_ir_emit_compound_literal(builder, cast_type, close + 1, initializer_close);
-                    if (literal.value == IR_ID_UNDERLYING_INVALID)
+                    c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count,
+                                              operation_count, initializer_close + 1, expect_operand);
+                    state->pending_type = cast_type;
+                    state->pending_source = source;
+                    frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_COMPOUND_LITERAL;
+                    if (!c_ir_lower_compound_literal_frame_push(builder, cast_type, close + 1, initializer_close))
                     {
-                        return false;
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     }
-                    IrValueId literal_place = c_ir_emit_temporary(builder, cast_type, source);
-                    if (literal_place.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_store_place(builder, literal_place, cast_type, literal, source))
-                    {
-                        return false;
-                    }
-                    literal = c_ir_emit_load_place(builder, literal_place, cast_type, source);
-                    if (literal.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return false;
-                    }
-                    values[value_count++] = literal;
-                    expect_operand = false;
-                    index = initializer_close;
-                    continue;
+                    return;
                 }
                 operations[operation_count] = C_CONDITIONAL_CAST;
                 operation_sources[operation_count] = source;
@@ -20906,19 +22748,22 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
         {
             if (expect_operand)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, index);
             if (prepared && prepared->emitted)
             {
                 if (!value_count)
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
                 IrValueId place = c_ir_emit_index_place(builder, values[value_count - 1], prepared->result, source);
                 if (place.value == IR_ID_UNDERLYING_INVALID)
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
                 IrTypeId element_type = builder->function->values[place.value].canonical_type;
                 IrType* element = ir_type_from_id(&builder->program->types, element_type);
@@ -20946,24 +22791,28 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
         {
             if (expect_operand)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             while (operation_count && operations[operation_count - 1] != C_CONDITIONAL_INDEX_OPEN)
             {
                 if (operations[operation_count - 1] == C_CONDITIONAL_OPEN)
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
                 operation_count -= 1;
                 if (!c_ir_apply_operation(builder, operations[operation_count], values, &value_count, operation_sources[operation_count],
                                           operation_cast_types[operation_count]))
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
             }
             if (!operation_count || value_count < 2)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             operation_count -= 1;
             IrValueId place = c_ir_emit_index_place(builder, values[value_count - 2], values[value_count - 1], source);
@@ -20973,7 +22822,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
                 {
                     builder->failure_message = S8("could not form an indexed place");
                 }
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             value_count -= 2;
             IrTypeId element_type = builder->function->values[place.value].canonical_type;
@@ -20991,7 +22841,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             if (values[value_count - 1].value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
             {
                 builder->failure_message = S8("could not load an indexed expression");
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             expect_operand = false;
             continue;
@@ -21000,24 +22851,28 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
         {
             if (expect_operand)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             while (operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN)
             {
                 if (operations[operation_count - 1] == C_CONDITIONAL_INDEX_OPEN)
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
                 operation_count -= 1;
                 if (!c_ir_apply_operation(builder, operations[operation_count], values, &value_count, operation_sources[operation_count],
                                           operation_cast_types[operation_count]))
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
             }
             if (!operation_count)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             operation_count -= 1;
             continue;
@@ -21028,14 +22883,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             IrValueId place = c_ir_emit_field_place_from_value(builder, values[value_count - 1], token, builder->preprocess.tokens[index + 1]);
             if (place.value == IR_ID_UNDERLYING_INVALID)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             IrTypeId field_type = builder->function->values[place.value].canonical_type;
             IrType* field = ir_type_from_id(&builder->program->types, field_type);
             values[value_count - 1] = field && field->kind == IR_TYPE_ARRAY ? place : c_ir_emit_load_place(builder, place, field_type, source);
             if (values[value_count - 1].value == IR_ID_UNDERLYING_INVALID)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             index += 1;
             continue;
@@ -21044,12 +22901,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
         if (!c_conditional_operator(token, expect_operand, &operation) ||
             !c_ir_operation(operation, &(IrUnaryOperation){IR_UNARY_COUNT}, &(IrBinaryOperation){IR_BINARY_COUNT}))
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
         bool unary = c_conditional_is_unary(operation);
         if (expect_operand != unary)
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
         u32 precedence = c_conditional_precedence(operation);
         while (operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN && operations[operation_count - 1] != C_CONDITIONAL_INDEX_OPEN)
@@ -21063,7 +22922,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             operation_count -= 1;
             if (!c_ir_apply_operation(builder, previous, values, &value_count, operation_sources[operation_count], operation_cast_types[operation_count]))
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
         }
         operations[operation_count] = operation;
@@ -21073,7 +22933,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
     }
     if (expect_operand)
     {
-        return false;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
     }
     while (operation_count)
     {
@@ -21082,15 +22943,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_core(CIntegerIrBuilder* builder, 
             !c_ir_apply_operation(builder, operations[operation_count], values, &value_count, operation_sources[operation_count],
                                   operation_cast_types[operation_count]))
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
     }
     if (value_count != 1)
     {
-        return false;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
     }
-    *value_out = values[0];
-    return true;
+    c_ir_lower_frame_finish(builder, true, values[0]);
 }
 
 BUSTER_GLOBAL_LOCAL IrBlockId c_ir_block_create(CIntegerIrBuilder* builder)
@@ -21271,7 +23133,6 @@ BUSTER_GLOBAL_LOCAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u3
 BUSTER_GLOBAL_LOCAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
                                                u32* expression_end);
 
-typedef struct CIrConditionTask CIrConditionTask;
 struct CIrConditionTask
 {
     u32 start;
@@ -21281,8 +23142,60 @@ struct CIrConditionTask
     IrBlockId false_block;
 };
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_leaf(CIntegerIrBuilder* builder, u32 start, u32 end, IrValueId* value_out)
+BUSTER_GLOBAL_LOCAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder)
 {
+    CIrLowerMachine* machine = &builder->lower_machine;
+    BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+    CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
+    BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_CONDITION_LEAF);
+    if (frame->stage == C_IR_LOWER_STAGE_CONDITION_LEAF_PLACE)
+    {
+        IrValueId place = machine->child_result.value;
+        if (!machine->child_result.success || place.value >= builder->function->value_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.condition_leaf.place = place;
+        frame->as.condition_leaf.type = builder->function->values[place.value].canonical_type;
+        frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_ASSIGNMENT;
+        if (!c_ir_lower_expression_core_frame_push(builder, frame->as.condition_leaf.start, frame->as.condition_leaf.end))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
+    }
+    if (frame->stage == C_IR_LOWER_STAGE_CONDITION_LEAF_CORE)
+    {
+        c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
+        return;
+    }
+    if (frame->stage == C_IR_LOWER_STAGE_CONDITION_LEAF_ASSIGNMENT)
+    {
+        IrValueId value = machine->child_result.value;
+        IrValueId place = frame->as.condition_leaf.place;
+        IrTypeId type = frame->as.condition_leaf.type;
+        IrSourceRange source = frame->as.condition_leaf.source;
+        if (!machine->child_result.success || place.value >= builder->function->value_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (!frame->as.condition_leaf.simple)
+        {
+            bool success = c_ir_emit_compound_assignment(builder, place, type, frame->as.condition_leaf.operation, value, source, 0, &value);
+            c_ir_lower_frame_finish(builder, success, value);
+            return;
+        }
+        value = c_ir_decay_array(builder, value, type, source);
+        value = c_ir_emit_cast(builder, value, type, source);
+        bool success = value.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, place, type, value, source);
+        c_ir_lower_frame_finish(builder, success, value);
+        return;
+    }
+    BUSTER_CHECK(frame->stage == C_IR_LOWER_STAGE_BEGIN);
+    u32 start = frame->as.condition_leaf.start;
+    u32 end = frame->as.condition_leaf.end;
     u32 assignment = end;
     u32 parentheses = 0;
     u32 brackets = 0;
@@ -21323,64 +23236,80 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_leaf(CIntegerIrBuilder* builder, u
     }
     if (assignment >= end)
     {
-        return c_ir_lower_expression_core(builder, start, end, value_out);
+        frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_CORE;
+        if (!c_ir_lower_expression_core_frame_push(builder, start, end))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
     }
     if (assignment == start || assignment + 1 >= end)
     {
-        return false;
-    }
-    IrValueId place = c_ir_emit_simple_place_expression(builder, start, assignment);
-    IrValueId value = IR_VALUE_ID_INVALID;
-    if (place.value >= builder->function->value_count || !c_ir_lower_expression_core(builder, assignment + 1, end, &value))
-    {
-        return false;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
     }
     CToken assignment_token = builder->preprocess.tokens[assignment];
-    IrSourceRange assignment_source = c_ir_source_range(assignment_token.location, assignment_token.spelling.length);
-    IrTypeId type = builder->function->values[place.value].canonical_type;
-    bool simple = c_token_is_punctuator(assignment_token, S8("="));
-    if (!simple)
+    frame->as.condition_leaf.source = c_ir_source_range(assignment_token.location, assignment_token.spelling.length);
+    frame->as.condition_leaf.operation = operation;
+    frame->as.condition_leaf.simple = c_token_is_punctuator(assignment_token, S8("="));
+    frame->as.condition_leaf.start = assignment + 1;
+    frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_PLACE;
+    if (!c_ir_lower_place_frame_push(builder, start, assignment))
     {
-        if (!c_ir_emit_compound_assignment(builder, place, type, operation, value, assignment_source, 0, &value))
-        {
-            return false;
-        }
-        *value_out = value;
-        return true;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
     }
-    value = c_ir_decay_array(builder, value, type, assignment_source);
-    value = c_ir_emit_cast(builder, value, type, assignment_source);
-    if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_store_place(builder, place, type, value, assignment_source))
-    {
-        return false;
-    }
-    *value_out = value;
-    return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(CIntegerIrBuilder* builder, u32 start, u32 end, IrBlockId true_block, IrBlockId false_block,
-                                                   IrSourceRange source)
+BUSTER_GLOBAL_LOCAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
 {
-    if (start > end || end > builder->preprocess.token_count)
+    CIrLowerMachine* machine = &builder->lower_machine;
+    BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+    CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
+    BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_CONDITION);
+    if (frame->stage == C_IR_LOWER_STAGE_CONDITION_CHILD)
     {
-        return false;
+        IrValueId condition = machine->child_result.value;
+        condition = machine->child_result.success ? c_ir_truth_value(builder, condition, frame->as.condition.source) : IR_VALUE_ID_INVALID;
+        IrBlockId targets[2] = {
+            frame->as.condition.leaf_true_block,
+            frame->as.condition.leaf_false_block,
+        };
+        if (condition.value == IR_ID_UNDERLYING_INVALID ||
+            !c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.condition.source))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     }
-    u32 capacity = end - start + 1;
-    CIrConditionTask* tasks = arena_allocate(builder->temporary_arena, CIrConditionTask, capacity);
-    u32 task_count = 1;
-    tasks[0] = (CIrConditionTask){
-        .start = start,
-        .end = end,
-        .block = builder->current_block,
-        .true_block = true_block,
-        .false_block = false_block,
-    };
-    while (task_count)
+    else if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        CIrConditionTask task = tasks[--task_count];
+        if (frame->as.condition.start > frame->as.condition.end || frame->as.condition.end > builder->preprocess.token_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.condition.task_capacity = frame->as.condition.end - frame->as.condition.start + 1;
+        frame->as.condition.tasks = arena_allocate(builder->temporary_arena, CIrConditionTask, frame->as.condition.task_capacity);
+        frame->as.condition.task_count = 1;
+        frame->as.condition.tasks[0] = (CIrConditionTask){
+            .start = frame->as.condition.start,
+            .end = frame->as.condition.end,
+            .block = builder->current_block,
+            .true_block = frame->as.condition.true_block,
+            .false_block = frame->as.condition.false_block,
+        };
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+    }
+    CIrConditionTask* tasks = frame->as.condition.tasks;
+    u32 capacity = frame->as.condition.task_capacity;
+    while (frame->as.condition.task_count)
+    {
+        CIrConditionTask task = tasks[--frame->as.condition.task_count];
         if (!c_ir_switch_block(builder, task.block))
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
         while (task.start < task.end && c_token_is_punctuator(builder->preprocess.tokens[task.start], S8("(")))
         {
@@ -21459,14 +23388,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(CIntegerIrBuilder* builder, u
                                                                  .spelling = S8("1"),
                                                                  .kind = C_TOKEN_PREPROCESSING_NUMBER,
                                                              });
-            condition = c_ir_truth_value(builder, condition, source);
+            condition = c_ir_truth_value(builder, condition, frame->as.condition.source);
             IrBlockId targets[2] = {
                 task.true_block,
                 task.false_block,
             };
-            if (condition.value == IR_ID_UNDERLYING_INVALID || !c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, source))
+            if (condition.value == IR_ID_UNDERLYING_INVALID ||
+                !c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.condition.source))
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             continue;
         }
@@ -21476,31 +23407,33 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(CIntegerIrBuilder* builder, u
         u32 conditional_end = 0;
         if (c_ir_root_conditional(builder, task.start, task.end, &conditional_start, &conditional_question, &conditional_colon, &conditional_end))
         {
-            if (task_count + 3 > capacity)
+            if (frame->as.condition.task_count + 3 > capacity)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             IrBlockId true_expression = c_ir_block_create(builder);
             IrBlockId false_expression = c_ir_block_create(builder);
             if (true_expression.value == IR_ID_UNDERLYING_INVALID || false_expression.value == IR_ID_UNDERLYING_INVALID)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
-            tasks[task_count++] = (CIrConditionTask){
+            tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                 .start = conditional_colon + 1,
                 .end = conditional_end,
                 .block = false_expression,
                 .true_block = task.true_block,
                 .false_block = task.false_block,
             };
-            tasks[task_count++] = (CIrConditionTask){
+            tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                 .start = conditional_question + 1,
                 .end = conditional_colon,
                 .block = true_expression,
                 .true_block = task.true_block,
                 .false_block = task.false_block,
             };
-            tasks[task_count++] = (CIrConditionTask){
+            tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                 .start = conditional_start,
                 .end = conditional_question,
                 .block = task.block,
@@ -21525,7 +23458,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(CIntegerIrBuilder* builder, u
             {
                 if (!parentheses)
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
                 parentheses -= 1;
             }
@@ -21537,7 +23471,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(CIntegerIrBuilder* builder, u
             {
                 if (!brackets)
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
                 brackets -= 1;
             }
@@ -21549,7 +23484,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(CIntegerIrBuilder* builder, u
             {
                 if (!braces)
                 {
-                    return false;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
                 braces -= 1;
             }
@@ -21564,29 +23500,32 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(CIntegerIrBuilder* builder, u
         }
         if (parentheses || brackets || braces)
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
         u32 operation = logical_or != UINT32_MAX ? logical_or : logical_and;
         if (operation != UINT32_MAX)
         {
-            if (operation == task.start || operation + 1 == task.end || task_count + 2 > capacity)
+            if (operation == task.start || operation + 1 == task.end || frame->as.condition.task_count + 2 > capacity)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             IrBlockId right = c_ir_block_create(builder);
             if (right.value == IR_ID_UNDERLYING_INVALID)
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             bool is_or = operation == logical_or;
-            tasks[task_count++] = (CIrConditionTask){
+            tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                 .start = operation + 1,
                 .end = task.end,
                 .block = right,
                 .true_block = task.true_block,
                 .false_block = task.false_block,
             };
-            tasks[task_count++] = (CIrConditionTask){
+            tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                 .start = task.start,
                 .end = operation,
                 .block = task.block,
@@ -21595,31 +23534,760 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition_impl(CIntegerIrBuilder* builder, u
             };
             continue;
         }
-        IrValueId condition = IR_VALUE_ID_INVALID;
-        if (!c_ir_lower_condition_leaf(builder, task.start, task.end, &condition))
+        frame->as.condition.leaf_true_block = task.true_block;
+        frame->as.condition.leaf_false_block = task.false_block;
+        frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_CHILD;
+        if (!c_ir_lower_condition_leaf_frame_push(builder, task.start, task.end))
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         }
-        condition = c_ir_truth_value(builder, condition, source);
-        IrBlockId targets[2] = {
-            task.true_block,
-            task.false_block,
-        };
-        if (condition.value == IR_ID_UNDERLYING_INVALID || !c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, source))
-        {
-            return false;
-        }
+        return;
     }
-    return true;
+    c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_condition(CIntegerIrBuilder* builder, u32 start, u32 end, IrBlockId true_block, IrBlockId false_block, IrSourceRange source)
+BUSTER_GLOBAL_LOCAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
 {
-    TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
-    BUSTER_CHECK(builder->lower_condition_dispatch);
-    bool result = builder->lower_condition_dispatch(builder, start, end, true_block, false_block, source);
-    scratch_end(temporary);
+    CIrLowerMachine* machine = &builder->lower_machine;
+    CIrLowerFrame* frame = machine->frames + machine->frame_count - 1;
+    CIrLowerVlaLayoutState* state = frame->as.vla_layout;
+    BUSTER_CHECK(state);
+    CIrVlaLayout* result = state->result;
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    {
+        memset(result, 0, sizeof(*result));
+        result->runtime_size = IR_VALUE_ID_INVALID;
+        result->element_type = IR_TYPE_ID_INVALID;
+        if (state->array_type.value >= builder->parse.type_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        u32 capacity = builder->parse.type_count;
+        state->bounds = arena_allocate(builder->scratch_arena, CArrayBound, capacity);
+        CTypeId type_id = state->array_type;
+        while (type_id.value < builder->parse.type_count && builder->parse.types[type_id.value].kind == C_TYPE_ARRAY)
+        {
+            CType* type = &builder->parse.types[type_id.value];
+            if (result->dimension_count >= capacity || type->array_bound >= builder->parse.array_bound_count)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            state->bounds[result->dimension_count++] = builder->parse.array_bounds[type->array_bound];
+            type_id = type->element_type;
+        }
+        if (!result->dimension_count || type_id.value >= builder->parse.type_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        result->element_type = builder->c_type_ir_map[type_id.value];
+        IrType* element = ir_type_from_id(&builder->program->types, result->element_type);
+        if (!element || !element->layout.resolved || !element->layout.size)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        result->dimension_counts = arena_allocate(builder->arena, IrValueId, result->dimension_count);
+        result->suffix_sizes = arena_allocate(builder->arena, IrValueId, result->dimension_count + 1);
+        memset(result->dimension_counts, 0xff, sizeof(*result->dimension_counts) * result->dimension_count);
+        memset(result->suffix_sizes, 0xff, sizeof(*result->suffix_sizes) * (result->dimension_count + 1));
+        state->source = c_ir_source_range(state->token.location, state->token.spelling.length);
+        state->dimension = 0;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        arena_set_position(builder->temporary_arena, state->temporary_mark);
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        u32 dimension = state->dimension;
+        IrValueId count = machine->child_result.value;
+        if (count.value < builder->function->value_count && builder->function->values[count.value].category == IR_VALUE_PLACE)
+        {
+            count = c_ir_emit_load_place(builder, count, builder->function->values[count.value].canonical_type, state->source);
+        }
+        result->dimension_counts[dimension] = c_ir_emit_cast(builder, count, builder->size_type, state->source);
+        if (result->dimension_counts[dimension].value == IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->dimension += 1;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    while (state->dimension < result->dimension_count)
+    {
+        u32 dimension = state->dimension;
+        CArrayBound bound = c_ir_vla_bound_expression(builder->preprocess, state->bounds[dimension]);
+        u64 constant_count = 0;
+        if (c_ir_array_bound_evaluate(builder, bound, &constant_count))
+        {
+            result->dimension_counts[dimension] =
+                c_ir_emit_integer_value_typed(builder, constant_count, false, state->token, builder->size_type);
+            state->dimension += 1;
+            continue;
+        }
+        if (!bound.token_count || bound.is_star)
+        {
+            if (state->parameter && dimension == 0)
+            {
+                state->dimension += 1;
+                continue;
+            }
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->temporary_mark = builder->temporary_arena->position;
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
+        c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                           .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                           .as.expression =
+                                               {
+                                                   .start = bound.token_start,
+                                                   .end = bound.token_start + bound.token_count,
+                                               },
+                                       });
+        return;
+    }
+    IrType* element = ir_type_from_id(&builder->program->types, result->element_type);
+    result->suffix_sizes[result->dimension_count] =
+        c_ir_emit_integer_value_typed(builder, element->layout.size, false, state->token, builder->size_type);
+    for (u32 dimension = result->dimension_count; dimension != 0; dimension -= 1)
+    {
+        u32 index = dimension - 1;
+        IrValueId count = result->dimension_counts[index];
+        IrValueId suffix = result->suffix_sizes[index + 1];
+        if (count.value != IR_ID_UNDERLYING_INVALID && suffix.value != IR_ID_UNDERLYING_INVALID)
+        {
+            result->suffix_sizes[index] =
+                c_ir_emit_binary_value(builder, count, suffix, builder->size_type, IR_BINARY_INTEGER_MULTIPLY, state->source);
+        }
+    }
+    result->runtime_size = result->suffix_sizes[0];
+    c_ir_lower_frame_finish(builder, state->parameter || result->runtime_size.value != IR_ID_UNDERLYING_INVALID, result->runtime_size);
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_automatic_declaration_step(CIntegerIrBuilder* builder);
+BUSTER_GLOBAL_LOCAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIrBuilder* builder);
+BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builder);
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_assignment_statement_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+                                                                              CIrLowerAssignmentStatementState* state,
+                                                                              CIrLowerAssignmentStatementContinuation continuation, u32 start,
+                                                                              u32 end)
+{
+    state->continuation = continuation;
+    state->temporary_mark = builder->temporary_arena->position;
+    frame->stage = C_IR_LOWER_STAGE_CHILD;
+    c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                       .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                       .as.expression =
+                                           {
+                                               .start = start,
+                                               .end = end,
+                                           },
+                                   });
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_assignment_statement_request_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+                                                                         CIrLowerAssignmentStatementState* state, u32 start, u32 end)
+{
+    state->continuation = C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_LEFT;
+    state->temporary_mark = builder->temporary_arena->position;
+    frame->stage = C_IR_LOWER_STAGE_CHILD;
+    c_ir_lower_place_frame_push(builder, start, end);
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* builder)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    CIrLowerFrame* frame = machine->frames + machine->frame_count - 1;
+    CIrLowerAssignmentStatementState* state = frame->as.assignment_statement;
+    BUSTER_CHECK(state);
+    if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        arena_set_position(builder->temporary_arena, state->temporary_mark);
+        frame->stage = C_IR_LOWER_STAGE_BEGIN;
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (state->continuation == C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION)
+        {
+            c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (state->continuation == C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_LEFT)
+        {
+            if (!builder->function->values)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            IrValueId left = machine->child_result.value;
+            IrValue* left_value = left.value < builder->function->value_count ? builder->function->values + left.value : 0;
+            if (left_value && left_value->category == IR_VALUE_PLACE)
+            {
+                state->place = left;
+            }
+            else if (left_value && left_value->definition.value < builder->function->instruction_count)
+            {
+                IrInstruction* definition = builder->function->instructions + left_value->definition.value;
+                if ((definition->opcode == IR_OPCODE_LOAD || definition->opcode == IR_OPCODE_ATOMIC_LOAD) && definition->operand_count == 1)
+                {
+                    IrInstructionId definition_id = left_value->definition;
+                    IrBlock* current_block = builder->function->blocks + builder->current_block.value;
+                    if (definition_id.value + 1 != builder->function->instruction_count || left.value + 1 != builder->function->value_count ||
+                        current_block->last_instruction.value != definition_id.value || builder->last_instruction.value != definition_id.value)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
+                    IrInstructionId cursor = current_block->first_instruction;
+                    while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
+                    {
+                        previous = cursor;
+                        cursor = builder->function->instructions[cursor.value].next;
+                    }
+                    if (cursor.value != definition_id.value)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    if (previous.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        current_block->first_instruction = IR_INSTRUCTION_ID_INVALID;
+                    }
+                    else
+                    {
+                        builder->function->instructions[previous.value].next = IR_INSTRUCTION_ID_INVALID;
+                    }
+                    current_block->last_instruction = previous;
+                    builder->last_instruction = previous;
+                    builder->function->instruction_count -= 1;
+                    builder->function->value_count -= 1;
+                    state->place = definition->operands[0];
+                }
+            }
+            if (state->place.value == IR_ID_UNDERLYING_INVALID)
+            {
+                for (u32 value_index = builder->function->value_count; value_index > state->left_value_start; value_index -= 1)
+                {
+                    IrValueId candidate = {
+                        .value = value_index - 1,
+                    };
+                    IrValue* candidate_value = builder->function->values + candidate.value;
+                    if (candidate_value->category != IR_VALUE_PLACE || !c_ir_bit_field_from_place(builder, candidate))
+                    {
+                        continue;
+                    }
+                    IrInstructionId definition_id = candidate_value->definition;
+                    IrBlock* current_block = builder->function->blocks + builder->current_block.value;
+                    IrInstructionId cursor = current_block->first_instruction;
+                    while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
+                    {
+                        cursor = builder->function->instructions[cursor.value].next;
+                    }
+                    if (cursor.value != definition_id.value)
+                    {
+                        continue;
+                    }
+                    builder->function->instructions[definition_id.value].next = IR_INSTRUCTION_ID_INVALID;
+                    current_block->last_instruction = definition_id;
+                    builder->last_instruction = definition_id;
+                    builder->function->instruction_count = definition_id.value + 1;
+                    builder->function->value_count = candidate.value + 1;
+                    state->place = candidate;
+                    break;
+                }
+            }
+            if (state->place.value >= builder->function->value_count)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            state->type = builder->function->values[state->place.value].canonical_type;
+            c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_RIGHT,
+                                                               state->assignment + 1, state->end);
+            return;
+        }
+        if (state->continuation == C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT)
+        {
+            CToken assignment = builder->preprocess.tokens[state->assignment];
+            state->place = c_ir_emit_index_place(builder, state->base, machine->child_result.value,
+                                                 c_ir_source_range(assignment.location, assignment.spelling.length));
+            if (state->place.value >= builder->function->value_count)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            state->type = builder->function->values[state->place.value].canonical_type;
+            c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_RIGHT, state->close + 2,
+                                                               state->end);
+            return;
+        }
+        IrValueId value = machine->child_result.value;
+        CToken assignment = builder->preprocess.tokens[state->assignment];
+        IrSourceRange source = c_ir_source_range(assignment.location, assignment.spelling.length);
+        bool success = value.value != IR_ID_UNDERLYING_INVALID;
+        if (success && state->simple)
+        {
+            success = c_ir_emit_store_place(builder, state->place, state->type, value, source);
+        }
+        else if (success)
+        {
+            success = c_ir_emit_compound_assignment(builder, state->place, state->type, state->operation, value, source, 0, 0);
+        }
+        c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+        return;
+    }
+
+    u32 start = state->start;
+    u32 end = state->end;
+    CToken first = builder->preprocess.tokens[start];
+    u32 direct_index_open = UINT32_MAX;
+    IrValueId direct_index_base = IR_VALUE_ID_INVALID;
+    CEntityId direct_index_entity = first.kind == C_TOKEN_IDENTIFIER ? c_ir_identifier_entity(builder, start) : C_ENTITY_ID_INVALID;
+    CIntegerIrLocal* direct_index_local = c_ir_find_local_by_entity(builder, direct_index_entity);
+    if (first.kind == C_TOKEN_IDENTIFIER && start + 4 < end && c_token_is_punctuator(builder->preprocess.tokens[start + 1], S8("[")))
+    {
+        direct_index_open = start + 1;
+        if (direct_index_local)
+        {
+            direct_index_base = direct_index_local->place;
+        }
+        else
+        {
+            direct_index_base = c_ir_emit_global_place(builder, direct_index_entity,
+                                                       c_ir_source_range(first.location, first.spelling.length));
+        }
+    }
+    else if (first.kind == C_TOKEN_IDENTIFIER && start + 6 < end &&
+             (c_token_is_punctuator(builder->preprocess.tokens[start + 1], S8(".")) ||
+              c_token_is_punctuator(builder->preprocess.tokens[start + 1], S8("->"))) &&
+             builder->preprocess.tokens[start + 2].kind == C_TOKEN_IDENTIFIER && c_token_is_punctuator(builder->preprocess.tokens[start + 3], S8("[")))
+    {
+        direct_index_open = start + 3;
+        if (direct_index_local)
+        {
+            direct_index_base = c_ir_emit_field_place(builder, direct_index_local, builder->preprocess.tokens[start + 1],
+                                                      builder->preprocess.tokens[start + 2]);
+        }
+        else
+        {
+            IrSourceRange field_source = c_ir_source_range(first.location, first.spelling.length);
+            IrValueId base = c_ir_emit_global_place(builder, direct_index_entity, field_source);
+            if (base.value != IR_ID_UNDERLYING_INVALID && c_token_is_punctuator(builder->preprocess.tokens[start + 1], S8("->")))
+            {
+                IrTypeId pointer_type = builder->function->values[base.value].canonical_type;
+                base = c_ir_emit_load_place(builder, base, pointer_type, field_source);
+            }
+            direct_index_base =
+                c_ir_emit_field_place_from_value(builder, base, builder->preprocess.tokens[start + 1], builder->preprocess.tokens[start + 2]);
+        }
+    }
+    if (direct_index_open != UINT32_MAX)
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, direct_index_open, end, S8("["), S8("]"));
+        if (close != UINT32_MAX && close != direct_index_open + 1 && close + 2 < end)
+        {
+            CToken assignment = builder->preprocess.tokens[close + 1];
+            CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+            bool simple = c_token_is_punctuator(assignment, S8("="));
+            bool compound = c_ir_compound_assignment_operator(assignment, &operation);
+            if (simple || compound)
+            {
+                IrTypeId base_type_id = direct_index_base.value < builder->function->value_count
+                                            ? builder->function->values[direct_index_base.value].canonical_type
+                                            : IR_TYPE_ID_INVALID;
+                IrType* base_type = ir_type_from_id(&builder->program->types, base_type_id);
+                if (base_type && base_type->kind == IR_TYPE_POINTER && builder->function->values[direct_index_base.value].category == IR_VALUE_PLACE)
+                {
+                    direct_index_base = c_ir_emit_load_place(builder, direct_index_base, base_type_id,
+                                                             c_ir_source_range(first.location, first.spelling.length));
+                }
+                if (direct_index_base.value >= builder->function->value_count)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                state->base = direct_index_base;
+                state->assignment = close + 1;
+                state->close = close;
+                state->operation = operation;
+                state->simple = simple;
+                c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT,
+                                                                   direct_index_open + 1, close);
+                return;
+            }
+        }
+    }
+    u32 assignment_index = end;
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    CConditionalOperator assignment_operation = C_CONDITIONAL_OPERATOR_COUNT;
+    bool simple_assignment = false;
+    bool compound_assignment = false;
+    for (u32 scan = start; scan < end; scan += 1)
+    {
+        CToken token = builder->preprocess.tokens[scan];
+        if (c_token_is_punctuator(token, S8("(")))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(token, S8(")")) && parentheses)
+        {
+            parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(token, S8("[")))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(token, S8("]")) && brackets)
+        {
+            brackets -= 1;
+        }
+        else if (c_token_is_punctuator(token, S8("{")))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(token, S8("}")) && braces)
+        {
+            braces -= 1;
+        }
+        else if (!parentheses && !brackets && !braces)
+        {
+            simple_assignment = c_token_is_punctuator(token, S8("="));
+            compound_assignment = c_ir_compound_assignment_operator(token, &assignment_operation);
+            if (simple_assignment || compound_assignment)
+            {
+                assignment_index = scan;
+                break;
+            }
+        }
+    }
+    if (assignment_index < end)
+    {
+        if (assignment_index == start || assignment_index + 1 >= end)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->assignment = assignment_index;
+        state->operation = assignment_operation;
+        state->simple = simple_assignment;
+        state->left_value_start = builder->function->value_count;
+        bool expression_place = assignment_index != start + 1 || builder->preprocess.tokens[start].kind != C_TOKEN_IDENTIFIER;
+        if (expression_place)
+        {
+            c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_LEFT, start,
+                                                               assignment_index);
+        }
+        else
+        {
+            c_ir_lower_assignment_statement_request_place(builder, frame, state, start, assignment_index);
+        }
+        return;
+    }
+
+    if (first.kind == C_TOKEN_IDENTIFIER && start + 4 < end && c_token_is_punctuator(builder->preprocess.tokens[start + 1], S8("[")))
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, S8("["), S8("]"));
+        if (close == UINT32_MAX || close == start + 2 || close + 2 >= end)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        CToken assignment = builder->preprocess.tokens[close + 1];
+        CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+        bool simple = c_token_is_punctuator(assignment, S8("="));
+        bool compound = c_ir_compound_assignment_operator(assignment, &operation);
+        CEntityId entity = c_ir_identifier_entity(builder, start);
+        CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+        IrValueId base = IR_VALUE_ID_INVALID;
+        if (local)
+        {
+            IrType* local_type = ir_type_from_id(&builder->program->types, local->type);
+            base = local_type && local_type->kind == IR_TYPE_ARRAY ? local->place : c_ir_emit_load(builder, local, first);
+        }
+        if ((!simple && !compound) || base.value == IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->base = base;
+        state->assignment = close + 1;
+        state->close = close;
+        state->operation = operation;
+        state->simple = simple;
+        c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT, start + 2, close);
+        return;
+    }
+    if (first.kind == C_TOKEN_IDENTIFIER && start + 4 < end &&
+        (c_token_is_punctuator(builder->preprocess.tokens[start + 1], S8(".")) ||
+         c_token_is_punctuator(builder->preprocess.tokens[start + 1], S8("->"))) &&
+        builder->preprocess.tokens[start + 2].kind == C_TOKEN_IDENTIFIER && c_ir_assignment_operator(builder->preprocess.tokens[start + 3]))
+    {
+        CToken assignment = builder->preprocess.tokens[start + 3];
+        CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+        bool simple = c_token_is_punctuator(assignment, S8("="));
+        c_ir_compound_assignment_operator(assignment, &operation);
+        CEntityId entity = c_ir_identifier_entity(builder, start);
+        CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+        IrValueId place = IR_VALUE_ID_INVALID;
+        if (local)
+        {
+            place = c_ir_emit_field_place(builder, local, builder->preprocess.tokens[start + 1], builder->preprocess.tokens[start + 2]);
+        }
+        else
+        {
+            IrSourceRange field_source = c_ir_source_range(first.location, first.spelling.length);
+            IrValueId base = c_ir_emit_global_place(builder, entity, field_source);
+            if (base.value != IR_ID_UNDERLYING_INVALID && c_token_is_punctuator(builder->preprocess.tokens[start + 1], S8("->")))
+            {
+                IrTypeId pointer_type = builder->function->values[base.value].canonical_type;
+                base = c_ir_emit_load_place(builder, base, pointer_type, field_source);
+            }
+            place = c_ir_emit_field_place_from_value(builder, base, builder->preprocess.tokens[start + 1], builder->preprocess.tokens[start + 2]);
+        }
+        if (place.value >= builder->function->value_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->place = place;
+        state->type = builder->function->values[place.value].canonical_type;
+        state->assignment = start + 3;
+        state->operation = operation;
+        state->simple = simple;
+        c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_FIELD_RIGHT, start + 4, end);
+        return;
+    }
+    if (first.kind == C_TOKEN_IDENTIFIER && start + 2 == end &&
+        (c_token_is_punctuator(builder->preprocess.tokens[start + 1], S8("++")) ||
+         c_token_is_punctuator(builder->preprocess.tokens[start + 1], S8("--"))))
+    {
+        CToken update = builder->preprocess.tokens[start + 1];
+        CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, c_ir_identifier_entity(builder, start));
+        IrValueId one = c_ir_emit_integer(builder, (CToken){
+                                                       .spelling = S8("1"),
+                                                       .location = update.location,
+                                                       .kind = C_TOKEN_PREPROCESSING_NUMBER,
+                                                   });
+        bool success = local && c_ir_emit_compound_assignment(builder, local->place, local->type,
+                                                              c_token_is_punctuator(update, S8("++")) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
+                                                              c_ir_source_range(update.location, update.spelling.length), 0, 0);
+        c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+        return;
+    }
+    if (c_token_is_punctuator(first, S8("++")) || c_token_is_punctuator(first, S8("--")))
+    {
+        if (start + 2 != end || builder->preprocess.tokens[start + 1].kind != C_TOKEN_IDENTIFIER)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, c_ir_identifier_entity(builder, start + 1));
+        IrValueId one = c_ir_emit_integer(builder, (CToken){
+                                                       .spelling = S8("1"),
+                                                       .location = first.location,
+                                                       .kind = C_TOKEN_PREPROCESSING_NUMBER,
+                                                   });
+        bool success = local && c_ir_emit_compound_assignment(builder, local->place, local->type,
+                                                              c_token_is_punctuator(first, S8("++")) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
+                                                              c_ir_source_range(first.location, first.spelling.length), 0, 0);
+        c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+        return;
+    }
+    if (first.kind == C_TOKEN_IDENTIFIER && start + 2 < end)
+    {
+        CToken assignment = builder->preprocess.tokens[start + 1];
+        CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+        bool simple = c_token_is_punctuator(assignment, S8("="));
+        bool compound = c_ir_compound_assignment_operator(assignment, &operation);
+        if (simple || compound)
+        {
+            CEntityId entity = c_ir_identifier_entity(builder, start);
+            CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+            IrSourceRange source = c_ir_source_range(assignment.location, assignment.spelling.length);
+            IrValueId place = local ? local->place : c_ir_emit_global_place(builder, entity, source);
+            if (place.value >= builder->function->value_count)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            state->place = place;
+            state->type = local ? local->type : builder->function->values[place.value].canonical_type;
+            state->assignment = start + 1;
+            state->operation = operation;
+            state->simple = simple;
+            c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_IDENTIFIER_RIGHT, start + 2, end);
+            return;
+        }
+    }
+    c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION, start, end);
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_frame_fallback(CIntegerIrBuilder* builder)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+    CIrLowerFrame* active = machine->frames + machine->frame_count - 1;
+    switch (active->kind)
+    {
+        case C_IR_LOWER_FRAME_PLACE:
+            c_ir_lower_place_step(builder, active);
+            return;
+        case C_IR_LOWER_FRAME_VLA_INDEX_PLACE:
+            c_ir_lower_vla_index_place_step(builder, active);
+            return;
+        case C_IR_LOWER_FRAME_ATOMIC_PLACE:
+            c_ir_lower_atomic_place_step(builder, active);
+            return;
+        case C_IR_LOWER_FRAME_VA_LIST_EXPRESSION:
+            c_ir_lower_va_list_expression_step(builder, active);
+            return;
+        case C_IR_LOWER_FRAME_COMPOUND_LITERAL:
+            c_ir_lower_compound_literal_step(builder, active);
+            return;
+        case C_IR_LOWER_FRAME_NESTED_COMPOUND_LITERAL:
+            c_ir_lower_nested_compound_literal_step(builder, active);
+            return;
+        case C_IR_LOWER_FRAME_PREPARE_CONTROL_EXPRESSIONS:
+            c_ir_prepare_control_expressions_step(builder, active);
+            return;
+        case C_IR_LOWER_FRAME_PREPARE_CALLS:
+            c_ir_prepare_calls_step(builder, active);
+            return;
+        case C_IR_LOWER_FRAME_PREPARED_CALL:
+        {
+            CIrPreparedCallStepResult result = c_ir_emit_prepared_call_step(builder, active);
+            if (result != C_IR_PREPARED_CALL_STEP_SUSPENDED)
+            {
+                c_ir_lower_frame_finish(builder, result == C_IR_PREPARED_CALL_STEP_FINISHED, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
+        default:
+            break;
+    }
+    switch (active->kind)
+    {
+        case C_IR_LOWER_FRAME_EXPRESSION:
+            c_ir_lower_expression_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_EXPRESSION_CORE:
+            c_ir_lower_expression_core_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_LOGICAL_VALUE:
+            c_ir_lower_logical_value_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_CONDITION:
+            c_ir_lower_condition_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_CONDITION_LEAF:
+            c_ir_lower_condition_leaf_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_CONDITIONAL_VALUE:
+            c_ir_lower_conditional_value_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_BODY:
+            c_ir_lower_body_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_STATEMENT_EXPRESSION:
+            c_ir_lower_statement_expression_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_BODY_VLA_LAYOUT:
+            c_ir_lower_vla_layout_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION:
+            c_ir_lower_automatic_declaration_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION_LIST:
+            c_ir_lower_declaration_or_assignment_list_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT:
+            c_ir_lower_assignment_statement_step(builder);
+            return;
+        case C_IR_LOWER_FRAME_BODY_INLINE_ASSEMBLY:
+            c_ir_lower_inline_assembly_step(builder);
+            return;
+        default:
+            builder->failure_message = S8("C lowering machine encountered an invalid resumable frame");
+            machine->failed = true;
+            break;
+    }
+    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+}
+
+BUSTER_GLOBAL_LOCAL CIrLowerFrameResult c_ir_lower_dispatch_run(CIntegerIrBuilder* builder, u32 request_mark, bool outermost)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    machine->run_depth += 1;
+    while (machine->frame_count > request_mark && !machine->failed)
+    {
+        c_ir_lower_frame_fallback(builder);
+    }
+    machine->run_depth -= 1;
+    CIrLowerFrameResult result = machine->child_result;
+    result.success &= !machine->failed;
+    if (outermost && machine->failed)
+    {
+        c_ir_lower_machine_unwind(builder);
+    }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL CIrLowerFrameResult c_ir_lower_dispatch(CIntegerIrBuilder* builder, CIrLowerFrame root)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    bool outermost = machine->run_depth == 0;
+    if (outermost)
+    {
+        machine->root_frame_mark = machine->frame_count;
+        machine->scratch_mark = builder->scratch_arena->position;
+        machine->child_result = (CIrLowerFrameResult){
+            .value = IR_VALUE_ID_INVALID,
+            .index = UINT32_MAX,
+        };
+        machine->failed = false;
+    }
+    u32 request_mark = machine->frame_count;
+    if (!c_ir_lower_frame_push(builder, root))
+    {
+        if (outermost)
+        {
+            c_ir_lower_machine_unwind(builder);
+        }
+        return (CIrLowerFrameResult){
+            .value = IR_VALUE_ID_INVALID,
+        };
+    }
+    return c_ir_lower_dispatch_run(builder, request_mark, outermost);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, CIrVlaLayout* result)
+{
+    CIrLowerVlaLayoutState* state = arena_allocate(builder->scratch_arena, CIrLowerVlaLayoutState, 1);
+    *state = (CIrLowerVlaLayoutState){
+        .result = result,
+        .array_type = array_type,
+        .token = token,
+        .parameter = parameter,
+    };
+    CIrLowerFrameResult lowered = c_ir_lower_dispatch(builder, (CIrLowerFrame){
+                                                                    .kind = C_IR_LOWER_FRAME_BODY_VLA_LAYOUT,
+                                                                    .as.vla_layout = state,
+                                                                });
+    return lowered.success;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* builder, u32 start, u32 end)
@@ -21684,22 +24352,61 @@ BUSTER_GLOBAL_LOCAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* bui
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_logical_value(CIntegerIrBuilder* builder, u32 start, u32 end, IrValueId* value_out)
+BUSTER_GLOBAL_LOCAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
 {
-    if (!c_ir_expression_has_root_logical(builder, start, end))
+    CIrLowerMachine* machine = &builder->lower_machine;
+    BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+    CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
+    BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_LOGICAL_VALUE);
+    if (frame->stage == C_IR_LOWER_STAGE_LOGICAL_CORE)
     {
-        return c_ir_lower_expression_core(builder, start, end, value_out);
+        c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
+        return;
     }
-    IrSourceRange source = c_ir_source_range(builder->preprocess.tokens[start].location, builder->preprocess.tokens[start].spelling.length);
-    IrValueId place = c_ir_emit_temporary(builder, builder->bool_type, source);
-    IrBlockId true_block = c_ir_block_create(builder);
-    IrBlockId false_block = c_ir_block_create(builder);
-    IrBlockId merge_block = c_ir_block_create(builder);
-    if (place.value == IR_ID_UNDERLYING_INVALID || true_block.value == IR_ID_UNDERLYING_INVALID || false_block.value == IR_ID_UNDERLYING_INVALID ||
-        merge_block.value == IR_ID_UNDERLYING_INVALID || !c_ir_lower_condition(builder, start, end, true_block, false_block, source) ||
-        !c_ir_switch_block(builder, true_block))
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        return false;
+        if (!c_ir_expression_has_root_logical(builder, frame->as.logical.start, frame->as.logical.end))
+        {
+            frame->stage = (u8)C_IR_LOWER_STAGE_LOGICAL_CORE;
+            if (!c_ir_lower_expression_core_frame_push(builder, frame->as.logical.start, frame->as.logical.end))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
+        frame->as.logical.source =
+            c_ir_source_range(builder->preprocess.tokens[frame->as.logical.start].location,
+                              builder->preprocess.tokens[frame->as.logical.start].spelling.length);
+        frame->as.logical.type = builder->bool_type;
+        frame->as.logical.place = c_ir_emit_temporary(builder, builder->bool_type, frame->as.logical.source);
+        frame->as.logical.true_block = c_ir_block_create(builder);
+        frame->as.logical.false_block = c_ir_block_create(builder);
+        frame->as.logical.merge_block = c_ir_block_create(builder);
+        if (frame->as.logical.place.value == IR_ID_UNDERLYING_INVALID ||
+            frame->as.logical.true_block.value == IR_ID_UNDERLYING_INVALID || frame->as.logical.false_block.value == IR_ID_UNDERLYING_INVALID ||
+            frame->as.logical.merge_block.value == IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_LOGICAL_CONDITION;
+        if (!c_ir_lower_condition_frame_push(builder, frame->as.logical.start, frame->as.logical.end, frame->as.logical.true_block,
+                                             frame->as.logical.false_block, frame->as.logical.source))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
+    }
+    BUSTER_CHECK(frame->stage == C_IR_LOWER_STAGE_LOGICAL_CONDITION);
+    IrValueId place = frame->as.logical.place;
+    IrBlockId true_block = frame->as.logical.true_block;
+    IrBlockId false_block = frame->as.logical.false_block;
+    IrBlockId merge_block = frame->as.logical.merge_block;
+    IrSourceRange source = frame->as.logical.source;
+    if (!machine->child_result.success || !c_ir_switch_block(builder, true_block))
+    {
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
     }
     IrValueId one = c_ir_emit_integer(builder, (CToken){
                                                    .spelling = S8("1"),
@@ -21709,7 +24416,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_logical_value(CIntegerIrBuilder* builder, u3
     if (!c_ir_emit_store_place(builder, place, builder->bool_type, one, source) || !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &merge_block, 1, source) ||
         !c_ir_switch_block(builder, false_block))
     {
-        return false;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
     }
     IrValueId zero = c_ir_emit_integer(builder, (CToken){
                                                     .spelling = S8("0"),
@@ -21719,10 +24427,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_logical_value(CIntegerIrBuilder* builder, u3
     if (!c_ir_emit_store_place(builder, place, builder->bool_type, zero, source) || !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &merge_block, 1, source) ||
         !c_ir_switch_block(builder, merge_block))
     {
-        return false;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
     }
-    *value_out = c_ir_emit_load_place(builder, place, builder->bool_type, source);
-    return value_out->value != IR_ID_UNDERLYING_INVALID;
+    IrValueId value = c_ir_emit_load_place(builder, place, builder->bool_type, source);
+    c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
@@ -22497,68 +25206,132 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* bui
     return result.result_type;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_conditional_value(CIntegerIrBuilder* builder, u32 start, u32 end, IrValueId* value_out)
+BUSTER_GLOBAL_LOCAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* builder)
 {
-    u32 expression_start = 0;
-    u32 question = 0;
-    u32 colon = 0;
-    u32 expression_end = 0;
-    if (!c_ir_root_conditional(builder, start, end, &expression_start, &question, &colon, &expression_end))
+    CIrLowerMachine* machine = &builder->lower_machine;
+    BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+    CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
+    BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_CONDITIONAL_VALUE);
+    if (frame->stage == C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_ROOT)
     {
-        return c_ir_lower_logical_value(builder, start, end, value_out);
+        c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
+        return;
     }
-    IrTypeId true_type = c_ir_predict_expression_type(builder, question + 1, colon);
-    IrTypeId false_type = c_ir_predict_expression_type(builder, colon + 1, expression_end);
-    IrType* true_type_value = ir_type_from_id(&builder->program->types, true_type);
-    IrType* false_type_value = ir_type_from_id(&builder->program->types, false_type);
-    IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end);
-    if (result_type.value == IR_ID_UNDERLYING_INVALID)
+    if (frame->stage == C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_TASK)
     {
-        builder->failure_message = string_format(
-            builder->arena, S8("conditional expression predicted incompatible branch types {u32} (kind {u32}) and {u32} (kind {u32})"), true_type.value,
-            true_type_value ? (u32)true_type_value->kind : UINT32_MAX, false_type.value, false_type_value ? (u32)false_type_value->kind : UINT32_MAX);
-        return false;
-    }
-    IrSourceRange source =
-        c_ir_source_range(builder->preprocess.tokens[expression_start].location, builder->preprocess.tokens[expression_start].spelling.length);
-    IrValueId place = c_ir_emit_temporary(builder, result_type, source);
-    IrBlockId final_block = c_ir_block_create(builder);
-    if (place.value == IR_ID_UNDERLYING_INVALID || final_block.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return false;
-    }
-    u32 frame_start = builder->lower_frame_count;
-    if (builder->lower_frame_count >= builder->lower_frame_capacity)
-    {
-        builder->failure_message = S8("C conditional nesting exceeds the lowering frame capacity");
-        builder->failure_token_index = question;
-        return false;
-    }
-    builder->lower_frames[builder->lower_frame_count++] = (CIrLowerFrame){
-        .kind = C_IR_LOWER_FRAME_SELECTION_EXPRESSION,
-        .as.selection =
+        IrValueId value = machine->child_result.value;
+        IrType* task_type = ir_type_from_id(&builder->program->types, frame->as.conditional.type);
+        if (!machine->child_result.success || !task_type || value.value >= builder->function->value_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (task_type->is_nullptr && builder->function->values[value.value].canonical_type.value != frame->as.conditional.type.value)
+        {
+            u64 branch_constant = 0;
+            if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, frame->as.conditional.leaf_start,
+                                                frame->as.conditional.leaf_end, &branch_constant) ||
+                branch_constant)
             {
-                .start = expression_start,
-                .end = expression_end,
-                .block = builder->current_block,
-                .continuation = final_block,
-                .place = place,
-                .type = result_type,
-                .source = source,
-            },
-    };
-    while (builder->lower_frame_count > frame_start)
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            value = c_ir_emit_cast_instruction(builder, value, frame->as.conditional.type, IR_CONVERSION_INTEGER_TO_POINTER,
+                                               frame->as.conditional.source);
+        }
+        if (value.value == IR_ID_UNDERLYING_INVALID ||
+            !c_ir_emit_store_place(builder, frame->as.conditional.place, frame->as.conditional.type, value, frame->as.conditional.source) ||
+            !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &frame->as.conditional.leaf_continuation, 1,
+                            frame->as.conditional.source))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_CONDITIONAL_CONDITION)
     {
-        CIrLowerFrame task = builder->lower_frames[--builder->lower_frame_count];
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    {
+        u32 expression_start = 0;
+        u32 question = 0;
+        u32 colon = 0;
+        u32 expression_end = 0;
+        u32 start = frame->as.conditional.start;
+        u32 end = frame->as.conditional.end;
+        if (!c_ir_root_conditional(builder, start, end, &expression_start, &question, &colon, &expression_end))
+        {
+            frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_ROOT;
+            if (!c_ir_lower_logical_value_frame_push(builder, start, end))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
+        IrTypeId true_type = c_ir_predict_expression_type(builder, question + 1, colon);
+        IrTypeId false_type = c_ir_predict_expression_type(builder, colon + 1, expression_end);
+        IrType* true_type_value = ir_type_from_id(&builder->program->types, true_type);
+        IrType* false_type_value = ir_type_from_id(&builder->program->types, false_type);
+        IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end);
+        if (result_type.value == IR_ID_UNDERLYING_INVALID)
+        {
+            builder->failure_message = string_format(
+                builder->arena, S8("conditional expression predicted incompatible branch types {u32} (kind {u32}) and {u32} (kind {u32})"),
+                true_type.value, true_type_value ? (u32)true_type_value->kind : UINT32_MAX, false_type.value,
+                false_type_value ? (u32)false_type_value->kind : UINT32_MAX);
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.conditional.source =
+            c_ir_source_range(builder->preprocess.tokens[expression_start].location, builder->preprocess.tokens[expression_start].spelling.length);
+        frame->as.conditional.type = result_type;
+        frame->as.conditional.place = c_ir_emit_temporary(builder, result_type, frame->as.conditional.source);
+        frame->as.conditional.final_block = c_ir_block_create(builder);
+        frame->as.conditional.task_capacity = end - start + 1;
+        frame->as.conditional.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.conditional.task_capacity);
+        if (frame->as.conditional.place.value == IR_ID_UNDERLYING_INVALID ||
+            frame->as.conditional.final_block.value == IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.conditional.task_count = 1;
+        frame->as.conditional.tasks[0] = (CIrLowerFrame){
+            .kind = C_IR_LOWER_FRAME_SELECTION_EXPRESSION,
+            .as.selection =
+                {
+                    .start = expression_start,
+                    .end = expression_end,
+                    .block = builder->current_block,
+                    .continuation = frame->as.conditional.final_block,
+                    .place = frame->as.conditional.place,
+                    .type = result_type,
+                    .source = frame->as.conditional.source,
+                },
+        };
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+    }
+    while (frame->as.conditional.task_count)
+    {
+        CIrLowerFrame task = frame->as.conditional.tasks[--frame->as.conditional.task_count];
         if (!c_ir_switch_block(builder, task.as.selection.block))
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
         if (task.kind == C_IR_LOWER_FRAME_SELECTION_CONTINUE)
         {
             if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.as.selection.continuation, 1, task.as.selection.source))
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
             continue;
         }
@@ -22566,50 +25339,34 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_conditional_value(CIntegerIrBuilder* builder
         u32 nested_question = 0;
         u32 nested_colon = 0;
         u32 nested_end = 0;
-        if (!c_ir_root_conditional(builder, task.as.selection.start, task.as.selection.end, &nested_start, &nested_question, &nested_colon, &nested_end))
+        if (!c_ir_root_conditional(builder, task.as.selection.start, task.as.selection.end, &nested_start, &nested_question, &nested_colon,
+                                   &nested_end))
         {
-            IrValueId value = IR_VALUE_ID_INVALID;
-            if (!c_ir_lower_logical_value(builder, task.as.selection.start, task.as.selection.end, &value))
+            frame->as.conditional.leaf_start = task.as.selection.start;
+            frame->as.conditional.leaf_end = task.as.selection.end;
+            frame->as.conditional.leaf_continuation = task.as.selection.continuation;
+            frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_TASK;
+            if (!c_ir_lower_logical_value_frame_push(builder, task.as.selection.start, task.as.selection.end))
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
-            IrType* task_type = ir_type_from_id(&builder->program->types, task.as.selection.type);
-            if (!task_type || value.value >= builder->function->value_count)
-            {
-                return false;
-            }
-            if (task_type->is_nullptr && builder->function->values[value.value].canonical_type.value != task.as.selection.type.value)
-            {
-                u64 branch_constant = 0;
-                if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, task.as.selection.start, task.as.selection.end, &branch_constant) ||
-                    branch_constant)
-                {
-                    return false;
-                }
-                value = c_ir_emit_cast_instruction(builder, value, task.as.selection.type, IR_CONVERSION_INTEGER_TO_POINTER, task.as.selection.source);
-            }
-            if (value.value == IR_ID_UNDERLYING_INVALID ||
-                !c_ir_emit_store_place(builder, task.as.selection.place, task.as.selection.type, value, task.as.selection.source) ||
-                !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.as.selection.continuation, 1, task.as.selection.source))
-            {
-                return false;
-            }
-            continue;
+            return;
         }
         IrBlockId true_block = c_ir_block_create(builder);
         IrBlockId false_block = c_ir_block_create(builder);
         IrBlockId merge_block = c_ir_block_create(builder);
-        if (true_block.value == IR_ID_UNDERLYING_INVALID || false_block.value == IR_ID_UNDERLYING_INVALID || merge_block.value == IR_ID_UNDERLYING_INVALID ||
-            builder->lower_frame_capacity - builder->lower_frame_count < 3 ||
-            !c_ir_lower_condition(builder, nested_start, nested_question, true_block, false_block, task.as.selection.source))
+        if (true_block.value == IR_ID_UNDERLYING_INVALID || false_block.value == IR_ID_UNDERLYING_INVALID ||
+            merge_block.value == IR_ID_UNDERLYING_INVALID ||
+            frame->as.conditional.task_capacity - frame->as.conditional.task_count < 3)
         {
-            return false;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
-        builder->lower_frames[builder->lower_frame_count++] = (CIrLowerFrame){
+        frame->as.conditional.tasks[frame->as.conditional.task_count++] = (CIrLowerFrame){
             .kind = C_IR_LOWER_FRAME_SELECTION_CONTINUE,
             .as.selection = {.block = merge_block, .continuation = task.as.selection.continuation, .source = task.as.selection.source},
         };
-        builder->lower_frames[builder->lower_frame_count++] = (CIrLowerFrame){
+        frame->as.conditional.tasks[frame->as.conditional.task_count++] = (CIrLowerFrame){
             .kind = C_IR_LOWER_FRAME_SELECTION_EXPRESSION,
             .as.selection =
                 {
@@ -22622,7 +25379,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_conditional_value(CIntegerIrBuilder* builder
                     .source = task.as.selection.source,
                 },
         };
-        builder->lower_frames[builder->lower_frame_count++] = (CIrLowerFrame){
+        frame->as.conditional.tasks[frame->as.conditional.task_count++] = (CIrLowerFrame){
             .kind = C_IR_LOWER_FRAME_SELECTION_EXPRESSION,
             .as.selection =
                 {
@@ -22635,26 +25392,242 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_conditional_value(CIntegerIrBuilder* builder
                     .source = task.as.selection.source,
                 },
         };
+        frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_CONDITION;
+        if (!c_ir_lower_condition_frame_push(builder, nested_start, nested_question, true_block, false_block, task.as.selection.source))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
     }
-    if (!c_ir_switch_block(builder, final_block))
+    if (!c_ir_switch_block(builder, frame->as.conditional.final_block))
     {
-        return false;
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
     }
-    *value_out = c_ir_emit_load_place(builder, place, result_type, source);
-    return value_out->value != IR_ID_UNDERLYING_INVALID;
+    IrValueId value = c_ir_emit_load_place(builder, frame->as.conditional.place, frame->as.conditional.type, frame->as.conditional.source);
+    c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression_impl(CIntegerIrBuilder* builder, u32 start, u32 end, IrValueId* value_out)
+BUSTER_GLOBAL_LOCAL bool c_ir_expression_task_push(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrLowerFrame task, u32 token_index)
 {
-    if (start >= end || end > builder->preprocess.token_count)
+    if (!frame->as.expression.tasks)
     {
+        frame->as.expression.task_capacity = frame->as.expression.end - frame->as.expression.start + 1;
+        frame->as.expression.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.expression.task_capacity);
+    }
+    if (frame->as.expression.task_count >= frame->as.expression.task_capacity)
+    {
+        builder->failure_message = S8("C expression nesting exceeds the lowering frame capacity");
+        builder->failure_token_index = token_index;
         return false;
     }
-    u32 frame_start = builder->lower_frame_count;
-    IrValueId value = IR_VALUE_ID_INVALID;
-c_ir_lower_expression_range:
+    frame->as.expression.tasks[frame->as.expression.task_count++] = task;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+    CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
+    BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_EXPRESSION);
+    bool unwind = false;
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    {
+        if (frame->as.expression.start >= frame->as.expression.end || frame->as.expression.end > builder->preprocess.token_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.expression.value = IR_VALUE_ID_INVALID;
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_VALUE)
+    {
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.expression.value = machine->child_result.value;
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+        unwind = true;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_PLACE)
+    {
+        IrValueId place = machine->child_result.value;
+        u32 assignment = frame->as.expression.pending_assignment;
+        if (!machine->child_result.success || place.value >= builder->function->value_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        CToken operator_token = builder->preprocess.tokens[assignment];
+        CIrLowerFrame task = {
+            .kind = C_IR_LOWER_FRAME_ASSIGNMENT_COMPLETION,
+            .as.assignment =
+                {
+                    .place = place,
+                    .type = builder->function->values[place.value].canonical_type,
+                    .source = c_ir_source_range(operator_token.location, operator_token.spelling.length),
+                    .operation = frame->as.expression.pending_operation,
+                    .simple = c_token_is_punctuator(operator_token, S8("=")),
+                },
+        };
+        if (!c_ir_expression_task_push(builder, frame, task, assignment))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.expression.start = assignment + 1;
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+    }
+    else
+    {
+        BUSTER_CHECK(frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CONDITION);
+        if (!machine->child_result.success || !frame->as.expression.task_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        CIrLowerFrame* task = &frame->as.expression.tasks[frame->as.expression.task_count - 1];
+        BUSTER_CHECK(task->kind == C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_LEFT);
+        if (!c_ir_switch_block(builder, frame->as.expression.pending_true_block))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+    }
     while (true)
     {
+        while (unwind)
+        {
+            if (!frame->as.expression.task_count)
+            {
+                c_ir_lower_frame_finish(builder, true, frame->as.expression.value);
+                return;
+            }
+            CIrLowerFrame task = frame->as.expression.tasks[--frame->as.expression.task_count];
+            IrValueId value = frame->as.expression.value;
+            if (task.kind == C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_LEFT)
+            {
+                task.kind = C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_COMPLETION;
+                task.as.arithmetic_conditional.left = value;
+                if (!c_ir_expression_task_push(builder, frame, task, task.as.arithmetic_conditional.nested_start))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.expression.start = task.as.arithmetic_conditional.nested_start;
+                frame->as.expression.end = task.as.arithmetic_conditional.nested_end;
+                frame->as.expression.value = IR_VALUE_ID_INVALID;
+                unwind = false;
+                break;
+            }
+            if (task.kind == C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_COMPLETION)
+            {
+                IrValueId operands[2] = {task.as.arithmetic_conditional.left, value};
+                u32 operand_count = 2;
+                if (!c_ir_apply_operation(builder, C_CONDITIONAL_ADD, operands, &operand_count,
+                                          task.as.arithmetic_conditional.operation_source, IR_TYPE_ID_INVALID) ||
+                    operand_count != 1 ||
+                    !c_ir_emit_store_place(builder, task.as.arithmetic_conditional.place, task.as.arithmetic_conditional.type, operands[0],
+                                           task.as.arithmetic_conditional.source) ||
+                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.as.arithmetic_conditional.merge_block, 1,
+                                    task.as.arithmetic_conditional.source) ||
+                    !c_ir_switch_block(builder, task.as.arithmetic_conditional.false_block))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                task.kind = C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_FALSE_COMPLETION;
+                if (!c_ir_expression_task_push(builder, frame, task, task.as.arithmetic_conditional.false_start))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.expression.start = task.as.arithmetic_conditional.false_start;
+                frame->as.expression.end = task.as.arithmetic_conditional.false_end;
+                frame->as.expression.value = IR_VALUE_ID_INVALID;
+                unwind = false;
+                break;
+            }
+            if (task.kind == C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_FALSE_COMPLETION)
+            {
+                if (!c_ir_emit_store_place(builder, task.as.arithmetic_conditional.place, task.as.arithmetic_conditional.type, value,
+                                           task.as.arithmetic_conditional.source) ||
+                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.as.arithmetic_conditional.merge_block, 1,
+                                    task.as.arithmetic_conditional.source) ||
+                    !c_ir_switch_block(builder, task.as.arithmetic_conditional.merge_block) ||
+                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.as.arithmetic_conditional.final_block, 1,
+                                    task.as.arithmetic_conditional.source) ||
+                    !c_ir_switch_block(builder, task.as.arithmetic_conditional.final_block))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                value = c_ir_emit_load_place(builder, task.as.arithmetic_conditional.place, task.as.arithmetic_conditional.type,
+                                             task.as.arithmetic_conditional.source);
+                if (value.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.expression.value = value;
+                continue;
+            }
+            if (task.kind == C_IR_LOWER_FRAME_COMPOUND_LITERAL_COMPLETION)
+            {
+                value = c_ir_emit_cast(builder, value, task.as.compound_literal.type, task.as.compound_literal.source);
+                IrValueId place = c_ir_emit_temporary(builder, task.as.compound_literal.type, task.as.compound_literal.source);
+                if (value.value == IR_ID_UNDERLYING_INVALID || place.value == IR_ID_UNDERLYING_INVALID ||
+                    !c_ir_emit_store_place(builder, place, task.as.compound_literal.type, value, task.as.compound_literal.source))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                value = c_ir_emit_load_place(builder, place, task.as.compound_literal.type, task.as.compound_literal.source);
+                if (value.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.expression.value = value;
+                continue;
+            }
+            if (task.kind == C_IR_LOWER_FRAME_COMMA_COMPLETION)
+            {
+                frame->as.expression.start = task.as.range.start;
+                frame->as.expression.end = task.as.range.end;
+                frame->as.expression.value = IR_VALUE_ID_INVALID;
+                unwind = false;
+                break;
+            }
+            BUSTER_CHECK(task.kind == C_IR_LOWER_FRAME_ASSIGNMENT_COMPLETION);
+            if (!task.as.assignment.simple)
+            {
+                if (!c_ir_emit_compound_assignment(builder, task.as.assignment.place, task.as.assignment.type, task.as.assignment.operation, value,
+                                                   task.as.assignment.source, 0, &value))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.expression.value = value;
+                continue;
+            }
+            value = c_ir_decay_array(builder, value, task.as.assignment.type, task.as.assignment.source);
+            value = c_ir_emit_cast(builder, value, task.as.assignment.type, task.as.assignment.source);
+            if (value.value == IR_ID_UNDERLYING_INVALID ||
+                !c_ir_emit_store_place(builder, task.as.assignment.place, task.as.assignment.type, value, task.as.assignment.source))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            frame->as.expression.value = value;
+        }
+        u32 start = frame->as.expression.start;
+        u32 end = frame->as.expression.end;
         u32 conditional_start = 0;
         u32 conditional_question = 0;
         u32 conditional_colon = 0;
@@ -22722,21 +25695,7 @@ c_ir_lower_expression_range:
                 IrBlockId true_block = c_ir_block_create(builder);
                 IrBlockId false_block = c_ir_block_create(builder);
                 IrBlockId merge_block = c_ir_block_create(builder);
-                if (result_type.value == IR_ID_UNDERLYING_INVALID || place.value == IR_ID_UNDERLYING_INVALID ||
-                    final_block.value == IR_ID_UNDERLYING_INVALID || true_block.value == IR_ID_UNDERLYING_INVALID ||
-                    false_block.value == IR_ID_UNDERLYING_INVALID || merge_block.value == IR_ID_UNDERLYING_INVALID ||
-                    !c_ir_lower_condition(builder, conditional_start, conditional_question, true_block, false_block, source) ||
-                    !c_ir_switch_block(builder, true_block))
-                {
-                    return false;
-                }
-                if (builder->lower_frame_count >= builder->lower_frame_capacity)
-                {
-                    builder->failure_message = S8("C conditional nesting exceeds the lowering frame capacity");
-                    builder->failure_token_index = conditional_question;
-                    return false;
-                }
-                builder->lower_frames[builder->lower_frame_count++] = (CIrLowerFrame){
+                CIrLowerFrame task = {
                     .kind = C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_LEFT,
                     .as.arithmetic_conditional =
                         {
@@ -22754,9 +25713,23 @@ c_ir_lower_expression_range:
                             .nested_end = nested_end,
                         },
                 };
-                start = conditional_question + 1;
-                end = plus;
-                continue;
+                if (result_type.value == IR_ID_UNDERLYING_INVALID || place.value == IR_ID_UNDERLYING_INVALID ||
+                    final_block.value == IR_ID_UNDERLYING_INVALID || true_block.value == IR_ID_UNDERLYING_INVALID ||
+                    false_block.value == IR_ID_UNDERLYING_INVALID || merge_block.value == IR_ID_UNDERLYING_INVALID ||
+                    !c_ir_expression_task_push(builder, frame, task, conditional_question))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.expression.start = conditional_question + 1;
+                frame->as.expression.end = plus;
+                frame->as.expression.pending_true_block = true_block;
+                frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CONDITION;
+                if (!c_ir_lower_condition_frame_push(builder, conditional_start, conditional_question, true_block, false_block, source))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                }
+                return;
             }
         }
         if (start + 4 < end && c_token_is_punctuator(builder->preprocess.tokens[start], S8("(")))
@@ -22771,23 +25744,23 @@ c_ir_lower_expression_range:
                 if (literal_type_value && literal_type_value->kind != IR_TYPE_ARRAY && literal_type_value->kind != IR_TYPE_STRUCT &&
                     literal_type_value->kind != IR_TYPE_UNION)
                 {
-                    if (builder->lower_frame_count >= builder->lower_frame_capacity)
+                    if (!c_ir_expression_task_push(builder, frame,
+                                                   (CIrLowerFrame){
+                                                       .kind = C_IR_LOWER_FRAME_COMPOUND_LITERAL_COMPLETION,
+                                                       .as.compound_literal =
+                                                           {
+                                                               .type = literal_type,
+                                                               .source = c_ir_source_range(builder->preprocess.tokens[start].location,
+                                                                                           builder->preprocess.tokens[start].spelling.length),
+                                                           },
+                                                   },
+                                                   start))
                     {
-                        builder->failure_message = S8("C compound-literal nesting exceeds the lowering frame capacity");
-                        builder->failure_token_index = start;
-                        return false;
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
                     }
-                    builder->lower_frames[builder->lower_frame_count++] = (CIrLowerFrame){
-                        .kind = C_IR_LOWER_FRAME_COMPOUND_LITERAL_COMPLETION,
-                        .as.compound_literal =
-                            {
-                                .type = literal_type,
-                                .source = c_ir_source_range(builder->preprocess.tokens[start].location,
-                                                            builder->preprocess.tokens[start].spelling.length),
-                            },
-                    };
-                    start = type_close + 2;
-                    end -= 1;
+                    frame->as.expression.start = type_close + 2;
+                    frame->as.expression.end = end - 1;
                     continue;
                 }
             }
@@ -22798,17 +25771,76 @@ c_ir_lower_expression_range:
             c_ir_matching_delimiter_cached(builder, start, end, S8("("), S8(")")) == end - 1 &&
             c_ir_matching_delimiter_cached(builder, start + 1, end - 1, S8("{"), S8("}")) == end - 2)
         {
-            if (!c_ir_lower_statement_expression(builder, start + 1, end - 2, &value))
+            frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_VALUE;
+            if (!c_ir_lower_statement_expression_frame_push(builder, start + 1, end - 2))
             {
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
-            break;
+            return;
         }
         while (start < end && c_token_is_punctuator(builder->preprocess.tokens[start], S8("(")) &&
                c_ir_matching_delimiter_cached(builder, start, end, S8("("), S8(")")) == end - 1)
         {
             start += 1;
             end -= 1;
+        }
+        frame->as.expression.start = start;
+        frame->as.expression.end = end;
+        u32 last_comma = UINT32_MAX;
+        u32 comma_parentheses = 0;
+        u32 comma_brackets = 0;
+        u32 comma_braces = 0;
+        for (u32 index = start; index < end; index += 1)
+        {
+            CToken token = builder->preprocess.tokens[index];
+            if (c_token_is_punctuator(token, S8("(")))
+            {
+                comma_parentheses += 1;
+            }
+            else if (c_token_is_punctuator(token, S8(")")) && comma_parentheses)
+            {
+                comma_parentheses -= 1;
+            }
+            else if (c_token_is_punctuator(token, S8("[")))
+            {
+                comma_brackets += 1;
+            }
+            else if (c_token_is_punctuator(token, S8("]")) && comma_brackets)
+            {
+                comma_brackets -= 1;
+            }
+            else if (c_token_is_punctuator(token, S8("{")))
+            {
+                comma_braces += 1;
+            }
+            else if (c_token_is_punctuator(token, S8("}")) && comma_braces)
+            {
+                comma_braces -= 1;
+            }
+            else if (!comma_parentheses && !comma_brackets && !comma_braces && c_token_is_punctuator(token, S8(",")))
+            {
+                last_comma = index;
+            }
+        }
+        if (last_comma != UINT32_MAX)
+        {
+            if (last_comma == start || last_comma + 1 >= end ||
+                !c_ir_expression_task_push(builder, frame,
+                                           (CIrLowerFrame){
+                                               .kind = C_IR_LOWER_FRAME_COMMA_COMPLETION,
+                                               .as.range =
+                                                   {
+                                                       .start = last_comma + 1,
+                                                       .end = end,
+                                                   },
+                                           },
+                                           last_comma))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            frame->as.expression.end = last_comma;
+            continue;
         }
         u32 assignment = end;
         u32 parentheses = 0;
@@ -22851,148 +25883,29 @@ c_ir_lower_expression_range:
         }
         if (assignment < end && assignment != start && assignment + 1 < end)
         {
-            if (builder->lower_frame_count >= builder->lower_frame_capacity)
+            frame->as.expression.pending_assignment = assignment;
+            frame->as.expression.pending_operation = assignment_operation;
+            frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_PLACE;
+            if (!c_ir_lower_place_frame_push(builder, start, assignment))
             {
-                builder->failure_message = S8("C expression nesting exceeds the lowering frame capacity");
-                builder->failure_token_index = assignment;
-                return false;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
-            CToken operator_token = builder->preprocess.tokens[assignment];
-            IrValueId place = c_ir_emit_simple_place_expression(builder, start, assignment);
-            if (place.value >= builder->function->value_count)
-            {
-                return false;
-            }
-            builder->lower_frames[builder->lower_frame_count++] = (CIrLowerFrame){
-                .kind = C_IR_LOWER_FRAME_ASSIGNMENT_COMPLETION,
-                .as.assignment =
-                    {
-                        .place = place,
-                        .type = builder->function->values[place.value].canonical_type,
-                        .source = c_ir_source_range(operator_token.location, operator_token.spelling.length),
-                        .operation = assignment_operation,
-                        .simple = c_token_is_punctuator(operator_token, S8("=")),
-                    },
-            };
-            start = assignment + 1;
-            continue;
+            return;
         }
         u32 expression_start = 0;
         u32 question = 0;
         u32 colon = 0;
         u32 expression_end = 0;
-        if (!c_ir_root_conditional(builder, start, end, &expression_start, &question, &colon, &expression_end))
+        frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_VALUE;
+        bool pushed = !c_ir_root_conditional(builder, start, end, &expression_start, &question, &colon, &expression_end)
+                          ? c_ir_lower_logical_value_frame_push(builder, start, end)
+                          : c_ir_lower_conditional_value_frame_push(builder, start, end);
+        if (!pushed)
         {
-            if (!c_ir_lower_logical_value(builder, start, end, &value))
-            {
-                return false;
-            }
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         }
-        else if (!c_ir_lower_conditional_value(builder, start, end, &value))
-        {
-            return false;
-        }
-        break;
+        return;
     }
-    while (builder->lower_frame_count > frame_start)
-    {
-        CIrLowerFrame frame = builder->lower_frames[--builder->lower_frame_count];
-        if (frame.kind == C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_LEFT)
-        {
-            frame.kind = C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_COMPLETION;
-            frame.as.arithmetic_conditional.left = value;
-            builder->lower_frames[builder->lower_frame_count++] = frame;
-            start = frame.as.arithmetic_conditional.nested_start;
-            end = frame.as.arithmetic_conditional.nested_end;
-            goto c_ir_lower_expression_range;
-        }
-        if (frame.kind == C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_COMPLETION)
-        {
-            IrValueId operands[2] = {frame.as.arithmetic_conditional.left, value};
-            u32 operand_count = 2;
-            if (!c_ir_apply_operation(builder, C_CONDITIONAL_ADD, operands, &operand_count, frame.as.arithmetic_conditional.operation_source,
-                                      IR_TYPE_ID_INVALID) ||
-                operand_count != 1 ||
-                !c_ir_emit_store_place(builder, frame.as.arithmetic_conditional.place, frame.as.arithmetic_conditional.type, operands[0],
-                                       frame.as.arithmetic_conditional.source) ||
-                !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &frame.as.arithmetic_conditional.merge_block, 1,
-                                frame.as.arithmetic_conditional.source) ||
-                !c_ir_switch_block(builder, frame.as.arithmetic_conditional.false_block))
-            {
-                return false;
-            }
-            frame.kind = C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_FALSE_COMPLETION;
-            builder->lower_frames[builder->lower_frame_count++] = frame;
-            start = frame.as.arithmetic_conditional.false_start;
-            end = frame.as.arithmetic_conditional.false_end;
-            goto c_ir_lower_expression_range;
-        }
-        if (frame.kind == C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_FALSE_COMPLETION)
-        {
-            if (!c_ir_emit_store_place(builder, frame.as.arithmetic_conditional.place, frame.as.arithmetic_conditional.type, value,
-                                       frame.as.arithmetic_conditional.source) ||
-                !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &frame.as.arithmetic_conditional.merge_block, 1,
-                                frame.as.arithmetic_conditional.source) ||
-                !c_ir_switch_block(builder, frame.as.arithmetic_conditional.merge_block) ||
-                !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &frame.as.arithmetic_conditional.final_block, 1,
-                                frame.as.arithmetic_conditional.source) ||
-                !c_ir_switch_block(builder, frame.as.arithmetic_conditional.final_block))
-            {
-                return false;
-            }
-            value = c_ir_emit_load_place(builder, frame.as.arithmetic_conditional.place, frame.as.arithmetic_conditional.type,
-                                         frame.as.arithmetic_conditional.source);
-            if (value.value == IR_ID_UNDERLYING_INVALID)
-            {
-                return false;
-            }
-            continue;
-        }
-        if (frame.kind == C_IR_LOWER_FRAME_COMPOUND_LITERAL_COMPLETION)
-        {
-            value = c_ir_emit_cast(builder, value, frame.as.compound_literal.type, frame.as.compound_literal.source);
-            IrValueId place = c_ir_emit_temporary(builder, frame.as.compound_literal.type, frame.as.compound_literal.source);
-            if (value.value == IR_ID_UNDERLYING_INVALID || place.value == IR_ID_UNDERLYING_INVALID ||
-                !c_ir_emit_store_place(builder, place, frame.as.compound_literal.type, value, frame.as.compound_literal.source))
-            {
-                return false;
-            }
-            value = c_ir_emit_load_place(builder, place, frame.as.compound_literal.type, frame.as.compound_literal.source);
-            if (value.value == IR_ID_UNDERLYING_INVALID)
-            {
-                return false;
-            }
-            continue;
-        }
-        BUSTER_CHECK(frame.kind == C_IR_LOWER_FRAME_ASSIGNMENT_COMPLETION);
-        if (!frame.as.assignment.simple)
-        {
-            if (!c_ir_emit_compound_assignment(builder, frame.as.assignment.place, frame.as.assignment.type, frame.as.assignment.operation, value,
-                                               frame.as.assignment.source, 0, &value))
-            {
-                return false;
-            }
-            continue;
-        }
-        value = c_ir_decay_array(builder, value, frame.as.assignment.type, frame.as.assignment.source);
-        value = c_ir_emit_cast(builder, value, frame.as.assignment.type, frame.as.assignment.source);
-        if (value.value == IR_ID_UNDERLYING_INVALID ||
-            !c_ir_emit_store_place(builder, frame.as.assignment.place, frame.as.assignment.type, value, frame.as.assignment.source))
-        {
-            return false;
-        }
-    }
-    *value_out = value;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_expression(CIntegerIrBuilder* builder, u32 start, u32 end, IrValueId* value_out)
-{
-    TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
-    BUSTER_CHECK(builder->lower_expression_dispatch);
-    bool result = builder->lower_expression_dispatch(builder, start, end, value_out);
-    scratch_end(temporary);
-    return result;
 }
 
 typedef enum CIrBodyTaskKind
@@ -23113,74 +26026,6 @@ BUSTER_GLOBAL_LOCAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u3
         }
     }
     return UINT32_MAX;
-}
-
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_simple_assignment_segment(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    while (start < end && c_token_is_punctuator(builder->preprocess.tokens[start], S8("(")) &&
-           c_ir_matching_delimiter_cached(builder, start, end, S8("("), S8(")")) == end - 1)
-    {
-        start += 1;
-        end -= 1;
-    }
-    u32 assignment = end;
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
-    CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
-    for (u32 index = start; index < end; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(token, S8("(")))
-        {
-            parentheses += 1;
-        }
-        else if (c_token_is_punctuator(token, S8(")")) && parentheses)
-        {
-            parentheses -= 1;
-        }
-        else if (c_token_is_punctuator(token, S8("[")))
-        {
-            brackets += 1;
-        }
-        else if (c_token_is_punctuator(token, S8("]")) && brackets)
-        {
-            brackets -= 1;
-        }
-        else if (c_token_is_punctuator(token, S8("{")))
-        {
-            braces += 1;
-        }
-        else if (c_token_is_punctuator(token, S8("}")) && braces)
-        {
-            braces -= 1;
-        }
-        else if (!parentheses && !brackets && !braces && (c_token_is_punctuator(token, S8("=")) || c_ir_compound_assignment_operator(token, &operation)))
-        {
-            assignment = index;
-            break;
-        }
-    }
-    if (assignment >= end)
-    {
-        return false;
-    }
-    IrSourceRange source =
-        c_ir_source_range(builder->preprocess.tokens[assignment].location, builder->preprocess.tokens[assignment].spelling.length);
-    IrValueId place = c_ir_emit_simple_place_expression(builder, start, assignment);
-    IrValueId value = c_ir_emit_simple_place_expression(builder, assignment + 1, end);
-    if (value.value != IR_ID_UNDERLYING_INVALID)
-    {
-        value = c_ir_emit_load_place(builder, value, builder->function->values[value.value].canonical_type, source);
-    }
-    else if (!c_ir_lower_expression(builder, assignment + 1, end, &value))
-    {
-        return false;
-    }
-    IrTypeId type = place.value < builder->function->value_count ? builder->function->values[place.value].canonical_type : IR_TYPE_ID_INVALID;
-    bool simple = c_token_is_punctuator(builder->preprocess.tokens[assignment], S8("="));
-    return place.value != IR_ID_UNDERLYING_INVALID && ((simple && c_ir_emit_store_place(builder, place, type, value, source)) ||
-                                                       (!simple && c_ir_emit_place_update(builder, place, type, operation, value, source)));
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_control_statement_ends_with_body(CPreprocessResult preprocess, u32 start, u32 end)
@@ -23472,8 +26317,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_terminate_switch(CIntegerIrBuilder* builder, IrVal
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_automatic_declaration_segment(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_GLOBAL_LOCAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* builder, CIrLowerAutomaticDeclarationState* state,
+                                                             u32* expression_start_out, u32* expression_end_out, bool* expression_pending_out)
 {
+    u32 start = state->start;
+    u32 end = state->end;
+    *expression_pending_out = false;
     CEntityId entity = C_ENTITY_ID_INVALID;
     u32 name_index = end;
     for (u32 index = start; index < end; index += 1)
@@ -23585,6 +26434,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_automatic_declaration_segment(CIntegerIrBuil
         builder->failure_message = string_format(builder->arena, S8("could not lower automatic local '{S8}'"), name.spelling);
         return false;
     }
+    state->local = local;
+    state->local_entity = local_entity;
+    state->local_type_value = local_type_value;
+    state->local_type = local_type;
+    state->name = name;
     u32 initializer_index = end;
     u32 parentheses = 0;
     u32 brackets = 0;
@@ -23656,15 +26510,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_automatic_declaration_segment(CIntegerIrBuil
     else if (c_token_is_punctuator(builder->preprocess.tokens[value_start], S8("{")) && c_token_is_punctuator(builder->preprocess.tokens[end - 1], S8("}")) &&
              c_ir_matching_delimiter_cached(builder, value_start, end, S8("{"), S8("}")) == end - 1)
     {
-        value = c_ir_emit_compound_literal(builder, local_type, value_start, end - 1);
-        if (value.value == IR_ID_UNDERLYING_INVALID)
-        {
-            builder->failure_message = string_format(builder->arena, S8("could not lower aggregate initializer for local '{S8}'"), name.spelling);
-        }
+        state->initializer_index = initializer_index;
+        state->child_kind = 2;
+        *expression_start_out = value_start;
+        *expression_end_out = end - 1;
+        *expression_pending_out = true;
+        return true;
     }
-    else if (!c_ir_lower_expression(builder, value_start, end, &value))
+    else
     {
-        return false;
+        state->initializer_index = initializer_index;
+        state->child_kind = 1;
+        *expression_start_out = value_start;
+        *expression_end_out = end;
+        *expression_pending_out = true;
+        return true;
     }
     CToken assignment = builder->preprocess.tokens[initializer_index];
     bool stored = value.value != IR_ID_UNDERLYING_INVALID &&
@@ -23678,6 +26538,147 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_automatic_declaration_segment(CIntegerIrBuil
         c_ir_mark_local_read_only(builder, local);
     }
     return stored;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_finish_automatic_declaration(CIntegerIrBuilder* builder, CIrLowerAutomaticDeclarationState* state, IrValueId value)
+{
+    CToken assignment = builder->preprocess.tokens[state->initializer_index];
+    bool stored = value.value != IR_ID_UNDERLYING_INVALID &&
+                  c_ir_emit_store(builder, state->local, value, c_ir_source_range(assignment.location, assignment.spelling.length));
+    if (!stored && !builder->failure_message.length)
+    {
+        builder->failure_message = string_format(builder->arena, S8("could not initialize automatic local '{S8}'"), state->name.spelling);
+    }
+    if (stored)
+    {
+        c_ir_mark_local_read_only(builder, state->local);
+    }
+    return stored;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_automatic_declaration_step(CIntegerIrBuilder* builder)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    CIrLowerFrame* frame = machine->frames + machine->frame_count - 1;
+    CIrLowerAutomaticDeclarationState* state = frame->as.automatic_declaration;
+    BUSTER_CHECK(state);
+    if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        arena_set_position(builder->temporary_arena, state->temporary_mark);
+        bool success = machine->child_result.success && c_ir_finish_automatic_declaration(builder, state, machine->child_result.value);
+        c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+        return;
+    }
+    u32 expression_start = 0;
+    u32 expression_end = 0;
+    bool expression_pending = false;
+    bool success = c_ir_prepare_automatic_declaration(builder, state, &expression_start, &expression_end, &expression_pending);
+    if (!success || !expression_pending)
+    {
+        c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+        return;
+    }
+    state->temporary_mark = builder->temporary_arena->position;
+    frame->stage = C_IR_LOWER_STAGE_CHILD;
+    if (state->child_kind == 2)
+    {
+        c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                           .kind = C_IR_LOWER_FRAME_COMPOUND_LITERAL,
+                                           .as.compound_literal_machine =
+                                               {
+                                                   .type = state->local_type,
+                                                   .open = expression_start,
+                                                   .close = expression_end,
+                                               },
+                                       });
+    }
+    else
+    {
+        c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                           .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                           .as.expression =
+                                               {
+                                                   .start = expression_start,
+                                                   .end = expression_end,
+                                               },
+                                       });
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIrBuilder* builder)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    CIrLowerFrame* frame = machine->frames + machine->frame_count - 1;
+    BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION_LIST);
+    CIrLowerAutomaticDeclarationListState* state = frame->as.automatic_declaration_list;
+    BUSTER_CHECK(state);
+    if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        arena_set_position(builder->temporary_arena, state->temporary_mark);
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = C_IR_LOWER_STAGE_BEGIN;
+    }
+    while (state->scan <= state->end)
+    {
+        bool at_end = state->scan == state->end;
+        CToken token = at_end ? (CToken){0} : builder->preprocess.tokens[state->scan];
+        if (!at_end && c_token_is_punctuator(token, S8("(")))
+        {
+            state->parentheses += 1;
+        }
+        else if (!at_end && c_token_is_punctuator(token, S8(")")) && state->parentheses)
+        {
+            state->parentheses -= 1;
+        }
+        else if (!at_end && c_token_is_punctuator(token, S8("[")))
+        {
+            state->brackets += 1;
+        }
+        else if (!at_end && c_token_is_punctuator(token, S8("]")) && state->brackets)
+        {
+            state->brackets -= 1;
+        }
+        else if (!at_end && c_token_is_punctuator(token, S8("{")))
+        {
+            state->braces += 1;
+        }
+        else if (!at_end && c_token_is_punctuator(token, S8("}")) && state->braces)
+        {
+            state->braces -= 1;
+        }
+        bool separator = at_end || (!state->parentheses && !state->brackets && !state->braces && c_token_is_punctuator(token, S8(",")));
+        if (!separator)
+        {
+            state->scan += 1;
+            continue;
+        }
+        if (state->segment_start == state->scan)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        CIrLowerAutomaticDeclarationState* declaration_child =
+            arena_allocate(builder->scratch_arena, CIrLowerAutomaticDeclarationState, 1);
+        *declaration_child = (CIrLowerAutomaticDeclarationState){
+            .start = state->segment_start,
+            .end = state->scan,
+        };
+        CIrLowerFrame child = {
+            .kind = C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION,
+            .as.automatic_declaration = declaration_child,
+        };
+        state->segment_start = state->scan + 1;
+        state->scan += 1;
+        state->temporary_mark = builder->temporary_arena->position;
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
+        c_ir_lower_frame_push(builder, child);
+        return;
+    }
+    c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builder, CToken token, bool output, u64* constraint_out)
@@ -23727,84 +26728,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* buil
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_inline_assembly_segment(CIntegerIrBuilder* builder, u32 start, u32 end, bool output, IrValueId* operands, u64* constraints,
-                                                            u32* operand_count)
-{
-    u32 index = start;
-    while (index < end)
-    {
-        if (c_token_is_punctuator(builder->preprocess.tokens[index], S8("[")))
-        {
-            if (index + 3 >= end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER ||
-                !c_token_is_punctuator(builder->preprocess.tokens[index + 2], S8("]")))
-            {
-                return false;
-            }
-            index += 3;
-        }
-        if (builder->preprocess.tokens[index].kind != C_TOKEN_STRING_LITERAL || index + 2 >= end ||
-            !c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("(")))
-        {
-            return false;
-        }
-        u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, S8("("), S8(")"));
-        if (close == UINT32_MAX || close == index + 2)
-        {
-            return false;
-        }
-        IrValueId value = IR_VALUE_ID_INVALID;
-        if (!c_ir_lower_expression(builder, index + 2, close, &value) || value.value >= builder->function->value_count)
-        {
-            return false;
-        }
-        if (output)
-        {
-            IrValue* output_value = builder->function->values + value.value;
-            if (output_value->category == IR_VALUE_PLACE)
-            {
-                operands[*operand_count] = value;
-            }
-            else if (output_value->definition.value < builder->function->instruction_count)
-            {
-                IrInstruction* definition = builder->function->instructions + output_value->definition.value;
-                if (definition->opcode != IR_OPCODE_LOAD || definition->operand_count != 1)
-                {
-                    return false;
-                }
-                operands[*operand_count] = definition->operands[0];
-            }
-            else
-            {
-                return false;
-            }
-            if (c_ir_bit_field_from_place(builder, operands[*operand_count]))
-            {
-                return false;
-            }
-        }
-        else
-        {
-            operands[*operand_count] = value;
-        }
-        if (!c_ir_inline_assembly_constraint(builder, builder->preprocess.tokens[index], output, constraints + *operand_count))
-        {
-            return false;
-        }
-        *operand_count += 1;
-        index = close + 1;
-        if (index == end)
-        {
-            break;
-        }
-        if (!c_token_is_punctuator(builder->preprocess.tokens[index], S8(",")))
-        {
-            return false;
-        }
-        index += 1;
-    }
-    return true;
-}
-
 BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_clobbers_valid(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     u32 index = start;
@@ -23845,90 +26768,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_clobbers_valid(CIntegerIrBuilder* 
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_inline_assembly(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_GLOBAL_LOCAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
 {
-    u32 open = start + 1;
-    while (open < end && builder->preprocess.tokens[open].kind == C_TOKEN_IDENTIFIER &&
-           (string_equal(builder->preprocess.tokens[open].spelling, S8("volatile")) ||
-            string_equal(builder->preprocess.tokens[open].spelling, S8("__volatile__")) ||
-            string_equal(builder->preprocess.tokens[open].spelling, S8("inline")) || string_equal(builder->preprocess.tokens[open].spelling, S8("__inline__"))))
-    {
-        open += 1;
-    }
-    if (open + 2 >= end || !c_token_is_punctuator(builder->preprocess.tokens[open], S8("(")) ||
-        builder->preprocess.tokens[open + 1].kind != C_TOKEN_STRING_LITERAL)
-    {
-        return false;
-    }
-    u32 close = c_ir_matching_delimiter_cached(builder, open, end, S8("("), S8(")"));
-    if (close != end - 1)
-    {
-        return false;
-    }
-    u32 template_end = open + 1;
-    while (template_end < close && builder->preprocess.tokens[template_end].kind == C_TOKEN_STRING_LITERAL)
-    {
-        template_end += 1;
-    }
-    u32 separators[4] = {
-        UINT32_MAX,
-        UINT32_MAX,
-        UINT32_MAX,
-        UINT32_MAX,
-    };
-    u32 separator_count = 0;
-    u32 parentheses = 0;
-    for (u32 index = template_end; index < close; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(token, S8("(")))
-        {
-            parentheses += 1;
-        }
-        else if (c_token_is_punctuator(token, S8(")")) && parentheses)
-        {
-            parentheses -= 1;
-        }
-        else if (!parentheses && c_token_is_punctuator(token, S8(":")))
-        {
-            if (separator_count >= BUSTER_ARRAY_LENGTH(separators))
-            {
-                return false;
-            }
-            separators[separator_count++] = index;
-        }
-    }
-    if (separator_count == 1)
-    {
-        return false;
-    }
-    if (separator_count == 4)
-    {
-        builder->failure_message = S8("GNU asm goto is not yet supported");
-        return false;
-    }
-    if (separator_count == 3 && !c_ir_inline_assembly_clobbers_valid(builder, separators[2] + 1, close))
-    {
-        builder->failure_message = S8("unsupported GNU inline assembly clobber");
-        return false;
-    }
-    IrValueId* operands = arena_allocate(builder->arena, IrValueId, end - start);
-    u64* constraints = arena_allocate(builder->arena, u64, end - start);
-    u32 operand_count = 0;
-    if (separator_count >= 2 && (!c_ir_lower_inline_assembly_segment(builder, separators[0] + 1, separators[1], true, operands, constraints, &operand_count) ||
-                                 !c_ir_lower_inline_assembly_segment(builder, separators[1] + 1, separator_count == 3 ? separators[2] : close, false, operands,
-                                                                     constraints, &operand_count)))
-    {
-        if (!builder->failure_message.length)
-        {
-            builder->failure_message = S8("unsupported GNU inline assembly constraint or operand");
-        }
-        return false;
-    }
     u64 assembly_length = 0;
-    ByteSlice* fragments = arena_allocate(builder->arena, ByteSlice, template_end - (open + 1));
+    ByteSlice* fragments = arena_allocate(builder->arena, ByteSlice, state->template_end - (state->open + 1));
     u32 fragment_count = 0;
-    for (u32 template_index = open + 1; template_index < template_end; template_index += 1)
+    for (u32 template_index = state->open + 1; template_index < state->template_end; template_index += 1)
     {
         if (!c_ir_decode_quoted(builder->arena, builder->preprocess.tokens[template_index], '"', &fragments[fragment_count]))
         {
@@ -23953,16 +26798,220 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_inline_assembly(CIntegerIrBuilder* builder, 
     }
     IrInstruction instruction = c_ir_instruction_initialize(
         IR_OPCODE_INLINE_ASSEMBLY, builder->void_type,
-        c_ir_source_range(builder->preprocess.tokens[start].location, builder->preprocess.tokens[start].spelling.length));
+        c_ir_source_range(builder->preprocess.tokens[state->start].location, builder->preprocess.tokens[state->start].spelling.length));
     instruction.literal = (String8){
         .pointer = (char8*)assembly.pointer,
         .length = assembly.length,
     };
-    instruction.operands = operands;
-    instruction.operand_count = operand_count;
-    instruction.immediates = constraints;
-    instruction.immediate_count = operand_count;
+    instruction.operands = state->operands;
+    instruction.operand_count = state->operand_count;
+    instruction.immediates = state->constraints;
+    instruction.immediate_count = state->operand_count;
     return c_ir_append_instruction(builder, instruction).value != IR_ID_UNDERLYING_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builder)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    CIrLowerFrame* frame = machine->frames + machine->frame_count - 1;
+    CIrLowerInlineAssemblyState* state = frame->as.inline_assembly;
+    BUSTER_CHECK(state);
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    {
+        state->open = state->start + 1;
+        while (state->open < state->end && builder->preprocess.tokens[state->open].kind == C_TOKEN_IDENTIFIER &&
+               (string_equal(builder->preprocess.tokens[state->open].spelling, S8("volatile")) ||
+                string_equal(builder->preprocess.tokens[state->open].spelling, S8("__volatile__")) ||
+                string_equal(builder->preprocess.tokens[state->open].spelling, S8("inline")) ||
+                string_equal(builder->preprocess.tokens[state->open].spelling, S8("__inline__"))))
+        {
+            state->open += 1;
+        }
+        if (state->open + 2 >= state->end || !c_token_is_punctuator(builder->preprocess.tokens[state->open], S8("(")) ||
+            builder->preprocess.tokens[state->open + 1].kind != C_TOKEN_STRING_LITERAL)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->close = c_ir_matching_delimiter_cached(builder, state->open, state->end, S8("("), S8(")"));
+        if (state->close != state->end - 1)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->template_end = state->open + 1;
+        while (state->template_end < state->close && builder->preprocess.tokens[state->template_end].kind == C_TOKEN_STRING_LITERAL)
+        {
+            state->template_end += 1;
+        }
+        memset(state->separators, 0xff, sizeof(state->separators));
+        u32 parentheses = 0;
+        for (u32 index = state->template_end; index < state->close; index += 1)
+        {
+            CToken token = builder->preprocess.tokens[index];
+            if (c_token_is_punctuator(token, S8("(")))
+            {
+                parentheses += 1;
+            }
+            else if (c_token_is_punctuator(token, S8(")")) && parentheses)
+            {
+                parentheses -= 1;
+            }
+            else if (!parentheses && c_token_is_punctuator(token, S8(":")))
+            {
+                if (state->separator_count >= BUSTER_ARRAY_LENGTH(state->separators))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                state->separators[state->separator_count++] = index;
+            }
+        }
+        if (state->separator_count == 1)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (state->separator_count == 4)
+        {
+            builder->failure_message = S8("GNU asm goto is not yet supported");
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (state->separator_count == 3 && !c_ir_inline_assembly_clobbers_valid(builder, state->separators[2] + 1, state->close))
+        {
+            builder->failure_message = S8("unsupported GNU inline assembly clobber");
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->operands = arena_allocate(builder->arena, IrValueId, state->end - state->start);
+        state->constraints = arena_allocate(builder->arena, u64, state->end - state->start);
+        if (state->separator_count < 2)
+        {
+            c_ir_lower_frame_finish(builder, c_ir_finish_inline_assembly(builder, state), IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->segment_index = state->separators[0] + 1;
+        state->segment_end = state->separators[1];
+        state->output = true;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        arena_set_position(builder->temporary_arena, state->temporary_mark);
+        IrValueId value = machine->child_result.value;
+        if (!machine->child_result.success || value.value >= builder->function->value_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (state->output)
+        {
+            IrValue* output_value = builder->function->values + value.value;
+            if (output_value->category == IR_VALUE_PLACE)
+            {
+                state->operands[state->operand_count] = value;
+            }
+            else if (output_value->definition.value < builder->function->instruction_count)
+            {
+                IrInstruction* definition = builder->function->instructions + output_value->definition.value;
+                if (definition->opcode != IR_OPCODE_LOAD || definition->operand_count != 1)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                state->operands[state->operand_count] = definition->operands[0];
+            }
+            else
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            if (c_ir_bit_field_from_place(builder, state->operands[state->operand_count]))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+        }
+        else
+        {
+            state->operands[state->operand_count] = value;
+        }
+        if (!c_ir_inline_assembly_constraint(builder, builder->preprocess.tokens[state->constraint_index], state->output,
+                                             state->constraints + state->operand_count))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->operand_count += 1;
+        state->segment_index = state->operand_close + 1;
+        if (state->segment_index < state->segment_end)
+        {
+            if (!c_token_is_punctuator(builder->preprocess.tokens[state->segment_index], S8(",")))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            state->segment_index += 1;
+        }
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+    }
+    for (;;)
+    {
+        if (state->segment_index >= state->segment_end)
+        {
+            if (state->output)
+            {
+                state->output = false;
+                state->segment_index = state->separators[1] + 1;
+                state->segment_end = state->separator_count == 3 ? state->separators[2] : state->close;
+                continue;
+            }
+            bool success = c_ir_finish_inline_assembly(builder, state);
+            if (!success && !builder->failure_message.length)
+            {
+                builder->failure_message = S8("unsupported GNU inline assembly constraint or operand");
+            }
+            c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+            return;
+        }
+        u32 index = state->segment_index;
+        if (c_token_is_punctuator(builder->preprocess.tokens[index], S8("[")))
+        {
+            if (index + 3 >= state->segment_end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER ||
+                !c_token_is_punctuator(builder->preprocess.tokens[index + 2], S8("]")))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            index += 3;
+        }
+        if (builder->preprocess.tokens[index].kind != C_TOKEN_STRING_LITERAL || index + 2 >= state->segment_end ||
+            !c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("(")))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        u32 close = c_ir_matching_delimiter_cached(builder, index + 1, state->segment_end, S8("("), S8(")"));
+        if (close == UINT32_MAX || close == index + 2)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        state->constraint_index = index;
+        state->operand_close = close;
+        state->temporary_mark = builder->temporary_arena->position;
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
+        c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                           .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                           .as.expression =
+                                               {
+                                                   .start = index + 2,
+                                                   .end = close,
+                                               },
+                                       });
+        return;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out)
@@ -24094,17 +27143,17 @@ BUSTER_GLOBAL_LOCAL bool c_ir_static_assert_expression_range(CIntegerIrBuilder* 
     return *expression_start_out < *expression_end_out;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDeclaration declaration, bool statement_expression_mode,
-                                              IrValueId* statement_expression_result)
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
+    CDeclaration declaration = state->declaration;
     u32 body_end = declaration.body_start + declaration.body_token_count;
     u32 label_capacity = 0;
     for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
     {
         label_capacity += c_ir_named_label_at(builder->preprocess, declaration.body_start, index, body_end);
     }
-    CIrLabel* labels = arena_allocate(builder->scratch_arena, CIrLabel, label_capacity ? label_capacity : 1);
-    u32 label_count = 0;
+    state->labels = arena_allocate(builder->scratch_arena, CIrLabel, label_capacity ? label_capacity : 1);
+    state->label_count = 0;
     for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
@@ -24113,7 +27162,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
         {
             continue;
         }
-        if (c_ir_label_find(labels, label_count, token.spelling))
+        if (c_ir_label_find(state->labels, state->label_count, token.spelling))
         {
             return false;
         }
@@ -24122,7 +27171,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
         {
             return false;
         }
-        labels[label_count++] = (CIrLabel){
+        state->labels[state->label_count++] = (CIrLabel){
             .name = token.spelling,
             .token_index = index,
             .block = block,
@@ -24148,54 +27197,259 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
     {
         return false;
     }
-    CIrBodyTask* tasks = arena_allocate(builder->scratch_arena, CIrBodyTask, (u32)task_capacity);
-    CIrSwitchCase* switch_cases = arena_allocate(builder->scratch_arena, CIrSwitchCase, switch_case_capacity ? switch_case_capacity : 1);
-    u32 task_count = 1;
-    tasks[0] = (CIrBodyTask){
+    state->tasks = arena_allocate(builder->scratch_arena, CIrBodyTask, (u32)task_capacity);
+    state->switch_cases = arena_allocate(builder->scratch_arena, CIrSwitchCase, switch_case_capacity ? switch_case_capacity : 1);
+    state->task_capacity = (u32)task_capacity;
+    state->switch_case_capacity = switch_case_capacity;
+    state->task_count = 1;
+    state->tasks[0] = (CIrBodyTask){
         .start = declaration.body_start,
         .end = body_end,
         .block = builder->current_block,
         .continuation = IR_BLOCK_ID_INVALID,
         .break_block = IR_BLOCK_ID_INVALID,
         .continue_block = IR_BLOCK_ID_INVALID,
-        .allow_trailing_expression = statement_expression_mode,
+        .allow_trailing_expression = state->statement_expression_mode,
     };
-    IrSourceRange declaration_source = c_ir_source_range(declaration.location, declaration.name.length);
-    while (task_count)
+    state->current_task = arena_allocate(builder->scratch_arena, CIrBodyTask, 1);
+    state->declaration_source = c_ir_source_range(declaration.location, declaration.name.length);
+    state->initialized = true;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_lower_body_yield(CIntegerIrBuilder* builder, CIrLowerBodyState* state, CIrBodyTask task, u32 index,
+                                               CIrLowerBodyContinuation continuation, CIrLowerFrame child)
+{
+    *state->current_task = task;
+    state->index = index;
+    state->has_current_task = true;
+    state->continuation = continuation;
+    state->temporary_mark = builder->temporary_arena->position;
+    state->yielded = true;
+    c_ir_lower_frame_push(builder, child);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
+{
+    CIrVlaLayout* layout = state->vla_layout;
+    IrValueId storage = c_ir_add_result(builder, state->vla_pointer_type);
+    if (layout->runtime_size.value == IR_ID_UNDERLYING_INVALID || storage.value == IR_ID_UNDERLYING_INVALID)
     {
-        CIrBodyTask task = tasks[--task_count];
-        if (!c_ir_switch_block(builder, task.block))
+        return false;
+    }
+    IrSourceRange source = c_ir_source_range(state->vla_name.location, state->vla_name.spelling.length);
+    IrInstruction allocation = c_ir_instruction_initialize(IR_OPCODE_STACK_ALLOCATE, state->vla_pointer_type, source);
+    allocation.operands = arena_allocate(builder->arena, IrValueId, 1);
+    allocation.operands[0] = layout->runtime_size;
+    allocation.operand_count = 1;
+    allocation.immediates = arena_allocate(builder->arena, u64, 1);
+    allocation.immediates[0] = state->vla_alignment;
+    allocation.immediate_count = 1;
+    allocation.result = storage;
+    builder->function->values[storage.value].definition = c_ir_append_instruction(builder, allocation);
+    IrType* pointer_type = ir_type_from_id(&builder->program->types, state->vla_pointer_type);
+    IrValueId place = c_ir_emit_local(builder, state->vla_name, state->vla_pointer_type, state->vla_entity,
+                                      pointer_type ? pointer_type->layout.alignment : state->vla_alignment);
+    CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, state->vla_entity);
+    if (place.value == IR_ID_UNDERLYING_INVALID || !local)
+    {
+        return false;
+    }
+    local->runtime_size = layout->runtime_size;
+    local->vla_element_type = state->vla_element_type;
+    local->vla_dimension_counts = layout->dimension_counts;
+    local->vla_suffix_sizes = layout->suffix_sizes;
+    local->vla_dimension_count = layout->dimension_count;
+    local->is_variable_length_array = true;
+    if (!c_ir_emit_store(builder, local, storage, source))
+    {
+        return false;
+    }
+    c_ir_mark_local_read_only(builder, local);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
+{
+    if (!state->initialized && !c_ir_lower_body_initialize(builder, state))
+    {
+        return false;
+    }
+    bool statement_expression_mode = state->statement_expression_mode;
+    CIrLabel* labels = state->labels;
+    u32 label_count = state->label_count;
+    CIrBodyTask* tasks = state->tasks;
+    CIrSwitchCase* switch_cases = state->switch_cases;
+    u32 switch_case_capacity = state->switch_case_capacity;
+    u32 task_count = state->task_count;
+    IrSourceRange declaration_source = state->declaration_source;
+    state->yielded = false;
+    if (state->continuation != C_IR_LOWER_BODY_CONTINUE_NONE)
+    {
+        arena_set_position(builder->temporary_arena, state->temporary_mark);
+        CIrLowerBodyContinuation continuation = state->continuation;
+        state->continuation = C_IR_LOWER_BODY_CONTINUE_NONE;
+        if (!builder->lower_machine.child_result.success)
         {
+            if (continuation == C_IR_LOWER_BODY_CONTINUE_RETURN && !builder->failure_message.length)
+            {
+                builder->failure_message = S8("could not lower return expression");
+            }
+            else if (continuation == C_IR_LOWER_BODY_CONTINUE_DECLARATION_INITIALIZER && !builder->failure_message.length)
+            {
+                builder->failure_message = string_format(builder->arena, S8("could not lower initializer expression for local '{S8}'"),
+                                                         state->child_name.spelling);
+            }
             return false;
         }
-        if (task.kind == C_IR_BODY_TASK_CONDITION)
+        if (continuation == C_IR_LOWER_BODY_CONTINUE_TRAILING_EXPRESSION)
         {
-            if (!c_ir_lower_condition(builder, task.start, task.end, task.true_block, task.false_block, declaration_source))
+            state->result = builder->lower_machine.child_result.value;
+        }
+        else if (continuation == C_IR_LOWER_BODY_CONTINUE_RETURN)
+        {
+            IrValueId value = builder->lower_machine.child_result.value;
+            value = c_ir_decay_array(builder, value, builder->return_type, state->child_source);
+            value = c_ir_emit_cast(builder, value, builder->return_type, state->child_source);
+            if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_terminate(builder, IR_OPCODE_RETURN, &value, 1, 0, 0, state->child_source))
             {
                 return false;
             }
-            continue;
         }
-        if (task.save_stack_at_entry)
+        else if (continuation == C_IR_LOWER_BODY_CONTINUE_SWITCH)
         {
-            task.stack_checkpoint = c_ir_emit_stack_save(builder, declaration_source);
-            if (task.stack_checkpoint.value == IR_ID_UNDERLYING_INVALID)
+            IrValueId switched = builder->lower_machine.child_result.value;
+            IrType* switched_type = switched.value < builder->function->value_count
+                                        ? ir_type_from_id(&builder->program->types, builder->function->values[switched.value].canonical_type)
+                                        : 0;
+            IrBlockId merge = c_ir_block_create(builder);
+            if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || merge.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
             }
-            task.has_stack_checkpoint = true;
-            if (task.checkpoint_is_break)
+            IrBlockId default_block = merge;
+            for (u32 case_index = 0; case_index < state->switch_case_count; case_index += 1)
             {
-                task.break_checkpoint = task.stack_checkpoint;
-                task.has_break_checkpoint = true;
+                switch_cases[case_index].block = c_ir_block_create(builder);
+                if (switch_cases[case_index].block.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                if (switch_cases[case_index].is_default)
+                {
+                    default_block = switch_cases[case_index].block;
+                }
             }
-            if (task.checkpoint_is_continue)
+            if (!c_ir_terminate_switch(builder, switched, switch_cases, state->switch_case_count, default_block, state->child_source))
             {
-                task.continue_checkpoint = task.stack_checkpoint;
-                task.has_continue_checkpoint = true;
+                return false;
             }
+            CIrBodyTask task = *state->current_task;
+            tasks[task_count++] = (CIrBodyTask){
+                .start = state->switch_body_close + 1,
+                .end = task.end,
+                .block = merge,
+                .continuation = task.continuation,
+                .break_block = task.break_block,
+                .continue_block = task.continue_block,
+            };
+            c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
+            for (u32 case_index = state->switch_case_count; case_index != 0; case_index -= 1)
+            {
+                u32 current = case_index - 1;
+                IrBlockId fallthrough = current + 1 < state->switch_case_count ? switch_cases[current + 1].block : merge;
+                tasks[task_count++] = (CIrBodyTask){
+                    .start = switch_cases[current].content_start,
+                    .end = switch_cases[current].content_end,
+                    .block = switch_cases[current].block,
+                    .continuation = fallthrough,
+                    .break_block = merge,
+                    .continue_block = task.continue_block,
+                };
+                tasks[task_count - 1].continue_checkpoint = task.continue_checkpoint;
+                tasks[task_count - 1].has_continue_checkpoint = task.has_continue_checkpoint;
+            }
+            state->has_current_task = false;
         }
-        u32 index = task.start;
+        else if (continuation == C_IR_LOWER_BODY_CONTINUE_VLA_DECLARATION && !c_ir_lower_body_finish_vla_declaration(builder, state))
+        {
+            if (!builder->failure_message.length)
+            {
+                builder->failure_message = S8("could not lower variable-length array declaration");
+            }
+            return false;
+        }
+        else if (continuation == C_IR_LOWER_BODY_CONTINUE_DECLARATION_INITIALIZER)
+        {
+            IrValueId value = builder->lower_machine.child_result.value;
+            if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_store(builder, state->child_local, value, state->child_source))
+            {
+                if (!builder->failure_message.length)
+                {
+                    builder->failure_message = string_format(builder->arena, S8("could not initialize local '{S8}'"), state->child_name.spelling);
+                }
+                return false;
+            }
+            c_ir_mark_local_read_only(builder, state->child_local);
+        }
+    }
+    while (task_count || state->has_current_task)
+    {
+        CIrBodyTask task = {0};
+        u32 index = 0;
+        if (state->has_current_task)
+        {
+            task = *state->current_task;
+            index = state->index;
+            state->has_current_task = false;
+        }
+        else
+        {
+            task = tasks[--task_count];
+            if (!c_ir_switch_block(builder, task.block))
+            {
+                return false;
+            }
+            if (task.kind == C_IR_BODY_TASK_CONDITION)
+            {
+                state->task_count = task_count;
+                state->continuation = C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK;
+                state->temporary_mark = builder->temporary_arena->position;
+                state->yielded = true;
+                c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                   .kind = C_IR_LOWER_FRAME_CONDITION,
+                                                   .as.condition =
+                                                       {
+                                                           .true_block = task.true_block,
+                                                           .false_block = task.false_block,
+                                                           .source = declaration_source,
+                                                           .start = task.start,
+                                                           .end = task.end,
+                                                       },
+                                               });
+                return false;
+            }
+            if (task.save_stack_at_entry)
+            {
+                task.stack_checkpoint = c_ir_emit_stack_save(builder, declaration_source);
+                if (task.stack_checkpoint.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                task.has_stack_checkpoint = true;
+                if (task.checkpoint_is_break)
+                {
+                    task.break_checkpoint = task.stack_checkpoint;
+                    task.has_break_checkpoint = true;
+                }
+                if (task.checkpoint_is_continue)
+                {
+                    task.continue_checkpoint = task.stack_checkpoint;
+                    task.has_continue_checkpoint = true;
+                }
+            }
+            index = task.start;
+        }
         bool split = false;
         while (index < task.end)
         {
@@ -24436,61 +27690,20 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                 {
                     cases[case_count - 1].content_end = body_close;
                 }
-                IrValueId switched = IR_VALUE_ID_INVALID;
-                if (!c_ir_lower_expression(builder, index + 2, expression_close, &switched))
-                {
-                    return false;
-                }
-                IrType* switched_type = ir_type_from_id(&builder->program->types, builder->function->values[switched.value].canonical_type);
-                IrBlockId merge = c_ir_block_create(builder);
-                if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || merge.value == IR_ID_UNDERLYING_INVALID)
-                {
-                    return false;
-                }
-                IrBlockId default_block = merge;
-                for (u32 case_index = 0; case_index < case_count; case_index += 1)
-                {
-                    cases[case_index].block = c_ir_block_create(builder);
-                    if (cases[case_index].block.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return false;
-                    }
-                    if (cases[case_index].is_default)
-                    {
-                        default_block = cases[case_index].block;
-                    }
-                }
-                if (!c_ir_terminate_switch(builder, switched, cases, case_count, default_block,
-                                           c_ir_source_range(first.location, first.spelling.length)))
-                {
-                    return false;
-                }
-                tasks[task_count++] = (CIrBodyTask){
-                    .start = body_close + 1,
-                    .end = task.end,
-                    .block = merge,
-                    .continuation = task.continuation,
-                    .break_block = task.break_block,
-                    .continue_block = task.continue_block,
-                };
-                c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
-                for (u32 case_index = case_count; case_index != 0; case_index -= 1)
-                {
-                    u32 current = case_index - 1;
-                    IrBlockId fallthrough = current + 1 < case_count ? cases[current + 1].block : merge;
-                    tasks[task_count++] = (CIrBodyTask){
-                        .start = cases[current].content_start,
-                        .end = cases[current].content_end,
-                        .block = cases[current].block,
-                        .continuation = fallthrough,
-                        .break_block = merge,
-                        .continue_block = task.continue_block,
-                    };
-                    tasks[task_count - 1].continue_checkpoint = task.continue_checkpoint;
-                    tasks[task_count - 1].has_continue_checkpoint = task.has_continue_checkpoint;
-                }
-                split = true;
-                break;
+                state->switch_case_count = case_count;
+                state->switch_body_close = body_close;
+                state->child_source = c_ir_source_range(first.location, first.spelling.length);
+                c_ir_lower_body_yield(builder, state, task, body_close + 1, C_IR_LOWER_BODY_CONTINUE_SWITCH,
+                                      (CIrLowerFrame){
+                                          .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                          .as.expression =
+                                              {
+                                                  .start = index + 2,
+                                                  .end = expression_close,
+                                              },
+                                      });
+                state->task_count = task_count;
+                return false;
             }
             if (first.kind == C_TOKEN_IDENTIFIER && string_equal(first.spelling, S8("if")))
             {
@@ -24532,10 +27745,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                 {
                     return false;
                 }
-                if (!c_ir_lower_condition(builder, index + 2, condition_close, then_block, has_else ? else_block : merge, condition_source))
-                {
-                    return false;
-                }
                 tasks[task_count++] = (CIrBodyTask){
                     .start = after,
                     .end = task.end,
@@ -24566,8 +27775,22 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                     .continue_block = task.continue_block,
                 };
                 c_ir_body_task_inherit_control(&tasks[task_count - 1], task);
-                split = true;
-                break;
+                state->task_count = task_count;
+                state->continuation = C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK;
+                state->temporary_mark = builder->temporary_arena->position;
+                state->yielded = true;
+                c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                   .kind = C_IR_LOWER_FRAME_CONDITION,
+                                                   .as.condition =
+                                                       {
+                                                           .true_block = then_block,
+                                                           .false_block = has_else ? else_block : merge,
+                                                           .source = condition_source,
+                                                           .start = index + 2,
+                                                           .end = condition_close,
+                                                       },
+                                               });
+                return false;
             }
             if (first.kind == C_TOKEN_IDENTIFIER && string_equal(first.spelling, S8("do")))
             {
@@ -24781,10 +28004,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                     return false;
                 }
                 IrSourceRange condition_source = c_ir_source_range(first.location, first.spelling.length);
-                if (!c_ir_lower_condition(builder, index + 2, condition_close, body_block, exit_block, condition_source))
-                {
-                    return false;
-                }
                 tasks[task_count++] = (CIrBodyTask){
                     .start = after_body,
                     .end = task.end,
@@ -24806,8 +28025,22 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                     .checkpoint_is_break = true,
                     .checkpoint_is_continue = true,
                 };
-                split = true;
-                break;
+                state->task_count = task_count;
+                state->continuation = C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK;
+                state->temporary_mark = builder->temporary_arena->position;
+                state->yielded = true;
+                c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                   .kind = C_IR_LOWER_FRAME_CONDITION,
+                                                   .as.condition =
+                                                       {
+                                                           .true_block = body_block,
+                                                           .false_block = exit_block,
+                                                           .source = condition_source,
+                                                           .start = index + 2,
+                                                           .end = condition_close,
+                                                       },
+                                               });
+                return false;
             }
             u32 end = index;
             u32 parentheses = 0;
@@ -24924,90 +28157,38 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                                               string_equal(first.spelling, S8("enum"))));
                 if (!control && !trailing_declaration)
                 {
-                    IrValueId trailing = IR_VALUE_ID_INVALID;
-                    if (!c_ir_lower_expression(builder, index, end, &trailing))
-                    {
-                        return false;
-                    }
-                    if (statement_expression_result)
-                    {
-                        *statement_expression_result = trailing;
-                    }
-                    index = task.end;
-                    continue;
+                    c_ir_lower_body_yield(builder, state, task, task.end, C_IR_LOWER_BODY_CONTINUE_TRAILING_EXPRESSION,
+                                          (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                              .as.expression =
+                                                  {
+                                                      .start = index,
+                                                      .end = end,
+                                                  },
+                                          });
+                    state->task_count = task_count;
+                    return false;
                 }
             }
             if (first.kind == C_TOKEN_IDENTIFIER &&
                 (string_equal(first.spelling, S8("asm")) || string_equal(first.spelling, S8("__asm")) || string_equal(first.spelling, S8("__asm__"))))
             {
-                if (!c_ir_lower_inline_assembly(builder, index, end))
-                {
-                    return false;
-                }
-                index = end == task.end ? task.end : end + 1;
-                continue;
-            }
-            u32 assignment_start = index;
-            u32 assignment_end = end;
-            while (assignment_start < assignment_end && c_token_is_punctuator(builder->preprocess.tokens[assignment_start], S8("(")) &&
-                   c_ir_matching_delimiter_cached(builder, assignment_start, assignment_end, S8("("), S8(")")) == assignment_end - 1)
-            {
-                assignment_start += 1;
-                assignment_end -= 1;
-            }
-            bool root_is_declaration = first.kind == C_TOKEN_IDENTIFIER && (string_equal(first.spelling, S8("typedef")) ||
-                                                                             c_parse_type_word_for_dialect(first.spelling,
-                                                                                                           builder->preprocess.dialect) ||
-                                                                             first_is_typedef_name || first_is_unbound_typedef_name);
-            bool assignment_sequence = !root_is_declaration;
-            u32 sequence_segment_start = assignment_start;
-            u32 segment_parentheses = 0;
-            u32 segment_brackets = 0;
-            u32 segment_braces = 0;
-            for (u32 scan = assignment_start; assignment_sequence && scan <= assignment_end; scan += 1)
-            {
-                bool at_end = scan == assignment_end;
-                CToken token = at_end ? (CToken){0} : builder->preprocess.tokens[scan];
-                if (!at_end && c_token_is_punctuator(token, S8("(")))
-                {
-                    segment_parentheses += 1;
-                }
-                else if (!at_end && c_token_is_punctuator(token, S8(")")) && segment_parentheses)
-                {
-                    segment_parentheses -= 1;
-                }
-                else if (!at_end && c_token_is_punctuator(token, S8("[")))
-                {
-                    segment_brackets += 1;
-                }
-                else if (!at_end && c_token_is_punctuator(token, S8("]")) && segment_brackets)
-                {
-                    segment_brackets -= 1;
-                }
-                else if (!at_end && c_token_is_punctuator(token, S8("{")))
-                {
-                    segment_braces += 1;
-                }
-                else if (!at_end && c_token_is_punctuator(token, S8("}")) && segment_braces)
-                {
-                    segment_braces -= 1;
-                }
-                bool separator = at_end || (!segment_parentheses && !segment_brackets && !segment_braces && c_token_is_punctuator(token, S8(",")));
-                if (!separator)
-                {
-                    continue;
-                }
-                assignment_sequence = sequence_segment_start < scan && c_ir_lower_simple_assignment_segment(builder, sequence_segment_start, scan);
-                sequence_segment_start = scan + 1;
-            }
-            if (assignment_sequence)
-            {
-                index = end == task.end ? task.end : end + 1;
-                continue;
+                CIrLowerInlineAssemblyState* inline_state = arena_allocate(builder->scratch_arena, CIrLowerInlineAssemblyState, 1);
+                *inline_state = (CIrLowerInlineAssemblyState){
+                    .start = index,
+                    .end = end,
+                };
+                c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
+                                      C_IR_LOWER_BODY_CONTINUE_INLINE_ASSEMBLY,
+                                      (CIrLowerFrame){
+                                          .kind = C_IR_LOWER_FRAME_BODY_INLINE_ASSEMBLY,
+                                          .as.inline_assembly = inline_state,
+                                      });
+                state->task_count = task_count;
+                return false;
             }
             if (first.kind == C_TOKEN_IDENTIFIER && string_equal(first.spelling, S8("return")))
             {
-                IrValueId value = IR_VALUE_ID_INVALID;
                 bool has_value = index + 1 < end;
                 if (has_value == builder->returns_void)
                 {
@@ -25015,25 +28196,23 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                                                          : S8("return statement has no value but the parsed function return type is non-void");
                     return false;
                 }
-                if (has_value && !c_ir_lower_expression(builder, index + 1, end, &value))
-                {
-                    if (!builder->failure_message.length)
-                    {
-                        builder->failure_message = S8("could not lower return expression");
-                    }
-                    return false;
-                }
+                IrSourceRange return_source = c_ir_source_range(first.location, first.spelling.length);
                 if (has_value)
                 {
-                    value = c_ir_decay_array(builder, value, builder->return_type, c_ir_source_range(first.location, first.spelling.length));
-                    value = c_ir_emit_cast(builder, value, builder->return_type, c_ir_source_range(first.location, first.spelling.length));
-                    if (value.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return false;
-                    }
+                    state->child_source = return_source;
+                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1, C_IR_LOWER_BODY_CONTINUE_RETURN,
+                                          (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                              .as.expression =
+                                                  {
+                                                      .start = index + 1,
+                                                      .end = end,
+                                                  },
+                                          });
+                    state->task_count = task_count;
+                    return false;
                 }
-                if (!c_ir_terminate(builder, IR_OPCODE_RETURN, has_value ? &value : 0, has_value ? 1 : 0, 0, 0,
-                                    c_ir_source_range(first.location, first.spelling.length)))
+                if (!c_ir_terminate(builder, IR_OPCODE_RETURN, 0, 0, 0, 0, return_source))
                 {
                     return false;
                 }
@@ -25119,52 +28298,22 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                 }
                 if (multiple_declarators)
                 {
-                    u32 segment_start = index;
-                    declaration_parentheses = 0;
-                    declaration_brackets = 0;
-                    declaration_braces = 0;
-                    for (u32 scan = index; scan <= end; scan += 1)
-                    {
-                        bool at_end = scan == end;
-                        CToken token = at_end ? (CToken){0} : builder->preprocess.tokens[scan];
-                        if (!at_end && c_token_is_punctuator(token, S8("(")))
-                        {
-                            declaration_parentheses += 1;
-                        }
-                        else if (!at_end && c_token_is_punctuator(token, S8(")")) && declaration_parentheses)
-                        {
-                            declaration_parentheses -= 1;
-                        }
-                        else if (!at_end && c_token_is_punctuator(token, S8("[")))
-                        {
-                            declaration_brackets += 1;
-                        }
-                        else if (!at_end && c_token_is_punctuator(token, S8("]")) && declaration_brackets)
-                        {
-                            declaration_brackets -= 1;
-                        }
-                        else if (!at_end && c_token_is_punctuator(token, S8("{")))
-                        {
-                            declaration_braces += 1;
-                        }
-                        else if (!at_end && c_token_is_punctuator(token, S8("}")) && declaration_braces)
-                        {
-                            declaration_braces -= 1;
-                        }
-                        bool separator =
-                            at_end || (!declaration_parentheses && !declaration_brackets && !declaration_braces && c_token_is_punctuator(token, S8(",")));
-                        if (!separator)
-                        {
-                            continue;
-                        }
-                        if (segment_start == scan || !c_ir_lower_automatic_declaration_segment(builder, segment_start, scan))
-                        {
-                            return false;
-                        }
-                        segment_start = scan + 1;
-                    }
-                    index = end == task.end ? task.end : end + 1;
-                    continue;
+                    CIrLowerAutomaticDeclarationListState* declaration_state =
+                        arena_allocate(builder->scratch_arena, CIrLowerAutomaticDeclarationListState, 1);
+                    *declaration_state = (CIrLowerAutomaticDeclarationListState){
+                        .start = index,
+                        .end = end,
+                        .scan = index,
+                        .segment_start = index,
+                    };
+                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
+                                          C_IR_LOWER_BODY_CONTINUE_AUTOMATIC_DECLARATION,
+                                          (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION_LIST,
+                                              .as.automatic_declaration_list = declaration_state,
+                                          });
+                    state->task_count = task_count;
+                    return false;
                 }
                 u32 name_index = end;
                 CEntityId entity = C_ENTITY_ID_INVALID;
@@ -25207,7 +28356,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                 CType* local_c_type = &builder->parse.types[local_c_type_id.value];
                 IrTypeId local_type = builder->c_type_ir_map[local_c_type_id.value];
                 bool variable_length_array = false;
-                CIrVlaLayout variable_layout = {0};
                 IrTypeId variable_element_type = IR_TYPE_ID_INVALID;
                 if (local_type.value == IR_ID_UNDERLYING_INVALID && local_c_type->kind == C_TYPE_ARRAY &&
                     local_c_type->array_bound < builder->parse.array_bound_count && !builder->parse.array_bounds[local_c_type->array_bound].token_count)
@@ -25363,8 +28511,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                     index = end == task.end ? task.end : end + 1;
                     continue;
                 }
-                IrValueId variable_size = IR_VALUE_ID_INVALID;
-                IrValueId variable_storage = IR_VALUE_ID_INVALID;
                 if (variable_length_array)
                 {
                     if (!task.has_stack_checkpoint)
@@ -25377,31 +28523,37 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                         task.has_stack_checkpoint = true;
                         task.restore_before_continuation = true;
                     }
-                    if (!c_ir_prepare_vla_layout(builder, local_c_type_id, name, false, &variable_layout))
+                    if (c_ir_declaration_initializer_range(builder->preprocess,
+                                                           (CDeclaration){
+                                                               .token_start = index,
+                                                               .token_count = end - index,
+                                                           },
+                                                           &(u32){0}, &(u32){0}))
                     {
-                        if (!builder->failure_message.length)
-                        {
-                            builder->failure_message = S8("could not lower variable-length array bound");
-                        }
+                        builder->failure_message = S8("variable-length array cannot have an initializer");
                         return false;
                     }
-                    variable_size = variable_layout.runtime_size;
-                    variable_storage = c_ir_add_result(builder, local_type);
-                    if (variable_size.value == IR_ID_UNDERLYING_INVALID || variable_storage.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return false;
-                    }
-                    IrInstruction allocation = c_ir_instruction_initialize(IR_OPCODE_STACK_ALLOCATE, local_type,
-                                                                           c_ir_source_range(name.location, name.spelling.length));
-                    allocation.operands = arena_allocate(builder->arena, IrValueId, 1);
-                    allocation.operands[0] = variable_size;
-                    allocation.operand_count = 1;
-                    allocation.immediates = arena_allocate(builder->arena, u64, 1);
-                    allocation.immediates[0] = local_alignment;
-                    allocation.immediate_count = 1;
-                    allocation.result = variable_storage;
-                    IrInstructionId allocation_id = c_ir_append_instruction(builder, allocation);
-                    builder->function->values[variable_storage.value].definition = allocation_id;
+                    CIrVlaLayout* layout = arena_allocate(builder->scratch_arena, CIrVlaLayout, 1);
+                    CIrLowerVlaLayoutState* layout_state = arena_allocate(builder->scratch_arena, CIrLowerVlaLayoutState, 1);
+                    *layout_state = (CIrLowerVlaLayoutState){
+                        .result = layout,
+                        .array_type = local_c_type_id,
+                        .token = name,
+                    };
+                    state->vla_layout = layout;
+                    state->vla_pointer_type = local_type;
+                    state->vla_element_type = variable_element_type;
+                    state->vla_entity = entity;
+                    state->vla_name = name;
+                    state->vla_alignment = local_alignment;
+                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
+                                          C_IR_LOWER_BODY_CONTINUE_VLA_DECLARATION,
+                                          (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_BODY_VLA_LAYOUT,
+                                              .as.vla_layout = layout_state,
+                                          });
+                    state->task_count = task_count;
+                    return false;
                 }
                 IrValueId place = IR_VALUE_ID_INVALID;
                 if (static_storage)
@@ -25466,19 +28618,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                 if (place.value == IR_ID_UNDERLYING_INVALID || !local)
                 {
                     return false;
-                }
-                if (variable_length_array)
-                {
-                    local->runtime_size = variable_size;
-                    local->vla_element_type = variable_element_type;
-                    local->vla_dimension_counts = variable_layout.dimension_counts;
-                    local->vla_suffix_sizes = variable_layout.suffix_sizes;
-                    local->vla_dimension_count = variable_layout.dimension_count;
-                    local->is_variable_length_array = true;
-                    if (!c_ir_emit_store(builder, local, variable_storage, c_ir_source_range(name.location, name.spelling.length)))
-                    {
-                        return false;
-                    }
                 }
                 u32 initializer_index = end;
                 u32 declarator_brackets = 0;
@@ -25563,47 +28702,54 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
                     {
                         value = c_ir_emit_string_range_typed(builder, value_start, end, local_type);
                     }
-                    else if (c_token_is_punctuator(builder->preprocess.tokens[value_start], S8("{")) &&
-                             c_token_is_punctuator(builder->preprocess.tokens[end - 1], S8("}")) &&
-                             c_ir_matching_delimiter_cached(builder, value_start, end, S8("{"), S8("}")) == end - 1)
+                    else
                     {
+                        CIrLowerFrame child = {
+                            .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                            .as.expression =
+                                {
+                                    .start = value_start,
+                                    .end = end,
+                                },
+                        };
+                        bool braced = c_token_is_punctuator(builder->preprocess.tokens[value_start], S8("{")) &&
+                                      c_token_is_punctuator(builder->preprocess.tokens[end - 1], S8("}")) &&
+                                      c_ir_matching_delimiter_cached(builder, value_start, end, S8("{"), S8("}")) == end - 1;
                         IrType* initializer_type = ir_type_from_id(&builder->program->types, local_type);
                         bool aggregate = initializer_type && (initializer_type->kind == IR_TYPE_ARRAY || initializer_type->kind == IR_TYPE_STRUCT ||
                                                               initializer_type->kind == IR_TYPE_UNION);
-                        if (aggregate)
+                        if (braced && aggregate)
                         {
-                            value = c_ir_emit_compound_literal(builder, local_type, value_start, end - 1);
-                            if (value.value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
-                            {
-                                builder->failure_message =
-                                    string_format(builder->arena, S8("could not lower aggregate initializer for local '{S8}'"), name.spelling);
-                            }
+                            child = (CIrLowerFrame){
+                                .kind = C_IR_LOWER_FRAME_COMPOUND_LITERAL,
+                                .as.compound_literal_machine =
+                                    {
+                                        .type = local_type,
+                                        .open = value_start,
+                                        .close = end - 1,
+                                    },
+                            };
                         }
-                        else
+                        else if (braced)
                         {
                             u32 scalar_end = end - 1;
                             if (scalar_end > value_start + 1 && c_token_is_punctuator(builder->preprocess.tokens[scalar_end - 1], S8(",")))
                             {
                                 scalar_end -= 1;
                             }
-                            if (scalar_end <= value_start + 1 || !c_ir_lower_expression(builder, value_start + 1, scalar_end, &value))
+                            if (scalar_end <= value_start + 1)
                             {
-                                if (!builder->failure_message.length)
-                                {
-                                    builder->failure_message =
-                                        string_format(builder->arena, S8("could not lower initializer expression for local '{S8}'"), name.spelling);
-                                }
                                 return false;
                             }
+                            child.as.expression.start = value_start + 1;
+                            child.as.expression.end = scalar_end;
                         }
-                    }
-                    else if (!c_ir_lower_expression(builder, value_start, end, &value))
-                    {
-                        if (!builder->failure_message.length)
-                        {
-                            builder->failure_message =
-                                string_format(builder->arena, S8("could not lower initializer expression for local '{S8}'"), name.spelling);
-                        }
+                        state->child_local = local;
+                        state->child_name = name;
+                        state->child_source = c_ir_source_range(assign.location, assign.spelling.length);
+                        c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
+                                              C_IR_LOWER_BODY_CONTINUE_DECLARATION_INITIALIZER, child);
+                        state->task_count = task_count;
                         return false;
                     }
                     if (value.value == IR_ID_UNDERLYING_INVALID ||
@@ -25622,336 +28768,22 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
             }
             else
             {
-                u32 assignment_index = end;
-                u32 assignment_parentheses = 0;
-                u32 assignment_brackets = 0;
-                u32 assignment_braces = 0;
-                CConditionalOperator assignment_operation = C_CONDITIONAL_OPERATOR_COUNT;
-                bool simple_assignment = false;
-                bool compound_assignment = false;
-                for (u32 scan = index; scan < end; scan += 1)
-                {
-                    CToken token = builder->preprocess.tokens[scan];
-                    if (c_token_is_punctuator(token, S8("(")))
-                    {
-                        assignment_parentheses += 1;
-                    }
-                    else if (c_token_is_punctuator(token, S8(")")) && assignment_parentheses)
-                    {
-                        assignment_parentheses -= 1;
-                    }
-                    else if (c_token_is_punctuator(token, S8("[")))
-                    {
-                        assignment_brackets += 1;
-                    }
-                    else if (c_token_is_punctuator(token, S8("]")) && assignment_brackets)
-                    {
-                        assignment_brackets -= 1;
-                    }
-                    else if (c_token_is_punctuator(token, S8("{")))
-                    {
-                        assignment_braces += 1;
-                    }
-                    else if (c_token_is_punctuator(token, S8("}")) && assignment_braces)
-                    {
-                        assignment_braces -= 1;
-                    }
-                    else if (!assignment_parentheses && !assignment_brackets && !assignment_braces)
-                    {
-                        simple_assignment = c_token_is_punctuator(token, S8("="));
-                        compound_assignment = c_ir_compound_assignment_operator(token, &assignment_operation);
-                        if (simple_assignment || compound_assignment)
-                        {
-                            assignment_index = scan;
-                            break;
-                        }
-                    }
-                }
-                if (assignment_index < end)
-                {
-                    if (assignment_index == index || assignment_index + 1 >= end)
-                    {
-                        return false;
-                    }
-                    IrValueId left = IR_VALUE_ID_INVALID;
-                    u32 left_value_start = builder->function->value_count;
-                    if (!c_ir_lower_expression(builder, index, assignment_index, &left) || left.value >= builder->function->value_count)
-                    {
-                        return false;
-                    }
-                    IrValueId place = IR_VALUE_ID_INVALID;
-                    IrValue* left_value = &builder->function->values[left.value];
-                    if (left_value->category == IR_VALUE_PLACE)
-                    {
-                        place = left;
-                    }
-                    else if (left_value->definition.value < builder->function->instruction_count)
-                    {
-                        IrInstruction* definition = &builder->function->instructions[left_value->definition.value];
-                        if (definition->opcode == IR_OPCODE_LOAD && definition->operand_count == 1)
-                        {
-                            place = definition->operands[0];
-                            IrInstructionId definition_id = left_value->definition;
-                            IrBlock* current_block = &builder->function->blocks[builder->current_block.value];
-                            if (definition_id.value + 1 != builder->function->instruction_count || left.value + 1 != builder->function->value_count ||
-                                current_block->last_instruction.value != definition_id.value || builder->last_instruction.value != definition_id.value)
-                            {
-                                return false;
-                            }
-                            {
-                                IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
-                                IrInstructionId cursor = current_block->first_instruction;
-                                while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
-                                {
-                                    previous = cursor;
-                                    cursor = builder->function->instructions[cursor.value].next;
-                                }
-                                if (cursor.value != definition_id.value)
-                                {
-                                    return false;
-                                }
-                                if (previous.value == IR_ID_UNDERLYING_INVALID)
-                                {
-                                    current_block->first_instruction = IR_INSTRUCTION_ID_INVALID;
-                                }
-                                else
-                                {
-                                    builder->function->instructions[previous.value].next = IR_INSTRUCTION_ID_INVALID;
-                                }
-                                current_block->last_instruction = previous;
-                                builder->last_instruction = previous;
-                                builder->function->instruction_count -= 1;
-                                builder->function->value_count -= 1;
-                            }
-                        }
-                    }
-                    if (place.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        for (u32 value_index = builder->function->value_count; value_index > left_value_start; value_index -= 1)
-                        {
-                            IrValueId candidate = {
-                                .value = value_index - 1,
-                            };
-                            IrValue* candidate_value = builder->function->values + candidate.value;
-                            if (candidate_value->category != IR_VALUE_PLACE || !c_ir_bit_field_from_place(builder, candidate))
-                            {
-                                continue;
-                            }
-                            IrInstructionId definition_id = candidate_value->definition;
-                            IrBlock* current_block = &builder->function->blocks[builder->current_block.value];
-                            IrInstructionId cursor = current_block->first_instruction;
-                            while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
-                            {
-                                cursor = builder->function->instructions[cursor.value].next;
-                            }
-                            if (cursor.value != definition_id.value)
-                            {
-                                continue;
-                            }
-                            builder->function->instructions[definition_id.value].next = IR_INSTRUCTION_ID_INVALID;
-                            current_block->last_instruction = definition_id;
-                            builder->last_instruction = definition_id;
-                            builder->function->instruction_count = definition_id.value + 1;
-                            builder->function->value_count = candidate.value + 1;
-                            place = candidate;
-                            break;
-                        }
-                    }
-                    if (place.value >= builder->function->value_count)
-                    {
-                        return false;
-                    }
-                    IrValueId right = IR_VALUE_ID_INVALID;
-                    if (!c_ir_lower_expression(builder, assignment_index + 1, end, &right))
-                    {
-                        return false;
-                    }
-                    IrTypeId type = builder->function->values[place.value].canonical_type;
-                    CToken assignment = builder->preprocess.tokens[assignment_index];
-                    IrSourceRange source = c_ir_source_range(assignment.location, assignment.spelling.length);
-                    if ((simple_assignment && !c_ir_emit_store_place(builder, place, type, right, source)) ||
-                        (compound_assignment && !c_ir_emit_place_update(builder, place, type, assignment_operation, right, source)))
-                    {
-                        return false;
-                    }
-                    index = end == task.end ? task.end : end + 1;
-                    continue;
-                }
+                CIrLowerAssignmentStatementState* statement_state = arena_allocate(builder->scratch_arena, CIrLowerAssignmentStatementState, 1);
+                *statement_state = (CIrLowerAssignmentStatementState){
+                    .place = IR_VALUE_ID_INVALID,
+                    .base = IR_VALUE_ID_INVALID,
+                    .type = IR_TYPE_ID_INVALID,
+                    .start = index,
+                    .end = end,
+                };
+                c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1, C_IR_LOWER_BODY_CONTINUE_STATEMENT,
+                                      (CIrLowerFrame){
+                                          .kind = C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT,
+                                          .as.assignment_statement = statement_state,
+                                      });
+                state->task_count = task_count;
+                return false;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && index + 4 < end && c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("[")))
-            {
-                u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, S8("["), S8("]"));
-                if (close == UINT32_MAX || close == index + 2 || close + 2 >= end)
-                {
-                    return false;
-                }
-                CToken assignment = builder->preprocess.tokens[close + 1];
-                bool simple_assignment = c_token_is_punctuator(assignment, S8("="));
-                CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
-                bool compound_assignment = c_ir_compound_assignment_operator(assignment, &operation);
-                CEntityId entity = c_ir_identifier_entity(builder, index);
-                CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-                IrValueId base = IR_VALUE_ID_INVALID;
-                if (local)
-                {
-                    IrType* local_type = ir_type_from_id(&builder->program->types, local->type);
-                    base = local_type && local_type->kind == IR_TYPE_ARRAY ? local->place : c_ir_emit_load(builder, local, first);
-                }
-                IrValueId subscript = IR_VALUE_ID_INVALID;
-                if ((!simple_assignment && !compound_assignment) || base.value == IR_ID_UNDERLYING_INVALID ||
-                    !c_ir_lower_expression(builder, index + 2, close, &subscript))
-                {
-                    return false;
-                }
-                IrSourceRange source = c_ir_source_range(assignment.location, assignment.spelling.length);
-                IrValueId place = c_ir_emit_index_place(builder, base, subscript, source);
-                IrValueId value = IR_VALUE_ID_INVALID;
-                if (place.value == IR_ID_UNDERLYING_INVALID || !c_ir_lower_expression(builder, close + 2, end, &value))
-                {
-                    return false;
-                }
-                IrTypeId element_type = builder->function->values[place.value].canonical_type;
-                if (compound_assignment)
-                {
-                    if (!c_ir_emit_compound_assignment(builder, place, element_type, operation, value, source, 0, &value))
-                    {
-                        return false;
-                    }
-                }
-                if (!compound_assignment && !c_ir_emit_store_place(builder, place, element_type, value, source))
-                {
-                    return false;
-                }
-            }
-            else if (first.kind == C_TOKEN_IDENTIFIER && index + 4 < end &&
-                     (c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8(".")) ||
-                      c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("->"))) &&
-                     builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER && c_ir_assignment_operator(builder->preprocess.tokens[index + 3]))
-            {
-                CToken assignment = builder->preprocess.tokens[index + 3];
-                bool simple_assignment = c_token_is_punctuator(assignment, S8("="));
-                CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
-                bool compound_assignment = c_ir_compound_assignment_operator(assignment, &operation);
-                CEntityId entity = c_ir_identifier_entity(builder, index);
-                CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-                IrValueId place = IR_VALUE_ID_INVALID;
-                if (local)
-                {
-                    place = c_ir_emit_field_place(builder, local, builder->preprocess.tokens[index + 1], builder->preprocess.tokens[index + 2]);
-                }
-                else
-                {
-                    IrSourceRange field_source = c_ir_source_range(first.location, first.spelling.length);
-                    IrValueId base = c_ir_emit_global_place(builder, entity, field_source);
-                    if (base.value != IR_ID_UNDERLYING_INVALID && c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("->")))
-                    {
-                        IrTypeId pointer_type = builder->function->values[base.value].canonical_type;
-                        base = c_ir_emit_load_place(builder, base, pointer_type, field_source);
-                    }
-                    place = c_ir_emit_field_place_from_value(builder, base, builder->preprocess.tokens[index + 1], builder->preprocess.tokens[index + 2]);
-                }
-                IrValueId value = IR_VALUE_ID_INVALID;
-                if ((!simple_assignment && !compound_assignment) || place.value == IR_ID_UNDERLYING_INVALID ||
-                    !c_ir_lower_expression(builder, index + 4, end, &value))
-                {
-                    return false;
-                }
-                IrTypeId field_type = builder->function->values[place.value].canonical_type;
-                IrSourceRange source = c_ir_source_range(assignment.location, assignment.spelling.length);
-                if (compound_assignment)
-                {
-                    if (!c_ir_emit_compound_assignment(builder, place, field_type, operation, value, source, 0, &value))
-                    {
-                        return false;
-                    }
-                }
-                if (!compound_assignment && !c_ir_emit_store_place(builder, place, field_type, value, source))
-                {
-                    return false;
-                }
-            }
-            else if (first.kind == C_TOKEN_IDENTIFIER && index + 2 == end &&
-                     (c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("++")) ||
-                      c_token_is_punctuator(builder->preprocess.tokens[index + 1], S8("--"))))
-            {
-                CToken update = builder->preprocess.tokens[index + 1];
-                CEntityId entity = c_ir_identifier_entity(builder, index);
-                CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-                IrValueId one = c_ir_emit_integer(builder, (CToken){
-                                                               .spelling = S8("1"),
-                                                               .location = update.location,
-                                                               .kind = C_TOKEN_PREPROCESSING_NUMBER,
-                                                           });
-                if (!local ||
-                    !c_ir_emit_local_update(builder, local, first, c_token_is_punctuator(update, S8("++")) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
-                                            c_ir_source_range(update.location, update.spelling.length)))
-                {
-                    return false;
-                }
-            }
-            else if (c_token_is_punctuator(first, S8("++")) || c_token_is_punctuator(first, S8("--")))
-            {
-                if (index + 2 != end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
-                {
-                    return false;
-                }
-                CToken name = builder->preprocess.tokens[index + 1];
-                CEntityId entity = c_ir_identifier_entity(builder, index + 1);
-                CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-                IrValueId one = c_ir_emit_integer(builder, (CToken){
-                                                               .spelling = S8("1"),
-                                                               .location = first.location,
-                                                               .kind = C_TOKEN_PREPROCESSING_NUMBER,
-                                                           });
-                if (!local || !c_ir_emit_local_update(builder, local, name, c_token_is_punctuator(first, S8("++")) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT,
-                                                      one, c_ir_source_range(first.location, first.spelling.length)))
-                {
-                    return false;
-                }
-            }
-            else if (first.kind == C_TOKEN_IDENTIFIER && index + 2 < end)
-            {
-                CToken assignment = builder->preprocess.tokens[index + 1];
-                bool simple_assignment = c_token_is_punctuator(assignment, S8("="));
-                CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
-                bool compound_assignment = c_ir_compound_assignment_operator(assignment, &operation);
-                if (!simple_assignment && !compound_assignment)
-                {
-                    IrValueId unused = IR_VALUE_ID_INVALID;
-                    if (!c_ir_lower_expression(builder, index, end, &unused))
-                    {
-                        return false;
-                    }
-                    index = end == task.end ? task.end : end + 1;
-                    continue;
-                }
-                CEntityId entity = c_ir_identifier_entity(builder, index);
-                CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-                IrSourceRange source = c_ir_source_range(assignment.location, assignment.spelling.length);
-                IrValueId place = local ? local->place : c_ir_emit_global_place(builder, entity, source);
-                IrTypeId type = local                                          ? local->type
-                                : place.value < builder->function->value_count ? builder->function->values[place.value].canonical_type
-                                                                               : IR_TYPE_ID_INVALID;
-                IrValueId value = IR_VALUE_ID_INVALID;
-                if (place.value == IR_ID_UNDERLYING_INVALID || !c_ir_lower_expression(builder, index + 2, end, &value))
-                {
-                    return false;
-                }
-                if ((simple_assignment && !c_ir_emit_store_place(builder, place, type, value, source)) ||
-                    (compound_assignment && !c_ir_emit_place_update(builder, place, type, operation, value, source)))
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                IrValueId unused = IR_VALUE_ID_INVALID;
-                if (!c_ir_lower_expression(builder, index, end, &unused))
-                {
-                    return false;
-                }
-            }
-            index = end == task.end ? task.end : end + 1;
         }
         if (split)
         {
@@ -25998,14 +28830,52 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_impl(CIntegerIrBuilder* builder, CDecla
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL void c_ir_lower_body_step(CIntegerIrBuilder* builder)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+    CIrLowerFrame* frame = machine->frames + machine->frame_count - 1;
+    BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_BODY && frame->as.body.state);
+    CIrLowerBodyState* state = frame->as.body.state;
+    bool success = c_ir_lower_body_advance(builder, state);
+    if (!state->yielded)
+    {
+        c_ir_lower_frame_finish(builder, success, state->result);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaration declaration, bool statement_expression_mode,
                                          IrValueId* statement_expression_result)
 {
     TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
-    BUSTER_CHECK(builder->lower_body_dispatch);
-    bool result = builder->lower_body_dispatch(builder, declaration, statement_expression_mode, statement_expression_result);
+    CIrLowerMachine* machine = &builder->lower_machine;
+    bool outermost = machine->run_depth == 0;
+    if (outermost)
+    {
+        machine->root_frame_mark = machine->frame_count;
+        machine->scratch_mark = builder->scratch_arena->position;
+        machine->child_result = (CIrLowerFrameResult){
+            .value = IR_VALUE_ID_INVALID,
+        };
+        machine->failed = false;
+    }
+    u32 request_mark = machine->frame_count;
+    bool pushed = c_ir_lower_body_frame_push(builder, declaration, statement_expression_mode);
+    CIrLowerFrameResult lowered = {0};
+    if (pushed)
+    {
+        lowered = c_ir_lower_dispatch_run(builder, request_mark, outermost);
+    }
+    else if (outermost)
+    {
+        c_ir_lower_machine_unwind(builder);
+    }
     scratch_end(temporary);
-    return result;
+    if (statement_expression_result)
+    {
+        *statement_expression_result = lowered.value;
+    }
+    return lowered.success;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out)
@@ -29936,12 +32806,12 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .token_entities = token_entities,
             .declaration_functions = declaration_functions,
             .entity_symbols = entity_symbols,
-            .lower_expression_dispatch = c_ir_lower_expression_impl,
-            .lower_condition_dispatch = c_ir_lower_condition_impl,
-            .lower_body_dispatch = c_ir_lower_body_impl,
             .queries = &queries,
-            .lower_frames = arena_allocate(lowering_temporary.arena, CIrLowerFrame, (u32)lower_frame_capacity),
-            .lower_frame_capacity = (u32)lower_frame_capacity,
+            .lower_machine =
+                {
+                    .frames = arena_allocate(lowering_temporary.arena, CIrLowerFrame, (u32)lower_frame_capacity),
+                    .frame_capacity = (u32)lower_frame_capacity,
+                },
             .function_names = &function_names,
             .pointer_types = &pointer_types,
             .signatures = signatures,

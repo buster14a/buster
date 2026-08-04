@@ -5145,5 +5145,153 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         scratch_end(names_temporary);
     }
+    enum
+    {
+        C_TYPE_MIXED_MACHINE_STRESS_DEPTH = 32,
+        C_IR_MIXED_MACHINE_STRESS_DEPTH = 32,
+    };
+    {
+        Arena* mixed_type_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+        String8 mixed_type_open = S8("_Alignas(8) int value; struct {");
+        String8 mixed_type_close = S8("} member;");
+        String8 mixed_type_suffix =
+            S8("}; struct Root root; int mixed_type_main(void) { return atomic0 + inferred0 + callback0(0); }");
+        u32 mixed_type_part_count = C_TYPE_MIXED_MACHINE_STRESS_DEPTH * 3 + 3;
+        String8* mixed_type_parts = arena_allocate(mixed_type_arena, String8, mixed_type_part_count);
+        u32 mixed_type_part_index = 0;
+        for (u32 depth = 0; depth < C_TYPE_MIXED_MACHINE_STRESS_DEPTH; depth += 1)
+        {
+            mixed_type_parts[mixed_type_part_index++] =
+                string_format(mixed_type_arena,
+                              S8("__typeof__(sizeof(int)) inferred{u32}; _Atomic(int) atomic{u32};"
+                                 " int (*callback{u32})(__typeof__(sizeof(int)) argument);"),
+                              depth, depth, depth);
+        }
+        mixed_type_parts[mixed_type_part_index++] = S8("struct Root {");
+        for (u32 depth = 0; depth < C_TYPE_MIXED_MACHINE_STRESS_DEPTH; depth += 1)
+        {
+            mixed_type_parts[mixed_type_part_index++] = mixed_type_open;
+        }
+        mixed_type_parts[mixed_type_part_index++] = S8("_Alignas(8) int value;");
+        for (u32 depth = 0; depth < C_TYPE_MIXED_MACHINE_STRESS_DEPTH; depth += 1)
+        {
+            mixed_type_parts[mixed_type_part_index++] = mixed_type_close;
+        }
+        mixed_type_parts[mixed_type_part_index++] = mixed_type_suffix;
+        BUSTER_TEST(arguments, mixed_type_part_index == mixed_type_part_count);
+        String8 mixed_type_source =
+            string_join_arena(mixed_type_arena, (SliceString8){.pointer = mixed_type_parts, .length = mixed_type_part_count}, false);
+        CPreprocessResult mixed_type_tokens = c_preprocess(mixed_type_arena, mixed_type_source, (CPreprocessOptions){0});
+        CParseResult mixed_type_parse = c_parse(mixed_type_arena, mixed_type_tokens);
+        CIRLowerResult mixed_type_lowered =
+            c_lower_to_ir(mixed_type_arena, S8("mixed-type-machine-stress.c"), mixed_type_tokens, mixed_type_parse, target_native);
+        BUSTER_TEST(arguments, mixed_type_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, mixed_type_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, mixed_type_lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, mixed_type_parse.member_count >= C_TYPE_MIXED_MACHINE_STRESS_DEPTH);
+        BUSTER_TEST(arguments, mixed_type_parse.parameter_count >= C_TYPE_MIXED_MACHINE_STRESS_DEPTH);
+        BUSTER_TEST(arguments, mixed_type_parse.alignment_count >= C_TYPE_MIXED_MACHINE_STRESS_DEPTH);
+        if (mixed_type_lowered.program)
+        {
+            BUSTER_TEST(arguments,
+                        ir_validate_canonical_module(mixed_type_lowered.program, mixed_type_lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, arena_destroy(mixed_type_arena, 1));
+    }
+    {
+        Arena* mixed_ir_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
+        u32 mixed_ir_part_count = C_IR_MIXED_MACHINE_STRESS_DEPTH * 2 + 3;
+        String8* mixed_ir_parts = arena_allocate(mixed_ir_arena, String8, mixed_ir_part_count);
+        u32 mixed_ir_part_index = 0;
+        mixed_ir_parts[mixed_ir_part_index++] =
+            S8("static int global_values[2];"
+               " static int *pointer_source(void) { return global_values; }"
+               " static int identity(int value) { return value; }"
+               " int mixed_ir_main(int count) {"
+               " _Atomic(int) atomic_value = 0;"
+               " int values[2] = { 0, 0 };"
+               " __asm__ volatile (\"\" : : \"r\"(");
+        for (u32 depth = 0; depth < C_IR_MIXED_MACHINE_STRESS_DEPTH; depth += 1)
+        {
+            mixed_ir_parts[mixed_ir_part_index++] = S8("identity(({");
+        }
+        mixed_ir_parts[mixed_ir_part_index++] = S8("count");
+        for (u32 depth = 0; depth < C_IR_MIXED_MACHINE_STRESS_DEPTH; depth += 1)
+        {
+            u32 local_index = C_IR_MIXED_MACHINE_STRESS_DEPTH - depth - 1;
+            mixed_ir_parts[mixed_ir_part_index++] =
+                string_format(mixed_ir_arena,
+                              S8("; int local{u32} = (int){{1}}; int vla{u32}[local{u32} ? local{u32} : 1];"
+                                 " values[local{u32} ? 0 : 1] = (atomic_value += local{u32});"
+                                 " local{u32} + (int)sizeof(vla{u32}); }}))"),
+                              local_index, local_index, local_index, local_index, local_index, local_index, local_index, local_index);
+        }
+        mixed_ir_parts[mixed_ir_part_index++] =
+            S8(")); (global_values[0] = 1, global_values[1] = 2); *pointer_source() = 3; return atomic_value; }");
+        BUSTER_TEST(arguments, mixed_ir_part_index == mixed_ir_part_count);
+        String8 mixed_ir_source =
+            string_join_arena(mixed_ir_arena, (SliceString8){.pointer = mixed_ir_parts, .length = mixed_ir_part_count}, false);
+        CPreprocessResult mixed_ir_tokens = c_preprocess(mixed_ir_arena, mixed_ir_source, (CPreprocessOptions){0});
+        CParseResult mixed_ir_parse = c_parse(mixed_ir_arena, mixed_ir_tokens);
+        CIRLowerResult mixed_ir_lowered =
+            c_lower_to_ir(mixed_ir_arena, S8("mixed-ir-machine-stress.c"), mixed_ir_tokens, mixed_ir_parse, target_native);
+        BUSTER_TEST(arguments, mixed_ir_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, mixed_ir_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, mixed_ir_lowered.diagnostic_count == 0);
+        if (mixed_ir_lowered.program)
+        {
+            IrModule* mixed_ir_module = mixed_ir_lowered.program->modules;
+            BUSTER_TEST(arguments, mixed_ir_module->function_count == 3);
+            if (mixed_ir_module->function_count == 3)
+            {
+                IrFunction* mixed_ir_function = mixed_ir_module->functions + 2;
+                u32 call_count = 0;
+                u32 inline_assembly_count = 0;
+                u32 atomic_rmw_count = 0;
+                u32 branch_if_count = 0;
+                u32 local_count = 0;
+                u32 store_count = 0;
+                u32 return_count = 0;
+                u32 first_inline_assembly = UINT32_MAX;
+                u32 first_atomic_rmw = UINT32_MAX;
+                u32 first_call = UINT32_MAX;
+                for (u32 instruction_index = 0; instruction_index < mixed_ir_function->instruction_count; instruction_index += 1)
+                {
+                    IrOpcode opcode = mixed_ir_function->instructions[instruction_index].opcode;
+                    call_count += opcode == IR_OPCODE_CALL;
+                    inline_assembly_count += opcode == IR_OPCODE_INLINE_ASSEMBLY;
+                    atomic_rmw_count += opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE;
+                    branch_if_count += opcode == IR_OPCODE_BRANCH_IF;
+                    local_count += opcode == IR_OPCODE_LOCAL;
+                    store_count += opcode == IR_OPCODE_STORE;
+                    return_count += opcode == IR_OPCODE_RETURN;
+                    if (opcode == IR_OPCODE_INLINE_ASSEMBLY && first_inline_assembly == UINT32_MAX)
+                    {
+                        first_inline_assembly = instruction_index;
+                    }
+                    if (opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE && first_atomic_rmw == UINT32_MAX)
+                    {
+                        first_atomic_rmw = instruction_index;
+                    }
+                    if (opcode == IR_OPCODE_CALL && first_call == UINT32_MAX)
+                    {
+                        first_call = instruction_index;
+                    }
+                }
+                BUSTER_TEST(arguments, call_count == C_IR_MIXED_MACHINE_STRESS_DEPTH + 1);
+                BUSTER_TEST(arguments, inline_assembly_count == 1);
+                BUSTER_TEST(arguments, atomic_rmw_count == C_IR_MIXED_MACHINE_STRESS_DEPTH);
+                BUSTER_TEST(arguments, branch_if_count >= C_IR_MIXED_MACHINE_STRESS_DEPTH * 2);
+                BUSTER_TEST(arguments, local_count >= C_IR_MIXED_MACHINE_STRESS_DEPTH * 2);
+                BUSTER_TEST(arguments, store_count >= C_IR_MIXED_MACHINE_STRESS_DEPTH * 3);
+                BUSTER_TEST(arguments, return_count == 1);
+                BUSTER_TEST(arguments, mixed_ir_function->block_count >= C_IR_MIXED_MACHINE_STRESS_DEPTH * 6);
+                BUSTER_TEST(arguments, first_atomic_rmw < first_call);
+                BUSTER_TEST(arguments, first_call < first_inline_assembly);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(mixed_ir_lowered.program, mixed_ir_module).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, arena_destroy(mixed_ir_arena, 1));
+    }
     return result;
 }
