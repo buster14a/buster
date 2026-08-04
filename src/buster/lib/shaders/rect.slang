@@ -69,7 +69,7 @@ VertexOut rect_vertex(uint vertex_id, RectVertex v, float width, float height)
 #endif
 
     float2 uv0 = v.uv0;
-    float2 uv1 = uv0 + extent;
+    float2 uv1 = uv0 + v.uv_extent;
     float2 texture_center = (uv1 + uv0) * 0.5;
 
     output.texture_index = v.texture_index;

@@ -673,6 +673,7 @@ struct WindowFrame
     VkFence render_fence;
     VkBuffer index_buffer;
     GPUDrawPushConstants push_constants;
+    RenderingCommandStream commands;
     FramePipelineInstantiation pipeline_instantiations[(u64)BUSTER_PIPELINE_COUNT];
     BusterPipeline bound_pipeline;
     u8 reserved[4];
@@ -767,7 +768,7 @@ struct RenderingWindowHandle
     u32 swapchain_image_count;
     u32 frame_index;
     u32 frame_count;
-    u8 reserved[4];
+    RenderingScale scale;
     VulkanImage render_image;
     VkImage swapchain_images[MAX_SWAPCHAIN_IMAGE_COUNT];
     VkImageView swapchain_image_views[MAX_SWAPCHAIN_IMAGE_COUNT];
@@ -2855,6 +2856,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 #else
     result->frame_count = 2;
 #endif
+    result->scale = (RenderingScale){.x = 1.0f, .y = 1.0f};
 
     swapchain_recreate(rendering, result);
     string_print(S8("Vulkan swapchain ready: swapchain={u64:x}, extent={u32}x{u32}, images={u32}\n"), result->swapchain, result->width, result->height,
@@ -2873,6 +2875,9 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
             pipeline->index_buffer.gpu.type = BUFFER_TYPE_INDEX;
             pipeline->transient_buffer.type = BUFFER_TYPE_STAGING;
         }
+        rendering_command_stream_bind_buffers(&frame->commands, frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].vertex_buffer.cpu,
+                                              frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].index_buffer.cpu);
+        rendering_command_stream_begin(&frame->commands, (RenderingWindowSize){.width = result->width, .height = result->height}, result->scale);
     }
 
     for (BusterPipeline pipeline_index = 0; pipeline_index < BUSTER_PIPELINE_COUNT; pipeline_index += 1)
@@ -3415,6 +3420,24 @@ BUSTER_GLOBAL_LOCAL WindowFrame* rendering_window_frame(RenderingWindowHandle* w
     return &window->frames[window->frame_index % window->frame_count];
 }
 
+RenderingCommandStream* rendering_window_command_stream(RenderingWindowHandle* window)
+{
+    return window ? &rendering_window_frame(window)->commands : 0;
+}
+
+void rendering_window_set_content_scale_internal(RenderingWindowHandle* window, RenderingScale scale)
+{
+    if (!window)
+    {
+        return;
+    }
+    window->scale = scale.x > 0.0f && scale.y > 0.0f ? scale : (RenderingScale){.x = 1.0f, .y = 1.0f};
+    for (u32 frame_index = 0; frame_index < window->frame_count && frame_index < BUSTER_ARRAY_LENGTH(window->frames); frame_index += 1)
+    {
+        rendering_command_stream_set_scale(&window->frames[frame_index].commands, window->scale);
+    }
+}
+
 void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
     WindowFrame* frame = rendering_window_frame(window);
@@ -3500,6 +3523,7 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         pipeline_instantiation->vertex_buffer.count = 0;
         arena_reset_to_start(pipeline_instantiation->index_buffer.cpu);
     }
+    rendering_command_stream_begin(&frame->commands, (RenderingWindowSize){.width = window->width, .height = window->height}, window->scale);
 }
 
 BUSTER_GLOBAL_LOCAL void buffer_destroy(RenderingHandle* rendering, VulkanBuffer buffer)
@@ -3660,7 +3684,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
         {
             FramePipelineInstantiation* frame_pipeline_instantiation = &frame->pipeline_instantiations[pipeline_index];
 
-            if (!arena_buffer_is_empty(frame_pipeline_instantiation->vertex_buffer.cpu))
+            if (frame->commands.batch_count != 0)
             {
                 u64 new_vertex_buffer_size = arena_buffer_size(frame_pipeline_instantiation->vertex_buffer.cpu);
                 u64 new_index_buffer_size = arena_buffer_size(frame_pipeline_instantiation->index_buffer.cpu);
@@ -3852,7 +3876,20 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
                 }
 #endif
 
-                vkCmdDrawIndexed(frame->command_buffer, (u32)(arena_buffer_size(frame_pipeline_instantiation->index_buffer.cpu) / sizeof(u32)), 1, 0, 0, 0);
+                for (u32 batch_index = 0; batch_index < frame->commands.batch_count; batch_index += 1)
+                {
+                    RenderingBatch batch = frame->commands.batches[batch_index];
+                    if (batch.pipeline != pipeline_index || rendering_clip_rect_is_empty(batch.clip))
+                    {
+                        continue;
+                    }
+                    VkRect2D batch_scissor = {
+                        .offset = {.x = batch.clip.x0, .y = batch.clip.y0},
+                        .extent = {.width = (u32)(batch.clip.x1 - batch.clip.x0), .height = (u32)(batch.clip.y1 - batch.clip.y0)},
+                    };
+                    vkCmdSetScissor(frame->command_buffer, 0, 1, &batch_scissor);
+                    vkCmdDrawIndexed(frame->command_buffer, batch.index_count, 1, batch.first_index, 0, 0);
+                }
             }
         }
 

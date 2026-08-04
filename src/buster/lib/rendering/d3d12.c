@@ -105,6 +105,7 @@ struct WindowFrame
 {
     ID3D12CommandAllocator* command_allocator;
     ID3D12GraphicsCommandList* command_list;
+    RenderingCommandStream commands;
     FramePipelineInstantiation pipeline_instantiations[(u64)BUSTER_PIPELINE_COUNT];
     u64 fence_value;
 };
@@ -166,6 +167,7 @@ struct RenderingWindowHandle
     u32 height;
     u32 frame_index;
     u32 frame_count;
+    RenderingScale scale;
     u32 rect_descriptor_base;
     WindowFrame frames[BUSTER_D3D12_FRAME_COUNT];
 };
@@ -299,8 +301,8 @@ BUSTER_GLOBAL_LOCAL u32 d3d12_format_channel_count(TextureFormat format)
 #if !BUSTER_USE_SLANG_SHADERS
 BUSTER_GLOBAL_LOCAL const char* d3d12_rect_inline_shader_source(void)
 {
-    return "struct RectVertex { float2 p0; float2 uv0; float2 extent; float corner_radius; float softness; float4 colors[4]; uint texture_index; uint3 "
-           "reserved; };\n"
+    return "struct RectVertex { float2 p0; float2 uv0; float2 extent; float corner_radius; float softness; float4 colors[4]; uint texture_index; uint reserved; float2 "
+           "uv_extent; };\n"
            "struct VertexOut { float4 position : SV_Position; nointerpolation uint texture_index : TEXCOORD0; float4 color : TEXCOORD1; float2 uv : TEXCOORD2; "
            "float2 pixel_position : TEXCOORD3; float2 center : TEXCOORD4; float2 half_size : TEXCOORD5; float corner_radius : TEXCOORD6; float softness : "
            "TEXCOORD7; };\n"
@@ -317,7 +319,7 @@ BUSTER_GLOBAL_LOCAL const char* d3d12_rect_inline_shader_source(void)
                                                      "center;\n"
                                                      "    output.position = float4(2.0 * position.x / width - 1.0, 1.0 - 2.0 * position.y / height, 0.0, "
                                                      "1.0);\n"
-                                                     "    float2 uv0 = v.uv0; float2 uv1 = uv0 + extent; float2 texture_center = (uv1 + uv0) * 0.5; output.uv "
+                                                     "    float2 uv0 = v.uv0; float2 uv1 = uv0 + v.uv_extent; float2 texture_center = (uv1 + uv0) * 0.5; output.uv "
                                                      "= quad_vertices[quad_vertex_id] * half_size + texture_center;\n"
                                                      "    output.texture_index = v.texture_index; output.color = v.colors[quad_vertex_id]; "
                                                      "output.pixel_position = position; output.center = center; output.half_size = half_size; "
@@ -817,6 +819,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_WIN32);
     result->hwnd = (HWND)native_surface.window;
     result->frame_count = BUSTER_D3D12_FRAME_COUNT;
+    result->scale = (RenderingScale){.x = 1.0f, .y = 1.0f};
 
     RECT client_rect;
     GetClientRect(result->hwnd, &client_rect);
@@ -919,6 +922,9 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
             pipeline->vertex_buffer.gpu.type = BUFFER_TYPE_VERTEX;
             pipeline->index_buffer.gpu.type = BUFFER_TYPE_INDEX;
         }
+        rendering_command_stream_bind_buffers(&frame->commands, frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].vertex_buffer.cpu,
+                                              frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].index_buffer.cpu);
+        rendering_command_stream_begin(&frame->commands, (RenderingWindowSize){.width = result->width, .height = result->height}, result->scale);
     }
     string_print(S8("DirectX 12 render window initialization succeeded: hwnd={u64:x}, presentable={u32}, frame_count={u32}, rtv_descriptor_size={u32}\n"),
                  (u64)(UINT_PTR)result->hwnd, (u32)(result->swapchain != 0), result->frame_count, result->rtv_descriptor_size);
@@ -1055,6 +1061,24 @@ BUSTER_GLOBAL_LOCAL WindowFrame* rendering_window_frame(RenderingWindowHandle* w
     return &window->frames[window->frame_index % window->frame_count];
 }
 
+RenderingCommandStream* rendering_window_command_stream(RenderingWindowHandle* window)
+{
+    return window ? &rendering_window_frame(window)->commands : 0;
+}
+
+void rendering_window_set_content_scale_internal(RenderingWindowHandle* window, RenderingScale scale)
+{
+    if (!window)
+    {
+        return;
+    }
+    window->scale = scale.x > 0.0f && scale.y > 0.0f ? scale : (RenderingScale){.x = 1.0f, .y = 1.0f};
+    for (u32 frame_index = 0; frame_index < window->frame_count && frame_index < BUSTER_ARRAY_LENGTH(window->frames); frame_index += 1)
+    {
+        rendering_command_stream_set_scale(&window->frames[frame_index].commands, window->scale);
+    }
+}
+
 void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
     RECT client_rect;
@@ -1089,6 +1113,7 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         pipeline_instantiation->vertex_buffer.count = 0;
         arena_reset_to_start(pipeline_instantiation->index_buffer.cpu);
     }
+    rendering_command_stream_begin(&frame->commands, (RenderingWindowSize){.width = window->width, .height = window->height}, window->scale);
 }
 
 void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandle* window)
@@ -1158,7 +1183,22 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
                 .Format = DXGI_FORMAT_R32_UINT,
             };
             ID3D12GraphicsCommandList_IASetIndexBuffer(command_list, &index_buffer_view);
-            ID3D12GraphicsCommandList_DrawIndexedInstanced(command_list, (UINT)(index_size / sizeof(u32)), 1, 0, 0, 0);
+            for (u32 batch_index = 0; batch_index < frame->commands.batch_count; batch_index += 1)
+            {
+                RenderingBatch batch = frame->commands.batches[batch_index];
+                if (batch.pipeline != pipeline_index || rendering_clip_rect_is_empty(batch.clip))
+                {
+                    continue;
+                }
+                D3D12_RECT batch_scissor = {
+                    .left = (LONG)batch.clip.x0,
+                    .top = (LONG)batch.clip.y0,
+                    .right = (LONG)batch.clip.x1,
+                    .bottom = (LONG)batch.clip.y1,
+                };
+                ID3D12GraphicsCommandList_RSSetScissorRects(command_list, 1, &batch_scissor);
+                ID3D12GraphicsCommandList_DrawIndexedInstanced(command_list, (UINT)batch.index_count, 1, (UINT)batch.first_index, 0, 0);
+            }
         }
     }
 

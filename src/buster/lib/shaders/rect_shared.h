@@ -10,7 +10,8 @@ struct RectVertex
     float softness;
     float4 colors[4];
     uint texture_index;
-    uint reserved[3];
+    uint reserved[1];
+    float2 uv_extent;
 };
 
 #endif /* BUSTER_RECT_SHARED_H */

@@ -7,6 +7,7 @@
 #include <buster/lib/os.h>
 #include <buster/lib/arena.h>
 #include <buster/lib/file.h>
+#include <buster/lib/float.h>
 #include <buster/lib/font_provider.h>
 #include <buster/lib/window.h>
 #include <buster/lib/shaders/rect_shared.h>
@@ -35,6 +36,77 @@ typedef enum BusterPipeline
     BUSTER_PIPELINE_RECT,
     BUSTER_PIPELINE_COUNT,
 } BusterPipeline;
+
+#define RENDERING_MAX_DRAW_COUNT (4096)
+#define RENDERING_MAX_BATCH_COUNT (RENDERING_MAX_DRAW_COUNT)
+#define RENDERING_MAX_CLIP_DEPTH (64)
+#define RENDERING_MAX_VERTEX_COUNT (RENDERING_MAX_DRAW_COUNT * 4)
+#define RENDERING_MAX_INDEX_COUNT (RENDERING_MAX_DRAW_COUNT * 6)
+#define RENDERING_MAX_BLUR_RADIUS (32)
+#define RENDERING_MAX_BLUR_PIXELS (4 * 1024 * 1024)
+
+typedef enum RenderingCommandKind
+{
+    RENDERING_COMMAND_RECT,
+    RENDERING_COMMAND_CLIP_PUSH,
+    RENDERING_COMMAND_CLIP_POP,
+    RENDERING_COMMAND_FLUSH,
+    RENDERING_COMMAND_KIND_COUNT,
+} RenderingCommandKind;
+
+typedef struct RenderingCommand RenderingCommand;
+struct RenderingCommand
+{
+    RenderingCommandKind kind;
+    BusterPipeline pipeline;
+    u32 first_index;
+    u32 index_count;
+    TextureIndex texture;
+    RenderingClipRect clip;
+};
+
+typedef struct RenderingBatch RenderingBatch;
+struct RenderingBatch
+{
+    BusterPipeline pipeline;
+    u32 first_index;
+    u32 index_count;
+    TextureIndex texture;
+    RenderingClipRect clip;
+};
+
+typedef struct RenderingCommandStream RenderingCommandStream;
+struct RenderingCommandStream
+{
+    Arena* vertex_cpu;
+    Arena* index_cpu;
+    RenderingCommand commands[RENDERING_MAX_DRAW_COUNT];
+    RenderingBatch batches[RENDERING_MAX_BATCH_COUNT];
+    RenderingClipRect clip_stack[RENDERING_MAX_CLIP_DEPTH];
+    RenderingScale scale;
+    RenderingWindowSize target_size;
+    u32 command_count;
+    u32 batch_count;
+    u32 clip_depth;
+    u32 vertex_count;
+    u32 index_count;
+    bool force_new_batch;
+    bool overflowed;
+    u8 reserved[2];
+};
+
+BUSTER_F_DECL RenderingCommandStream* rendering_window_command_stream(RenderingWindowHandle* window);
+BUSTER_F_DECL void rendering_window_set_content_scale_internal(RenderingWindowHandle* window, RenderingScale scale);
+BUSTER_F_DECL void rendering_command_stream_bind_buffers(RenderingCommandStream* stream, Arena* vertex_cpu, Arena* index_cpu);
+BUSTER_F_DECL void rendering_command_stream_begin(RenderingCommandStream* stream, RenderingWindowSize target_size, RenderingScale scale);
+BUSTER_F_DECL void rendering_command_stream_set_scale(RenderingCommandStream* stream, RenderingScale scale);
+BUSTER_F_DECL void rendering_command_stream_push_clip(RenderingCommandStream* stream, F32Interval2 rect);
+BUSTER_F_DECL void rendering_command_stream_pop_clip(RenderingCommandStream* stream);
+BUSTER_F_DECL void rendering_command_stream_reset_clip(RenderingCommandStream* stream);
+BUSTER_F_DECL void rendering_command_stream_record_rect(RenderingCommandStream* stream, BusterPipeline pipeline, TextureIndex texture, u32 first_index,
+                                                         u32 index_count);
+BUSTER_F_DECL void rendering_command_stream_record_clip(RenderingCommandStream* stream, RenderingCommandKind kind, RenderingClipRect clip);
+BUSTER_F_DECL void rendering_command_stream_record_flush(RenderingCommandStream* stream);
 
 typedef enum RenderingVulkanDeviceType
 {

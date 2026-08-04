@@ -123,6 +123,7 @@ typedef struct WindowFrame WindowFrame;
 struct WindowFrame
 {
     id command_buffer;
+    RenderingCommandStream commands;
     FramePipelineInstantiation pipeline_instantiations[(u64)BUSTER_PIPELINE_COUNT];
 };
 
@@ -158,6 +159,7 @@ struct RenderingWindowHandle
     u32 height;
     u32 frame_index;
     u32 frame_count;
+    RenderingScale scale;
     TextureIndex rect_textures[RECT_TEXTURE_SLOT_COUNT];
     WindowFrame frames[BUSTER_METAL_FRAME_COUNT];
 };
@@ -228,8 +230,8 @@ BUSTER_GLOBAL_LOCAL const char* metal_rect_inline_shader_source(void)
 {
     return "#include <metal_stdlib>\n"
            "using namespace metal;\n"
-           "struct RectVertex { float2 p0; float2 uv0; float2 extent; float corner_radius; float softness; float4 colors[4]; uint texture_index; uint "
-           "reserved0; uint reserved1; uint reserved2; };\n"
+           "struct RectVertex { float2 p0; float2 uv0; float2 extent; float corner_radius; float softness; float4 colors[4]; uint texture_index; uint reserved; float2 "
+           "uv_extent; };\n"
            "struct DrawConstants { float width; float height; };\n"
            "struct VertexOut { float4 position [[position]]; uint texture_index [[flat]]; float4 color; float2 uv; float2 pixel_position; float2 center; "
            "float2 half_size; float corner_radius; float softness; };\n"
@@ -240,7 +242,7 @@ BUSTER_GLOBAL_LOCAL const char* metal_rect_inline_shader_source(void)
            "float2 p1 = p0 + extent; float2 center = (p1 + p0) * 0.5; float2 half_size = (p1 - p0) * 0.5; float2 position = quad_vertices[quad_vertex_id] * "
            "half_size + center;\n"
            "    output.position = float4(2.0 * position.x / constants.width - 1.0, 1.0 - 2.0 * position.y / constants.height, 0.0, 1.0);\n"
-           "    float2 uv0 = v.uv0; float2 uv1 = uv0 + extent; float2 texture_center = (uv1 + uv0) * 0.5; output.uv = quad_vertices[quad_vertex_id] * "
+           "    float2 uv0 = v.uv0; float2 uv1 = uv0 + v.uv_extent; float2 texture_center = (uv1 + uv0) * 0.5; output.uv = quad_vertices[quad_vertex_id] * "
            "half_size + texture_center;\n"
            "    output.texture_index = v.texture_index; output.color = v.colors[quad_vertex_id]; output.pixel_position = position; output.center = center; "
            "output.half_size = half_size; output.corner_radius = v.corner_radius; output.softness = v.softness; return output; }\n"
@@ -473,6 +475,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     WmNativeSurface native_surface = wm_window_get_native_surface(windowing, window);
     result->frame_index = 0;
     result->frame_count = BUSTER_METAL_FRAME_COUNT;
+    result->scale = (RenderingScale){.x = 1.0f, .y = 1.0f};
 
 #if BUSTER_IOS
     // On iOS the window handle already exposes a CAMetalLayer (the UIView's
@@ -522,6 +525,9 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
             pipeline->vertex_buffer.gpu.type = BUFFER_TYPE_VERTEX;
             pipeline->index_buffer.gpu.type = BUFFER_TYPE_INDEX;
         }
+        rendering_command_stream_bind_buffers(&frame->commands, frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].vertex_buffer.cpu,
+                                              frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].index_buffer.cpu);
+        rendering_command_stream_begin(&frame->commands, (RenderingWindowSize){.width = result->width, .height = result->height}, result->scale);
         string_print(S8("Metal frame resources {u32}: command_buffer={u64:x}\n"), (u32)frame_index, (u64)frame->command_buffer);
     }
     string_print(S8("Metal render window initialization succeeded: ns_window={u64:x}, layer={u64:x}, frame_count={u32}\n"), (u64)result->ns_window,
@@ -620,6 +626,24 @@ BUSTER_GLOBAL_LOCAL WindowFrame* rendering_window_frame(RenderingWindowHandle* w
     return &window->frames[window->frame_index % window->frame_count];
 }
 
+RenderingCommandStream* rendering_window_command_stream(RenderingWindowHandle* window)
+{
+    return window ? &rendering_window_frame(window)->commands : 0;
+}
+
+void rendering_window_set_content_scale_internal(RenderingWindowHandle* window, RenderingScale scale)
+{
+    if (!window)
+    {
+        return;
+    }
+    window->scale = scale.x > 0.0f && scale.y > 0.0f ? scale : (RenderingScale){.x = 1.0f, .y = 1.0f};
+    for (u32 frame_index = 0; frame_index < window->frame_count && frame_index < BUSTER_ARRAY_LENGTH(window->frames); frame_index += 1)
+    {
+        rendering_command_stream_set_scale(&window->frames[frame_index].commands, window->scale);
+    }
+}
+
 void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
     BUSTER_UNUSED(rendering);
@@ -645,6 +669,7 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         pipeline_instantiation->vertex_buffer.count = 0;
         arena_reset_to_start(pipeline_instantiation->index_buffer.cpu);
     }
+    rendering_command_stream_begin(&frame->commands, (RenderingWindowSize){.width = window->width, .height = window->height}, window->scale);
 }
 
 BUSTER_GLOBAL_LOCAL void metal_buffer_destroy(MetalBuffer* buffer)
@@ -774,9 +799,25 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
             f32 constants[] = {(f32)window->width, (f32)window->height};
             ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(encoder, metal_sel("setVertexBytes:length:atIndex:"), constants,
                                                                                                (BusterNSUInteger)sizeof(constants), 1);
-            ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger, id, BusterNSUInteger))objc_msgSend)(
-                encoder, metal_sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"), BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE,
-                (BusterNSUInteger)(index_size / sizeof(u32)), BUSTER_MTL_INDEX_TYPE_UINT32, pipeline_instantiation->index_buffer.gpu.resource, 0);
+            for (u32 batch_index = 0; batch_index < frame->commands.batch_count; batch_index += 1)
+            {
+                RenderingBatch batch = frame->commands.batches[batch_index];
+                if (batch.pipeline != pipeline_index || rendering_clip_rect_is_empty(batch.clip))
+                {
+                    continue;
+                }
+                BusterMTLScissorRect batch_scissor = {
+                    .x = (BusterNSUInteger)batch.clip.x0,
+                    .y = (BusterNSUInteger)batch.clip.y0,
+                    .width = (BusterNSUInteger)(batch.clip.x1 - batch.clip.x0),
+                    .height = (BusterNSUInteger)(batch.clip.y1 - batch.clip.y0),
+                };
+                ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(encoder, metal_sel("setScissorRect:"), batch_scissor);
+                ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger, id, BusterNSUInteger))objc_msgSend)(
+                    encoder, metal_sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"), BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE,
+                    (BusterNSUInteger)batch.index_count, BUSTER_MTL_INDEX_TYPE_UINT32, pipeline_instantiation->index_buffer.gpu.resource,
+                    (BusterNSUInteger)batch.first_index * sizeof(u32));
+            }
         }
     }
 
