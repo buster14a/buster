@@ -420,8 +420,9 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                                        TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8;
     TargetCpuFeatures avx2_arrowlake_s = avx2_arrowlake | TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16;
     TargetCpuFeatures amd_btver2 = TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AES | TARGET_CPU_FEATURE_X86_PCLMUL;
-    TargetCpuFeatures amd_bdver1 = amd_btver2;
-    TargetCpuFeatures amd_bdver4 = amd_bdver1 | TARGET_CPU_FEATURE_X86_AVX2;
+    TargetCpuFeatures amd_bdver1 = amd_btver2 | TARGET_CPU_FEATURE_X86_FMA4 | TARGET_CPU_FEATURE_X86_LWP | TARGET_CPU_FEATURE_X86_XOP;
+    TargetCpuFeatures amd_bdver2 = amd_bdver1 | TARGET_CPU_FEATURE_X86_TBM;
+    TargetCpuFeatures amd_bdver4 = amd_bdver2 | TARGET_CPU_FEATURE_X86_AVX2;
     TargetCpuFeatures amd_zen1 = avx2_haswell | TARGET_CPU_FEATURE_X86_AES;
     TargetCpuFeatures amd_zen3 = amd_zen1 | TARGET_CPU_FEATURE_X86_VAES | TARGET_CPU_FEATURE_X86_VPCLMULQDQ;
     TargetCpuFeatures avx512_skylake = avx2_skylake | TARGET_CPU_FEATURE_X86_AVX512F |
@@ -440,6 +441,11 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     TargetCpuFeatures granite_rapids_d = granite_rapids | TARGET_CPU_FEATURE_X86_AMX_COMPLEX;
     switch (model)
     {
+    case CPU_MODEL_AMD_K8:
+    case CPU_MODEL_AMD_K8_SSE3:
+    case CPU_MODEL_AMD_AMD_FAMILY_10:
+        result |= TARGET_CPU_FEATURE_X86_3DNOW | TARGET_CPU_FEATURE_X86_3DNOWA;
+        break;
     case CPU_MODEL_AMD_ZEN_1:
     case CPU_MODEL_AMD_ZEN_2:
         result |= amd_zen1;
@@ -451,9 +457,11 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
         result |= amd_btver2;
         break;
     case CPU_MODEL_AMD_BD_1:
+        result |= amd_bdver1;
+        break;
     case CPU_MODEL_AMD_BD_2:
     case CPU_MODEL_AMD_BD_3:
-        result |= amd_bdver1;
+        result |= amd_bdver2;
         break;
     case CPU_MODEL_AMD_BD_4:
         result |= amd_bdver4;
@@ -604,12 +612,22 @@ bool target_cpu_features_are_valid(Target target)
                               TARGET_CPU_FEATURE_X86_AMX_FP16 | TARGET_CPU_FEATURE_X86_AMX_COMPLEX | TARGET_CPU_FEATURE_X86_AMX_FP8 |
                               TARGET_CPU_FEATURE_X86_AMX_AVX512 | TARGET_CPU_FEATURE_X86_AMX_MOVRS |
                               TARGET_CPU_FEATURE_X86_AVX_VNNI | TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8 | TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16 |
-                              TARGET_CPU_FEATURE_X86_AVX_IFMA | TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT | TARGET_CPU_FEATURE_X86_MOVRS;
+                              TARGET_CPU_FEATURE_X86_AVX_IFMA | TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT | TARGET_CPU_FEATURE_X86_MOVRS |
+                              TARGET_CPU_FEATURE_X86_3DNOW | TARGET_CPU_FEATURE_X86_3DNOWA | TARGET_CPU_FEATURE_X86_FMA4 |
+                              TARGET_CPU_FEATURE_X86_LWP | TARGET_CPU_FEATURE_X86_TBM | TARGET_CPU_FEATURE_X86_XOP;
     if ((features & ~known) || !(features & TARGET_CPU_FEATURE_X86_SSE2))
     {
         return false;
     }
     if ((features & TARGET_CPU_FEATURE_X86_AVX2) && !(features & TARGET_CPU_FEATURE_X86_AVX))
+    {
+        return false;
+    }
+    if ((features & (TARGET_CPU_FEATURE_X86_FMA4 | TARGET_CPU_FEATURE_X86_XOP)) && !(features & TARGET_CPU_FEATURE_X86_AVX))
+    {
+        return false;
+    }
+    if ((features & TARGET_CPU_FEATURE_X86_3DNOWA) && !(features & TARGET_CPU_FEATURE_X86_3DNOW))
     {
         return false;
     }
@@ -743,6 +761,8 @@ struct TargetCpuFeatureName
 // Kept in bytewise name order so verbose output is stable without sorting or
 // allocating one node per feature.
 BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
+    {.name = S8_INITIALIZER("3dnow"), .feature = TARGET_CPU_FEATURE_X86_3DNOW, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("3dnowa"), .feature = TARGET_CPU_FEATURE_X86_3DNOWA, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("aes"), .feature = TARGET_CPU_FEATURE_X86_AES, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("amx-avx512"), .feature = TARGET_CPU_FEATURE_X86_AMX_AVX512, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("amx-bf16"), .feature = TARGET_CPU_FEATURE_X86_AMX_BF16, .arch = CPU_ARCH_X86_64},
@@ -785,7 +805,9 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("avx512vpopcntdq"), .feature = TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("bmi1"), .feature = TARGET_CPU_FEATURE_X86_BMI1, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("cx16"), .feature = TARGET_CPU_FEATURE_X86_CX16, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("fma4"), .feature = TARGET_CPU_FEATURE_X86_FMA4, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("gfni"), .feature = TARGET_CPU_FEATURE_X86_GFNI, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("lwp"), .feature = TARGET_CPU_FEATURE_X86_LWP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("lzcnt"), .feature = TARGET_CPU_FEATURE_X86_LZCNT, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("movrs"), .feature = TARGET_CPU_FEATURE_X86_MOVRS, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("neon"), .feature = TARGET_CPU_FEATURE_AARCH64_NEON, .arch = CPU_ARCH_AARCH64},
@@ -793,8 +815,10 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("popcnt"), .feature = TARGET_CPU_FEATURE_X86_POPCNT, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse2"), .feature = TARGET_CPU_FEATURE_X86_SSE2, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse3"), .feature = TARGET_CPU_FEATURE_X86_SSE3, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("tbm"), .feature = TARGET_CPU_FEATURE_X86_TBM, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("vaes"), .feature = TARGET_CPU_FEATURE_X86_VAES, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("vpclmulqdq"), .feature = TARGET_CPU_FEATURE_X86_VPCLMULQDQ, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("xop"), .feature = TARGET_CPU_FEATURE_X86_XOP, .arch = CPU_ARCH_X86_64},
 };
 
 TargetCpuFeature target_cpu_feature_from_string(CpuArch arch, String8 name)

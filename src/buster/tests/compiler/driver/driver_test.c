@@ -200,6 +200,38 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     BUSTER_TEST(arguments, x86_cpu_invocation.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, x86_cpu_invocation.target.cpu_model == CPU_MODEL_AMD_ZEN_5);
     BUSTER_TEST(arguments, target_vector_register_size(x86_cpu_invocation.target) == 64);
+    String8 amd_extended_cpu_command_line[] = {
+        S8("-c"),
+        S8("--target=x86_64-linux"),
+        S8("-march=bdver2"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation amd_extended_cpu_invocation =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(amd_extended_cpu_command_line));
+    BUSTER_TEST(arguments, amd_extended_cpu_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, amd_extended_cpu_invocation.target.cpu_model == CPU_MODEL_AMD_BD_2);
+    BUSTER_TEST(arguments, target_cpu_feature_has(amd_extended_cpu_invocation.target, TARGET_CPU_FEATURE_X86_FMA4));
+    BUSTER_TEST(arguments, target_cpu_feature_has(amd_extended_cpu_invocation.target, TARGET_CPU_FEATURE_X86_LWP));
+    BUSTER_TEST(arguments, target_cpu_feature_has(amd_extended_cpu_invocation.target, TARGET_CPU_FEATURE_X86_TBM));
+    BUSTER_TEST(arguments, target_cpu_feature_has(amd_extended_cpu_invocation.target, TARGET_CPU_FEATURE_X86_XOP));
+    BUSTER_TEST(arguments, !target_cpu_feature_has(amd_extended_cpu_invocation.target, TARGET_CPU_FEATURE_X86_3DNOW));
+    BUSTER_TEST(arguments, !target_cpu_feature_has(amd_extended_cpu_invocation.target, TARGET_CPU_FEATURE_X86_3DNOWA));
+    String8 amd_feature_command_line[] = {
+        S8("-c"),
+        S8("--target=x86_64-linux"),
+        S8("-march=baseline"),
+        S8("-mattr=+avx,+3dnow,+3dnowa,+fma4,+lwp,+tbm,+xop"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation amd_feature_invocation =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(amd_feature_command_line));
+    BUSTER_TEST(arguments, amd_feature_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, target_cpu_feature_has(amd_feature_invocation.target, TARGET_CPU_FEATURE_X86_3DNOW));
+    BUSTER_TEST(arguments, target_cpu_feature_has(amd_feature_invocation.target, TARGET_CPU_FEATURE_X86_3DNOWA));
+    BUSTER_TEST(arguments, target_cpu_feature_has(amd_feature_invocation.target, TARGET_CPU_FEATURE_X86_FMA4));
+    BUSTER_TEST(arguments, target_cpu_feature_has(amd_feature_invocation.target, TARGET_CPU_FEATURE_X86_LWP));
+    BUSTER_TEST(arguments, target_cpu_feature_has(amd_feature_invocation.target, TARGET_CPU_FEATURE_X86_TBM));
+    BUSTER_TEST(arguments, target_cpu_feature_has(amd_feature_invocation.target, TARGET_CPU_FEATURE_X86_XOP));
     String8 feature_command_line[] = {
         S8("-c"),
         S8("-mattr=+avx512f,+avx512vl,+avx2,+avx512bw"),

@@ -3460,5 +3460,632 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, invalid_apx_high_byte.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
+
+    Target amd_target = x86_target;
+    amd_target.cpu_features_explicit = true;
+    amd_target.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_XOP |
+                              TARGET_CPU_FEATURE_X86_FMA4 | TARGET_CPU_FEATURE_X86_TBM | TARGET_CPU_FEATURE_X86_LWP |
+                              TARGET_CPU_FEATURE_X86_3DNOW | TARGET_CPU_FEATURE_X86_3DNOWA;
+    String8 amd_intel_source =
+        S8("vfrczps xmm1, xmm2\n"
+           "vfrczps xmm8, xmm9\n"
+           "vfrczps xmm1, xmmword ptr [rax + 127]\n"
+           "vpshab xmm1, xmm2, xmm3\n"
+           "vpshab xmm1, xmm2, xmmword ptr [rax]\n"
+           "vprotb xmm1, xmm2, 0x55\n"
+           "vprotb xmm1, xmm2, xmm3\n"
+           "vprotb xmm1, xmm2, xmmword ptr [rax]\n"
+           "vpcmov xmm1, xmm2, xmm3, xmm4\n"
+           "vpcmov xmm1, xmm2, xmm3, xmmword ptr [rax]\n"
+           "vpcmov xmm1, xmm2, xmmword ptr [rax], xmm4\n"
+           "vpperm xmm1, xmm2, xmm3, xmmword ptr [rax + 127]\n"
+           "vfmaddps xmm1, xmm2, xmm3, xmm4\n"
+           "vfmaddps xmm1, xmm2, xmm3, xmmword ptr [rax]\n"
+           "vfmaddps xmm1, xmm2, xmmword ptr [rax], xmm4\n"
+           "vfmaddss xmm1, xmm2, xmm3, xmm4\n"
+           "bextr r8, r9, 0x11223344\n"
+           "bextr eax, ecx, 0x11223344\n"
+           "blcfill r8, r9\n"
+           "blcfill r8, qword ptr [rax + 127]\n"
+           "llwpcb r8\n"
+           "slwpcb r9\n"
+           "lwpins r8, ecx, 0x11223344\n"
+           "lwpins r8, dword ptr [rax + 127], 0x11223344\n"
+           "femms\n"
+           "pi2fw mm0, mm1\n"
+           "pfadd mm0, qword ptr [rax + 127]\n");
+    u8 expected_amd_intel[] = {
+        0x8f, 0xe9, 0x78, 0x80, 0xca,
+        0x8f, 0x49, 0x78, 0x80, 0xc1,
+        0x8f, 0xe9, 0x78, 0x80, 0x48, 0x7f,
+        0x8f, 0xe9, 0x60, 0x98, 0xca,
+        0x8f, 0xe9, 0xe8, 0x98, 0x08,
+        0x8f, 0xe8, 0x78, 0xc0, 0xca, 0x55,
+        0x8f, 0xe9, 0x60, 0x90, 0xca,
+        0x8f, 0xe9, 0xe8, 0x90, 0x08,
+        0x8f, 0xe8, 0x68, 0xa2, 0xcb, 0x40,
+        0x8f, 0xe8, 0xe8, 0xa2, 0x08, 0x30,
+        0x8f, 0xe8, 0x68, 0xa2, 0x08, 0x40,
+        0x8f, 0xe8, 0xe8, 0xa3, 0x48, 0x7f, 0x30,
+        0xc4, 0xe3, 0xe9, 0x68, 0xcc, 0x30,
+        0xc4, 0xe3, 0xe9, 0x68, 0x08, 0x30,
+        0xc4, 0xe3, 0x69, 0x68, 0x08, 0x40,
+        0xc4, 0xe3, 0xe9, 0x6a, 0xcc, 0x30,
+        0x8f, 0x4a, 0xf8, 0x10, 0xc1, 0x44, 0x33, 0x22, 0x11,
+        0x8f, 0xea, 0x78, 0x10, 0xc1, 0x44, 0x33, 0x22, 0x11,
+        0x8f, 0xc9, 0xb8, 0x01, 0xc9,
+        0x8f, 0xe9, 0xb8, 0x01, 0x48, 0x7f,
+        0x8f, 0xc9, 0xf8, 0x12, 0xc0,
+        0x8f, 0xc9, 0xf8, 0x12, 0xc9,
+        0x8f, 0xea, 0xb8, 0x12, 0xc1, 0x44, 0x33, 0x22, 0x11,
+        0x8f, 0xea, 0xb8, 0x12, 0x40, 0x7f, 0x44, 0x33, 0x22, 0x11,
+        0x0f, 0x0e,
+        0x0f, 0x0f, 0xc1, 0x0c,
+        0x0f, 0x0f, 0x40, 0x7f, 0x9e,
+    };
+    AssemblyEncodeResult amd_intel = assembly_encode(arguments->arena, amd_intel_source,
+                                                      (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, amd_intel.diagnostic_count == 0 && amd_intel.bytes.length == sizeof(expected_amd_intel) &&
+                               memcmp(amd_intel.bytes.pointer, expected_amd_intel, sizeof(expected_amd_intel)) == 0);
+
+    String8 amd_att_source =
+        S8("vfrczps %xmm2, %xmm1\n"
+           "vpshab %xmm3, %xmm2, %xmm1\n"
+           "vprotb $0x55, %xmm2, %xmm1\n"
+           "vpcmov %xmm4, %xmm3, %xmm2, %xmm1\n"
+           "vpcmov (%rax), %xmm3, %xmm2, %xmm1\n"
+           "vfmaddps %xmm4, %xmm3, %xmm2, %xmm1\n"
+           "bextrq $0x11223344, %r9, %r8\n"
+           "pfadd 127(%rax), %mm0\n");
+    u8 expected_amd_att[] = {
+        0x8f, 0xe9, 0x78, 0x80, 0xca,
+        0x8f, 0xe9, 0x60, 0x98, 0xca,
+        0x8f, 0xe8, 0x78, 0xc0, 0xca, 0x55,
+        0x8f, 0xe8, 0x68, 0xa2, 0xcb, 0x40,
+        0x8f, 0xe8, 0xe8, 0xa2, 0x08, 0x30,
+        0xc4, 0xe3, 0xe9, 0x68, 0xcc, 0x30,
+        0x8f, 0x4a, 0xf8, 0x10, 0xc1, 0x44, 0x33, 0x22, 0x11,
+        0x0f, 0x0f, 0x40, 0x7f, 0x9e,
+    };
+    AssemblyEncodeResult amd_att = assembly_encode(arguments->arena, amd_att_source,
+                                                    (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, amd_att.diagnostic_count == 0 && amd_att.bytes.length == sizeof(expected_amd_att) &&
+                               memcmp(amd_att.bytes.pointer, expected_amd_att, sizeof(expected_amd_att)) == 0);
+
+    AssemblyEncodeResult amd_att_shapes = assembly_encode(
+        arguments->arena,
+        S8("vpcomb $3, %xmm2, %xmm1, %xmm0\n"
+           "vpcomub $3, %xmm2, %xmm1, %xmm0\n"
+           "vpshlb (%rax), %xmm1, %xmm0\n"
+           "vprotb %xmm2, %xmm1, %xmm0\n"
+           "vpcmov (%rax), %xmm2, %xmm1, %xmm0\n"
+           "vpperm %xmm3, %xmm2, %xmm1, %xmm0\n"
+           "vpermil2ps $3, %xmm3, %xmm2, %xmm1, %xmm0\n"
+           "vfmaddps (%rax), %xmm2, %xmm1, %xmm0\n"
+           "vfmaddps %xmm3, (%rax), %xmm1, %xmm0\n"
+           "lwpval $3, %edx, %r9\n"),
+        (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    u8 expected_amd_att_shapes[] = {
+        0x8f, 0xe8, 0x70, 0xcc, 0xc2, 0x03,
+        0x8f, 0xe8, 0x70, 0xec, 0xc2, 0x03,
+        0x8f, 0xe9, 0xf0, 0x94, 0x00,
+        0x8f, 0xe9, 0x68, 0x90, 0xc1,
+        0x8f, 0xe8, 0xf0, 0xa2, 0x00, 0x20,
+        0x8f, 0xe8, 0x70, 0xa3, 0xc2, 0x30,
+        0xc4, 0xe3, 0x71, 0x48, 0xc2, 0x33,
+        0xc4, 0xe3, 0xf1, 0x68, 0x00, 0x20,
+        0xc4, 0xe3, 0x71, 0x68, 0x00, 0x30,
+        0x8f, 0xea, 0xb0, 0x12, 0xca, 0x03, 0x00, 0x00, 0x00,
+    };
+    BUSTER_TEST(arguments, amd_att_shapes.diagnostic_count == 0 && amd_att_shapes.bytes.length == sizeof(expected_amd_att_shapes) &&
+                               memcmp(amd_att_shapes.bytes.pointer, expected_amd_att_shapes, sizeof(expected_amd_att_shapes)) == 0);
+
+    String8 amd_xop_inventory_source =
+        S8("vfrczps xmm0, xmm1\n"
+           "vfrczpd xmm0, xmm1\n"
+           "vfrczss xmm0, xmm1\n"
+           "vfrczsd xmm0, xmm1\n"
+           "vphaddbw xmm0, xmm1\n"
+           "vphaddbd xmm0, xmm1\n"
+           "vphaddbq xmm0, xmm1\n"
+           "vphaddwd xmm0, xmm1\n"
+           "vphaddwq xmm0, xmm1\n"
+           "vphaddubw xmm0, xmm1\n"
+           "vphaddubd xmm0, xmm1\n"
+           "vphaddubq xmm0, xmm1\n"
+           "vphadduwd xmm0, xmm1\n"
+           "vphadduwq xmm0, xmm1\n"
+           "vphsubbw xmm0, xmm1\n"
+           "vphsubwd xmm0, xmm1\n"
+           "vphsubdq xmm0, xmm1\n"
+           "vphadddq xmm0, xmm1\n"
+           "vphaddudq xmm0, xmm1\n"
+           "vprotb xmm0, xmm1, 3\n"
+           "vprotw xmm0, xmm1, 3\n"
+           "vprotd xmm0, xmm1, 3\n"
+           "vprotq xmm0, xmm1, 3\n"
+           "vpcomb xmm0, xmm1, xmm2, 3\n"
+           "vpcomw xmm0, xmm1, xmm2, 3\n"
+           "vpcomd xmm0, xmm1, xmm2, 3\n"
+           "vpcomq xmm0, xmm1, xmm2, 3\n"
+           "vpcomub xmm0, xmm1, xmm2, 3\n"
+           "vpcomuw xmm0, xmm1, xmm2, 3\n"
+           "vpcomud xmm0, xmm1, xmm2, 3\n"
+           "vpcomuq xmm0, xmm1, xmm2, 3\n"
+           "vprotb xmm0, xmm1, xmm2\n"
+           "vprotw xmm0, xmm1, xmm2\n"
+           "vprotd xmm0, xmm1, xmm2\n"
+           "vprotq xmm0, xmm1, xmm2\n"
+           "vpshlb xmm0, xmm1, xmm2\n"
+           "vpshlw xmm0, xmm1, xmm2\n"
+           "vpshld xmm0, xmm1, xmm2\n"
+           "vpshlq xmm0, xmm1, xmm2\n"
+           "vpshab xmm0, xmm1, xmm2\n"
+           "vpshaw xmm0, xmm1, xmm2\n"
+           "vpshad xmm0, xmm1, xmm2\n"
+           "vpshaq xmm0, xmm1, xmm2\n"
+           "vpmacssww xmm0, xmm1, xmm2, xmm3\n"
+           "vpmacsswd xmm0, xmm1, xmm2, xmm3\n"
+           "vpmacssdql xmm0, xmm1, xmm2, xmm3\n"
+           "vpmacsww xmm0, xmm1, xmm2, xmm3\n"
+           "vpmacswd xmm0, xmm1, xmm2, xmm3\n"
+           "vpmacsdql xmm0, xmm1, xmm2, xmm3\n"
+           "vpcmov xmm0, xmm1, xmm2, xmm3\n"
+           "vpperm xmm0, xmm1, xmm2, xmm3\n"
+           "vpmadcsswd xmm0, xmm1, xmm2, xmm3\n"
+           "vpmadcswd xmm0, xmm1, xmm2, xmm3\n"
+           "vpmacssdd xmm0, xmm1, xmm2, xmm3\n"
+           "vpmacssdqh xmm0, xmm1, xmm2, xmm3\n"
+           "vpmacsdd xmm0, xmm1, xmm2, xmm3\n"
+           "vpmacsdqh xmm0, xmm1, xmm2, xmm3\n"
+           "vpermil2ps xmm0, xmm1, xmm2, xmm3, 3\n"
+           "vpermil2pd xmm0, xmm1, xmm2, xmm3, 3\n"
+           "llwpcb r8\n"
+           "slwpcb r9\n"
+           "lwpins r8, ecx, 3\n"
+           "lwpval r9, edx, 3\n");
+    u8 expected_amd_xop_inventory[] = {
+        0x8f, 0xe9, 0x78, 0x80, 0xc1,
+        0x8f, 0xe9, 0x78, 0x81, 0xc1,
+        0x8f, 0xe9, 0x78, 0x82, 0xc1,
+        0x8f, 0xe9, 0x78, 0x83, 0xc1,
+        0x8f, 0xe9, 0x78, 0xc1, 0xc1,
+        0x8f, 0xe9, 0x78, 0xc2, 0xc1,
+        0x8f, 0xe9, 0x78, 0xc3, 0xc1,
+        0x8f, 0xe9, 0x78, 0xc6, 0xc1,
+        0x8f, 0xe9, 0x78, 0xc7, 0xc1,
+        0x8f, 0xe9, 0x78, 0xd1, 0xc1,
+        0x8f, 0xe9, 0x78, 0xd2, 0xc1,
+        0x8f, 0xe9, 0x78, 0xd3, 0xc1,
+        0x8f, 0xe9, 0x78, 0xd6, 0xc1,
+        0x8f, 0xe9, 0x78, 0xd7, 0xc1,
+        0x8f, 0xe9, 0x78, 0xe1, 0xc1,
+        0x8f, 0xe9, 0x78, 0xe2, 0xc1,
+        0x8f, 0xe9, 0x78, 0xe3, 0xc1,
+        0x8f, 0xe9, 0x78, 0xcb, 0xc1,
+        0x8f, 0xe9, 0x78, 0xdb, 0xc1,
+        0x8f, 0xe8, 0x78, 0xc0, 0xc1, 0x03,
+        0x8f, 0xe8, 0x78, 0xc1, 0xc1, 0x03,
+        0x8f, 0xe8, 0x78, 0xc2, 0xc1, 0x03,
+        0x8f, 0xe8, 0x78, 0xc3, 0xc1, 0x03,
+        0x8f, 0xe8, 0x70, 0xcc, 0xc2, 0x03,
+        0x8f, 0xe8, 0x70, 0xcd, 0xc2, 0x03,
+        0x8f, 0xe8, 0x70, 0xce, 0xc2, 0x03,
+        0x8f, 0xe8, 0x70, 0xcf, 0xc2, 0x03,
+        0x8f, 0xe8, 0x70, 0xec, 0xc2, 0x03,
+        0x8f, 0xe8, 0x70, 0xed, 0xc2, 0x03,
+        0x8f, 0xe8, 0x70, 0xee, 0xc2, 0x03,
+        0x8f, 0xe8, 0x70, 0xef, 0xc2, 0x03,
+        0x8f, 0xe9, 0x68, 0x90, 0xc1,
+        0x8f, 0xe9, 0x68, 0x91, 0xc1,
+        0x8f, 0xe9, 0x68, 0x92, 0xc1,
+        0x8f, 0xe9, 0x68, 0x93, 0xc1,
+        0x8f, 0xe9, 0x68, 0x94, 0xc1,
+        0x8f, 0xe9, 0x68, 0x95, 0xc1,
+        0x8f, 0xe9, 0x68, 0x96, 0xc1,
+        0x8f, 0xe9, 0x68, 0x97, 0xc1,
+        0x8f, 0xe9, 0x68, 0x98, 0xc1,
+        0x8f, 0xe9, 0x68, 0x99, 0xc1,
+        0x8f, 0xe9, 0x68, 0x9a, 0xc1,
+        0x8f, 0xe9, 0x68, 0x9b, 0xc1,
+        0x8f, 0xe8, 0x70, 0x85, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0x86, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0x87, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0x95, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0x96, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0x97, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0xa2, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0xa3, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0xa6, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0xb6, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0x8e, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0x8f, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0x9e, 0xc2, 0x30,
+        0x8f, 0xe8, 0x70, 0x9f, 0xc2, 0x30,
+        0xc4, 0xe3, 0x71, 0x48, 0xc2, 0x33,
+        0xc4, 0xe3, 0x71, 0x49, 0xc2, 0x33,
+        0x8f, 0xc9, 0xf8, 0x12, 0xc0,
+        0x8f, 0xc9, 0xf8, 0x12, 0xc9,
+        0x8f, 0xea, 0xb8, 0x12, 0xc1, 0x03, 0x00, 0x00, 0x00,
+        0x8f, 0xea, 0xb0, 0x12, 0xca, 0x03, 0x00, 0x00, 0x00,
+    };
+    AssemblyEncodeResult amd_xop_inventory = assembly_encode(arguments->arena, amd_xop_inventory_source,
+                                                              (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, amd_xop_inventory.diagnostic_count == 0 && amd_xop_inventory.bytes.length == sizeof(expected_amd_xop_inventory) &&
+                               memcmp(amd_xop_inventory.bytes.pointer, expected_amd_xop_inventory, sizeof(expected_amd_xop_inventory)) == 0);
+
+    String8 amd_fma4_inventory_source =
+        S8("vfmaddsubps xmm0, xmm1, xmm2, xmm3\n"
+           "vfmaddsubpd xmm0, xmm1, xmm2, xmm3\n"
+           "vfmsubaddps xmm0, xmm1, xmm2, xmm3\n"
+           "vfmsubaddpd xmm0, xmm1, xmm2, xmm3\n"
+           "vfmaddps xmm0, xmm1, xmm2, xmm3\n"
+           "vfmaddpd xmm0, xmm1, xmm2, xmm3\n"
+           "vfmaddss xmm0, xmm1, xmm2, xmm3\n"
+           "vfmaddsd xmm0, xmm1, xmm2, xmm3\n"
+           "vfmsubps xmm0, xmm1, xmm2, xmm3\n"
+           "vfmsubpd xmm0, xmm1, xmm2, xmm3\n"
+           "vfmsubss xmm0, xmm1, xmm2, xmm3\n"
+           "vfmsubsd xmm0, xmm1, xmm2, xmm3\n"
+           "vfnmaddps xmm0, xmm1, xmm2, xmm3\n"
+           "vfnmaddpd xmm0, xmm1, xmm2, xmm3\n"
+           "vfnmaddss xmm0, xmm1, xmm2, xmm3\n"
+           "vfnmaddsd xmm0, xmm1, xmm2, xmm3\n"
+           "vfnmsubps xmm0, xmm1, xmm2, xmm3\n"
+           "vfnmsubpd xmm0, xmm1, xmm2, xmm3\n"
+           "vfnmsubss xmm0, xmm1, xmm2, xmm3\n"
+           "vfnmsubsd xmm0, xmm1, xmm2, xmm3\n");
+    u8 expected_amd_fma4_inventory[] = {
+        0xc4, 0xe3, 0xf1, 0x5c, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x5d, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x5e, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x5f, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x68, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x69, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x6a, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x6b, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x6c, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x6d, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x6e, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x6f, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x78, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x79, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x7a, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x7b, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x7c, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x7d, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x7e, 0xc3, 0x20,
+        0xc4, 0xe3, 0xf1, 0x7f, 0xc3, 0x20,
+    };
+    AssemblyEncodeResult amd_fma4_inventory = assembly_encode(arguments->arena, amd_fma4_inventory_source,
+                                                               (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, amd_fma4_inventory.diagnostic_count == 0 && amd_fma4_inventory.bytes.length == sizeof(expected_amd_fma4_inventory) &&
+                               memcmp(amd_fma4_inventory.bytes.pointer, expected_amd_fma4_inventory, sizeof(expected_amd_fma4_inventory)) == 0);
+
+    String8 amd_tbm_inventory_source =
+        S8("bextr r8, r9, 3\n"
+           "blcfill r8, r9\n"
+           "blci r8, r9\n"
+           "blcic r8, r9\n"
+           "blcmsk r8, r9\n"
+           "blcs r8, r9\n"
+           "blsfill r8, r9\n"
+           "blsic r8, r9\n"
+           "t1mskc r8, r9\n"
+           "tzmsk r8, r9\n");
+    u8 expected_amd_tbm_inventory[] = {
+        0x8f, 0x4a, 0xf8, 0x10, 0xc1, 0x03, 0x00, 0x00, 0x00,
+        0x8f, 0xc9, 0xb8, 0x01, 0xc9,
+        0x8f, 0xc9, 0xb8, 0x02, 0xf1,
+        0x8f, 0xc9, 0xb8, 0x01, 0xe9,
+        0x8f, 0xc9, 0xb8, 0x02, 0xc9,
+        0x8f, 0xc9, 0xb8, 0x01, 0xd9,
+        0x8f, 0xc9, 0xb8, 0x01, 0xd1,
+        0x8f, 0xc9, 0xb8, 0x01, 0xf1,
+        0x8f, 0xc9, 0xb8, 0x01, 0xf9,
+        0x8f, 0xc9, 0xb8, 0x01, 0xe1,
+    };
+    AssemblyEncodeResult amd_tbm_inventory = assembly_encode(arguments->arena, amd_tbm_inventory_source,
+                                                              (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, amd_tbm_inventory.diagnostic_count == 0 && amd_tbm_inventory.bytes.length == sizeof(expected_amd_tbm_inventory) &&
+                               memcmp(amd_tbm_inventory.bytes.pointer, expected_amd_tbm_inventory, sizeof(expected_amd_tbm_inventory)) == 0);
+
+    String8 amd_3dnow_inventory_source =
+        S8("femms\n"
+           "pi2fw mm0, mm1\n"
+           "pi2fd mm0, mm1\n"
+           "pf2iw mm0, mm1\n"
+           "pf2id mm0, mm1\n"
+           "pfnacc mm0, mm1\n"
+           "pfpnacc mm0, mm1\n"
+           "pfcmpge mm0, mm1\n"
+           "pfmin mm0, mm1\n"
+           "pfrcp mm0, mm1\n"
+           "pfrsqrt mm0, mm1\n"
+           "pfsub mm0, mm1\n"
+           "pfadd mm0, mm1\n"
+           "pfcmpgt mm0, mm1\n"
+           "pfmax mm0, mm1\n"
+           "pfrcpit1 mm0, mm1\n"
+           "pfrsqit1 mm0, mm1\n"
+           "pfsubr mm0, mm1\n"
+           "pfacc mm0, mm1\n"
+           "pfcmpeq mm0, mm1\n"
+           "pfmul mm0, mm1\n"
+           "pfrcpit2 mm0, mm1\n"
+           "pmulhrw mm0, mm1\n"
+           "pswapd mm0, mm1\n"
+           "pavgusb mm0, mm1\n");
+    u8 expected_amd_3dnow_inventory[] = {
+        0x0f, 0x0e,
+        0x0f, 0x0f, 0xc1, 0x0c,
+        0x0f, 0x0f, 0xc1, 0x0d,
+        0x0f, 0x0f, 0xc1, 0x1c,
+        0x0f, 0x0f, 0xc1, 0x1d,
+        0x0f, 0x0f, 0xc1, 0x8a,
+        0x0f, 0x0f, 0xc1, 0x8e,
+        0x0f, 0x0f, 0xc1, 0x90,
+        0x0f, 0x0f, 0xc1, 0x94,
+        0x0f, 0x0f, 0xc1, 0x96,
+        0x0f, 0x0f, 0xc1, 0x97,
+        0x0f, 0x0f, 0xc1, 0x9a,
+        0x0f, 0x0f, 0xc1, 0x9e,
+        0x0f, 0x0f, 0xc1, 0xa0,
+        0x0f, 0x0f, 0xc1, 0xa4,
+        0x0f, 0x0f, 0xc1, 0xa6,
+        0x0f, 0x0f, 0xc1, 0xa7,
+        0x0f, 0x0f, 0xc1, 0xaa,
+        0x0f, 0x0f, 0xc1, 0xae,
+        0x0f, 0x0f, 0xc1, 0xb0,
+        0x0f, 0x0f, 0xc1, 0xb4,
+        0x0f, 0x0f, 0xc1, 0xb6,
+        0x0f, 0x0f, 0xc1, 0xb7,
+        0x0f, 0x0f, 0xc1, 0xbb,
+        0x0f, 0x0f, 0xc1, 0xbf,
+    };
+    AssemblyEncodeResult amd_3dnow_inventory = assembly_encode(arguments->arena, amd_3dnow_inventory_source,
+                                                                (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, amd_3dnow_inventory.diagnostic_count == 0 && amd_3dnow_inventory.bytes.length == sizeof(expected_amd_3dnow_inventory) &&
+                               memcmp(amd_3dnow_inventory.bytes.pointer, expected_amd_3dnow_inventory, sizeof(expected_amd_3dnow_inventory)) == 0);
+
+    String8 amd_memory_source =
+        S8("vfrczps ymm8, ymm9\n"
+           "vfrczpd ymm8, ymm9\n"
+           "vpcmov ymm8, ymm9, ymm10, ymm11\n"
+           "vpcmov ymm8, ymm9, ymm10, ymmword ptr [rax]\n"
+           "vpcmov ymm8, ymm9, ymmword ptr [rax], ymm11\n"
+           "vfrczps xmm8, xmmword ptr [r12 + r9*4 + 0x12345678]\n"
+           "vprotb xmm8, xmm9, xmmword ptr [r12 + r9*8 - 128]\n"
+           "vpshlq xmm8, xmm9, xmmword ptr [r12 + r9*8 + 127]\n"
+           "vpcmov xmm8, xmm9, xmm10, xmmword ptr [r12 + r9*4 + 0x12345678]\n"
+           "vpperm xmm8, xmm9, xmm10, xmmword ptr [r12 + r9*8 + 127]\n"
+           "vpperm xmm8, xmm9, xmmword ptr [r12 + r9*8 + 127], xmm10\n"
+           "vpmacssww xmm8, xmm9, xmmword ptr [r12 + r9*2 + 127], xmm10\n"
+           "vpermil2ps ymm8, ymm9, ymmword ptr [r12 + r9*4 - 128], ymm10, 7\n"
+           "vfmaddpd ymm8, ymm9, ymmword ptr [r12 + r9*8 + 0x12345678], ymm10\n"
+           "vfmaddsubps ymm8, ymm9, ymm10, ymmword ptr [r12 + r9*8 - 128]\n"
+           "bextr r8, qword ptr [r12 + r9*8 + 0x12345678], 0x11223344\n"
+           "blci r8, qword ptr [r12 + r9*8 + 127]\n"
+           "lwpins r8, dword ptr [r12 + r9*4 + 0x12345678], 0x11223344\n"
+           "pfadd mm0, qword ptr [r12 + r9*8 + 127]\n"
+           "vfrczps xmm0, xmmword ptr [0x12345678]\n"
+           "pfadd mm0, qword ptr [0x12345678]\n"
+           "blcfill r8, qword ptr [0x12345678]\n");
+    u8 expected_amd_memory[] = {
+        0x8f, 0x49, 0x7c, 0x80, 0xc1,
+        0x8f, 0x49, 0x7c, 0x81, 0xc1,
+        0x8f, 0x48, 0x34, 0xa2, 0xc2, 0xb0,
+        0x8f, 0x68, 0xb4, 0xa2, 0x00, 0xa0,
+        0x8f, 0x68, 0x34, 0xa2, 0x00, 0xb0,
+        0x8f, 0x09, 0x78, 0x80, 0x84, 0x8c, 0x78, 0x56, 0x34, 0x12,
+        0x8f, 0x09, 0xb0, 0x90, 0x44, 0xcc, 0x80,
+        0x8f, 0x09, 0xb0, 0x97, 0x44, 0xcc, 0x7f,
+        0x8f, 0x08, 0xb0, 0xa2, 0x84, 0x8c, 0x78, 0x56, 0x34, 0x12, 0xa0,
+        0x8f, 0x08, 0xb0, 0xa3, 0x44, 0xcc, 0x7f, 0xa0,
+        0x8f, 0x08, 0x30, 0xa3, 0x44, 0xcc, 0x7f, 0xa0,
+        0x8f, 0x08, 0x30, 0x85, 0x44, 0x4c, 0x7f, 0xa0,
+        0xc4, 0x03, 0x35, 0x48, 0x44, 0x8c, 0x80, 0xa7,
+        0xc4, 0x03, 0x35, 0x69, 0x84, 0xcc, 0x78, 0x56, 0x34, 0x12, 0xa0,
+        0xc4, 0x03, 0xb5, 0x5c, 0x44, 0xcc, 0x80, 0xa0,
+        0x8f, 0x0a, 0xf8, 0x10, 0x84, 0xcc, 0x78, 0x56, 0x34, 0x12, 0x44, 0x33, 0x22, 0x11,
+        0x8f, 0x89, 0xb8, 0x02, 0x74, 0xcc, 0x7f,
+        0x8f, 0x8a, 0xb8, 0x12, 0x84, 0x8c, 0x78, 0x56, 0x34, 0x12, 0x44, 0x33, 0x22, 0x11,
+        0x43, 0x0f, 0x0f, 0x44, 0xcc, 0x7f, 0x9e,
+        0x8f, 0xe9, 0x78, 0x80, 0x04, 0x25, 0x78, 0x56, 0x34, 0x12,
+        0x0f, 0x0f, 0x04, 0x25, 0x78, 0x56, 0x34, 0x12, 0x9e,
+        0x8f, 0xe9, 0xb8, 0x01, 0x0c, 0x25, 0x78, 0x56, 0x34, 0x12,
+    };
+    AssemblyEncodeResult amd_memory = assembly_encode(arguments->arena, amd_memory_source,
+                                                       (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, amd_memory.diagnostic_count == 0 && amd_memory.bytes.length == sizeof(expected_amd_memory) &&
+                               memcmp(amd_memory.bytes.pointer, expected_amd_memory, sizeof(expected_amd_memory)) == 0);
+
+    String8 amd_memory_att_source =
+        S8("vfrczps %ymm9, %ymm8\n"
+           "vfrczpd %ymm9, %ymm8\n"
+           "vpcmov %ymm11, %ymm10, %ymm9, %ymm8\n"
+           "vpcmov (%rax), %ymm10, %ymm9, %ymm8\n"
+           "vpcmov %ymm11, (%rax), %ymm9, %ymm8\n"
+           "vfrczps 305419896(%r12,%r9,4), %xmm8\n"
+           "vprotb -128(%r12,%r9,8), %xmm9, %xmm8\n"
+           "vpshlq 127(%r12,%r9,8), %xmm9, %xmm8\n"
+           "vpcmov 305419896(%r12,%r9,4), %xmm10, %xmm9, %xmm8\n"
+           "vpperm 127(%r12,%r9,8), %xmm10, %xmm9, %xmm8\n"
+           "vpperm %xmm10, 127(%r12,%r9,8), %xmm9, %xmm8\n"
+           "vpmacssww %xmm10, 127(%r12,%r9,2), %xmm9, %xmm8\n"
+           "vpermil2ps $7, %ymm10, -128(%r12,%r9,4), %ymm9, %ymm8\n"
+           "vfmaddpd %ymm10, 305419896(%r12,%r9,8), %ymm9, %ymm8\n"
+           "vfmaddsubps -128(%r12,%r9,8), %ymm10, %ymm9, %ymm8\n"
+           "bextrq $287454020, 305419896(%r12,%r9,8), %r8\n"
+           "blciq 127(%r12,%r9,8), %r8\n"
+           "lwpins $287454020, 305419896(%r12,%r9,4), %r8\n"
+           "pfadd 127(%r12,%r9,8), %mm0\n");
+    u8 expected_amd_memory_att[] = {
+        0x8f, 0x49, 0x7c, 0x80, 0xc1,
+        0x8f, 0x49, 0x7c, 0x81, 0xc1,
+        0x8f, 0x48, 0x34, 0xa2, 0xc2, 0xb0,
+        0x8f, 0x68, 0xb4, 0xa2, 0x00, 0xa0,
+        0x8f, 0x68, 0x34, 0xa2, 0x00, 0xb0,
+        0x8f, 0x09, 0x78, 0x80, 0x84, 0x8c, 0x78, 0x56, 0x34, 0x12,
+        0x8f, 0x09, 0xb0, 0x90, 0x44, 0xcc, 0x80,
+        0x8f, 0x09, 0xb0, 0x97, 0x44, 0xcc, 0x7f,
+        0x8f, 0x08, 0xb0, 0xa2, 0x84, 0x8c, 0x78, 0x56, 0x34, 0x12, 0xa0,
+        0x8f, 0x08, 0xb0, 0xa3, 0x44, 0xcc, 0x7f, 0xa0,
+        0x8f, 0x08, 0x30, 0xa3, 0x44, 0xcc, 0x7f, 0xa0,
+        0x8f, 0x08, 0x30, 0x85, 0x44, 0x4c, 0x7f, 0xa0,
+        0xc4, 0x03, 0x35, 0x48, 0x44, 0x8c, 0x80, 0xa7,
+        0xc4, 0x03, 0x35, 0x69, 0x84, 0xcc, 0x78, 0x56, 0x34, 0x12, 0xa0,
+        0xc4, 0x03, 0xb5, 0x5c, 0x44, 0xcc, 0x80, 0xa0,
+        0x8f, 0x0a, 0xf8, 0x10, 0x84, 0xcc, 0x78, 0x56, 0x34, 0x12, 0x44, 0x33, 0x22, 0x11,
+        0x8f, 0x89, 0xb8, 0x02, 0x74, 0xcc, 0x7f,
+        0x8f, 0x8a, 0xb8, 0x12, 0x84, 0x8c, 0x78, 0x56, 0x34, 0x12, 0x44, 0x33, 0x22, 0x11,
+        0x43, 0x0f, 0x0f, 0x44, 0xcc, 0x7f, 0x9e,
+    };
+    AssemblyEncodeResult amd_memory_att = assembly_encode(arguments->arena, amd_memory_att_source,
+                                                           (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, amd_memory_att.diagnostic_count == 0 && amd_memory_att.bytes.length == sizeof(expected_amd_memory_att) &&
+                               memcmp(amd_memory_att.bytes.pointer, expected_amd_memory_att, sizeof(expected_amd_memory_att)) == 0);
+
+    AssemblyEncodeResult amd_rip_relocations = assembly_encode(
+        arguments->arena,
+        S8("vfrczps xmm0, xmmword ptr [rip + amd_external]\n"
+           "vpcmov xmm0, xmm1, xmm2, xmmword ptr [rip + amd_external]\n"
+           "vfmaddps xmm0, xmm1, xmm2, xmmword ptr [rip + amd_external]\n"
+           "bextr r8, qword ptr [rip + amd_external], 0x11223344\n"
+           "pfadd mm0, qword ptr [rip + amd_external]\n"),
+        (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_amd_rip_relocations[] = {
+        0x8f, 0xe9, 0x78, 0x80, 0x05, 0x00, 0x00, 0x00, 0x00,
+        0x8f, 0xe8, 0xf0, 0xa2, 0x05, 0x00, 0x00, 0x00, 0x00, 0x20,
+        0xc4, 0xe3, 0xf1, 0x68, 0x05, 0x00, 0x00, 0x00, 0x00, 0x20,
+        0x8f, 0x6a, 0xf8, 0x10, 0x05, 0x00, 0x00, 0x00, 0x00, 0x44, 0x33, 0x22, 0x11,
+        0x0f, 0x0f, 0x05, 0x00, 0x00, 0x00, 0x00, 0x9e,
+    };
+    BUSTER_TEST(arguments, amd_rip_relocations.diagnostic_count == 0 && amd_rip_relocations.bytes.length == sizeof(expected_amd_rip_relocations) &&
+                               memcmp(amd_rip_relocations.bytes.pointer, expected_amd_rip_relocations, sizeof(expected_amd_rip_relocations)) == 0);
+    BUSTER_TEST(arguments, amd_rip_relocations.symbol_count == 1 && !amd_rip_relocations.symbols[0].defined &&
+                               string_equal(amd_rip_relocations.symbols[0].name, S8("amd_external")) && amd_rip_relocations.relocation_count == 5);
+    u64 amd_rip_relocation_offsets[] = {5, 14, 24, 34, 45};
+    s64 amd_rip_relocation_addends[] = {-4, -5, -5, -8, -5};
+    for (u32 relocation_index = 0; relocation_index < 5; relocation_index += 1)
+    {
+        BUSTER_TEST(arguments, amd_rip_relocations.relocations[relocation_index].offset == amd_rip_relocation_offsets[relocation_index] &&
+                                   amd_rip_relocations.relocations[relocation_index].symbol == 0 &&
+                                   amd_rip_relocations.relocations[relocation_index].addend == amd_rip_relocation_addends[relocation_index] &&
+                                   amd_rip_relocations.relocations[relocation_index].kind == ASSEMBLY_RELOCATION_X86_PC32);
+    }
+
+    Target amd_no_xop = amd_target;
+    amd_no_xop.cpu_features &= ~((TargetCpuFeatures)TARGET_CPU_FEATURE_X86_XOP);
+    AssemblyEncodeResult unsupported_amd_xop = assembly_encode(arguments->arena, S8("vfrczps xmm0, xmm1\n"),
+                                                                 (AssemblyEncodeOptions){.target = amd_no_xop, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_amd_xop.diagnostic_count == 1 &&
+                               unsupported_amd_xop.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               string_equal(unsupported_amd_xop.diagnostics[0].message, S8("instruction requires the xop target feature")));
+    Target amd_no_fma4 = amd_target;
+    amd_no_fma4.cpu_features &= ~((TargetCpuFeatures)TARGET_CPU_FEATURE_X86_FMA4);
+    AssemblyEncodeResult unsupported_amd_fma4 = assembly_encode(arguments->arena, S8("vfmaddps xmm0, xmm1, xmm2, xmm3\n"),
+                                                                  (AssemblyEncodeOptions){.target = amd_no_fma4, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_amd_fma4.diagnostic_count == 1 &&
+                               unsupported_amd_fma4.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               string_equal(unsupported_amd_fma4.diagnostics[0].message, S8("instruction requires the fma4 target feature")));
+    Target amd_no_3dnow = amd_target;
+    amd_no_3dnow.cpu_features &= ~((TargetCpuFeatures)TARGET_CPU_FEATURE_X86_3DNOW | TARGET_CPU_FEATURE_X86_3DNOWA);
+    AssemblyEncodeResult unsupported_amd_3dnow = assembly_encode(arguments->arena, S8("pfadd mm0, mm1\n"),
+                                                                   (AssemblyEncodeOptions){.target = amd_no_3dnow, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_amd_3dnow.diagnostic_count == 1 &&
+                               unsupported_amd_3dnow.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               string_equal(unsupported_amd_3dnow.diagnostics[0].message, S8("instruction requires the 3dnow target feature")));
+    Target amd_base_3dnow_only = amd_target;
+    amd_base_3dnow_only.cpu_features &= ~((TargetCpuFeatures)TARGET_CPU_FEATURE_X86_3DNOWA);
+    AssemblyEncodeResult unsupported_amd_3dnowa = assembly_encode(arguments->arena, S8("pi2fw mm0, mm1\n"),
+                                                                    (AssemblyEncodeOptions){.target = amd_base_3dnow_only, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_amd_3dnowa.diagnostic_count == 1 &&
+                               unsupported_amd_3dnowa.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               string_equal(unsupported_amd_3dnowa.diagnostics[0].message, S8("instruction requires the 3dnowa target feature")));
+    AssemblyEncodeResult enhanced_amd_3dnow = assembly_encode(
+        arguments->arena,
+        S8("pi2fw mm0, mm1\n"
+           "pf2iw mm0, mm1\n"
+           "pfnacc mm0, mm1\n"
+           "pfpnacc mm0, mm1\n"
+           "pswapd mm0, mm1\n"),
+        (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_enhanced_amd_3dnow[] = {
+        0x0f, 0x0f, 0xc1, 0x0c,
+        0x0f, 0x0f, 0xc1, 0x1c,
+        0x0f, 0x0f, 0xc1, 0x8a,
+        0x0f, 0x0f, 0xc1, 0x8e,
+        0x0f, 0x0f, 0xc1, 0xbb,
+    };
+    BUSTER_TEST(arguments, enhanced_amd_3dnow.diagnostic_count == 0 && enhanced_amd_3dnow.bytes.length == sizeof(expected_enhanced_amd_3dnow) &&
+                               memcmp(enhanced_amd_3dnow.bytes.pointer, expected_enhanced_amd_3dnow, sizeof(expected_enhanced_amd_3dnow)) == 0);
+    AssemblyEncodeResult unsupported_amd_3dnowa_all = assembly_encode(
+        arguments->arena,
+        S8("pi2fw mm0, mm1\n"
+           "pf2iw mm0, mm1\n"
+           "pfnacc mm0, mm1\n"
+           "pfpnacc mm0, mm1\n"
+           "pswapd mm0, mm1\n"),
+        (AssemblyEncodeOptions){.target = amd_base_3dnow_only, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_amd_3dnowa_all.diagnostic_count == 5);
+    for (u32 diagnostic_index = 0; diagnostic_index < unsupported_amd_3dnowa_all.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, unsupported_amd_3dnowa_all.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   string_equal(unsupported_amd_3dnowa_all.diagnostics[diagnostic_index].message,
+                                                S8("instruction requires the 3dnowa target feature")));
+    }
+    Target amd_no_tbm = amd_target;
+    amd_no_tbm.cpu_features &= ~((TargetCpuFeatures)TARGET_CPU_FEATURE_X86_TBM);
+    AssemblyEncodeResult unsupported_amd_tbm = assembly_encode(arguments->arena, S8("bextr rax, rcx, 0x1\n"),
+                                                                 (AssemblyEncodeOptions){.target = amd_no_tbm, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_amd_tbm.diagnostic_count == 1 &&
+                               unsupported_amd_tbm.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    Target amd_no_lwp = amd_target;
+    amd_no_lwp.cpu_features &= ~((TargetCpuFeatures)TARGET_CPU_FEATURE_X86_LWP);
+    AssemblyEncodeResult unsupported_amd_lwp = assembly_encode(arguments->arena, S8("llwpcb r8\n"),
+                                                                (AssemblyEncodeOptions){.target = amd_no_lwp, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, unsupported_amd_lwp.diagnostic_count == 1 &&
+                               unsupported_amd_lwp.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               string_equal(unsupported_amd_lwp.diagnostics[0].message, S8("instruction requires the lwp target feature")));
+
+    AssemblyEncodeResult invalid_amd_forms = assembly_encode(
+        arguments->arena,
+        S8("vfrczps ymm0, xmm1\n"
+           "vfmaddss ymm0, ymm1, ymm2, ymm3\n"
+           "vpcmov xmm0, xmm1, xmmword ptr [rax], xmmword ptr [rbx]\n"
+           "vpmacssww xmm0, xmm1, xmm2, xmmword ptr [rax]\n"
+           "vprotb xmm0, xmm1, 0x100\n"
+           "vpermil2ps xmm0, xmm1, xmm2, xmm3, 0x10\n"
+           "bextr rax, ecx, 0x1\n"
+           "lwpins eax, ecx, 0x1\n"
+           "pfadd xmm0, xmm1\n"),
+        (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_amd_forms.diagnostic_count == 9);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_amd_forms.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_amd_forms.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+    AssemblyEncodeResult invalid_amd_bounds = assembly_encode(
+        arguments->arena,
+        S8("vpcomb xmm0, xmm1, xmm2, 0x100\n"
+           "vpcomb xmm0, xmm1, 0x1\n"
+           "vpcomw ymm0, ymm1, ymm2, 0\n"
+           "vprotb xmm0, xmm1, xmm2, 0\n"
+           "vpshlb xmm0, xmmword ptr [rax], xmmword ptr [rbx]\n"
+           "vpcmov xmm0, xmm1, xmmword ptr [rax], xmmword ptr [rbx]\n"
+           "vpmacssww xmm0, xmm1, xmm2, xmmword ptr [rax]\n"
+           "vpermil2ps xmm0, xmm1, xmm2, xmm3, 16\n"
+           "vpermil2pd xmm0, xmm1, xmm2, xmm3, 16\n"
+           "vfmaddps xmm0, xmm1, xmmword ptr [rax], xmmword ptr [rbx]\n"
+           "blci eax, rcx\n"
+           "lwpval r8, r9, 1\n"
+           "pi2fw xmm0, xmm1\n"),
+        (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_amd_bounds.diagnostic_count == 13);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_amd_bounds.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_amd_bounds.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
     return result;
 }

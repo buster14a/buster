@@ -96,6 +96,33 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     bool amx_state = has_osxsave &&
                      (input.xcr0 & (UINT64_C(0x20000) | UINT64_C(0x40000))) == (UINT64_C(0x20000) | UINT64_C(0x40000));
     bool apx_state = has_osxsave && (input.xcr0 & (UINT64_C(0x80000))) != 0;
+    if (input.maximum_extended_leaf >= UINT32_C(0x80000001))
+    {
+        if (input.extended_basic.edx & (UINT32_C(0x80000000)))
+        {
+            result |= TARGET_CPU_FEATURE_X86_3DNOW;
+        }
+        if (input.extended_basic.edx & (UINT32_C(0x40000000)))
+        {
+            result |= TARGET_CPU_FEATURE_X86_3DNOWA;
+        }
+        if (avx_usable && (input.extended_basic.ecx & (UINT32_C(0x800))))
+        {
+            result |= TARGET_CPU_FEATURE_X86_XOP;
+        }
+        if (avx_usable && (input.extended_basic.ecx & (UINT32_C(0x10000))))
+        {
+            result |= TARGET_CPU_FEATURE_X86_FMA4;
+        }
+        if (input.extended_basic.ecx & (UINT32_C(0x8000)))
+        {
+            result |= TARGET_CPU_FEATURE_X86_LWP;
+        }
+        if (input.extended_basic.ecx & (UINT32_C(0x200000)))
+        {
+            result |= TARGET_CPU_FEATURE_X86_TBM;
+        }
+    }
     if (avx_usable)
     {
         result |= TARGET_CPU_FEATURE_X86_AVX;

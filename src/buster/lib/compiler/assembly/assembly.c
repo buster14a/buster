@@ -267,12 +267,19 @@ typedef enum AssemblyOpcode
     ASSEMBLY_OPCODE_X86_FCLEX,
     ASSEMBLY_OPCODE_X86_FNCLEX,
     ASSEMBLY_OPCODE_X86_FWAIT,
+    ASSEMBLY_OPCODE_X86_AMD_XOP,
+    ASSEMBLY_OPCODE_X86_AMD_FMA4,
+    ASSEMBLY_OPCODE_X86_AMD_TBM,
+    ASSEMBLY_OPCODE_X86_AMD_3DNOW,
+    ASSEMBLY_OPCODE_X86_AMD_FEMMS,
     ASSEMBLY_OPCODE_AARCH64_NOP,
     ASSEMBLY_OPCODE_AARCH64_RET,
     ASSEMBLY_OPCODE_AARCH64_B,
     ASSEMBLY_OPCODE_AARCH64_BL,
     ASSEMBLY_OPCODE_COUNT,
 } AssemblyOpcode;
+
+typedef struct AssemblyAmdForm AssemblyAmdForm;
 
 typedef enum AssemblyOperandKind
 {
@@ -346,7 +353,7 @@ struct AssemblyOperand
 typedef struct AssemblyInstruction AssemblyInstruction;
 struct AssemblyInstruction
 {
-    AssemblyOperand operands[4];
+    AssemblyOperand operands[5];
     u64 offset;
     u32 line;
     u32 column;
@@ -359,6 +366,8 @@ struct AssemblyInstruction
     bool no_flags;
     bool evex;
     u8 rip_relocation_trailing;
+    String8 amd_mnemonic;
+    AssemblyAmdForm const* amd_form;
 };
 
 typedef struct AssemblyBuilder AssemblyBuilder;
@@ -1057,7 +1066,296 @@ struct AssemblyInstructionInfo
     u8 source_width;
     u8 condition;
     bool no_flags;
+    AssemblyAmdForm const* amd_form;
 };
+
+typedef enum AssemblyAmdEncoding
+{
+    ASSEMBLY_AMD_ENCODING_XOP_VECTOR2,
+    ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT,
+    ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_IMMEDIATE,
+    ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE,
+    ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT,
+    ASSEMBLY_AMD_ENCODING_VEX_VECTOR5_IMMEDIATE,
+    ASSEMBLY_AMD_ENCODING_VEX_FMA4,
+    ASSEMBLY_AMD_ENCODING_XOP_GPR2,
+    ASSEMBLY_AMD_ENCODING_XOP_GPR3_BEXTR,
+    ASSEMBLY_AMD_ENCODING_XOP_LWP1,
+    ASSEMBLY_AMD_ENCODING_XOP_LWP3,
+    ASSEMBLY_AMD_ENCODING_3DNOW2,
+    ASSEMBLY_AMD_ENCODING_FEMMS,
+} AssemblyAmdEncoding;
+
+enum
+{
+    ASSEMBLY_AMD_FORM_SCALAR = 1u << 0,
+    ASSEMBLY_AMD_FORM_DEFAULT_W1 = 1u << 1,
+    ASSEMBLY_AMD_FORM_ALLOW_W1 = 1u << 2,
+};
+
+struct AssemblyAmdForm
+{
+    String8 name;
+    AssemblyOpcode opcode;
+    AssemblyAmdEncoding encoding;
+    u8 map;
+    u8 opcode_byte;
+    u8 fixed_reg;
+    u8 operand_count;
+    u8 vector_width_mask;
+    u8 element_bytes;
+    u8 mandatory_prefix;
+    u8 flags;
+    TargetCpuFeature feature;
+};
+
+BUSTER_GLOBAL_LOCAL AssemblyAmdForm const assembly_x86_amd_forms[] = {
+    {S8_INITIALIZER("vpermil2ps"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_VEX_VECTOR5_IMMEDIATE, 3, 0x48, 0, 5, 3, 4, 1, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpermil2pd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_VEX_VECTOR5_IMMEDIATE, 3, 0x49, 0, 5, 3, 8, 1, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmacssww"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0x85, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmacsswd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0x86, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmacssdql"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0x87, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmacsww"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0x95, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmacswd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0x96, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmacsdql"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0x97, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpcmov"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0xa2, 0, 4, 3, 0, 0, ASSEMBLY_AMD_FORM_ALLOW_W1,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpperm"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0xa3, 0, 4, 1, 0, 0, ASSEMBLY_AMD_FORM_ALLOW_W1,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmadcsswd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0xa6, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmadcswd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0xb6, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vprotb"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_IMMEDIATE, 8, 0xc0, 0, 3, 1, 1, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vprotw"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_IMMEDIATE, 8, 0xc1, 0, 3, 1, 2, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vprotd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_IMMEDIATE, 8, 0xc2, 0, 3, 1, 4, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vprotq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_IMMEDIATE, 8, 0xc3, 0, 3, 1, 8, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vprotb"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x90, 0, 3, 1, 0, 0,
+     ASSEMBLY_AMD_FORM_ALLOW_W1, TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vprotw"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x91, 0, 3, 1, 0, 0,
+     ASSEMBLY_AMD_FORM_ALLOW_W1, TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vprotd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x92, 0, 3, 1, 0, 0,
+     ASSEMBLY_AMD_FORM_ALLOW_W1, TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vprotq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x93, 0, 3, 1, 0, 0,
+     ASSEMBLY_AMD_FORM_ALLOW_W1, TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmacssdd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0x8e, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmacssdqh"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0x8f, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmacsdd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0x9e, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpmacsdqh"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT, 8, 0x9f, 0, 4, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpcomb"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE, 8, 0xcc, 0, 4, 1, 1, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpcomw"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE, 8, 0xcd, 0, 4, 1, 2, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpcomd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE, 8, 0xce, 0, 4, 1, 4, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpcomq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE, 8, 0xcf, 0, 4, 1, 8, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpcomub"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE, 8, 0xec, 0, 4, 1, 1, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpcomuw"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE, 8, 0xed, 0, 4, 1, 2, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpcomud"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE, 8, 0xee, 0, 4, 1, 4, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpcomuq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE, 8, 0xef, 0, 4, 1, 8, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vfrczps"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0x80, 0, 2, 3, 4, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vfrczpd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0x81, 0, 2, 3, 8, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vfrczss"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0x82, 0, 2, 1, 4, 0, ASSEMBLY_AMD_FORM_SCALAR,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vfrczsd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0x83, 0, 2, 1, 8, 0, ASSEMBLY_AMD_FORM_SCALAR,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpshlb"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x94, 0, 3, 1, 0, 0, ASSEMBLY_AMD_FORM_ALLOW_W1,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpshlw"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x95, 0, 3, 1, 0, 0, ASSEMBLY_AMD_FORM_ALLOW_W1,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpshld"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x96, 0, 3, 1, 0, 0, ASSEMBLY_AMD_FORM_ALLOW_W1,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpshlq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x97, 0, 3, 1, 0, 0, ASSEMBLY_AMD_FORM_ALLOW_W1,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphaddbw"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xc1, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphaddbd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xc2, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphaddbq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xc3, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphaddwd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xc6, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphaddwq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xc7, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphaddubw"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xd1, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphaddubd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xd2, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphaddubq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xd3, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphadduwd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xd6, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphadduwq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xd7, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphsubbw"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xe1, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphsubwd"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xe2, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphsubdq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xe3, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpshab"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x98, 0, 3, 1, 0, 0, ASSEMBLY_AMD_FORM_ALLOW_W1,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpshaw"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x99, 0, 3, 1, 0, 0, ASSEMBLY_AMD_FORM_ALLOW_W1,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpshad"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x9a, 0, 3, 1, 0, 0, ASSEMBLY_AMD_FORM_ALLOW_W1,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vpshaq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT, 9, 0x9b, 0, 3, 1, 0, 0, ASSEMBLY_AMD_FORM_ALLOW_W1,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphadddq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xcb, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("vphaddudq"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_VECTOR2, 9, 0xdb, 0, 2, 1, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_XOP},
+    {S8_INITIALIZER("llwpcb"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_LWP1, 9, 0x12, 0, 1, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_LWP},
+    {S8_INITIALIZER("slwpcb"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_LWP1, 9, 0x12, 1, 1, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_LWP},
+    {S8_INITIALIZER("lwpins"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_LWP3, 10, 0x12, 0, 3, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_LWP},
+    {S8_INITIALIZER("lwpval"), ASSEMBLY_OPCODE_X86_AMD_XOP, ASSEMBLY_AMD_ENCODING_XOP_LWP3, 10, 0x12, 1, 3, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_LWP},
+
+    {S8_INITIALIZER("vfmaddsubps"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x5c, 0, 4, 3, 4, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmaddsubpd"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x5d, 0, 4, 3, 8, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmsubaddps"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x5e, 0, 4, 3, 4, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmsubaddpd"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x5f, 0, 4, 3, 8, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmaddps"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x68, 0, 4, 3, 4, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmaddpd"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x69, 0, 4, 3, 8, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmaddss"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x6a, 0, 4, 1, 4, 1, ASSEMBLY_AMD_FORM_SCALAR | ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmaddsd"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x6b, 0, 4, 1, 8, 1, ASSEMBLY_AMD_FORM_SCALAR | ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmsubps"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x6c, 0, 4, 3, 4, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmsubpd"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x6d, 0, 4, 3, 8, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmsubss"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x6e, 0, 4, 1, 4, 1, ASSEMBLY_AMD_FORM_SCALAR | ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfmsubsd"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x6f, 0, 4, 1, 8, 1, ASSEMBLY_AMD_FORM_SCALAR | ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfnmaddps"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x78, 0, 4, 3, 4, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfnmaddpd"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x79, 0, 4, 3, 8, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfnmaddss"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x7a, 0, 4, 1, 4, 1, ASSEMBLY_AMD_FORM_SCALAR | ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfnmaddsd"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x7b, 0, 4, 1, 8, 1, ASSEMBLY_AMD_FORM_SCALAR | ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfnmsubps"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x7c, 0, 4, 3, 4, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfnmsubpd"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x7d, 0, 4, 3, 8, 1, ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfnmsubss"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x7e, 0, 4, 1, 4, 1, ASSEMBLY_AMD_FORM_SCALAR | ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+    {S8_INITIALIZER("vfnmsubsd"), ASSEMBLY_OPCODE_X86_AMD_FMA4, ASSEMBLY_AMD_ENCODING_VEX_FMA4, 3, 0x7f, 0, 4, 1, 8, 1, ASSEMBLY_AMD_FORM_SCALAR | ASSEMBLY_AMD_FORM_DEFAULT_W1,
+     TARGET_CPU_FEATURE_X86_FMA4},
+
+    {S8_INITIALIZER("bextr"), ASSEMBLY_OPCODE_X86_AMD_TBM, ASSEMBLY_AMD_ENCODING_XOP_GPR3_BEXTR, 10, 0x10, 0, 3, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_TBM},
+    {S8_INITIALIZER("blcfill"), ASSEMBLY_OPCODE_X86_AMD_TBM, ASSEMBLY_AMD_ENCODING_XOP_GPR2, 9, 0x01, 1, 2, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_TBM},
+    {S8_INITIALIZER("blci"), ASSEMBLY_OPCODE_X86_AMD_TBM, ASSEMBLY_AMD_ENCODING_XOP_GPR2, 9, 0x02, 6, 2, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_TBM},
+    {S8_INITIALIZER("blcic"), ASSEMBLY_OPCODE_X86_AMD_TBM, ASSEMBLY_AMD_ENCODING_XOP_GPR2, 9, 0x01, 5, 2, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_TBM},
+    {S8_INITIALIZER("blcmsk"), ASSEMBLY_OPCODE_X86_AMD_TBM, ASSEMBLY_AMD_ENCODING_XOP_GPR2, 9, 0x02, 1, 2, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_TBM},
+    {S8_INITIALIZER("blcs"), ASSEMBLY_OPCODE_X86_AMD_TBM, ASSEMBLY_AMD_ENCODING_XOP_GPR2, 9, 0x01, 3, 2, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_TBM},
+    {S8_INITIALIZER("blsfill"), ASSEMBLY_OPCODE_X86_AMD_TBM, ASSEMBLY_AMD_ENCODING_XOP_GPR2, 9, 0x01, 2, 2, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_TBM},
+    {S8_INITIALIZER("blsic"), ASSEMBLY_OPCODE_X86_AMD_TBM, ASSEMBLY_AMD_ENCODING_XOP_GPR2, 9, 0x01, 6, 2, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_TBM},
+    {S8_INITIALIZER("t1mskc"), ASSEMBLY_OPCODE_X86_AMD_TBM, ASSEMBLY_AMD_ENCODING_XOP_GPR2, 9, 0x01, 7, 2, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_TBM},
+    {S8_INITIALIZER("tzmsk"), ASSEMBLY_OPCODE_X86_AMD_TBM, ASSEMBLY_AMD_ENCODING_XOP_GPR2, 9, 0x01, 4, 2, 0, 0, 0, 0,
+     TARGET_CPU_FEATURE_X86_TBM},
+
+    {S8_INITIALIZER("femms"), ASSEMBLY_OPCODE_X86_AMD_FEMMS, ASSEMBLY_AMD_ENCODING_FEMMS, 0, 0, 0, 0, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pi2fw"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x0c, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOWA},
+    {S8_INITIALIZER("pi2fd"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x0d, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pf2iw"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x1c, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOWA},
+    {S8_INITIALIZER("pf2id"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x1d, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfnacc"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x8a, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOWA},
+    {S8_INITIALIZER("pfpnacc"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x8e, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOWA},
+    {S8_INITIALIZER("pfcmpge"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x90, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfmin"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x94, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfrcp"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x96, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfrsqrt"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x97, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfsub"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x9a, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfadd"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0x9e, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfcmpgt"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xa0, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfmax"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xa4, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfrcpit1"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xa6, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfrsqit1"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xa7, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfsubr"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xaa, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfacc"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xae, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfcmpeq"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xb0, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfmul"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xb4, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pfrcpit2"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xb6, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pmulhrw"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xb7, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+    {S8_INITIALIZER("pswapd"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xbb, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOWA},
+    {S8_INITIALIZER("pavgusb"), ASSEMBLY_OPCODE_X86_AMD_3DNOW, ASSEMBLY_AMD_ENCODING_3DNOW2, 0, 0xbf, 0, 2, 0, 0, 0, 0, TARGET_CPU_FEATURE_X86_3DNOW},
+};
+
+BUSTER_GLOBAL_LOCAL AssemblyAmdForm const* assembly_x86_amd_form_lookup(String8 mnemonic)
+{
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(assembly_x86_amd_forms); index += 1)
+    {
+        if (assembly_word_equal(mnemonic, assembly_x86_amd_forms[index].name))
+        {
+            return assembly_x86_amd_forms + index;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL AssemblyAmdForm const* assembly_x86_amd_form_select(AssemblyInstruction* instruction)
+{
+    AssemblyAmdForm const* form = instruction->amd_form;
+    if (form && form->encoding == ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_IMMEDIATE && instruction->operand_count == 3 &&
+        instruction->operands[2].kind != ASSEMBLY_OPERAND_EXPRESSION)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(assembly_x86_amd_forms); index += 1)
+        {
+            AssemblyAmdForm const* candidate = assembly_x86_amd_forms + index;
+            if (candidate->encoding == ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT &&
+                assembly_word_equal(instruction->amd_mnemonic, candidate->name))
+            {
+                return candidate;
+            }
+        }
+    }
+    return form;
+}
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_condition_parse(String8 name, u8* result)
 {
@@ -1088,6 +1386,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_condition_parse(String8 name, u8* result)
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic, AssemblyInstructionInfo* result)
 {
+    AssemblyAmdForm const* amd_form = assembly_x86_amd_form_lookup(mnemonic);
+    if (amd_form)
+    {
+        *result = (AssemblyInstructionInfo){.opcode = amd_form->opcode, .operand_count = amd_form->operand_count, .amd_form = amd_form};
+        return true;
+    }
     static const struct
     {
         String8 name;
@@ -2811,6 +3115,346 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_instruction_size(AssemblyInstruction*
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_x86_amd_vector_register_valid(AssemblyRegister reg, u8 vector_width_mask)
+{
+    return !reg.high_byte && reg.index < 16 &&
+           ((reg.class == ASSEMBLY_REGISTER_XMM && (vector_width_mask & 1)) ||
+            (reg.class == ASSEMBLY_REGISTER_YMM && (vector_width_mask & 2)));
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_amd_vector_rm_valid(AssemblyAmdForm const* form, AssemblyOperand* operand,
+                                                          AssemblyRegister destination, u16 vector_width)
+{
+    if (operand->kind == ASSEMBLY_OPERAND_REGISTER)
+    {
+        return assembly_x86_amd_vector_register_valid(operand->reg, form->vector_width_mask) && operand->reg.class == destination.class &&
+               operand->reg.width == vector_width;
+    }
+    if (operand->kind != ASSEMBLY_OPERAND_MEMORY)
+    {
+        return false;
+    }
+    u16 memory_width = (form->flags & ASSEMBLY_AMD_FORM_SCALAR) ? (u16)form->element_bytes * 8u : vector_width;
+    return assembly_x86_memory_set_width(operand, memory_width);
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_amd_immediate_valid(AssemblyOperand operand, u64 maximum)
+{
+    return operand.kind == ASSEMBLY_OPERAND_EXPRESSION && !operand.expression.has_symbol && operand.expression.addend >= 0 &&
+           (u64)operand.expression.addend <= maximum;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_amd_gpr_valid(AssemblyOperand operand, u16 width)
+{
+    return operand.kind == ASSEMBLY_OPERAND_REGISTER && operand.reg.class == ASSEMBLY_REGISTER_GPR && !operand.reg.high_byte &&
+           operand.reg.index < 16 && operand.reg.width == width;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_amd_instruction_size(AssemblyInstruction* instruction, AssemblyAmdForm const* form)
+{
+    form = assembly_x86_amd_form_select(instruction);
+    instruction->amd_form = form;
+    if (instruction->evex || instruction->lock_prefix || instruction->no_flags || instruction->operand_count != form->operand_count)
+    {
+        return false;
+    }
+    AssemblyOperand* first = instruction->operands;
+    AssemblyOperand* second = instruction->operands + 1;
+    u32 address_size = 1;
+    switch (form->encoding)
+    {
+    case ASSEMBLY_AMD_ENCODING_FEMMS:
+        instruction->size = 2;
+        return instruction->operand_count == 0;
+    case ASSEMBLY_AMD_ENCODING_3DNOW2:
+    {
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_MMX || first->reg.index >= 8 ||
+            first->reg.width != 64 || (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
+            (second->kind == ASSEMBLY_OPERAND_REGISTER &&
+             (second->reg.class != ASSEMBLY_REGISTER_MMX || second->reg.index >= 8 || second->reg.width != 64)))
+        {
+            return false;
+        }
+        if (second->kind == ASSEMBLY_OPERAND_MEMORY &&
+            (!assembly_x86_memory_set_width(second, 64) || !assembly_x86_memory_encoding_size(second->memory, &address_size)))
+        {
+            return false;
+        }
+        instruction->rip_relocation_trailing = second->kind == ASSEMBLY_OPERAND_MEMORY;
+        instruction->width = 64;
+        instruction->size = (u32)(second->kind == ASSEMBLY_OPERAND_MEMORY && assembly_x86_memory_rex_needed(0, first->reg, second->memory)) +
+                            2u + address_size + 1u;
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_VECTOR2:
+    {
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(first->reg, form->vector_width_mask))
+        {
+            return false;
+        }
+        u16 vector_width = first->reg.width;
+        if ((form->flags & ASSEMBLY_AMD_FORM_SCALAR) && vector_width != 128)
+        {
+            return false;
+        }
+        if (!assembly_x86_amd_vector_rm_valid(form, second, first->reg, vector_width))
+        {
+            return false;
+        }
+        if (second->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(second->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->rip_relocation_trailing = 0;
+        instruction->width = vector_width;
+        instruction->size = 3u + 1u + address_size;
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT:
+    {
+        AssemblyOperand* source_2 = instruction->operands + 1;
+        AssemblyOperand* source_3 = instruction->operands + 2;
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(first->reg, form->vector_width_mask))
+        {
+            return false;
+        }
+        u16 vector_width = first->reg.width;
+        if (source_3->kind == ASSEMBLY_OPERAND_MEMORY)
+        {
+            if (!(form->flags & ASSEMBLY_AMD_FORM_ALLOW_W1) || source_2->kind != ASSEMBLY_OPERAND_REGISTER ||
+                !assembly_x86_amd_vector_register_valid(source_2->reg, form->vector_width_mask) || source_2->reg.class != first->reg.class ||
+                source_2->reg.width != vector_width || !assembly_x86_amd_vector_rm_valid(form, source_3, first->reg, vector_width))
+            {
+                return false;
+            }
+        }
+        else if (source_3->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(source_3->reg, form->vector_width_mask) ||
+                 source_3->reg.class != first->reg.class || source_3->reg.width != vector_width ||
+                 !assembly_x86_amd_vector_rm_valid(form, source_2, first->reg, vector_width))
+        {
+            return false;
+        }
+        if (source_3->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(source_3->memory, &address_size))
+        {
+            return false;
+        }
+        if (source_2->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(source_2->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->rip_relocation_trailing = 0;
+        instruction->width = vector_width;
+        instruction->size = 3u + 1u + address_size;
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_IMMEDIATE:
+    {
+        AssemblyOperand* immediate = instruction->operands + 2;
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(first->reg, form->vector_width_mask) ||
+            !assembly_x86_amd_immediate_valid(*immediate, UINT8_MAX) ||
+            !assembly_x86_amd_vector_rm_valid(form, second, first->reg, first->reg.width))
+        {
+            return false;
+        }
+        if (second->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(second->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->rip_relocation_trailing = second->kind == ASSEMBLY_OPERAND_MEMORY;
+        instruction->width = first->reg.width;
+        instruction->size = 3u + 1u + address_size + 1u;
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE:
+    {
+        AssemblyOperand* source_1 = instruction->operands + 1;
+        AssemblyOperand* source_2 = instruction->operands + 2;
+        AssemblyOperand* immediate = instruction->operands + 3;
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(first->reg, form->vector_width_mask) ||
+            source_1->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(source_1->reg, form->vector_width_mask) ||
+            source_1->reg.class != first->reg.class || source_1->reg.width != first->reg.width ||
+            !assembly_x86_amd_immediate_valid(*immediate, UINT8_MAX) ||
+            !assembly_x86_amd_vector_rm_valid(form, source_2, first->reg, first->reg.width))
+        {
+            return false;
+        }
+        if (source_2->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(source_2->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->rip_relocation_trailing = source_2->kind == ASSEMBLY_OPERAND_MEMORY;
+        instruction->width = first->reg.width;
+        instruction->size = 3u + 1u + address_size + 1u;
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT:
+    case ASSEMBLY_AMD_ENCODING_VEX_VECTOR5_IMMEDIATE:
+    case ASSEMBLY_AMD_ENCODING_VEX_FMA4:
+    {
+        AssemblyOperand* source_1 = instruction->operands + 1;
+        AssemblyOperand* source_2 = instruction->operands + 2;
+        AssemblyOperand* source_3 = instruction->operands + 3;
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(first->reg, form->vector_width_mask) ||
+            source_1->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(source_1->reg, form->vector_width_mask) ||
+            source_1->reg.class != first->reg.class || source_1->reg.width != first->reg.width)
+        {
+            return false;
+        }
+        u16 vector_width = first->reg.width;
+        if ((form->flags & ASSEMBLY_AMD_FORM_SCALAR) && vector_width != 128)
+        {
+            return false;
+        }
+        if (form->encoding == ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT)
+        {
+            if (source_3->kind == ASSEMBLY_OPERAND_MEMORY)
+            {
+                if (!(form->flags & ASSEMBLY_AMD_FORM_ALLOW_W1) || source_2->kind != ASSEMBLY_OPERAND_REGISTER ||
+                    !assembly_x86_amd_vector_rm_valid(form, source_3, first->reg, vector_width))
+                {
+                    return false;
+                }
+            }
+            else if (source_3->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(source_3->reg, form->vector_width_mask) ||
+                     source_3->reg.class != first->reg.class || source_3->reg.width != vector_width ||
+                     !assembly_x86_amd_vector_rm_valid(form, source_2, first->reg, vector_width))
+            {
+                return false;
+            }
+        }
+        else if (source_2->kind == ASSEMBLY_OPERAND_MEMORY)
+        {
+            if (!assembly_x86_amd_vector_rm_valid(form, source_2, first->reg, vector_width) || source_3->kind != ASSEMBLY_OPERAND_REGISTER ||
+                !assembly_x86_amd_vector_register_valid(source_3->reg, form->vector_width_mask) || source_3->reg.class != first->reg.class ||
+                source_3->reg.width != vector_width)
+            {
+                return false;
+            }
+        }
+        else if (source_2->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(source_2->reg, form->vector_width_mask) ||
+                 source_2->reg.class != first->reg.class || source_2->reg.width != vector_width)
+        {
+            return false;
+        }
+        else if (source_3->kind == ASSEMBLY_OPERAND_MEMORY)
+        {
+            if (source_2->kind == ASSEMBLY_OPERAND_MEMORY || !assembly_x86_amd_vector_rm_valid(form, source_3, first->reg, vector_width))
+            {
+                return false;
+            }
+        }
+        else if (source_3->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_amd_vector_register_valid(source_3->reg, form->vector_width_mask) ||
+                 source_3->reg.class != first->reg.class || source_3->reg.width != vector_width)
+        {
+            return false;
+        }
+        if (form->encoding == ASSEMBLY_AMD_ENCODING_VEX_VECTOR5_IMMEDIATE &&
+            !assembly_x86_amd_immediate_valid(instruction->operands[4], 15))
+        {
+            return false;
+        }
+        if (source_2->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(source_2->memory, &address_size))
+        {
+            return false;
+        }
+        if (source_3->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(source_3->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->rip_relocation_trailing = (u8)(source_2->kind == ASSEMBLY_OPERAND_MEMORY || source_3->kind == ASSEMBLY_OPERAND_MEMORY);
+        instruction->width = vector_width;
+        instruction->size = (form->encoding == ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT ? 3u : 3u) + 1u + address_size + 1u;
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_GPR2:
+    {
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte || first->reg.index >= 16 ||
+            (first->reg.width != 32 && first->reg.width != 64) ||
+            (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY))
+        {
+            return false;
+        }
+        u16 width = first->reg.width;
+        if (second->kind == ASSEMBLY_OPERAND_REGISTER && !assembly_x86_amd_gpr_valid(*second, width))
+        {
+            return false;
+        }
+        if (second->kind == ASSEMBLY_OPERAND_MEMORY &&
+            (!assembly_x86_memory_set_width(second, width) || !assembly_x86_memory_encoding_size(second->memory, &address_size)))
+        {
+            return false;
+        }
+        instruction->rip_relocation_trailing = 0;
+        instruction->width = width;
+        instruction->size = 3u + 1u + address_size;
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_GPR3_BEXTR:
+    {
+        AssemblyOperand* immediate = instruction->operands + 2;
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte || first->reg.index >= 16 ||
+            (first->reg.width != 32 && first->reg.width != 64) ||
+            (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
+            !assembly_x86_amd_immediate_valid(*immediate, UINT32_MAX))
+        {
+            return false;
+        }
+        u16 width = first->reg.width;
+        if (second->kind == ASSEMBLY_OPERAND_REGISTER && !assembly_x86_amd_gpr_valid(*second, width))
+        {
+            return false;
+        }
+        if (second->kind == ASSEMBLY_OPERAND_MEMORY &&
+            (!assembly_x86_memory_set_width(second, width) || !assembly_x86_memory_encoding_size(second->memory, &address_size)))
+        {
+            return false;
+        }
+        instruction->rip_relocation_trailing = second->kind == ASSEMBLY_OPERAND_MEMORY ? 4 : 0;
+        instruction->width = width;
+        instruction->size = 3u + 1u + address_size + 4u;
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_LWP1:
+    {
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte || first->reg.index >= 16 ||
+            first->reg.width != 64)
+        {
+            return false;
+        }
+        instruction->rip_relocation_trailing = 0;
+        instruction->width = 64;
+        instruction->size = 5;
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_LWP3:
+    {
+        AssemblyOperand* immediate = instruction->operands + 2;
+        if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte || first->reg.index >= 16 ||
+            first->reg.width != 64 || (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
+            !assembly_x86_amd_immediate_valid(*immediate, UINT32_MAX))
+        {
+            return false;
+        }
+        if (second->kind == ASSEMBLY_OPERAND_REGISTER)
+        {
+            if (!assembly_x86_amd_gpr_valid(*second, 32))
+            {
+                return false;
+            }
+        }
+        else if (!assembly_x86_memory_set_width(second, 32) || !assembly_x86_memory_encoding_size(second->memory, &address_size))
+        {
+            return false;
+        }
+        instruction->rip_relocation_trailing = second->kind == ASSEMBLY_OPERAND_MEMORY ? 4 : 0;
+        instruction->width = 64;
+        instruction->size = 3u + 1u + address_size + 4u;
+        return true;
+    }
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_x86_amx_memory_size(AssemblyMemory memory, bool forced_sib, u32* result)
 {
     if (forced_sib && memory.rip_relative)
@@ -3745,6 +4389,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     {
         return false;
     }
+    if (instruction->amd_form)
+    {
+        return assembly_x86_amd_instruction_size(instruction, instruction->amd_form);
+    }
     if (assembly_x86_opcode_is_amx(opcode))
     {
         return assembly_x86_amx_instruction_size(instruction);
@@ -4655,6 +5303,18 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION, line, column, (u32)mnemonic.length, S8("unknown instruction"));
         return;
     }
+    if (info.amd_form && !target_cpu_feature_has(target, info.amd_form->feature))
+    {
+        String8 feature_message = info.amd_form->feature == TARGET_CPU_FEATURE_X86_FMA4  ? S8("instruction requires the fma4 target feature")
+                              : info.amd_form->feature == TARGET_CPU_FEATURE_X86_TBM    ? S8("instruction requires the tbm target feature")
+                              : info.amd_form->feature == TARGET_CPU_FEATURE_X86_3DNOWA ? S8("instruction requires the 3dnowa target feature")
+                              : info.amd_form->feature == TARGET_CPU_FEATURE_X86_3DNOW  ? S8("instruction requires the 3dnow target feature")
+                              : info.amd_form->feature == TARGET_CPU_FEATURE_X86_LWP    ? S8("instruction requires the lwp target feature")
+                              : info.amd_form->feature == TARGET_CPU_FEATURE_X86_XOP    ? S8("instruction requires the xop target feature")
+                                                                                       : S8("unsupported AMD instruction feature");
+        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length, feature_message);
+        return;
+    }
     u8 no_flags_source_count = (u8)pseudo_no_flags + (u8)info.no_flags;
     if (no_flags_source_count > 1)
     {
@@ -4730,6 +5390,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         .condition = info.condition,
         .lock_prefix = lock_prefix,
         .no_flags = pseudo_no_flags || info.no_flags,
+        .amd_mnemonic = mnemonic,
+        .amd_form = info.amd_form,
     };
     u8 parsed_operand_count = 0;
     u64 operand_start = 0;
@@ -4860,7 +5522,17 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
         return;
     }
     instruction.operand_count = parsed_operand_count;
-    if (target.cpu_arch == CPU_ARCH_X86_64 && syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 2)
+    if (target.cpu_arch == CPU_ARCH_X86_64 && info.amd_form && syntax == ASSEMBLY_SYNTAX_ATT)
+    {
+        for (u32 left = 0; left < parsed_operand_count / 2; left += 1)
+        {
+            AssemblyOperand temporary = instruction.operands[left];
+            u32 right = parsed_operand_count - 1 - left;
+            instruction.operands[left] = instruction.operands[right];
+            instruction.operands[right] = temporary;
+        }
+    }
+    else if (target.cpu_arch == CPU_ARCH_X86_64 && syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 2)
     {
         AssemblyOperand temporary = instruction.operands[0];
         instruction.operands[0] = instruction.operands[1];
@@ -4904,7 +5576,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     }
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
-        if (syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 4)
+        if (syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 4 && !info.amd_form)
         {
             AssemblyVectorForm const* vector_form = assembly_x86_vector_form(instruction.opcode);
             if (vector_form && (vector_form->flags & ASSEMBLY_VECTOR_FORM_MASK_DESTINATION) &&
@@ -5482,6 +6154,177 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_emit_vex_prefix(AssemblyBuilder* builder, 
     assembly_emit_byte(builder, 0xc4);
     assembly_emit_byte(builder, (u8)(inverted_reg | inverted_index | inverted_base | map));
     assembly_emit_byte(builder, (u8)(inverted_source | vector_length | prefix));
+}
+
+BUSTER_GLOBAL_LOCAL void assembly_x86_emit_amd_prefix(AssemblyBuilder* builder, AssemblyAmdForm const* form, AssemblyRegister reg,
+                                                       AssemblyOperand rm, u16 width, u8 source, bool w)
+{
+    u8 p0 = (u8)(0xe0 | (form->map & 0x1f));
+    if (reg.index >= 8)
+    {
+        p0 &= (u8)~0x80;
+    }
+    if (rm.kind == ASSEMBLY_OPERAND_REGISTER)
+    {
+        if (rm.reg.index >= 8)
+        {
+            p0 &= (u8)~0x20;
+        }
+    }
+    else if (rm.kind == ASSEMBLY_OPERAND_MEMORY)
+    {
+        if (rm.memory.has_base && rm.memory.base.index >= 8)
+        {
+            p0 &= (u8)~0x20;
+        }
+        if (rm.memory.has_index && rm.memory.index.index >= 8)
+        {
+            p0 &= (u8)~0x40;
+        }
+    }
+    u8 p1 = (u8)((w ? 0x80 : 0) | ((~source & 15) << 3) | (width == 256 ? 0x04 : 0) | (form->mandatory_prefix & 3));
+    assembly_emit_byte(builder, form->encoding == ASSEMBLY_AMD_ENCODING_VEX_VECTOR5_IMMEDIATE ||
+                                      form->encoding == ASSEMBLY_AMD_ENCODING_VEX_FMA4
+                                  ? 0xc4
+                                  : 0x8f);
+    assembly_emit_byte(builder, p0);
+    assembly_emit_byte(builder, p1);
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_amd(AssemblyBuilder* builder, AssemblyInstruction* instruction)
+{
+    AssemblyAmdForm const* form = instruction->amd_form;
+    AssemblyOperand* first = instruction->operands;
+    AssemblyOperand* second = instruction->operands + 1;
+    switch (form->encoding)
+    {
+    case ASSEMBLY_AMD_ENCODING_FEMMS:
+        assembly_emit_byte(builder, 0x0f);
+        assembly_emit_byte(builder, 0x0e);
+        return true;
+    case ASSEMBLY_AMD_ENCODING_3DNOW2:
+        if (second->kind == ASSEMBLY_OPERAND_MEMORY)
+        {
+            assembly_x86_emit_memory_prefix(builder, 0, first->reg, second->memory);
+        }
+        assembly_emit_byte(builder, 0x0f);
+        assembly_emit_byte(builder, 0x0f);
+        if (!assembly_x86_emit_rm(builder, instruction, first->reg.index, *second))
+        {
+            return false;
+        }
+        assembly_emit_byte(builder, form->opcode_byte);
+        return true;
+    case ASSEMBLY_AMD_ENCODING_XOP_VECTOR2:
+    case ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT:
+    case ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_IMMEDIATE:
+    case ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE:
+    case ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT:
+    case ASSEMBLY_AMD_ENCODING_VEX_VECTOR5_IMMEDIATE:
+    case ASSEMBLY_AMD_ENCODING_VEX_FMA4:
+    {
+        AssemblyOperand rm = *second;
+        AssemblyRegister selector = {0};
+        u8 source = 0;
+        u8 immediate = 0;
+        bool has_selector = false;
+        bool w = false;
+        if (form->encoding == ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_SHIFT)
+        {
+            w = instruction->operands[2].kind == ASSEMBLY_OPERAND_MEMORY;
+            rm = instruction->operands[w ? 2 : 1];
+            source = instruction->operands[w ? 1 : 2].reg.index;
+        }
+        else if (form->encoding == ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE)
+        {
+            rm = instruction->operands[2];
+            source = instruction->operands[1].reg.index;
+        }
+        else if (form->encoding == ASSEMBLY_AMD_ENCODING_XOP_VECTOR4_SELECT)
+        {
+            source = instruction->operands[1].reg.index;
+            w = instruction->operands[3].kind == ASSEMBLY_OPERAND_MEMORY;
+            rm = instruction->operands[w ? 3 : 2];
+            selector = instruction->operands[w ? 2 : 3].reg;
+            has_selector = true;
+        }
+        else if (form->encoding == ASSEMBLY_AMD_ENCODING_VEX_VECTOR5_IMMEDIATE || form->encoding == ASSEMBLY_AMD_ENCODING_VEX_FMA4)
+        {
+            source = instruction->operands[1].reg.index;
+            bool memory_second = instruction->operands[2].kind == ASSEMBLY_OPERAND_MEMORY;
+            bool memory_third = instruction->operands[3].kind == ASSEMBLY_OPERAND_MEMORY;
+            w = memory_third || (!memory_second && (form->flags & ASSEMBLY_AMD_FORM_DEFAULT_W1));
+            rm = instruction->operands[w ? 3 : 2];
+            selector = instruction->operands[w ? 2 : 3].reg;
+            has_selector = true;
+            if (form->encoding == ASSEMBLY_AMD_ENCODING_VEX_VECTOR5_IMMEDIATE)
+            {
+                immediate = (u8)instruction->operands[4].expression.addend;
+            }
+        }
+        assembly_x86_emit_amd_prefix(builder, form, first->reg, rm, first->reg.width, source, w);
+        assembly_emit_byte(builder, form->opcode_byte);
+        if (!assembly_x86_emit_rm(builder, instruction, first->reg.index, rm))
+        {
+            return false;
+        }
+        if (has_selector)
+        {
+            assembly_emit_byte(builder, (u8)((selector.index << 4) | immediate));
+        }
+        else if (form->encoding == ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_IMMEDIATE)
+        {
+            assembly_emit_byte(builder, (u8)instruction->operands[2].expression.addend);
+        }
+        else if (form->encoding == ASSEMBLY_AMD_ENCODING_XOP_VECTOR3_COMPARE_IMMEDIATE)
+        {
+            assembly_emit_byte(builder, (u8)instruction->operands[3].expression.addend);
+        }
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_GPR2:
+    {
+        AssemblyOperand rm = *second;
+        AssemblyRegister fixed = {.index = form->fixed_reg, .width = first->reg.width, .class = ASSEMBLY_REGISTER_GPR};
+        assembly_x86_emit_amd_prefix(builder, form, fixed, rm, first->reg.width, first->reg.index, first->reg.width == 64);
+        assembly_emit_byte(builder, form->opcode_byte);
+        return assembly_x86_emit_rm(builder, instruction, form->fixed_reg, rm);
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_GPR3_BEXTR:
+    {
+        AssemblyOperand rm = *second;
+        assembly_x86_emit_amd_prefix(builder, form, first->reg, rm, first->reg.width, 0, first->reg.width == 64);
+        assembly_emit_byte(builder, form->opcode_byte);
+        if (!assembly_x86_emit_rm(builder, instruction, first->reg.index, rm))
+        {
+            return false;
+        }
+        assembly_emit_immediate(builder, (u64)instruction->operands[2].expression.addend, 4);
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_LWP1:
+    {
+        AssemblyRegister fixed = {.index = form->fixed_reg, .width = 64, .class = ASSEMBLY_REGISTER_GPR};
+        assembly_x86_emit_amd_prefix(builder, form, fixed, *first, 64, 0, true);
+        assembly_emit_byte(builder, form->opcode_byte);
+        assembly_x86_emit_modrm(builder, form->fixed_reg, first->reg.index);
+        return true;
+    }
+    case ASSEMBLY_AMD_ENCODING_XOP_LWP3:
+    {
+        AssemblyOperand rm = *second;
+        AssemblyRegister fixed = {.index = form->fixed_reg, .width = 64, .class = ASSEMBLY_REGISTER_GPR};
+        assembly_x86_emit_amd_prefix(builder, form, fixed, rm, 64, first->reg.index, true);
+        assembly_emit_byte(builder, form->opcode_byte);
+        if (!assembly_x86_emit_rm(builder, instruction, form->fixed_reg, rm))
+        {
+            return false;
+        }
+        assembly_emit_immediate(builder, (u64)instruction->operands[2].expression.addend, 4);
+        return true;
+    }
+    }
+    return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_evex_memory(AssemblyBuilder* builder, AssemblyInstruction* instruction, u8 reg,
@@ -6601,6 +7444,16 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         if (instruction->lock_prefix)
         {
             assembly_emit_byte(builder, 0xf0);
+        }
+        if (instruction->amd_form)
+        {
+            if (!assembly_x86_emit_amd(builder, instruction))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
+                                    S8("AMD instruction memory displacement is out of range"));
+                return;
+            }
+            continue;
         }
         if (assembly_x86_opcode_is_amx(instruction->opcode))
         {
