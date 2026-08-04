@@ -32,6 +32,7 @@
 #include <buster/tests/ide_document_test.h>
 #include <buster/tests/window_test.h>
 #include <buster/tests/rendering_test.h>
+#include <buster/tests/ui_test.h>
 #include <buster/tests/target_test.h>
 #include <buster/tests/compiler/frontend/buster/parser_test.h>
 #include <buster/tests/compiler/frontend/buster/analysis_test.h>
@@ -60,6 +61,7 @@
 #include <buster/tests/ide_document_test.c>
 #include <buster/tests/window_test.c>
 #include <buster/tests/rendering_test.c>
+#include <buster/tests/ui_test.c>
 #include <buster/tests/target_test.c>
 #include <buster/tests/compiler/frontend/buster/parser_test.c>
 #include <buster/tests/compiler/frontend/buster/analysis_test.c>
@@ -176,6 +178,7 @@ BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
     &ide_document_tests,
     &window_tests,
     &rendering_tests,
+    &ui_tests,
     &target_tests,
     &parser_tokenizer_tests,
     &parser_expression_tests,

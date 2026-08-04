@@ -847,6 +847,8 @@ set(BUSTER_TEST_FILES
     src/buster/tests/window_test.h
     src/buster/tests/rendering_test.c
     src/buster/tests/rendering_test.h
+    src/buster/tests/ui_test.c
+    src/buster/tests/ui_test.h
     src/buster/tests/target_test.c
     src/buster/tests/target_test.h
     src/buster/tests/x86_64_test.c

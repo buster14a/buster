@@ -178,6 +178,61 @@ typedef u64 UI_BoxFlags;
 #define UI_BoxFlag_ViewClamp (UI_BoxFlag_ViewClampX | UI_BoxFlag_ViewClampY)
 #define UI_BoxFlag_DisableFocusEffects (UI_BoxFlag_DisableFocusBorder | UI_BoxFlag_DisableFocusOverlay)
 
+#define UI_BOX_FLAG_COUNT (57)
+#define UI_BoxFlag_All (UI_BoxFlags)((1ull << UI_BOX_FLAG_COUNT) - 1ull)
+
+typedef enum UI_BoxFlagSupportKind
+{
+    UI_BoxFlagSupport_Interaction,
+    UI_BoxFlagSupport_Layout,
+    UI_BoxFlagSupport_Appearance,
+    UI_BoxFlagSupport_Debug,
+} UI_BoxFlagSupportKind;
+
+typedef struct UI_BoxFlagInfo UI_BoxFlagInfo;
+struct UI_BoxFlagInfo
+{
+    UI_BoxFlags flag;
+    String8 name;
+    UI_BoxFlagSupportKind kind;
+    bool implemented;
+    bool renderer_dependency;
+};
+
+typedef u32 UI_BoxRendererDependencyFlags;
+enum
+{
+    UI_BoxRendererDependency_None = 0,
+    UI_BoxRendererDependency_BackgroundBlur = (1u << 0),
+    UI_BoxRendererDependency_BucketSubmission = (1u << 1),
+    UI_BoxRendererDependency_CornerRadii = (1u << 2),
+};
+
+typedef u32 UI_BoxStateFlags;
+enum
+{
+    UI_BoxState_Visible = (1u << 0),
+    UI_BoxState_Hot = (1u << 1),
+    UI_BoxState_Active = (1u << 2),
+    UI_BoxState_FocusHot = (1u << 3),
+    UI_BoxState_FocusActive = (1u << 4),
+    UI_BoxState_FocusEdit = (1u << 5),
+    UI_BoxState_TextTruncated = (1u << 6),
+    UI_BoxState_Clipped = (1u << 7),
+    UI_BoxState_Scrollable = (1u << 8),
+    UI_BoxState_RendererDependency = (1u << 9),
+    UI_BoxState_TextFastpath = (1u << 10),
+    UI_BoxState_Overlay = (1u << 11),
+    UI_BoxState_Fade = (1u << 12),
+};
+
+typedef struct UI_FuzzyMatchRange UI_FuzzyMatchRange;
+struct UI_FuzzyMatchRange
+{
+    u64 first;
+    u64 one_past_last;
+};
+
 // union UI_BoxFlags
 // {
 //     struct
@@ -268,7 +323,9 @@ struct UI_Box
     // per-build equipment
     UI_Key key;
     UI_BoxFlags flags;
+    String8 raw_string;
     String8 string;
+    String8 display_string;
     UI_TextAlign text_align;
     float2 fixed_position;
     float2 fixed_size;
@@ -284,7 +341,21 @@ struct UI_Box
 
     // per-build artifacts
     F32Interval2 rect;
+    F32Interval2 clip_rect;
     float2 position_delta;
+    u64 build_order;
+    u64 draw_order;
+    u32 draw_pass;
+    u32 reserved_draw_order;
+    u64 text_visible_length;
+    UI_BoxRendererDependencyFlags renderer_dependency_flags;
+    UI_BoxStateFlags state_flags;
+    UI_FuzzyMatchRange* fuzzy_match_ranges;
+    u64 fuzzy_match_range_count;
+    bool visible;
+    bool text_truncated;
+    bool has_previous_rect;
+    u8 reserved_artifacts;
 
     // persistent interaction/animation data
     u64 first_touched_build_index;
@@ -321,6 +392,11 @@ enum
     UI_SignalFlag_Hovering = (1u << 3),
     UI_SignalFlag_MouseOver = (1u << 4),
     UI_SignalFlag_KeyboardPressed = (1u << 5),
+    UI_SignalFlag_Dragging = (1u << 6),
+    UI_SignalFlag_Scrolled = (1u << 7),
+    UI_SignalFlag_Dropped = (1u << 8),
+    UI_SignalFlag_FocusChanged = (1u << 9),
+    UI_SignalFlag_Focused = (1u << 10),
     UI_SignalFlag_Pressed = UI_SignalFlag_LeftPressed | UI_SignalFlag_KeyboardPressed,
     UI_SignalFlag_Released = UI_SignalFlag_LeftReleased,
     UI_SignalFlag_Clicked = UI_SignalFlag_LeftClicked | UI_SignalFlag_KeyboardPressed,
@@ -331,12 +407,21 @@ struct UI_Signal
 {
     UI_Box* box;
     UI_SignalFlags f;
+    WmKey key;
+    u8 modifiers;
+    u8 reserved_key[2];
+    float2 scroll_delta;
     u32 clicked_left : 1;
     u32 pressed_left : 1;
     u32 released_left : 1;
     u32 hovering : 1;
     u32 mouse_over : 1;
-    u32 reserved : 27;
+    u32 dragging : 1;
+    u32 scrolled : 1;
+    u32 dropped : 1;
+    u32 focus_changed : 1;
+    u32 focused : 1;
+    u32 reserved : 22;
 };
 
 #define ui_pressed(s) !!((s).f & UI_SignalFlag_Pressed)
@@ -344,6 +429,11 @@ struct UI_Signal
 #define ui_released(s) !!((s).f & UI_SignalFlag_Released)
 #define ui_hovering(s) !!((s).f & UI_SignalFlag_Hovering)
 #define ui_mouse_over(s) !!((s).f & UI_SignalFlag_MouseOver)
+#define ui_dragging(s) !!((s).f & UI_SignalFlag_Dragging)
+#define ui_scrolled(s) !!((s).f & UI_SignalFlag_Scrolled)
+#define ui_dropped(s) !!((s).f & UI_SignalFlag_Dropped)
+#define ui_focus_changed(s) !!((s).f & UI_SignalFlag_FocusChanged)
+#define ui_focused(s) !!((s).f & UI_SignalFlag_Focused)
 
 #define UI_STACK_CAPACITY (64)
 
@@ -445,9 +535,16 @@ struct UI_State
 
     UI_Key hot_box_key;
     UI_Key active_box_key[(u64)UI_MouseButtonKind_COUNT];
+    UI_Key focus_hot_key;
+    UI_Key focus_active_key;
+    UI_Key focus_edit_key;
     float2 mouse;
+    float2 previous_mouse;
+    u64 next_build_order;
+    u64 next_draw_order;
     u64 is_animating : 1;
-    u64 reserved : 63;
+    u64 focus_changed : 1;
+    u64 reserved : 62;
 
     UI_StateStacks stacks;
     UI_StateStackNulls stack_nulls;
@@ -557,6 +654,7 @@ BUSTER_F_DECL UI_Key ui_key_zero(void);
 BUSTER_F_DECL UI_Key ui_key_make(u64 value);
 BUSTER_F_DECL UI_Key ui_key_from_string(UI_Key seed, String8 string);
 BUSTER_F_DECL bool ui_key_match(UI_Key a, UI_Key b);
+BUSTER_F_DECL UI_BoxFlagInfo ui_box_flag_info(u32 bit_index);
 BUSTER_F_DECL UI_Size ui_size(UI_SizeKind kind, f32 value, f32 strictness);
 BUSTER_F_DECL UI_Size ui_pixels(u32 width, f32 strictness);
 BUSTER_F_DECL UI_Size ui_percentage(f32 percentage, f32 strictness);
@@ -569,6 +667,13 @@ BUSTER_F_DECL UI_Box* ui_box_from_key(UI_Key key);
 BUSTER_F_DECL UI_Box* ui_build_box_from_key(UI_BoxFlags flags, UI_Key key);
 BUSTER_F_DECL UI_Box* ui_build_box_from_string(UI_BoxFlags flags, String8 string);
 BUSTER_F_DECL UI_Box* ui_build_box_from_stringf(UI_BoxFlags flags, String8 format, ...);
+BUSTER_F_DECL void ui_box_set_display_string(UI_Box* box, String8 string);
+BUSTER_F_DECL void ui_box_set_fuzzy_match_ranges(UI_Box* box, UI_FuzzyMatchRange* ranges, u64 count);
+BUSTER_F_DECL void ui_box_set_corner_radii(UI_Box* box, f32 radius);
+BUSTER_F_DECL bool ui_box_is_visible(UI_Box* box);
+BUSTER_F_DECL bool ui_box_is_focused(UI_Box* box);
+BUSTER_F_DECL void ui_box_scroll_by(UI_Box* box, float2 delta);
+BUSTER_F_DECL float2 ui_box_scroll_offset(UI_Box* box);
 BUSTER_F_DECL UI_BoxRec ui_box_rec_df(UI_Box* box, UI_Box* root, u64 sibling_offset, u64 child_offset);
 BUSTER_F_DECL UI_Signal ui_signal_from_box(UI_Box* box);
 
@@ -591,5 +696,10 @@ BUSTER_F_DECL UI_Box* ui_box_make_format(UI_BoxFlags flags, String8 format, ...)
 #define UI_FontSize(v) for (u8 ui_once = (ui_push_font_size(v), 1); ui_once; ui_once = (ui_pop_font_size(), 0))
 #define UI_Flags(v) for (u8 ui_once = (ui_push_flags(v), 1); ui_once; ui_once = (ui_pop_flags(), 0))
 #define UI_FlagsAdd(v) for (u8 ui_once = (ui_push_flags(ui_top_flags() | (v)), 1); ui_once; ui_once = (ui_pop_flags(), 0))
+#define UI_MinWidth(v) for (u8 ui_once = (ui_push_min_width(v), 1); ui_once; ui_once = (ui_pop_min_width(), 0))
+#define UI_MinHeight(v) for (u8 ui_once = (ui_push_min_height(v), 1); ui_once; ui_once = (ui_pop_min_height(), 0))
+#define UI_TextPadding(v) for (u8 ui_once = (ui_push_text_padding(v), 1); ui_once; ui_once = (ui_pop_text_padding(), 0))
+#define UI_TextAlign(v) for (u8 ui_once = (ui_push_text_alignment(v), 1); ui_once; ui_once = (ui_pop_text_alignment(), 0))
+#define UI_BorderColor(v) for (u8 ui_once = (ui_push_border_color(v), 1); ui_once; ui_once = (ui_pop_border_color(), 0))
 #define UI_WidthFill UI_PrefWidth(ui_percentage(1.0f, 0.0f))
 #define UI_HeightFill UI_PrefHeight(ui_percentage(1.0f, 0.0f))
