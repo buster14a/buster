@@ -583,6 +583,7 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
         BUSTER_TEST(arguments, os_directory_delete(outside_directory));
 #elif defined(_WIN32)
         String8 outside_directory = buster_test_temporary_path(test_arena, S8("buster-ide-document-outside"), S8(""));
+        outside_directory = os_path_absolute(test_arena, outside_directory, true);
         String8 outside_file = string_format_z(test_arena, S8("{S8}/outside.bbb"), outside_directory);
         String8 link_directory = string_format_z(test_arena, S8("{S8}/escape"), root);
         String8 safe_directory = string_format_z(test_arena, S8("{S8}/safe"), root);
@@ -590,6 +591,8 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
         String8 escaped_file = string_format_z(test_arena, S8("{S8}/outside.bbb"), link_directory);
         String8 nested_escaped_file = string_format_z(test_arena, S8("{S8}/safe/link/outside.bbb"), root);
         String8 outside_source = S8("code outside : fn () s32 { return 9; }\n");
+        BUSTER_TEST(arguments, !ide_document_path_is_within(root, outside_directory));
+        BUSTER_TEST(arguments, !ide_document_path_is_within(root, outside_file));
         os_directory_delete(outside_directory);
         os_file_delete(outside_file);
         os_directory_delete(safe_directory);
