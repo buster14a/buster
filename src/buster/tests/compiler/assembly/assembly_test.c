@@ -1904,5 +1904,521 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                                            });
     BUSTER_TEST(arguments, invalid_syntax.diagnostic_count == 1 &&
                                invalid_syntax.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_SYNTAX);
+    Target advanced_target = x86_target;
+    advanced_target.cpu_features_explicit = true;
+    advanced_target.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX |
+                                   TARGET_CPU_FEATURE_X86_AVX512F | TARGET_CPU_FEATURE_X86_AVX512VL |
+                                   TARGET_CPU_FEATURE_X86_AVX512BW | TARGET_CPU_FEATURE_X86_AVX512DQ |
+                                   TARGET_CPU_FEATURE_X86_APX | TARGET_CPU_FEATURE_X86_AMX_TILE |
+                                   TARGET_CPU_FEATURE_X86_AMX_BF16 | TARGET_CPU_FEATURE_X86_AMX_INT8;
+    AssemblyEncodeResult advanced_evex = assembly_encode(
+        arguments->arena,
+        S8("vaddps zmm0 {k1}{z}, zmm2, zmm3\n"
+           "vaddps zmm0 {k1}, zmm1, dword ptr [rax]{1to16}\n"
+           "vcmpps k1, zmm2, zmm3, 7\n"
+           "vmovdqa64 zmm31 {k7}{z}, zmmword ptr [r15+64]\n"
+           "vpcmpq k7, zmm30, zmm31, 7\n"
+           "kmovw k1, k2\n"
+           "kmovd k1, k2\n"
+           "kmovq k1, k2\n"
+           "kaddw k1, k2, k3\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex[] = {
+        0x62, 0xf1, 0x6c, 0xc9, 0x58, 0xc3,
+        0x62, 0xf1, 0x74, 0x59, 0x58, 0x00,
+        0x62, 0xf1, 0x6c, 0x48, 0xc2, 0xcb, 0x07,
+        0x62, 0x41, 0xfd, 0xcf, 0x6f, 0x7f, 0x01,
+        0x62, 0x93, 0x8d, 0x40, 0x1f, 0xff, 0x07,
+        0xc5, 0xf8, 0x90, 0xca,
+        0xc4, 0xe1, 0xf9, 0x90, 0xca,
+        0xc4, 0xe1, 0xf8, 0x90, 0xca,
+        0xc5, 0xec, 0x4a, 0xcb,
+    };
+    BUSTER_TEST(arguments, advanced_evex.diagnostic_count == 0 &&
+                               advanced_evex.bytes.length == sizeof(expected_advanced_evex) &&
+                               memcmp(advanced_evex.bytes.pointer, expected_advanced_evex, sizeof(expected_advanced_evex)) == 0);
+
+    AssemblyEncodeResult advanced_vmovdqu = assembly_encode(
+        arguments->arena,
+        S8("vmovdqu8 zmm1, zmm2\n"
+           "vmovdqu16 zmm1, zmm2\n"
+           "vmovdqu16 zmmword ptr [rax], zmm1\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_vmovdqu[] = {
+        0x62, 0xf1, 0x7f, 0x48, 0x6f, 0xca,
+        0x62, 0xf1, 0xff, 0x48, 0x6f, 0xca,
+        0x62, 0xf1, 0xff, 0x48, 0x7f, 0x08,
+    };
+    BUSTER_TEST(arguments, advanced_vmovdqu.diagnostic_count == 0 &&
+                               advanced_vmovdqu.bytes.length == sizeof(expected_advanced_vmovdqu) &&
+                               memcmp(advanced_vmovdqu.bytes.pointer, expected_advanced_vmovdqu,
+                                      sizeof(expected_advanced_vmovdqu)) == 0);
+
+    AssemblyEncodeResult advanced_opmask_binary = assembly_encode(
+        arguments->arena, S8("kandw k1, k2, k3\nkorw k1, k2, k3\nkxorw k1, k2, k3\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_opmask_binary[] = {
+        0xc5, 0xec, 0x41, 0xcb,
+        0xc5, 0xec, 0x45, 0xcb,
+        0xc5, 0xec, 0x47, 0xcb,
+    };
+    BUSTER_TEST(arguments, advanced_opmask_binary.diagnostic_count == 0 &&
+                               advanced_opmask_binary.bytes.length == sizeof(expected_advanced_opmask_binary) &&
+                               memcmp(advanced_opmask_binary.bytes.pointer, expected_advanced_opmask_binary,
+                                      sizeof(expected_advanced_opmask_binary)) == 0);
+
+    AssemblyEncodeResult advanced_evex_memory = assembly_encode(
+        arguments->arena, S8("vaddps zmm0, zmm1, zmmword ptr [r15+r14*4+64]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_memory[] = {0x62, 0x91, 0x74, 0x48, 0x58, 0x44, 0xb7, 0x01};
+    BUSTER_TEST(arguments, advanced_evex_memory.diagnostic_count == 0 &&
+                               advanced_evex_memory.bytes.length == sizeof(expected_advanced_evex_memory) &&
+                               memcmp(advanced_evex_memory.bytes.pointer, expected_advanced_evex_memory,
+                                      sizeof(expected_advanced_evex_memory)) == 0);
+
+    AssemblyEncodeResult advanced_evex_egpr_base = assembly_encode(
+        arguments->arena, S8("vaddps zmm0, zmm1, zmmword ptr [r16]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_egpr_base[] = {0x62, 0xf9, 0x74, 0x48, 0x58, 0x00};
+    BUSTER_TEST(arguments, advanced_evex_egpr_base.diagnostic_count == 0 &&
+                               advanced_evex_egpr_base.bytes.length == sizeof(expected_advanced_evex_egpr_base) &&
+                               memcmp(advanced_evex_egpr_base.bytes.pointer, expected_advanced_evex_egpr_base,
+                                      sizeof(expected_advanced_evex_egpr_base)) == 0);
+
+    AssemblyEncodeResult advanced_evex_egpr_sib = assembly_encode(
+        arguments->arena, S8("vaddps zmm0, zmm1, zmmword ptr [r24+r25*4+64]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_egpr_sib[] = {0x62, 0x99, 0x70, 0x48, 0x58, 0x44, 0x88, 0x01};
+    BUSTER_TEST(arguments, advanced_evex_egpr_sib.diagnostic_count == 0 &&
+                               advanced_evex_egpr_sib.bytes.length == sizeof(expected_advanced_evex_egpr_sib) &&
+                               memcmp(advanced_evex_egpr_sib.bytes.pointer, expected_advanced_evex_egpr_sib,
+                                      sizeof(expected_advanced_evex_egpr_sib)) == 0);
+
+    AssemblyEncodeResult advanced_evex_egpr_index = assembly_encode(
+        arguments->arena, S8("vaddps zmm0, zmm1, zmmword ptr [r25*4+64]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_egpr_index[] = {
+        0x62, 0xb1, 0x70, 0x48, 0x58, 0x04, 0x8d, 0x40, 0x00, 0x00, 0x00,
+    };
+    BUSTER_TEST(arguments, advanced_evex_egpr_index.diagnostic_count == 0 &&
+                               advanced_evex_egpr_index.bytes.length == sizeof(expected_advanced_evex_egpr_index) &&
+                               memcmp(advanced_evex_egpr_index.bytes.pointer, expected_advanced_evex_egpr_index,
+                                      sizeof(expected_advanced_evex_egpr_index)) == 0);
+
+    AssemblyEncodeResult advanced_evex_rip = assembly_encode(
+        arguments->arena, S8("vaddps zmm0, zmm1, zmmword ptr [rip+external]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_rip[] = {0x62, 0xf1, 0x74, 0x48, 0x58, 0x05, 0x00, 0x00, 0x00, 0x00};
+    BUSTER_TEST(arguments, advanced_evex_rip.diagnostic_count == 0 &&
+                               advanced_evex_rip.bytes.length == sizeof(expected_advanced_evex_rip) &&
+                               memcmp(advanced_evex_rip.bytes.pointer, expected_advanced_evex_rip,
+                                      sizeof(expected_advanced_evex_rip)) == 0 &&
+                               advanced_evex_rip.relocation_count == 1 && advanced_evex_rip.relocations[0].offset == 6 &&
+                               advanced_evex_rip.relocations[0].addend == -4 &&
+                               advanced_evex_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_evex_cmp_rip = assembly_encode(
+        arguments->arena, S8("vcmpps k1, zmm2, zmmword ptr [rip+cmp_external], 7\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_cmp_rip[] = {0x62, 0xf1, 0x6c, 0x48, 0xc2, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x07};
+    BUSTER_TEST(arguments, advanced_evex_cmp_rip.diagnostic_count == 0 &&
+                               advanced_evex_cmp_rip.bytes.length == sizeof(expected_advanced_evex_cmp_rip) &&
+                               memcmp(advanced_evex_cmp_rip.bytes.pointer, expected_advanced_evex_cmp_rip,
+                                      sizeof(expected_advanced_evex_cmp_rip)) == 0 &&
+                               advanced_evex_cmp_rip.relocation_count == 1 && advanced_evex_cmp_rip.relocations[0].offset == 6 &&
+                               advanced_evex_cmp_rip.relocations[0].addend == -5 &&
+                               advanced_evex_cmp_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_evex_cmpd_rip = assembly_encode(
+        arguments->arena, S8("vcmppd k1, zmm2, zmmword ptr [rip+cmpd_external], 7\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_cmpd_rip[] = {0x62, 0xf1, 0xed, 0x48, 0xc2, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x07};
+    BUSTER_TEST(arguments, advanced_evex_cmpd_rip.diagnostic_count == 0 &&
+                               advanced_evex_cmpd_rip.bytes.length == sizeof(expected_advanced_evex_cmpd_rip) &&
+                               memcmp(advanced_evex_cmpd_rip.bytes.pointer, expected_advanced_evex_cmpd_rip,
+                                      sizeof(expected_advanced_evex_cmpd_rip)) == 0 &&
+                               advanced_evex_cmpd_rip.relocation_count == 1 && advanced_evex_cmpd_rip.relocations[0].offset == 6 &&
+                               advanced_evex_cmpd_rip.relocations[0].addend == -5 &&
+                               advanced_evex_cmpd_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_evex_pcmpq_rip = assembly_encode(
+        arguments->arena, S8("vpcmpq k1, zmm2, zmmword ptr [rip+pcmpq_external], 7\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_pcmpq_rip[] = {0x62, 0xf3, 0xed, 0x48, 0x1f, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x07};
+    BUSTER_TEST(arguments, advanced_evex_pcmpq_rip.diagnostic_count == 0 &&
+                               advanced_evex_pcmpq_rip.bytes.length == sizeof(expected_advanced_evex_pcmpq_rip) &&
+                               memcmp(advanced_evex_pcmpq_rip.bytes.pointer, expected_advanced_evex_pcmpq_rip,
+                                      sizeof(expected_advanced_evex_pcmpq_rip)) == 0 &&
+                               advanced_evex_pcmpq_rip.relocation_count == 1 && advanced_evex_pcmpq_rip.relocations[0].offset == 6 &&
+                               advanced_evex_pcmpq_rip.relocations[0].addend == -5 &&
+                               advanced_evex_pcmpq_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_evex_pcmpud_rip = assembly_encode(
+        arguments->arena, S8("vpcmpud k1, zmm2, zmmword ptr [rip+pcmpud_external], 7\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_pcmpud_rip[] = {0x62, 0xf3, 0x6d, 0x48, 0x1e, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x07};
+    BUSTER_TEST(arguments, advanced_evex_pcmpud_rip.diagnostic_count == 0 &&
+                               advanced_evex_pcmpud_rip.bytes.length == sizeof(expected_advanced_evex_pcmpud_rip) &&
+                               memcmp(advanced_evex_pcmpud_rip.bytes.pointer, expected_advanced_evex_pcmpud_rip,
+                                      sizeof(expected_advanced_evex_pcmpud_rip)) == 0 &&
+                               advanced_evex_pcmpud_rip.relocation_count == 1 && advanced_evex_pcmpud_rip.relocations[0].offset == 6 &&
+                               advanced_evex_pcmpud_rip.relocations[0].addend == -5 &&
+                               advanced_evex_pcmpud_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_evex_round_rip = assembly_encode(
+        arguments->arena, S8("vrndscaleps zmm0, zmmword ptr [rip+round_external], 4\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_round_rip[] = {0x62, 0xf3, 0x7d, 0x48, 0x08, 0x05, 0x00, 0x00, 0x00, 0x00, 0x04};
+    BUSTER_TEST(arguments, advanced_evex_round_rip.diagnostic_count == 0 &&
+                               advanced_evex_round_rip.bytes.length == sizeof(expected_advanced_evex_round_rip) &&
+                               memcmp(advanced_evex_round_rip.bytes.pointer, expected_advanced_evex_round_rip,
+                                      sizeof(expected_advanced_evex_round_rip)) == 0 &&
+                               advanced_evex_round_rip.relocation_count == 1 && advanced_evex_round_rip.relocations[0].offset == 6 &&
+                               advanced_evex_round_rip.relocations[0].addend == -5 &&
+                               advanced_evex_round_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_evex_roundd_rip = assembly_encode(
+        arguments->arena, S8("vrndscalepd zmm0, zmmword ptr [rip+roundd_external], 4\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_evex_roundd_rip[] = {0x62, 0xf3, 0xfd, 0x48, 0x09, 0x05, 0x00, 0x00, 0x00, 0x00, 0x04};
+    BUSTER_TEST(arguments, advanced_evex_roundd_rip.diagnostic_count == 0 &&
+                               advanced_evex_roundd_rip.bytes.length == sizeof(expected_advanced_evex_roundd_rip) &&
+                               memcmp(advanced_evex_roundd_rip.bytes.pointer, expected_advanced_evex_roundd_rip,
+                                      sizeof(expected_advanced_evex_roundd_rip)) == 0 &&
+                               advanced_evex_roundd_rip.relocation_count == 1 && advanced_evex_roundd_rip.relocations[0].offset == 6 &&
+                               advanced_evex_roundd_rip.relocations[0].addend == -5 &&
+                               advanced_evex_roundd_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_evex_cmp_att_rip = assembly_encode(
+        arguments->arena, S8("vcmpps $7, cmp_att_external(%rip), %zmm2, %k1\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, advanced_evex_cmp_att_rip.diagnostic_count == 0 &&
+                               advanced_evex_cmp_att_rip.bytes.length == sizeof(expected_advanced_evex_cmp_rip) &&
+                               memcmp(advanced_evex_cmp_att_rip.bytes.pointer, expected_advanced_evex_cmp_rip,
+                                      sizeof(expected_advanced_evex_cmp_rip)) == 0 &&
+                               advanced_evex_cmp_att_rip.relocation_count == 1 &&
+                               advanced_evex_cmp_att_rip.relocations[0].offset == 6 &&
+                               advanced_evex_cmp_att_rip.relocations[0].addend == -5 &&
+                               advanced_evex_cmp_att_rip.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    AssemblyEncodeResult advanced_att = assembly_encode(
+        arguments->arena,
+        S8("vaddps %zmm3, %zmm2, %zmm0\n"
+           "vcmpPS $7, %zmm3, %zmm2, %k1\n"
+           "vrndscaleps $4, %zmm30, %zmm31\n"
+           "vaddps {rn-sae}, %zmm2, %zmm1, %zmm0 {%k1}{z}\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    u8 expected_advanced_att[] = {
+        0x62, 0xf1, 0x6c, 0x48, 0x58, 0xc3,
+        0x62, 0xf1, 0x6c, 0x48, 0xc2, 0xcb, 0x07,
+        0x62, 0x03, 0x7d, 0x48, 0x08, 0xfe, 0x04,
+        0x62, 0xf1, 0x74, 0x99, 0x58, 0xc2,
+    };
+    BUSTER_TEST(arguments, advanced_att.diagnostic_count == 0 && advanced_att.bytes.length == sizeof(expected_advanced_att) &&
+                               memcmp(advanced_att.bytes.pointer, expected_advanced_att, sizeof(expected_advanced_att)) == 0);
+
+    AssemblyEncodeResult advanced_vectors = assembly_encode(
+        arguments->arena,
+        S8("vaddps xmm16, xmm17, xmm18\n"
+           "vaddps ymm16, ymm17, ymm18\n"
+           "vaddps zmm16, zmm17, zmm18\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_vectors[] = {
+        0x62, 0xa1, 0x74, 0x00, 0x58, 0xc2,
+        0x62, 0xa1, 0x74, 0x20, 0x58, 0xc2,
+        0x62, 0xa1, 0x74, 0x40, 0x58, 0xc2,
+    };
+    BUSTER_TEST(arguments, advanced_vectors.diagnostic_count == 0 &&
+                               advanced_vectors.bytes.length == sizeof(expected_advanced_vectors) &&
+                               memcmp(advanced_vectors.bytes.pointer, expected_advanced_vectors, sizeof(expected_advanced_vectors)) == 0);
+
+    AssemblyEncodeResult advanced_apx = assembly_encode(
+        arguments->arena,
+        S8("add r16d, r17d, r18d\n"
+           "add{nf} r16d, r17d, r18d\n"
+           "{nf} add r16d, r17d\n"
+           "addnf r16d, r17d\n"
+           "{nf} add dword ptr [r16], r17d\n"
+           "{nf} add dword ptr [r16+r17*4], r18d\n"
+           "{nf} add dword ptr [r24+r25*4+64], r26d\n"
+           "add r24, r25, r26\n"
+           "mov r16d, r17d\n"
+           "add r16d, dword ptr [r17]\n"
+           "push r16\n"
+           "pop r17\n"
+           "push2 r16, r17\n"
+           "pop2 r16, r17\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx[] = {
+        0x62, 0xec, 0x7c, 0x10, 0x01, 0xd1,
+        0x62, 0xec, 0x7c, 0x90, 0x01, 0xd1,
+        0x62, 0xec, 0x7c, 0x0c, 0x01, 0xc8,
+        0x62, 0xec, 0x7c, 0x0c, 0x01, 0xc8,
+        0x62, 0xec, 0x7c, 0x0c, 0x01, 0x08,
+        0x62, 0xec, 0x78, 0x0c, 0x01, 0x14, 0x88,
+        0x62, 0x0c, 0x78, 0x0c, 0x01, 0x54, 0x88, 0x40,
+        0x62, 0x4c, 0xbc, 0x10, 0x01, 0xd1,
+        0xd5, 0x50, 0x89, 0xc8,
+        0xd5, 0x50, 0x03, 0x01,
+        0xd5, 0x10, 0x50,
+        0xd5, 0x10, 0x59,
+        0x62, 0xfc, 0x7c, 0x10, 0xff, 0xf1,
+        0x62, 0xfc, 0x7c, 0x10, 0x8f, 0xc1,
+    };
+    BUSTER_TEST(arguments, advanced_apx.diagnostic_count == 0 && advanced_apx.bytes.length == sizeof(expected_advanced_apx) &&
+                               memcmp(advanced_apx.bytes.pointer, expected_advanced_apx, sizeof(expected_advanced_apx)) == 0);
+
+    AssemblyEncodeResult advanced_apx_att_nf = assembly_encode(
+        arguments->arena,
+        S8("{nf} addl %r18d, (%r16,%r17,4)\n"
+           "{nf} addl %r26d, 64(%r24,%r25,4)\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    u8 expected_advanced_apx_att_nf[] = {
+        0x62, 0xec, 0x78, 0x0c, 0x01, 0x14, 0x88,
+        0x62, 0x0c, 0x78, 0x0c, 0x01, 0x54, 0x88, 0x40,
+    };
+    BUSTER_TEST(arguments, advanced_apx_att_nf.diagnostic_count == 0 &&
+                               advanced_apx_att_nf.bytes.length == sizeof(expected_advanced_apx_att_nf) &&
+                               memcmp(advanced_apx_att_nf.bytes.pointer, expected_advanced_apx_att_nf,
+                                      sizeof(expected_advanced_apx_att_nf)) == 0);
+
+    AssemblyEncodeResult advanced_apx_legacy_memory = assembly_encode(
+        arguments->arena,
+        S8("mov qword ptr [r16], r17\n"
+           "add qword ptr [r16], r17\n"
+           "mov qword ptr [r24+r25*4+64], r26\n"
+           "add qword ptr [r24+r25*4+64], r26\n"
+           "mov qword ptr [r16+apx_external], r17\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_apx_legacy_memory[] = {
+        0xd5, 0x58, 0x89, 0x08,
+        0xd5, 0x58, 0x01, 0x08,
+        0xd5, 0x7f, 0x89, 0x54, 0x88, 0x40,
+        0xd5, 0x7f, 0x01, 0x54, 0x88, 0x40,
+        0xd5, 0x58, 0x89, 0x88, 0x00, 0x00, 0x00, 0x00,
+    };
+    BUSTER_TEST(arguments, advanced_apx_legacy_memory.diagnostic_count == 0 &&
+                               advanced_apx_legacy_memory.bytes.length == sizeof(expected_advanced_apx_legacy_memory) &&
+                               memcmp(advanced_apx_legacy_memory.bytes.pointer, expected_advanced_apx_legacy_memory,
+                                      sizeof(expected_advanced_apx_legacy_memory)) == 0 &&
+                               advanced_apx_legacy_memory.relocation_count == 1 &&
+                               advanced_apx_legacy_memory.relocations[0].offset == 24 &&
+                               advanced_apx_legacy_memory.relocations[0].addend == 0 &&
+                               advanced_apx_legacy_memory.relocations[0].kind == ASSEMBLY_RELOCATION_X86_32 &&
+                               string_equal(advanced_apx_legacy_memory.symbols[advanced_apx_legacy_memory.relocations[0].symbol].name,
+                                            S8("apx_external")));
+
+    AssemblyEncodeResult advanced_apx_legacy_memory_att = assembly_encode(
+        arguments->arena,
+        S8("movq %r17, (%r16)\n"
+           "addq %r17, (%r16)\n"
+           "movq %r26, 64(%r24,%r25,4)\n"
+           "addq %r26, 64(%r24,%r25,4)\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    u8 expected_advanced_apx_legacy_memory_att[] = {
+        0xd5, 0x58, 0x89, 0x08,
+        0xd5, 0x58, 0x01, 0x08,
+        0xd5, 0x7f, 0x89, 0x54, 0x88, 0x40,
+        0xd5, 0x7f, 0x01, 0x54, 0x88, 0x40,
+    };
+    BUSTER_TEST(arguments, advanced_apx_legacy_memory_att.diagnostic_count == 0 &&
+                               advanced_apx_legacy_memory_att.bytes.length == sizeof(expected_advanced_apx_legacy_memory_att) &&
+                               memcmp(advanced_apx_legacy_memory_att.bytes.pointer, expected_advanced_apx_legacy_memory_att,
+                                      sizeof(expected_advanced_apx_legacy_memory_att)) == 0);
+
+    AssemblyEncodeResult invalid_apx_legacy_memory = assembly_encode(
+        arguments->arena,
+        S8("mov qword ptr [r16], r17d\n"
+           "mov qword ptr [r16], ah\n"
+           "add qword ptr [r16], dh\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_apx_legacy_memory.diagnostic_count == 3);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_apx_legacy_memory.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_apx_legacy_memory.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    AssemblyEncodeResult advanced_amx = assembly_encode(
+        arguments->arena,
+        S8("ldtilecfg [rax]\n"
+           "sttilecfg [rax]\n"
+           "tileloadd tmm1, [rax+rbx*4]\n"
+           "tileloaddt1 tmm2, [rax]\n"
+           "tilestored [r14], tmm7\n"
+           "tilezero tmm0\n"
+           "tdpbf16ps tmm0, tmm1, tmm2\n"
+           "tdpbssd tmm0, tmm1, tmm2\n"
+           "tdpbsud tmm0, tmm1, tmm2\n"
+           "tdpbusd tmm0, tmm1, tmm2\n"
+           "tdpbuud tmm0, tmm1, tmm2\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_amx[] = {
+        0xc4, 0xe2, 0x78, 0x49, 0x00,
+        0xc4, 0xe2, 0x79, 0x49, 0x00,
+        0xc4, 0xe2, 0x7b, 0x4b, 0x0c, 0x98,
+        0xc4, 0xe2, 0x79, 0x4b, 0x14, 0x20,
+        0xc4, 0xc2, 0x7a, 0x4b, 0x3c, 0x26,
+        0xc4, 0xe2, 0x7b, 0x49, 0xc0,
+        0xc4, 0xe2, 0x6a, 0x5c, 0xc1,
+        0xc4, 0xe2, 0x6b, 0x5e, 0xc1,
+        0xc4, 0xe2, 0x6a, 0x5e, 0xc1,
+        0xc4, 0xe2, 0x69, 0x5e, 0xc1,
+        0xc4, 0xe2, 0x68, 0x5e, 0xc1,
+    };
+    BUSTER_TEST(arguments, advanced_amx.diagnostic_count == 0 && advanced_amx.bytes.length == sizeof(expected_advanced_amx) &&
+                               memcmp(advanced_amx.bytes.pointer, expected_advanced_amx, sizeof(expected_advanced_amx)) == 0);
+
+    AssemblyEncodeResult advanced_amx_egpr = assembly_encode(
+        arguments->arena, S8("tileloadd tmm0, [r16]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_amx_egpr[] = {0x62, 0xfa, 0x7f, 0x08, 0x4b, 0x04, 0x20};
+    BUSTER_TEST(arguments, advanced_amx_egpr.diagnostic_count == 0 &&
+                               advanced_amx_egpr.bytes.length == sizeof(expected_advanced_amx_egpr) &&
+                               memcmp(advanced_amx_egpr.bytes.pointer, expected_advanced_amx_egpr,
+                                      sizeof(expected_advanced_amx_egpr)) == 0);
+
+    AssemblyEncodeResult advanced_amx_att = assembly_encode(
+        arguments->arena, S8("tileloadd (%r16), %tmm0\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    u8 expected_advanced_amx_att[] = {0x62, 0xfa, 0x7f, 0x08, 0x4b, 0x04, 0x20};
+    BUSTER_TEST(arguments, advanced_amx_att.diagnostic_count == 0 &&
+                               advanced_amx_att.bytes.length == sizeof(expected_advanced_amx_att) &&
+                               memcmp(advanced_amx_att.bytes.pointer, expected_advanced_amx_att,
+                                      sizeof(expected_advanced_amx_att)) == 0);
+
+    AssemblyEncodeResult advanced_amx_egpr_sib = assembly_encode(
+        arguments->arena, S8("tileloadd tmm0, [r24+r25*4+64]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_advanced_amx_egpr_sib[] = {0x62, 0x9a, 0x7b, 0x08, 0x4b, 0x44, 0x88, 0x40};
+    BUSTER_TEST(arguments, advanced_amx_egpr_sib.diagnostic_count == 0 &&
+                               advanced_amx_egpr_sib.bytes.length == sizeof(expected_advanced_amx_egpr_sib) &&
+                               memcmp(advanced_amx_egpr_sib.bytes.pointer, expected_advanced_amx_egpr_sib,
+                                      sizeof(expected_advanced_amx_egpr_sib)) == 0);
+
+    Target avx10_1_target = x86_target;
+    avx10_1_target.cpu_features_explicit = true;
+    avx10_1_target.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX |
+                                   TARGET_CPU_FEATURE_X86_AVX10_1;
+    AssemblyEncodeResult avx10_1 = assembly_encode(arguments->arena, S8("vmovdqa32 ymm0, ymm1\nvmovdqa32 zmm0, zmm1\n"),
+                                                     (AssemblyEncodeOptions){.target = avx10_1_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_avx10_1[] = {0x62, 0xf1, 0x7d, 0x28, 0x6f, 0xc1};
+    BUSTER_TEST(arguments, avx10_1.diagnostic_count == 1 && avx10_1.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               avx10_1.bytes.length == sizeof(expected_avx10_1) &&
+                               memcmp(avx10_1.bytes.pointer, expected_avx10_1, sizeof(expected_avx10_1)) == 0);
+    avx10_1_target.cpu_features |= TARGET_CPU_FEATURE_X86_AVX10_512;
+    AssemblyEncodeResult avx10_512 = assembly_encode(arguments->arena, S8("vmovdqa32 zmm0, zmm1\n"),
+                                                      (AssemblyEncodeOptions){.target = avx10_1_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_avx10_512[] = {0x62, 0xf1, 0x7d, 0x48, 0x6f, 0xc1};
+    BUSTER_TEST(arguments, avx10_512.diagnostic_count == 0 && avx10_512.bytes.length == sizeof(expected_avx10_512) &&
+                               memcmp(avx10_512.bytes.pointer, expected_avx10_512, sizeof(expected_avx10_512)) == 0);
+
+    AssemblyEncodeResult invalid_advanced_features = assembly_encode(
+        arguments->arena,
+        S8("vaddps zmm0, zmm1, zmm2\n"
+           "vmovdqa32 xmm0, xmm1\n"
+           "kmovw k1, k2\n"
+           "add r16d, r17d, r18d\n"
+           "ldtilecfg [rax]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_advanced_features.diagnostic_count == 5);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_advanced_features.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_advanced_features.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+
+    AssemblyEncodeResult invalid_advanced_operands = assembly_encode(
+        arguments->arena,
+        S8("vaddps zmm0 {z}, zmm1, zmm2\n"
+           "vaddps zmm0, zmm1 {k1}, zmm2\n"
+           "vaddps zmm0, zmm1, dword ptr [rax]{1to8}\n"
+           "vcmpps k1, zmm2, zmm3, 32\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_advanced_operands.diagnostic_count == 4);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_advanced_operands.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_advanced_operands.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    AssemblyEncodeResult invalid_advanced_decorators = assembly_encode(
+        arguments->arena,
+        S8("vaddps zmm0 {k1}{k2}, zmm1, zmm2\n"
+           "vaddps zmm0 {z}{z}, zmm1, zmm2\n"
+           "vaddps zmm0 {1to16}, zmm1, zmm2\n"
+           "vaddps zmm0 {sae}, zmm1, zmm2\n"
+           "vxorps zmm0 {rn-sae}, zmm1, zmm2\n"
+           "vaddps zmm0, zmm1, zmmword ptr [rax]{1to16}{1to8}\n"
+           "vcmpps k1 {k2}, zmm2, zmm3, 7\n"
+           "vcmpps k1, zmm2 {k2}, zmm3, 7\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_advanced_decorators.diagnostic_count == 8);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_advanced_decorators.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_advanced_decorators.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    AssemblyEncodeResult invalid_advanced_alias = assembly_encode(
+        arguments->arena, S8("vroundscaleps zmm0, zmm1, 4\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_advanced_alias.diagnostic_count == 1 &&
+                               invalid_advanced_alias.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+
+    AssemblyEncodeResult invalid_vmovdqa_aliases = assembly_encode(
+        arguments->arena,
+        S8("vmovdqa8 zmm0, zmm1\n"
+           "vmovdqa16 zmm0, zmm1\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_vmovdqa_aliases.diagnostic_count == 2);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_vmovdqa_aliases.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_vmovdqa_aliases.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+    }
+
+    Target missing_kmov_width_target = advanced_target;
+    missing_kmov_width_target.cpu_features &= ~TARGET_CPU_FEATURE_X86_AVX512BW;
+    AssemblyEncodeResult invalid_kmov_width_features = assembly_encode(
+        arguments->arena,
+        S8("kmovd k1, k2\n"
+           "kmovq k1, k2\n"),
+        (AssemblyEncodeOptions){.target = missing_kmov_width_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_kmov_width_features.diagnostic_count == 2);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_kmov_width_features.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_kmov_width_features.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+
+    Target missing_kadd_width_target = advanced_target;
+    missing_kadd_width_target.cpu_features &= ~TARGET_CPU_FEATURE_X86_AVX512DQ;
+    AssemblyEncodeResult invalid_kadd_width_features = assembly_encode(
+        arguments->arena, S8("kaddw k1, k2, k3\n"),
+        (AssemblyEncodeOptions){.target = missing_kadd_width_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_kadd_width_features.diagnostic_count == 1 &&
+                               invalid_kadd_width_features.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+
+    Target amx_missing_target = advanced_target;
+    amx_missing_target.cpu_features &= ~(TARGET_CPU_FEATURE_X86_AMX_TILE | TARGET_CPU_FEATURE_X86_AMX_BF16 |
+                                         TARGET_CPU_FEATURE_X86_AMX_INT8);
+    AssemblyEncodeResult invalid_amx_features = assembly_encode(
+        arguments->arena,
+        S8("tilezero tmm0\n"
+           "tdpbf16ps tmm0, tmm1, tmm2\n"
+           "tdpbssd tmm0, tmm1, tmm2\n"),
+        (AssemblyEncodeOptions){.target = amx_missing_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_amx_features.diagnostic_count == 3);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_amx_features.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_amx_features.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+
+    AssemblyEncodeResult invalid_apx_high_byte = assembly_encode(
+        arguments->arena,
+        S8("mov r16b, ah\n"
+           "mov byte ptr [r16], ah\n"
+           "add r16b, dh\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_apx_high_byte.diagnostic_count == 3);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_apx_high_byte.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_apx_high_byte.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
     return result;
 }
