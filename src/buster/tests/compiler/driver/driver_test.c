@@ -192,7 +192,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_has
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_test_x64_fallthrough_epilog(ByteSlice text, u64 offset, u64 function_end, bool windows)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_x64_fallthrough_epilog(ByteSlice text, u64 offset, u64 function_end, bool windows)
 {
     if (offset > function_end)
     {
