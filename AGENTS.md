@@ -82,10 +82,14 @@ The combination matrix shares one multi-config build tree across Debug and
 Release when their configure-time policy matches. Clang's fuzz-enabled Debug
 sanitized and Release non-sanitized configurations use dedicated trees;
 sanitizer rows are otherwise Clang-only. GCC and Zig cover unsanitized Debug
-and Release, while TCC covers Debug. Independent non-sanitized Release unity
-compiles run in parallel. CI Release builds use `-O2`; local Release builds
-retain the toolchain default. Clang static analysis runs only against
-unsanitized Release. GUI/GPU smoke tests run for Debug sanitized and Release
+and Release, and MSVC covers Debug and Release on Windows. Only optimized,
+unsanitized Clang/AppleClang builds use the requested unity build; GCC, Zig,
+MSVC, and every other non-Clang compiler use split translation units in
+Release as well as Debug. TCC remains a local Debug application compiler and
+is omitted from CI combinations. Independent non-sanitized Release builds
+run in parallel. CI Release builds use `-O2`; local Release builds retain the
+toolchain default. Clang static analysis runs only against unsanitized
+Release. GUI/GPU smoke tests run for Debug sanitized and Release
 non-sanitized configurations; other combinations run unit tests only.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|tcc|zig|cl>` are accepted **only by
@@ -251,8 +255,10 @@ enabled.
   must not execute through them.
 - **Warnings are errors** under a very large warning set (see
   `GNU_FAMILY_WARNINGS` in `CMakeLists.txt`), and code must stay clean under
-  clang, gcc, tcc, zig cc, and MSVC. Avoid compiler-specific extensions
-  unless guarded.
+  Clang, GCC, TinyCC, Zig cc, and MSVC. TinyCC supports local Debug
+  application builds and bootstraps the native `build.c` driver through
+  `build.sh`/`build.ps1`; the CI matrix omits it. Avoid compiler-specific
+  extensions unless guarded.
 - **Idioms**: arena allocation (`<buster/lib/arena.h>`) — no malloc/free churn;
   `String8`/`S8("...")` (defined in `<buster/lib/base.h>`) — no C strings; `STRUCT(Name)`
   declarations; `BUSTER_`-prefixed macros; 4-space indent, snake_case, braces

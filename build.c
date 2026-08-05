@@ -3532,7 +3532,7 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
 
     for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)
     {
-        if (ci && compiler == BUILD_COMPILER_TCC && (BUSTER_WINDOWS || BUSTER_APPLE))
+        if (ci && compiler == BUILD_COMPILER_TCC)
         {
             continue;
         }
