@@ -17,6 +17,45 @@ BUSTER_F_DECL bool ide_app_test_failed_editor_commit_preserves_buffer(String8 pa
 BUSTER_F_DECL bool ide_app_test_drop_preserves_first(SliceString8 first, SliceString8 second, String8 expected_path);
 BUSTER_F_DECL bool ide_app_test_copy_storage_self(void);
 
+BUSTER_GLOBAL_LOCAL String8 ide_document_test_temporary_root(Arena* arena, String8 name)
+{
+    String8 temporary = buster_test_temporary_path(arena, name, S8(""));
+#if defined(_WIN32)
+    String8 result = os_path_absolute(arena, temporary, true);
+    if (!result.length)
+    {
+        return temporary;
+    }
+    for (u64 index = 0; index < result.length; index += 1)
+    {
+        if (result.pointer[index] == '\\')
+        {
+            result.pointer[index] = '/';
+        }
+    }
+    return result;
+#elif defined(__linux__) || defined(__APPLE__)
+    // realpath() rejects a not-yet-created leaf. Canonicalize the existing
+    // temporary parent instead so macOS /tmp -> /private/tmp is reflected in
+    // every test path before the workspace is created.
+    String8 parent = os_path_absolute(arena, S8("/tmp"), true);
+    if (!parent.length)
+    {
+        return temporary;
+    }
+    u64 leaf_start = temporary.length;
+    while (leaf_start && temporary.pointer[leaf_start - 1] != '/' && temporary.pointer[leaf_start - 1] != '\\')
+    {
+        leaf_start -= 1;
+    }
+    String8 leaf = string_slice(temporary, leaf_start, temporary.length);
+    bool parent_separator = parent.length && (parent.pointer[parent.length - 1] == '/' || parent.pointer[parent.length - 1] == '\\');
+    return string_format_z(arena, parent_separator ? S8("{S8}{S8}") : S8("{S8}/{S8}"), parent, leaf);
+#else
+    return temporary;
+#endif
+}
+
 UnitTestResult ide_document_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -38,10 +77,7 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
     }
 
     Arena* test_arena = arguments->arena;
-    String8 root = buster_test_temporary_path(test_arena, S8("buster-ide-document-model"), S8(""));
-#if defined(_WIN32)
-    root = os_path_absolute(test_arena, root, true);
-#endif
+    String8 root = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-model"));
     String8 subdirectory = string_format_z(test_arena, S8("{S8}/sub"), root);
     String8 a_path = string_format_z(test_arena, S8("{S8}/a.bbb"), root);
     String8 b_path = string_format_z(test_arena, S8("{S8}/sub/b.bbb"), root);
@@ -566,7 +602,7 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, ide_document_model_refresh_workspace(&model) == IDE_DOCUMENT_ERROR_NONE);
         BUSTER_TEST(arguments, ide_document_model_document_count(&model) == 3);
 
-        String8 outside_directory = buster_test_temporary_path(test_arena, S8("buster-ide-document-outside"), S8(""));
+        String8 outside_directory = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-outside"));
         String8 outside_file = string_format_z(test_arena, S8("{S8}/outside.bbb"), outside_directory);
         String8 link_directory = string_format_z(test_arena, S8("{S8}/escape"), root);
         String8 safe_directory = string_format_z(test_arena, S8("{S8}/safe"), root);
@@ -601,8 +637,7 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_delete(outside_file));
         BUSTER_TEST(arguments, os_directory_delete(outside_directory));
 #elif defined(_WIN32)
-        String8 outside_directory = buster_test_temporary_path(test_arena, S8("buster-ide-document-outside"), S8(""));
-        outside_directory = os_path_absolute(test_arena, outside_directory, true);
+        String8 outside_directory = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-outside"));
         String8 outside_file = string_format_z(test_arena, S8("{S8}/outside.bbb"), outside_directory);
         String8 link_directory = string_format_z(test_arena, S8("{S8}/escape"), root);
         String8 safe_directory = string_format_z(test_arena, S8("{S8}/safe"), root);
@@ -656,10 +691,7 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
 
     ide_document_model_deinitialize(&model);
     {
-        String8 second_root = buster_test_temporary_path(test_arena, S8("buster-ide-document-second-root"), S8(""));
-#if defined(_WIN32)
-        second_root = os_path_absolute(test_arena, second_root, true);
-#endif
+        String8 second_root = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-second-root"));
         String8 second_path = string_format_z(test_arena, S8("{S8}/second.bbb"), second_root);
         String8 second_source = S8("code Helper : fn () s32 { return 8; }\n");
         String8 missing_path = string_format_z(test_arena, S8("{S8}/missing.bbb"), second_root);
@@ -690,8 +722,13 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
         IdeDocumentModel empty_model = {0};
         BUSTER_TEST(arguments, ide_document_model_initialize(&empty_model, arena, staging_arena, (IdeDocumentModelOptions){0}) ==
                                   IDE_DOCUMENT_ERROR_NONE);
-        BUSTER_TEST(arguments, empty_model.workspace.root_path.length == 0 && ide_document_model_document_count(&empty_model) == 0 &&
+        BUSTER_TEST(arguments, empty_model.workspace.root_path.length == 0 && empty_model.workspace.documents == 0 &&
+                                  ide_document_model_document_count(&empty_model) == 0 &&
                                   ide_document_model_active_document(&empty_model) == 0);
+        IdeDocumentWorkspaceStatus empty_status = ide_document_model_status(&empty_model);
+        BUSTER_TEST(arguments, empty_status.document_count == 0 && empty_status.open_document_count == 0 &&
+                                  ide_document_model_find(&empty_model, missing_path) == 0 &&
+                                  ide_document_model_document_at(&empty_model, 0) == 0);
         BUSTER_TEST(arguments, ide_document_model_open_path(&empty_model, missing_path) == IDE_DOCUMENT_ERROR_PATH_NOT_FOUND);
         BUSTER_TEST(arguments, empty_model.workspace.root_path.length == 0 && ide_document_model_active_document(&empty_model) == 0);
         BUSTER_TEST(arguments, ide_document_model_open_path(&empty_model, second_path) == IDE_DOCUMENT_ERROR_NONE);

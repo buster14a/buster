@@ -3039,6 +3039,11 @@ IdeDocumentWorkspaceStatus ide_document_model_status(IdeDocumentModel* model)
     result.open_document_count = model->workspace.open_document_count;
     result.import_count = model->workspace.import_count;
     result.entity_count = model->workspace.entity_count;
+    if (model->workspace.document_count == 0)
+    {
+        return result;
+    }
+    BUSTER_CHECK(model->workspace.documents != 0);
     for (u32 index = 0; index < model->workspace.document_count; index += 1)
     {
         IdeDocument* document = model->workspace.documents + index;
@@ -3070,6 +3075,11 @@ IdeDocument* ide_document_model_find(IdeDocumentModel* model, String8 path)
     {
         return 0;
     }
+    if (model->workspace.document_count == 0)
+    {
+        return 0;
+    }
+    BUSTER_CHECK(model->workspace.documents != 0);
     TemporalArena scratch = scratch_begin(0, 0);
     u32 index = ide_workspace_find_path(scratch.arena, &model->workspace, path);
     scratch_end(scratch);
@@ -3078,7 +3088,16 @@ IdeDocument* ide_document_model_find(IdeDocumentModel* model, String8 path)
 
 IdeDocument* ide_document_model_document_at(IdeDocumentModel* model, u32 index)
 {
-    if (!model || !model->initialized || index >= model->workspace.document_count)
+    if (!model || !model->initialized)
+    {
+        return 0;
+    }
+    if (model->workspace.document_count == 0)
+    {
+        return 0;
+    }
+    BUSTER_CHECK(model->workspace.documents != 0);
+    if (index >= model->workspace.document_count)
     {
         return 0;
     }
@@ -3087,7 +3106,16 @@ IdeDocument* ide_document_model_document_at(IdeDocumentModel* model, u32 index)
 
 IdeDocument* ide_document_model_active_document(IdeDocumentModel* model)
 {
-    if (!model || !model->initialized || model->workspace.active_document_index == IDE_DOCUMENT_INDEX_INVALID)
+    if (!model || !model->initialized)
+    {
+        return 0;
+    }
+    if (model->workspace.document_count == 0)
+    {
+        return 0;
+    }
+    BUSTER_CHECK(model->workspace.documents != 0);
+    if (model->workspace.active_document_index == IDE_DOCUMENT_INDEX_INVALID)
     {
         return 0;
     }
