@@ -994,17 +994,20 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* data)
 {
     SelfHostCompare* compare = data;
-    ByteSlice stage1 = {0};
-    ByteSlice stage2 = {0};
-#if BUSTER_WINDOWS
-    FileMapRead stage1_map = file_map_read(arena, compare->stage1, (FileReadOptions){.map_required = 1});
+    String8 stage1_path = compare->stage1;
+    String8 stage2_path = compare->stage2;
+#if BUSTER_LINUX || BUSTER_MACOS
+    stage1_path = os_path_absolute(arena, stage1_path, true);
+    stage2_path = os_path_absolute(arena, stage2_path, true);
+#endif
+    FileMapRead stage1_map = file_map_read(arena, stage1_path, (FileReadOptions){.map_required = 1});
     if (!stage1_map.mapped_pointer)
     {
         file_map_unmap(stage1_map);
         string_print(S8("error: could not map self-host outputs\n"));
         return PROCESS_RESULT_FAILED;
     }
-    FileMapRead stage2_map = file_map_read(arena, compare->stage2, (FileReadOptions){.map_required = 1});
+    FileMapRead stage2_map = file_map_read(arena, stage2_path, (FileReadOptions){.map_required = 1});
     if (!stage2_map.mapped_pointer)
     {
         file_map_unmap(stage2_map);
@@ -1012,6 +1015,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* d
         string_print(S8("error: could not map self-host outputs\n"));
         return PROCESS_RESULT_FAILED;
     }
+    ByteSlice stage1 = stage1_map.bytes;
+    ByteSlice stage2 = stage2_map.bytes;
+    bool executable_equal = stage1.length == stage2.length && memory_compare(stage1.pointer, stage2.pointer, stage1.length);
+#if BUSTER_WINDOWS
     FileMapRead pdb1_map = file_map_read(arena, compare->pdb1, (FileReadOptions){.map_required = 1});
     if (!pdb1_map.mapped_pointer)
     {
@@ -1031,9 +1038,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* d
         string_print(S8("error: could not map self-host outputs\n"));
         return PROCESS_RESULT_FAILED;
     }
-    stage1 = stage1_map.bytes;
-    stage2 = stage2_map.bytes;
-    bool executable_equal = stage1_map.mapped_pointer && stage2_map.mapped_pointer && self_host_compare_pe(stage1, stage2);
+    executable_equal = self_host_compare_pe(stage1, stage2);
     bool pdb_equal = pdb1_map.mapped_pointer && pdb2_map.mapped_pointer && pdb1_map.bytes.length == pdb2_map.bytes.length &&
                      memory_compare(pdb1_map.bytes.pointer, pdb2_map.bytes.pointer, pdb1_map.bytes.length);
     file_map_unmap(pdb2_map);
@@ -1042,14 +1047,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* d
     file_map_unmap(stage1_map);
     if (!executable_equal || !pdb_equal)
 #else
-    stage1 = file_read(arena, compare->stage1, (FileReadOptions){0});
-    stage2 = file_read(arena, compare->stage2, (FileReadOptions){0});
-    if (!stage1.pointer || !stage2.pointer)
-    {
-        string_print(S8("error: could not read self-host stage outputs\n"));
-        return PROCESS_RESULT_FAILED;
-    }
-    if (stage1.length != stage2.length || !memory_compare(stage1.pointer, stage2.pointer, stage1.length))
+    file_map_unmap(stage2_map);
+    file_map_unmap(stage1_map);
+    if (!executable_equal)
 #endif
     {
         string_print(S8("error: self-host stages differ: {S8} ({u64} bytes) != {S8} ({u64} bytes)\n"), compare->stage1, stage1.length, compare->stage2,
