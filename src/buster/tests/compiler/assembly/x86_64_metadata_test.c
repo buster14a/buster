@@ -1753,6 +1753,10 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         u32 apx_total = 0;
         u32 apx_emitted = 0;
         u32 apx_blocked = 0;
+        u32 emitted_bnd = 0;
+        u32 emitted_control = 0;
+        u32 emitted_debug = 0;
+        u32 emitted_segment = 0;
         bool ledger_rows_consistent = true;
         for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
         {
@@ -1778,8 +1782,36 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                 apx_emitted += entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED;
                 apx_blocked += entry.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED;
             }
+            if (entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED && buster_x86_metadata_form(form_id, &form))
+            {
+                // Count visible physical classes only on emitted normalized
+                // rows.  This proves which non-GPR register classes are
+                // reachable from the current 8,428-form schema rather than
+                // treating schema-blocked classes as public coverage.
+                bool has_bnd = false;
+                bool has_control = false;
+                bool has_debug = false;
+                bool has_segment = false;
+                for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+                {
+                    BusterX86MetadataOperand emitted_operand = {0};
+                    if (!buster_x86_metadata_operand(form_id, operand_index, &emitted_operand) || !emitted_operand.visible)
+                    {
+                        continue;
+                    }
+                    has_bnd |= emitted_operand.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_BND;
+                    has_control |= emitted_operand.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_CONTROL;
+                    has_debug |= emitted_operand.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_DEBUG;
+                    has_segment |= emitted_operand.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_SEGMENT;
+                }
+                emitted_bnd += has_bnd;
+                emitted_control += has_control;
+                emitted_debug += has_debug;
+                emitted_segment += has_segment;
+            }
         }
         BUSTER_TEST(arguments, ledger_rows_consistent);
+        BUSTER_TEST(arguments, emitted_bnd == 0 && emitted_control == 0 && emitted_debug == 0 && emitted_segment == 4);
         BUSTER_TEST(arguments, privileged_capable == 75);
         BUSTER_TEST(arguments, privileged_blocked == 109);
         BUSTER_TEST(arguments, not64_capable == 0);

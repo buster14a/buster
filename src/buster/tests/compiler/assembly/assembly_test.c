@@ -4088,6 +4088,406 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, invalid_amd_bounds.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
+
+    {
+        u8 expected_ud0[] = {0x0f, 0xff};
+        AssemblyEncodeResult metadata_legacy = assembly_encode(arguments->arena, S8("ud0\n"),
+                                                                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_legacy.diagnostic_count == 0 && metadata_legacy.relocation_count == 0 &&
+                                   metadata_legacy.bytes.length == sizeof(expected_ud0) &&
+                                   memcmp(metadata_legacy.bytes.pointer, expected_ud0, sizeof(expected_ud0)) == 0);
+
+        u8 expected_rex[] = {0x41, 0x0f, 0x01, 0xe0};
+        AssemblyEncodeResult metadata_rex_intel = assembly_encode(arguments->arena, S8("smsw r8d\n"),
+                                                                   (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_rex_att = assembly_encode(arguments->arena, S8("smswl %r8d\n"),
+                                                                 (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_rex_intel.diagnostic_count == 0 && metadata_rex_intel.relocation_count == 0 &&
+                                   metadata_rex_intel.bytes.length == sizeof(expected_rex) &&
+                                   memcmp(metadata_rex_intel.bytes.pointer, expected_rex, sizeof(expected_rex)) == 0);
+        BUSTER_TEST(arguments, metadata_rex_att.diagnostic_count == 0 && metadata_rex_att.relocation_count == 0 &&
+                                   metadata_rex_att.bytes.length == sizeof(expected_rex) &&
+                                   memcmp(metadata_rex_att.bytes.pointer, expected_rex, sizeof(expected_rex)) == 0);
+
+        u8 expected_hlt[] = {0xf4};
+        AssemblyEncodeResult metadata_system = assembly_encode(arguments->arena, S8("hlt\n"),
+                                                                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_system.diagnostic_count == 0 && metadata_system.relocation_count == 0 &&
+                                   metadata_system.bytes.length == sizeof(expected_hlt) &&
+                                   memcmp(metadata_system.bytes.pointer, expected_hlt, sizeof(expected_hlt)) == 0);
+
+        u8 expected_smsw[] = {0x0f, 0x01, 0xe0};
+        AssemblyEncodeResult metadata_control = assembly_encode(arguments->arena, S8("smsw eax\n"),
+                                                                 (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_control.diagnostic_count == 0 && metadata_control.relocation_count == 0 &&
+                                   metadata_control.bytes.length == sizeof(expected_smsw) &&
+                                   memcmp(metadata_control.bytes.pointer, expected_smsw, sizeof(expected_smsw)) == 0);
+
+        u8 expected_rex2[] = {0xd5, 0x18, 0x50};
+        AssemblyEncodeResult metadata_rex2_intel = assembly_encode(arguments->arena, S8("pushp r16\n"),
+                                                                    (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_rex2_att = assembly_encode(arguments->arena, S8("pushpq %r16\n"),
+                                                                  (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_rex2_intel.diagnostic_count == 0 && metadata_rex2_intel.bytes.length == sizeof(expected_rex2) &&
+                                   memcmp(metadata_rex2_intel.bytes.pointer, expected_rex2, sizeof(expected_rex2)) == 0);
+        BUSTER_TEST(arguments, metadata_rex2_att.diagnostic_count == 0 && metadata_rex2_att.bytes.length == sizeof(expected_rex2) &&
+                                   memcmp(metadata_rex2_att.bytes.pointer, expected_rex2, sizeof(expected_rex2)) == 0);
+
+        u8 expected_apx[] = {0x62, 0xfc, 0x7c, 0x10, 0x83, 0xc1, 0x7b};
+        AssemblyEncodeResult metadata_apx = assembly_encode(arguments->arena, S8("addl $123, %r17d, %r16d\n"),
+                                                             (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_apx.diagnostic_count == 0 && metadata_apx.relocation_count == 0 &&
+                                   metadata_apx.bytes.length == sizeof(expected_apx) &&
+                                   memcmp(metadata_apx.bytes.pointer, expected_apx, sizeof(expected_apx)) == 0);
+        AssemblyEncodeResult metadata_apx_missing = assembly_encode(arguments->arena, S8("addl $123, %r17d, %r16d\n"),
+                                                                     (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_apx_missing.diagnostic_count == 1 &&
+                                   metadata_apx_missing.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+
+        u8 expected_unsigned_immediate[] = {0x48, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+        AssemblyEncodeResult metadata_unsigned_immediate_intel = assembly_encode(
+            arguments->arena, S8("mov rax, 0xffffffffffffffff\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_unsigned_immediate_att = assembly_encode(
+            arguments->arena, S8("movq $0xffffffffffffffff, %rax\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_unsigned_immediate_intel.diagnostic_count == 0 &&
+                                   metadata_unsigned_immediate_intel.bytes.length == sizeof(expected_unsigned_immediate) &&
+                                   memcmp(metadata_unsigned_immediate_intel.bytes.pointer, expected_unsigned_immediate,
+                                          sizeof(expected_unsigned_immediate)) == 0);
+        BUSTER_TEST(arguments, metadata_unsigned_immediate_att.diagnostic_count == 0 &&
+                                   metadata_unsigned_immediate_att.bytes.length == sizeof(expected_unsigned_immediate) &&
+                                   memcmp(metadata_unsigned_immediate_att.bytes.pointer, expected_unsigned_immediate,
+                                          sizeof(expected_unsigned_immediate)) == 0);
+
+        u8 expected_movq_exact[] = {0x0f, 0x6f, 0xc1};
+        AssemblyEncodeResult metadata_movq_exact_intel = assembly_encode(
+            arguments->arena, S8("movq mm0, mm1\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_movq_exact_att = assembly_encode(
+            arguments->arena, S8("movq %mm1, %mm0\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_movq_exact_intel.diagnostic_count == 0 &&
+                                   metadata_movq_exact_intel.bytes.length == sizeof(expected_movq_exact) &&
+                                   memcmp(metadata_movq_exact_intel.bytes.pointer, expected_movq_exact, sizeof(expected_movq_exact)) == 0);
+        BUSTER_TEST(arguments, metadata_movq_exact_att.diagnostic_count == 0 &&
+                                   metadata_movq_exact_att.bytes.length == sizeof(expected_movq_exact) &&
+                                   memcmp(metadata_movq_exact_att.bytes.pointer, expected_movq_exact, sizeof(expected_movq_exact)) == 0);
+
+        AssemblyEncodeResult metadata_invalid_suffix = assembly_encode(
+            arguments->arena, S8("hltq\nsmswq %r8d\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_invalid_suffix.diagnostic_count == 2 && metadata_invalid_suffix.bytes.length == 0 &&
+                                   metadata_invalid_suffix.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+                                   metadata_invalid_suffix.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+
+        u8 expected_relative_literal[] = {0x90, 0xeb, 0xfd};
+        AssemblyEncodeResult metadata_relative_literal_intel = assembly_encode(
+            arguments->arena, S8("nop\njmp_near 0\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_relative_literal_att = assembly_encode(
+            arguments->arena, S8("nop\njmp_near $0\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_relative_literal_intel.diagnostic_count == 0 &&
+                                   metadata_relative_literal_intel.bytes.length == sizeof(expected_relative_literal) &&
+                                   memcmp(metadata_relative_literal_intel.bytes.pointer, expected_relative_literal,
+                                          sizeof(expected_relative_literal)) == 0);
+        BUSTER_TEST(arguments, metadata_relative_literal_att.diagnostic_count == 0 &&
+                                   metadata_relative_literal_att.bytes.length == sizeof(expected_relative_literal) &&
+                                   memcmp(metadata_relative_literal_att.bytes.pointer, expected_relative_literal,
+                                          sizeof(expected_relative_literal)) == 0);
+
+        u8 expected_int_symbol[] = {0xcd, 0x00};
+        AssemblyEncodeResult metadata_int_external = assembly_encode(
+            arguments->arena, S8("int external\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_int_external.diagnostic_count == 0 && metadata_int_external.symbol_count == 1 &&
+                                   !metadata_int_external.symbols[0].defined && metadata_int_external.relocation_count == 1 &&
+                                   metadata_int_external.relocations[0].offset == 1 && metadata_int_external.relocations[0].symbol == 0 &&
+                                   metadata_int_external.relocations[0].addend == 0 &&
+                                   metadata_int_external.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8 &&
+                                   metadata_int_external.bytes.length == sizeof(expected_int_symbol) &&
+                                   memcmp(metadata_int_external.bytes.pointer, expected_int_symbol, sizeof(expected_int_symbol)) == 0);
+        AssemblyEncodeResult metadata_int_local = assembly_encode(
+            arguments->arena, S8("local:\nint local\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_int_local.diagnostic_count == 0 && metadata_int_local.symbol_count == 1 &&
+                                   metadata_int_local.symbols[0].defined && metadata_int_local.symbols[0].offset == 0 &&
+                                   metadata_int_local.relocation_count == 0 && metadata_int_local.bytes.length == sizeof(expected_int_symbol) &&
+                                   memcmp(metadata_int_local.bytes.pointer, expected_int_symbol, sizeof(expected_int_symbol)) == 0);
+
+        u8 expected_vex_address32[] = {0x67, 0xc5, 0xf0, 0x58, 0x03};
+        AssemblyEncodeResult metadata_vex_intel = assembly_encode(
+            arguments->arena, S8("vaddps xmm0, xmm1, xmmword ptr [ebx]\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_vex_att = assembly_encode(
+            arguments->arena, S8("vaddps (%ebx), %xmm1, %xmm0\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_vex_intel.diagnostic_count == 0 && metadata_vex_intel.bytes.length == sizeof(expected_vex_address32) &&
+                                   memcmp(metadata_vex_intel.bytes.pointer, expected_vex_address32, sizeof(expected_vex_address32)) == 0);
+        BUSTER_TEST(arguments, metadata_vex_att.diagnostic_count == 0 && metadata_vex_att.bytes.length == sizeof(expected_vex_address32) &&
+                                   memcmp(metadata_vex_att.bytes.pointer, expected_vex_address32, sizeof(expected_vex_address32)) == 0);
+
+        u8 expected_vex_ymm_address32[] = {0x67, 0xc5, 0xf4, 0x58, 0x03};
+        AssemblyEncodeResult metadata_vex_ymm_address32 = assembly_encode(
+            arguments->arena, S8("vaddps ymm0, ymm1, ymmword ptr [ebx]\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_vex_ymm_address32.diagnostic_count == 0 &&
+                                   metadata_vex_ymm_address32.bytes.length == sizeof(expected_vex_ymm_address32) &&
+                                   memcmp(metadata_vex_ymm_address32.bytes.pointer, expected_vex_ymm_address32,
+                                          sizeof(expected_vex_ymm_address32)) == 0);
+
+        u8 expected_evex_zmm_memory[] = {0x62, 0xf9, 0x74, 0x48, 0x58, 0x00};
+        AssemblyEncodeResult metadata_evex_zmm_qualified = assembly_encode(
+            arguments->arena, S8("vaddps zmm0, zmm1, zmmword ptr [r16]\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_evex_zmm_qualified.diagnostic_count == 0 &&
+                                   metadata_evex_zmm_qualified.bytes.length == sizeof(expected_evex_zmm_memory) &&
+                                   memcmp(metadata_evex_zmm_qualified.bytes.pointer, expected_evex_zmm_memory,
+                                          sizeof(expected_evex_zmm_memory)) == 0);
+        AssemblyEncodeResult metadata_evex_mismatched_qualifier = assembly_encode(
+            arguments->arena, S8("vaddps zmm0, zmm1, xmmword ptr [r16]\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_evex_mismatched_qualifier.diagnostic_count == 1 &&
+                                   metadata_evex_mismatched_qualifier.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   metadata_evex_mismatched_qualifier.bytes.length == 0 &&
+                                   metadata_evex_mismatched_qualifier.symbol_count == 0 &&
+                                   metadata_evex_mismatched_qualifier.relocation_count == 0);
+
+        AssemblyEncodeResult metadata_vex_relocation_intel = assembly_encode(
+            arguments->arena, S8("vaddps xmm0, xmm1, xmmword ptr [ebx + external + 8]\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_vex_relocation_att = assembly_encode(
+            arguments->arena, S8("vaddps external+8(%ebx), %xmm1, %xmm0\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        u8 expected_vex_relocation[] = {0x67, 0xc5, 0xf0, 0x58, 0x83, 0x00, 0x00, 0x00, 0x00};
+        BUSTER_TEST(arguments, metadata_vex_relocation_intel.diagnostic_count == 0 && metadata_vex_relocation_intel.symbol_count == 1 &&
+                                   metadata_vex_relocation_intel.bytes.length == sizeof(expected_vex_relocation) &&
+                                   memcmp(metadata_vex_relocation_intel.bytes.pointer, expected_vex_relocation,
+                                          sizeof(expected_vex_relocation)) == 0 && metadata_vex_relocation_intel.relocation_count == 1 &&
+                                   !metadata_vex_relocation_intel.symbols[0].defined &&
+                                   string_equal(metadata_vex_relocation_intel.symbols[0].name, S8("external")) &&
+                                   metadata_vex_relocation_intel.relocations[0].offset == 5 &&
+                                   metadata_vex_relocation_intel.relocations[0].symbol == 0 &&
+                                   metadata_vex_relocation_intel.relocations[0].addend == 8 &&
+                                   metadata_vex_relocation_intel.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED);
+        BUSTER_TEST(arguments, metadata_vex_relocation_att.diagnostic_count == 0 && metadata_vex_relocation_att.symbol_count == 1 &&
+                                   metadata_vex_relocation_att.bytes.length == sizeof(expected_vex_relocation) &&
+                                   memcmp(metadata_vex_relocation_att.bytes.pointer, expected_vex_relocation,
+                                          sizeof(expected_vex_relocation)) == 0 && metadata_vex_relocation_att.relocation_count == 1 &&
+                                   !metadata_vex_relocation_att.symbols[0].defined &&
+                                   string_equal(metadata_vex_relocation_att.symbols[0].name, S8("external")) &&
+                                   metadata_vex_relocation_att.relocations[0].offset == 5 &&
+                                   metadata_vex_relocation_att.relocations[0].symbol == 0 &&
+                                   metadata_vex_relocation_att.relocations[0].addend == 8 &&
+                                   metadata_vex_relocation_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED);
+
+        u8 expected_vpternlogd_two_relocations[] = {
+            0x62, 0xf3, 0x75, 0x48, 0x25, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00,
+        };
+        AssemblyEncodeResult metadata_vpternlogd_no_newline = assembly_encode(
+            arguments->arena, S8("vpternlogd zmm0, zmm1, zmmword ptr [mem_symbol], imm_symbol"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_vpternlogd_newline = assembly_encode(
+            arguments->arena, S8("vpternlogd zmm0, zmm1, zmmword ptr [mem_symbol], imm_symbol\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_vpternlogd_no_newline.diagnostic_count == 0 &&
+                                   metadata_vpternlogd_no_newline.bytes.length == sizeof(expected_vpternlogd_two_relocations) &&
+                                   memcmp(metadata_vpternlogd_no_newline.bytes.pointer, expected_vpternlogd_two_relocations,
+                                          sizeof(expected_vpternlogd_two_relocations)) == 0 &&
+                                   metadata_vpternlogd_no_newline.symbol_count == 2 &&
+                                   string_equal(metadata_vpternlogd_no_newline.symbols[0].name, S8("mem_symbol")) &&
+                                   !metadata_vpternlogd_no_newline.symbols[0].defined &&
+                                   string_equal(metadata_vpternlogd_no_newline.symbols[1].name, S8("imm_symbol")) &&
+                                   !metadata_vpternlogd_no_newline.symbols[1].defined &&
+                                   metadata_vpternlogd_no_newline.relocation_count == 2 &&
+                                   metadata_vpternlogd_no_newline.relocations[0].offset == 7 &&
+                                   metadata_vpternlogd_no_newline.relocations[0].symbol == 0 &&
+                                   metadata_vpternlogd_no_newline.relocations[0].addend == 0 &&
+                                   metadata_vpternlogd_no_newline.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED &&
+                                   metadata_vpternlogd_no_newline.relocations[1].offset == 11 &&
+                                   metadata_vpternlogd_no_newline.relocations[1].symbol == 1 &&
+                                   metadata_vpternlogd_no_newline.relocations[1].addend == 0 &&
+                                   metadata_vpternlogd_no_newline.relocations[1].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8);
+        BUSTER_TEST(arguments, metadata_vpternlogd_newline.diagnostic_count == 0 &&
+                                   metadata_vpternlogd_newline.bytes.length == metadata_vpternlogd_no_newline.bytes.length &&
+                                   memcmp(metadata_vpternlogd_newline.bytes.pointer, metadata_vpternlogd_no_newline.bytes.pointer,
+                                          metadata_vpternlogd_no_newline.bytes.length) == 0 &&
+                                   metadata_vpternlogd_newline.symbol_count == metadata_vpternlogd_no_newline.symbol_count &&
+                                   metadata_vpternlogd_newline.relocation_count == metadata_vpternlogd_no_newline.relocation_count &&
+                                   metadata_vpternlogd_newline.relocations[0].offset == metadata_vpternlogd_no_newline.relocations[0].offset &&
+                                   metadata_vpternlogd_newline.relocations[0].symbol == metadata_vpternlogd_no_newline.relocations[0].symbol &&
+                                   metadata_vpternlogd_newline.relocations[0].addend == metadata_vpternlogd_no_newline.relocations[0].addend &&
+                                   metadata_vpternlogd_newline.relocations[0].kind == metadata_vpternlogd_no_newline.relocations[0].kind &&
+                                   metadata_vpternlogd_newline.relocations[1].offset == metadata_vpternlogd_no_newline.relocations[1].offset &&
+                                   metadata_vpternlogd_newline.relocations[1].symbol == metadata_vpternlogd_no_newline.relocations[1].symbol &&
+                                   metadata_vpternlogd_newline.relocations[1].addend == metadata_vpternlogd_no_newline.relocations[1].addend &&
+                                   metadata_vpternlogd_newline.relocations[1].kind == metadata_vpternlogd_no_newline.relocations[1].kind);
+        AssemblyEncodeResult metadata_vex_local = assembly_encode(
+            arguments->arena, S8("local:\n"
+                                 "vaddps xmm0, xmm1, xmmword ptr [ebx + local + 8]\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_vex_local[] = {0x67, 0xc5, 0xf0, 0x58, 0x83, 0x08, 0x00, 0x00, 0x00};
+        BUSTER_TEST(arguments, metadata_vex_local.diagnostic_count == 0 && metadata_vex_local.symbol_count == 1 &&
+                                   metadata_vex_local.symbols[0].defined && metadata_vex_local.symbols[0].offset == 0 &&
+                                   string_equal(metadata_vex_local.symbols[0].name, S8("local")) &&
+                                   metadata_vex_local.relocation_count == 0 && metadata_vex_local.bytes.length == sizeof(expected_vex_local) &&
+                                   memcmp(metadata_vex_local.bytes.pointer, expected_vex_local, sizeof(expected_vex_local)) == 0);
+
+        u8 expected_xop_address32[] = {0x67, 0x8f, 0xe8, 0x70, 0xa3, 0x03, 0x20};
+        AssemblyEncodeResult metadata_xop_intel = assembly_encode(
+            arguments->arena, S8("vpperm xmm0, xmm1, xmmword ptr [ebx], xmm2\n"),
+            (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_xop_att = assembly_encode(
+            arguments->arena, S8("vpperm %xmm2, (%ebx), %xmm1, %xmm0\n"),
+            (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_xop_intel.diagnostic_count == 0 && metadata_xop_intel.bytes.length == sizeof(expected_xop_address32) &&
+                                   memcmp(metadata_xop_intel.bytes.pointer, expected_xop_address32, sizeof(expected_xop_address32)) == 0);
+        BUSTER_TEST(arguments, metadata_xop_att.diagnostic_count == 0 && metadata_xop_att.bytes.length == sizeof(expected_xop_address32) &&
+                                   memcmp(metadata_xop_att.bytes.pointer, expected_xop_address32, sizeof(expected_xop_address32)) == 0);
+
+        Target gather_target = advanced_target;
+        gather_target.cpu_features |= TARGET_CPU_FEATURE_X86_AVX2;
+        AssemblyEncodeResult metadata_vsib_intel = assembly_encode(
+            arguments->arena, S8("vgatherdps xmm0, dword ptr [rax + xmm1*4], xmm2\n"),
+            (AssemblyEncodeOptions){.target = gather_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_vsib_att = assembly_encode(
+            arguments->arena, S8("vgatherdps %xmm2, (%rax,%xmm1,4), %xmm0\n"),
+            (AssemblyEncodeOptions){.target = gather_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        u8 expected_vsib[] = {0xc4, 0xe2, 0x79, 0x92, 0x04, 0x88};
+        BUSTER_TEST(arguments, metadata_vsib_intel.diagnostic_count == 0 && metadata_vsib_intel.bytes.length == sizeof(expected_vsib) &&
+                                   memcmp(metadata_vsib_intel.bytes.pointer, expected_vsib, sizeof(expected_vsib)) == 0);
+        BUSTER_TEST(arguments, metadata_vsib_att.diagnostic_count == 0 && metadata_vsib_att.bytes.length == sizeof(expected_vsib) &&
+                                   memcmp(metadata_vsib_att.bytes.pointer, expected_vsib, sizeof(expected_vsib)) == 0);
+        AssemblyEncodeResult metadata_vsib_invalid = assembly_encode(
+            arguments->arena, S8("vgatherdps xmm0, dword ptr [rax + rcx*4], xmm2\n"),
+            (AssemblyEncodeOptions){.target = gather_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_vsib_invalid.diagnostic_count == 1 &&
+                                   metadata_vsib_invalid.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   string_equal(metadata_vsib_invalid.diagnostics[0].message, S8("metadata instruction form is not encodable")) &&
+                                   metadata_vsib_invalid.bytes.length == 0 && metadata_vsib_invalid.symbol_count == 0 &&
+                                   metadata_vsib_invalid.relocation_count == 0);
+        Target gather_no_avx2 = gather_target;
+        gather_no_avx2.cpu_features &= ~((TargetCpuFeatures)TARGET_CPU_FEATURE_X86_AVX2);
+        AssemblyEncodeResult metadata_vsib_missing = assembly_encode(
+            arguments->arena, S8("vgatherdps xmm0, dword ptr [rax + xmm1*4], xmm2\n"),
+            (AssemblyEncodeOptions){.target = gather_no_avx2, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_vsib_missing.diagnostic_count == 1 &&
+                                   metadata_vsib_missing.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   metadata_vsib_missing.bytes.length == 0 && metadata_vsib_missing.symbol_count == 0 &&
+                                   metadata_vsib_missing.relocation_count == 0);
+
+        u8 expected_evex[] = {0x62, 0xf2, 0x6d, 0x49, 0x65, 0xc3};
+        AssemblyEncodeResult metadata_evex_intel = assembly_encode(
+            arguments->arena, S8("vblendmps zmm0 {k1}, zmm2, zmm3\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_evex_att = assembly_encode(
+            arguments->arena, S8("vblendmps %zmm3, %zmm2, %zmm0 {%k1}\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_evex_intel.diagnostic_count == 0 && metadata_evex_intel.bytes.length == sizeof(expected_evex) &&
+                                   memcmp(metadata_evex_intel.bytes.pointer, expected_evex, sizeof(expected_evex)) == 0);
+        BUSTER_TEST(arguments, metadata_evex_att.diagnostic_count == 0 && metadata_evex_att.bytes.length == sizeof(expected_evex) &&
+                                   memcmp(metadata_evex_att.bytes.pointer, expected_evex, sizeof(expected_evex)) == 0);
+
+        u8 expected_amx[] = {0xc4, 0xe2, 0x78, 0x49, 0xc0};
+        AssemblyEncodeResult metadata_amx_intel = assembly_encode(arguments->arena, S8("tilerelease\n"),
+                                                                   (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_amx_att = assembly_encode(arguments->arena, S8("tilerelease\n"),
+                                                                 (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_amx_intel.diagnostic_count == 0 && metadata_amx_intel.bytes.length == sizeof(expected_amx) &&
+                                   memcmp(metadata_amx_intel.bytes.pointer, expected_amx, sizeof(expected_amx)) == 0);
+        BUSTER_TEST(arguments, metadata_amx_att.diagnostic_count == 0 && metadata_amx_att.bytes.length == sizeof(expected_amx) &&
+                                   memcmp(metadata_amx_att.bytes.pointer, expected_amx, sizeof(expected_amx)) == 0);
+
+        u8 expected_segment[] = {0x64, 0x8b, 0x03};
+        AssemblyEncodeResult metadata_segment_intel = assembly_encode(
+            arguments->arena, S8("mov eax, dword ptr fs:[rbx]\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_segment_att = assembly_encode(
+            arguments->arena, S8("movl %fs:(%rbx), %eax\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_segment_intel.diagnostic_count == 0 && metadata_segment_intel.bytes.length == sizeof(expected_segment) &&
+                                   memcmp(metadata_segment_intel.bytes.pointer, expected_segment, sizeof(expected_segment)) == 0);
+        BUSTER_TEST(arguments, metadata_segment_att.diagnostic_count == 0 && metadata_segment_att.bytes.length == sizeof(expected_segment) &&
+                                   memcmp(metadata_segment_att.bytes.pointer, expected_segment, sizeof(expected_segment)) == 0);
+        u8 expected_segment_displacement[] = {0x64, 0x8b, 0x43, 0x08};
+        AssemblyEncodeResult metadata_segment_displacement_att = assembly_encode(
+            arguments->arena, S8("movl %fs:8(%rbx), %eax\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_segment_displacement_att.diagnostic_count == 0 &&
+                                   metadata_segment_displacement_att.bytes.length == sizeof(expected_segment_displacement) &&
+                                   memcmp(metadata_segment_displacement_att.bytes.pointer, expected_segment_displacement,
+                                          sizeof(expected_segment_displacement)) == 0);
+
+        u8 expected_segment_register[] = {0x66, 0x8c, 0xe0};
+        AssemblyEncodeResult metadata_segment_register_intel = assembly_encode(
+            arguments->arena, S8("mov ax, fs\n"), (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_segment_register_att = assembly_encode(
+            arguments->arena, S8("movw %fs, %ax\n"), (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_segment_register_intel.diagnostic_count == 0 &&
+                                   metadata_segment_register_intel.bytes.length == sizeof(expected_segment_register) &&
+                                   memcmp(metadata_segment_register_intel.bytes.pointer, expected_segment_register,
+                                          sizeof(expected_segment_register)) == 0);
+        BUSTER_TEST(arguments, metadata_segment_register_att.diagnostic_count == 0 &&
+                                   metadata_segment_register_att.bytes.length == sizeof(expected_segment_register) &&
+                                   memcmp(metadata_segment_register_att.bytes.pointer, expected_segment_register,
+                                          sizeof(expected_segment_register)) == 0);
+
+        u8 expected_segment_register_store[] = {0x66, 0x8e, 0xe0};
+        AssemblyEncodeResult metadata_segment_register_store_intel = assembly_encode(
+            arguments->arena, S8("mov fs, ax\n"), (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_segment_register_store_att = assembly_encode(
+            arguments->arena, S8("movw %ax, %fs\n"), (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_segment_register_store_intel.diagnostic_count == 0 &&
+                                   metadata_segment_register_store_intel.bytes.length == sizeof(expected_segment_register_store) &&
+                                   memcmp(metadata_segment_register_store_intel.bytes.pointer, expected_segment_register_store,
+                                          sizeof(expected_segment_register_store)) == 0);
+        BUSTER_TEST(arguments, metadata_segment_register_store_att.diagnostic_count == 0 &&
+                                   metadata_segment_register_store_att.bytes.length == sizeof(expected_segment_register_store) &&
+                                   memcmp(metadata_segment_register_store_att.bytes.pointer, expected_segment_register_store,
+                                          sizeof(expected_segment_register_store)) == 0);
+
+        u8 expected_address32[] = {0x67, 0x8b, 0x03};
+        AssemblyEncodeResult metadata_address32_intel = assembly_encode(
+            arguments->arena, S8("mov eax, dword ptr [ebx]\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_address32_att = assembly_encode(
+            arguments->arena, S8("movl (%ebx), %eax\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_address32_intel.diagnostic_count == 0 && metadata_address32_intel.bytes.length == sizeof(expected_address32) &&
+                                   memcmp(metadata_address32_intel.bytes.pointer, expected_address32, sizeof(expected_address32)) == 0);
+        BUSTER_TEST(arguments, metadata_address32_att.diagnostic_count == 0 && metadata_address32_att.bytes.length == sizeof(expected_address32) &&
+                                   memcmp(metadata_address32_att.bytes.pointer, expected_address32, sizeof(expected_address32)) == 0);
+
+        u8 expected_indirect[] = {0xff, 0xd0, 0xff, 0x50, 0x08, 0xff, 0xe0, 0xff, 0x60, 0x08};
+        AssemblyEncodeResult metadata_indirect_att = assembly_encode(
+            arguments->arena, S8("call *%rax\ncall *8(%rax)\njmp *%rax\njmp *8(%rax)\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_indirect_att.diagnostic_count == 0 && metadata_indirect_att.relocation_count == 0 &&
+                                   metadata_indirect_att.bytes.length == sizeof(expected_indirect) &&
+                                   memcmp(metadata_indirect_att.bytes.pointer, expected_indirect, sizeof(expected_indirect)) == 0);
+
+        AssemblyEncodeResult metadata_bnd = assembly_encode(arguments->arena, S8("bndcl bnd0, rax\n"),
+                                                             (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_bnd.diagnostic_count == 1 && metadata_bnd.bytes.length == 0 &&
+                                   metadata_bnd.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   string_equal(metadata_bnd.diagnostics[0].message, S8("metadata instruction form is not encodable")));
+        AssemblyEncodeResult metadata_debug = assembly_encode(arguments->arena, S8("mov rax, dr0\n"),
+                                                               (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_debug.diagnostic_count == 1 && metadata_debug.bytes.length == 0 &&
+                                   metadata_debug.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+
+        AssemblyEncodeResult metadata_rollback = assembly_encode(
+            arguments->arena,
+            S8("vpperm xmm0, xmm1, xmmword ptr [rip + leaked], xmm2, 7\n"
+               "nop\n"),
+            (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_rollback.diagnostic_count == 1 &&
+                                   metadata_rollback.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   metadata_rollback.bytes.length == 1 && metadata_rollback.bytes.pointer[0] == 0x90 &&
+                                   metadata_rollback.symbol_count == 0 && metadata_rollback.relocation_count == 0);
+    }
+
     return result;
 }
 #endif

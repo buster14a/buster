@@ -600,7 +600,10 @@ struct BusterX86MetadataPhysicalMemory
     bool has_symbol;
     bool has_segment;
     bool vsib;
-    u8 reserved[3];
+    // Source-level aggregate qualifiers (xmmword/ymmword/zmmword) are
+    // distinct from the scalar element width used by the encoding schema.
+    u16 source_width;
+    u8 reserved[1];
 };
 
 typedef struct BusterX86MetadataPhysicalOperand BusterX86MetadataPhysicalOperand;
@@ -668,6 +671,7 @@ struct BusterX86MetadataPhysicalQuery
     bool include_privileged;
     bool include_not64;
     bool include_implicit;
+    bool source_semantics;
     u8 reserved;
 };
 
@@ -693,6 +697,7 @@ typedef enum BusterX86MetadataEncodeStatus
     BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY,
     BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY,
     BUSTER_X86_METADATA_ENCODE_SUCCESS,
+    BUSTER_X86_METADATA_ENCODE_INVALID_EXPRESSION,
     BUSTER_X86_METADATA_ENCODE_STATUS_COUNT,
 } BusterX86MetadataEncodeStatus;
 
@@ -729,6 +734,11 @@ typedef enum BusterX86MetadataRelocationKind
 } BusterX86MetadataRelocationKind;
 
 typedef struct BusterX86MetadataRelocation BusterX86MetadataRelocation;
+enum
+{
+    BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY = 8,
+};
+
 struct BusterX86MetadataRelocation
 {
     u32 offset;

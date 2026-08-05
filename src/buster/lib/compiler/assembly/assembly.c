@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/assembly/assembly.h>
+#include <buster/lib/compiler/assembly/x86_64_metadata.h>
 
 #include <buster/lib/string.h>
 
@@ -294,9 +295,11 @@ typedef struct AssemblyExpression AssemblyExpression;
 struct AssemblyExpression
 {
     s64 addend;
+    u64 unsigned_addend;
     u32 symbol;
     bool has_symbol;
-    u8 reserved[3];
+    bool has_unsigned_addend;
+    u8 reserved[2];
 };
 
 typedef struct AssemblyRegister AssemblyRegister;
@@ -310,6 +313,11 @@ typedef enum AssemblyRegisterClass
     ASSEMBLY_REGISTER_TILE,
     ASSEMBLY_REGISTER_MMX,
     ASSEMBLY_REGISTER_X87,
+    ASSEMBLY_REGISTER_BND,
+    ASSEMBLY_REGISTER_CONTROL,
+    ASSEMBLY_REGISTER_DEBUG,
+    ASSEMBLY_REGISTER_SEGMENT,
+    ASSEMBLY_REGISTER_SPECIAL,
     ASSEMBLY_REGISTER_CLASS_COUNT,
 } AssemblyRegisterClass;
 
@@ -328,11 +336,14 @@ struct AssemblyMemory
     AssemblyRegister base;
     AssemblyRegister index;
     u8 scale;
+    u8 address_size;
+    u8 segment;
     u16 width;
     bool has_base;
     bool has_index;
     bool rip_relative;
-    u8 reserved;
+    bool has_segment;
+    bool vsib;
 };
 
 typedef struct AssemblyOperand AssemblyOperand;
@@ -368,12 +379,22 @@ struct AssemblyInstruction
     u8 rip_relocation_trailing;
     String8 amd_mnemonic;
     AssemblyAmdForm const* amd_form;
+    bool metadata;
+    u8 metadata_operand_count;
+    u16 metadata_reserved;
+    u32 metadata_form_id;
+    String8 metadata_mnemonic;
+    u8 metadata_address_size;
+    u8 metadata_reserved_address[3];
+    BusterX86MetadataPhysicalOperand metadata_operands[5];
+    BusterX86MetadataPhysicalAttributes metadata_attributes;
 };
 
 typedef struct AssemblyBuilder AssemblyBuilder;
 struct AssemblyBuilder
 {
     Arena* arena;
+    Target target;
     AssemblyEncodeResult result;
     AssemblyInstruction* instructions;
     u32 instruction_count;
@@ -383,6 +404,13 @@ struct AssemblyBuilder
     u32 diagnostic_capacity;
     u64 output_capacity;
     u64 output_count;
+};
+
+enum
+{
+    // A source line can define one label and contain five metadata operands;
+    // each of those can introduce one distinct symbol.
+    ASSEMBLY_SOURCE_SYMBOLS_PER_LINE = 6,
 };
 
 BUSTER_GLOBAL_LOCAL bool assembly_space(char8 value)
@@ -541,6 +569,43 @@ BUSTER_GLOBAL_LOCAL bool assembly_parse_s64(String8 string, s64* result)
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_parse_u64(String8 string, u64* result)
+{
+    string = assembly_trim(string);
+    if (!string.length || !result || string.pointer[0] == '-')
+    {
+        return false;
+    }
+    u64 cursor = string.pointer[0] == '+' ? 1 : 0;
+    u32 base = 10;
+    if (cursor + 2 <= string.length && string.pointer[cursor] == '0' &&
+        (string.pointer[cursor + 1] == 'x' || string.pointer[cursor + 1] == 'X'))
+    {
+        base = 16;
+        cursor += 2;
+    }
+    if (cursor == string.length)
+    {
+        return false;
+    }
+    u64 value = 0;
+    for (; cursor < string.length; cursor += 1)
+    {
+        char8 character = string.pointer[cursor];
+        u32 digit = character >= '0' && character <= '9' ? (u32)(character - '0')
+                    : character >= 'a' && character <= 'f' ? (u32)(character - 'a') + 10
+                    : character >= 'A' && character <= 'F' ? (u32)(character - 'A') + 10
+                                                            : UINT32_MAX;
+        if (digit >= base || value > (UINT64_MAX - digit) / base)
+        {
+            return false;
+        }
+        value = value * base + digit;
+    }
+    *result = value;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_expression_parse(AssemblyBuilder* builder, String8 text, AssemblyExpression* result)
 {
     text = assembly_trim(text);
@@ -552,6 +617,20 @@ BUSTER_GLOBAL_LOCAL bool assembly_expression_parse(AssemblyBuilder* builder, Str
     if (assembly_parse_s64(text, &integer))
     {
         result->addend = integer;
+        return true;
+    }
+    u64 unsigned_integer = 0;
+    if (assembly_parse_u64(text, &unsigned_integer))
+    {
+        if (unsigned_integer <= (u64)INT64_MAX)
+        {
+            result->addend = (s64)unsigned_integer;
+        }
+        else
+        {
+            result->unsigned_addend = unsigned_integer;
+            result->has_unsigned_addend = true;
+        }
         return true;
     }
     u64 operator_index = text.length;
@@ -690,6 +769,25 @@ BUSTER_GLOBAL_LOCAL bool assembly_register_parse(String8 text, AssemblySyntax sy
         return true;
     }
 
+    if (assembly_numbered_register_parse(text, S8("cr"), 15, 64, ASSEMBLY_REGISTER_CONTROL, result) ||
+        assembly_numbered_register_parse(text, S8("dr"), 15, 64, ASSEMBLY_REGISTER_DEBUG, result) ||
+        assembly_numbered_register_parse(text, S8("bnd"), 3, 128, ASSEMBLY_REGISTER_BND, result))
+    {
+        return true;
+    }
+    static String8 const names_segment[] = {
+        S8_INITIALIZER("es"), S8_INITIALIZER("cs"), S8_INITIALIZER("ss"),
+        S8_INITIALIZER("ds"), S8_INITIALIZER("fs"), S8_INITIALIZER("gs"),
+    };
+    for (u32 register_index = 0; register_index < BUSTER_ARRAY_LENGTH(names_segment); register_index += 1)
+    {
+        if (assembly_word_equal(text, names_segment[register_index]))
+        {
+            *result = (AssemblyRegister){.index = (u8)register_index, .width = 16, .class = ASSEMBLY_REGISTER_SEGMENT};
+            return true;
+        }
+    }
+
     static String8 const names_64[] = {
         S8_INITIALIZER("rax"), S8_INITIALIZER("rcx"), S8_INITIALIZER("rdx"), S8_INITIALIZER("rbx"),
         S8_INITIALIZER("rsp"), S8_INITIALIZER("rbp"), S8_INITIALIZER("rsi"), S8_INITIALIZER("rdi"),
@@ -823,6 +921,36 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_rip_parse(String8 text, AssemblySyntax syn
     return assembly_word_equal(text, S8("rip"));
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_x86_segment_parse(String8 text, AssemblySyntax syntax, u8* result)
+{
+    text = assembly_trim(text);
+    if (syntax == ASSEMBLY_SYNTAX_ATT)
+    {
+        if (!text.length || text.pointer[0] != '%')
+        {
+            return false;
+        }
+        text.pointer += 1;
+        text.length -= 1;
+    }
+    static String8 const names[] = {
+        S8_INITIALIZER("es"), S8_INITIALIZER("cs"), S8_INITIALIZER("ss"),
+        S8_INITIALIZER("ds"), S8_INITIALIZER("fs"), S8_INITIALIZER("gs"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        if (assembly_word_equal(text, names[index]))
+        {
+            if (result)
+            {
+                *result = (u8)(index + 1);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_x86_scale_parse(String8 text, u8* result)
 {
     s64 value = 0;
@@ -837,7 +965,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_scale_parse(String8 text, u8* result)
 BUSTER_GLOBAL_LOCAL bool assembly_expression_merge(AssemblyBuilder* builder, AssemblyExpression* destination, String8 text, bool subtract)
 {
     AssemblyExpression expression = {0};
-    if (!assembly_expression_parse(builder, text, &expression) || (destination->has_symbol && expression.has_symbol))
+    if (!assembly_expression_parse(builder, text, &expression) || expression.has_unsigned_addend ||
+        (destination->has_symbol && expression.has_symbol))
     {
         return false;
     }
@@ -869,9 +998,28 @@ BUSTER_GLOBAL_LOCAL bool assembly_expression_merge(AssemblyBuilder* builder, Ass
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL String8 assembly_x86_memory_strip_segment(String8 text, AssemblySyntax syntax, AssemblyMemory* result)
+{
+    u64 colon = string_first_code_unit(text, ':');
+    if (colon < text.length)
+    {
+        u8 segment = 0;
+        String8 prefix = assembly_trim(string_slice(text, 0, colon));
+        if (result->has_segment || !assembly_x86_segment_parse(prefix, syntax, &segment))
+        {
+            return text;
+        }
+        result->has_segment = true;
+        result->segment = segment;
+        text = assembly_trim(string_slice(text, colon + 1, text.length));
+    }
+    return text;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_intel(AssemblyBuilder* builder, String8 text, AssemblyMemory* result)
 {
     text = assembly_trim(text);
+    text = assembly_x86_memory_strip_segment(text, ASSEMBLY_SYNTAX_INTEL, result);
     static const struct
     {
         String8 prefix;
@@ -897,6 +1045,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_intel(AssemblyBuilder* builde
             break;
         }
     }
+    text = assembly_x86_memory_strip_segment(text, ASSEMBLY_SYNTAX_INTEL, result);
     if (text.length < 2 || text.pointer[0] != '[' || text.pointer[text.length - 1] != ']')
     {
         return false;
@@ -936,13 +1085,29 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_intel(AssemblyBuilder* builde
         {
             String8 register_text = assembly_trim(string_slice(term, 0, star));
             String8 scale_text = assembly_trim(string_slice(term, star + 1, term.length));
-            if (subtract || result->has_index || !assembly_register_parse(register_text, ASSEMBLY_SYNTAX_INTEL, &reg) || reg.width != 64 ||
-                !assembly_x86_scale_parse(scale_text, &result->scale) || reg.index == 4)
+            if (subtract || result->has_index || !assembly_register_parse(register_text, ASSEMBLY_SYNTAX_INTEL, &reg) ||
+                !assembly_x86_scale_parse(scale_text, &result->scale))
             {
                 return false;
             }
+            bool vector_index = reg.class == ASSEMBLY_REGISTER_XMM || reg.class == ASSEMBLY_REGISTER_YMM ||
+                                reg.class == ASSEMBLY_REGISTER_ZMM;
+            if ((!vector_index && (reg.class != ASSEMBLY_REGISTER_GPR || (reg.width != 32 && reg.width != 64) || reg.index == 4)) ||
+                (vector_index && result->rip_relative))
+            {
+                return false;
+            }
+            if (!vector_index)
+            {
+                if (result->address_size && result->address_size != reg.width)
+                {
+                    return false;
+                }
+                result->address_size = (u8)reg.width;
+            }
             result->index = reg;
             result->has_index = true;
+            result->vsib = vector_index;
         }
         else if (assembly_x86_rip_parse(term, ASSEMBLY_SYNTAX_INTEL))
         {
@@ -954,10 +1119,15 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_intel(AssemblyBuilder* builde
         }
         else if (assembly_register_parse(term, ASSEMBLY_SYNTAX_INTEL, &reg))
         {
-            if (subtract || reg.width != 64)
+            if (subtract || reg.class != ASSEMBLY_REGISTER_GPR || (reg.width != 32 && reg.width != 64))
             {
                 return false;
             }
+            if (result->address_size && result->address_size != reg.width)
+            {
+                return false;
+            }
+            result->address_size = (u8)reg.width;
             if (!result->has_base)
             {
                 result->base = reg;
@@ -986,6 +1156,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_intel(AssemblyBuilder* builde
 BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_att(AssemblyBuilder* builder, String8 text, AssemblyMemory* result)
 {
     text = assembly_trim(text);
+    text = assembly_x86_memory_strip_segment(text, ASSEMBLY_SYNTAX_ATT, result);
     u64 open = string_first_code_unit(text, '(');
     if (open == text.length || text.length < open + 2 || text.pointer[text.length - 1] != ')')
     {
@@ -1024,24 +1195,41 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_att(AssemblyBuilder* builder,
         {
             result->rip_relative = true;
         }
-        else if (!assembly_register_parse(fields[0], ASSEMBLY_SYNTAX_ATT, &result->base) || result->base.width != 64)
+        else if (!assembly_register_parse(fields[0], ASSEMBLY_SYNTAX_ATT, &result->base) ||
+                 result->base.class != ASSEMBLY_REGISTER_GPR || (result->base.width != 32 && result->base.width != 64))
         {
             return false;
         }
         else
         {
+            result->address_size = (u8)result->base.width;
             result->has_base = true;
         }
     }
     result->scale = 1;
     if (field_count >= 2 && fields[1].length)
     {
-        if (result->rip_relative || !assembly_register_parse(fields[1], ASSEMBLY_SYNTAX_ATT, &result->index) ||
-            result->index.width != 64 || result->index.index == 4)
+        if (result->rip_relative || !assembly_register_parse(fields[1], ASSEMBLY_SYNTAX_ATT, &result->index))
         {
             return false;
         }
+        bool vector_index = result->index.class == ASSEMBLY_REGISTER_XMM || result->index.class == ASSEMBLY_REGISTER_YMM ||
+                            result->index.class == ASSEMBLY_REGISTER_ZMM;
+        if ((!vector_index && (result->index.class != ASSEMBLY_REGISTER_GPR ||
+                               (result->index.width != 32 && result->index.width != 64) || result->index.index == 4)))
+        {
+            return false;
+        }
+        if (!vector_index)
+        {
+            if (result->address_size && result->address_size != result->index.width)
+            {
+                return false;
+            }
+            result->address_size = (u8)result->index.width;
+        }
         result->has_index = true;
+        result->vsib = vector_index;
     }
     if (field_count == 3 && fields[2].length && (!result->has_index || !assembly_x86_scale_parse(fields[2], &result->scale)))
     {
@@ -5227,8 +5415,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset,
-                                                    Target target, AssemblySyntax syntax)
+BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder* builder, String8 statement, u32 line, u32 column,
+                                                                 u64 offset, Target target, AssemblySyntax syntax)
 {
     u8 lock_prefix = false;
     u64 lock_end = 0;
@@ -5816,6 +6004,1219 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     builder->instructions[builder->instruction_count++] = instruction;
 }
 
+BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, String8* names, u32 capacity)
+{
+    static TargetCpuFeature const feature_bits[] = {
+        TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_AVX,
+        TARGET_CPU_FEATURE_X86_AVX2,
+        TARGET_CPU_FEATURE_X86_AVX512F,
+        TARGET_CPU_FEATURE_X86_AVX512VL,
+        TARGET_CPU_FEATURE_X86_AVX10_1,
+        TARGET_CPU_FEATURE_X86_AVX10_2,
+        TARGET_CPU_FEATURE_X86_AVX10_512,
+        TARGET_CPU_FEATURE_X86_APX,
+        TARGET_CPU_FEATURE_X86_AVX512BW,
+        TARGET_CPU_FEATURE_X86_SSE3,
+        TARGET_CPU_FEATURE_X86_POPCNT,
+        TARGET_CPU_FEATURE_X86_LZCNT,
+        TARGET_CPU_FEATURE_X86_BMI1,
+        TARGET_CPU_FEATURE_X86_CX16,
+        TARGET_CPU_FEATURE_X86_AVX512CD,
+        TARGET_CPU_FEATURE_X86_AVX512DQ,
+        TARGET_CPU_FEATURE_X86_AVX512IFMA,
+        TARGET_CPU_FEATURE_X86_AVX512PF,
+        TARGET_CPU_FEATURE_X86_AVX512ER,
+        TARGET_CPU_FEATURE_X86_AVX512VBMI,
+        TARGET_CPU_FEATURE_X86_AVX512VBMI2,
+        TARGET_CPU_FEATURE_X86_AVX512VNNI,
+        TARGET_CPU_FEATURE_X86_AVX512BITALG,
+        TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ,
+        TARGET_CPU_FEATURE_X86_AVX5124VNNIW,
+        TARGET_CPU_FEATURE_X86_AVX5124FMAPS,
+        TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT,
+        TARGET_CPU_FEATURE_X86_AVX512BF16,
+        TARGET_CPU_FEATURE_X86_AVX512FP16,
+        TARGET_CPU_FEATURE_X86_GFNI,
+        TARGET_CPU_FEATURE_X86_VAES,
+        TARGET_CPU_FEATURE_X86_VPCLMULQDQ,
+        TARGET_CPU_FEATURE_X86_AES,
+        TARGET_CPU_FEATURE_X86_PCLMUL,
+        TARGET_CPU_FEATURE_X86_AVX10_V1_AUX,
+        TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF,
+        TARGET_CPU_FEATURE_X86_AMX_TILE,
+        TARGET_CPU_FEATURE_X86_AMX_INT8,
+        TARGET_CPU_FEATURE_X86_AMX_BF16,
+        TARGET_CPU_FEATURE_X86_AMX_FP16,
+        TARGET_CPU_FEATURE_X86_AMX_COMPLEX,
+        TARGET_CPU_FEATURE_X86_AMX_FP8,
+        TARGET_CPU_FEATURE_X86_AMX_AVX512,
+        TARGET_CPU_FEATURE_X86_AMX_MOVRS,
+        TARGET_CPU_FEATURE_X86_AVX_VNNI,
+        TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8,
+        TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16,
+        TARGET_CPU_FEATURE_X86_AVX_IFMA,
+        TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT,
+        TARGET_CPU_FEATURE_X86_MOVRS,
+        TARGET_CPU_FEATURE_X86_3DNOW,
+        TARGET_CPU_FEATURE_X86_3DNOWA,
+        TARGET_CPU_FEATURE_X86_FMA4,
+        TARGET_CPU_FEATURE_X86_LWP,
+        TARGET_CPU_FEATURE_X86_TBM,
+        TARGET_CPU_FEATURE_X86_XOP,
+    };
+    if (!names || !capacity)
+    {
+        return 0;
+    }
+    TargetCpuFeatures effective = target_cpu_features_effective(target);
+    u32 count = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(feature_bits) && count < capacity; index += 1)
+    {
+        if (effective & feature_bits[index])
+        {
+            names[count++] = target_cpu_feature_to_string(feature_bits[index]);
+        }
+    }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL u8 assembly_x86_metadata_physical_class(AssemblyRegisterClass class)
+{
+    return class == ASSEMBLY_REGISTER_GPR       ? BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR
+           : class == ASSEMBLY_REGISTER_XMM     ? BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM
+           : class == ASSEMBLY_REGISTER_YMM     ? BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM
+           : class == ASSEMBLY_REGISTER_ZMM     ? BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM
+           : class == ASSEMBLY_REGISTER_OPMASK  ? BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK
+           : class == ASSEMBLY_REGISTER_TILE    ? BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM
+           : class == ASSEMBLY_REGISTER_MMX     ? BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX
+           : class == ASSEMBLY_REGISTER_X87     ? BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL
+           : class == ASSEMBLY_REGISTER_BND     ? BUSTER_X86_METADATA_PHYSICAL_CLASS_BND
+           : class == ASSEMBLY_REGISTER_CONTROL ? BUSTER_X86_METADATA_PHYSICAL_CLASS_CONTROL
+           : class == ASSEMBLY_REGISTER_DEBUG   ? BUSTER_X86_METADATA_PHYSICAL_CLASS_DEBUG
+           : class == ASSEMBLY_REGISTER_SEGMENT ? BUSTER_X86_METADATA_PHYSICAL_CLASS_SEGMENT
+           : class == ASSEMBLY_REGISTER_SPECIAL ? BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL
+                                                : BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN;
+}
+
+BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_symbol_name(AssemblyBuilder* builder, u32 symbol)
+{
+    return symbol < builder->result.symbol_count ? builder->result.symbols[symbol].name : (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_physical_operand(AssemblyBuilder* builder, AssemblyOperand operand, bool relative,
+                                                                 bool absolute, BusterX86MetadataPhysicalOperand* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    *result = (BusterX86MetadataPhysicalOperand){0};
+    if (operand.kind == ASSEMBLY_OPERAND_REGISTER)
+    {
+        result->kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER;
+        result->width = operand.reg.width;
+        result->reg = (BusterX86MetadataPhysicalRegister){
+            .index = operand.reg.index,
+            .width = operand.reg.width,
+            .physical_class = assembly_x86_metadata_physical_class(operand.reg.class),
+            .high_byte = operand.reg.high_byte,
+        };
+        return result->reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN;
+    }
+    if (operand.kind == ASSEMBLY_OPERAND_MEMORY)
+    {
+        AssemblyMemory memory = operand.memory;
+        result->kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY;
+        // Metadata memory widths describe the encoded scalar element for
+        // vector forms, while the source qualifier records the aggregate
+        // vector width (xmmword/ymmword/zmmword).  Leave aggregate widths
+        // unresolved so the selected vector form supplies the element width;
+        // scalar and branch memory widths retain their source value.
+        result->width = memory.width > 64 ? 0 : memory.width ? memory.width : (relative ? 64 : 0);
+        result->memory.source_width = memory.width;
+        result->memory.address_size = memory.address_size ? memory.address_size : 64;
+        result->memory.scale = memory.scale ? memory.scale : 1;
+        result->memory.segment = memory.has_segment ? memory.segment : BUSTER_X86_METADATA_SEGMENT_NONE;
+        result->memory.has_segment = memory.has_segment;
+        result->memory.has_base = memory.has_base;
+        result->memory.has_index = memory.has_index;
+        result->memory.rip_relative = memory.rip_relative;
+        result->memory.vsib = memory.vsib;
+        if (memory.has_base)
+        {
+            result->memory.base = (BusterX86MetadataPhysicalRegister){
+                .index = memory.base.index,
+                .width = memory.base.width,
+                .physical_class = assembly_x86_metadata_physical_class(memory.base.class),
+            };
+        }
+        if (memory.has_index)
+        {
+            result->memory.index = (BusterX86MetadataPhysicalRegister){
+                .index = memory.index.index,
+                .width = memory.index.width,
+                .physical_class = assembly_x86_metadata_physical_class(memory.index.class),
+            };
+        }
+        if (memory.displacement.has_symbol)
+        {
+            result->memory.symbol = assembly_x86_metadata_symbol_name(builder, memory.displacement.symbol);
+            result->memory.has_symbol = result->memory.symbol.length != 0;
+            result->memory.addend = memory.displacement.addend;
+            if (!result->memory.has_symbol)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (memory.displacement.has_unsigned_addend)
+            {
+                return false;
+            }
+            result->memory.displacement = memory.displacement.addend;
+            result->memory.has_displacement = memory.displacement.addend != 0;
+        }
+        if (memory.has_base && result->memory.base.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
+        {
+            return false;
+        }
+        if (memory.has_index && memory.vsib)
+        {
+            if (result->memory.index.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM &&
+                result->memory.index.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM &&
+                result->memory.index.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM)
+            {
+                return false;
+            }
+        }
+        else if (memory.has_index && result->memory.index.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
+        {
+            return false;
+        }
+        return true;
+    }
+    if (operand.kind != ASSEMBLY_OPERAND_EXPRESSION)
+    {
+        return false;
+    }
+    result->kind = absolute       ? BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE
+                   : relative    ? BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE
+                                 : BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE;
+    result->width = 0;
+    if (operand.expression.has_symbol)
+    {
+        result->symbol = assembly_x86_metadata_symbol_name(builder, operand.expression.symbol);
+        result->has_symbol = result->symbol.length != 0;
+        result->addend = operand.expression.addend;
+        return result->has_symbol;
+    }
+    if (operand.expression.has_unsigned_addend)
+    {
+        result->unsigned_value = operand.expression.unsigned_addend;
+        result->has_unsigned_value = true;
+    }
+    else
+    {
+        result->value = operand.expression.addend;
+        result->has_value = true;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_absolute_mnemonic(String8 mnemonic)
+{
+    return assembly_word_equal(mnemonic, S8("jmpabs"));
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_adjust_relative_literals(BusterX86MetadataPhysicalOperand* operands, u32 operand_count,
+                                                                          u64 offset, u32 byte_count)
+{
+    if (!operands)
+    {
+        return false;
+    }
+    bool has_relative_literal = false;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        has_relative_literal |= operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE && !operands[index].has_symbol;
+    }
+    if (!has_relative_literal)
+    {
+        return true;
+    }
+    if (offset > (u64)INT64_MAX || (u64)byte_count > (u64)INT64_MAX - offset)
+    {
+        return false;
+    }
+    s64 next = (s64)(offset + byte_count);
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        BusterX86MetadataPhysicalOperand* operand = operands + index;
+        if (operand->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE || operand->has_symbol)
+        {
+            continue;
+        }
+        if (operand->has_unsigned_value)
+        {
+            if (operand->unsigned_value > (u64)INT64_MAX)
+            {
+                return false;
+            }
+            operand->value = (s64)operand->unsigned_value;
+            operand->has_unsigned_value = false;
+            operand->has_value = true;
+        }
+        if (!operand->has_value || operand->value < INT64_MIN + next)
+        {
+            return false;
+        }
+        operand->value -= next;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_relative_mnemonic(String8 mnemonic)
+{
+    if (!mnemonic.length)
+    {
+        return false;
+    }
+    if (assembly_word_equal(mnemonic, S8("jmpabs")))
+    {
+        return false;
+    }
+    if (mnemonic.pointer[0] == 'j' || mnemonic.pointer[0] == 'J')
+    {
+        return true;
+    }
+    return assembly_word_equal(mnemonic, S8("call")) || assembly_word_equal(mnemonic, S8("call_near")) ||
+           assembly_word_equal(mnemonic, S8("loop")) ||
+           assembly_word_equal(mnemonic, S8("loope")) || assembly_word_equal(mnemonic, S8("loopz")) ||
+           assembly_word_equal(mnemonic, S8("loopne")) || assembly_word_equal(mnemonic, S8("loopnz")) ||
+           assembly_word_equal(mnemonic, S8("xbegin"));
+}
+
+BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_mnemonic(String8 mnemonic)
+{
+    if (buster_x86_metadata_lookup_mnemonic(mnemonic).count)
+    {
+        return mnemonic;
+    }
+    if (mnemonic.length > 5 && assembly_word_equal(string_slice(mnemonic, mnemonic.length - 5, mnemonic.length), S8("_near")))
+    {
+        String8 base = string_slice(mnemonic, 0, mnemonic.length - 5);
+        if (buster_x86_metadata_lookup_mnemonic(base).count)
+        {
+            return base;
+        }
+    }
+    return mnemonic;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_mnemonic_has_visible_operands(String8 mnemonic)
+{
+    BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+    for (u32 position = 0; position < candidates.count; position += 1)
+    {
+        u32 form_id = 0;
+        BusterX86MetadataForm form = {0};
+        if (!buster_x86_metadata_candidate_at(candidates, position, &form_id) || !buster_x86_metadata_form(form_id, &form))
+        {
+            continue;
+        }
+        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        {
+            BusterX86MetadataOperand operand = {0};
+            if (buster_x86_metadata_operand(form_id, operand_index, &operand) && operand.visible)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, AssemblySyntax syntax, String8 mnemonic,
+                                                             String8* base, AssemblyInstructionInfo* base_info, u8* width)
+{
+    if (syntax != ASSEMBLY_SYNTAX_ATT || mnemonic.length <= 1 || !base || !width)
+    {
+        return false;
+    }
+    char8 suffix = assembly_ascii_lower(mnemonic.pointer[mnemonic.length - 1]);
+    u8 suffix_width = suffix == 'b' ? 8 : suffix == 'w' ? 16 : suffix == 'l' ? 32 : suffix == 'q' ? 64 : 0;
+    if (!suffix_width)
+    {
+        return false;
+    }
+    String8 candidate = string_slice(mnemonic, 0, mnemonic.length - 1);
+    AssemblyInstructionInfo info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+    bool has_handwritten_base = assembly_instruction_lookup(target, syntax, candidate, &info);
+    if (has_handwritten_base)
+    {
+        if ((!info.operand_count && info.opcode != ASSEMBLY_OPCODE_X86_RET) || info.opcode == ASSEMBLY_OPCODE_X86_JCC ||
+            info.opcode == ASSEMBLY_OPCODE_X86_SETCC)
+        {
+            return false;
+        }
+    }
+    else if (!buster_x86_metadata_lookup_mnemonic(candidate).count ||
+             !assembly_x86_metadata_mnemonic_has_visible_operands(candidate))
+    {
+        return false;
+    }
+    if (assembly_x86_metadata_relative_mnemonic(candidate) && !assembly_word_equal(candidate, S8("jmp")) &&
+        !assembly_word_equal(candidate, S8("call")) && !assembly_word_equal(candidate, S8("call_near")))
+    {
+        return false;
+    }
+    *base = candidate;
+    if (base_info)
+    {
+        *base_info = info;
+    }
+    *width = suffix_width;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_applies(AssemblyOpcode opcode, u32 operand_index, u32 operand_count)
+{
+    if (opcode == ASSEMBLY_OPCODE_X86_LEA || assembly_x86_opcode_is_rotate(opcode) ||
+        opcode == ASSEMBLY_OPCODE_X86_MOVZX || opcode == ASSEMBLY_OPCODE_X86_MOVSX || opcode == ASSEMBLY_OPCODE_X86_MOVSXD)
+    {
+        return operand_index == 0;
+    }
+    if (opcode == ASSEMBLY_OPCODE_X86_SHLD || opcode == ASSEMBLY_OPCODE_X86_SHRD)
+    {
+        return operand_index < 2;
+    }
+    if (assembly_x86_opcode_is_shift(opcode))
+    {
+        return operand_index + 1 < operand_count;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_width_matches(AssemblyInstructionInfo info, u8 suffix_width,
+                                                                      AssemblyOperand const* operands,
+                                                                      BusterX86MetadataPhysicalOperand* physical,
+                                                                      u32 operand_count)
+{
+    bool saw_width_operand = false;
+    for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+    {
+        if (!assembly_x86_metadata_suffix_applies(info.opcode, operand_index, operand_count))
+        {
+            continue;
+        }
+        AssemblyOperand operand = operands[operand_index];
+        if (operand.kind == ASSEMBLY_OPERAND_REGISTER && operand.reg.width != suffix_width)
+        {
+            return false;
+        }
+        if (operand.kind == ASSEMBLY_OPERAND_REGISTER)
+        {
+            saw_width_operand = true;
+        }
+        if (operand.kind == ASSEMBLY_OPERAND_MEMORY)
+        {
+            if (operand.memory.width && operand.memory.width != suffix_width)
+            {
+                return false;
+            }
+            physical[operand_index].width = suffix_width;
+            saw_width_operand = true;
+        }
+    }
+    // A suffix must describe a data-width operand.  This excludes metadata
+    // mnemonics whose visible operand is only an immediate or branch target
+    // (for example intb), while retaining register and memory aliases such as
+    // smswl and pushpq.
+    return saw_width_operand;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataSelectResult assembly_x86_metadata_select_source_form(
+    BusterX86MetadataPhysicalQuery query, String8 mnemonic, String8 suffix_base, AssemblyInstructionInfo suffix_info,
+    u8 suffix_width, AssemblyOperand const* operands, BusterX86MetadataPhysicalOperand* physical, u32 operand_count,
+    String8* selected_mnemonic)
+{
+    if (selected_mnemonic)
+    {
+        *selected_mnemonic = mnemonic;
+    }
+    BusterX86MetadataSelectResult selection = buster_x86_metadata_select_form(query);
+    if (selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS || !suffix_base.length)
+    {
+        return selection;
+    }
+    if (!assembly_x86_metadata_suffix_width_matches(suffix_info, suffix_width, operands, physical, operand_count))
+    {
+        selection.status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        return selection;
+    }
+    query.mnemonic = suffix_base;
+    BusterX86MetadataSelectResult suffix_selection = buster_x86_metadata_select_form(query);
+    if (suffix_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && selected_mnemonic)
+    {
+        *selected_mnemonic = suffix_base;
+    }
+    return suffix_selection;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_operand_decorators(BusterX86MetadataPhysicalAttributes* attributes,
+                                                                    AssemblyOperand const* operands, u32 operand_count)
+{
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        AssemblyOperand operand = operands[index];
+        if ((operand.has_mask || operand.zeroing || operand.rounding || operand.sae) &&
+            (index != 0 || operand.kind != ASSEMBLY_OPERAND_REGISTER))
+        {
+            return false;
+        }
+        if (operand.zeroing && !operand.has_mask)
+        {
+            return false;
+        }
+        if (operand.broadcast && operand.kind != ASSEMBLY_OPERAND_MEMORY)
+        {
+            return false;
+        }
+        if (operand.has_mask)
+        {
+            if (attributes->has_mask_register && attributes->mask_register != operand.mask)
+            {
+                return false;
+            }
+            attributes->decorator_flags |= BUSTER_X86_METADATA_DECORATOR_MASK;
+            attributes->has_mask_register = true;
+            attributes->mask_register = operand.mask;
+        }
+        if (operand.zeroing)
+        {
+            attributes->decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ZEROING;
+            attributes->zeroing = true;
+        }
+        if (operand.broadcast)
+        {
+            if (attributes->broadcast_elements && attributes->broadcast_elements != operand.broadcast)
+            {
+                return false;
+            }
+            attributes->decorator_flags |= BUSTER_X86_METADATA_DECORATOR_BROADCAST;
+            attributes->broadcast_elements = operand.broadcast;
+        }
+        if (operand.rounding)
+        {
+            if (attributes->rounding_mode && attributes->rounding_mode != operand.rounding)
+            {
+                return false;
+            }
+            attributes->decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ROUNDING;
+            attributes->rounding_mode = operand.rounding;
+            attributes->sae = true;
+            attributes->decorator_flags |= BUSTER_X86_METADATA_DECORATOR_SAE;
+        }
+        else if (operand.sae)
+        {
+            attributes->decorator_flags |= BUSTER_X86_METADATA_DECORATOR_SAE;
+            attributes->sae = true;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_physical_has_duplicate_registers(BusterX86MetadataPhysicalOperand const* operands,
+                                                                                 u32 operand_count)
+{
+    for (u32 left = 0; left < operand_count; left += 1)
+    {
+        if (operands[left].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
+        {
+            continue;
+        }
+        for (u32 right = left + 1; right < operand_count; right += 1)
+        {
+            if (operands[right].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                operands[left].reg.physical_class == operands[right].reg.physical_class &&
+                operands[left].reg.index == operands[right].reg.index &&
+                operands[left].reg.width == operands[right].reg.width)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruction_parse(
+    AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset, Target target, AssemblySyntax syntax)
+{
+    if (target.cpu_arch != CPU_ARCH_X86_64)
+    {
+        return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
+    }
+    bool lock = false;
+    bool rep = false;
+    bool repne = false;
+    String8 work = assembly_trim(statement);
+    for (;;)
+    {
+        u64 prefix_end = 0;
+        while (prefix_end < work.length && !assembly_space(work.pointer[prefix_end])) prefix_end += 1;
+        String8 prefix = string_slice(work, 0, prefix_end);
+        if (assembly_word_equal(prefix, S8("lock")))
+        {
+            lock = true;
+        }
+        else if (assembly_word_equal(prefix, S8("rep")) || assembly_word_equal(prefix, S8("repe")) ||
+                 assembly_word_equal(prefix, S8("repz")))
+        {
+            rep = true;
+        }
+        else if (assembly_word_equal(prefix, S8("repne")) || assembly_word_equal(prefix, S8("repnz")))
+        {
+            repne = true;
+        }
+        else
+        {
+            break;
+        }
+        work = assembly_trim(string_slice(work, prefix_end, work.length));
+    }
+    bool no_flags = false;
+    if (work.length && work.pointer[0] == '{')
+    {
+        u64 end = 1;
+        while (end < work.length && work.pointer[end] != '}') end += 1;
+        if (end >= work.length || !assembly_word_equal(assembly_trim(string_slice(work, 1, end)), S8("nf")))
+        {
+            return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+        no_flags = true;
+        work = assembly_trim(string_slice(work, end + 1, work.length));
+    }
+    u64 mnemonic_end = 0;
+    while (mnemonic_end < work.length && !assembly_space(work.pointer[mnemonic_end])) mnemonic_end += 1;
+    String8 source_mnemonic = string_slice(work, 0, mnemonic_end);
+    String8 mnemonic = assembly_x86_metadata_mnemonic(source_mnemonic);
+    String8 mnemonic_suffix_base = {0};
+    AssemblyInstructionInfo mnemonic_suffix_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+    u8 mnemonic_suffix_width = 0;
+    bool has_suffix_alias = assembly_x86_metadata_suffix_alias(target, syntax, source_mnemonic, &mnemonic_suffix_base,
+                                                                &mnemonic_suffix_info, &mnemonic_suffix_width);
+    bool has_mnemonic = mnemonic.length && buster_x86_metadata_lookup_mnemonic(mnemonic).count;
+    if (!has_mnemonic)
+    {
+        if (!has_suffix_alias)
+        {
+            return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
+        }
+        mnemonic = mnemonic_suffix_base;
+    }
+    else if (!has_suffix_alias)
+    {
+        mnemonic_suffix_base = (String8){0};
+    }
+    bool suffix_alias_selected = !has_mnemonic && has_suffix_alias;
+    String8 operands_text = assembly_trim(string_slice(work, mnemonic_end, work.length));
+    u8 leading_rounding = 0;
+    bool leading_sae = false;
+    if (operands_text.length && operands_text.pointer[0] == '{')
+    {
+        u64 end = 1;
+        while (end < operands_text.length && operands_text.pointer[end] != '}') end += 1;
+        if (end >= operands_text.length)
+        {
+            return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+        }
+        String8 decorator = assembly_trim(string_slice(operands_text, 1, end));
+        leading_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+                          : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+                          : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+                          : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+                                                                          : 0;
+        leading_sae = assembly_word_equal(decorator, S8("sae")) || leading_rounding != 0;
+        if (!leading_sae)
+        {
+            return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+        }
+        operands_text = assembly_trim(string_slice(operands_text, end + 1, operands_text.length));
+        if (operands_text.length && operands_text.pointer[0] == ',')
+        {
+            operands_text = assembly_trim(string_slice(operands_text, 1, operands_text.length));
+        }
+    }
+    AssemblyOperand operands[5] = {0};
+    u32 operand_count = 0;
+    u64 operand_start = 0;
+    bool relative = assembly_x86_metadata_relative_mnemonic(mnemonic);
+    while (operand_start < operands_text.length)
+    {
+        if (operand_count >= BUSTER_ARRAY_LENGTH(operands))
+        {
+            return BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT;
+        }
+        u64 operand_end = operand_start;
+        u32 delimiter_depth = 0;
+        while (operand_end < operands_text.length)
+        {
+            char8 character = operands_text.pointer[operand_end];
+            if (character == '(' || character == '[')
+            {
+                delimiter_depth += 1;
+            }
+            else if (character == ')' || character == ']')
+            {
+                if (!delimiter_depth)
+                {
+                    return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+                }
+                delimiter_depth -= 1;
+            }
+            else if (character == ',' && !delimiter_depth)
+            {
+                break;
+            }
+            operand_end += 1;
+        }
+        if (delimiter_depth)
+        {
+            return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+        String8 text = assembly_trim(string_slice(operands_text, operand_start, operand_end));
+        if (!text.length)
+        {
+            return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+        bool indirect = syntax == ASSEMBLY_SYNTAX_ATT && relative && text.pointer[0] == '*';
+        if (indirect)
+        {
+            text = assembly_trim(string_slice(text, 1, text.length));
+            if (!text.length)
+            {
+                return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+            }
+        }
+        AssemblyOperand* operand = operands + operand_count;
+        if (!assembly_x86_operand_decorators_parse(&text, syntax, operand, &no_flags))
+        {
+            return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+        }
+        if (assembly_register_parse(text, syntax, &operand->reg))
+        {
+            operand->kind = ASSEMBLY_OPERAND_REGISTER;
+        }
+        else if (assembly_x86_memory_parse(builder, text, syntax, &operand->memory))
+        {
+            operand->kind = ASSEMBLY_OPERAND_MEMORY;
+        }
+        else
+        {
+            bool immediate = syntax == ASSEMBLY_SYNTAX_ATT && text.pointer[0] == '$';
+            if (immediate)
+            {
+                text = string_slice(text, 1, text.length);
+            }
+            else if (syntax == ASSEMBLY_SYNTAX_INTEL && text.pointer[0] == '$')
+            {
+                return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+            }
+            else if (syntax == ASSEMBLY_SYNTAX_ATT && !relative)
+            {
+                return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+            }
+            if (!text.length || !assembly_expression_parse(builder, text, &operand->expression))
+            {
+                return BUSTER_X86_METADATA_ENCODE_INVALID_EXPRESSION;
+            }
+            operand->kind = ASSEMBLY_OPERAND_EXPRESSION;
+        }
+        operand_count += 1;
+        if (operand_end == operands_text.length)
+        {
+            operand_start = operand_end;
+        }
+        else
+        {
+            operand_start = operand_end + 1;
+        }
+    }
+    if (syntax == ASSEMBLY_SYNTAX_ATT)
+    {
+        for (u32 left = 0; left < operand_count / 2; left += 1)
+        {
+            AssemblyOperand temporary = operands[left];
+            u32 right = operand_count - left - 1;
+            operands[left] = operands[right];
+            operands[right] = temporary;
+        }
+    }
+    BusterX86MetadataPhysicalOperand physical[5] = {0};
+    bool absolute = assembly_x86_metadata_absolute_mnemonic(mnemonic);
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        if (!assembly_x86_metadata_physical_operand(builder, operands[index], relative, absolute,
+                                                     physical + index))
+        {
+            return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+    }
+    if (suffix_alias_selected && !assembly_x86_metadata_suffix_width_matches(mnemonic_suffix_info, mnemonic_suffix_width, operands,
+                                                                               physical, operand_count))
+    {
+        return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+    }
+    for (u32 immediate_index = 0; immediate_index < operand_count; immediate_index += 1)
+    {
+        if (physical[immediate_index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || physical[immediate_index].width)
+        {
+            continue;
+        }
+        for (u32 source_index = 0; source_index < operand_count; source_index += 1)
+        {
+            if (source_index == immediate_index)
+            {
+                continue;
+            }
+            BusterX86MetadataPhysicalOperand source = physical[source_index];
+            u16 width = 0;
+            if (source.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                source.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && source.reg.width <= 64)
+            {
+                width = source.reg.width;
+            }
+            else if (source.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && source.width && source.width <= 64)
+            {
+                width = source.width;
+            }
+            if (width)
+            {
+                physical[immediate_index].width = width;
+                break;
+            }
+        }
+    }
+    BusterX86MetadataPhysicalAttributes attributes = {
+        .lock = lock,
+        .rep = rep,
+        .repne = repne,
+        .no_flags = no_flags,
+    };
+    if (no_flags)
+    {
+        attributes.apx_flags |= BUSTER_X86_METADATA_APX_NF;
+    }
+    if (leading_sae)
+    {
+        attributes.sae = true;
+        attributes.decorator_flags |= BUSTER_X86_METADATA_DECORATOR_SAE;
+    }
+    if (!assembly_x86_metadata_operand_decorators(&attributes, operands, operand_count))
+    {
+        return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+    }
+    if (leading_rounding)
+    {
+        attributes.rounding_mode = leading_rounding;
+        attributes.sae = true;
+        attributes.decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ROUNDING | BUSTER_X86_METADATA_DECORATOR_SAE;
+    }
+    String8 feature_names[64] = {0};
+    u32 feature_count = assembly_x86_metadata_feature_names(target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+    u8 address_size = 64;
+    bool memory_address_size_seen = false;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+        {
+            continue;
+        }
+        u8 memory_address_size = physical[index].memory.address_size ? physical[index].memory.address_size : 64;
+        if (memory_address_size_seen && address_size != memory_address_size)
+        {
+            return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+        }
+        address_size = memory_address_size;
+        memory_address_size_seen = true;
+    }
+    BusterX86MetadataPhysicalQuery query = {
+        .mnemonic = mnemonic,
+        .operands = physical,
+        .operand_count = operand_count,
+        .features = {.names = feature_names, .count = feature_count},
+        .attributes = attributes,
+        .address_size = address_size,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .include_privileged = true,
+        .include_not64 = false,
+        .source_semantics = true,
+    };
+    bool relative_literal = false;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        relative_literal |= physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE && !physical[index].has_symbol;
+    }
+    BusterX86MetadataSelectResult selection = {
+        .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
+        .form_id = UINT32_MAX,
+    };
+    bool selected = false;
+    u32 trial_count = relative_literal ? 15 : 1;
+    for (u32 trial_byte_count = 1; trial_byte_count <= trial_count; trial_byte_count += 1)
+    {
+        BusterX86MetadataPhysicalOperand trial_physical[5] = {0};
+        memcpy(trial_physical, physical, operand_count * sizeof(*physical));
+        if (relative_literal && !assembly_x86_metadata_adjust_relative_literals(trial_physical, operand_count, offset, trial_byte_count))
+        {
+            continue;
+        }
+        query.operands = trial_physical;
+        String8 trial_mnemonic = mnemonic;
+        BusterX86MetadataSelectResult trial_selection = assembly_x86_metadata_select_source_form(
+            query, mnemonic, mnemonic_suffix_base, mnemonic_suffix_info, mnemonic_suffix_width, operands, trial_physical, operand_count,
+            &trial_mnemonic);
+        if (trial_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+            (!relative_literal || trial_selection.selected_byte_count == trial_byte_count))
+        {
+            memcpy(physical, trial_physical, operand_count * sizeof(*physical));
+            mnemonic = trial_mnemonic;
+            selection = trial_selection;
+            selected = true;
+            break;
+        }
+        if (!relative_literal)
+        {
+            selection = trial_selection;
+            break;
+        }
+    }
+    if (!selected && relative_literal)
+    {
+        query.operands = physical;
+        String8 original_mnemonic = mnemonic;
+        selection = assembly_x86_metadata_select_source_form(query, mnemonic, mnemonic_suffix_base, mnemonic_suffix_info,
+                                                              mnemonic_suffix_width, operands, physical, operand_count, &original_mnemonic);
+        if (selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS)
+        {
+            selection.status = BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE;
+        }
+    }
+    if (selection.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
+    {
+        if (selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+            (!selection.required_feature.length ||
+             (assembly_x86_metadata_physical_has_duplicate_registers(physical, operand_count) && query.source_semantics)))
+        {
+            return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+        return selection.status;
+    }
+    if (builder->instruction_count >= builder->instruction_capacity)
+    {
+        return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+    }
+    AssemblyInstruction instruction = {
+        .offset = offset,
+        .line = line,
+        .column = column,
+        .size = selection.selected_byte_count,
+        .metadata = true,
+        .metadata_operand_count = (u8)operand_count,
+        .metadata_form_id = selection.form_id,
+        .metadata_mnemonic = mnemonic,
+        .metadata_address_size = address_size,
+        .metadata_attributes = attributes,
+    };
+    if (operand_count)
+    {
+        memcpy(instruction.metadata_operands, physical, operand_count * sizeof(*physical));
+    }
+    builder->instructions[builder->instruction_count++] = instruction;
+    return BUSTER_X86_METADATA_ENCODE_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_has_unsigned_expression(AssemblyInstruction instruction)
+{
+    for (u32 index = 0; index < instruction.operand_count; index += 1)
+    {
+        AssemblyOperand operand = instruction.operands[index];
+        if (operand.kind == ASSEMBLY_OPERAND_EXPRESSION && operand.expression.has_unsigned_addend)
+        {
+            return true;
+        }
+        if (operand.kind == ASSEMBLY_OPERAND_MEMORY && operand.memory.displacement.has_unsigned_addend)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_instruction_is_novel(AssemblyInstruction instruction)
+{
+    for (u32 index = 0; index < instruction.metadata_operand_count; index += 1)
+    {
+        BusterX86MetadataPhysicalOperand operand = instruction.metadata_operands[index];
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
+        {
+            if ((operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && operand.reg.index >= 16) ||
+                operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_BND ||
+                operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_CONTROL ||
+                operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_DEBUG ||
+                operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_SEGMENT ||
+                operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL)
+            {
+                return true;
+            }
+        }
+        else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                 (operand.memory.address_size != 64 || operand.memory.has_segment || operand.memory.vsib ||
+                  (operand.memory.has_base && operand.memory.base.index >= 16) ||
+                  (operand.memory.has_index && operand.memory.index.index >= 16)))
+        {
+            return true;
+        }
+    }
+    BusterX86MetadataForm form = {0};
+    if (buster_x86_metadata_form(instruction.metadata_form_id, &form) &&
+        (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 || form.encoder_family == BUSTER_X86_METADATA_ENCODER_XOP))
+    {
+        return true;
+    }
+    return instruction.metadata_attributes.apx_flags != 0 || instruction.metadata_attributes.amx_flags != 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_requires_metadata(AssemblyInstruction instruction)
+{
+    for (u32 index = 0; index < instruction.operand_count; index += 1)
+    {
+        AssemblyOperand operand = instruction.operands[index];
+        if (operand.kind == ASSEMBLY_OPERAND_REGISTER &&
+            (operand.reg.class == ASSEMBLY_REGISTER_BND || operand.reg.class == ASSEMBLY_REGISTER_CONTROL ||
+             operand.reg.class == ASSEMBLY_REGISTER_DEBUG || operand.reg.class == ASSEMBLY_REGISTER_SEGMENT ||
+             operand.reg.class == ASSEMBLY_REGISTER_SPECIAL))
+        {
+            return true;
+        }
+        if (operand.kind == ASSEMBLY_OPERAND_MEMORY &&
+            ((operand.memory.address_size && operand.memory.address_size != 64) || operand.memory.has_segment || operand.memory.vsib))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_instruction_has_duplicate_registers(AssemblyInstruction instruction)
+{
+    for (u32 left = 0; left < instruction.metadata_operand_count; left += 1)
+    {
+        BusterX86MetadataPhysicalOperand left_operand = instruction.metadata_operands[left];
+        if (left_operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
+        {
+            continue;
+        }
+        for (u32 right = left + 1; right < instruction.metadata_operand_count; right += 1)
+        {
+            BusterX86MetadataPhysicalOperand right_operand = instruction.metadata_operands[right];
+            if (right_operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                left_operand.reg.physical_class == right_operand.reg.physical_class &&
+                left_operand.reg.index == right_operand.reg.index && left_operand.reg.width == right_operand.reg.width)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_statement_has_extended_gpr(String8 statement)
+{
+    for (u64 index = 0; index < statement.length; index += 1)
+    {
+        if (assembly_ascii_lower(statement.pointer[index]) != 'r')
+        {
+            continue;
+        }
+        u64 end = index + 1;
+        while (end < statement.length &&
+               ((statement.pointer[end] >= '0' && statement.pointer[end] <= '9') ||
+                assembly_ascii_lower(statement.pointer[end]) == 'b' ||
+                assembly_ascii_lower(statement.pointer[end]) == 'd' ||
+                assembly_ascii_lower(statement.pointer[end]) == 'w'))
+        {
+            end += 1;
+        }
+        AssemblyRegister register_value = {0};
+        if (assembly_extended_gpr_parse(string_slice(statement, index, end), &register_value))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_statement_has_no_flags_decorator(String8 statement)
+{
+    for (u64 index = 0; index < statement.length; index += 1)
+    {
+        if (statement.pointer[index] != '{')
+        {
+            continue;
+        }
+        u64 end = index + 1;
+        while (end < statement.length && statement.pointer[end] != '}')
+        {
+            end += 1;
+        }
+        if (end < statement.length && assembly_word_equal(assembly_trim(string_slice(statement, index + 1, end)), S8("nf")))
+        {
+            return true;
+        }
+        index = end;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_diagnostic(AssemblyBuilder* builder, BusterX86MetadataEncodeStatus status,
+                                                           u32 line, u32 column, u32 length)
+{
+    AssemblyDiagnosticKind kind = ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS;
+    String8 message = S8("metadata instruction form is not encodable");
+    if (status == BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC)
+    {
+        kind = ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION;
+        message = S8("unknown instruction");
+    }
+    else if (status == BUSTER_X86_METADATA_ENCODE_INVALID_EXPRESSION)
+    {
+        kind = ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION;
+        message = S8("invalid instruction expression");
+    }
+    else if (status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE)
+    {
+        kind = ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE;
+        message = S8("instruction requires an enabled target feature");
+    }
+    else if (status == BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE)
+    {
+        kind = ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE;
+        message = S8("x86 branch target is out of range");
+    }
+    else if (status == BUSTER_X86_METADATA_ENCODE_DISPLACEMENT_RANGE)
+    {
+        kind = ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION;
+        message = S8("x86 memory displacement is out of range");
+    }
+    else if (status == BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE)
+    {
+        kind = ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION;
+        message = S8("x86 immediate is out of range");
+    }
+    else if (status == BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY ||
+             status == BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY)
+    {
+        kind = ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT;
+        message = S8("metadata instruction output capacity exceeded");
+    }
+    assembly_diagnostic(builder, kind, line, column, length, message);
+}
+
+BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset,
+                                                     Target target, AssemblySyntax syntax)
+{
+    u32 instruction_count = builder->instruction_count;
+    u32 symbol_count = builder->result.symbol_count;
+    u32 relocation_count = builder->result.relocation_count;
+    u32 diagnostic_count = builder->result.diagnostic_count;
+    u64 output_count = builder->output_count;
+    assembly_instruction_parse_handwritten(builder, statement, line, column, offset, target, syntax);
+    bool handwritten_succeeded = builder->instruction_count != instruction_count;
+    bool unsigned_expression = handwritten_succeeded &&
+                               assembly_x86_instruction_has_unsigned_expression(builder->instructions[instruction_count]);
+    bool handwritten_requires_metadata = handwritten_succeeded &&
+                                         assembly_x86_instruction_requires_metadata(builder->instructions[instruction_count]);
+    if (handwritten_succeeded && !unsigned_expression && !handwritten_requires_metadata)
+    {
+        return;
+    }
+    AssemblyDiagnosticKind handwritten_kind = ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT;
+    AssemblyDiagnostic handwritten_diagnostic = {0};
+    bool has_handwritten_diagnostic = false;
+    if (builder->result.diagnostic_count > diagnostic_count)
+    {
+        handwritten_kind = builder->result.diagnostics[builder->result.diagnostic_count - 1].kind;
+        handwritten_diagnostic = builder->result.diagnostics[builder->result.diagnostic_count - 1];
+        has_handwritten_diagnostic = true;
+    }
+    bool fallback_allowed = target.cpu_arch == CPU_ARCH_X86_64 &&
+                             (!handwritten_succeeded || unsigned_expression || handwritten_requires_metadata);
+    if (!fallback_allowed)
+    {
+        return;
+    }
+    builder->instruction_count = instruction_count;
+    builder->result.symbol_count = symbol_count;
+    builder->result.relocation_count = relocation_count;
+    builder->result.diagnostic_count = diagnostic_count;
+    builder->output_count = output_count;
+    BusterX86MetadataEncodeStatus status = assembly_x86_metadata_instruction_parse(builder, statement, line, column, offset, target, syntax);
+    if (status == BUSTER_X86_METADATA_ENCODE_SUCCESS)
+    {
+        bool metadata_novel = builder->instruction_count > instruction_count &&
+                              assembly_x86_metadata_instruction_is_novel(builder->instructions[instruction_count]);
+        if (handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE ||
+            (handwritten_kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+             (!metadata_novel || assembly_x86_metadata_instruction_has_duplicate_registers(builder->instructions[instruction_count]))))
+        {
+            builder->instruction_count = instruction_count;
+            builder->result.symbol_count = symbol_count;
+            builder->result.relocation_count = relocation_count;
+            builder->result.diagnostic_count = diagnostic_count;
+            builder->output_count = output_count;
+            if (has_handwritten_diagnostic)
+            {
+                assembly_diagnostic(builder, handwritten_diagnostic.kind, handwritten_diagnostic.line, handwritten_diagnostic.column,
+                                    handwritten_diagnostic.length, handwritten_diagnostic.message);
+            }
+        }
+        return;
+    }
+    builder->instruction_count = instruction_count;
+    builder->result.symbol_count = symbol_count;
+    builder->result.relocation_count = relocation_count;
+    builder->result.diagnostic_count = diagnostic_count;
+    builder->output_count = output_count;
+    bool metadata_precise = !handwritten_succeeded &&
+                            (handwritten_kind != ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS ||
+                             (status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                              assembly_x86_statement_has_extended_gpr(statement) &&
+                              !assembly_x86_statement_has_no_flags_decorator(statement)) ||
+                             (handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+                              (status == BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT ||
+                               status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH))) &&
+                            status != BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC &&
+                            status != BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
+                            handwritten_kind != ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE;
+    if (metadata_precise)
+    {
+        u32 length = statement.length > UINT32_MAX ? UINT32_MAX : (u32)statement.length;
+        assembly_x86_metadata_diagnostic(builder, status, line, column, length);
+    }
+    else if (handwritten_succeeded)
+    {
+        assembly_instruction_parse_handwritten(builder, statement, line, column, offset, target, syntax);
+    }
+    else if (has_handwritten_diagnostic)
+    {
+        assembly_diagnostic(builder, handwritten_diagnostic.kind, handwritten_diagnostic.line, handwritten_diagnostic.column,
+                            handwritten_diagnostic.length, handwritten_diagnostic.message);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8 source, Target target, AssemblySyntax syntax)
 {
     u64 source_cursor = 0;
@@ -5844,7 +7245,31 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
         if (statement.length)
         {
             u64 colon = string_first_code_unit(statement, ':');
+            bool segment_override = false;
             if (colon < statement.length)
+            {
+                u64 segment_start = colon;
+                while (segment_start && !assembly_space(statement.pointer[segment_start - 1]))
+                {
+                    segment_start -= 1;
+                }
+                String8 segment = string_slice(statement, segment_start, colon);
+                u64 following_index = colon + 1;
+                while (following_index < statement.length && assembly_space(statement.pointer[following_index]))
+                {
+                    following_index += 1;
+                }
+                char8 following = following_index < statement.length ? statement.pointer[following_index] : 0;
+                u8 segment_index = 0;
+                bool memory_after_segment = following == '[' || following == '(';
+                if (syntax == ASSEMBLY_SYNTAX_ATT && !memory_after_segment && following_index < statement.length)
+                {
+                    String8 after_segment = string_slice(statement, following_index, statement.length);
+                    memory_after_segment = string_first_code_unit(after_segment, '(') < after_segment.length;
+                }
+                segment_override = memory_after_segment && assembly_x86_segment_parse(segment, syntax, &segment_index);
+            }
+            if (colon < statement.length && !segment_override)
             {
                 String8 label = assembly_trim((String8){.pointer = statement.pointer, .length = colon});
                 if (!assembly_identifier(label))
@@ -5997,7 +7422,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_expression_target(AssemblyBuilder* builder, As
 {
     if (!expression.has_symbol)
     {
-        *target = expression.addend;
+        *target = expression.has_unsigned_addend && expression.unsigned_addend > (u64)INT64_MAX
+                      ? INT64_MAX
+                      : expression.has_unsigned_addend ? (s64)expression.unsigned_addend : expression.addend;
         return true;
     }
     AssemblySymbol* symbol = builder->result.symbols + expression.symbol;
@@ -6103,6 +7530,298 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_memory(AssemblyBuilder* builder, Asse
         }
         assembly_emit_immediate(builder, (u64)value, displacement_size);
     }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_pc_value(AssemblyInstruction* instruction, u64 relocation_offset, u64 target,
+                                                         s64 addend, s64* value)
+{
+    if (!instruction || !value || instruction->offset > (u64)INT64_MAX || relocation_offset > (u64)INT64_MAX ||
+        instruction->offset > (u64)INT64_MAX - relocation_offset)
+    {
+        return false;
+    }
+    u64 place_unsigned = instruction->offset + relocation_offset;
+    if (place_unsigned > (u64)INT64_MAX || target > (u64)INT64_MAX)
+    {
+        return false;
+    }
+    s64 target_value = (s64)target;
+    s64 place_value = (s64)place_unsigned;
+    if ((addend > 0 && target_value > INT64_MAX - addend) || (addend < 0 && target_value < INT64_MIN - addend))
+    {
+        return false;
+    }
+    target_value += addend;
+    if ((place_value > 0 && target_value < INT64_MIN + place_value) ||
+        (place_value < 0 && target_value > INT64_MAX + place_value))
+    {
+        return false;
+    }
+    *value = target_value - place_value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_relocation_kind(u8 metadata_kind, AssemblyRelocationKind* kind)
+{
+    if (!kind)
+    {
+        return false;
+    }
+    switch ((BusterX86MetadataRelocationKind)metadata_kind)
+    {
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE8:
+        *kind = ASSEMBLY_RELOCATION_X86_ABSOLUTE8;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE16:
+        *kind = ASSEMBLY_RELOCATION_X86_ABSOLUTE16;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32:
+        *kind = ASSEMBLY_RELOCATION_X86_ABSOLUTE32;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE64:
+        *kind = ASSEMBLY_RELOCATION_X86_ABSOLUTE64;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED:
+        *kind = ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_ZERO_EXTENDED:
+        *kind = ASSEMBLY_RELOCATION_X86_ABSOLUTE32_ZERO_EXTENDED;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_PC8:
+        *kind = ASSEMBLY_RELOCATION_X86_PC8;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_PC16:
+        *kind = ASSEMBLY_RELOCATION_X86_PC16;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_PC32:
+        *kind = ASSEMBLY_RELOCATION_X86_PC32;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_PC64:
+        *kind = ASSEMBLY_RELOCATION_X86_PC64;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_KIND_COUNT:
+        break;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_local_relocation(AssemblyBuilder* builder, AssemblyInstruction* instruction,
+                                                                 BusterX86MetadataRelocation relocation, u8* bytes)
+{
+    if (!builder || !instruction || !bytes || relocation.width == 0 || relocation.width > 8 ||
+        relocation.offset > UINT32_MAX - relocation.width || relocation.offset + relocation.width > instruction->size)
+    {
+        return false;
+    }
+    u32 symbol_index = assembly_symbol_find(builder, relocation.symbol);
+    if (symbol_index == UINT32_MAX)
+    {
+        return false;
+    }
+    AssemblySymbol symbol = builder->result.symbols[symbol_index];
+    AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
+    if (!assembly_x86_metadata_relocation_kind(relocation.kind, &kind))
+    {
+        return false;
+    }
+    if (!symbol.defined)
+    {
+        return true;
+    }
+    u64 value = 0;
+    if (kind == ASSEMBLY_RELOCATION_X86_PC8 || kind == ASSEMBLY_RELOCATION_X86_PC16 ||
+        kind == ASSEMBLY_RELOCATION_X86_PC32 || kind == ASSEMBLY_RELOCATION_X86_PC64)
+    {
+        s64 relative = 0;
+        if (!assembly_x86_metadata_pc_value(instruction, relocation.offset, symbol.offset, relocation.addend, &relative))
+        {
+            return false;
+        }
+        if ((kind == ASSEMBLY_RELOCATION_X86_PC8 && (relative < INT8_MIN || relative > INT8_MAX)) ||
+            (kind == ASSEMBLY_RELOCATION_X86_PC16 && (relative < INT16_MIN || relative > INT16_MAX)) ||
+            (kind == ASSEMBLY_RELOCATION_X86_PC32 && (relative < INT32_MIN || relative > INT32_MAX)))
+        {
+            return false;
+        }
+        value = (u64)relative;
+    }
+    else
+    {
+        u64 magnitude = 0;
+        if (relocation.addend >= 0)
+        {
+            u64 unsigned_addend = (u64)relocation.addend;
+            if (symbol.offset > UINT64_MAX - unsigned_addend)
+            {
+                return false;
+            }
+            value = symbol.offset + unsigned_addend;
+        }
+        else
+        {
+            magnitude = (u64)(-(relocation.addend + 1)) + 1;
+            if (symbol.offset < magnitude)
+            {
+                if (kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE64)
+                {
+                    value = 0 - (magnitude - symbol.offset);
+                }
+                else if (kind != ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED)
+                {
+                    return false;
+                }
+                else if (magnitude > (u64)INT64_MAX)
+                {
+                    s64 signed_value = INT64_MIN + (s64)symbol.offset;
+                    if (signed_value < INT32_MIN || signed_value > INT32_MAX)
+                    {
+                        return false;
+                    }
+                    value = (u64)signed_value;
+                }
+                else
+                {
+                    s64 signed_value = (s64)symbol.offset - (s64)magnitude;
+                    if (signed_value < INT32_MIN || signed_value > INT32_MAX)
+                    {
+                        return false;
+                    }
+                    value = (u64)signed_value;
+                }
+            }
+            else
+            {
+                value = symbol.offset - magnitude;
+            }
+        }
+        if ((kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8 && value > UINT8_MAX) ||
+            (kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE16 && value > UINT16_MAX) ||
+            (kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32 && value > UINT32_MAX) ||
+            (kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_ZERO_EXTENDED && value > UINT32_MAX) ||
+            (kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED &&
+             (relocation.addend >= 0 || symbol.offset >= magnitude) && value > (u64)INT32_MAX))
+        {
+            return false;
+        }
+    }
+    for (u32 byte_index = 0; byte_index < relocation.width; byte_index += 1)
+    {
+        bytes[relocation.offset + byte_index] = (u8)(value >> (byte_index * 8));
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, AssemblyInstruction* instruction)
+{
+    String8 feature_names[64] = {0};
+    u32 feature_count = assembly_x86_metadata_feature_names(builder->target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+    BusterX86MetadataPhysicalOperand operands[5] = {0};
+    if (instruction->metadata_operand_count > BUSTER_ARRAY_LENGTH(operands))
+    {
+        return false;
+    }
+    if (instruction->metadata_operand_count)
+    {
+        memcpy(operands, instruction->metadata_operands, instruction->metadata_operand_count * sizeof(*operands));
+    }
+    BusterX86MetadataPhysicalQuery physical = {
+        .mnemonic = instruction->metadata_mnemonic,
+        .operands = operands,
+        .operand_count = instruction->metadata_operand_count,
+        .features = {.names = feature_names, .count = feature_count},
+        .attributes = instruction->metadata_attributes,
+        .address_size = instruction->metadata_address_size ? instruction->metadata_address_size : 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .include_privileged = true,
+        .include_not64 = false,
+        .source_semantics = true,
+    };
+    u8 bytes[64] = {0};
+    BusterX86MetadataRelocation metadata_relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
+    BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+        .physical = physical,
+        .form_id = instruction->metadata_form_id,
+        .output = bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(bytes),
+        .relocations = metadata_relocations,
+        .relocation_capacity = BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY,
+    });
+    if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.byte_count != instruction->size ||
+        builder->result.relocation_count > builder->relocation_capacity ||
+        emitted.relocation_count > builder->relocation_capacity - builder->result.relocation_count)
+    {
+        BusterX86MetadataEncodeStatus status = emitted.status;
+        if (status == BUSTER_X86_METADATA_ENCODE_SUCCESS)
+        {
+            status = BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY;
+        }
+        assembly_x86_metadata_diagnostic(builder, status, instruction->line, instruction->column, 1);
+        return false;
+    }
+    for (u32 relocation_index = 0; relocation_index < emitted.relocation_count; relocation_index += 1)
+    {
+        BusterX86MetadataRelocation relocation = metadata_relocations[relocation_index];
+        if (!assembly_x86_metadata_local_relocation(builder, instruction, relocation, bytes))
+        {
+            assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE, instruction->line, instruction->column, 1);
+            return false;
+        }
+    }
+    if (builder->output_count > builder->output_capacity || emitted.byte_count > builder->output_capacity - builder->output_count)
+    {
+        assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY, instruction->line, instruction->column, 1);
+        return false;
+    }
+    u32 relocation_symbols[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
+    AssemblyRelocationKind relocation_kinds[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
+    u32 unresolved_relocation_count = 0;
+    for (u32 relocation_index = 0; relocation_index < emitted.relocation_count; relocation_index += 1)
+    {
+        BusterX86MetadataRelocation relocation = metadata_relocations[relocation_index];
+        u32 symbol = assembly_symbol_find(builder, relocation.symbol);
+        AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
+        if (symbol == UINT32_MAX || !assembly_x86_metadata_relocation_kind(relocation.kind, &kind))
+        {
+            assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_INVALID_EXPRESSION, instruction->line, instruction->column, 1);
+            return false;
+        }
+        if (!builder->result.symbols[symbol].defined)
+        {
+            if (instruction->offset > UINT64_MAX - relocation.offset)
+            {
+                assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_INVALID_EXPRESSION, instruction->line, instruction->column, 1);
+                return false;
+            }
+            relocation_symbols[unresolved_relocation_count] = symbol;
+            relocation_kinds[unresolved_relocation_count] = kind;
+            unresolved_relocation_count += 1;
+        }
+    }
+    if (unresolved_relocation_count > builder->relocation_capacity - builder->result.relocation_count)
+    {
+        assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY, instruction->line, instruction->column, 1);
+        return false;
+    }
+    u32 unresolved_index = 0;
+    for (u32 relocation_index = 0; relocation_index < emitted.relocation_count; relocation_index += 1)
+    {
+        BusterX86MetadataRelocation relocation = metadata_relocations[relocation_index];
+        u32 symbol = assembly_symbol_find(builder, relocation.symbol);
+        if (builder->result.symbols[symbol].defined)
+        {
+            continue;
+        }
+        builder->result.relocations[builder->result.relocation_count++] = (AssemblyRelocation){
+            .addend = relocation.addend,
+            .offset = instruction->offset + relocation.offset,
+            .symbol = relocation_symbols[unresolved_index],
+            .kind = relocation_kinds[unresolved_index],
+        };
+        unresolved_index += 1;
+    }
+    memcpy(builder->result.bytes.pointer + builder->output_count, bytes, emitted.byte_count);
+    builder->output_count += emitted.byte_count;
     return true;
 }
 
@@ -7441,6 +9160,14 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                                 S8("internal instruction offset mismatch"));
             return;
         }
+        if (instruction->metadata)
+        {
+            if (!assembly_x86_metadata_emit(builder, instruction))
+            {
+                return;
+            }
+            continue;
+        }
         if (instruction->lock_prefix)
         {
             assembly_emit_byte(builder, 0xf0);
@@ -8470,15 +10197,17 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
             line_count += 1;
         }
     }
-    if (line_count > UINT32_MAX / 4)
+    if (line_count > UINT32_MAX / BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY ||
+        line_count > UINT32_MAX / ASSEMBLY_SOURCE_SYMBOLS_PER_LINE)
     {
         return empty;
     }
     AssemblyBuilder builder = {
         .arena = arena,
+        .target = options.target,
         .instruction_capacity = line_count,
-        .symbol_capacity = line_count * 2,
-        .relocation_capacity = line_count,
+        .symbol_capacity = line_count * ASSEMBLY_SOURCE_SYMBOLS_PER_LINE,
+        .relocation_capacity = line_count * BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY,
         .diagnostic_capacity = line_count * 4,
     };
     builder.result.symbols = arena_allocate(arena, AssemblySymbol, builder.symbol_capacity);
