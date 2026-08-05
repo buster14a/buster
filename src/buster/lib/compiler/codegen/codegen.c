@@ -9279,7 +9279,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 codegen_emit_u8(&buffer, 0x48);
                 codegen_emit_u8(&buffer, 0x89);
                 codegen_emit_u8(&buffer, 0x9d);
-                codegen_emit_u32(&buffer, (u32)(-(s32)x64_rbx_save_offset));
+                codegen_emit_u32(&buffer, (u32)codegen_canonical_x64_rebase_frame_displacement(&buffer, -(s64)x64_rbx_save_offset,
+                                                                                                  canonical_x64_frame_base_offset));
                 unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, (u32)buffer.count - descriptor->code_offset,
                                                             CODEGEN_UNWIND_ACTION_SAVE_REGISTER, X64_REGISTER_RBX,
                                                             frame_size - x64_rbx_save_offset) &&
@@ -9493,7 +9494,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             codegen_emit_u8(&buffer, 0x48);                                                                                                                    \
             codegen_emit_u8(&buffer, 0x8b);                                                                                                                    \
             codegen_emit_u8(&buffer, 0x9d);                                                                                                                    \
-            codegen_emit_u32(&buffer, (u32)(-(s32)x64_rbx_save_offset));                                                                                        \
+            codegen_emit_u32(&buffer, (u32)codegen_canonical_x64_rebase_frame_displacement(&buffer, -(s64)x64_rbx_save_offset,                  \
+                                                                                              canonical_x64_frame_base_offset));                          \
         }                                                                                                                                                      \
     } while (0)
                     if (instruction->opcode == IR_OPCODE_LOCAL)

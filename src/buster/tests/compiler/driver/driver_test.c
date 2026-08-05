@@ -191,6 +191,172 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_has
     }
     return false;
 }
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_windows_x64_dynamic_rbx(ObjectFile* object)
+{
+    if (!object || object->error != OBJECT_ERROR_NONE || !object->sections || !object->symbols || !object->relocations)
+    {
+        return false;
+    }
+    u32 function_symbol = UINT32_MAX;
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        if (symbol->kind == OBJECT_SYMBOL_FUNCTION && symbol->section == OBJECT_SECTION_TEXT && string_equal(symbol->name, S8("dynamic_stack_fixed_b")))
+        {
+            function_symbol = symbol_index;
+            break;
+        }
+    }
+    if (function_symbol == UINT32_MAX)
+    {
+        return false;
+    }
+    ObjectSymbol* function = object->symbols + function_symbol;
+    ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
+    if (function->value > text.length || function->size > text.length - function->value)
+    {
+        return false;
+    }
+    u64 function_end = function->value + function->size;
+    bool found_save = false;
+    bool found_restore = false;
+    s32 save_displacement = 0;
+    s32 restore_displacement = 0;
+    for (u64 offset = function->value; offset + 7 <= function_end; offset += 1)
+    {
+        if (text.pointer[offset] != 0x48 || text.pointer[offset + 1] != 0x89 || text.pointer[offset + 2] != 0x9d)
+        {
+            if (text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8b && text.pointer[offset + 2] == 0x9d)
+            {
+                memcpy(&restore_displacement, text.pointer + offset + 3, sizeof(restore_displacement));
+                found_restore = true;
+            }
+            continue;
+        }
+        memcpy(&save_displacement, text.pointer + offset + 3, sizeof(save_displacement));
+        found_save = true;
+    }
+    if (!found_save || !found_restore || save_displacement != restore_displacement || save_displacement < 0)
+    {
+        return false;
+    }
+    u64 pdata_offset = UINT64_MAX;
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (relocation->section == OBJECT_SECTION_WINDOWS_PDATA && relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB &&
+            relocation->offset % 12 == 0 && relocation->symbol == function_symbol)
+        {
+            pdata_offset = relocation->offset;
+            break;
+        }
+    }
+    if (pdata_offset == UINT64_MAX)
+    {
+        return false;
+    }
+    u64 xdata_offset = UINT64_MAX;
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (relocation->section == OBJECT_SECTION_WINDOWS_PDATA && relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB &&
+            relocation->offset == pdata_offset + 8 && relocation->addend >= 0)
+        {
+            xdata_offset = (u64)relocation->addend;
+            break;
+        }
+    }
+    ByteSlice xdata = object->sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    if (xdata_offset == UINT64_MAX || xdata_offset > xdata.length || xdata.length - xdata_offset < 4)
+    {
+        return false;
+    }
+    u8 code_slots = xdata.pointer[xdata_offset + 2];
+    if (xdata_offset + 4 + (u64)code_slots * 2 > xdata.length)
+    {
+        return false;
+    }
+    u32 frame_size = 0;
+    bool found_rbx_unwind = false;
+    for (u32 code_index = 0; code_index < code_slots;)
+    {
+        u8 unwind = xdata.pointer[xdata_offset + 5 + code_index * 2];
+        u8 operation = unwind & 15;
+        u8 information = unwind >> 4;
+        if (operation == 0 || operation == 3)
+        {
+            code_index += 1;
+        }
+        else if (operation == 1 && information == 0)
+        {
+            if (code_index + 1 >= code_slots)
+            {
+                return false;
+            }
+            u16 scaled = 0;
+            memcpy(&scaled, xdata.pointer + xdata_offset + 6 + code_index * 2, sizeof(scaled));
+            if (frame_size > UINT32_MAX - (u32)scaled * 8)
+            {
+                return false;
+            }
+            frame_size += (u32)scaled * 8;
+            code_index += 2;
+        }
+        else if (operation == 1 && information == 1)
+        {
+            if (code_index + 2 >= code_slots)
+            {
+                return false;
+            }
+            u32 allocation = 0;
+            memcpy(&allocation, xdata.pointer + xdata_offset + 6 + code_index * 2, sizeof(allocation));
+            if (frame_size > UINT32_MAX - allocation)
+            {
+                return false;
+            }
+            frame_size += allocation;
+            code_index += 3;
+        }
+        else if (operation == 2)
+        {
+            u32 allocation = ((u32)information + 1) * 8;
+            if (frame_size > UINT32_MAX - allocation)
+            {
+                return false;
+            }
+            frame_size += allocation;
+            code_index += 1;
+        }
+        else if (operation == 4 && information == 3)
+        {
+            if (code_index + 1 >= code_slots)
+            {
+                return false;
+            }
+            u16 scaled = 0;
+            memcpy(&scaled, xdata.pointer + xdata_offset + 6 + code_index * 2, sizeof(scaled));
+            found_rbx_unwind = (u32)scaled * 8 == (u32)save_displacement;
+            code_index += 2;
+        }
+        else if (operation == 5 && information == 3)
+        {
+            if (code_index + 2 >= code_slots)
+            {
+                return false;
+            }
+            u32 far_offset = 0;
+            memcpy(&far_offset, xdata.pointer + xdata_offset + 6 + code_index * 2, sizeof(far_offset));
+            found_rbx_unwind = far_offset == (u32)save_displacement;
+            code_index += 3;
+        }
+        else
+        {
+            code_index += 1;
+        }
+    }
+    return found_rbx_unwind && frame_size != 0 && (u64)save_displacement + 8 <= frame_size;
+}
 #endif
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_label_relocations(ObjectFile* object, u32* count_out)
@@ -2589,6 +2755,18 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                                                                            },
                                                                                                        .length = 4,
                                                                                                    }));
+    }
+    String8 c_asm_windows_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-windows"), S8(".obj"));
+    String8 c_asm_windows_command_line[] = {
+        S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-o"), c_asm_windows_path, S8("tests/basic_c_asm.c"),
+    };
+    CompilerDriverResult c_asm_windows = compiler_driver_execute_invocation(
+        c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_asm_windows_command_line)));
+    BUSTER_TEST(arguments, c_asm_windows.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_asm_windows.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        BUSTER_TEST(arguments, c_asm_windows.has_object);
+        BUSTER_TEST(arguments, compiler_driver_test_windows_x64_dynamic_rbx(&c_asm_windows.object));
     }
     scratch_end(c_asm_temporary);
 #endif

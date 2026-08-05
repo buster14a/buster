@@ -84,6 +84,14 @@ static void outputs_only_fixed_order(void)
     (void)fixed;
 }
 
+static int dynamic_stack_fixed_b(int count)
+{
+    int values[count + 1];
+    values[0] = count + 4;
+    __asm__ volatile("" : : "b"(values[0]));
+    return values[0];
+}
+
 static int exact_width_asm_outputs(void)
 {
     struct AsmWidthProbe local = {
@@ -137,7 +145,7 @@ int main(void)
 #if defined(__x86_64__) || defined(_M_X64)
     outputs_only_fixed_order();
     valid = valid && two_generic_read_write_outputs() == 12 && generic_before_fixed_read_write_output() == 12 &&
-            fixed_before_generic_read_write_output() == 12 && exact_width_asm_outputs();
+            fixed_before_generic_read_write_output() == 12 && dynamic_stack_fixed_b(3) == 7 && exact_width_asm_outputs();
 #endif
     return valid ? 0 : 1;
 }
