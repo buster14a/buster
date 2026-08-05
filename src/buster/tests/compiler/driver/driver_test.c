@@ -192,6 +192,29 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_has
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_x64_fallthrough_epilog(ByteSlice text, u64 offset, u64 function_end, bool windows)
+{
+    if (offset > function_end)
+    {
+        return false;
+    }
+    u64 remaining = function_end - offset;
+    if (windows)
+    {
+        bool pop_return = remaining >= 2 && text.pointer[offset] == 0x5d && text.pointer[offset + 1] == 0xc3;
+        bool add8_pop_return = remaining >= 6 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x83 &&
+                               text.pointer[offset + 2] == 0xc4 && text.pointer[offset + 4] == 0x5d && text.pointer[offset + 5] == 0xc3;
+        bool add32_pop_return = remaining >= 9 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x81 &&
+                                text.pointer[offset + 2] == 0xc4 && text.pointer[offset + 7] == 0x5d && text.pointer[offset + 8] == 0xc3;
+        bool lea8_pop_return = remaining >= 6 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8d &&
+                               text.pointer[offset + 2] == 0x65 && text.pointer[offset + 4] == 0x5d && text.pointer[offset + 5] == 0xc3;
+        bool lea32_pop_return = remaining >= 9 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8d &&
+                                text.pointer[offset + 2] == 0xa5 && text.pointer[offset + 7] == 0x5d && text.pointer[offset + 8] == 0xc3;
+        return pop_return || add8_pop_return || add32_pop_return || lea8_pop_return || lea32_pop_return;
+    }
+    return remaining >= 2 && text.pointer[offset] == 0xc9 && text.pointer[offset + 1] == 0xc3;
+}
+
 #endif
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dynamic_rbx(ObjectFile* object)
@@ -2040,6 +2063,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, function_found && function_offset <= text.length && function_size <= text.length - function_offset);
         bool restored_before_taken_edge = false;
         bool restored_before_fallthrough = false;
+        bool windows_target = c_labels_object.object.target.os == OPERATING_SYSTEM_WINDOWS;
         if (function_found && function_offset <= text.length && function_size <= text.length - function_offset)
         {
             for (u64 byte_index = function_offset; byte_index + 7 < function_offset + function_size; byte_index += 1)
@@ -2047,8 +2071,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 bool restore = text.pointer[byte_index] == 0x48 && text.pointer[byte_index + 1] == 0x8b && text.pointer[byte_index + 2] == 0x9d;
                 if (restore)
                 {
-                    restored_before_taken_edge |= text.pointer[byte_index + 7] == 0xe9;
-                    restored_before_fallthrough |= text.pointer[byte_index + 7] == 0xc9;
+                    u64 after_restore = byte_index + 7;
+                    u64 function_end = function_offset + function_size;
+                    restored_before_taken_edge |= after_restore < function_end && text.pointer[after_restore] == 0xe9;
+                    restored_before_fallthrough |= compiler_driver_test_x64_fallthrough_epilog(text, after_restore, function_end, windows_target);
                 }
             }
         }
