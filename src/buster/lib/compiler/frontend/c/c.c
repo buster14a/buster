@@ -14511,8 +14511,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* 
     {
         u32 old_capacity = builder->label_metadata_store_capacity;
         u32 new_capacity = builder->function->value_capacity;
-        if (!builder->scratch_arena || new_capacity < old_capacity || (u64)new_capacity > UINT64_MAX / sizeof(IrBlockId) ||
-            (u64)new_capacity > UINT64_MAX / sizeof(bool))
+        if (!builder->scratch_arena || new_capacity < old_capacity)
         {
             builder->failure_message = S8("C IR label metadata capacity is not representable");
             return false;
