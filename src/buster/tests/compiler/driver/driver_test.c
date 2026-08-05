@@ -192,7 +192,9 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_has
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_test_windows_x64_dynamic_rbx(ObjectFile* object)
+#endif
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dynamic_rbx(ObjectFile* object)
 {
     if (!object || object->error != OBJECT_ERROR_NONE || !object->sections || !object->symbols || !object->relocations)
     {
@@ -357,7 +359,6 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_windows_x64_dynamic_rbx(ObjectFile
     }
     return found_rbx_unwind && frame_size != 0 && (u64)save_displacement + 8 <= frame_size;
 }
-#endif
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_label_relocations(ObjectFile* object, u32* count_out)
 {

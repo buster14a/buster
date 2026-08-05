@@ -532,7 +532,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_global_relocation_apply(Arena* arena, Ir
     return ir_interpreter_memory_write(arena, object, relocation->offset, pointer_size, function);
 }
 
-BUSTER_TEST_F_DECL bool ir_interpreter_test_static_label_relocations(Arena* arena)
+BUSTER_F_DECL bool ir_interpreter_test_static_label_relocations(Arena* arena)
 {
     if (!arena)
     {
