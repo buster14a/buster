@@ -247,9 +247,12 @@ BUSTER_TEST_F_DECL UnitTestResult pdb_tests(UnitTestArguments* arguments)
         }
     }
     BUSTER_TEST(arguments, found_procedure && found_local && found_frame);
-    // Leave the file on disk so external validators can read it.
+#if !BUSTER_IOS
+    // Leave the file on disk where external validators can read it. The iOS
+    // app keeps the complete PDB validation above in memory instead.
     String8 pdb_path = buster_test_temporary_path(arguments->arena, S8("buster-pdb"), S8(".pdb"));
     BUSTER_TEST(arguments, file_write(pdb_path, built.bytes));
+#endif
     // Invalid input must be rejected rather than producing a broken file.
     PdbInput invalid = input;
     invalid.section_count = 0;

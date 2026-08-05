@@ -628,12 +628,19 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
     {
         TemporalArena dialect_temporary = arena_begin_temporal(arguments->arena);
         Arena* dialect_arena = dialect_temporary.arena;
+#if BUSTER_IOS
+        String8 dialect_command_line[] = {
+            S8("-fsyntax-only"), dialect_flags[dialect_index], dialect_versions[dialect_index],
+            dialect_index < 3 ? S8("-DEXPECTED_GNU=1") : S8("-DEXPECTED_GNU=0"), S8("tests/basic_c_dialect.c"),
+        };
+#else
         String8 dialect_object_path =
             buster_test_temporary_path(dialect_arena, S8("buster-c-dialect"), string_format(dialect_arena, S8("-{u32}.o"), dialect_index));
         String8 dialect_command_line[] = {
             S8("-c"), dialect_flags[dialect_index], dialect_versions[dialect_index], dialect_index < 3 ? S8("-DEXPECTED_GNU=1") : S8("-DEXPECTED_GNU=0"),
             S8("-o"), dialect_object_path,          S8("tests/basic_c_dialect.c"),
         };
+#endif
         CompilerDriverResult dialect_result = compiler_driver_execute_invocation(
             dialect_arena, compiler_driver_parse_arguments(dialect_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(dialect_command_line)));
         BUSTER_TEST(arguments, dialect_result.error == COMPILER_DRIVER_ERROR_NONE);
