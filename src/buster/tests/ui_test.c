@@ -2,6 +2,7 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/ui_builder.h>
+#include <buster/lib/rendering/internal.h>
 #include <buster/lib/string.h>
 
 BUSTER_GLOBAL_LOCAL void ui_test_frame(UI_State* state, Arena* arena, UI_EventList events, f64 frame_time)
@@ -97,6 +98,22 @@ BUSTER_GLOBAL_LOCAL u64 ui_test_draw_command_index(UI_State* state, UI_Box* box,
     return (u64)-1;
 }
 
+BUSTER_GLOBAL_LOCAL u64 ui_test_last_draw_command_index(UI_State* state, UI_Box* box, UI_DrawCommandKind kind)
+{
+    if (state)
+    {
+        for (u64 index = state->draw_command_count; index != 0; index -= 1)
+        {
+            u64 command_index = index - 1;
+            if (state->draw_commands[command_index].box == box && state->draw_commands[command_index].kind == kind)
+            {
+                return command_index;
+            }
+        }
+    }
+    return (u64)-1;
+}
+
 BUSTER_GLOBAL_LOCAL UI_DrawCommand* ui_test_text_command(UI_State* state, UI_Box* box, String8 text)
 {
     for (u64 index = 0; index < state->draw_command_count; index += 1)
@@ -109,6 +126,79 @@ BUSTER_GLOBAL_LOCAL UI_DrawCommand* ui_test_text_command(UI_State* state, UI_Box
     }
     return 0;
 }
+
+BUSTER_GLOBAL_LOCAL u64 ui_test_draw_command_count(UI_State* state, UI_Box* box, UI_DrawCommandKind kind)
+{
+    u64 result = 0;
+    if (state)
+    {
+        for (u64 index = 0; index < state->draw_command_count; index += 1)
+        {
+            result += state->draw_commands[index].box == box && state->draw_commands[index].kind == kind;
+        }
+    }
+    return result;
+}
+
+#if !BUSTER_USE_VULKAN && !(defined(_WIN32) && BUSTER_USE_D3D12) && !defined(__APPLE__) && !BUSTER_ANDROID
+typedef struct UI_TestRenderContext UI_TestRenderContext;
+struct UI_TestRenderContext
+{
+    RenderingHandle* rendering;
+    RenderingWindowHandle* window;
+    UI_State* state;
+};
+
+BUSTER_GLOBAL_LOCAL bool ui_test_render_context_begin(UnitTestArguments* arguments, u32 width, u32 height, UI_TestRenderContext* context)
+{
+    bool result = false;
+    if (arguments && context)
+    {
+        *context = (UI_TestRenderContext){0};
+        context->rendering = rendering_initialize(arguments->arena);
+        context->window = rendering_window_initialize(arguments->arena, 0, context->rendering, 0);
+        if (context->rendering && context->window && rendering_window_set_size_for_test(context->window, (RenderingWindowSize){.width = width, .height = height}))
+        {
+            context->state = ui_state_allocate(context->rendering, context->window);
+            if (context->state)
+            {
+                rendering_window_frame_begin(context->rendering, context->window);
+                result = true;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_test_render_context_end(UI_TestRenderContext* context)
+{
+    if (context)
+    {
+        if (context->state)
+        {
+            ui_state_deinitialize(context->state);
+        }
+        if (context->window)
+        {
+            rendering_window_deinitialize(context->rendering, context->window);
+        }
+        *context = (UI_TestRenderContext){0};
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 ui_test_renderer_blur_command_count(RenderingCommandStream* stream)
+{
+    u32 result = 0;
+    if (stream)
+    {
+        for (u32 index = 0; index < stream->command_count; index += 1)
+        {
+            result += stream->commands[index].kind == RENDERING_COMMAND_BACKGROUND_BLUR;
+        }
+    }
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL UI_Box* ui_test_build_tooltip_box(UI_BoxFlags flags)
 {
@@ -201,8 +291,9 @@ BUSTER_GLOBAL_LOCAL void ui_test_flag_inventory(UnitTestArguments* arguments, Un
     UI_BoxFlagInfo blur = ui_box_flag_info(28);
     UI_BoxFlagInfo bucket = ui_box_flag_info(41);
     UI_BoxFlagInfo rounded = ui_box_flag_info(55);
-    BUSTER_TEST_RAW(arguments, blur.renderer_dependency && bucket.renderer_dependency && rounded.renderer_dependency,
-                    S8("UI renderer dependency inventory missing"));
+    UI_BoxFlagInfo clip = ui_box_flag_info(46);
+    BUSTER_TEST_RAW(arguments, !blur.renderer_dependency && bucket.renderer_dependency && rounded.renderer_dependency && clip.renderer_dependency,
+                    S8("UI renderer dependency audit status changed"));
     BUSTER_TEST(arguments, (UI_BoxFlag_All & UI_BoxFlag_AllContiguous) == UI_BoxFlag_AllContiguous);
     BUSTER_TEST(arguments, (UI_BoxFlag_All & UI_BoxFlag_Debug) == UI_BoxFlag_Debug);
     BUSTER_TEST(arguments, (UI_BoxFlag_All & ((UI_BoxFlags)0x3full << 57)) == 0);
@@ -1466,6 +1557,428 @@ BUSTER_GLOBAL_LOCAL void ui_test_text_edit_atomic_policy(UnitTestArguments* argu
     result->test_count += result_local.test_count;
 }
 
+#if !BUSTER_USE_VULKAN && !(defined(_WIN32) && BUSTER_USE_D3D12) && !defined(__APPLE__) && !BUSTER_ANDROID
+BUSTER_GLOBAL_LOCAL void ui_test_background_blur_renderer_order(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    BUSTER_UNUSED(arguments);
+    UnitTestResult result_local = {0};
+#define result result_local
+    UI_TestRenderContext context = {0};
+    bool context_ready = ui_test_render_context_begin(arguments, 120, 40, &context);
+    BUSTER_TEST(arguments, context_ready);
+    if (context_ready)
+    {
+        ui_test_frame(context.state, arguments->arena, (UI_EventList){0}, 0.016);
+        ui_set_next_child_layout_axis(AXIS2_X);
+
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* before = ui_box_make(UI_BoxFlag_DrawBackground | UI_BoxFlag_DisableTruncatedHover, S8("blur_order_before"));
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* blur = ui_box_make(UI_BoxFlag_DrawBackgroundBlur | UI_BoxFlag_DisableTruncatedHover, S8("blur_order_blur"));
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* after = ui_box_make(UI_BoxFlag_DrawBackground | UI_BoxFlag_DisableTruncatedHover, S8("blur_order_after"));
+        ui_build_end();
+
+        bool draw_result = ui_draw();
+        u64 before_index = ui_test_draw_command_index(context.state, before, UI_DrawCommandKind_Rect);
+        u64 blur_index = ui_test_draw_command_index(context.state, blur, UI_DrawCommandKind_BackgroundBlur);
+        u64 after_index = ui_test_draw_command_index(context.state, after, UI_DrawCommandKind_Rect);
+        UI_DrawCommand* blur_audit = blur_index != (u64)-1 ? &context.state->draw_commands[blur_index] : 0;
+        BUSTER_TEST(arguments, draw_result && context.state->draw_renderer_succeeded && before_index < blur_index && blur_index < after_index);
+        BUSTER_TEST(arguments, ui_test_draw_command_count(context.state, before, UI_DrawCommandKind_Rect) == 1 &&
+                                   ui_test_draw_command_count(context.state, after, UI_DrawCommandKind_Rect) == 1 &&
+                                   ui_test_draw_command_count(context.state, blur, UI_DrawCommandKind_Rect) == 0 &&
+                                   ui_test_draw_command_count(context.state, blur, UI_DrawCommandKind_BackgroundBlur) == 1);
+        BUSTER_TEST(arguments, blur_audit && blur_audit->rect.x0 == blur->rect.x0 && blur_audit->rect.y0 == blur->rect.y0 &&
+                                   blur_audit->rect.x1 == blur->rect.x1 && blur_audit->rect.y1 == blur->rect.y1 &&
+                                   blur_audit->blur_radius == UI_BACKGROUND_BLUR_RADIUS_DEFAULT);
+
+        RenderingCommandStream* stream = rendering_window_command_stream(context.window);
+        RenderingReplayEvent replay_events[16] = {0};
+        u32 replay_count = rendering_command_stream_replay(stream, replay_events, BUSTER_ARRAY_LENGTH(replay_events));
+        u32 blur_command_index = UINT32_MAX;
+        bool saw_rect_before = false;
+        bool saw_rect_after = false;
+        for (u32 command_index = 0; stream && command_index < stream->command_count; command_index += 1)
+        {
+            RenderingCommand command = stream->commands[command_index];
+            if (command.kind == RENDERING_COMMAND_BACKGROUND_BLUR && blur_command_index == UINT32_MAX)
+            {
+                blur_command_index = command_index;
+            }
+            else if (command.kind == RENDERING_COMMAND_RECT)
+            {
+                if (blur_command_index == UINT32_MAX)
+                {
+                    saw_rect_before = true;
+                }
+                else
+                {
+                    saw_rect_after = true;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, replay_count == 3 && replay_events[0].kind == RENDERING_REPLAY_DRAW &&
+                                   replay_events[1].kind == RENDERING_REPLAY_BACKGROUND_BLUR && replay_events[2].kind == RENDERING_REPLAY_DRAW);
+        BUSTER_TEST(arguments, blur_command_index != UINT32_MAX && saw_rect_before && saw_rect_after &&
+                                   stream->commands[blur_command_index].blur_rect.x0 == (s32)blur->rect.x0 &&
+                                   stream->commands[blur_command_index].blur_rect.y0 == (s32)blur->rect.y0 &&
+                                   stream->commands[blur_command_index].blur_rect.x1 == (s32)blur->rect.x1 &&
+                                   stream->commands[blur_command_index].blur_rect.y1 == (s32)blur->rect.y1);
+
+        rendering_window_frame_end(context.rendering, context.window);
+        BUSTER_TEST(arguments, stream->backend_trace.blur_capture_pass_count == 1 && stream->backend_trace.blur_horizontal_pass_count == 1 &&
+                                   stream->backend_trace.blur_vertical_pass_count == 1 && stream->backend_trace.blur_pass_count == 3 &&
+                                   !stream->backend_trace.error_frame && !rendering_window_has_rendering_error(context.window));
+    }
+    ui_test_render_context_end(&context);
+#undef result
+    result->succeeded_test_count += result_local.succeeded_test_count;
+    result->test_count += result_local.test_count;
+}
+#else
+BUSTER_GLOBAL_LOCAL void ui_test_background_blur_renderer_order(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    BUSTER_UNUSED(arguments);
+    BUSTER_UNUSED(result);
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL void ui_test_background_blur_clipping(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    BUSTER_UNUSED(arguments);
+    UnitTestResult result_local = {0};
+#define result result_local
+#if !BUSTER_USE_VULKAN && !(defined(_WIN32) && BUSTER_USE_D3D12) && !defined(__APPLE__) && !BUSTER_ANDROID
+    UI_TestRenderContext context = {0};
+    bool context_ready = ui_test_render_context_begin(arguments, 100, 100, &context);
+    BUSTER_TEST(arguments, context_ready);
+    if (context_ready)
+    {
+        ui_test_frame(context.state, arguments->arena, (UI_EventList){0}, 0.016);
+
+        ui_set_next_fixed_x(10.0f);
+        ui_set_next_fixed_y(10.0f);
+        ui_set_next_fixed_width(70.0f);
+        ui_set_next_fixed_height(70.0f);
+        UI_Box* outer_clip = ui_box_make(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_Clip, S8("blur_clip_outer"));
+        ui_push_parent(outer_clip);
+
+        ui_set_next_fixed_x(20.0f);
+        ui_set_next_fixed_y(15.0f);
+        ui_set_next_fixed_width(30.0f);
+        ui_set_next_fixed_height(30.0f);
+        UI_Box* inner_clip = ui_box_make(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_Clip, S8("blur_clip_inner"));
+        ui_push_parent(inner_clip);
+
+        ui_set_next_fixed_x(-5.0f);
+        ui_set_next_fixed_y(5.0f);
+        ui_set_next_fixed_width(40.0f);
+        ui_set_next_fixed_height(40.0f);
+        UI_Box* blur = ui_box_make(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_DrawBackgroundBlur, S8("blur_clip_box"));
+        BUSTER_UNUSED(ui_pop_parent());
+        BUSTER_UNUSED(ui_pop_parent());
+        ui_build_end();
+
+        bool draw_result = ui_draw();
+        UI_DrawCommand* blur_audit = ui_test_first_draw_command(context.state, blur, UI_DrawCommandKind_BackgroundBlur);
+        RenderingCommandStream* stream = rendering_window_command_stream(context.window);
+        RenderingCommand* blur_command = 0;
+        for (u32 command_index = 0; stream && command_index < stream->command_count; command_index += 1)
+        {
+            if (stream->commands[command_index].kind == RENDERING_COMMAND_BACKGROUND_BLUR)
+            {
+                blur_command = &stream->commands[command_index];
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, draw_result && blur->visible && (blur->state_flags & UI_BoxState_Clipped) && blur_audit && blur_command);
+        BUSTER_TEST(arguments, blur_audit && blur_audit->rect.x0 == 30.0f && blur_audit->rect.y0 == 30.0f && blur_audit->rect.x1 == 60.0f &&
+                                   blur_audit->rect.y1 == 55.0f && blur_audit->clip_rect.x0 == 30.0f && blur_audit->clip_rect.y0 == 25.0f &&
+                                   blur_audit->clip_rect.x1 == 60.0f && blur_audit->clip_rect.y1 == 55.0f);
+        BUSTER_TEST(arguments, blur_command && blur_command->blur_rect.x0 == 30 && blur_command->blur_rect.y0 == 30 && blur_command->blur_rect.x1 == 60 &&
+                                   blur_command->blur_rect.y1 == 55 && blur_command->clip.x0 == 0 && blur_command->clip.y0 == 0 &&
+                                   blur_command->clip.x1 == 100 && blur_command->clip.y1 == 100);
+
+        rendering_window_frame_end(context.rendering, context.window);
+        BUSTER_TEST(arguments, !rendering_window_has_rendering_error(context.window));
+    }
+    ui_test_render_context_end(&context);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+#undef result
+    result->succeeded_test_count += result_local.succeeded_test_count;
+    result->test_count += result_local.test_count;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_test_background_blur_radius(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    BUSTER_UNUSED(arguments);
+    UnitTestResult result_local = {0};
+#define result result_local
+#if !BUSTER_USE_VULKAN && !(defined(_WIN32) && BUSTER_USE_D3D12) && !defined(__APPLE__) && !BUSTER_ANDROID
+    UI_TestRenderContext context = {0};
+    bool context_ready = ui_test_render_context_begin(arguments, 100, 32, &context);
+    BUSTER_TEST(arguments, context_ready);
+    if (context_ready)
+    {
+        ui_test_frame(context.state, arguments->arena, (UI_EventList){0}, 0.016);
+        ui_set_next_child_layout_axis(AXIS2_X);
+
+        UI_Box* radius0 = 0;
+        UI_Box* radius1 = 0;
+        UI_Box* radius32 = 0;
+        UI_Box* radius33 = 0;
+        UI_Box* boxes[] = {0, 0, 0, 0};
+        u32 requested_radii[] = {0, 1, 32, 33};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(boxes); index += 1)
+        {
+            ui_set_next_fixed_width(20.0f);
+            ui_set_next_fixed_height(20.0f);
+            boxes[index] = ui_box_make(UI_BoxFlag_DrawBackgroundBlur, S8("blur_radius_box"));
+            ui_box_set_background_blur_radius(boxes[index], requested_radii[index]);
+        }
+        radius0 = boxes[0];
+        radius1 = boxes[1];
+        radius32 = boxes[2];
+        radius33 = boxes[3];
+        ui_build_end();
+
+        bool draw_result = ui_draw();
+        u32 expected_radii[] = {0, 1, 32, 32};
+        BUSTER_TEST(arguments, draw_result && context.state->draw_renderer_succeeded && radius0->background_blur_radius == 0 &&
+                                   radius1->background_blur_radius == 1 && radius32->background_blur_radius == 32 && radius33->background_blur_radius == 32);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(boxes); index += 1)
+        {
+            UI_DrawCommand* audit = ui_test_first_draw_command(context.state, boxes[index], UI_DrawCommandKind_BackgroundBlur);
+            BUSTER_TEST(arguments, audit && audit->blur_radius == expected_radii[index]);
+        }
+
+        RenderingCommandStream* stream = rendering_window_command_stream(context.window);
+        u32 blur_index = 0;
+        bool radii_match = true;
+        for (u32 command_index = 0; stream && command_index < stream->command_count; command_index += 1)
+        {
+            if (stream->commands[command_index].kind == RENDERING_COMMAND_BACKGROUND_BLUR)
+            {
+                radii_match = radii_match && blur_index < BUSTER_ARRAY_LENGTH(expected_radii) && stream->commands[command_index].blur_radius == expected_radii[blur_index];
+                blur_index += 1;
+            }
+        }
+        BUSTER_TEST(arguments, stream && blur_index == BUSTER_ARRAY_LENGTH(expected_radii) && radii_match);
+        rendering_window_frame_end(context.rendering, context.window);
+        BUSTER_TEST(arguments, stream->backend_trace.blur_pass_count == 9 && !stream->backend_trace.error_frame && !rendering_window_has_rendering_error(context.window));
+    }
+    ui_test_render_context_end(&context);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+#undef result
+    result->succeeded_test_count += result_local.succeeded_test_count;
+    result->test_count += result_local.test_count;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_test_background_blur_empty_and_failure(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    BUSTER_UNUSED(arguments);
+    UnitTestResult result_local = {0};
+#define result result_local
+#if !BUSTER_USE_VULKAN && !(defined(_WIN32) && BUSTER_USE_D3D12) && !defined(__APPLE__) && !BUSTER_ANDROID
+    {
+        UI_TestRenderContext context = {0};
+        bool context_ready = ui_test_render_context_begin(arguments, 100, 100, &context);
+        BUSTER_TEST(arguments, context_ready);
+        if (context_ready)
+        {
+            ui_test_frame(context.state, arguments->arena, (UI_EventList){0}, 0.016);
+            ui_set_next_fixed_width(0.0f);
+            ui_set_next_fixed_height(0.0f);
+            UI_Box* empty = ui_box_make(UI_BoxFlag_DrawBackgroundBlur, S8("blur_empty_box"));
+
+            ui_set_next_fixed_x(8.0f);
+            ui_set_next_fixed_y(8.0f);
+            ui_set_next_fixed_width(20.0f);
+            ui_set_next_fixed_height(20.0f);
+            UI_Box* clip_parent = ui_box_make(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_Clip, S8("blur_empty_parent"));
+            ui_push_parent(clip_parent);
+            ui_set_next_fixed_x(30.0f);
+            ui_set_next_fixed_y(0.0f);
+            ui_set_next_fixed_width(10.0f);
+            ui_set_next_fixed_height(10.0f);
+            UI_Box* clipped = ui_box_make(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_DrawBackgroundBlur, S8("blur_clipped_box"));
+            BUSTER_UNUSED(ui_pop_parent());
+            ui_build_end();
+
+            bool draw_result = ui_draw();
+            RenderingCommandStream* stream = rendering_window_command_stream(context.window);
+            BUSTER_TEST(arguments, draw_result && !empty->visible && !clipped->visible && ui_test_renderer_blur_command_count(stream) == 0 &&
+                                       ui_test_first_draw_command(context.state, empty, UI_DrawCommandKind_BackgroundBlur) == 0 &&
+                                       ui_test_first_draw_command(context.state, clipped, UI_DrawCommandKind_BackgroundBlur) == 0);
+            rendering_window_frame_end(context.rendering, context.window);
+            BUSTER_TEST(arguments, stream->backend_trace.blur_pass_count == 0 && !rendering_window_has_rendering_error(context.window));
+        }
+        ui_test_render_context_end(&context);
+    }
+
+    {
+        UI_TestRenderContext context = {0};
+        bool context_ready = ui_test_render_context_begin(arguments, 64, 64, &context);
+        BUSTER_TEST(arguments, context_ready);
+        if (context_ready)
+        {
+            ui_test_frame(context.state, arguments->arena, (UI_EventList){0}, 0.016);
+            for (u32 index = 0; index < RENDERING_MAX_DRAW_COUNT - 5; index += 1)
+            {
+                ui_set_next_fixed_x(0.0f);
+                ui_set_next_fixed_y(0.0f);
+                ui_set_next_fixed_width(1.0f);
+                ui_set_next_fixed_height(1.0f);
+                ui_box_make_format(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_DrawBackground | UI_BoxFlag_DisableTruncatedHover,
+                                   S8("blur_capacity_rect_{u32}"), index);
+            }
+            ui_set_next_fixed_x(2.0f);
+            ui_set_next_fixed_y(2.0f);
+            ui_set_next_fixed_width(1.0f);
+            ui_set_next_fixed_height(1.0f);
+            UI_Box* failed_blur = ui_box_make(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_DrawBackgroundBlur | UI_BoxFlag_DisableTruncatedHover,
+                                              S8("blur_capacity_blur"));
+            ui_build_end();
+
+            bool draw_result = ui_draw();
+            RenderingCommandStream* stream = rendering_window_command_stream(context.window);
+            BUSTER_TEST(arguments, !draw_result && !context.state->draw_renderer_succeeded && context.state->draw_commands_complete && stream->overflowed &&
+                                       stream->command_count == RENDERING_MAX_DRAW_COUNT && ui_test_renderer_blur_command_count(stream) == 0 &&
+                                       ui_test_first_draw_command(context.state, failed_blur, UI_DrawCommandKind_BackgroundBlur) != 0 &&
+                                       ui_test_first_draw_command(context.state, failed_blur, UI_DrawCommandKind_Rect) == 0);
+            rendering_window_frame_end(context.rendering, context.window);
+            BUSTER_TEST(arguments, rendering_window_has_rendering_error(context.window) && stream->backend_trace.failure_propagated);
+        }
+        ui_test_render_context_end(&context);
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+#undef result
+    result->succeeded_test_count += result_local.succeeded_test_count;
+    result->test_count += result_local.test_count;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_test_background_blur_ui_audit(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    BUSTER_UNUSED(arguments);
+    UnitTestResult result_local = {0};
+#define result result_local
+    UI_State* state = ui_state_allocate(0, 0);
+    BUSTER_TEST(arguments, state != 0);
+    if (state)
+    {
+        ui_test_frame(state, arguments->arena, (UI_EventList){0}, 0.016);
+        ui_set_next_child_layout_axis(AXIS2_X);
+
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* before = ui_box_make(UI_BoxFlag_DrawBackground | UI_BoxFlag_DisableTruncatedHover, S8("ui_blur_audit_before"));
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* default_blur = ui_box_make(UI_BoxFlag_DrawBackgroundBlur | UI_BoxFlag_DisableTruncatedHover, S8("ui_blur_audit_default"));
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* zero_blur = ui_box_make(UI_BoxFlag_DrawBackgroundBlur | UI_BoxFlag_DisableTruncatedHover, S8("ui_blur_audit_zero"));
+        ui_box_set_background_blur_radius(zero_blur, 0);
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* clamped_blur = ui_box_make(UI_BoxFlag_DrawBackgroundBlur | UI_BoxFlag_DisableTruncatedHover, S8("ui_blur_audit_clamped"));
+        ui_box_set_background_blur_radius(clamped_blur, UI_BACKGROUND_BLUR_RADIUS_MAX + 1);
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* after = ui_box_make(UI_BoxFlag_DrawBackground | UI_BoxFlag_DisableTruncatedHover, S8("ui_blur_audit_after"));
+        ui_build_end();
+
+        bool draw_result = ui_draw();
+        u64 before_first_rect = ui_test_draw_command_index(state, before, UI_DrawCommandKind_Rect);
+        u64 before_last_rect = ui_test_last_draw_command_index(state, before, UI_DrawCommandKind_Rect);
+        u64 default_index = ui_test_draw_command_index(state, default_blur, UI_DrawCommandKind_BackgroundBlur);
+        u64 zero_index = ui_test_draw_command_index(state, zero_blur, UI_DrawCommandKind_BackgroundBlur);
+        u64 clamped_index = ui_test_draw_command_index(state, clamped_blur, UI_DrawCommandKind_BackgroundBlur);
+        u64 after_first_rect = ui_test_draw_command_index(state, after, UI_DrawCommandKind_Rect);
+        u64 after_last_rect = ui_test_last_draw_command_index(state, after, UI_DrawCommandKind_Rect);
+        UI_DrawCommand* default_audit = default_index != (u64)-1 ? &state->draw_commands[default_index] : 0;
+        UI_DrawCommand* zero_audit = zero_index != (u64)-1 ? &state->draw_commands[zero_index] : 0;
+        UI_DrawCommand* clamped_audit = clamped_index != (u64)-1 ? &state->draw_commands[clamped_index] : 0;
+        BUSTER_TEST(arguments, draw_result && state->draw_commands_complete && state->draw_renderer_succeeded && before_first_rect != (u64)-1 &&
+                                   before_last_rect < default_index && default_index < zero_index && zero_index < clamped_index && clamped_index < after_first_rect &&
+                                   after_first_rect != (u64)-1 && after_first_rect <= after_last_rect);
+        BUSTER_TEST(arguments, ui_test_draw_command_count(state, before, UI_DrawCommandKind_Rect) != 0 &&
+                                   ui_test_draw_command_count(state, after, UI_DrawCommandKind_Rect) != 0);
+        BUSTER_TEST(arguments, ui_test_draw_command_count(state, default_blur, UI_DrawCommandKind_Rect) == 0);
+        BUSTER_TEST(arguments, ui_test_draw_command_count(state, zero_blur, UI_DrawCommandKind_Rect) == 0);
+        BUSTER_TEST(arguments, ui_test_draw_command_count(state, clamped_blur, UI_DrawCommandKind_Rect) == 0);
+        BUSTER_TEST(arguments, ui_test_draw_command_count(state, default_blur, UI_DrawCommandKind_BackgroundBlur) == 1 &&
+                                   ui_test_draw_command_count(state, zero_blur, UI_DrawCommandKind_BackgroundBlur) == 1 &&
+                                   ui_test_draw_command_count(state, clamped_blur, UI_DrawCommandKind_BackgroundBlur) == 1);
+        BUSTER_TEST(arguments, default_blur->background_blur_radius == UI_BACKGROUND_BLUR_RADIUS_DEFAULT && default_audit &&
+                                   default_audit->blur_radius == UI_BACKGROUND_BLUR_RADIUS_DEFAULT && zero_blur->background_blur_radius == 0 && zero_audit &&
+                                   zero_audit->blur_radius == 0 && clamped_blur->background_blur_radius == UI_BACKGROUND_BLUR_RADIUS_MAX && clamped_audit &&
+                                   clamped_audit->blur_radius == UI_BACKGROUND_BLUR_RADIUS_MAX);
+
+        ui_test_frame(state, arguments->arena, (UI_EventList){0}, 0.016);
+        ui_set_next_fixed_x(10.0f);
+        ui_set_next_fixed_y(10.0f);
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* clip_parent = ui_box_make(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_Clip, S8("ui_blur_audit_clip_parent"));
+        ui_push_parent(clip_parent);
+        ui_set_next_fixed_x(-5.0f);
+        ui_set_next_fixed_y(5.0f);
+        ui_set_next_fixed_width(30.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* clipped_blur = ui_box_make(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_DrawBackgroundBlur, S8("ui_blur_audit_clipped"));
+        BUSTER_UNUSED(ui_pop_parent());
+        ui_build_end();
+
+        draw_result = ui_draw();
+        UI_DrawCommand* clipped_audit = ui_test_first_draw_command(state, clipped_blur, UI_DrawCommandKind_BackgroundBlur);
+        BUSTER_TEST(arguments, draw_result && clipped_blur->visible && (clipped_blur->state_flags & UI_BoxState_Clipped) && clipped_audit &&
+                                   clipped_audit->rect.x0 == 10.0f && clipped_audit->rect.y0 == 15.0f && clipped_audit->rect.x1 == 30.0f &&
+                                   clipped_audit->rect.y1 == 30.0f && clipped_audit->clip_rect.x0 == 10.0f && clipped_audit->clip_rect.y0 == 10.0f &&
+                                   clipped_audit->clip_rect.x1 == 30.0f && clipped_audit->clip_rect.y1 == 30.0f);
+        BUSTER_TEST(arguments, ui_test_draw_command_count(state, clipped_blur, UI_DrawCommandKind_Rect) == 0);
+
+        ui_test_frame(state, arguments->arena, (UI_EventList){0}, 0.016);
+        ui_set_next_fixed_width(0.0f);
+        ui_set_next_fixed_height(0.0f);
+        UI_Box* empty_blur = ui_box_make(UI_BoxFlag_DrawBackgroundBlur, S8("ui_blur_audit_empty"));
+        ui_set_next_fixed_x(50.0f);
+        ui_set_next_fixed_y(50.0f);
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        UI_Box* fully_clipped_parent = ui_box_make(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_Clip, S8("ui_blur_audit_empty_parent"));
+        ui_push_parent(fully_clipped_parent);
+        ui_set_next_fixed_x(30.0f);
+        ui_set_next_fixed_y(0.0f);
+        ui_set_next_fixed_width(10.0f);
+        ui_set_next_fixed_height(10.0f);
+        UI_Box* fully_clipped_blur = ui_box_make(UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_DrawBackgroundBlur, S8("ui_blur_audit_fully_clipped"));
+        BUSTER_UNUSED(ui_pop_parent());
+        ui_build_end();
+
+        draw_result = ui_draw();
+        BUSTER_TEST(arguments, draw_result && !empty_blur->visible && !fully_clipped_blur->visible &&
+                                   ui_test_first_draw_command(state, empty_blur, UI_DrawCommandKind_BackgroundBlur) == 0 &&
+                                   ui_test_first_draw_command(state, fully_clipped_blur, UI_DrawCommandKind_BackgroundBlur) == 0 &&
+                                   ui_test_draw_command_count(state, empty_blur, UI_DrawCommandKind_Rect) == 0 &&
+                                   ui_test_draw_command_count(state, fully_clipped_blur, UI_DrawCommandKind_Rect) == 0);
+        ui_state_deinitialize(state);
+    }
+#undef result
+    result->succeeded_test_count += result_local.succeeded_test_count;
+    result->test_count += result_local.test_count;
+}
+
 BUSTER_GLOBAL_LOCAL void ui_test_draw_command_capacity(UnitTestArguments* arguments, UnitTestResult* result)
 {
     BUSTER_UNUSED(arguments);
@@ -2158,6 +2671,11 @@ UnitTestResult ui_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     ui_test_flag_inventory(arguments, &result);
+    ui_test_background_blur_ui_audit(arguments, &result);
+    ui_test_background_blur_renderer_order(arguments, &result);
+    ui_test_background_blur_clipping(arguments, &result);
+    ui_test_background_blur_radius(arguments, &result);
+    ui_test_background_blur_empty_and_failure(arguments, &result);
     ui_test_layout_and_view(arguments, &result);
     ui_test_input_and_focus(arguments, &result);
     ui_test_clipped_hit_ownership(arguments, &result);

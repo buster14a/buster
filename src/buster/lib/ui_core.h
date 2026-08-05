@@ -187,6 +187,12 @@ typedef u64 UI_BoxFlags;
 //- rjf: debug
 #define UI_BoxFlag_Debug (UI_BoxFlags)(1ull << 63)
 
+// Background blur radii are expressed in device pixels. Zero records a
+// deterministic no-op blur command; larger values clamp to the renderer's
+// supported maximum.
+#define UI_BACKGROUND_BLUR_RADIUS_MAX (32u)
+#define UI_BACKGROUND_BLUR_RADIUS_DEFAULT (8u)
+
 //- rjf: bundles
 #define UI_BoxFlag_Clickable (UI_BoxFlag_MouseClickable | UI_BoxFlag_KeyboardClickable)
 #define UI_BoxFlag_DefaultFocusNav (UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY | UI_BoxFlag_DefaultFocusEdit)
@@ -362,6 +368,7 @@ struct UI_Box
     float4 background_color;
     float4 text_color;
     float4 border_color;
+    u32 background_blur_radius;
     f32 font_size;
     f32 text_padding;
     u32 fastpath_codepoint;
@@ -425,6 +432,7 @@ typedef enum UI_DrawCommandKind
 {
     UI_DrawCommandKind_Rect,
     UI_DrawCommandKind_Text,
+    UI_DrawCommandKind_BackgroundBlur,
     UI_DrawCommandKind_COUNT,
 } UI_DrawCommandKind;
 
@@ -443,6 +451,7 @@ struct UI_DrawCommand
     F32Interval2 clip_rect;
     float4 colors[4];
     float4 corner_radii;
+    u32 blur_radius;
     String8 text;
 };
 
@@ -606,7 +615,8 @@ struct UI_State
     u64 draw_command_count;
     u64 draw_command_capacity;
     bool draw_commands_complete;
-    u8 reserved_draw_commands[7];
+    bool draw_renderer_succeeded;
+    u8 reserved_draw_commands[6];
     UI_Box* draw_command_box;
     // Pointer/scroll/drop ownership is routed from the previous completed
     // tree. It is false on the first build, so current partial build order
@@ -731,7 +741,7 @@ BUSTER_F_DECL UI_Box* ui_root_from_state(UI_State* state);
 BUSTER_F_DECL UI_EventList ui_event_list_from_wm_events(Arena* arena, WmWindowHandle* window, WmEventList event_queue);
 BUSTER_F_DECL void ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time_milliseconds, UI_EventList events);
 BUSTER_F_DECL void ui_build_end(void);
-BUSTER_F_DECL void ui_draw(void);
+BUSTER_F_DECL bool ui_draw(void);
 
 // UI event queue. Window-system events are translated before ui_build_begin.
 BUSTER_F_DECL UI_EventNode* ui_event_list_push(Arena* arena, UI_EventList* list, UI_Event* event);
@@ -762,6 +772,7 @@ BUSTER_F_DECL void ui_box_set_fastpath_codepoint(UI_Box* box, u32 codepoint);
 // Fuzzy-match ranges are UTF-8 byte ranges in the displayed string. The
 // ranges are copied into the current build arena and may be frame-borrowed.
 BUSTER_F_DECL void ui_box_set_fuzzy_match_ranges(UI_Box* box, UI_FuzzyMatchRange* ranges, u64 count);
+BUSTER_F_DECL void ui_box_set_background_blur_radius(UI_Box* box, u32 radius);
 BUSTER_F_DECL void ui_box_set_corner_radii(UI_Box* box, f32 radius);
 BUSTER_F_DECL bool ui_box_is_visible(UI_Box* box);
 BUSTER_F_DECL bool ui_box_is_focused(UI_Box* box);

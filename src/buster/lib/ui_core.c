@@ -57,6 +57,11 @@ BUSTER_GLOBAL_LOCAL bool ui_rect_has_area(F32Interval2 rect)
     return rect.x1 > rect.x0 && rect.y1 > rect.y0;
 }
 
+BUSTER_GLOBAL_LOCAL u32 ui_background_blur_radius_clamp(u32 radius)
+{
+    return radius > UI_BACKGROUND_BLUR_RADIUS_MAX ? UI_BACKGROUND_BLUR_RADIUS_MAX : radius;
+}
+
 BUSTER_GLOBAL_LOCAL F32Interval2 ui_box_text_clip_rect(UI_Box* box)
 {
     F32Interval2 result = box ? box->clip_rect : (F32Interval2){0};
@@ -672,7 +677,7 @@ UI_BoxFlagInfo ui_box_flag_info(u32 bit_index)
         UI_BOX_FLAG_INFO(25, SkipViewOffX, Layout, false);
         UI_BOX_FLAG_INFO(26, SkipViewOffY, Layout, false);
         UI_BOX_FLAG_INFO(27, DrawDropShadow, Appearance, false);
-        UI_BOX_FLAG_INFO(28, DrawBackgroundBlur, Appearance, true);
+        UI_BOX_FLAG_INFO(28, DrawBackgroundBlur, Appearance, false);
         UI_BOX_FLAG_INFO(29, DrawBackground, Appearance, false);
         UI_BOX_FLAG_INFO(30, DrawBorder, Appearance, false);
         UI_BOX_FLAG_INFO(31, DrawSideTop, Appearance, false);
@@ -1003,6 +1008,7 @@ UI_Box* ui_build_box_from_key(UI_BoxFlags flags, UI_Key key)
     box->background_color = ui_top_background_color();
     box->text_color = ui_top_text_color();
     box->border_color = ui_top_border_color();
+    box->background_blur_radius = UI_BACKGROUND_BLUR_RADIUS_DEFAULT;
     box->font_size = ui_top_font_size();
     box->text_padding = ui_top_text_padding();
     box->text_align = ui_top_text_alignment();
@@ -1155,6 +1161,14 @@ void ui_box_set_fuzzy_match_ranges(UI_Box* box, UI_FuzzyMatchRange* ranges, u64 
                 box->flags |= UI_BoxFlag_HasFuzzyMatchRanges;
             }
         }
+    }
+}
+
+void ui_box_set_background_blur_radius(UI_Box* box, u32 radius)
+{
+    if (box)
+    {
+        box->background_blur_radius = ui_background_blur_radius_clamp(radius);
     }
 }
 
@@ -2969,6 +2983,22 @@ BUSTER_GLOBAL_LOCAL void ui_draw_command_push_rect(F32Interval2 rect, float4* co
     ui_draw_command_push(command);
 }
 
+BUSTER_GLOBAL_LOCAL void ui_draw_command_push_background_blur(UI_Box* box, F32Interval2 rect, u32 radius)
+{
+    UI_DrawCommand command;
+    memset(&command, 0, sizeof(command));
+    command.kind = UI_DrawCommandKind_BackgroundBlur;
+    command.box = box;
+    command.rect = rect;
+    command.clip_rect = box ? box->clip_rect : (F32Interval2){0};
+    command.blur_radius = radius;
+    if (box)
+    {
+        command.corner_radii = float4_make(box->corner_radii[CORNER_00], box->corner_radii[CORNER_01], box->corner_radii[CORNER_10], box->corner_radii[CORNER_11]);
+    }
+    ui_draw_command_push(command);
+}
+
 BUSTER_GLOBAL_LOCAL void ui_draw_command_push_text(String8 text, float2 position, float4 color, F32Interval2 clip_rect)
 {
     if (!ui_state || !ui_state->draw_command_box || text.length == 0)
@@ -3134,12 +3164,13 @@ BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
 
     if (box->flags & UI_BoxFlag_DrawBackgroundBlur)
     {
-        // The renderer has no blur operation yet. Keep the UI-side ordering
-        // and provide a deterministic translucent fallback until it exposes
-        // one; the dependency remains recorded on the box.
-        float4 blur_fallback = box->background_color;
-        float4_element(blur_fallback, 3) *= 0.35f;
-        ui_draw_rect(rect, blur_fallback);
+        u32 radius = ui_background_blur_radius_clamp(box->background_blur_radius);
+        box->background_blur_radius = radius;
+        ui_draw_command_push_background_blur(box, rect, radius);
+        if (ui_state->rendering_window && !rendering_window_render_background_blur(ui_state->rendering_window, rect, radius))
+        {
+            ui_state->draw_renderer_succeeded = false;
+        }
     }
 
     if (box->flags & UI_BoxFlag_DrawDropShadow)
@@ -3337,25 +3368,26 @@ BUSTER_GLOBAL_LOCAL void ui_draw_tooltips(UI_Box* root)
     }
 }
 
-void ui_draw(void)
+bool ui_draw(void)
 {
     UI_Box* root = ui_state->root;
     ui_state->draw_commands = 0;
     ui_state->draw_command_count = 0;
     ui_state->draw_command_capacity = 0;
     ui_state->draw_commands_complete = false;
+    ui_state->draw_renderer_succeeded = true;
     ui_state->draw_command_box = 0;
     if (!root)
     {
         ui_state->draw_commands_complete = true;
-        return;
+        return true;
     }
 
     ui_state->draw_command_capacity = ui_draw_command_upper_bound(root);
     if (ui_state->draw_command_capacity > (u64)-1 / sizeof(UI_DrawCommand))
     {
         BUSTER_CHECK(false);
-        return;
+        return false;
     }
     u64 position = ui_build_arena()->position;
     bool capacity_fits = ui_arena_try_advance(ui_build_arena(), &position, ui_state->draw_command_capacity * sizeof(UI_DrawCommand),
@@ -3364,9 +3396,10 @@ void ui_draw(void)
     if (!capacity_fits)
     {
         ui_state->draw_command_capacity = 0;
-        return;
+        return false;
     }
     ui_state->draw_commands = arena_allocate(ui_build_arena(), UI_DrawCommand, ui_state->draw_command_capacity);
+    ui_state->draw_commands_complete = true;
     ui_state->draw_command_box = root;
 
     //- rjf: draw UI background & simple window border
@@ -3380,5 +3413,5 @@ void ui_draw(void)
     ui_draw_tree(root);
     ui_draw_tooltips(root);
     ui_state->draw_command_box = 0;
-    ui_state->draw_commands_complete = true;
+    return ui_state->draw_commands_complete && ui_state->draw_renderer_succeeded;
 }
