@@ -34039,10 +34039,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilde
                 {
                     return false;
                 }
+                if (relocation_base > UINT64_MAX - task.offset)
+                {
+                    return false;
+                }
                 relocations[(*relocation_count)++] = (IrGlobalRelocation){
                     .symbol = builder->function->symbol,
                     .label_block = label->block,
-                    .offset = task.offset,
+                    .offset = relocation_base + task.offset,
                     .is_label_address = true,
                 };
                 continue;
