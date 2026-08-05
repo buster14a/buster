@@ -151,7 +151,7 @@ enabled.
   `./build.sh test_all_combinations_ci` on Linux/macOS/Windows plus
   Debug+Release on an Android emulator and the iOS simulator, on every push.
 
-## Performance tracking
+## Benchmarking and diagnostics
 
 - **`test_self_host` is the most trustworthy and complete compiler benchmark.**
   It exercises the full self-hosting IDE pipeline, including the trusted
@@ -190,47 +190,9 @@ enabled.
   unity TU); the latter parses one or more clang `-ftime-trace` JSON files
   (enable via `--time-trace`) and reports the slowest `"Total *"` rollups
   clang itself pre-aggregates (`Total Frontend`, `Total Backend`,
-  `Total InstantiateFunction`, ...), summed across every file given. Neither
-  is wired into `perf-history` or the regression gate — they're printed to
-  the CI log (or run manually) for a human to read when the aggregate
-  numbers below say something regressed.
-- CI's `Perf` steps (one per platform, see `.forgejo/workflows/ci.yml` and
-  `.forgejo/scripts/perf_step.sh`) build **both Debug and Release** when the
-  preceding work succeeds (sanitize/fuzz off, `--instrument --time-trace` on)
-  in dedicated `build/perf-<Config>` directories. A failure stops that server
-  immediately; matrix servers remain independent. Each completed config runs
-  `bench_all`, prints the two diagnostics above, and hands the numbers to
-  `.forgejo/scripts/record_perf.sh`. That script compares the run against
-  the same `(runner, config)`'s own rolling history on the orphan
-  `perf-history` git branch — one row per metric, not one wide line per run
-  (`ts=... runner=... config=... commit=... metric=... value=...
-  [file=...]`, plain text, no JSON/`jq`) — and emits a **warning without
-  failing the CI job** if
-  `compile_milliseconds` or `bench_parse_median_ns_per_file` regresses more than
-  15% (`PERF_REGRESSION_THRESHOLD`) past that `(runner, config)`'s median.
-  Regressions emit both a `::warning` Actions annotation for CI interfaces
-  that support workflow commands and a plain stderr warning as a fallback.
-  Mode-specific raw medians and file counts are also retained, but only
-  `bench_parse_median_ns_per_file` is gated so growing the parser corpus does
-  not register as a performance regression. The file-read-per-iteration
-  `bench_io_*` rows are diagnostic only, and the old unqualified benchmark
-  metric names are never reused. `compile_milliseconds` times CMake
-  generation plus the clean `ide` build; `bench_all` runs afterward, outside
-  that timer, so growing the corpus cannot inflate the compile metric. The
-  `bench_all` invocation is wall-clock timed separately and recorded as
-  `bench_run_milliseconds` (not gated — it includes ninja/process overhead),
-  and each config prints its own
-  `PERF_TOTAL config=... compile_milliseconds=... bench_run_milliseconds=...`
-  line to the CI log; Debug and Release totals are reported independently,
-  never summed. The
-  mode-specific phase (`bench_io_tokenize_median_ns`,
-  `bench_parse_tokenize_median_ns`, and corresponding parse rows) and per-file
-  rows are recorded for trend/diagnostic purposes but never gate the build —
-  20+ per-file checks per run would make the job flaky on any one noisy file.
-  History is only appended/pushed on
-  `main`; other branches are compared but don't pollute it. Pushing needs a
-  `PERF_HISTORY_TOKEN` repo secret with push access, since the main
-  `Checkout` step deliberately uses `persist-credentials: false`.
+  `Total InstantiateFunction`, ...), summed across every file given. These
+  commands are diagnostics for humans to inspect when aggregate numbers
+  suggest a regression, and can be run from CI or locally.
 
 ## Latest performance audit notes
 
@@ -256,8 +218,7 @@ enabled.
   input.
 - The two-mode benchmark now separates parser throughput from filesystem input;
   compare `BENCH_PARSE` and `BENCH_IO` using their mode-specific phase and
-  per-file rows, while only `bench_parse_median_ns_per_file` participates in
-  regression gating.
+  per-file rows when investigating parser throughput.
 
 `2026-08-02` (Linux x86_64, Release `bench_all`, `BUSTER_INSTRUMENT=1`):
 
@@ -545,8 +506,7 @@ Top level:
 | `src/buster/tests/` | Test harness and module test pairs, unity-included or independently compiled according to the build mode. |
 | `tests/` | Runtime compiler fixture corpus: `.bbb` language programs and C frontend/driver fixtures. Test implementations themselves live under `src/buster/tests/`. |
 | `android/`, `ios/` | Manifest/plist plus CI scripts to package, install, and run the on-device/simulator test suite. |
-| `.forgejo/workflows/ci.yml` | CI pipeline, including the per-platform `Perf` steps. |
-| `.forgejo/scripts/` | `perf_step.sh` (clean Debug/Release `ide` builds + separately run `bench_all`), `record_perf.sh` (perf-history compare/append/push — see Performance tracking above). |
+| `.forgejo/workflows/ci.yml` | CI pipeline for correctness, sanitizer/fuzz, self-host, and mobile tests. |
 | `lsan.supp` | LeakSanitizer suppressions. |
 | `build/` | Generated build output (ninja files, per-config dirs, `compile_commands.json`, `build/build`). Never edit. |
 

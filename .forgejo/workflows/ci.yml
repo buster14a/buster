@@ -2,7 +2,7 @@ on: [push]
 
 # Stacked pushes to the same ref supersede each other instead of queueing
 # full matrices on the self-hosted runners. Runs on main are never
-# cancelled: they must finish to record perf history.
+# cancelled so each push receives the complete correctness matrix.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -68,36 +68,12 @@ jobs:
             echo "Running Android ${build_config} tests"
             BUSTER_ANDROID_BUILD_CONFIG="$build_config" ./android/test_ci.sh
           done
-      - name: Perf (Linux)
-        shell: bash
-        if: ${{ contains(matrix.runner, 'x86_64-linux') }}
-        env:
-          PERF_HISTORY_TOKEN: ${{ secrets.PERF_HISTORY_TOKEN }}
-          RUNNER_NAME: ${{ matrix.runner }}
-          COMMIT_SHA: ${{ github.sha }}
-          PUSH_HISTORY: ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
-        run: |
-          set -euo pipefail
-          source /opt/vulkan-sdk/current/setup-env.sh
-          ./.forgejo/scripts/perf_step.sh
       - name: Test (Linux)
         shell: bash
         if: ${{ matrix.runner == 'x86_64-linux' }}
         run: |
           set -euo pipefail
           ./build.sh test_all_combinations_ci --verbose=1
-      - name: Perf (macOS)
-        shell: bash
-        if: ${{ contains(matrix.runner, 'macos') }}
-        env:
-          PERF_HISTORY_TOKEN: ${{ secrets.PERF_HISTORY_TOKEN }}
-          RUNNER_NAME: ${{ matrix.runner }}
-          COMMIT_SHA: ${{ github.sha }}
-          PUSH_HISTORY: ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
-        run: |
-          set -euo pipefail
-          source /opt/vulkan-sdk/current/setup-env.sh
-          ./.forgejo/scripts/perf_step.sh
       - name: Test (macOS)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
@@ -123,8 +99,6 @@ jobs:
       - name: Test (Windows)
         shell: powershell
         if: ${{ contains(matrix.runner, 'windows') }}
-        env:
-          PERF_HISTORY_TOKEN: ${{ secrets.PERF_HISTORY_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -155,74 +129,3 @@ jobs:
 
           ./build.ps1 test_self_host --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          # --- Perf: compile-time + parse-bench tracking ---------------------
-          # Appended to this same step (rather than a separate one) so it
-          # inherits the VsDevShell environment (INCLUDE/LIB/PATH) set up
-          # above -- a fresh step would start a new process without it.
-          # Unlike the Linux/macOS Perf steps, this doesn't also run
-          # ninja_log_summary/time_trace_summary: those are diagnostics
-          # only, printed to the CI log for humans, not recorded.
-          # A generate/build failure must stop this config immediately:
-          # continuing would record a garbage COMPILE_MILLISECONDS into
-          # perf history or surface later as a confusing "no BENCH line".
-          foreach ($config in @('Debug', 'Release')) {
-            $buildDir = "build/perf-$config"
-            if (Test-Path -LiteralPath $buildDir) {
-              Remove-Item -Recurse -Force $buildDir -ErrorAction Stop
-            }
-
-            $genStart = Get-Date
-            ./build.ps1 generate --build-dir $buildDir --config $config --no-sanitize --no-fuzz --instrument --time-trace
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $genEnd = Get-Date
-
-            $buildStart = Get-Date
-            ./build.ps1 build --build-dir $buildDir --config $config -t ide
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $buildEnd = Get-Date
-
-            # Keep benchmark execution outside the compile timer. bench_all
-            # depends on the already up-to-date ide target, so corpus growth
-            # cannot be misreported as a compile-time regression. Its wall
-            # time is timed separately as this config's benchmark run time.
-            $benchStart = Get-Date
-            $benchOutput = ./build.ps1 build --build-dir $buildDir --config $config -t bench_all
-            $benchExitCode = $LASTEXITCODE
-            $benchEnd = Get-Date
-            $benchOutput | ForEach-Object { Write-Output $_ }
-            if ($benchExitCode -ne 0) { exit $benchExitCode }
-
-            $benchIoLine = ($benchOutput | Select-String '^BENCH_IO ' | Select-Object -Last 1).Line
-            $benchParseLine = ($benchOutput | Select-String '^BENCH_PARSE ' | Select-Object -Last 1).Line
-            if (-not $benchIoLine -or -not $benchParseLine) {
-              throw "Perf: both BENCH_IO and BENCH_PARSE lines are required in bench_all output for $config"
-            }
-            $benchPhaseLines = ($benchOutput | Select-String '^BENCH_(IO|PARSE)_PHASE ' | ForEach-Object { $_.Line }) -join "`n"
-            $benchFileLines = ($benchOutput | Select-String '^BENCH_(IO|PARSE)_FILE ' | ForEach-Object { $_.Line }) -join "`n"
-
-            $generationMilliseconds = [int](($genEnd - $genStart).TotalMilliseconds)
-            $ideBuildMilliseconds = [int](($buildEnd - $buildStart).TotalMilliseconds)
-            $compileMilliseconds = $generationMilliseconds + $ideBuildMilliseconds
-            $benchRunMilliseconds = [int](($benchEnd - $benchStart).TotalMilliseconds)
-
-            # Per-config totals; Debug and Release each report their own, never summed.
-            Write-Output "PERF_TOTAL config=$config generation_milliseconds=$generationMilliseconds ide_build_milliseconds=$ideBuildMilliseconds compile_milliseconds=$compileMilliseconds bench_run_milliseconds=$benchRunMilliseconds"
-
-            $env:RUNNER_NAME = "${{ matrix.runner }}"
-            $env:CONFIG = $config
-            $env:COMPILE_MILLISECONDS = "$compileMilliseconds"
-            $env:BENCH_RUN_MILLISECONDS = "$benchRunMilliseconds"
-            $env:BENCH_IO_LINE = $benchIoLine
-            $env:BENCH_PARSE_LINE = $benchParseLine
-            $env:BENCH_PHASE_LINES = $benchPhaseLines
-            $env:BENCH_FILE_LINES = $benchFileLines
-            $env:COMMIT_SHA = "${{ github.sha }}"
-            $env:PUSH_HISTORY = "${{ github.ref == 'refs/heads/main' && '1' || '0' }}"
-
-            $serverHost = "${{ github.server_url }}" -replace '^https?://', ''
-            $env:REPO_PUSH_URL = "https://x-access-token:$($env:PERF_HISTORY_TOKEN)@$serverHost/${{ github.repository }}.git"
-
-            bash ./.forgejo/scripts/record_perf.sh
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }

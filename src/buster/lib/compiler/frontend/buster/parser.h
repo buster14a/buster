@@ -807,5 +807,5 @@ struct ParserBenchResult
 // PARSER_BENCH_MODE_IO reads every source during every iteration. The parse
 // mode loads every source once, then repeatedly tokenizes and parses the
 // preloaded contents. Not gated by BUSTER_INCLUDE_TESTS: this is a benchmark,
-// not a test, and must stay buildable in Release for CI perf tracking.
+// not a test, and must stay buildable in Release.
 BUSTER_F_DECL ParserBenchResult parser_bench_run(Arena* arena, u64 iterations, ParserBenchMode mode);

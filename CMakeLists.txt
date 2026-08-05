@@ -1890,9 +1890,8 @@ else()
         )
     endif()
 
-    # Desktop-only performance benchmark, tracked by CI perf steps. Not wired
-    # up for Android/iOS: emulator/simulator numbers are too noisy to be
-    # worth tracking as compile/run-time regressions.
+    # Desktop-only performance benchmark. Not wired up for Android/iOS:
+    # emulator/simulator numbers are too noisy for useful local comparisons.
     add_custom_target(bench_all
         COMMAND
         ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
