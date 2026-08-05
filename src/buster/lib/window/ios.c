@@ -125,6 +125,15 @@ BUSTER_GLOBAL_LOCAL void* buster_ios_worker_thread(void* arg)
     return 0;
 }
 
+BUSTER_GLOBAL_LOCAL void buster_ios_worker_attributes_destroy(pthread_attr_t* attributes)
+{
+    int result = pthread_attr_destroy(attributes);
+    if (result != 0)
+    {
+        os_fail_message(S8("failed to destroy iOS worker pthread attributes"));
+    }
+}
+
 // -[BusterAppDelegate application:didFinishLaunchingWithOptions:]: build the
 // window/view on the main thread, publish them, then start the IDE worker.
 BUSTER_GLOBAL_LOCAL bool buster_ios_did_finish_launching(id self, SEL _cmd, id application, id options)
@@ -158,10 +167,45 @@ BUSTER_GLOBAL_LOCAL bool buster_ios_did_finish_launching(id self, SEL _cmd, id a
     buster_ios_metal_layer = layer;
     buster_ios_window_ready = true;
 
-    pthread_t thread;
-    if (pthread_create(&thread, 0, buster_ios_worker_thread, 0) == 0)
+    pthread_attr_t attributes;
+    int attributes_result = pthread_attr_init(&attributes);
+    if (attributes_result != 0)
     {
-        pthread_detach(thread);
+        os_fail_message(S8("failed to initialize iOS worker pthread attributes"));
+    }
+
+    // The default secondary-thread stack is too small for the Debug C frontend
+    // tests. Keep the worker at a conservative fixed 8 MiB, matching the stack
+    // budget expected by the full test process, and honor a larger platform
+    // minimum if one is defined.
+    u64 stack_size = BUSTER_MB(8);
+#if defined(PTHREAD_STACK_MIN)
+    stack_size = BUSTER_MAX(stack_size, (u64)PTHREAD_STACK_MIN);
+#endif
+    u64 page_size = os_get_page_size();
+    if (page_size && stack_size % page_size)
+    {
+        stack_size += page_size - stack_size % page_size;
+    }
+    attributes_result = pthread_attr_setstacksize(&attributes, (size_t)stack_size);
+    if (attributes_result != 0)
+    {
+        buster_ios_worker_attributes_destroy(&attributes);
+        os_fail_message(S8("failed to set iOS worker pthread stack size"));
+    }
+
+    pthread_t thread;
+    int create_result = pthread_create(&thread, &attributes, buster_ios_worker_thread, 0);
+    buster_ios_worker_attributes_destroy(&attributes);
+    if (create_result != 0)
+    {
+        os_fail_message(S8("failed to create iOS worker pthread"));
+    }
+
+    int detach_result = pthread_detach(thread);
+    if (detach_result != 0)
+    {
+        os_fail_message(S8("failed to detach iOS worker pthread"));
     }
 
     return true;
