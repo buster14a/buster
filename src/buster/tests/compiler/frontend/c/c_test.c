@@ -7502,6 +7502,82 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         scratch_end(legal_label_pointer_address_temporary);
     }
     {
+        TemporalArena label_metadata_growth_temporary = scratch_begin(0, 0);
+        CPreprocessResult label_metadata_growth_tokens = c_preprocess(
+            label_metadata_growth_temporary.arena,
+            S8("int label_metadata_capacity_growth(int selector) {"
+               " int padding[256] = { 0 };"
+               " void *table[2] = { &&zero, &&one };"
+               " goto *table[selector & 1];"
+               "zero: return padding[0];"
+               "one: return padding[1];"
+               "}\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult label_metadata_growth_parse = c_parse(label_metadata_growth_temporary.arena, label_metadata_growth_tokens);
+        CIRLowerResult label_metadata_growth_lowered = c_lower_to_ir(label_metadata_growth_temporary.arena, S8("label-metadata-growth.c"),
+                                                                      label_metadata_growth_tokens, label_metadata_growth_parse, target_native);
+        BUSTER_TEST(arguments, label_metadata_growth_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, label_metadata_growth_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, label_metadata_growth_lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, label_metadata_growth_lowered.program != 0);
+        if (label_metadata_growth_lowered.program)
+        {
+            IrModule* module = &label_metadata_growth_lowered.program->modules[0];
+            IrFunction* function = c_test_find_ir_function(module, S8("label_metadata_capacity_growth"));
+            BUSTER_TEST(arguments, function != 0);
+            if (function)
+            {
+                CDeclaration declaration = label_metadata_growth_parse.declarations[0];
+                u64 initial_value_capacity = (u64)declaration.body_token_count * 3 + (u64)declaration.parameter_count * 4 + 16;
+                IrInstruction* indirect_branch = 0;
+                u32 label_address_count = 0;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    label_address_count += instruction->opcode == IR_OPCODE_LABEL_ADDRESS;
+                    if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
+                    {
+                        indirect_branch = instruction;
+                    }
+                }
+                BUSTER_TEST(arguments, function->value_count > initial_value_capacity);
+                BUSTER_TEST(arguments, function->value_capacity > initial_value_capacity);
+                BUSTER_TEST(arguments, label_address_count == 2);
+                BUSTER_TEST(arguments, indirect_branch != 0);
+                if (indirect_branch)
+                {
+                    BUSTER_TEST(arguments, indirect_branch->operand_count == 1 && indirect_branch->operands != 0);
+                    BUSTER_TEST(arguments, indirect_branch->target_count == 2 && indirect_branch->targets != 0);
+                    if (indirect_branch->operand_count == 1 && indirect_branch->operands && indirect_branch->target_count == 2 && indirect_branch->targets &&
+                        indirect_branch->operands[0].value < function->value_count)
+                    {
+                        IrValue* target = function->values + indirect_branch->operands[0].value;
+                        BUSTER_TEST(arguments, ir_label_provenance_valid(target));
+                        BUSTER_TEST(arguments, target->label_block_count == 2 && target->label_blocks != 0);
+                        if (target->label_block_count == 2 && target->label_blocks)
+                        {
+                            for (u32 label_index = 0; label_index < target->label_block_count; label_index += 1)
+                            {
+                                bool found = false;
+                                for (u32 target_index = 0; target_index < indirect_branch->target_count; target_index += 1)
+                                {
+                                    found |= target->label_blocks[label_index].value == indirect_branch->targets[target_index].value;
+                                }
+                                BUSTER_TEST(arguments, found);
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, ir_validate_canonical_module(label_metadata_growth_lowered.program, module).error == IR_VALIDATION_NONE);
+            }
+        }
+        scratch_end(label_metadata_growth_temporary);
+    }
+    {
         TemporalArena cfg_label_storage_temporary = scratch_begin(0, 0);
         CPreprocessResult cfg_label_storage_tokens = c_preprocess(
             cfg_label_storage_temporary.arena,
