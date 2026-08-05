@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Lifecycle modes:
+#   (default)       start an emulator and wait for it to finish booting
+#   start           prepare and start an emulator, then return immediately
+#   wait            wait for the emulator started by `start` (or an existing
+#                   device) to finish booting
+#   stop            stop the owned emulator, if one was started
+#
+# The default keeps this script useful as a standalone blocking helper. CI uses
+# `start` followed by a later `wait` so CMake/Ninja can build while Android boots.
+lifecycle=${1:-start-and-wait}
+if [[ $# -gt 1 ]]; then
+    echo "usage: $0 [start|wait|stop]" >&2
+    exit 2
+fi
+case "$lifecycle" in
+    start|wait|stop|start-and-wait) ;;
+    *)
+        echo "error: unknown Android emulator lifecycle '$lifecycle'" >&2
+        echo "usage: $0 [start|wait|stop]" >&2
+        exit 2
+        ;;
+esac
+
 avd_name=${BUSTER_ANDROID_AVD:-buster-ci}
 gpu_mode=${BUSTER_ANDROID_EMULATOR_GPU:-host}
 headless=${BUSTER_ANDROID_EMULATOR_HEADLESS:-1}
@@ -11,6 +34,7 @@ system_image=${BUSTER_ANDROID_SYSTEM_IMAGE:-}
 command_timeout_seconds=${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}
 adb_timeout_seconds=${BUSTER_ANDROID_ADB_TIMEOUT_SECONDS:-$command_timeout_seconds}
 tool_timeout_seconds=${BUSTER_ANDROID_TOOL_TIMEOUT_SECONDS:-$command_timeout_seconds}
+cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-$command_timeout_seconds}
 avd_create_timeout_seconds=${BUSTER_ANDROID_AVD_CREATE_TIMEOUT_SECONDS:-${BUSTER_ANDROID_CREATE_AVD_TIMEOUT_SECONDS:-120}}
 if [[ -z $system_image ]]; then
     system_image="system-images;android-35;google_apis;x86_64"
@@ -31,19 +55,27 @@ export ANDROID_AVD_HOME=$android_avd_home
 export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
 
 if ! command -v timeout >/dev/null 2>&1; then
-    echo "error: timeout command is required for Android emulator startup" >&2
+    echo "error: timeout command is required for Android emulator lifecycle management" >&2
     exit 1
 fi
 if ! command -v adb >/dev/null 2>&1; then
     echo "error: adb was not found; check ANDROID_HOME/ANDROID_SDK_ROOT" >&2
     exit 1
 fi
-if ! command -v emulator >/dev/null 2>&1; then
-    echo "error: emulator was not found; install the Android SDK emulator package" >&2
-    exit 1
+if [[ $lifecycle == start || $lifecycle == start-and-wait ]]; then
+    if ! command -v emulator >/dev/null 2>&1; then
+        echo "error: emulator was not found; install the Android SDK emulator package" >&2
+        exit 1
+    fi
 fi
 
-for timeout_value in "$command_timeout_seconds" "$adb_timeout_seconds" "$tool_timeout_seconds" "$avd_create_timeout_seconds"; do
+for timeout_value in \
+    "$boot_timeout_seconds" \
+    "$command_timeout_seconds" \
+    "$adb_timeout_seconds" \
+    "$tool_timeout_seconds" \
+    "$cleanup_timeout_seconds" \
+    "$avd_create_timeout_seconds"; do
     if [[ ! $timeout_value =~ ^[1-9][0-9]*$ ]]; then
         echo "error: Android command timeouts must be positive integers; got '$timeout_value'" >&2
         exit 1
@@ -120,11 +152,8 @@ optional_timed_command() {
 log_dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
 emulator_log=${BUSTER_ANDROID_EMULATOR_LOG:-${log_dir%/}/buster-android-emulator.log}
 started_marker=${BUSTER_ANDROID_EMULATOR_STARTED_MARKER:-${log_dir%/}/buster-android-emulator.started}
-mkdir -p "$(dirname "$started_marker")"
+mkdir -p "$(dirname "$started_marker")" "$(dirname "$emulator_log")"
 mkdir -p "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME"
-rm -f "$started_marker"
-
-timed_command "$adb_timeout_seconds" "adb start-server" adb start-server
 
 adb_devices_output=
 adb_has_device() {
@@ -135,14 +164,247 @@ adb_has_device() {
         return 1
     fi
     # A failed/timed-out adb command is different from a successful probe with
-    # no connected device. Callers must fail instead of trying AVD setup.
+    # no connected device. Callers must fail instead of treating an adb outage
+    # as a device that is merely still booting.
     return 2
 }
+
+print_diagnostics() {
+    echo "----- Android emulator log tail -----" >&2
+    if [[ -f $emulator_log ]]; then
+        tail -n 200 "$emulator_log" >&2 || true
+    else
+        echo "(emulator log not found: $emulator_log)" >&2
+    fi
+    echo "----- adb devices -----" >&2
+    timeout --kill-after=1s "${adb_timeout_seconds}s" adb devices >&2 || true
+    echo "----- adb logcat tail -----" >&2
+    timeout --kill-after=1s "${adb_timeout_seconds}s" adb logcat -d -v time -t 200 >&2 || true
+}
+
+read_emulator_pid() {
+    emulator_pid=
+    if [[ ! -f $started_marker ]]; then
+        return 1
+    fi
+    if ! IFS= read -r emulator_pid <"$started_marker"; then
+        echo "error: could not read Android emulator PID marker '$started_marker'" >&2
+        return 1
+    fi
+    if [[ ! $emulator_pid =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: Android emulator PID marker '$started_marker' is invalid" >&2
+        return 1
+    fi
+    return 0
+}
+
+stop_owned_emulator() {
+    local status=0
+    local pid=
+    local fallback_pid=${emulator_pid:-}
+    local stop_deadline
+
+    if read_emulator_pid; then
+        pid=$emulator_pid
+    elif [[ $fallback_pid =~ ^[1-9][0-9]*$ ]]; then
+        # Cover the small window between launching the process and publishing
+        # the marker when an interrupt arrives.
+        pid=$fallback_pid
+    fi
+
+    # Ask the emulator through adb first so it can release its device state.
+    # The PID fallback handles adb outages and fake/test emulators.
+    if [[ -n $pid ]] && kill -0 "$pid" >/dev/null 2>&1; then
+        if timed_command "$cleanup_timeout_seconds" "adb emulator shutdown" adb emu kill; then
+            :
+        else
+            echo "warning: adb emulator shutdown failed; terminating owned PID $pid" >&2
+            status=1
+        fi
+
+        stop_deadline=$((SECONDS + cleanup_timeout_seconds))
+        while kill -0 "$pid" >/dev/null 2>&1 && (( SECONDS < stop_deadline )); do
+            sleep 1
+        done
+        if kill -0 "$pid" >/dev/null 2>&1; then
+            echo "warning: Android emulator PID $pid did not exit; sending SIGTERM" >&2
+            kill "$pid" >/dev/null 2>&1 || true
+            sleep 1
+        fi
+        if kill -0 "$pid" >/dev/null 2>&1; then
+            echo "warning: Android emulator PID $pid still exists; sending SIGKILL" >&2
+            kill -KILL "$pid" >/dev/null 2>&1 || true
+            status=1
+        fi
+    elif [[ -n $pid ]]; then
+        echo "Android emulator PID $pid is no longer running"
+    fi
+
+    rm -f "$started_marker"
+    return "$status"
+}
+
+emulator_pid=
+emulator_started=0
+cleanup_after_start_failure() {
+    local status=$?
+    trap - EXIT INT TERM
+    if [[ ${emulator_started:-0} == 1 ]]; then
+        if ! stop_owned_emulator; then
+            echo "warning: failed to clean up owned Android emulator after lifecycle failure" >&2
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup_after_start_failure EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [[ $lifecycle == stop ]]; then
+    if stop_owned_emulator; then
+        exit 0
+    else
+        echo "warning: Android emulator cleanup reported a failure" >&2
+        exit 1
+    fi
+fi
+
+wait_for_ready() {
+    local connect_deadline=$((SECONDS + boot_timeout_seconds))
+    local boot_deadline
+    local boot_probe_output
+    local boot_completed
+    local adb_status
+
+    echo "Waiting up to ${boot_timeout_seconds}s for the emulator to connect..."
+    while true; do
+        if adb_has_device; then
+            break
+        else
+            adb_status=$?
+            if [[ $adb_status -ne 1 ]]; then
+                echo "error: adb device discovery failed while waiting for the emulator" >&2
+                print_diagnostics
+                return 1
+            fi
+        fi
+        if read_emulator_pid && ! kill -0 "$emulator_pid" >/dev/null 2>&1; then
+            echo "error: emulator exited before connecting to adb" >&2
+            print_diagnostics
+            return 1
+        fi
+        if (( SECONDS >= connect_deadline )); then
+            echo "error: emulator did not connect within ${boot_timeout_seconds}s" >&2
+            print_diagnostics
+            return 1
+        fi
+        sleep 2
+    done
+
+    echo "Waiting up to ${boot_timeout_seconds}s for Android boot to complete..."
+    boot_deadline=$((SECONDS + boot_timeout_seconds))
+    while true; do
+        boot_probe_output=
+        if timed_capture boot_probe_output "$adb_timeout_seconds" "adb boot-completion probe" adb shell getprop sys.boot_completed; then
+            boot_completed=$(printf '%s' "$boot_probe_output" | tr -d '\r')
+        else
+            echo "warning: unable to query Android boot state; retrying" >&2
+            boot_completed=
+        fi
+        if [[ $boot_completed == 1 ]]; then
+            break
+        fi
+        if read_emulator_pid && ! kill -0 "$emulator_pid" >/dev/null 2>&1; then
+            echo "error: emulator exited before Android finished booting" >&2
+            print_diagnostics
+            return 1
+        fi
+        if (( SECONDS >= boot_deadline )); then
+            echo "error: Android did not finish booting within ${boot_timeout_seconds}s" >&2
+            print_diagnostics
+            return 1
+        fi
+        sleep 2
+    done
+
+    optional_timed_command "$adb_timeout_seconds" "disable window animations" adb shell settings put global window_animation_scale 0
+    optional_timed_command "$adb_timeout_seconds" "disable transition animations" adb shell settings put global transition_animation_scale 0
+    optional_timed_command "$adb_timeout_seconds" "disable animator duration" adb shell settings put global animator_duration_scale 0
+    optional_timed_command "$adb_timeout_seconds" "unlock Android input" adb shell input keyevent 82
+
+    if adb_has_device; then
+        printf '%s\n' "$adb_devices_output"
+    else
+        adb_status=$?
+        if [[ $adb_status -eq 1 ]]; then
+            echo "error: final adb device probe found no connected Android device" >&2
+        else
+            echo "error: final adb device probe failed (status $adb_status)" >&2
+        fi
+        print_diagnostics
+        return 1
+    fi
+    return 0
+}
+
+if [[ $lifecycle == wait ]]; then
+    # A failed `wait` must clean up a process owned by a preceding `start`
+    # invocation even when the caller is not wrapping both lifecycle calls in
+    # its own EXIT trap. A successful wait disarms this helper's trap so the
+    # caller retains ownership through install/run and can stop it afterward.
+    if read_emulator_pid; then
+        emulator_started=1
+    fi
+    if ! timed_command "$adb_timeout_seconds" "adb start-server" adb start-server; then
+        exit 1
+    fi
+    wait_started=$SECONDS
+    if wait_for_ready; then
+        echo "TIMING_ANDROID boot_wait_seconds=$((SECONDS - wait_started))"
+        emulator_started=0
+        trap - EXIT INT TERM
+        exit 0
+    else
+        exit 1
+    fi
+fi
+
+if ! timed_command "$adb_timeout_seconds" "adb start-server" adb start-server; then
+    exit 1
+fi
+
+if read_emulator_pid && kill -0 "$emulator_pid" >/dev/null 2>&1; then
+    echo "Reusing owned Android emulator PID $emulator_pid"
+    if [[ $lifecycle == start ]]; then
+        trap - EXIT INT TERM
+        exit 0
+    fi
+    emulator_started=1
+    wait_started=$SECONDS
+    if wait_for_ready; then
+        echo "TIMING_ANDROID boot_wait_seconds=$((SECONDS - wait_started))"
+        emulator_started=0
+        trap - EXIT INT TERM
+        exit 0
+    else
+        exit 1
+    fi
+fi
+rm -f "$started_marker"
 
 if adb_has_device; then
     echo "Android device is already available; not starting an emulator."
     printf '%s\n' "$adb_devices_output"
-    exit 0
+    if [[ $lifecycle == start ]]; then
+        exit 0
+    fi
+    wait_started=$SECONDS
+    if wait_for_ready; then
+        echo "TIMING_ANDROID boot_wait_seconds=$((SECONDS - wait_started))"
+        exit 0
+    else
+        exit 1
+    fi
 else
     adb_status=$?
     if [[ $adb_status -ne 1 ]]; then
@@ -156,9 +418,7 @@ emulator_list_avds() {
     timed_capture emulator_avds_output "$tool_timeout_seconds" "emulator -list-avds" emulator -list-avds
 }
 
-if emulator_list_avds; then
-    :
-else
+if ! emulator_list_avds; then
     echo "error: unable to list Android AVDs" >&2
     exit 1
 fi
@@ -197,9 +457,7 @@ if ! grep -Fx -- "$avd_name" <<<"$emulator_avds_output" >/dev/null; then
         exit 1
     fi
 
-    if emulator_list_avds; then
-        :
-    else
+    if ! emulator_list_avds; then
         echo "error: unable to verify the Android AVD list after creation" >&2
         exit 1
     fi
@@ -235,84 +493,31 @@ if [[ $headless != 0 && $headless != false && $headless != FALSE ]]; then
 fi
 
 echo "Starting Android emulator '$avd_name' with gpu=$gpu_mode headless=$headless"
-emulator "${emulator_args[@]}" >"$emulator_log" 2>&1 &
+emulator "${emulator_args[@]}" >"$emulator_log" 2>&1 < /dev/null &
 emulator_pid=$!
-printf '%s\n' "$emulator_pid" >"$started_marker"
-
-echo "Waiting up to ${boot_timeout_seconds}s for the emulator to connect..."
-connect_deadline=$((SECONDS + boot_timeout_seconds))
-while true; do
-    if adb_has_device; then
-        break
-    else
-        adb_status=$?
-        if [[ $adb_status -ne 1 ]]; then
-            echo "error: adb device discovery failed while waiting for the emulator" >&2
-            tail -n 200 "$emulator_log" >&2 || true
-            exit 1
-        fi
-    fi
-    if ! kill -0 "$emulator_pid" >/dev/null 2>&1; then
-        echo "error: emulator exited before connecting to adb" >&2
-        tail -n 200 "$emulator_log" >&2 || true
-        exit 1
-    fi
-    if (( SECONDS >= connect_deadline )); then
-        echo "error: emulator did not connect within ${boot_timeout_seconds}s" >&2
-        tail -n 200 "$emulator_log" >&2 || true
-        exit 1
-    fi
-    sleep 2
-done
-
-echo "Waiting up to ${boot_timeout_seconds}s for Android boot to complete..."
-boot_deadline=$((SECONDS + boot_timeout_seconds))
-while true; do
-    boot_probe_output=
-    if timed_capture boot_probe_output "$adb_timeout_seconds" "adb boot-completion probe" adb shell getprop sys.boot_completed; then
-        boot_completed=$(printf '%s' "$boot_probe_output" | tr -d '\r')
-    else
-        echo "error: unable to query Android boot state" >&2
-        tail -n 200 "$emulator_log" >&2 || true
-        exit 1
-    fi
-    if [[ $boot_completed == 1 ]]; then
-        break
-    fi
-    if ! kill -0 "$emulator_pid" >/dev/null 2>&1; then
-        echo "error: emulator exited before Android finished booting" >&2
-        tail -n 200 "$emulator_log" >&2 || true
-        exit 1
-    fi
-    if (( SECONDS >= boot_deadline )); then
-        echo "error: Android did not finish booting within ${boot_timeout_seconds}s" >&2
-        tail -n 200 "$emulator_log" >&2 || true
-        exit 1
-    fi
-    sleep 2
-done
-
-optional_timed_command "$adb_timeout_seconds" "disable window animations" adb shell settings put global window_animation_scale 0
-optional_timed_command "$adb_timeout_seconds" "disable transition animations" adb shell settings put global transition_animation_scale 0
-optional_timed_command "$adb_timeout_seconds" "disable animator duration" adb shell settings put global animator_duration_scale 0
-optional_timed_command "$adb_timeout_seconds" "unlock Android input" adb shell input keyevent 82
-
-if adb_has_device; then
-    printf '%s\n' "$adb_devices_output"
-else
-    adb_status=$?
-    if [[ $adb_status -eq 1 ]]; then
-        echo "error: final adb device probe found no connected Android device" >&2
-    else
-        echo "error: final adb device probe failed (status $adb_status)" >&2
-    fi
+if [[ ! $emulator_pid =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: emulator did not provide a valid process ID" >&2
     exit 1
 fi
-
-product_abi_output=
-if timed_capture product_abi_output "$adb_timeout_seconds" "adb product ABI probe" adb shell getprop ro.product.cpu.abi; then
-    printf '%s\n' "$product_abi_output"
-else
-    echo "error: unable to query the Android product ABI" >&2
+emulator_started=1
+marker_tmp="${started_marker}.tmp.$$"
+if ! printf '%s\n' "$emulator_pid" >"$marker_tmp" || ! mv -f "$marker_tmp" "$started_marker"; then
+    rm -f "$marker_tmp"
+    echo "error: could not publish Android emulator PID marker '$started_marker'" >&2
+    kill "$emulator_pid" >/dev/null 2>&1 || true
     exit 1
 fi
+echo "Android emulator started asynchronously (pid=$emulator_pid, log=$emulator_log)"
+
+if [[ $lifecycle == start ]]; then
+    trap - EXIT INT TERM
+    exit 0
+fi
+
+wait_started=$SECONDS
+if ! wait_for_ready; then
+    exit 1
+fi
+echo "TIMING_ANDROID boot_wait_seconds=$((SECONDS - wait_started))"
+emulator_started=0
+trap - EXIT INT TERM

@@ -16,14 +16,61 @@ if ! command -v xcrun >/dev/null 2>&1; then
     exit 1
 fi
 
-build_config=${BUSTER_IOS_BUILD_CONFIG:-Debug}
 deployment_target=${BUSTER_IOS_DEPLOYMENT_TARGET:-13.0}
 # Apple Silicon runners run the simulator natively as arm64.
 arch=${BUSTER_IOS_ARCH:-arm64}
 # One directory for all configs: the Ninja Multi-Config generator keeps
-# per-config artifacts separate, so the Debug and Release CI invocations
-# share a single CMake configure instead of paying it once per config.
+# per-config app bundles separate, so configure once and build each requested
+# configuration before booting the simulator.
 build_directory=${BUSTER_IOS_BUILD_DIRECTORY:-build/ios-simulator-${arch}}
+
+build_configs_string=${BUSTER_IOS_BUILD_CONFIGS:-}
+if [[ -z $build_configs_string ]]; then
+    if [[ -n ${BUSTER_IOS_BUILD_CONFIG:-} ]]; then
+        build_configs_string=$BUSTER_IOS_BUILD_CONFIG
+    else
+        build_configs_string="Debug Release"
+    fi
+fi
+
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        --all)
+            if [[ $# -ne 1 ]]; then
+                echo "usage: $0 [--all|Debug|Release ...]" >&2
+                exit 2
+            fi
+            build_configs_string="Debug Release"
+            ;;
+        --configs)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "error: --configs requires at least one configuration" >&2
+                exit 2
+            fi
+            build_configs_string="$*"
+            ;;
+        *)
+            build_configs_string="$*"
+            ;;
+    esac
+fi
+
+build_configs=()
+for build_config in $build_configs_string; do
+    case "$build_config" in
+        Debug|Release) ;;
+        *)
+            echo "error: iOS CI configurations must be Debug or Release (got '$build_config')" >&2
+            exit 1
+            ;;
+    esac
+    build_configs+=("$build_config")
+done
+if [[ ${#build_configs[@]} -eq 0 ]]; then
+    echo "error: no iOS build configurations were selected" >&2
+    exit 1
+fi
 
 # A monospace font to bundle into the .app. The in-app test always exercises the
 # GUI/rendering path (run_app), which builds a font atlas and hard-fails if no
@@ -54,6 +101,7 @@ echo "Bundling font: $ios_font"
 cmake --version
 xcrun --sdk iphonesimulator --show-sdk-path
 
+configure_started=$SECONDS
 cmake --warn-uninitialized -Werror=dev \
     -B "$build_directory" \
     -G "Ninja Multi-Config" \
@@ -61,7 +109,7 @@ cmake --warn-uninitialized -Werror=dev \
     -DCMAKE_OSX_SYSROOT=iphonesimulator \
     -DCMAKE_OSX_ARCHITECTURES="$arch" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET="$deployment_target" \
-    -DCMAKE_DEFAULT_BUILD_TYPE="$build_config" \
+    -DCMAKE_DEFAULT_BUILD_TYPE="${build_configs[0]}" \
     -DCMAKE_CONFIGURATION_TYPES="Debug;Release;RelWithDebInfo;MinSizeRel" \
     -DCMAKE_LINKER_TYPE=DEFAULT \
     -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
@@ -73,18 +121,31 @@ cmake --warn-uninitialized -Werror=dev \
     -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF \
     -DBUSTER_DEVELOPER_TARGETS=OFF \
     -DBUSTER_IOS_FONT="$ios_font"
+echo "TIMING_IOS configure_seconds=$((SECONDS - configure_started))"
 
-# Build only the app bundle (its POST_BUILD steps copy the tests dir and font
-# into ide.app). The on-simulator run is deliberately NOT the `test_all` Ninja
-# target: Ninja buffers a custom command's output until it exits, which makes the
-# boot/install/launch look hung. Invoking launch_simulator.sh directly streams
-# its progress live so a stall is visible (and bounded by the script's timeouts).
-cmake --build "$build_directory" --config "$build_config" --target ide --verbose
+app_paths=()
+for build_config in "${build_configs[@]}"; do
+    echo "Building iOS ${build_config} app bundle"
+    build_started=$SECONDS
+    # Build only the app bundle. Its POST_BUILD steps copy tests and the font
+    # into ide.app; simulator execution is deliberately kept outside Ninja so
+    # output remains streamed and both configs can share one boot.
+    cmake --build "$build_directory" --config "$build_config" --target ide --verbose
+    app_bundle="$build_directory/$build_config/ide.app"
+    if [[ ! -d $app_bundle ]]; then
+        echo "error: expected iOS app bundle not found at '$app_bundle'" >&2
+        exit 1
+    fi
+    app_paths+=("$app_bundle")
+    echo "TIMING_IOS build_seconds config=$build_config value=$((SECONDS - build_started))"
+done
 
-app_bundle="$build_directory/$build_config/ide.app"
-if [[ ! -d $app_bundle ]]; then
-    echo "error: expected app bundle not found at '$app_bundle'" >&2
-    exit 1
-fi
+launch_args=(--batch)
+for index in "${!build_configs[@]}"; do
+    launch_args+=("${build_configs[$index]}" "${app_paths[$index]}")
+done
 
-BUSTER_IOS_APP_BUNDLE="$app_bundle" bash ios/launch_simulator.sh
+# The launcher boots once, installs/launches each labeled bundle sequentially,
+# validates each result marker independently, and shuts the selected simulator
+# down once through its EXIT trap.
+bash ios/launch_simulator.sh "${launch_args[@]}"

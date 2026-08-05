@@ -39,35 +39,35 @@ jobs:
 
           cleanup_android_emulator() {
             status=$?
+            trap - EXIT INT TERM
             if [[ $status -ne 0 && -f "${BUSTER_ANDROID_EMULATOR_LOG:-}" ]]; then
               echo "Last Android emulator log lines:"
               tail -n 200 "$BUSTER_ANDROID_EMULATOR_LOG" || true
             fi
             if [[ -f "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER" ]]; then
-              android_sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/android-sdk}}
-              export PATH="$android_sdk/platform-tools:$PATH"
               cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}}
-              if timeout --kill-after=1s "${cleanup_timeout_seconds}s" adb emu kill; then
+              if BUSTER_ANDROID_EMULATOR_STARTED_MARKER="$BUSTER_ANDROID_EMULATOR_STARTED_MARKER" \
+                BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS="$cleanup_timeout_seconds" \
+                bash ./android/start_emulator_ci.sh stop; then
                 :
               else
                 cleanup_status=$?
-                if [[ $cleanup_status -eq 124 || $cleanup_status -eq 137 ]]; then
-                  echo "warning: adb emu kill timed out after ${cleanup_timeout_seconds}s; continuing cleanup" >&2
-                else
-                  echo "warning: adb emu kill failed with exit status $cleanup_status; continuing cleanup" >&2
+                echo "warning: Android emulator lifecycle cleanup failed with exit status $cleanup_status" >&2
+                if [[ $status -eq 0 ]]; then
+                  status=1
+                  if [[ -f "${BUSTER_ANDROID_EMULATOR_LOG:-}" ]]; then
+                    echo "Last Android emulator log lines:"
+                    tail -n 200 "$BUSTER_ANDROID_EMULATOR_LOG" || true
+                  fi
                 fi
               fi
-              rm -f "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER"
             fi
             exit "$status"
           }
           trap cleanup_android_emulator EXIT
 
-          bash ./android/start_emulator_ci.sh
-          for build_config in Debug Release; do
-            echo "Running Android ${build_config} tests"
-            BUSTER_ANDROID_BUILD_CONFIG="$build_config" ./android/test_ci.sh
-          done
+          bash ./android/start_emulator_ci.sh start
+          ./android/test_ci.sh --all
       - name: Test (Linux)
         shell: bash
         if: ${{ matrix.runner == 'x86_64-linux' }}
@@ -92,10 +92,7 @@ jobs:
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
           set -euo pipefail
-          for build_config in Debug Release; do
-            echo "Running iOS ${build_config} tests"
-            BUSTER_IOS_BUILD_CONFIG="$build_config" ./ios/test_ci.sh
-          done
+          ./ios/test_ci.sh --all
       - name: Test (Windows)
         shell: powershell
         if: ${{ contains(matrix.runner, 'windows') }}

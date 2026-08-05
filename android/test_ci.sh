@@ -32,67 +32,95 @@ if [[ -z ${android_ndk} || ! -f ${android_ndk}/build/cmake/android.toolchain.cma
 fi
 
 android_platform=${BUSTER_ANDROID_PLATFORM:-android-35}
-build_config=${BUSTER_ANDROID_BUILD_CONFIG:-Debug}
-adb_wait_timeout_seconds=${BUSTER_ANDROID_ADB_WAIT_TIMEOUT_SECONDS:-60}
-
-if ! command -v timeout >/dev/null 2>&1; then
-    echo "error: timeout command is required for Android CI device detection" >&2
+# The CI image is deliberately fixed to x86_64. Do not query adb before the
+# build: the emulator can be starting while CMake/Ninja compile and package.
+android_abi=${BUSTER_ANDROID_ABI:-x86_64}
+if [[ $android_abi != x86_64 ]]; then
+    echo "error: Android CI requires the fixed x86_64 emulator ABI (got '$android_abi')" >&2
     exit 1
 fi
 
-adb_getprop_retry() {
-    local property=$1
-    local attempt output
-    for attempt in {1..10}; do
-        if output=$(timeout 10 adb shell getprop "$property" 2>/dev/null | tr -d '\r') && [[ -n $output ]]; then
-            printf '%s\n' "$output"
-            return 0
-        fi
-        sleep 2
-    done
-    return 1
-}
-
-adb version
-cmake --version
-ninja --version
-echo "Waiting up to ${adb_wait_timeout_seconds}s for an Android device..."
-if ! timeout "$adb_wait_timeout_seconds" adb wait-for-device; then
-    echo "error: no Android device became available within ${adb_wait_timeout_seconds}s" >&2
-    adb devices >&2 || true
-    exit 1
-fi
-adb devices
-
-android_abi=${BUSTER_ANDROID_ABI:-}
-if [[ -z ${android_abi} ]]; then
-    if ! android_abi=$(adb_getprop_retry ro.product.cpu.abi); then
-        echo "error: could not read Android device ABI" >&2
-        adb devices >&2 || true
-        exit 1
+build_configs_string=${BUSTER_ANDROID_BUILD_CONFIGS:-}
+if [[ -z $build_configs_string ]]; then
+    if [[ -n ${BUSTER_ANDROID_BUILD_CONFIG:-} ]]; then
+        build_configs_string=$BUSTER_ANDROID_BUILD_CONFIG
+    else
+        build_configs_string="Debug Release"
     fi
 fi
-if [[ -z ${android_abi} ]]; then
-    echo "error: could not determine Android device ABI; set BUSTER_ANDROID_ABI" >&2
+
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        --all)
+            if [[ $# -ne 1 ]]; then
+                echo "usage: $0 [--all|Debug|Release ...]" >&2
+                exit 2
+            fi
+            build_configs_string="Debug Release"
+            ;;
+        --configs)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "error: --configs requires at least one configuration" >&2
+                exit 2
+            fi
+            build_configs_string="$*"
+            ;;
+        *)
+            build_configs_string="$*"
+            ;;
+    esac
+fi
+
+build_configs=()
+for build_config in $build_configs_string; do
+    case "$build_config" in
+        Debug|Release) ;;
+        *)
+            echo "error: Android CI configurations must be Debug or Release (got '$build_config')" >&2
+            exit 1
+            ;;
+    esac
+    build_configs+=("$build_config")
+done
+if [[ ${#build_configs[@]} -eq 0 ]]; then
+    echo "error: no Android build configurations were selected" >&2
     exit 1
 fi
 
-# One directory for all configs: the Ninja Multi-Config generator keeps
-# per-config artifacts separate, so the Debug and Release CI invocations
-# share a single CMake configure (the NDK toolchain + try_compile probes
-# are the expensive part) instead of paying it once per config.
 build_directory=${BUSTER_ANDROID_BUILD_DIRECTORY:-build/android-ci-${android_abi}}
+android_start_script=${BUSTER_ANDROID_START_SCRIPT:-android/start_emulator_ci.sh}
+android_run_tests_script=${BUSTER_ANDROID_RUN_TESTS_SCRIPT:-android/run_tests.sh}
+android_emulator_started_marker=${BUSTER_ANDROID_EMULATOR_STARTED_MARKER:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/buster-android-emulator.started}
+android_cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}}
 
-# This job intentionally uses an already-running full GUI Android device/emulator.
-# Do not start a headless emulator here; the test_all target launches the app and
-# waits for the in-app GUI test result through logcat.
+cleanup_on_failure() {
+    local status=$?
+    trap - EXIT INT TERM
+    if [[ $status -ne 0 && -f $android_emulator_started_marker ]]; then
+        if ! BUSTER_ANDROID_EMULATOR_STARTED_MARKER="$android_emulator_started_marker" \
+            BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS="$android_cleanup_timeout_seconds" \
+            bash "$android_start_script" stop; then
+            echo "warning: Android emulator cleanup failed after test status $status" >&2
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup_on_failure EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+cmake --version
+ninja --version
+
+configure_started=$SECONDS
 cmake --warn-uninitialized -Werror=dev \
     -B "$build_directory" \
     -G "Ninja Multi-Config" \
     -DCMAKE_TOOLCHAIN_FILE="${android_ndk}/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI="$android_abi" \
     -DANDROID_PLATFORM="$android_platform" \
-    -DCMAKE_DEFAULT_BUILD_TYPE="$build_config" \
+    -DCMAKE_DEFAULT_BUILD_TYPE="${build_configs[0]}" \
     -DCMAKE_CONFIGURATION_TYPES="Debug;Release;RelWithDebInfo;MinSizeRel" \
     -DCMAKE_LINKER_TYPE=DEFAULT \
     -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
@@ -103,5 +131,64 @@ cmake --warn-uninitialized -Werror=dev \
     -DBUSTER_INCLUDE_TESTS=ON \
     -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF \
     -DBUSTER_DEVELOPER_TARGETS=OFF
+echo "TIMING_ANDROID configure_seconds=$((SECONDS - configure_started))"
 
-cmake --build "$build_directory" --config "$build_config" --target test_all --verbose
+apk_paths=()
+for build_config in "${build_configs[@]}"; do
+    echo "Building and packaging Android ${build_config} while the emulator boots"
+    build_started=$SECONDS
+    cmake --build "$build_directory" --config "$build_config" --target apk --verbose
+    apk_source="$build_directory/buster.apk"
+    apk_path="$build_directory/$build_config/buster.apk"
+    if [[ ! -f $apk_source ]]; then
+        echo "error: expected Android APK not found at '$apk_source' after ${build_config} build" >&2
+        exit 1
+    fi
+    mkdir -p "$(dirname "$apk_path")"
+    cp -f "$apk_source" "$apk_path"
+    apk_paths+=("$apk_path")
+    echo "TIMING_ANDROID build_seconds config=$build_config value=$((SECONDS - build_started))"
+done
+
+wait_started=$SECONDS
+echo "Android artifacts are ready; waiting for the emulator before install/run"
+bash "$android_start_script" wait
+echo "TIMING_ANDROID boot_wait_seconds=$((SECONDS - wait_started))"
+
+adb_path=${BUSTER_ANDROID_ADB:-}
+if [[ -z $adb_path ]]; then
+    adb_path=$(command -v adb || true)
+fi
+if [[ -z $adb_path ]]; then
+    echo "error: adb was not found after the Android build; cannot install/run tests" >&2
+    exit 1
+fi
+
+android_package=${BUSTER_ANDROID_PACKAGE:-dev.buster.ide}
+android_activity=${BUSTER_ANDROID_ACTIVITY:-${android_package}/android.app.NativeActivity}
+android_test_args=${BUSTER_ANDROID_TEST_ARGUMENT_STRING:-"test --verbose=1 --ci=1"}
+
+overall_status=0
+for index in "${!build_configs[@]}"; do
+    build_config=${build_configs[$index]}
+    apk_path=${apk_paths[$index]}
+    echo "Running Android ${build_config} tests"
+    test_started=$SECONDS
+    if BUSTER_ANDROID_EXPECTED_ABI="$android_abi" \
+        bash "$android_run_tests_script" \
+            "$adb_path" \
+            "$apk_path" \
+            "$android_package" \
+            "$android_activity" \
+            "$android_test_args"; then
+        echo "TIMING_ANDROID install_test_seconds config=$build_config value=$((SECONDS - test_started))"
+    else
+        test_status=$?
+        echo "error: Android ${build_config} tests failed with status $test_status" >&2
+        overall_status=1
+    fi
+done
+
+if [[ $overall_status -ne 0 ]]; then
+    exit "$overall_status"
+fi
