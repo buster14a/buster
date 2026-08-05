@@ -358,8 +358,13 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_TEXT].data.length == sizeof(x86_text));
         BUSTER_TEST(arguments, memcmp(elf_roundtrip.sections[OBJECT_SECTION_TEXT].data.pointer, x86_text, sizeof(x86_text)) == 0);
     }
-    BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
-    BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
+    bool elf_zero_section_valid = elf_roundtrip.sections && elf_roundtrip.section_count > OBJECT_SECTION_ZERO;
+    BUSTER_TEST(arguments, elf_zero_section_valid);
+    if (elf_zero_section_valid)
+    {
+        BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
+        BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
+    }
     bool elf_relocation_valid = elf_roundtrip.relocations && elf_roundtrip.relocation_count && elf_roundtrip.symbols &&
                                 elf_roundtrip.relocations[0].symbol < elf_roundtrip.symbol_count;
     BUSTER_TEST(arguments, elf_relocation_valid);
