@@ -544,6 +544,291 @@ struct BusterX86MetadataResolveResult
     u16 reserved;
 };
 
+// The physical API is deliberately separate from OperandSignature.  A
+// signature is useful for allocation-free candidate filtering; these values
+// carry the architectural bits needed to select and emit one exact form.
+typedef enum BusterX86MetadataPhysicalOperandKind
+{
+    BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+    BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+    BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE,
+    BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE,
+    BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE,
+    BUSTER_X86_METADATA_PHYSICAL_OPERAND_KIND_COUNT,
+} BusterX86MetadataPhysicalOperandKind;
+
+typedef enum BusterX86MetadataPhysicalSegment
+{
+    BUSTER_X86_METADATA_SEGMENT_NONE,
+    BUSTER_X86_METADATA_SEGMENT_ES,
+    BUSTER_X86_METADATA_SEGMENT_CS,
+    BUSTER_X86_METADATA_SEGMENT_SS,
+    BUSTER_X86_METADATA_SEGMENT_DS,
+    BUSTER_X86_METADATA_SEGMENT_FS,
+    BUSTER_X86_METADATA_SEGMENT_GS,
+    BUSTER_X86_METADATA_SEGMENT_COUNT,
+} BusterX86MetadataPhysicalSegment;
+
+typedef struct BusterX86MetadataPhysicalRegister BusterX86MetadataPhysicalRegister;
+struct BusterX86MetadataPhysicalRegister
+{
+    // index is the architectural register number within physical_class.  For
+    // control/debug/segment/special registers it is the architectural number
+    // as well, rather than a host register encoding.
+    u16 index;
+    u16 width;
+    u8 physical_class;
+    bool high_byte;
+    u8 reserved[3];
+};
+
+typedef struct BusterX86MetadataPhysicalMemory BusterX86MetadataPhysicalMemory;
+struct BusterX86MetadataPhysicalMemory
+{
+    BusterX86MetadataPhysicalRegister base;
+    BusterX86MetadataPhysicalRegister index;
+    s64 displacement;
+    s64 addend;
+    String8 symbol;
+    u8 address_size;
+    u8 scale;
+    u8 segment;
+    bool has_base;
+    bool has_index;
+    bool has_displacement;
+    bool rip_relative;
+    bool has_symbol;
+    bool has_segment;
+    bool vsib;
+    u8 reserved[3];
+};
+
+typedef struct BusterX86MetadataPhysicalOperand BusterX86MetadataPhysicalOperand;
+struct BusterX86MetadataPhysicalOperand
+{
+    BusterX86MetadataPhysicalOperandKind kind;
+    u16 width;
+    u8 reserved[1];
+    BusterX86MetadataPhysicalRegister reg;
+    BusterX86MetadataPhysicalMemory memory;
+    // For immediate/relative/absolute operands, value is a signed
+    // mathematical value when has_value is true.  Unsigned encodings may
+    // instead use unsigned_value with has_unsigned_value true; that field is
+    // a complete u64 bit pattern and is not obtained by converting through
+    // s64.  A symbol is the third, mutually exclusive, value state.
+    s64 value;
+    u64 unsigned_value;
+    s64 addend;
+    String8 symbol;
+    bool has_symbol;
+    bool has_value;
+    bool has_unsigned_value;
+    u8 reserved2[5];
+};
+
+typedef enum BusterX86MetadataRoundingMode
+{
+    BUSTER_X86_METADATA_ROUNDING_NONE,
+    BUSTER_X86_METADATA_ROUNDING_NEAREST,
+    BUSTER_X86_METADATA_ROUNDING_DOWN,
+    BUSTER_X86_METADATA_ROUNDING_UP,
+    BUSTER_X86_METADATA_ROUNDING_ZERO,
+    BUSTER_X86_METADATA_ROUNDING_COUNT,
+} BusterX86MetadataRoundingMode;
+
+typedef struct BusterX86MetadataPhysicalAttributes BusterX86MetadataPhysicalAttributes;
+struct BusterX86MetadataPhysicalAttributes
+{
+    u16 decorator_flags;
+    u16 apx_flags;
+    u16 amx_flags;
+    u8 mask_register;
+    u8 broadcast_elements;
+    u8 rounding_mode;
+    bool has_mask_register;
+    bool zeroing;
+    bool sae;
+    bool no_flags;
+    bool lock;
+    bool rep;
+    bool repne;
+    u8 reserved[3];
+};
+
+typedef struct BusterX86MetadataPhysicalQuery BusterX86MetadataPhysicalQuery;
+struct BusterX86MetadataPhysicalQuery
+{
+    String8 mnemonic;
+    BusterX86MetadataPhysicalOperand const* operands;
+    u32 operand_count;
+    BusterX86MetadataFeatureInput features;
+    BusterX86MetadataPhysicalAttributes attributes;
+    u8 address_size;
+    u8 execution_mode;
+    bool include_privileged;
+    bool include_not64;
+    bool include_implicit;
+    u8 reserved;
+};
+
+typedef enum BusterX86MetadataEncodeStatus
+{
+    BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
+    BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC,
+    BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM,
+    BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT,
+    BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH,
+    BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE,
+    BUSTER_X86_METADATA_ENCODE_REGISTER_ENCODING,
+    BUSTER_X86_METADATA_ENCODE_HIGH_BYTE_WITH_REX,
+    BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION,
+    BUSTER_X86_METADATA_ENCODE_ADDRESSING,
+    BUSTER_X86_METADATA_ENCODE_DISPLACEMENT_RANGE,
+    BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE,
+    BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE,
+    BUSTER_X86_METADATA_ENCODE_DECORATOR,
+    BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA,
+    BUSTER_X86_METADATA_ENCODE_AMBIGUOUS,
+    BUSTER_X86_METADATA_ENCODE_INSTRUCTION_LENGTH,
+    BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY,
+    BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY,
+    BUSTER_X86_METADATA_ENCODE_SUCCESS,
+    BUSTER_X86_METADATA_ENCODE_STATUS_COUNT,
+} BusterX86MetadataEncodeStatus;
+
+typedef struct BusterX86MetadataSelectResult BusterX86MetadataSelectResult;
+struct BusterX86MetadataSelectResult
+{
+    BusterX86MetadataEncodeStatus status;
+    u32 form_id;
+    u64 stable_hash;
+    u32 candidate_count;
+    u32 selected_byte_count;
+    u32 diagnostic_operand;
+    s64 diagnostic_value;
+    BusterX86MetadataString required_feature;
+};
+
+typedef enum BusterX86MetadataRelocationKind
+{
+    BUSTER_X86_METADATA_RELOCATION_ABSOLUTE8,
+    BUSTER_X86_METADATA_RELOCATION_ABSOLUTE16,
+    BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32,
+    BUSTER_X86_METADATA_RELOCATION_ABSOLUTE64,
+    // A 32-bit absolute address field has different downstream semantics in
+    // 64-bit addressing (sign extension) and 32-bit addressing
+    // (zero extension).  Keep the generic ABSOLUTE32 kind for ordinary
+    // immediate fields, and use these two for address displacements.
+    BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED,
+    BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_ZERO_EXTENDED,
+    BUSTER_X86_METADATA_RELOCATION_PC8,
+    BUSTER_X86_METADATA_RELOCATION_PC16,
+    BUSTER_X86_METADATA_RELOCATION_PC32,
+    BUSTER_X86_METADATA_RELOCATION_PC64,
+    BUSTER_X86_METADATA_RELOCATION_KIND_COUNT,
+} BusterX86MetadataRelocationKind;
+
+typedef struct BusterX86MetadataRelocation BusterX86MetadataRelocation;
+struct BusterX86MetadataRelocation
+{
+    u32 offset;
+    u8 width;
+    u8 kind;
+    u16 reserved;
+    s64 addend;
+    String8 symbol;
+};
+
+typedef struct BusterX86MetadataEmitQuery BusterX86MetadataEmitQuery;
+struct BusterX86MetadataEmitQuery
+{
+    BusterX86MetadataPhysicalQuery physical;
+    u32 form_id;
+    u8* output;
+    u32 output_capacity;
+    BusterX86MetadataRelocation* relocations;
+    u32 relocation_capacity;
+};
+
+typedef struct BusterX86MetadataEmitResult BusterX86MetadataEmitResult;
+struct BusterX86MetadataEmitResult
+{
+    BusterX86MetadataEncodeStatus status;
+    u32 form_id;
+    u64 stable_hash;
+    u32 byte_count;
+    u32 relocation_count;
+    u32 required_byte_count;
+    u32 required_relocation_count;
+    u32 diagnostic_operand;
+    s64 diagnostic_value;
+    BusterX86MetadataString required_feature;
+};
+
+typedef enum BusterX86MetadataCoverageDisposition
+{
+    BUSTER_X86_METADATA_COVERAGE_EMITTED,
+    BUSTER_X86_METADATA_COVERAGE_BLOCKED,
+    BUSTER_X86_METADATA_COVERAGE_DISPOSITION_COUNT,
+} BusterX86MetadataCoverageDisposition;
+
+typedef enum BusterX86MetadataCoverageBlocker
+{
+    BUSTER_X86_METADATA_BLOCKER_NONE,
+    BUSTER_X86_METADATA_BLOCKER_NOT64,
+    BUSTER_X86_METADATA_BLOCKER_PRIVILEGED,
+    BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS,
+    BUSTER_X86_METADATA_BLOCKER_OPCODE_FIELDS,
+    BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS,
+    BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS,
+    BUSTER_X86_METADATA_BLOCKER_IMMEDIATE_FIELDS,
+    BUSTER_X86_METADATA_BLOCKER_DECORATOR_FIELDS,
+    BUSTER_X86_METADATA_BLOCKER_OPERAND_SEMANTICS,
+    BUSTER_X86_METADATA_BLOCKER_RESERVED_SNAPSHOT,
+    BUSTER_X86_METADATA_BLOCKER_UNCLASSIFIED,
+    BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT,
+} BusterX86MetadataCoverageBlocker;
+
+typedef struct BusterX86MetadataCoverageLedgerEntry BusterX86MetadataCoverageLedgerEntry;
+struct BusterX86MetadataCoverageLedgerEntry
+{
+    u32 form_id;
+    u64 stable_hash;
+    u8 coverage_class;
+    u8 encoder_family;
+    u8 disposition;
+    u8 blocker;
+    // Policy exclusion is kept separate from encoding capability.  A
+    // privileged row may be byte-emittable when the caller opts in even
+    // though ordinary x86-64 queries must reject it.
+    bool encoder_capable;
+    bool policy_excluded;
+    u8 reserved[2];
+};
+
+typedef struct BusterX86MetadataCoverageAuditResult BusterX86MetadataCoverageAuditResult;
+struct BusterX86MetadataCoverageAuditResult
+{
+    bool complete;
+    bool duplicate_form_id;
+    bool duplicate_stable_hash;
+    u8 reserved[2];
+    u32 required_entry_count;
+    u32 entry_count;
+    u32 normalized_entry_count;
+    u32 emitted_count;
+    u32 blocked_count;
+    u32 encoder_capable_count;
+    u32 policy_excluded_count;
+    u32 explicitly_unsupported_count;
+    u32 schema_inexpressible_count;
+    u32 disposition_counts[BUSTER_X86_METADATA_COVERAGE_DISPOSITION_COUNT];
+    u32 blocker_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT];
+    u32 family_counts[BUSTER_X86_METADATA_ENCODER_COUNT];
+    u32 family_emitted_counts[BUSTER_X86_METADATA_ENCODER_COUNT];
+    u32 family_blocked_counts[BUSTER_X86_METADATA_ENCODER_COUNT];
+};
+
 BUSTER_F_DECL u32 buster_x86_metadata_schema_version(void);
 BUSTER_F_DECL u32 buster_x86_metadata_form_count(void);
 BUSTER_F_DECL u32 buster_x86_metadata_normalized_form_count(void);
@@ -576,6 +861,23 @@ BUSTER_F_DECL bool buster_x86_metadata_candidate_next(BusterX86MetadataCandidate
 // an encoding. Use each returned form's stable_hash for durable identity.
 BUSTER_F_DECL BusterX86MetadataResolveResult buster_x86_metadata_resolve(BusterX86MetadataResolveQuery query, u32* form_ids,
                                                                           u32 form_id_capacity);
+// Select evaluates the candidate forms in metadata order and chooses the
+// shortest valid encoding, breaking equal lengths by snapshot form ID.  It
+// does not allocate and does not retain any operand or feature storage.
+BUSTER_F_DECL BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataPhysicalQuery query);
+// Emit encodes one form selected from the same physical query.  The output
+// and relocation arrays are caller-owned; symbols in relocations are borrowed
+// from the query and remain format-neutral.
+BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_form(BusterX86MetadataEmitQuery query);
+// The architectural instruction-length guard is shared by final emission and
+// tests that exercise the boundary without requiring an impossible hardware
+// encoding to be synthesized.
+BUSTER_F_DECL BusterX86MetadataEncodeStatus buster_x86_metadata_instruction_length_status(u32 byte_count);
+// Audit classifies every snapshot row deterministically.  Normalized rows
+// are either EMITTED or have exactly one blocker; non-normalized rows are
+// retained in the ledger with their explicit mode/privilege/reserved blocker.
+BUSTER_F_DECL BusterX86MetadataCoverageAuditResult buster_x86_metadata_coverage_audit(
+    BusterX86MetadataCoverageLedgerEntry* entries, u32 entry_capacity);
 
 #if BUSTER_INCLUDE_TESTS
 typedef enum BusterX86MetadataValidationPatchKind
