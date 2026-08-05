@@ -338,13 +338,26 @@ BUSTER_GLOBAL_LOCAL VkBool32 buster_vulkan_debug_callback(VkDebugUtilsMessageSev
     return VK_FALSE;
 }
 
+BUSTER_GLOBAL_LOCAL String8 vulkan_string_from_fixed_buffer(const char8* pointer, u64 capacity)
+{
+    u64 length = 0;
+    if (pointer)
+    {
+        while (length < capacity && pointer[length] != 0)
+        {
+            length += 1;
+        }
+    }
+    return string_from_pointer_length(pointer, length);
+}
+
 BUSTER_GLOBAL_LOCAL bool vulkan_instance_extension_supported(VkExtensionProperties* properties, u32 property_count, const char* name)
 {
     bool result = false;
     String8 requested = string_from_pointer((char8*)name);
     for (u32 i = 0; i < property_count; i += 1)
     {
-        String8 available = string_from_pointer((char8*)properties[i].extensionName);
+        String8 available = vulkan_string_from_fixed_buffer((char8*)properties[i].extensionName, VK_MAX_EXTENSION_NAME_SIZE);
         if (string_equal(available, requested))
         {
             result = true;
@@ -366,7 +379,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_instance_layer_supported(VkLayerProperties* prop
     String8 requested = string_from_pointer((char8*)name);
     for (u32 i = 0; i < property_count; i += 1)
     {
-        String8 available = string_from_pointer((char8*)properties[i].layerName);
+        String8 available = vulkan_string_from_fixed_buffer((char8*)properties[i].layerName, VK_MAX_EXTENSION_NAME_SIZE);
         if (string_equal(available, requested))
         {
             result = true;
@@ -1370,7 +1383,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_collect_device_candidate(Arena* arena, VkSurface
         return false;
     }
     vkGetPhysicalDeviceProperties(physical_device, &candidate->properties);
-    candidate->policy.name = string_from_pointer((char8*)candidate->properties.deviceName);
+    candidate->policy.name = vulkan_string_from_fixed_buffer((char8*)candidate->properties.deviceName, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE);
     candidate->policy.vendor_id = candidate->properties.vendorID;
     candidate->policy.device_id = candidate->properties.deviceID;
     candidate->policy.device_type = vulkan_device_type(candidate->properties.deviceType);
